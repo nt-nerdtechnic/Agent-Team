@@ -20,6 +20,7 @@ vi.mock('electron', () => {
     id = nextWebContentsId++
     sent: Array<{ channel: string; args: unknown[] }> = []
     loads: string[] = []
+    focusCount = 0
     private destroyed = false
     private listeners = new Map<string, Handler[]>()
     isDestroyed(): boolean {
@@ -27,6 +28,9 @@ vi.mock('electron', () => {
     }
     send(channel: string, ...args: unknown[]): void {
       this.sent.push({ channel, args })
+    }
+    focus(): void {
+      this.focusCount++
     }
     loadURL(url: string): Promise<void> {
       this.loads.push(url)
@@ -194,7 +198,9 @@ interface FakeWebContentsLike {
   id: number
   sent: Array<{ channel: string; args: unknown[] }>
   loads: string[]
+  focusCount: number
   isDestroyed(): boolean
+  focus(): void
   emit(event: string, ...args: unknown[]): void
   close(): void
 }
@@ -1125,6 +1131,445 @@ describe('view lifecycle (open / hideSelf / resize / death paths)', () => {
     expect(hostB.children).not.toContain(view)
     expect(hostA.focusCount).toBeGreaterThan(0)
     expect(hostB.focusCount).toBe(0)
+  })
+})
+
+describe('opaque view instance ownership', () => {
+  function packageDescriptor(): PluginLaunchDescriptor {
+    return {
+      id: 'acme.multi-view',
+      requires: [],
+      devUrl: '',
+      entryFile: '/plugins/acme.multi-view/fallback.html',
+      views: [
+        {
+          id: 'left',
+          contributionKey: 'acme.multi-view.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Left',
+          entryFile: '/plugins/acme.multi-view/left.html',
+        },
+        {
+          id: 'window',
+          contributionKey: 'acme.multi-view.window',
+          kind: 'custom',
+          location: 'window',
+          title: 'Window',
+          entryFile: '/plugins/acme.multi-view/window.html',
+        },
+      ],
+    }
+  }
+
+  it('creates independently addressable opaque instances for one package', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: { x: 1, y: 2, width: 300, height: 400 },
+    })
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: { x: 5, y: 6, width: 700, height: 500 },
+    })
+
+    expect(left.instanceId).toBeTruthy()
+    expect(window.instanceId).toBeTruthy()
+    expect(left.instanceId).not.toBe(window.instanceId)
+    expect(left.instanceId).not.toBe(packageDesc.id)
+    expect(window.instanceId).not.toBe(packageDesc.id)
+    expect(hostA.children).toHaveLength(1)
+    expect(hostB.children).toHaveLength(1)
+    expect((hostA.children[0] as FakeViewLike).webContents.loads).toEqual([
+      packageDesc.views![0].entryFile,
+    ])
+    expect((hostB.children[0] as FakeViewLike).webContents.loads).toEqual([
+      packageDesc.views![1].entryFile,
+    ])
+    expect(hostA.focusCount).toBeGreaterThan(0)
+    expect(hostB.focusCount).toBeGreaterThan(0)
+    expect((hostA.children[0] as FakeViewLike).webContents.focusCount).toBeGreaterThan(0)
+    expect((hostB.children[0] as FakeViewLike).webContents.focusCount).toBeGreaterThan(0)
+  })
+
+  it('resolves stale catalog objects against the current registered package', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+
+    const stalePackage: PluginLaunchDescriptor = {
+      ...packageDesc,
+      views: packageDesc.views!.map((view) => ({
+        ...view,
+        entryFile: '/plugins/stale/forged.html',
+      })),
+    }
+    mgr.setCapabilityContext(packageDesc.id, null)
+
+    const host = new FakeBrowserWindow()
+    await mgr.openView(stalePackage, stalePackage.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+    })
+
+    expect((host.children[0] as FakeViewLike).webContents.loads).toEqual([
+      packageDesc.views![0].entryFile,
+    ])
+  })
+
+  it('targets bounds, visibility, focus, and destruction by handle only', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: { x: 0, y: 0, width: 100, height: 100 },
+    })
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: { x: 10, y: 20, width: 200, height: 150 },
+    })
+    const leftView = hostA.children[0] as FakeViewLike
+    const windowView = hostB.children[0] as FakeViewLike
+
+    mgr.setBounds(left.instanceId, { x: 1, y: 2, width: 300, height: 250 })
+    expect(leftView.bounds).toEqual({ x: 1, y: 2, width: 300, height: 250 })
+    expect(windowView.bounds).toEqual({ x: 10, y: 20, width: 200, height: 150 })
+
+    mgr.deactivate(left.instanceId)
+    expect(leftView.visible).toBe(false)
+    expect(windowView.visible).toBe(true)
+    const hostFocusBeforeActivate = hostA.focusCount
+    const viewFocusBeforeActivate = leftView.webContents.focusCount
+    mgr.activate(left.instanceId)
+    expect(leftView.visible).toBe(true)
+    expect(hostA.focusCount).toBe(hostFocusBeforeActivate)
+    expect(leftView.webContents.focusCount).toBe(viewFocusBeforeActivate)
+
+    mgr.focusInstance(left.instanceId)
+    expect(hostA.focusCount).toBeGreaterThan(hostFocusBeforeActivate)
+    expect(leftView.webContents.focusCount).toBeGreaterThan(viewFocusBeforeActivate)
+
+    mgr.destroyInstance(left.instanceId)
+    expect(leftView.webContents.isDestroyed()).toBe(true)
+    expect(hostA.children).not.toContain(leftView)
+    expect(windowView.webContents.isDestroyed()).toBe(false)
+    expect(hostB.children).toContain(windowView)
+
+    mgr.setBounds(window.instanceId, { x: 9, y: 8, width: 700, height: 600 })
+    expect(windowView.bounds).toEqual({ x: 9, y: 8, width: 700, height: 600 })
+  })
+
+  it('cleans a dead v2 instance without disturbing its sibling', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: 'fill',
+    })
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: 'fill',
+    })
+    const leftView = hostA.children[0] as FakeViewLike
+    const windowView = hostB.children[0] as FakeViewLike
+    const staleSender = leftView.webContents.id
+
+    leftView.webContents.close()
+
+    expect(leftView.webContents.isDestroyed()).toBe(true)
+    expect(hostA.children).not.toContain(leftView)
+    expect(windowView.webContents.isDestroyed()).toBe(false)
+    mgr.setBounds(window.instanceId, { x: 4, y: 5, width: 600, height: 400 })
+    expect(windowView.bounds).toEqual({ x: 4, y: 5, width: 600, height: 400 })
+
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+    await expect(
+      call!({ sender: { id: staleSender } }, { reqId: 'dead', ns: 'ping', method: 'ping', args: {} })
+    ).resolves.toEqual({
+      reqId: '',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'unknown plugin sender' },
+    })
+    expect(window.instanceId).toBeTruthy()
+  })
+
+  it('destroys every live instance when a package is removed', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: 'fill',
+    })
+    await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: 'fill',
+    })
+    const leftView = hostA.children[0] as FakeViewLike
+    const windowView = hostB.children[0] as FakeViewLike
+
+    mgr.removeInstalledPlugin(packageDesc.id)
+
+    expect(leftView.webContents.isDestroyed()).toBe(true)
+    expect(windowView.webContents.isDestroyed()).toBe(true)
+    expect(hostA.children).toHaveLength(0)
+    expect(hostB.children).toHaveLength(0)
+  })
+
+  it('keeps v1 and v2 instances independent for the same package id', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const legacyHost = new FakeBrowserWindow()
+    const v2Host = new FakeBrowserWindow()
+    mgr.open(
+      asHost(legacyHost),
+      { id: packageDesc.id, requires: [], devUrl: '', entryFile: '/plugins/legacy/index.html' },
+      'fill'
+    )
+    const legacyView = legacyHost.children[0] as FakeViewLike
+    const v2 = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(v2Host),
+      bounds: 'fill',
+    })
+    const v2View = v2Host.children[0] as FakeViewLike
+
+    mgr.destroy(v2.instanceId)
+    expect(v2View.webContents.isDestroyed()).toBe(false)
+    mgr.destroyInstance(v2.instanceId)
+    expect(legacyView.webContents.isDestroyed()).toBe(false)
+    expect(v2View.webContents.isDestroyed()).toBe(true)
+
+    mgr.destroy(packageDesc.id)
+    expect(legacyView.webContents.isDestroyed()).toBe(true)
+  })
+
+  it('documents deferred package-level event and PTY ownership until Issue 15', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc: PluginLaunchDescriptor = {
+      ...packageDescriptor(),
+      requires: ['terminal'],
+    }
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: 'fill',
+    })
+    await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: 'fill',
+    })
+    const leftView = hostA.children[0] as FakeViewLike
+    const windowView = hostB.children[0] as FakeViewLike
+
+    mgr.emit(packageDesc.id, 'deferred.event', { source: 'package' })
+    expect(
+      leftView.webContents.sent.filter((message) => message.channel === 'plugin:cap:event')
+    ).toHaveLength(1)
+    expect(
+      windowView.webContents.sent.filter((message) => message.channel === 'plugin:cap:event')
+    ).toHaveLength(1)
+
+    mgr.noteTerminalRoutes(packageDesc.id, 'terminal.create', { terminal_session_id: 't-14' })
+    leftView.webContents.close()
+
+    expect(windowView.webContents.isDestroyed()).toBe(false)
+    expect(
+      mgr.filterTerminalReattachPayload(packageDesc.id, {
+        terminal_session_ids: ['t-14'],
+      }).terminal_session_ids
+    ).toEqual(['t-14'])
+    expect(left.instanceId).toBeTruthy()
+  })
+
+  it('keeps a sibling pending batch alive when one v2 instance closes', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc: PluginLaunchDescriptor = {
+        ...packageDescriptor(),
+        requires: ['terminal'],
+      }
+      mgr.registerDescriptor(packageDesc)
+      const hostA = new FakeBrowserWindow()
+      const hostB = new FakeBrowserWindow()
+      await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(hostA),
+        bounds: 'fill',
+      })
+      await mgr.openView(packageDesc, packageDesc.views![1], {
+        hostWindow: asHost(hostB),
+        bounds: 'fill',
+      })
+      const leftView = hostA.children[0] as FakeViewLike
+      const windowView = hostB.children[0] as FakeViewLike
+
+      mgr.noteTerminalRoutes(packageDesc.id, 'terminal.create', { terminal_session_id: 't-14-batch' })
+      ;(
+        mgr as unknown as {
+          dispatchEvent(event: string, payload: unknown): void
+        }
+      ).dispatchEvent('terminal.output', {
+        terminal_session_id: 't-14-batch',
+        data: 'sibling output',
+        sequence: 1,
+      })
+      leftView.webContents.close()
+      vi.advanceTimersByTime(12)
+
+      expect(leftView.webContents.isDestroyed()).toBe(true)
+      expect(windowView.webContents.isDestroyed()).toBe(false)
+      const outputs = windowView.webContents.sent
+        .filter((message) => message.channel === 'plugin:cap:event')
+        .map((message) => message.args[0] as { type: string; data: Record<string, unknown> })
+        .filter((event) => event.type === 'terminal.output')
+      expect(outputs).toHaveLength(1)
+      expect(outputs[0].data).toMatchObject({
+        terminal_session_id: 't-14-batch',
+        data: 'sibling output',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('loads each v2 contribution entry file in renderer dev mode', async () => {
+    vi.stubEnv('ELECTRON_RENDERER_URL', 'http://renderer.test')
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = { ...packageDescriptor(), devUrl: 'http://package.test' }
+      mgr.registerDescriptor(packageDesc)
+      const host = new FakeBrowserWindow()
+
+      await mgr.openView(packageDesc, packageDesc.views![1], {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+      })
+
+      expect((host.children[0] as FakeViewLike).webContents.loads).toEqual([
+        packageDesc.views![1].entryFile,
+      ])
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('rejects unknown contribution keys and plugin-supplied or sibling instance ids', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: 'fill',
+    })
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: 'fill',
+    })
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    await expect(
+      mgr.openView(
+        packageDesc,
+        { ...packageDesc.views![0], contributionKey: 'acme.multi-view.spoof' },
+        {
+          hostWindow: asHost(new FakeBrowserWindow()),
+          bounds: 'fill',
+        }
+      )
+    ).rejects.toThrow(/not registered by the Host package descriptor/)
+
+    const response = await call!(
+      { sender: { id: (hostB.children[0] as FakeViewLike).webContents.id } },
+      { reqId: 'spoofed', instanceId: left.instanceId, ns: 'ping', method: 'ping', args: {} }
+    )
+    expect(response).toEqual({
+      reqId: 'spoofed',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'instance identity is Host-owned' },
+    })
+    await expect(
+      call!(
+        { sender: { id: (hostB.children[0] as FakeViewLike).webContents.id } },
+        { reqId: 'undefined-instance', instanceId: undefined, ns: 'ping', method: 'ping', args: {} }
+      )
+    ).resolves.toEqual({
+      reqId: 'undefined-instance',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'instance identity is Host-owned' },
+    })
+    expect(window.instanceId).not.toBe(left.instanceId)
+
+    const staleSender = (hostB.children[0] as FakeViewLike).webContents.id
+    mgr.destroyInstance(window.instanceId)
+    await expect(
+      call!({ sender: { id: staleSender } }, { reqId: 'stale', ns: 'ping', method: 'ping', args: {} })
+    ).resolves.toEqual({
+      reqId: '',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'unknown plugin sender' },
+    })
+  })
+
+  it('rebinds v2 capability context to the Host-generated instance', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc: PluginLaunchDescriptor = {
+      ...packageDescriptor(),
+      id: 'acme.runtime-view',
+      requires: ['shell'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ shell: 'allowlist' }),
+      capabilityContext: {
+        publisherEligible: false,
+        userGrant: { packageVersion: '1.0.0', system: [], shell: 'allowlist' },
+        runtimeBinding: {
+          pluginId: 'acme.runtime-view',
+          packageVersion: '1.0.0',
+          workspaceId: 'workspace-1',
+          instanceId: 'plugin-supplied-instance',
+          audience: 'audience-1',
+        },
+      },
+    }
+    mgr.registerDescriptor(packageDesc)
+    const host = new FakeBrowserWindow()
+    const handle = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+    })
+    const plans: unknown[] = []
+    mgr.setPublicCapabilityHandler((plan) => {
+      plans.push(plan)
+      return { accepted: true }
+    })
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    const response = await call!(
+      { sender: { id: (host.children[0] as FakeViewLike).webContents.id } },
+      { reqId: 'r1', ns: 'shell', method: 'run', args: { command: 'git status' } }
+    )
+    expect(response).toMatchObject({ ok: true, result: { accepted: true } })
+    expect(plans[0]).toMatchObject({ runtime: { instanceId: handle.instanceId } })
+    expect(plans[0]).not.toMatchObject({ runtime: { instanceId: 'plugin-supplied-instance' } })
   })
 })
 

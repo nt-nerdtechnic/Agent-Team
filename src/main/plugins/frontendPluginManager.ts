@@ -8,6 +8,7 @@
 // shared WebSocket transport below.
 
 import { BrowserWindow, WebContentsView, ipcMain, type WebContents } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { WebSocket as NodeWebSocket } from 'ws'
@@ -103,8 +104,26 @@ export interface PluginBounds {
  *  in sync on host `resize` (full-overlay views like the mini-IDE editor). */
 export type PluginViewBounds = PluginBounds | 'fill'
 
+/** Host-owned handle for one live contribution view. The instance id is
+ * opaque: plugins never choose it and lifecycle calls must use the handle
+ * returned by {@link FrontendPluginManager.openView}. */
+export interface PluginViewHandle {
+  readonly instanceId: string
+}
+
+export interface PluginViewOpenOptions {
+  hostWindow: BrowserWindow
+  bounds: PluginViewBounds
+  query?: string
+  closeHostOnHide?: boolean
+  mirrorTitle?: boolean
+}
+
 interface RunningPlugin {
+  instanceId: string
   id: string
+  /** True for the legacy plugin-id keyed adapter exposed by {@link open}. */
+  legacy: boolean
   requires: string[]
   capabilityPolicy: PluginCapabilityPolicy
   capabilityContext: HostCapabilityContext | null
@@ -118,6 +137,8 @@ interface RunningPlugin {
   fill: boolean
   /** Removes the host `resize` listener; null when none is attached. */
   detachHostResize: (() => void) | null
+  /** Removes the host `closed` listener; null after instance teardown. */
+  detachHostClosed: (() => void) | null
   /** True when the host window exists solely for this view (dedicated plugin
    *  window): `hideSelf` then closes the window (legacy editor Esc semantics)
    *  instead of hiding the view under a still-visible host. */
@@ -180,7 +201,7 @@ function hasOfficialRegistryAuthority(trust: InstalledRegistryTrustContext): boo
 
 /**
  * Manages the lifecycle of frontend plugin views and brokers their capability
- * calls. A single instance owns all plugin views across every host window.
+ * calls. Host-generated instances own plugin views across every host window.
  */
 /** Coerce plugin-supplied args into a WS payload object; non-objects become an
  *  empty payload rather than corrupting the backend request. */
@@ -189,8 +210,12 @@ function toPayload(args: unknown): Record<string, unknown> {
 }
 
 export class FrontendPluginManager {
+  /** Host-generated instance id → running view. */
   private readonly running = new Map<string, RunningPlugin>()
-  /** webContents.id → pluginId, so a call's origin can be trusted, not the payload. */
+  /** Legacy plugin id → its v1 adapter instance. New views never enter this map. */
+  private readonly legacyInstances = new Map<string, string>()
+  /** webContents.id → opaque instance id, so a call's origin can be trusted,
+   *  not the payload. */
   private readonly bySender = new Map<number, string>()
   /** Installed/available plugin descriptors keyed by id (loader registry). The
    *  mini-IDE is registered here as the first built-in; third-party installs are
@@ -218,8 +243,9 @@ export class FrontendPluginManager {
   /** `terminal_session_id` → owning pluginId. Registered from terminal.create /
    *  terminal.reattach responses ({@link noteTerminalRoutes}); terminal.output
    *  and terminal.exit are delivered to the owner only, falling back to the
-   *  ns-gated fan-out for unregistered sessions. Cleared on terminal.exit and
-   *  on {@link destroy} of the owning plugin. */
+   *  ns-gated fan-out for unregistered sessions. Cleared on terminal.exit;
+   *  Issue 14 retains routes across view teardown at plugin scope until Issue
+   *  15 can bind them to an instance. */
   private readonly terminalRoutes = new Map<string, string>()
   /** Per-session micro-batcher for terminal.output (see the broker module):
    *  coalesces the dense PTY stream into one IPC send per ~12 ms per session. */
@@ -227,24 +253,80 @@ export class FrontendPluginManager {
     (sessionId, payload) => this.deliverTerminalEvent('terminal.output', sessionId, payload)
   )
 
+  private resolveInstance(id: string): RunningPlugin | undefined {
+    const direct = this.running.get(id)
+    if (direct) return direct
+    const legacyId = this.legacyInstances.get(id)
+    return legacyId ? this.running.get(legacyId) : undefined
+  }
+
+  private instancesForPlugin(pluginId: string): RunningPlugin[] {
+    return [...this.running.values()].filter((plugin) => plugin.id === pluginId)
+  }
+
+  private hasRunningPlugin(pluginId: string): boolean {
+    for (const plugin of this.running.values()) {
+      if (plugin.id === pluginId) return true
+    }
+    return false
+  }
+
+  private nextInstanceId(): string {
+    let instanceId = randomUUID()
+    while (this.running.has(instanceId)) instanceId = randomUUID()
+    return instanceId
+  }
+
+  /** Rebind only the Host-created runtime identity. V1 descriptors retain
+   *  their existing context shape; v2 view instances receive their own id. */
+  private bindCapabilityContext(
+    context: HostCapabilityContext | null | undefined,
+    instanceId: string
+  ): HostCapabilityContext | null {
+    if (!context || !context.runtimeBinding) return context ?? null
+    return {
+      ...context,
+      runtimeBinding: { ...context.runtimeBinding, instanceId },
+    }
+  }
+
+  private instanceForSender(senderId: number): RunningPlugin | undefined {
+    const instanceId = this.bySender.get(senderId)
+    return instanceId ? this.running.get(instanceId) : undefined
+  }
+
+  private payloadClaimsInstance(payload: unknown): boolean {
+    // `pluginId` remains a tolerated legacy envelope field and is ignored by
+    // parseCapabilityCall. `instanceId` is new Host-owned identity and must
+    // never be supplied by a plugin, even when its value is undefined.
+    return (
+      typeof payload === 'object' &&
+      payload !== null &&
+      Object.prototype.hasOwnProperty.call(payload, 'instanceId')
+    )
+  }
+
   /** Register the broker IPC handlers exactly once. Safe to call repeatedly. */
   registerIpc(): void {
     if (this.ipcReady) return
     this.ipcReady = true
 
     ipcMain.handle(IPC_CALL, async (event, payload: unknown): Promise<CapabilityResponse> => {
-      const pluginId = this.bySender.get(event.sender.id)
-      if (!pluginId) {
+      const plugin = this.instanceForSender(event.sender.id)
+      if (!plugin) {
         // Not a known plugin view — refuse without leaking anything.
         return buildError('', 'BAD_REQUEST', 'unknown plugin sender')
       }
-      const plugin = this.running.get(pluginId)
+      const pluginId = plugin.id
+      const reqId =
+        typeof payload === 'object' && payload && 'reqId' in payload
+          ? String((payload as Record<string, unknown>).reqId ?? '')
+          : ''
+      if (this.payloadClaimsInstance(payload)) {
+        return buildError(reqId, 'BAD_REQUEST', 'instance identity is Host-owned')
+      }
       const call = parseCapabilityCall(payload, pluginId)
-      if (!call || !plugin) {
-        const reqId =
-          typeof payload === 'object' && payload && 'reqId' in payload
-            ? String((payload as Record<string, unknown>).reqId ?? '')
-            : ''
+      if (!call) {
         return buildError(reqId, 'BAD_REQUEST', 'malformed capability call')
       }
 
@@ -311,8 +393,8 @@ export class FrontendPluginManager {
 
     // Plugins announce readiness; it is only logged (activation is not gated on it).
     ipcMain.on(IPC_READY, (event) => {
-      const pluginId = this.bySender.get(event.sender.id)
-      if (pluginId) console.log(`[plugin] ${pluginId} ready`)
+      const plugin = this.instanceForSender(event.sender.id)
+      if (plugin) console.log(`[plugin] ${plugin.id} ready`)
     })
 
     // A plugin dismisses its own view (e.g. the mini-IDE's Esc-close). Scoped
@@ -321,13 +403,12 @@ export class FrontendPluginManager {
     // (legacy editor Esc behavior; the `closed` hook runs the normal teardown);
     // main-window-hosted views keep the plain view-hide.
     ipcMain.on(IPC_HIDE_SELF, (event) => {
-      const pluginId = this.bySender.get(event.sender.id)
-      if (!pluginId) return
-      const plugin = this.running.get(pluginId)
+      const plugin = this.instanceForSender(event.sender.id)
+      if (!plugin) return
       if (plugin?.closeHostOnHide && !plugin.hostWindow.isDestroyed()) {
         plugin.hostWindow.close()
       } else {
-        this.deactivate(pluginId)
+        this.deactivate(plugin.instanceId)
       }
     })
   }
@@ -506,7 +587,7 @@ export class FrontendPluginManager {
     this.wsStatus = status
     for (const plugin of this.running.values()) {
       if (plugin.requires.length > 0 && plugin.capabilityPolicy.kind !== 'manifest-v2') {
-        this.emit(plugin.id, 'nav.backend_status', { status })
+        this.emitToInstance(plugin.instanceId, 'nav.backend_status', { status })
       }
     }
   }
@@ -577,7 +658,7 @@ export class FrontendPluginManager {
             )
           : isEventAllowed(plugin.capabilityPolicy, event)
       if (allowed) {
-        this.emit(plugin.id, event, payload)
+        this.emitToInstance(plugin.instanceId, event, payload)
       }
     }
   }
@@ -591,7 +672,7 @@ export class FrontendPluginManager {
    *  (and the renderer ignores pre-bind frames anyway). */
   private deliverTerminalEvent(event: string, sessionId: string, payload: unknown): void {
     const owner = this.terminalRoutes.get(sessionId)
-    if (owner && this.running.has(owner)) {
+    if (owner && this.hasRunningPlugin(owner)) {
       this.emit(owner, event, payload)
       return
     }
@@ -650,14 +731,18 @@ export class FrontendPluginManager {
     senderId: number,
     payload: unknown
   ): 'dispatched' | 'no-backend' | 'unknown-sender' | 'malformed' | 'denied' | 'unmapped' | 'not-castable' {
-    const pluginId = this.bySender.get(senderId)
-    if (!pluginId) {
+    const plugin = this.instanceForSender(senderId)
+    if (!plugin) {
       console.debug('[plugin] cast dropped: unknown sender')
       return 'unknown-sender'
     }
-    const plugin = this.running.get(pluginId)
+    const pluginId = plugin.id
+    if (this.payloadClaimsInstance(payload)) {
+      console.debug(`[plugin] cast dropped: ${pluginId} instance identity is Host-owned`)
+      return 'malformed'
+    }
     const call = parseCapabilityCall(payload, pluginId)
-    if (!call || !plugin) {
+    if (!call) {
       console.debug(`[plugin] cast dropped: malformed call from ${pluginId}`)
       return 'malformed'
     }
@@ -715,6 +800,42 @@ export class FrontendPluginManager {
     }
   }
 
+  /** Detach a view from its host without changing the WebContents lifecycle. */
+  private detachView(plugin: RunningPlugin): void {
+    try {
+      if (!plugin.hostWindow.isDestroyed()) {
+        plugin.hostWindow.contentView.removeChildView(plugin.view)
+      }
+    } catch {
+      // Host teardown may already have removed the view.
+    }
+  }
+
+  private forgetInstance(instanceId: string, view?: WebContentsView): RunningPlugin | undefined {
+    const plugin = this.running.get(instanceId)
+    if (!plugin || (view && plugin.view !== view)) return undefined
+    plugin.detachHostResize?.()
+    plugin.detachHostResize = null
+    plugin.detachHostClosed?.()
+    plugin.detachHostClosed = null
+    this.running.delete(instanceId)
+    this.bySender.delete(plugin.senderId)
+    if (this.legacyInstances.get(plugin.id) === instanceId) {
+      this.legacyInstances.delete(plugin.id)
+    }
+    // V1 PTY ownership remains plugin-level. Only the final live instance
+    // tears down pending batches; closing one of several views must not affect
+    // a sibling instance or its legacy route.
+    if (!this.hasRunningPlugin(plugin.id)) this.releaseTerminalOwnership(plugin.id)
+    return plugin
+  }
+
+  private destroyPluginInstances(pluginId: string): void {
+    for (const plugin of this.instancesForPlugin(pluginId)) {
+      this.destroyInstance(plugin.instanceId)
+    }
+  }
+
   /**
    * create → attach → activate. If the plugin is already running it is brought
    * back to visible and re-bounded (idempotent open); a new open target for the
@@ -729,12 +850,13 @@ export class FrontendPluginManager {
   ): void {
     this.registerIpc()
 
-    const existing = this.running.get(descriptor.id)
+    const existingId = this.legacyInstances.get(descriptor.id)
+    const existing = existingId ? this.running.get(existingId) : undefined
     if (existing) {
       if (existing.view.webContents.isDestroyed() || existing.hostWindow.isDestroyed()) {
         // Stale record (renderer crash / host teardown race) — drop it and fall
         // through to a fresh create; loadEntry on a dead webContents would brick.
-        this.destroy(descriptor.id)
+        this.destroyInstance(existing.instanceId)
       } else {
         existing.capabilityContext = descriptor.capabilityContext ?? existing.capabilityContext
         const query = descriptor.query ?? ''
@@ -765,6 +887,62 @@ export class FrontendPluginManager {
         revealHostWindow(existing.hostWindow)
         return
       }
+    }
+
+    this.mountView(hostWindow, descriptor, bounds, descriptor.query ?? '', opts, undefined, true)
+  }
+
+  /**
+   * Open one validated Manifest v2 contribution as a fresh Host-owned
+   * instance. The descriptor and view contribute only stable registry keys;
+   * launch data always comes from the current Host registry record.
+   */
+  async openView(
+    packageDescriptor: PluginLaunchDescriptor,
+    view: PluginViewLaunchDescriptor,
+    options: PluginViewOpenOptions
+  ): Promise<PluginViewHandle> {
+    const registered = this.descriptors.get(packageDescriptor.id)
+    if (!registered) {
+      throw new Error(`package descriptor '${packageDescriptor.id}' is not registered by the Host`)
+    }
+    const canonicalView = registered.views?.find(
+      (candidate) => candidate.contributionKey === view.contributionKey
+    )
+    if (!canonicalView) {
+      throw new Error(
+        `view '${view.contributionKey}' is not registered by the Host package descriptor`
+      )
+    }
+    this.registerIpc()
+
+    const handle = this.mountView(
+      options.hostWindow,
+      registered,
+      options.bounds,
+      options.query ?? '',
+      options,
+      canonicalView,
+      false
+    )
+    this.focusInstance(handle.instanceId)
+    return handle
+  }
+
+  private mountView(
+    hostWindow: BrowserWindow,
+    descriptor: PluginLaunchDescriptor,
+    bounds: PluginViewBounds,
+    query: string,
+    opts: { closeHostOnHide?: boolean; mirrorTitle?: boolean },
+    viewDescriptor: PluginViewLaunchDescriptor | undefined,
+    legacy: boolean
+  ): PluginViewHandle {
+    const instanceId = this.nextInstanceId()
+    const loadDescriptor: PluginLaunchDescriptor = {
+      ...descriptor,
+      entryFile: viewDescriptor?.entryFile ?? descriptor.entryFile,
+      query,
     }
 
     const preload = join(__dirname, '../preload/plugin-preload.js')
@@ -806,22 +984,28 @@ export class FrontendPluginManager {
     hostWindow.contentView.addChildView(view)
 
     const record: RunningPlugin = {
+      instanceId,
       id: descriptor.id,
+      legacy,
       requires: descriptor.requires,
       capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
-      capabilityContext: descriptor.capabilityContext ?? null,
+      capabilityContext: legacy
+        ? descriptor.capabilityContext ?? null
+        : this.bindCapabilityContext(descriptor.capabilityContext, instanceId),
       view,
       hostWindow,
-      query: descriptor.query ?? '',
+      query,
       senderId: view.webContents.id,
       fill: bounds === 'fill',
       detachHostResize: null,
+      detachHostClosed: null,
       closeHostOnHide: opts.closeHostOnHide ?? false,
       ready: false,
       pendingTargets: [],
     }
-    this.running.set(descriptor.id, record)
-    this.bySender.set(record.senderId, descriptor.id)
+    this.running.set(instanceId, record)
+    if (legacy) this.legacyInstances.set(descriptor.id, instanceId)
+    this.bySender.set(record.senderId, instanceId)
     this.applyBounds(record, bounds)
     this.trackHostResize(record)
 
@@ -833,30 +1017,24 @@ export class FrontendPluginManager {
     // If the host window goes away, tear the view down with it. Guarded so a
     // later record (view recreated on another window) is never torn down by a
     // stale hook.
-    hostWindow.once('closed', () => {
-      if (this.running.get(descriptor.id)?.view === view) this.destroy(descriptor.id)
-    })
+    const onHostClosed = (): void => {
+      if (this.running.get(instanceId)?.view === view) this.destroyInstance(instanceId)
+    }
+    hostWindow.on('closed', onHostClosed)
+    record.detachHostClosed = () => hostWindow.removeListener('closed', onHostClosed)
 
     // Defensive cleanup: if the view's webContents dies through any path other
     // than destroy() (renderer crash, Electron teardown), drop the record so
     // the next open() recreates instead of loading into a destroyed view.
     view.webContents.once('destroyed', () => {
-      const current = this.running.get(descriptor.id)
-      if (current?.view !== view) return
-      current.detachHostResize?.()
-      current.detachHostResize = null
-      this.running.delete(descriptor.id)
-      this.bySender.delete(current.senderId)
-      // Same terminal teardown as destroy(): a renderer crash must also stop
-      // pending output delivery, while the retained route marks keep the PTYs
-      // re-claimable by this plugin only.
-      this.releaseTerminalOwnership(descriptor.id)
+      const plugin = this.forgetInstance(instanceId, view)
+      if (plugin) this.detachView(plugin)
     })
 
     // Open targets sent before the entry finished loading are queued and
     // flushed here (mirrors the legacy editor window's did-finish-load flush).
     view.webContents.on('did-finish-load', () => {
-      const current = this.running.get(descriptor.id)
+      const current = this.running.get(instanceId)
       if (current?.view !== view) return
       current.ready = true
       for (const params of current.pendingTargets.splice(0)) {
@@ -870,14 +1048,15 @@ export class FrontendPluginManager {
         current.capabilityPolicy.kind !== 'manifest-v2' &&
         this.wsClient
       ) {
-        this.emit(descriptor.id, 'nav.backend_status', { status: this.wsStatus })
+        this.emitToInstance(instanceId, 'nav.backend_status', { status: this.wsStatus })
       }
     })
 
-    this.loadEntry(view, descriptor)
+    this.loadEntry(view, loadDescriptor, viewDescriptor !== undefined)
 
     // activate (show)
     view.setVisible(true)
+    return Object.freeze({ instanceId })
   }
 
   /** Deliver a new open target to a running view, queueing until its entry has
@@ -912,20 +1091,25 @@ export class FrontendPluginManager {
     record.detachHostResize = () => host.removeListener('resize', onResize)
   }
 
-  /** Load the plugin entry (dev server when available, built file otherwise).
-   *  A plugin with an empty devUrl (e.g. the separately-built mini-IDE) always
-   *  loadFiles. */
-  private loadEntry(view: WebContentsView, descriptor: PluginLaunchDescriptor): void {
-    const devUrl = process.env['ELECTRON_RENDERER_URL'] ? descriptor.devUrl : null
+  /** Load a legacy entry from the dev server when available, or a built file.
+   *  Contribution views always load their canonical view entry file so one
+   *  package-level devUrl cannot collapse multiple views onto one document. */
+  private loadEntry(
+    view: WebContentsView,
+    descriptor: PluginLaunchDescriptor,
+    forceFile = false
+  ): void {
+    const devUrl = !forceFile && process.env['ELECTRON_RENDERER_URL'] ? descriptor.devUrl : null
     const query = descriptor.query ?? ''
     if (devUrl) void view.webContents.loadURL(devUrl + query)
     else void view.webContents.loadFile(descriptor.entryFile, query ? { search: query } : undefined)
   }
 
   /** Show a plugin view without recreating it. A fill view re-syncs to the
-   *  host's content bounds and resumes tracking host resizes. */
-  activate(pluginId: string): void {
-    const plugin = this.running.get(pluginId)
+   *  host's content bounds and resumes tracking host resizes. This does not
+   *  change OS focus; call {@link focusInstance} explicitly when needed. */
+  activate(instanceId: string): void {
+    const plugin = this.resolveInstance(instanceId)
     if (!plugin) return
     if (plugin.fill && !plugin.hostWindow.isDestroyed()) {
       this.applyBounds(plugin, 'fill')
@@ -934,10 +1118,19 @@ export class FrontendPluginManager {
     plugin.view.setVisible(true)
   }
 
+  /** Focus one exact live Host-owned instance without changing its visibility
+   *  or bounds. Stale/unknown instance ids are ignored. */
+  focusInstance(instanceId: string): void {
+    const plugin = this.running.get(instanceId)
+    if (!plugin || plugin.view.webContents.isDestroyed()) return
+    revealHostWindow(plugin.hostWindow)
+    plugin.view.webContents.focus()
+  }
+
   /** Hide a plugin view without destroying its WebContents. Stops tracking
    *  host resizes while hidden (open()/activate re-attach the listener). */
-  deactivate(pluginId: string): void {
-    const plugin = this.running.get(pluginId)
+  deactivate(instanceId: string): void {
+    const plugin = this.resolveInstance(instanceId)
     if (!plugin) return
     plugin.detachHostResize?.()
     plugin.detachHostResize = null
@@ -945,27 +1138,27 @@ export class FrontendPluginManager {
   }
 
   /** Update the plugin view's rect (host-driven layout). */
-  setBounds(pluginId: string, bounds: PluginBounds): void {
-    const plugin = this.running.get(pluginId)
+  setBounds(instanceId: string, bounds: PluginBounds): void {
+    const plugin = this.resolveInstance(instanceId)
     if (plugin) plugin.view.setBounds(bounds)
   }
 
-  /** detach → destroy. WebContents are not auto-released, so close explicitly. */
+  /** Destroy the legacy v1 instance identified by plugin id. */
   destroy(pluginId: string): void {
-    const plugin = this.running.get(pluginId)
+    const legacyInstanceId = this.legacyInstances.get(pluginId)
+    if (legacyInstanceId) this.destroyInstance(legacyInstanceId)
+  }
+
+  /** Detach and destroy one exact Host-owned instance. Stale/unknown ids are
+   *  ignored and never fall back to a plugin id. */
+  destroyInstance(instanceId: string): void {
+    const plugin = this.forgetInstance(instanceId)
     if (!plugin) return
-    plugin.detachHostResize?.()
-    plugin.detachHostResize = null
-    this.running.delete(pluginId)
-    this.bySender.delete(plugin.senderId)
-    // The PTY itself keeps running — drop its pending output, keep the routes
-    // marked with this pluginId so only a reopened view of the SAME plugin can
-    // re-claim them (see releaseTerminalOwnership).
-    this.releaseTerminalOwnership(pluginId)
+    this.detachView(plugin)
+    // Issue 14 keeps PTY route/batch ownership at plugin level. A sibling
+    // instance therefore retains the route; Issue 15 must bind this state to
+    // the instance before multi-view production wiring is enabled.
     try {
-      if (!plugin.hostWindow.isDestroyed()) {
-        plugin.hostWindow.contentView.removeChildView(plugin.view)
-      }
       if (!plugin.view.webContents.isDestroyed()) {
         plugin.view.webContents.close()
       }
@@ -1019,8 +1212,11 @@ export class FrontendPluginManager {
   setCapabilityContext(pluginId: string, context: HostCapabilityContext | null): void {
     const descriptor = this.descriptors.get(pluginId)
     if (descriptor) this.descriptors.set(pluginId, { ...descriptor, capabilityContext: context ?? undefined })
-    const running = this.running.get(pluginId)
-    if (running) running.capabilityContext = context
+    for (const running of this.instancesForPlugin(pluginId)) {
+      running.capabilityContext = running.legacy
+        ? context
+        : this.bindCapabilityContext(context, running.instanceId)
+    }
   }
 
   /** All registered (installed + built-in) descriptors. */
@@ -1119,7 +1315,7 @@ export class FrontendPluginManager {
       )
     }
 
-    this.destroy(summary.id)
+    this.destroyPluginInstances(summary.id)
     this.descriptors.delete(summary.id)
     if (descriptor) this.registerDescriptor(descriptor, opts)
     this.installedPackages.set(summary.id, {
@@ -1301,7 +1497,7 @@ export class FrontendPluginManager {
           action: 'quarantine',
           reason: 'reserved plugin id requires the App-authorized Official Registry',
         })
-        this.destroy(pluginId)
+        this.destroyPluginInstances(pluginId)
         this.installedPackages.delete(pluginId)
         this.descriptors.delete(pluginId)
         const fallback = this.builtinFallbacks.get(pluginId)
@@ -1310,7 +1506,7 @@ export class FrontendPluginManager {
       }
       decisions.push({ pluginId, ...decision })
       if (decision.action === 'quarantine') {
-        this.destroy(pluginId)
+        this.destroyPluginInstances(pluginId)
         this.installedPackages.delete(pluginId)
         this.descriptors.delete(pluginId)
         const fallback = this.builtinFallbacks.get(pluginId)
@@ -1325,7 +1521,7 @@ export class FrontendPluginManager {
    *  a marketplace override of a bundled builtin re-registers the bundled copy
    *  (recorded by {@link registerBuiltin}) so the surface keeps working. */
   removeInstalledPlugin(id: string): void {
-    this.destroy(id)
+    this.destroyPluginInstances(id)
     this.installedPackages.delete(id)
     this.descriptors.delete(id)
     const fallback = this.builtinFallbacks.get(id)
@@ -1334,10 +1530,16 @@ export class FrontendPluginManager {
 
   /** Push an event to a plugin view (fed by the backend server-push fan-out
    *  in {@link dispatchEvent}). */
-  emit(pluginId: string, type: string, data: unknown): void {
-    const plugin = this.running.get(pluginId)
+  private emitToInstance(instanceId: string, type: string, data: unknown): void {
+    const plugin = this.running.get(instanceId)
     if (plugin && !plugin.view.webContents.isDestroyed()) {
       plugin.view.webContents.send(IPC_EVENT, { type, data })
+    }
+  }
+
+  emit(pluginId: string, type: string, data: unknown): void {
+    for (const plugin of this.instancesForPlugin(pluginId)) {
+      this.emitToInstance(plugin.instanceId, type, data)
     }
   }
 }
