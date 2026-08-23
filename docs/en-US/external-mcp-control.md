@@ -309,6 +309,7 @@ documented argument shapes.
 | `ui.pane.focus` | `{paneId}` | Reveal and focus a pane (switches tab if needed) |
 | `ui.pane.getStatus` | `{paneId}` | Returns `{status, buffer, logPath?}` for that pane |
 | `ui.tab.switch` | `{tabId}` | Switch the active stage/run-group tab |
+| `ui.preview.show` | `{kind, …}` | Show a file, diff or inline snippet in the right rail's preview panel |
 | `ui.window.openPlans` | — | Open the Plan window |
 | `ui.window.openGit` | — | Open the Git window for the current workspace |
 | `ui.window.openPipeline` | `{pipelineId?}` | Open the Pipeline Manager window |

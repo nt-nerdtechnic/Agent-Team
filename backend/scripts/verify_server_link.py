@@ -74,6 +74,7 @@ from agent_team_backend import (  # noqa: E402
     remote_roster,
     server_link,
 )
+from agent_team_backend import server_link  # noqa: E402
 from agent_team_backend.server_link import ServerLink, ServerLinkConfig  # noqa: E402
 
 URL = os.environ.get("NAVIDE_WS") or "ws://localhost:8787/ws"
@@ -361,8 +362,8 @@ async def main() -> int:
         check(link_a.member_id == str(payload.get("memberId") or ""), "程式碼解析出的 memberId 與回應相符", payload)
         check(payload.get("deviceId") == DEVICE_A, "回應回帶同一個 deviceId", payload)
         check(
-            all(k in payload for k in ("memberId", "role", "teamSpaceId", "displayName", "deviceId")),
-            "回應欄位齊全（memberId/role/teamSpaceId/displayName/deviceId）",
+            all(k in payload for k in ("memberId", "role", "tenantId", "displayName", "deviceId")),
+            "回應欄位齊全（memberId/role/tenantId/displayName/deviceId）",
             payload,
         )
 
@@ -822,6 +823,7 @@ async def main() -> int:
 
     await check_server_outage()
     await check_team_members()
+    await check_account_flow()
 
     print(f"\n== 結果：{_passed} 通過 / {_failed} 失敗 ==")
     return 1 if _failed else 0
@@ -1148,6 +1150,94 @@ async def check_team_members() -> None:
                 f"  （留下一筆已停用的成員 {MEMBER_NAME}：server 只有 revoke、沒有刪除介面，"
                 f"所以每跑一次就多一列停用成員，不是腳本沒清乾淨）"
             )
+
+
+async def check_account_flow() -> None:
+    """Section 16: registering and signing in, end to end against a real server.
+
+    This is the only place the account path is exercised against a server rather
+    than a fake. It matters because the two calls run *before* a token exists —
+    they cannot use the long-lived link, so a mistake here is invisible to every
+    test that starts from an authenticated connection.
+
+    The last check is the important one: an account registered here is its own
+    tenant, so it must not be able to see the pane the admin tenant registered
+    at the top of this script. That is the multi-tenant boundary observed from
+    the desktop side, not from the server's own test suite.
+    """
+    print("\n== 16. 帳號註冊與登入 ==")
+    stamp = RUN
+    email = f"verify-{stamp}@example.com"
+    password = "verify-passw0rd"
+
+    try:
+        created = await server_link.account_request(
+            URL, "auth.register", {"email": email, "password": password, "tenantName": f"verify {stamp}"}
+        )
+    except Exception as err:  # noqa: BLE001
+        check(False, f"註冊失敗：{err}")
+        return
+
+    token = str(created.get("token") or "")
+    tenant_id = str(created.get("tenantId") or "")
+    check(bool(token), "註冊回傳長期 token", {k: v for k, v in created.items() if k != "token"})
+    check(bool(tenant_id), "註冊建立了一個新租戶", tenant_id)
+    check(created.get("role") == "admin", "註冊者是該租戶的第一位 admin", created.get("role"))
+
+    # Same email twice must not silently create a second account.
+    try:
+        await server_link.account_request(URL, "auth.register", {"email": email, "password": password})
+        check(False, "重複 email 應該被拒")
+    except server_link.AccountError as err:
+        check(err.code == "EMAIL_TAKEN", "重複 email → EMAIL_TAKEN", err.code)
+
+    try:
+        await server_link.account_request(URL, "auth.login", {"email": email, "password": "wrong-one"})
+        check(False, "錯誤密碼應該被拒")
+    except server_link.AccountError as err:
+        check(err.code == "AUTH_REJECTED", "錯誤密碼 → AUTH_REJECTED", err.code)
+
+    try:
+        signed_in = await server_link.account_request(
+            URL, "auth.login", {"email": email, "password": password}
+        )
+    except Exception as err:  # noqa: BLE001
+        check(False, f"登入失敗：{err}")
+        return
+    check(signed_in.get("token") == token, "登入取回同一組裝置 token")
+    check(signed_in.get("tenantId") == tenant_id, "登入回報同一個租戶")
+
+    # The token must actually work as a device credential.
+    device = f"verify-acct-{stamp}"
+    _current_device.set(device)
+    link = ServerLink(
+        config_loader=lambda: ServerLinkConfig(url=URL, token=token),
+        token_clearer=lambda: None,
+        device_name="verify-account",
+    )
+    try:
+        started = await link.start()
+        check(started, "用註冊拿到的 token 可以建立連線")
+        authed = await until(
+            lambda: bool(link.member_id) or bool(link.terminated_reason), "account auth"
+        )
+        check(authed and not link.terminated_reason, "auth.hello 接受這組 token", link.terminated_reason)
+        check(link.tenant_id == tenant_id, "連線回報的租戶與註冊時相同", link.tenant_id)
+
+        directory = await link._request("sessions.directory", {})
+        sessions = ((directory.get("payload") or {}).get("sessions")) or []
+        names = [str(row.get("paneId") or "") for row in sessions]
+        check(
+            PANE_ID not in names and PANE_ID_2 not in names,
+            "新租戶看不到 admin 租戶登記的 pane（跨租戶隔離，從桌面端這側觀察）",
+            names,
+        )
+    finally:
+        await link.stop()
+        print(
+            f"  （留下一個帳號 {email}：server 沒有刪除租戶的介面，"
+            f"所以每跑一次就多一個測試租戶，不是腳本沒清乾淨）"
+        )
 
 
 if __name__ == "__main__":

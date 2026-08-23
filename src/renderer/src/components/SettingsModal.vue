@@ -81,12 +81,14 @@ import CliMessagingHelp from './CliMessagingHelp.vue'
 import McpHelp from './McpHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
 import StorageUsagePane from './StorageUsagePane.vue'
+import LayoutSettingsPane from '../layout/LayoutSettingsPane.vue'
 import SkillsPane from './SkillsPane.vue'
 import SettingsNavItem from './settings/SettingsNavItem.vue'
 import SettingsSection from './settings/SettingsSection.vue'
 import SettingsCard from './settings/SettingsCard.vue'
 import SettingRow from './settings/SettingRow.vue'
 import ToggleSwitch from './settings/ToggleSwitch.vue'
+import { formatBytes } from '../lib/formatBytes'
 import {
   isSecretSettingKey,
   nextRecordKey,
@@ -117,6 +119,10 @@ const props = defineProps<{
   confirmBeforeClosePane?: boolean
   idleReclaimEnabled?: boolean
   idleReclaimMinutes?: string
+  /** Panes that could be reclaimed right now, ignoring the idle threshold. */
+  reclaimableNowCount?: number
+  /** Rough bytes those panes are holding. Estimated, not measured. */
+  reclaimableNowBytes?: number
 }>()
 const emit = defineEmits<{
   (e: 'close'): void
@@ -126,6 +132,7 @@ const emit = defineEmits<{
   (e: 'update:confirmBeforeClosePane', v: boolean): void
   (e: 'update:idleReclaimEnabled', v: boolean): void
   (e: 'update:idleReclaimMinutes', v: string): void
+  (e: 'reclaim-now'): void
 }>()
 const confirmBeforeCloseModel = computed({
   get: () => props.confirmBeforeClose ?? true,
@@ -148,9 +155,15 @@ const idleReclaimMinutesModel = computed(() => props.idleReclaimMinutes ?? '180'
 function onIdleReclaimMinutesChange(v: string): void {
   emit('update:idleReclaimMinutes', v)
 }
+// The button says what it is about to do — a count and a size — because
+// "reclaim" alone does not tell you whether pressing it costs you one pane or
+// a dozen. Zero disables it and the row says so rather than hiding, so the
+// control does not appear and disappear as panes go idle.
+const reclaimNowCount = computed(() => props.reclaimableNowCount ?? 0)
+const reclaimNowSize = computed(() => formatBytes(props.reclaimableNowBytes ?? 0))
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
+type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
 type HelpTopic = 'messaging' | 'mcp'
@@ -767,6 +780,8 @@ const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof Se
   general: { scope: 'User', storage: 'localStorage' },
   updates: { scope: 'User', storage: 'mainProcess' },
   appearance: { scope: 'User', storage: 'localStorage' },
+  // One arrangement for every workspace, shared live across windows.
+  layout: { scope: 'User', storage: 'localStorage' },
   accounts: { scope: 'User / Workspace bindings', storage: 'safeStorage' },
   extensions: { scope: 'User', storage: 'mainProcess' },
   storage: { scope: 'User', storage: 'app_data_dir' },
@@ -926,6 +941,13 @@ interface P2pLinkStatus {
   detail: string
   deviceId: string
   memberId: string
+  /** Which account this machine is signed in as. Empty when the credential was
+   *  pasted in by hand rather than obtained by signing in — both are valid, so
+   *  this decides which face the card shows, not whether it works. */
+  accountEmail?: string
+  tenantId?: string
+  displayName?: string
+  role?: string
 }
 /** "Connecting" has to resolve on its own, so the section re-asks while it is
  *  on screen rather than freezing on whatever the save call answered. */
@@ -937,6 +959,75 @@ const p2pTokenInput = ref('')
 const p2pStatus = ref<P2pLinkStatus | null>(null)
 const p2pBusy = ref(false)
 const p2pError = ref('')
+
+// Sign-in. Registering creates this user's own tenant (a private network of
+// their machines) plus its first admin; signing in exchanges the password for
+// the long-lived device token. The password is sent once and never stored:
+// what lands in the vault is the token, which is exactly what a hand-pasted
+// credential already was — so the "token" tab stays as a peer, not a fallback,
+// for machines with no account (CI, servers) and for everyone already using one.
+type P2pMode = 'login' | 'register' | 'token'
+const p2pMode = ref<P2pMode>('login')
+const p2pEmail = ref('')
+const p2pPassword = ref('')
+const p2pDisplayName = ref('')
+const p2pTenantName = ref('')
+
+/** Signed in *as an account*, as opposed to holding a hand-pasted token. */
+const p2pSignedIn = computed(() => Boolean(p2pStatus.value?.accountEmail))
+
+function resetP2pAccountForm(): void {
+  p2pPassword.value = ''
+  p2pDisplayName.value = ''
+  p2pTenantName.value = ''
+}
+
+async function submitP2pAccount(verb: 'login' | 'register'): Promise<void> {
+  p2pBusy.value = true
+  p2pError.value = ''
+  try {
+    const payload: Record<string, unknown> = {
+      serverUrl: p2pServerUrl.value,
+      email: p2pEmail.value,
+      password: p2pPassword.value,
+    }
+    if (verb === 'register') {
+      if (p2pDisplayName.value.trim()) payload.displayName = p2pDisplayName.value
+      if (p2pTenantName.value.trim()) payload.tenantName = p2pTenantName.value
+    }
+    const resp = await props.backend.send<{ status: P2pLinkStatus }>(`p2p.account.${verb}`, payload)
+    if (!resp.ok) {
+      p2pError.value = resp.error?.message ?? 'Sign-in failed'
+      return
+    }
+    // The password has served its purpose the moment a token comes back.
+    resetP2pAccountForm()
+    if (resp.payload?.status) p2pStatus.value = resp.payload.status
+  } catch (err) {
+    p2pError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    p2pBusy.value = false
+  }
+}
+
+async function p2pLogout(): Promise<void> {
+  p2pBusy.value = true
+  p2pError.value = ''
+  try {
+    const resp = await props.backend.send<{ status: P2pLinkStatus }>('p2p.account.logout', {})
+    if (!resp.ok) {
+      p2pError.value = resp.error?.message ?? 'Sign-out failed'
+      return
+    }
+    resetP2pAccountForm()
+    p2pMode.value = 'login'
+    if (resp.payload?.status) p2pStatus.value = resp.payload.status
+  } catch (err) {
+    p2pError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    p2pBusy.value = false
+  }
+}
 let p2pUrlSeeded = false
 let p2pTimer: ReturnType<typeof setInterval> | null = null
 
@@ -1795,6 +1886,11 @@ watch(activeTab, (tab) => {
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.5 13.5 5.5 6.5 12.5 3.5 12.5 3.5 9.5 10.5 2.5Z"/><path d="M9 4l3 3"/></svg>
                 </template>
               </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.layout')" :active="activeTab === 'layout'" @select="activeTab = 'layout'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M5.5 2.5v11M14.5 6h-9"/></svg>
+                </template>
+              </SettingsNavItem>
             </div>
 
             <div class="s-nav-group">
@@ -2559,11 +2655,33 @@ watch(activeTab, (tab) => {
                     :value="idleReclaimMinutesModel"
                     @change="onIdleReclaimMinutesChange(($event.target as HTMLSelectElement).value)"
                   >
+                    <option value="15">{{ $t('settings.general.idle-reclaim-15m') }}</option>
                     <option value="30">{{ $t('settings.general.idle-reclaim-30m') }}</option>
                     <option value="60">{{ $t('settings.general.idle-reclaim-1h') }}</option>
                     <option value="180">{{ $t('settings.general.idle-reclaim-3h') }}</option>
                     <option value="480">{{ $t('settings.general.idle-reclaim-8h') }}</option>
                   </select>
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                v-if="idleReclaimEnabledModel"
+                data-settings-section="general-idle-reclaim-now"
+                :title="$t('settings.general.idle-reclaim-now')"
+                :description="reclaimNowCount > 0
+                  ? $t('settings.general.idle-reclaim-now-hint', { count: reclaimNowCount, size: reclaimNowSize })
+                  : $t('settings.general.idle-reclaim-now-empty')"
+              >
+                <template #control>
+                  <button
+                    class="reclaim-now-btn"
+                    :disabled="reclaimNowCount === 0"
+                    @click="emit('reclaim-now')"
+                  >
+                    {{ reclaimNowCount > 0
+                      ? $t('settings.general.idle-reclaim-now-action', { count: reclaimNowCount })
+                      : $t('settings.general.idle-reclaim-now-action-empty') }}
+                  </button>
                 </template>
               </SettingRow>
 
@@ -2809,27 +2927,142 @@ watch(activeTab, (tab) => {
                     type="text"
                     spellcheck="false"
                     autocomplete="off"
-                    :disabled="p2pBusy"
+                    :disabled="p2pBusy || p2pSignedIn"
                     :placeholder="$t('settings.p2p.server-url-placeholder')"
                   />
                 </div>
-                <div class="field p2p-field">
-                  <label class="lbl" for="p2p-token">{{ $t('settings.p2p.token') }}</label>
-                  <input
-                    id="p2p-token"
-                    v-model="p2pTokenInput"
-                    type="password"
-                    spellcheck="false"
-                    autocomplete="off"
-                    :disabled="p2pBusy"
-                    :placeholder="p2pStatus?.hasToken ? $t('settings.p2p.token-stored') : $t('settings.p2p.token-placeholder')"
-                  />
-                  <p class="ap-hint">{{ $t('settings.p2p.token-hint') }}</p>
+
+                <!-- Signed in as an account: the credential is the server's to
+                     revoke, so this side only shows who it belongs to. -->
+                <div v-if="p2pSignedIn" class="p2p-account">
+                  <div class="p2p-account-row">
+                    <span class="lbl">{{ $t('settings.p2p.account.email') }}</span>
+                    <span>{{ p2pStatus?.accountEmail }}</span>
+                  </div>
+                  <div v-if="p2pStatus?.displayName" class="p2p-account-row">
+                    <span class="lbl">{{ $t('settings.p2p.account.display-name') }}</span>
+                    <span>{{ p2pStatus.displayName }}</span>
+                  </div>
+                  <div v-if="p2pStatus?.role" class="p2p-account-row">
+                    <span class="lbl">{{ $t('settings.p2p.account.role') }}</span>
+                    <span>{{ p2pStatus.role }}</span>
+                  </div>
+                  <div class="row-g gap p2p-actions">
+                    <button class="ap-reset" :disabled="p2pBusy" @click="p2pLogout">
+                      {{ $t('settings.p2p.account.sign-out') }}
+                    </button>
+                  </div>
                 </div>
-                <div class="row-g gap p2p-actions">
-                  <button class="ap-reset" :disabled="p2pBusy" @click="saveP2pLink">{{ $t('settings.p2p.save') }}</button>
-                  <button class="ap-reset" :disabled="p2pBusy" @click="clearP2pLink">{{ $t('settings.p2p.clear') }}</button>
-                </div>
+
+                <template v-else>
+                  <div class="p2p-tabs" role="tablist">
+                    <button
+                      v-for="mode in (['login', 'register', 'token'] as const)"
+                      :key="mode"
+                      type="button"
+                      role="tab"
+                      class="p2p-tab"
+                      :class="{ on: p2pMode === mode }"
+                      :aria-selected="p2pMode === mode"
+                      :disabled="p2pBusy"
+                      @click="p2pMode = mode"
+                    >
+                      {{ $t('settings.p2p.account.tab-' + mode) }}
+                    </button>
+                  </div>
+
+                  <!-- Sign in / register. Both take the same two fields; only
+                       registering asks for the names it will label the new
+                       tenant with. -->
+                  <template v-if="p2pMode !== 'token'">
+                    <div class="field">
+                      <label class="lbl" for="p2p-email">{{ $t('settings.p2p.account.email') }}</label>
+                      <input
+                        id="p2p-email"
+                        v-model="p2pEmail"
+                        type="email"
+                        spellcheck="false"
+                        autocomplete="username"
+                        :disabled="p2pBusy"
+                        placeholder="you@example.com"
+                      />
+                    </div>
+                    <div class="field">
+                      <label class="lbl" for="p2p-password">{{ $t('settings.p2p.account.password') }}</label>
+                      <input
+                        id="p2p-password"
+                        v-model="p2pPassword"
+                        type="password"
+                        spellcheck="false"
+                        :autocomplete="p2pMode === 'register' ? 'new-password' : 'current-password'"
+                        :disabled="p2pBusy"
+                        :placeholder="$t('settings.p2p.account.password-placeholder')"
+                        @keyup.enter="submitP2pAccount(p2pMode === 'register' ? 'register' : 'login')"
+                      />
+                    </div>
+                    <template v-if="p2pMode === 'register'">
+                      <div class="field">
+                        <label class="lbl" for="p2p-display-name">
+                          {{ $t('settings.p2p.account.display-name') }}
+                        </label>
+                        <input
+                          id="p2p-display-name"
+                          v-model="p2pDisplayName"
+                          type="text"
+                          autocomplete="off"
+                          :disabled="p2pBusy"
+                          :placeholder="$t('settings.p2p.account.optional')"
+                        />
+                      </div>
+                      <div class="field">
+                        <label class="lbl" for="p2p-tenant-name">
+                          {{ $t('settings.p2p.account.tenant-name') }}
+                        </label>
+                        <input
+                          id="p2p-tenant-name"
+                          v-model="p2pTenantName"
+                          type="text"
+                          autocomplete="off"
+                          :disabled="p2pBusy"
+                          :placeholder="$t('settings.p2p.account.optional')"
+                        />
+                        <p class="ap-hint">{{ $t('settings.p2p.account.tenant-hint') }}</p>
+                      </div>
+                    </template>
+                    <div class="row-g gap p2p-actions">
+                      <button
+                        class="ap-reset"
+                        :disabled="p2pBusy"
+                        @click="submitP2pAccount(p2pMode === 'register' ? 'register' : 'login')"
+                      >
+                        {{ $t('settings.p2p.account.' + (p2pMode === 'register' ? 'submit-register' : 'submit-login')) }}
+                      </button>
+                    </div>
+                  </template>
+
+                  <!-- Pasting a token directly: unchanged, and deliberately kept
+                       for machines that have no account to sign in with. -->
+                  <template v-else>
+                    <div class="field p2p-field">
+                      <label class="lbl" for="p2p-token">{{ $t('settings.p2p.token') }}</label>
+                      <input
+                        id="p2p-token"
+                        v-model="p2pTokenInput"
+                        type="password"
+                        spellcheck="false"
+                        autocomplete="off"
+                        :disabled="p2pBusy"
+                        :placeholder="p2pStatus?.hasToken ? $t('settings.p2p.token-stored') : $t('settings.p2p.token-placeholder')"
+                      />
+                      <p class="ap-hint">{{ $t('settings.p2p.token-hint') }}</p>
+                    </div>
+                    <div class="row-g gap p2p-actions">
+                      <button class="ap-reset" :disabled="p2pBusy" @click="saveP2pLink">{{ $t('settings.p2p.save') }}</button>
+                      <button class="ap-reset" :disabled="p2pBusy" @click="clearP2pLink">{{ $t('settings.p2p.clear') }}</button>
+                    </div>
+                  </template>
+                </template>
+
                 <p class="p2p-status">
                   <span class="p2p-dot" :class="p2pDotClass"></span>
                   <span>{{ $t('settings.p2p.state-' + p2pState) }}</span>
@@ -3431,6 +3664,12 @@ watch(activeTab, (tab) => {
           <ExtensionsPane />
         </div>
 
+        <!-- ── LAYOUT TAB ────────────────────────────────────────────────── -->
+        <div v-show="activeTab === 'layout'" class="s-body layout-body" data-settings-section="layout">
+          <h1 class="s-page-title">{{ $t('settings.nav.layout') }}</h1>
+          <LayoutSettingsPane />
+        </div>
+
         <!-- ── STORAGE TAB ───────────────────────────────────────────────── -->
         <div v-show="activeTab === 'storage'" class="s-body storage-body" data-settings-section="storage">
           <h1 class="s-page-title">{{ $t('settings.nav.storage') }}</h1>
@@ -3819,6 +4058,9 @@ watch(activeTab, (tab) => {
 /* Storage tab is a two-column settings page like appearance/general: the bare
    .s-body clips instead of scrolling, so it needs its own scroll + padding. */
 .storage-body { overflow-y: auto; padding: 18px 22px; }
+/* Same reason as storage: a stack of region cards needs the gutter and its own
+   scroll, which the bare .s-body (overflow:hidden, no padding) does not give. */
+.layout-body { overflow-y: auto; padding: 18px 22px; }
 /* Same as the other padded tabs: without a modifier the bare .s-body is
    overflow:hidden with no gutter, which clips the shortcut list instead of
    scrolling it. */
@@ -3985,11 +4227,30 @@ button.danger { background: var(--danger-deep); border-color: var(--danger-muted
 button.danger:hover { background: var(--danger-muted); }
 button.ghost { background: transparent; }
 button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
+/* The label carries a count, which must not wrap inside the row's control slot. */
+.reclaim-now-btn { white-space: nowrap; }
 
 /* ── Messages ─────────────────────────────────────────────────────────────── */
 .err-msg { color: var(--danger-fg); font-size: 11px; margin: 0; }
 
 /* Cross-device link */
+/* Sign-in tabs. No width/box-sizing here on purpose: these panels have no
+   border-box, so a width:100% would push the card past its grid track. */
+.p2p-tabs { display: flex; gap: 2px; margin: 14px 0 4px; border-bottom: 1px solid var(--border-default); }
+.p2p-tab {
+  appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
+  padding: 6px 12px; font-size: 12px; color: var(--text-secondary); cursor: pointer;
+}
+.p2p-tab:hover:not(:disabled) { color: var(--text-bright); }
+.p2p-tab.on { color: var(--text-bright); border-bottom-color: var(--accent-emphasis); font-weight: 500; }
+.p2p-tab:disabled { opacity: 0.5; cursor: default; }
+.p2p-account { margin-top: 12px; }
+.p2p-account-row {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 5px 0; font-size: 12px; border-bottom: 1px solid var(--border-muted);
+}
+.p2p-account-row:last-of-type { border-bottom: 0; }
+.p2p-account-row .lbl { color: var(--text-secondary); }
 .p2p-field { margin-top: 10px; }
 .p2p-field .ap-hint { margin: 4px 0 0; }
 .p2p-actions { margin-top: 12px; }

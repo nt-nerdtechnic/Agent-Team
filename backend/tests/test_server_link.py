@@ -79,7 +79,7 @@ def default_responder(conn: "FakeConnection", message: dict) -> dict | None:
             {
                 "memberId": "m1",
                 "role": "member",
-                "teamSpaceId": "ts1",
+                "tenantId": "tn-test",
                 "displayName": "Tester",
                 "deviceId": payload.get("deviceId"),
                 "deviceName": payload.get("deviceName"),

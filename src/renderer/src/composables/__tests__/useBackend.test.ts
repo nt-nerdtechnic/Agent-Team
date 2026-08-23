@@ -65,16 +65,22 @@ const READY_INFO = {
 describe('useBackend applyBackendChanged', () => {
   let scope: EffectScope
   let backendChangedCb: ((info: unknown) => void) | undefined
+  let systemResumedCb: (() => void) | undefined
 
   beforeEach(() => {
     vi.useFakeTimers()
     FakeWebSocket.instances = []
     backendChangedCb = undefined
+    systemResumedCb = undefined
     vi.stubGlobal('WebSocket', FakeWebSocket)
     vi.stubGlobal('agentTeam', {
       getBackendInfo: vi.fn().mockResolvedValue(READY_INFO),
       onBackendChanged: (cb: (info: unknown) => void) => {
         backendChangedCb = cb
+      },
+      onSystemResumed: (cb: () => void) => {
+        systemResumedCb = cb
+        return () => { systemResumedCb = undefined }
       }
     })
   })
@@ -172,6 +178,28 @@ describe('useBackend applyBackendChanged', () => {
 
     // send() fail-fasts instead of queueing forever against a dead backend.
     await expect(backend.send('fs.write_file', {})).rejects.toThrow('ws not open')
+  })
+
+  it('rebuilds the socket when the machine wakes', async () => {
+    const { backend, socket } = await setupConnected()
+
+    // Sleep severs the TCP connection without touching readyState, so the
+    // socket still looks alive — no close event, no status transition.
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+
+    systemResumedCb!()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(socket.closed).toBe(true)
+    expect(FakeWebSocket.instances).toHaveLength(2) // reconnected without waiting for the watchdog
+    FakeWebSocket.instances[1].open()
+    expect(backend.status.value).toBe('connected')
+  })
+
+  it('stops listening for resumes once the scope is disposed', async () => {
+    await setupConnected()
+    scope.stop()
+    expect(systemResumedCb).toBeUndefined()
   })
 })
 

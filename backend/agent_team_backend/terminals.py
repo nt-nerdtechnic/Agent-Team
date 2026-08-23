@@ -591,6 +591,23 @@ class TerminalService:
         """Ids of all live (not closed) sessions."""
         return [s.id for s in self._sessions.values() if not s.closed]
 
+    def memory_pid_groups(self) -> dict[str, tuple[str, list[int]]]:
+        """Per live session: its pane id and every pid in its process tree.
+
+        A pane's memory is the whole tree, not the PTY child: that child is a
+        login shell, and the CLI, the MCP servers it spawned and anything else
+        below it are where the hundreds of megabytes actually live. The
+        descendant snapshot the kill path already maintains is reused rather
+        than re-walked, so this stays a dictionary lookup.
+        """
+        groups: dict[str, tuple[str, list[int]]] = {}
+        for session in self._sessions.values():
+            if session.closed:
+                continue
+            pids = [session.proc.pid, *session.descendants.keys()]
+            groups[session.id] = (session.pane_id, pids)
+        return groups
+
     def find_live_by_resume_id(
         self,
         agent_key: str,

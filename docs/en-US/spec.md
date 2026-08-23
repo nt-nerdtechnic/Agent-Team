@@ -32,6 +32,7 @@ Status: historical milestones below; current plans and test counts change contin
 | Activity event system | ✅ Stable | `log_readers.ActivityEvent` + `parse_activity` · consumed by History timeline |
 | Multi-signal idle detection | ✅ Stable | raw PTY + analyzer + 10-min threshold in App.vue watcher |
 | History tab on right panel | ✅ Stable | `history_store.py` + `HistoryPanel.vue` · append-only JSONL timeline · filter / expand / export / auto-scroll (M10) |
+| Preview tab on right panel | ✅ Stable | `preview/PreviewPanel.vue` · read-only host reusing `FilePreviewPane` (11 kinds), `DiffPane` (readonly), markdown/mermaid and inline snippet/HTML · fed by Explorer context menu, `ui.preview.show` (MCP / plugins) and `⌥⌘V` |
 | Workspace-first entry + mode-aware UI | ✅ Stable | `recent_workspaces.py` + `Welcome.vue` · recent list + pin · pipeline/spawn/completed mode (M11) |
 | Manager pattern + pre-spawn team | ✅ Stable | default execution model: pre-spawn all slots (role only) → activate per stage · `isManager` slot + dispatch/ask/stage-done router (M13) |
 | Frontend tests | ✅ Stable | Vitest 63 (buffer/stages pure fns + 3 composables w/ mock backend) + Playwright 2 (Electron launch + Welcome→workspace smoke) (M14) |

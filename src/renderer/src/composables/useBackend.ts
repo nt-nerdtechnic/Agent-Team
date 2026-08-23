@@ -163,7 +163,15 @@ export function useBackend() {
 
   window.agentTeam?.onBackendChanged?.((info) => applyBackendChanged(info))
 
+  // Sleep severs the TCP connection while leaving readyState reading OPEN, so
+  // no status transition arrives and isHealthyFor() would vouch for a corpse.
+  // Rebuild unconditionally rather than waiting ~40s for the ping watchdog.
+  const offSystemResumed = window.agentTeam?.onSystemResumed?.(() => {
+    client.reconnectNow('system resumed')
+  })
+
   onScopeDispose(() => {
+    offSystemResumed?.()
     client.dispose('ws not open')
   })
 

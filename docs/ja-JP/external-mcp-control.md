@@ -301,6 +301,7 @@ Turn に対する判定ではない唯一のものです。待機が判定に至
 | `ui.pane.focus` | `{paneId}` | Pane を表示して Focus（必要ならタブを切り替え） |
 | `ui.pane.getStatus` | `{paneId}` | その Pane の `{status, buffer, logPath?}` を返す |
 | `ui.tab.switch` | `{tabId}` | Active な Stage/Run-group タブを切り替え |
+| `ui.preview.show` | `{kind, …}` | 右レールのプレビューパネルにファイル・diff・インラインスニペットを表示 |
 | `ui.window.openPlans` | — | Plan ウィンドウを開く |
 | `ui.window.openGit` | — | 現在の Workspace の Git ウィンドウを開く |
 | `ui.window.openPipeline` | `{pipelineId?}` | Pipeline Manager ウィンドウを開く |

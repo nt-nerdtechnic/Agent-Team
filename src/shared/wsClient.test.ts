@@ -199,6 +199,33 @@ describe('createWsClient', () => {
     await vi.advanceTimersByTimeAsync(4_000) // ping timeout → failure
   }
 
+  it('reconnects immediately on reconnectNow, without waiting out the backoff', async () => {
+    const c = makeClient()
+    c.connect(URL)
+    const first = FakeWebSocket.instances[0]
+    first.open()
+
+    c.reconnectNow('system resumed')
+
+    // A new socket exists right away — no timer had to fire.
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect(first.closed).toBe(true)
+    expect(statuses).toEqual(['connecting', 'connected', 'disconnected', 'connecting'])
+
+    // The discarded socket's close must not schedule a competing reconnect.
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+  })
+
+  it('ignores reconnectNow after dispose', () => {
+    const c = makeClient()
+    c.connect(URL)
+    FakeWebSocket.instances[0].open()
+    c.dispose('shutting down')
+    c.reconnectNow('system resumed')
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+
   it('excuses late pongs while the socket is still delivering frames', async () => {
     const c = makeClient()
     c.connect(URL)

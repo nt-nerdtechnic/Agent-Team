@@ -78,6 +78,10 @@ export interface WsClient {
    *  `reason`, WITHOUT scheduling a reconnect or emitting a status. The caller
    *  decides the next state (see `useBackend.applyBackendChanged`). */
   reset(reason: string): void
+  /** Tear down and reconnect immediately, skipping the backoff. For when the
+   *  socket is known-dead but hasn't reported it yet — after a system resume,
+   *  the old TCP connection is gone while `readyState` still reads OPEN. */
+  reconnectNow(reason: string): void
   /** Put the client into fail-fast mode: subsequent sends reject instead of
    *  queueing (used when the backend has errored for good). */
   markErrored(): void
@@ -347,6 +351,15 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     rejectSendQueue(new Error(reason))
   }
 
+  function reconnectNow(reason: string): void {
+    if (disposed || !url) return
+    // reset() nulls `socket` first, so the old socket's close handler is a
+    // no-op and cannot schedule a competing backoff reconnect.
+    reset(reason)
+    setStatus('disconnected')
+    connect()
+  }
+
   function markErrored(): void {
     errored = true
   }
@@ -376,6 +389,7 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     on,
     connect: (u: string) => connect(u),
     reset,
+    reconnectNow,
     markErrored,
     isHealthyFor,
     currentUrl: () => url,

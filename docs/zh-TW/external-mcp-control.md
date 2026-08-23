@@ -265,6 +265,7 @@ copilot/cursor/kilo/muse/opencode 的 `turn_complete` 是 CLI 自己說回合結
 | `ui.pane.focus` | `{paneId}` | 顯示並聚焦一個 Pane（必要時切換分頁） |
 | `ui.pane.getStatus` | `{paneId}` | 回傳該 Pane 的 `{status, buffer, logPath?}` |
 | `ui.tab.switch` | `{tabId}` | 切換作用中的 Stage／Run-group 分頁 |
+| `ui.preview.show` | `{kind, …}` | 在右側 rail 的預覽面板顯示檔案、diff 或內嵌片段 |
 | `ui.window.openPlans` | — | 開啟 Plan 視窗 |
 | `ui.window.openGit` | — | 為目前 Workspace 開啟 Git 視窗 |
 | `ui.window.openPipeline` | `{pipelineId?}` | 開啟 Pipeline Manager 視窗 |

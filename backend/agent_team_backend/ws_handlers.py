@@ -2643,6 +2643,133 @@ async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, pay
         await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
 
 
+# Account sign-in. Registering creates a tenant (a private network of this
+# user's own machines) and its first admin; logging in exchanges the password
+# for the long-lived device token. Both are the same write as p2p.link.configure
+# ends in — url to settings, token to the vault, then reconnect — so the user
+# never has to see or handle the token at all.
+#
+# The password is not stored anywhere and is not echoed back. It exists for the
+# duration of one request and is exchanged for a token, which is what a
+# previously hand-pasted credential already was.
+async def _account_call(
+    session: "Session", msg_id: str, msg_type: str, payload: dict, verb: str
+) -> None:
+    from . import app
+
+    url = payload.get("serverUrl")
+    email = payload.get("email")
+    password = payload.get("password")
+    for name, value in (("serverUrl", url), ("email", email), ("password", password)):
+        if not isinstance(value, str) or not value.strip():
+            await session.send_json(
+                make_error(msg_id, msg_type, "BAD_REQUEST", f"{name} is required")
+            )
+            return
+
+    request: dict = {"email": email.strip(), "password": password}
+    if verb == "auth.register":
+        for optional in ("displayName", "tenantName"):
+            value = payload.get(optional)
+            if isinstance(value, str) and value.strip():
+                request[optional] = value.strip()
+
+    try:
+        result = await server_link.account_request(url.strip(), verb, request)
+    except server_link.AccountError as err:
+        # Keep the server's own code (EMAIL_TAKEN, AUTH_REJECTED, BAD_REQUEST):
+        # the UI tells these apart to decide whether to offer "sign in instead"
+        # or just let the user retype the password.
+        await session.send_json(make_error(msg_id, msg_type, err.code, err.message))
+        return
+    except Exception as err:  # noqa: BLE001
+        # Anything that stopped the call reaching a server is a link problem,
+        # not a credential problem — saying "wrong password" for an unreachable
+        # host sends the user to change something that was already right.
+        await session.send_json(
+            make_error(msg_id, msg_type, "LINK_OFFLINE", str(err) or "server unreachable")
+        )
+        return
+
+    token = result.get("token")
+    if not isinstance(token, str) or not token:
+        await session.send_json(
+            make_error(msg_id, msg_type, "SERVER_ERROR", "server returned no token")
+        )
+        return
+
+    delta = app.ui_settings_store.set(
+        {
+            server_link.SERVER_URL_SETTING: url.strip(),
+            server_link.ACCOUNT_EMAIL_SETTING: str(result.get("email") or email).strip(),
+        }
+    )
+    try:
+        await vault_to_thread(server_link.set_access_token, token)
+    except Exception as err:  # noqa: BLE001
+        await session.send_json(
+            make_error(msg_id, msg_type, "P2P_TOKEN_WRITE_FAILED", str(err))
+        )
+        return
+
+    await server_link.reconfigure()
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "status": await server_link.status(),
+                "account": {
+                    "email": result.get("email"),
+                    "memberId": result.get("memberId"),
+                    "displayName": result.get("displayName"),
+                    "tenantId": result.get("tenantId"),
+                    "tenantName": result.get("tenantName"),
+                    "role": result.get("role"),
+                },
+            },
+        )
+    )
+    if delta:
+        await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
+
+
+@handler("p2p.account.register")
+async def p2p_account_register(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await _account_call(session, msg_id, msg_type, payload, "auth.register")
+
+
+@handler("p2p.account.login")
+async def p2p_account_login(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await _account_call(session, msg_id, msg_type, payload, "auth.login")
+
+
+@handler("p2p.account.logout")
+async def p2p_account_logout(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Forget this machine's credential. The server keeps the account.
+
+    The server URL is deliberately left in place: signing out is "not right
+    now", not "I will never use this server again", and making the user retype
+    the address every time is the kind of friction that gets a feature abandoned.
+    """
+    from . import app
+
+    try:
+        await vault_to_thread(server_link.set_access_token, None)
+    except Exception as err:  # noqa: BLE001
+        await session.send_json(
+            make_error(msg_id, msg_type, "P2P_TOKEN_WRITE_FAILED", str(err))
+        )
+        return
+    delta = app.ui_settings_store.set({server_link.ACCOUNT_EMAIL_SETTING: None})
+    await server_link.reconfigure()
+    await session.send_json(
+        make_response(msg_id, msg_type, {"status": await server_link.status()})
+    )
+    if delta:
+        await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
+
+
 # The receiver-side pane policy: who, on another device, may drive a pane on
 # this machine. It lives on the server (only this device or an admin may write
 # it) and is cached here, so the two handlers below are a read that always
@@ -4286,6 +4413,45 @@ async def terminal_create_cancel(
 async def terminal_input(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     session.terminals.write(payload["terminal_session_id"], payload["data"])
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
+@handler("terminal.memory_usage")
+async def terminal_memory_usage(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Per-pane memory footprint, measured on demand.
+
+    Answers the one question the memory panel exists for — which panes are
+    holding the machine's memory — with the number the kernel charges each
+    process, not `ps` RSS (which counts shared pages once per process and so
+    over-reports a fleet of identical CLIs).
+
+    On demand, never on a timer: the sweep shells out, and its cost scales with
+    the pane count. Off Darwin, or when footprint cannot run, `available` is
+    false and the panel says it cannot measure rather than showing a number
+    that means something else.
+    """
+    from . import process_memory
+
+    groups = session.terminals.memory_pid_groups()
+    pids = [pid for _, pids in groups.values() for pid in pids]
+    measured = await asyncio.to_thread(process_memory.footprints, pids)
+    totals = process_memory.sum_by_group(
+        {sid: pids for sid, (_, pids) in groups.items()}, measured
+    )
+    panes = [
+        {
+            "terminal_session_id": sid,
+            "pane_id": pane_id,
+            "bytes": totals.get(sid, 0),
+        }
+        for sid, (pane_id, _) in groups.items()
+    ]
+    await session.send_json(make_response(msg_id, msg_type, {
+        # measured being empty with live panes means the sweep failed, which is
+        # not the same as "no panes" — the panel has to tell those apart.
+        "available": process_memory.available() and bool(measured or not groups),
+        "panes": panes,
+        "total_bytes": sum(totals.values()),
+    }))
 
 
 @handler("terminal.log_sent")

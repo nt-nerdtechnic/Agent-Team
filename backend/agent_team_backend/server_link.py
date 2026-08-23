@@ -59,6 +59,11 @@ log = logging.getLogger("agent_team_backend.server_link")
 #: private store so the Settings UI can write it through the existing
 #: ``ui.settings.set`` handler without new plumbing.
 SERVER_URL_SETTING = "agentTeam.p2p.serverUrl"
+# The signed-in email, kept in plain ui_settings rather than the vault: it is
+# not a credential, and the Settings pane needs it to say *which* account is
+# connected. The token it was exchanged for is the secret, and that stays in
+# the vault.
+ACCOUNT_EMAIL_SETTING = "agentTeam.p2p.accountEmail"
 
 #: Vault secret name for the access token. It is a *long-lived* credential —
 #: the server neither expires nor rotates it, the only way it stops working is
@@ -165,6 +170,13 @@ def server_url() -> str:
     from . import app
 
     value = app.ui_settings_store.get().get(SERVER_URL_SETTING)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def account_email() -> str:
+    from . import app
+
+    value = app.ui_settings_store.get().get(ACCOUNT_EMAIL_SETTING)
     return value.strip() if isinstance(value, str) else ""
 
 
@@ -308,6 +320,12 @@ class ServerLink:
         # whether the Settings pane offers the member-management actions — a UI
         # guessing at it would show buttons every request is going to refuse.
         self.member_role = ""
+        # Which tenant this account belongs to, and the human-readable name for
+        # it, both from auth.hello. The Settings pane shows them so the user can
+        # tell *which* account is connected — a bare "connected" says nothing
+        # once one machine can hold several accounts over its lifetime.
+        self.tenant_id = ""
+        self.display_name = ""
         # The team roster as the server last sent it, from team.members.list or
         # the team.members.changed push. None means "never fetched", which an
         # empty list must not be confused with. Kept across reconnects for the
@@ -601,6 +619,8 @@ class ServerLink:
         payload = payload if isinstance(payload, dict) else {}
         self.member_id = str(payload.get("memberId") or "")
         self.member_role = str(payload.get("role") or "")
+        self.tenant_id = str(payload.get("tenantId") or "")
+        self.display_name = str(payload.get("displayName") or "")
         log.info(
             "navide-server link authenticated as member %s (%s) for device %s",
             self.member_id or "unknown",
@@ -1243,6 +1263,10 @@ async def status() -> dict[str, Any]:
             "detail": link.terminated_reason or link.last_error,
             "deviceId": link._device_id,
             "memberId": link.member_id,
+            "accountEmail": await asyncio.to_thread(account_email),
+            "tenantId": getattr(link, "tenant_id", ""),
+            "displayName": getattr(link, "display_name", ""),
+            "role": link.member_role,
         }
     config = await asyncio.to_thread(load_config)
     return {
@@ -1255,6 +1279,10 @@ async def status() -> dict[str, Any]:
         "detail": "",
         "deviceId": "",
         "memberId": "",
+        "accountEmail": await asyncio.to_thread(account_email),
+        "tenantId": "",
+        "displayName": "",
+        "role": "",
     }
 
 
@@ -1390,3 +1418,67 @@ def note_delivery_result(msg_key: str, ok: bool, reason: str) -> bool:
     if _link is None:
         return False
     return _link.note_delivery_result(msg_key, ok, reason)
+
+
+# ---- account API (register / login) -----------------------------------------
+#
+# These two calls happen *before* this machine has a token, so they cannot go
+# through the long-lived link: that link only dials once a token exists, and
+# authenticates before it will carry anything. auth.register and auth.login are
+# the server's only unauthenticated endpoints, so each call opens its own
+# short-lived connection, sends one frame, and closes.
+#
+# The password only ever exists inside this function's frame. What gets stored
+# is the token the server hands back — the same long-lived credential a user
+# would otherwise have pasted in by hand.
+
+
+class AccountError(Exception):
+    """A server-reported failure of an account call, carrying its code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+async def account_request(
+    url: str, msg_type: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Call one unauthenticated account endpoint over a throwaway connection.
+
+    Raises AccountError for a server-reported failure (so the caller can keep
+    the server's own code, e.g. EMAIL_TAKEN) and ConnectionError/TimeoutError
+    for anything that stops the call reaching a server at all — the caller
+    turns those into a link-level error rather than a credential problem.
+    """
+    target = (url or "").strip()
+    if not target:
+        raise ConnectionError("no server url configured")
+    # Honour a test's injected connector when one is installed on the link.
+    connect = _link._connect if _link is not None else websockets.connect
+    frame = json.dumps({"id": "acct-1", "type": msg_type, "payload": payload})
+    async with connect(target) as ws:
+        await asyncio.wait_for(ws.send(frame), REQUEST_TIMEOUT_S)
+        while True:
+            raw = await asyncio.wait_for(ws.recv(), REQUEST_TIMEOUT_S)
+            try:
+                message = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(message, dict):
+                continue
+            # Ignore anything that is not the reply to this one request; a
+            # server is free to push events onto a connection at any time.
+            if message.get("id") != "acct-1":
+                continue
+            if message.get("ok"):
+                result = message.get("payload")
+                return result if isinstance(result, dict) else {}
+            error = message.get("error")
+            code = "SERVER_ERROR"
+            detail = "account request failed"
+            if isinstance(error, dict):
+                code = str(error.get("code") or code)
+                detail = str(error.get("message") or detail)
+            raise AccountError(code, detail)
