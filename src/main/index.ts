@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, safeStorage, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, powerMonitor, safeStorage, session, shell } from 'electron'
 import { join, dirname } from 'node:path'
 import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
@@ -27,6 +27,7 @@ import { withDeadline } from './deadline'
 import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
 import { setWindowDockTileBadge } from './dock-tile-badge'
 import { BackendBroadcastTracker } from './backend-broadcast'
+import { createResumeGate } from './resume-gate'
 import { stabilizeDroppedPaths, pruneDroppedFiles, saveClipboardImage } from './dropped-file-store'
 import { watchBackendExit } from './backend-crash'
 import { createBackendAutoRestart } from './backend-autorestart'
@@ -436,6 +437,34 @@ app.on('browser-window-created', (_event, win) => {
     if (payload !== undefined && !win.isDestroyed()) win.webContents.send('backend:changed', payload)
   })
   win.on('closed', () => backendBroadcastTracker.forget(win.id))
+})
+
+// Rebuild every WebSocket the moment the machine wakes.
+//
+// Sleep kills the TCP connections underneath, but nothing tells the sockets:
+// readyState still reads OPEN and isHealthyFor() still agrees, so the loss is
+// only discovered when the frontend's ping watchdog has timed out three times
+// — some 40 seconds of a UI that looks connected and is not. Waking is the one
+// moment the staleness is certain, so reconnect then instead of waiting to be
+// told.
+//
+// Only a full wake fires this; macOS maintenance/dark wakes do not. That is
+// the case worth covering anyway — it is when the user comes back to the
+// machine.
+const resumeGate = createResumeGate()
+app.whenReady().then(() => {
+  powerMonitor.on('resume', () => {
+    if (!resumeGate.admit(Date.now())) return
+    // Main holds its own backend socket for the plugin broker; it went stale
+    // with the rest.
+    frontendPluginManager.reconnectAfterResume()
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue
+      // Deliberately not focus-gated, unlike backend:changed: a backgrounded
+      // window would otherwise sit on a dead socket until someone clicks it.
+      win.webContents.send('system:resumed')
+    }
+  })
 })
 
 // Extensions view: install/update/remove third-party plugins. Verified packages

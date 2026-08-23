@@ -78,6 +78,44 @@ describe('idle reclaim wiring', () => {
     expect(sweep).toContain('if (!idleReclaimEnabled.value) return')
   })
 
+  // A manual reclaim must not become a way around the guards — the only thing
+  // pressing the button skips is the waiting.
+  it('runs manual reclaim through the same guards, minus the age check', () => {
+    const fn = block('async function reclaimPanesNow(', 'onMounted(() => {')
+    expect(fn).toContain('reclaimBlockedBy(reclaimCandidate(pane), RECLAIM_NOW_THRESHOLD_MS, Date.now()) !== null) continue')
+  })
+
+  it('offers the same candidate list to every reclaim-now control', () => {
+    expect(appSource).toContain('const reclaimableNowIds = computed<string[]>')
+    expect(appSource).toContain(':reclaimable-now-count="reclaimableNowIds.length"')
+  })
+
+  // The measurement shells out to footprint, whose cost scales with the pane
+  // count — on a timer it would be a tax paid forever for a panel nobody has
+  // open.
+  it('measures memory only when the panel is opened', () => {
+    const fn = block('function toggleMemoryPanel(', 'async function onMemoryReclaim(')
+    expect(fn).toContain("const opening = openPopover.value !== 'memory'")
+    expect(fn).toContain('if (opening) void refreshMemoryUsage()')
+    expect(appSource).not.toContain('setInterval(() => { void refreshMemoryUsage() }')
+  })
+
+  // A pane rebuilt around a new PTY gets a new pane id, and the backend still
+  // reports the session it created the PTY under. The session id is the key
+  // this window holds itself, so it cannot drift the same way.
+  it('keys measurements by terminal session id, with pane id as the fallback', () => {
+    const fn = block('const memoryRows = computed<MemoryPaneRow[]>', 'async function refreshMemoryUsage(')
+    expect(fn).toContain('memoryBytesBySession.value.get(')
+    expect(fn).toContain('?? memoryBytesByPane.value.get(p.id) ?? 0')
+  })
+
+  // Showing an unmeasured pane as 0 bytes reads as "this one is free", which is
+  // the opposite of what a failed sweep means.
+  it('marks memory unavailable rather than zero when the backend cannot answer', () => {
+    const fn = block('async function refreshMemoryUsage(', 'function toggleMemoryPanel(')
+    expect(fn).toContain('memoryAvailable.value = false')
+  })
+
   // A pane silently turning into a placeholder reads as a crash unless the app
   // says what it did.
   it('tells the user what was reclaimed', () => {

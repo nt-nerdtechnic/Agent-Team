@@ -83,6 +83,14 @@ export function reclaimBlockedBy(
   return null
 }
 
+/** Threshold for a reclaim the user asked for by name.
+ *
+ *  Every other guard still applies — the focused pane, one awaiting an answer,
+ *  one with unsent text and one that cannot be resumed are all still refused.
+ *  Only the waiting is skipped, because a person pressing "reclaim now" has
+ *  already answered the question the timer exists to answer. */
+export const RECLAIM_NOW_THRESHOLD_MS = 0
+
 /** Lower bound on the configured threshold, so a bad stored value cannot turn
  *  the sweep into "reclaim as soon as it stops typing". */
 export const IDLE_RECLAIM_MIN_MINUTES = 15

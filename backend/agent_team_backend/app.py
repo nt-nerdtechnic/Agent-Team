@@ -290,6 +290,14 @@ async def unicast_any(event: dict[str, Any]) -> bool:
     return False
 
 
+# A send slower than this is worth attributing; see Session._note_send_timing.
+_SEND_SLOW_WARN_MS = 500.0
+# Floor between two slow-send lines. The probe fires hardest exactly when the
+# loop can least afford another write to the log pipe, so it must not be the
+# thing that makes a stall worse.
+_SEND_SLOW_LOG_INTERVAL_S = 10.0
+
+
 class Session:
     """Per-WebSocket-connection state."""
 
@@ -323,6 +331,11 @@ class Session:
         # Set once the peer is gone (send failed or ws() loop exited). All
         # further send_json calls become silent no-ops.
         self.dead = False
+        # Throttle state for the slow-send probe (see _note_send_timing).
+        # None rather than 0.0: the first slow send must always report, which a
+        # zero baseline would swallow whenever the clock starts near zero.
+        self._slow_send_last_log: float | None = None
+        self._slow_send_suppressed = 0
 
     async def send_json(self, data: dict[str, Any]) -> None:
         """Serialized websocket send — sole writer for this connection.
@@ -333,8 +346,10 @@ class Session:
         """
         if self.dead:
             return
+        started = time.monotonic()
         try:
             async with self._send_lock:
+                acquired = time.monotonic()
                 # Re-check under the lock: on disconnect, a swarm of producers
                 # (broadcast + PTY output pump) can all pass the pre-lock guard
                 # while dead is still False, then serialize here. Without this
@@ -345,6 +360,11 @@ class Session:
                 if self.dead:
                     return
                 await self.websocket.send_json(data)
+            # Outside the lock deliberately: this probe logs, and a log write
+            # blocks the event loop whenever the stderr pipe is full — holding
+            # the lock across that would worsen the very contention it exists
+            # to measure.
+            self._note_send_timing(started, acquired, time.monotonic())
         except (RuntimeError, WebSocketDisconnect, ClientDisconnected) as err:
             # RuntimeError: starlette's 'Cannot call "send" once a close
             # message has been sent'; ClientDisconnected: uvicorn transport
@@ -358,6 +378,41 @@ class Session:
             # because these carry no message and rendered as an empty tail that
             # read like a truncated error.
             log.debug("ws peer gone (%s); marking session %#x dead", type(err).__name__, id(self))
+
+    def _note_send_timing(self, started: float, acquired: float, done: float) -> None:
+        """Split a slow send into lock contention vs transport backpressure.
+
+        `pty reader suspended ... held=N` reports that an outbound flush was
+        slow but not why, and the two causes want opposite fixes. Time spent
+        waiting for _send_lock means another producer was mid-flush, so a
+        heartbeat given its own path would skip the queue. Time spent inside
+        send_json means the peer is not draining, and no amount of reordering
+        helps — every writer is stuck behind the same TCP window. Measure
+        before rebuilding either one.
+
+        Takes `done` rather than reading the clock so it stays a pure function
+        of three timestamps; patching time.monotonic to test it would derange
+        the event loop that schedules on the same clock.
+        """
+        total_ms = (done - started) * 1000
+        if total_ms < _SEND_SLOW_WARN_MS:
+            return
+        if (
+            self._slow_send_last_log is not None
+            and done - self._slow_send_last_log < _SEND_SLOW_LOG_INTERVAL_S
+        ):
+            self._slow_send_suppressed += 1
+            return
+        tail = f" (+{self._slow_send_suppressed} suppressed)" if self._slow_send_suppressed else ""
+        self._slow_send_suppressed = 0
+        self._slow_send_last_log = done
+        log.warning(
+            "slow ws send: total=%.0fms lock_wait=%.0fms transport=%.0fms%s",
+            total_ms,
+            (acquired - started) * 1000,
+            (done - acquired) * 1000,
+            tail,
+        )
 
     async def _send_event(self, event: dict[str, Any]) -> None:
         try:

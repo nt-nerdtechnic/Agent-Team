@@ -56,6 +56,7 @@ declare global {
       stopBackend: () => Promise<{ ok: boolean }>
       onBackendChanged: (cb: (info: BackendInfo) => void) => void
       onMenuAction: (cb: (action: string) => void) => void
+      onSystemResumed: (cb: () => void) => () => void
       setRecentWorkspaces: (list: { path: string; name: string; exists: boolean }[]) => void
       openMainWindow: (args?: { workspace_path?: string }) => Promise<{ ok: boolean }>
       pickWorkspace: (defaultPath?: string) => Promise<string | null>

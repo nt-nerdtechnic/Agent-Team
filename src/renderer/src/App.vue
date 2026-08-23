@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, provi
 import ViewPanel, { type LayoutMode } from './components/ViewPanel.vue'
 import TerminalPane from './components/TerminalPane.vue'
 import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
+import MemoryPanel, { type MemoryPaneRow } from './components/MemoryPanel.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
 import ControlPane, {
@@ -22,6 +23,8 @@ import ControlPane, {
 import type { AgentOverviewRow } from './components/AgentOverviewPanel.vue'
 import QuestionAlert from './components/QuestionAlert.vue'
 import TokenStatsPanel from './components/TokenStatsPanel.vue'
+import { asAgentPush, normalizePreviewTarget } from './preview/previewTarget'
+import { usePreview } from './preview/usePreview'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
@@ -80,7 +83,7 @@ import { i18n } from './i18n'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from './lib/diagLog'
-import { reclaimBlockedBy, idleReclaimThresholdMs, type ReclaimCandidate } from './lib/idleReclaim'
+import { reclaimBlockedBy, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
 import { findConsecutiveQuestionBlocks, findSentinel } from './lib/buffer'
 import {
   buildCliPaneBufferReply,
@@ -170,6 +173,18 @@ import {
   type WorkspaceRestoreSession,
 } from './lib/resumeBehavior'
 import { initSettingsBackend, settingsGet, settingsSet } from './lib/settings'
+import { useLayoutStore } from './layout/useLayoutStore'
+import { RAIL_SIZE } from './layout/slots'
+import SlotContainer from './layout/SlotContainer.vue'
+// Bodies for the horizontal slots. Async because a slot that holds none of them
+// — the shipped default — should not pay for their code.
+//
+// Only three, because only three views may live here: the rest are pinned to
+// the host that knows how to reveal them (see viewRegistry). A slot that
+// cannot be asked to draw a view needs no import for it.
+const SlotHistory = defineAsyncComponent(() => import('./components/HistoryPanel.vue'))
+const SlotTasker = defineAsyncComponent(() => import('./components/TaskerPanel.vue'))
+const SlotMessages = defineAsyncComponent(() => import('./components/AgentMessagesPanel.vue'))
 import { pickWhatsNew, type WhatsNewEntry } from './lib/whatsNew'
 import { initUsage } from './composables/useUsage'
 import {
@@ -659,25 +674,67 @@ function pushQuitConfirmConfig(): void {
 watch(confirmBeforeClose, pushQuitConfirmConfig)
 // Strict completion: when ON, idle/cap timeouts do NOT auto-advance — instead they
 // prompt the user (or, if Full auto is also on, an LLM-styled 5-sec auto-advance).
-// Drives the third grid column width on .app. TokenStatsPanel persists its
-// own expanded/collapsed sticky state to the settings store; this ref mirrors
-// the component state via v-model:expanded so the layout knows its width.
-const tokenPanelExpanded = ref<boolean>(
-  settingsGet<string | null>('agentTeam.tokenPanel.expanded', null) === '1'
-)
-// The panel is controlled now, so persisting belongs here with the value rather
-// than inside the component that merely renders it.
-watch(tokenPanelExpanded, (v) => { settingsSet('agentTeam.tokenPanel.expanded', v ? '1' : '0') })
-const rightPanelWidth = ref<number>(
-  parseInt(settingsGet('agentTeam.rightWidth', '300')) || 300
-)
-watch(rightPanelWidth, (v) => { settingsSet('agentTeam.rightWidth', String(v)) })
-const tokenPanelWidth = computed(() => (tokenPanelExpanded.value ? `${rightPanelWidth.value}px` : '36px'))
+// Shell geometry now lives in the layout store: one object, one write path, and
+// the same source Settings will edit later. These stay as computeds so the rest
+// of this file — handles, refits, the panel props — keeps reading what it always
+// read; only the storage underneath moved.
+//
+// The store also carries `up` and `down`. Both start empty, an empty slot
+// resolves to a 0px track, so the shell renders exactly as the three-column
+// version did until a view is put there.
+const { layout: shellLayout, slotTracks, setSlotSize, setSlotCollapsed, setActiveView, canCollapse } = useLayoutStore()
 
-const leftPanelWidth = ref<number>(
-  parseInt(settingsGet('agentTeam.leftWidth', '360')) || 360
+const leftPanelWidth = computed(() => shellLayout.value.slots.left.size)
+const rightPanelWidth = computed(() => shellLayout.value.slots.right.size)
+const leftPanelCollapsed = computed(() => shellLayout.value.slots.left.collapsed)
+/** Kept for the panel prop and every `v-if` that already reads it. */
+const tokenPanelExpanded = computed<boolean>({
+  get: () => !shellLayout.value.slots.right.collapsed,
+  set: (v) => { setSlotCollapsed('right', !v); refitAllTerminals() },
+})
+const tokenPanelWidth = computed(() => slotTracks.value.right)
+const leftTrackWidth = computed(() => slotTracks.value.left)
+
+// Collapsing either side slot resizes the main column by hundreds of pixels.
+// Per-pane ResizeObservers coalesce that away often enough to leave terminals
+// at a stale width, so drive the refit from the toggle itself.
+function setLeftCollapsed(v: boolean): void {
+  if (v && !canCollapse('left')) return
+  setSlotCollapsed('left', v)
+  refitAllTerminals()
+}
+
+// The horizontal slots take height off the stage rather than width, but the
+// terminals care either way, so they refit on the same terms as the side ones.
+function setSlotCollapsedAndRefit(id: 'up' | 'down', v: boolean): void {
+  if (v && !canCollapse(id)) return
+  setSlotCollapsed(id, v)
+  refitAllTerminals()
+}
+
+// A handle needs a track to drag. A collapsed slot is a 36px rail and an empty
+// one is 0px wide — in both cases the handle would sit against the window edge
+// writing a size nothing displays.
+const leftHandleVisible = computed(
+  () => !shellLayout.value.slots.left.collapsed && shellLayout.value.slots.left.views.length > 0
 )
-watch(leftPanelWidth, (v) => { settingsSet('agentTeam.leftWidth', String(v)) })
+const rightHandleVisible = computed(
+  () => !shellLayout.value.slots.right.collapsed && shellLayout.value.slots.right.views.length > 0
+)
+
+const upTrackHeight = computed(() => slotTracks.value.up)
+const downTrackHeight = computed(() => slotTracks.value.down)
+
+// Safety net for every other way the stage can change size: a view moved in
+// Settings, a size typed there, or another window editing the shared layout.
+// The toggles above refit immediately because a delayed one would show a
+// stale-width flash; this covers the paths that have no single call site.
+// Debounced because dragging a handle rewrites the track on every mousemove.
+let _slotTrackTimer: number | null = null
+watch(slotTracks, () => {
+  if (_slotTrackTimer !== null) clearTimeout(_slotTrackTimer)
+  _slotTrackTimer = window.setTimeout(() => { _slotTrackTimer = null; refitAllTerminals() }, 120)
+}, { deep: true })
 
 type DragTarget = 'left' | 'right'
 let _dragTarget: DragTarget | null = null
@@ -705,11 +762,9 @@ function onResizeStart(e: MouseEvent, target: DragTarget): void {
 function onResizeMove(e: MouseEvent): void {
   if (!_dragTarget) return
   const dx = e.clientX - _dragStartX
-  if (_dragTarget === 'left') {
-    leftPanelWidth.value = Math.max(240, Math.min(560, _dragStartW + dx))
-  } else {
-    rightPanelWidth.value = Math.max(180, Math.min(520, _dragStartW - dx))
-  }
+  // The store clamps to each slot's own range, so the limits live with the slot
+  // definition instead of being repeated at every call site that moves one.
+  setSlotSize(_dragTarget, _dragTarget === 'left' ? _dragStartW + dx : _dragStartW - dx)
 }
 
 function refitAllTerminals(): void {
@@ -5043,8 +5098,9 @@ async function rebuildPaneViaResume(
 
 /** Batch pre-scan: ask once before rebuilding over running CLIs. Returns
  *  whether running panes should be force-rebuilt (false = keep skipping them). */
-async function confirmBatchRebuildOverRunning(ids: string[]): Promise<boolean> {
-  const runningCount = ids.filter((id) => {
+/** Panes in a batch that are mid-turn, so a rebuild would interrupt them. */
+function countPanesBusyForRebuild(ids: string[]): number {
+  return ids.filter((id) => {
     const paneRef = paneRefs[id]
     return paneBusyForRebuild(
       paneRef?.displayStatus as string | undefined,
@@ -5052,11 +5108,28 @@ async function confirmBatchRebuildOverRunning(ids: string[]): Promise<boolean> {
       paneRef?.startingAgeMs as number | null | undefined,
     ) === 'running'
   }).length
+}
+
+async function confirmBatchRebuildOverRunning(ids: string[]): Promise<boolean> {
+  const runningCount = countPanesBusyForRebuild(ids)
   if (runningCount === 0) return false
   return notifyRestore.confirm(
     i18n.global.t('pane.terminal.rebuild-running-confirm-body-batch', { count: runningCount }),
     {
       title: i18n.global.t('pane.terminal.rebuild-running-confirm-title'),
+      confirmText: i18n.global.t('pane.terminal.rebuild-running-confirm-confirm'),
+      cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
+    }
+  )
+}
+
+/** Batch rebuild with nothing mid-turn: still destructive to what is on
+ *  screen, so the batch buttons ask before rebuilding several panes at once. */
+async function confirmBatchRebuild(count: number): Promise<boolean> {
+  return notifyRestore.confirm(
+    i18n.global.t('pane.terminal.rebuild-batch-confirm-body', { count }),
+    {
+      title: i18n.global.t('pane.terminal.rebuild-batch-confirm-title'),
       confirmText: i18n.global.t('pane.terminal.rebuild-running-confirm-confirm'),
       cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
     }
@@ -5140,7 +5213,17 @@ async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
     .filter((p) => p.realized && (scope === 'all' || tabFilteredPaneIds.value.has(p.id)) && paneCanRebuild(p))
     .map((pane) => pane.id)
   if (!ids.length) return
-  const forceWhenRunning = await confirmBatchRebuildOverRunning(ids)
+  // The rebuild-all buttons hit every pane at once, so they always confirm:
+  // the running-pane dialog when some are mid-turn (its cancel means "skip the
+  // busy ones", not "abort"), a plain one otherwise — even idle panes lose
+  // their rendered scrollback and get reprinted from the resumed session.
+  const runningCount = countPanesBusyForRebuild(ids)
+  let forceWhenRunning = false
+  if (runningCount > 0) {
+    forceWhenRunning = await confirmBatchRebuildOverRunning(ids)
+  } else if (!(await confirmBatchRebuild(ids.length))) {
+    return
+  }
 
   rebuildingTabPanes.value = true
   pipelineLog(
@@ -5800,6 +5883,14 @@ registerCommand('ui.pane.getStatus', (args) => {
 // Diagnostics recorded by uiDiagnostics (e.g. injectText resends) — lets an
 // external MCP client see an in-window anomaly a "ok: true" reply hid. See
 // plan_mcp.ui_diagnostics for the MCP-facing tool that calls this action.
+const preview = usePreview()
+// A preview target names a workspace path. After switching project that path
+// may not even be open any more, and showing it against the new workspace
+// would be wrong rather than merely stale. Watching the ref covers all four
+// assignment sites at once (select / inspect / close / open).
+watch(currentWorkspace, (_next, prev) => {
+  if (prev) preview.clearWorkspace(prev)
+})
 registerCommand('ui.diagnostics.read', (args) => {
   const a = (args as { sinceSeq?: number; paneId?: string; limit?: number } | undefined) ?? {}
   const entries = readDiagnostics({ sinceSeq: a.sinceSeq, paneId: a.paneId || undefined, limit: a.limit })
@@ -5809,6 +5900,21 @@ registerCommand('ui.tab.switch', (args) => {
   const tabId = (args as { tabId?: string } | undefined)?.tabId
   if (!tabId) throw new Error('ui.tab.switch requires tabId')
   activeTab.value = tabId
+})
+// Push something into the right rail's preview panel. Reached by MCP
+// (ui_invoke), so the payload is untrusted and goes through
+// normalizePreviewTarget first. Plugins cannot reach this: their ui.* calls go
+// through the main process capability broker, whose host-action table does not
+// list preview.
+registerCommand('ui.preview.show', (args) => {
+  const target = normalizePreviewTarget(args)
+  if (!target) throw new Error('ui.preview.show requires a valid preview target')
+  // Attribution is applied at the boundary, not taken from the payload — see
+  // asAgentPush.
+  preview.show(asAgentPush(target))
+})
+registerCommand('workbench.action.focusPreview', () => {
+  preview.focus()
 })
 registerCommand('ui.window.openPlans', () => { openPlansWindow() })
 registerCommand('ui.window.openGit', async () => {
@@ -10275,6 +10381,47 @@ async function sweepIdlePanes(): Promise<void> {
   )
 }
 
+/** Panes the user could reclaim right now, ignoring how long they have been
+ *  idle. Drives the count on every "reclaim now" control, so the button can
+ *  say what it is about to do before it is pressed. */
+const reclaimableNowIds = computed<string[]>(() => {
+  const now = Date.now()
+  return panes.value
+    .filter((p) => reclaimBlockedBy(reclaimCandidate(p), RECLAIM_NOW_THRESHOLD_MS, now) === null)
+    .map((p) => p.id)
+})
+
+/** Rough bytes a reclaim would return, for a control that has no measurement.
+ *
+ *  Deliberately a round per-CLI figure rather than a real reading: the settings
+ *  row has no reason to shell out for a sweep, and the honest presentation of
+ *  an estimate is "about", which is what its copy says. The memory panel, which
+ *  does measure, never uses this. */
+const RECLAIM_ESTIMATE_BYTES_PER_CLI = 250 * 1024 * 1024
+
+/** Reclaim now, by explicit request. Returns how many actually went. */
+async function reclaimPanesNow(paneIds?: string[]): Promise<number> {
+  const targets = paneIds ?? reclaimableNowIds.value
+  let reclaimed = 0
+  for (const paneId of targets) {
+    // Re-checked per pane for the same reason the sweep does it: this awaits a
+    // kill between candidates, and the user can focus or type into the next one
+    // while it runs.
+    const pane = panes.value.find((p) => p.id === paneId)
+    if (!pane) continue
+    if (reclaimBlockedBy(reclaimCandidate(pane), RECLAIM_NOW_THRESHOLD_MS, Date.now()) !== null) continue
+    if (await reclaimIdlePane(paneId)) reclaimed++
+  }
+  if (reclaimed > 0) {
+    pipelineLog(`♻ reclaimed ${reclaimed} CLI pane(s) on request — click to resume`)
+    notifyRestore.toast(
+      i18n.global.t('pane.terminal.idle-reclaimed', { count: reclaimed }),
+      { type: 'info' }
+    )
+  }
+  return reclaimed
+}
+
 onMounted(() => {
   _idleReclaimTimer = window.setInterval(() => { void sweepIdlePanes() }, IDLE_RECLAIM_SWEEP_MS)
 })
@@ -11072,6 +11219,78 @@ function onAgentOverviewJump(paneId: string): void {
   closePopover()
   if (minimizedPanes.value.has(paneId)) restorePane(paneId)
   onSidebarFocusPane(paneId)
+}
+
+// ── Memory popover (status-bar "CLI memory") ────────────────────────────────
+// The measurement shells out to `footprint`, so it is taken when the panel
+// opens and not on a timer. Sizes stay from that reading until it is reopened:
+// a number that silently drifts while you read it is worse than one you know
+// the age of, and this panel exists to be acted on immediately.
+const memoryBytesByPane = ref<Map<string, number>>(new Map())
+const memoryBytesBySession = ref<Map<string, number>>(new Map())
+const memoryMeasured = ref(false)
+const memoryAvailable = ref(true)
+
+/** Panes with a live CLI. The status-bar pill counts these, not placeholders:
+ *  a placeholder holds no process and so no memory. */
+const realizedPaneCount = computed(() => panes.value.filter((p) => p.realized).length)
+
+const memoryRows = computed<MemoryPaneRow[]>(() => {
+  const reclaimable = new Set(reclaimableNowIds.value)
+  return panes.value
+    .filter((p) => p.realized)
+    .map((p) => ({
+      paneId: p.id,
+      title: p.customName || p.autoName || p.agentLabel,
+      // Keyed by terminal session first: that id is the one this window holds
+      // for its own PTY, so it cannot drift the way a pane id can when a pane
+      // is rebuilt around a new one. The pane id is the fallback for a pane
+      // whose ref is not mounted at this moment.
+      bytes: memoryBytesBySession.value.get(
+        (paneRefs[p.id]?.sessionId as unknown as string) ?? ''
+      ) ?? memoryBytesByPane.value.get(p.id) ?? 0,
+      reclaimable: reclaimable.has(p.id),
+    }))
+})
+
+async function refreshMemoryUsage(): Promise<void> {
+  memoryMeasured.value = false
+  const reply = await sendQuiet<{
+    available?: boolean
+    panes?: Array<{ pane_id?: string; terminal_session_id?: string; bytes?: number }>
+  }>('terminal.memory_usage', {})
+  if (!reply) {
+    // The backend could not answer at all. Sizes stay hidden rather than shown
+    // as zero, which would read as "these panes are free".
+    memoryAvailable.value = false
+    memoryMeasured.value = true
+    return
+  }
+  memoryAvailable.value = reply.available !== false
+  const byPane = new Map<string, number>()
+  const bySession = new Map<string, number>()
+  for (const row of reply.panes ?? []) {
+    const bytes = Number(row.bytes) || 0
+    if (row.pane_id) byPane.set(row.pane_id, bytes)
+    if (row.terminal_session_id) bySession.set(row.terminal_session_id, bytes)
+  }
+  memoryBytesByPane.value = byPane
+  memoryBytesBySession.value = bySession
+  memoryMeasured.value = true
+}
+
+function toggleMemoryPanel(): void {
+  const opening = openPopover.value !== 'memory'
+  togglePopover('memory')
+  if (opening) void refreshMemoryUsage()
+}
+
+async function onMemoryReclaim(): Promise<void> {
+  const reclaimed = await reclaimPanesNow()
+  // Re-measured rather than closed: the point of the panel is to show the
+  // machine getting its memory back, and the rows that are left are the answer
+  // to "what is still holding it".
+  if (reclaimed > 0) void refreshMemoryUsage()
 }
 
 // Pane right-click context menu, shared by the agent list, spotlight thumbnails,
@@ -12083,18 +12302,20 @@ function paneIsCommander(p: ActivePane): boolean {
       </div>
     </div>
   </Transition>
-  <div class="app" :style="{ '--token-panel-width': tokenPanelWidth, '--left-width': leftPanelWidth + 'px' }" :class="{ 'is-resizing-shell': isShellDragging, 'is-resizing-grid': isGridDragging }">
+  <div class="app" :style="{ '--token-panel-width': tokenPanelWidth, '--left-width': leftTrackWidth, '--up-height': upTrackHeight, '--down-height': downTrackHeight, '--rail-size': RAIL_SIZE + 'px', '--chrome-bottom': shellLayout.chrome.statusbar ? '24px' : '0px' }" :class="{ 'is-resizing-shell': isShellDragging, 'is-resizing-grid': isGridDragging }">
     <!-- Custom titlebar: traffic lights on left (via hiddenInset), name centre, gear right -->
     <div class="titlebar">
       <template v-if="workspaceSelected">
         <div class="titlebar-workspace">
+          <!-- Read-only: the workspace changes only through the buttons beside
+               it, so a stray edit here cannot move the whole window. -->
           <input
             :value="currentWorkspace"
             type="text"
             class="titlebar-ws-input"
             spellcheck="false"
             autocorrect="off"
-            @change="onWorkspaceBrowse(($event.target as HTMLInputElement).value)"
+            readonly
           />
           <button class="titlebar-ws-btn" @mousedown.stop @click="titlebarRevealWorkspace" :title="$t('action.open-in-finder')">📁</button>
           <button class="titlebar-ws-btn" @mousedown.stop @click="onSwitchWorkspace" :title="$t('action.switch-workspace')">↺</button>
@@ -12164,6 +12385,9 @@ function paneIsCommander(p: ActivePane): boolean {
       @spawn-for-issue="onHandleIssue"
       @rename-pane="setPaneCustomName"
       @install-cli="(p) => promptCliInstall(p.agentKey, p.label)"
+      :collapsed="leftPanelCollapsed"
+      :views="shellLayout.slots.left.views"
+      @update:collapsed="setLeftCollapsed"
     />
     <QuestionAlert
       :visible="!!activeQuestion"
@@ -12230,6 +12454,9 @@ function paneIsCommander(p: ActivePane): boolean {
       v-model:confirm-before-close-pane="confirmBeforeClosePane"
       v-model:idle-reclaim-enabled="idleReclaimEnabled"
       v-model:idle-reclaim-minutes="idleReclaimMinutes"
+      :reclaimable-now-count="reclaimableNowIds.length"
+      :reclaimable-now-bytes="reclaimableNowIds.length * RECLAIM_ESTIMATE_BYTES_PER_CLI"
+      @reclaim-now="() => void reclaimPanesNow()"
       @close="showSettings = false; settingsInitialTab = 'general'"
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"
@@ -12285,6 +12512,26 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="reconnectPickerOpen = false"
       @select="onConfirmReconnect"
     />
+    <!-- Horizontal slots. Both ship empty; SlotContainer renders nothing and
+         the grid row resolves to 0px, so the default shell is unchanged. -->
+    <SlotContainer
+      slot-id="up"
+      :views="shellLayout.slots.up.views"
+      :active="shellLayout.slots.up.active"
+      :collapsed="shellLayout.slots.up.collapsed"
+      @update:active="(v) => setActiveView('up', v)"
+      @update:collapsed="(v) => setSlotCollapsedAndRefit('up', v)"
+    >
+      <template #default="{ viewId }">
+        <!-- pipeline.workspacePath, not currentWorkspace: that is what the
+             right panel hands HistoryPanel, and it stays pinned to the running
+             pipeline's workspace. A view must not change behaviour because it
+             was moved. -->
+        <SlotHistory v-if="viewId === 'history'" :backend="backend" :workspace-path="pipeline.workspacePath" :pipeline="pipelineView" />
+        <SlotTasker v-else-if="viewId === 'tasker'" :backend="backend" />
+        <SlotMessages v-else-if="viewId === 'messages'" />
+      </template>
+    </SlotContainer>
     <main
       ref="stageRef"
       class="stage"
@@ -12670,6 +12917,24 @@ function paneIsCommander(p: ActivePane): boolean {
         <div v-if="floatPipExpanded" class="float-pip-resize" @mousedown="onPipResizeStart" />
       </div>
     </main>
+    <SlotContainer
+      slot-id="down"
+      :views="shellLayout.slots.down.views"
+      :active="shellLayout.slots.down.active"
+      :collapsed="shellLayout.slots.down.collapsed"
+      @update:active="(v) => setActiveView('down', v)"
+      @update:collapsed="(v) => setSlotCollapsedAndRefit('down', v)"
+    >
+      <template #default="{ viewId }">
+        <!-- pipeline.workspacePath, not currentWorkspace: that is what the
+             right panel hands HistoryPanel, and it stays pinned to the running
+             pipeline's workspace. A view must not change behaviour because it
+             was moved. -->
+        <SlotHistory v-if="viewId === 'history'" :backend="backend" :workspace-path="pipeline.workspacePath" :pipeline="pipelineView" />
+        <SlotTasker v-else-if="viewId === 'tasker'" :backend="backend" />
+        <SlotMessages v-else-if="viewId === 'messages'" />
+      </template>
+    </SlotContainer>
     <TokenStatsPanel
       :backend="backend"
       :workspace-path="pipeline.workspacePath"
@@ -12677,6 +12942,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :panes="paneViews"
       :pipeline="pipelineView"
       :expanded="tokenPanelExpanded"
+      :views="shellLayout.slots.right.views"
       @update:expanded="tokenPanelExpanded = $event"
     />
     <Welcome
@@ -12775,12 +13041,12 @@ function paneIsCommander(p: ActivePane): boolean {
         </div>
       </div>
     </Teleport>
-    <div class="resize-handle resize-handle-left" @mousedown="onResizeStart($event, 'left')" />
-    <div v-if="tokenPanelExpanded" class="resize-handle resize-handle-right" @mousedown="onResizeStart($event, 'right')" />
+    <div v-if="leftHandleVisible" class="resize-handle resize-handle-left" @mousedown="onResizeStart($event, 'left')" />
+    <div v-if="rightHandleVisible" class="resize-handle resize-handle-right" @mousedown="onResizeStart($event, 'right')" />
     <NotificationHost />
     <WhatsNewModal v-if="whatsNewEntry" :entry="whatsNewEntry" @close="dismissWhatsNew" />
     <!-- Status bar -->
-    <div class="statusbar">
+    <div v-if="shellLayout.chrome.statusbar" class="statusbar">
       <div class="statusbar-left">
         <span v-if="statusBarGit.branch" class="sb-item sb-git">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -12860,6 +13126,17 @@ function paneIsCommander(p: ActivePane): boolean {
           @keydown.enter="togglePopover('agents')"
         >
           {{ panes.length }} agent{{ panes.length !== 1 ? 's' : '' }}
+        </span>
+        <span
+          v-if="realizedPaneCount > 0"
+          class="sb-item sb-memory sb-clickable"
+          role="button"
+          tabindex="0"
+          :title="$t('memory.statusbar-title')"
+          @click="toggleMemoryPanel()"
+          @keydown.enter="toggleMemoryPanel()"
+        >
+          ▤ {{ realizedPaneCount }}<template v-if="reclaimableNowIds.length > 0"> · ♻ {{ reclaimableNowIds.length }}</template>
         </span>
         <span
           v-if="backfill.active"
@@ -12964,6 +13241,16 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="closePopover()"
       @jump="onAgentOverviewJump"
     />
+    <!-- Memory popover -->
+    <MemoryPanel
+      v-if="openPopover === 'memory'"
+      :rows="memoryRows"
+      :measured="memoryMeasured"
+      :available="memoryAvailable"
+      @close="closePopover()"
+      @reclaim="() => void onMemoryReclaim()"
+      @jump="onAgentOverviewJump"
+    />
   </div>
 </template>
 
@@ -13030,6 +13317,16 @@ function paneIsCommander(p: ActivePane): boolean {
   /* Three columns: controls · terminal grid · token stats panel
      Both left and token-panel widths are driven by CSS vars set inline. */
   grid-template-columns: var(--left-width, 360px) 1fr var(--token-panel-width, 36px);
+  /* Three rows: the up slot, the stage, the down slot. Both horizontal slots
+     ship empty, and an empty slot resolves to 0px — so the default shell is
+     the same single-row layout it has always been, to the pixel.
+
+     Every in-flow child must now declare its own grid-row. Auto-placement with
+     explicit rows would drop the sidebar into the `up` strip; with no explicit
+     rows it used to open an implicit second row instead, which is the failure
+     that put the handles off-screen. Both are silent, so the placements below
+     are load-bearing rather than tidy. */
+  grid-template-rows: var(--up-height, 0px) minmax(0, 1fr) var(--down-height, 0px);
   position: relative;
   height: 100vh;
   background: var(--bg-inset);
@@ -13038,7 +13335,10 @@ function paneIsCommander(p: ActivePane): boolean {
   overflow: hidden;
   box-sizing: border-box;
   padding-top: 38px;
-  padding-bottom: 24px;
+  /* The status bar is an absolute overlay, so the shell reserves its height as
+     padding rather than as a grid row. Hiding it therefore means zeroing this,
+     not removing a track. */
+  padding-bottom: var(--chrome-bottom, 24px);
 }
 
 /* ── Custom Titlebar ─────────────────────────────────────────────────────────── */
@@ -13089,9 +13389,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border-radius: 5px;
   color: var(--text-primary);
   outline: none;
-}
-.titlebar-ws-input:focus {
-  border-color: var(--border-focus, #4a90d9);
+  cursor: default;
 }
 .titlebar-ws-btn {
   -webkit-app-region: no-drag;
@@ -13186,6 +13484,9 @@ function paneIsCommander(p: ActivePane): boolean {
 .sb-pipeline.sb-completed { color: var(--success-fg); }
 .sb-pipeline.sb-aborted { color: var(--danger-fg); }
 .sb-agents { color: var(--text-secondary); }
+/* Same weight as the agent count beside it — this is an ambient reading, not
+   an alert, even when it is offering something to reclaim. */
+.sb-memory { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .sb-backfill { color: var(--text-secondary); opacity: 0.85; }
 .sb-update-available .sb-dot { background: var(--accent-fg); }
 .sb-update-downloading .sb-dot { background: var(--attention-fg); }
@@ -13281,9 +13582,8 @@ function paneIsCommander(p: ActivePane): boolean {
 .bp-restart { border-color: var(--accent-focus); color: var(--accent-fg); }
 .bp-stop { border-color: var(--danger-fg); color: var(--danger-fg); }
 .resize-handle {
-  position: absolute;
-  top: 0;
-  bottom: 0;
+  position: relative;
+  align-self: stretch;
   width: 8px;
   cursor: col-resize;
   z-index: 50;
@@ -13306,15 +13606,57 @@ function paneIsCommander(p: ActivePane): boolean {
    drag correctly while being drawn in the old place — but it is the shipped
    behaviour, and Phase 0 is not the place to change behaviour. The slot shell
    replaces both together. */
-.resize-handle-left {
-  left: var(--left-width, 360px);
-  transform: translateX(-50%);
+/* The side panels live in ControlPane / TokenStatsPanel, but a child
+   component's root element carries the parent's scope id too, so the shell
+   places them from here rather than telling each component which cell it is
+   in — the arrangement is the shell's business, not theirs. */
+.sidebar {
+  grid-column: 1;
+  grid-row: 1 / 4;
 }
-.resize-handle-right {
-  right: var(--token-panel-width, 36px);
+.token-panel {
+  grid-column: 3;
+  grid-row: 1 / 4;
+}
+
+/* Grid items sharing their panel's cell and hugging the edge that faces the
+   stage. The previous form positioned them from --left-width /
+   --token-panel-width — the same vars grid-template-columns reads — so a track
+   definition and a handle position had to be kept in step by hand, and a slot
+   that collapses to a rail broke the arithmetic outright.
+
+   grid-row is mandatory. Without it auto-placement cannot fit a handle beside a
+   row whose columns are all taken, so it opens a second row: the shell stretches
+   past the window and the handles land off-screen. */
+.resize-handle-left {
+  grid-row: 1 / 4;
+  grid-column: 1;
+  justify-self: end;
   transform: translateX(50%);
 }
+.resize-handle-right {
+  grid-row: 1 / 4;
+  grid-column: 3;
+  justify-self: start;
+  transform: translateX(-50%);
+}
+/* Column 2, rows 1 and 3 — the horizontal slots. `spanMode: 'inner'` (the
+   shipped default) is what keeps them between the side panels rather than
+   spanning the window. */
+.slot--up {
+  grid-column: 2;
+  grid-row: 1;
+}
+.slot--down {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+/* Column 2, middle row. The side panels span all three rows so the horizontal
+   slots sit between them (`spanMode: 'inner'`, the shipped default). */
 .stage {
+  grid-column: 2;
+  grid-row: 2;
   position: relative;
   display: flex;
   flex-direction: column;

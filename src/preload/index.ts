@@ -111,6 +111,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
   onMenuAction: (cb: (action: string) => void): void => {
     ipcRenderer.on('menu:action', (_event, action: string) => cb(action))
   },
+  // Returns a disposer — subscribed per useBackend scope. Fires when the
+  // machine wakes, so the renderer can rebuild a socket that slept through it.
+  onSystemResumed: (cb: () => void): (() => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on('system:resumed', listener)
+    return () => ipcRenderer.removeListener('system:resumed', listener)
+  },
   setRecentWorkspaces: (list: { path: string; name: string; exists: boolean }[]): void =>
     ipcRenderer.send('menu:setRecents', list),
   pickWorkspace: (defaultPath?: string): Promise<string | null> =>
