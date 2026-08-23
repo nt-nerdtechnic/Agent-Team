@@ -16,11 +16,14 @@ import {
   isPublicCapabilityEventAllowed,
   HOST_EVENT_SOURCE_PLUGIN_ID,
   shellTopLevelExecutables,
+  type PublicCapabilityDecision,
   type HostCapabilityContext,
   type CapabilityCall,
+  type PublicCapabilityExecutionPlan,
+  type StorageSnapshotTier,
 } from './pluginCapabilityBroker'
-import { HOST_SHELL_EXECUTABLE_ALLOWLIST } from './pluginCapabilityCatalog'
-import { manifestV2CapabilityPolicy } from './pluginPermissions'
+import { HOST_SHELL_EXECUTABLE_ALLOWLIST, STORAGE_LIMITS } from './pluginCapabilityCatalog'
+import { manifestV2CapabilityPolicy, type PluginCapabilityPolicy } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
 
 describe('isCapabilityAllowed', () => {
@@ -682,5 +685,307 @@ describe('createTerminalOutputBatcher', () => {
     batcher.push('t-2', payload('t-2', 'b', 1))
     batcher.flushAll()
     expect(delivered.sort()).toEqual(['t-1', 't-2'])
+  })
+})
+
+// ── Issue 16 — Host-managed plugin/workspace storage partitions ──────────────
+//
+// Storage is not a declared Manifest permission: a package reads/writes its
+// partition only through a Host-managed grant, and the Host derives every
+// partition identity (pluginId, currentWorkspaceId) from the authenticated
+// runtime binding. The Plugin chooses only a partition class and a key.
+
+type StoragePlan = NonNullable<PublicCapabilityExecutionPlan['storage']>
+
+function asStorage(result: PublicCapabilityDecision, label: string): StoragePlan {
+  if (result.kind !== 'allow') {
+    throw new Error(`${label}: expected allow, got ${JSON.stringify(result.response.error)}`)
+  }
+  const storage = result.plan.storage
+  if (!storage) {
+    throw new Error(`${label}: expected a storage plan`)
+  }
+  return storage
+}
+
+/** Read a planning result's storage sub-plan, or assert it exists. */
+function storagePlan(result: PublicCapabilityDecision, label: string): StoragePlan {
+  return asStorage(result, label)
+}
+
+describe('Issue 16 broker Host-managed storage partitions', () => {
+  const pluginId = 'acme.plugin'
+  const workspaceId = 'workspace-1'
+  const binding = {
+    pluginId,
+    packageVersion: '1.0.0',
+    workspaceId,
+    instanceId: 'instance-1',
+    audience: null,
+  } as const
+  /** Package versions bound to each versioned storage snapshot. */
+  const storageSnapshots = new Map<StorageSnapshotTier, string>([
+    ['candidate', '2.0.0'],
+    ['active', '1.0.0'],
+    ['previous', '0.9.0'],
+  ])
+
+  const call = (
+    method: 'get' | 'set' | 'delete',
+    scope: 'plugin' | 'workspace',
+    extra: Record<string, unknown> = {},
+    callerPluginId = pluginId
+  ): CapabilityCall => ({
+    pluginId: callerPluginId,
+    ns: 'storage',
+    method,
+    args: {
+      scope,
+      key: 'key-1',
+      ...(method === 'set' ? { value: { enabled: true } } : {}),
+      ...extra,
+    },
+    reqId: 'storage-req',
+  })
+
+  const context = (overrides: Partial<HostCapabilityContext> = {}): HostCapabilityContext => ({
+    publisherEligible: true,
+    userGrant: { packageVersion: '1.0.0', system: [], storage: true },
+    runtimeBinding: binding,
+    storageSnapshots,
+    storageSnapshotTier: 'active',
+    ...overrides,
+  })
+
+  const policy = (): Extract<PluginCapabilityPolicy, { kind: 'manifest-v2' }> =>
+    manifestV2CapabilityPolicy({ system: [] })
+
+  it('allows storage and derives the plugin partition from the binding', () => {
+    const result = planPublicCapabilityCall(call('get', 'plugin'), policy(), context())
+    expect(result).toMatchObject({ kind: 'allow' })
+    if (result.kind !== 'allow') return
+    expect(storagePlan(result, 'plugin-scope get')).toMatchObject({
+      partition: { pluginId, workspaceId: null, key: 'key-1' },
+      snapshot: { tier: 'active', packageVersion: '1.0.0' },
+    })
+  })
+
+  it('sets and deletes route the same Host-derived partition', () => {
+    const set = planPublicCapabilityCall(call('set', 'workspace'), policy(), context())
+    const del = planPublicCapabilityCall(call('delete', 'plugin'), policy(), context())
+    expect(set.kind).toBe('allow')
+    expect(del.kind).toBe('allow')
+    if (set.kind !== 'allow' || del.kind !== 'allow') return
+    expect(storagePlan(set, 'set')).toMatchObject({
+      partition: { pluginId, workspaceId, key: 'key-1' },
+      snapshot: { tier: 'active', packageVersion: '1.0.0' },
+    })
+    expect(storagePlan(del, 'delete')).toMatchObject({
+      partition: { pluginId, workspaceId: null, key: 'key-1' },
+    })
+  })
+
+  it('shares the plugin partition across live views and the backend of that plugin', () => {
+    // Two views of the same plugin, different workspaceId/instanceId, still share
+    // the plugin partition because identity is Host-derived from pluginId plus
+    // the selected package-version/tier snapshot and key.
+    const viewA = planPublicCapabilityCall(
+      call('get', 'plugin'),
+      policy(),
+      context({
+        runtimeBinding: { ...binding, workspaceId: 'workspace-9', instanceId: 'instance-99' },
+      })
+    )
+    const viewB = planPublicCapabilityCall(
+      call('get', 'plugin'),
+      policy(),
+      context({ runtimeBinding: { ...binding, instanceId: 'instance-other' } })
+    )
+    expect(viewA.kind).toBe('allow')
+    expect(viewB.kind).toBe('allow')
+    if (viewA.kind !== 'allow' || viewB.kind !== 'allow') return
+    const a = storagePlan(viewA, 'viewA')
+    const b = storagePlan(viewB, 'viewB')
+    expect(a.partition).toEqual({ pluginId, workspaceId: null, key: 'key-1' })
+    expect(b.partition).toEqual(a.partition)
+  })
+
+  it('keeps workspace partitions isolated across plugins and across workspaces', () => {
+    const self = planPublicCapabilityCall(call('get', 'workspace'), policy(), context())
+    const otherPlugin = planPublicCapabilityCall(
+      call('get', 'workspace', {}, 'other.plugin'),
+      policy(),
+      context({ runtimeBinding: { ...binding, pluginId: 'other.plugin' } })
+    )
+    const otherWorkspace = planPublicCapabilityCall(
+      call('get', 'workspace'),
+      policy(),
+      context({ runtimeBinding: { ...binding, workspaceId: 'workspace-2' } })
+    )
+    expect(self.kind).toBe('allow')
+    expect(otherPlugin.kind).toBe('allow')
+    expect(otherWorkspace.kind).toBe('allow')
+    if (self.kind !== 'allow' || otherPlugin.kind !== 'allow' || otherWorkspace.kind !== 'allow') return
+    const selfPartition = storagePlan(self, 'self').partition
+    expect(storagePlan(otherPlugin, 'other plugin').partition).toEqual({
+      ...selfPartition,
+      pluginId: 'other.plugin',
+    })
+    expect(storagePlan(otherWorkspace, 'other workspace').partition).toEqual({
+      ...selfPartition,
+      workspaceId: 'workspace-2',
+    })
+    expect(storagePlan(otherWorkspace, 'other workspace').partition).not.toEqual(selfPartition)
+  })
+
+  it('fails closed without a workspace binding and never falls back to plugin scope', () => {
+    const result = planPublicCapabilityCall(
+      call('get', 'workspace'),
+      policy(),
+      context({ runtimeBinding: { ...binding, workspaceId: null } })
+    )
+    expect(result).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'WORKSPACE_SCOPE_VIOLATION' } },
+    })
+    // A workspace request that cannot be bound must NOT silently become a plugin
+    // partition — a denied result has no execution plan.
+  })
+
+  it('rejects caller-supplied partition identities in the request', () => {
+    const spoofed = planPublicCapabilityCall(
+      call('get', 'plugin', { pluginId: 'attacker', workspaceId: 'ws', packageVersion: '9.9.9' }),
+      policy(),
+      context()
+    )
+    expect(spoofed).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'INVALID_ARGUMENT' } },
+    })
+  })
+
+  it('reports stable quota errors for oversized keys and values', () => {
+    const oversizedKey = planPublicCapabilityCall(
+      call('get', 'plugin', { key: 'x'.repeat(STORAGE_LIMITS.maxKeyBytes + 1) }),
+      policy(),
+      context()
+    )
+    const oversizedValue = planPublicCapabilityCall(
+      call('set', 'plugin', { value: 'x'.repeat(STORAGE_LIMITS.maxValueBytes) }),
+      policy(),
+      context()
+    )
+    expect(oversizedKey).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'STORAGE_QUOTA_EXCEEDED' } },
+    })
+    expect(oversizedValue).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'STORAGE_QUOTA_EXCEEDED' } },
+    })
+  })
+
+  it('requires a Host-managed storage grant before planning a partition', () => {
+    const noGrant = planPublicCapabilityCall(
+      call('set', 'plugin'),
+      policy(),
+      context({ userGrant: { packageVersion: '1.0.0', system: [] } })
+    )
+    expect(noGrant).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'CAPABILITY_DENIED' } },
+    })
+  })
+
+  it('selects the storage snapshot whose package version matches the binding', () => {
+    const active = planPublicCapabilityCall(call('get', 'plugin'), policy(), context())
+    const candidate = planPublicCapabilityCall(
+      call('get', 'plugin'),
+      policy(),
+      context({
+        runtimeBinding: { ...binding, packageVersion: '2.0.0' },
+        userGrant: { packageVersion: '2.0.0', system: [], storage: true },
+        storageSnapshotTier: 'candidate',
+      })
+    )
+    const previous = planPublicCapabilityCall(
+      call('get', 'plugin'),
+      policy(),
+      context({
+        runtimeBinding: { ...binding, packageVersion: '0.9.0' },
+        userGrant: { packageVersion: '0.9.0', system: [], storage: true },
+        storageSnapshotTier: 'previous',
+      })
+    )
+    expect(active.kind).toBe('allow')
+    expect(candidate.kind).toBe('allow')
+    expect(previous.kind).toBe('allow')
+    if (active.kind !== 'allow' || candidate.kind !== 'allow' || previous.kind !== 'allow') return
+    expect(storagePlan(active, 'active')).toMatchObject({
+      snapshot: { tier: 'active', packageVersion: '1.0.0' },
+    })
+    expect(storagePlan(candidate, 'candidate')).toMatchObject({
+      snapshot: { tier: 'candidate', packageVersion: '2.0.0' },
+    })
+    expect(storagePlan(previous, 'previous')).toMatchObject({
+      snapshot: { tier: 'previous', packageVersion: '0.9.0' },
+    })
+  })
+
+  it('fails closed when no storage snapshot matches the binding package version', () => {
+    const result = planPublicCapabilityCall(
+      call('get', 'plugin'),
+      policy(),
+      context({ runtimeBinding: { ...binding, packageVersion: '9.9.9' } })
+    )
+    expect(result).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'CAPABILITY_DENIED' } },
+    })
+  })
+
+  it('allows duplicate package versions across tiers when the selected tier matches', () => {
+    const duplicateVersions = new Map<StorageSnapshotTier, string>([
+      ['candidate', '1.0.0'],
+      ['active', '1.0.0'],
+    ])
+    const result = planPublicCapabilityCall(
+      call('get', 'plugin'),
+      policy(),
+      context({ storageSnapshots: duplicateVersions, storageSnapshotTier: 'candidate' })
+    )
+    expect(result).toMatchObject({
+      kind: 'allow',
+      plan: { storage: { snapshot: { tier: 'candidate', packageVersion: '1.0.0', pluginId } } },
+    })
+  })
+
+  it('fails closed when the selected tier is absent or bound to another version', () => {
+    expect(
+      planPublicCapabilityCall(
+        call('get', 'plugin'),
+        policy(),
+        context({ storageSnapshotTier: 'candidate', storageSnapshots: new Map([['active', '1.0.0']]) })
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+    expect(
+      planPublicCapabilityCall(
+        call('get', 'plugin'),
+        policy(),
+        context({ storageSnapshotTier: 'candidate', storageSnapshots: new Map([['candidate', '2.0.0']]) })
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it('rejects a raw storage path as partition identity', () => {
+    const result = planPublicCapabilityCall(
+      call('get', 'plugin', { path: '/etc/secrets.json' }),
+      policy(),
+      context()
+    )
+    expect(result).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'INVALID_ARGUMENT' } },
+    })
   })
 })

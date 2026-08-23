@@ -1,6 +1,6 @@
 # Plugin Developer Spec v2
 
-> **Status: target draft; Issue 03 contract enforcement is implemented.** The current runtime uses manifest
+> **Status: target draft; Issues 03 and 16 contract enforcement are implemented.** The current runtime uses manifest
 > v1 and is documented in [Plugin development guide](plugin-development.md).
 > This document is the author-facing contract that the v2 migration must
 > implement before third-party publishing opens.
@@ -9,8 +9,11 @@
 > Host authorization/planning seam. Actual backend child-process lifecycle
 > remains deferred to its owning follow-up issue. Issue 03 completes the
 > parser, catalog, authorization planner, and Host enforcement seams.
-> Production execution adapters and persisted consent wiring remain disabled
-> and belong to the later runtime integration issue.
+> Issue 16 adds the durable storage adapter and Host-only lifecycle seams to
+> Electron main. Production grant/consent and runtime-context production are
+> not wired yet, so ordinary production plugin instances cannot reach storage;
+> calls remain denied until that later integration is delivered. Other public
+> execution adapters and persisted consent wiring also remain disabled.
 >
 > Issue 06 adds the public package boundary and the external frontend workflow.
 > The checked-in SDK CLI currently supports `validate` and frontend-only
@@ -625,31 +628,106 @@ Host derives `workspaceId` from authenticated runtime binding. There is no
 public `runtime` scope. Workspace events also require a Host-authenticated
 event source for the same workspace; an unbound shared event is dropped.
 
-### Planned storage partitions — deferred to B2
+### Host-managed storage partitions
 
-Storage runtime remains deferred to B2 and is not opened by Issue 03. The
-planned API will accept a partition class in `scope`; it will not accept a
-plugin ID, workspace ID, package version, or storage path.
+Manifest v2 exposes durable JSON key/value storage through the public
+`storage.get`, `storage.set`, and `storage.delete` methods. Storage is a
+Host-managed grant, not a `permissions.system` namespace: a plugin must have a
+Host-approved storage grant for its authenticated package version, but must not
+declare a new `storage` permission in its manifest.
 
-When implemented:
+Current runtime status: the Electron main-process adapter and Host-only
+planning/lifecycle seams are implemented, but the production source of
+`storage` grants and authenticated snapshot context is not connected yet.
+Until that integration lands, production calls receive `CAPABILITY_DENIED`;
+the API below describes the contract and the adapter seam, not an enabled
+third-party runtime feature.
 
-- `storage.get`, `storage.set`, and `storage.delete` will accept the partition
-  class in `scope`.
-- `scope: "plugin"` will address the Host-bound `(pluginId, key)` partition.
-  All live views and the backend of that plugin will share it, while another
-  plugin using the same key will receive a different value.
-- `scope: "workspace"` will address the Host-bound
-  `(pluginId, currentWorkspaceId, key)` partition. Calls without a current
-  workspace binding will fail with `WORKSPACE_SCOPE_VIOLATION`; they will
-  never fall back to plugin scope.
-- Package updates will copy the active Host-managed storage snapshot into an
-  isolated candidate. **Restart Plugin** will activate the package and
-  snapshot together; rollback will restore the previous package and snapshot
-  together.
-- Raw `ui.settings` will remain a first-party legacy surface, not plugin
-  storage. Theme, language, workbench layout, terminal runtime state,
-  workspace files, and other domain data will not become accessible through
-  the storage API.
+The SDK calls accept only a partition class and key; the Host derives the
+plugin identity, workspace identity, package version, and storage location
+from the authenticated runtime binding:
+
+```ts
+await context.capabilities.invoke('storage.set', {
+  scope: 'plugin',
+  key: 'panel-state',
+  value: { collapsed: false },
+})
+
+const result = await context.capabilities.invoke('storage.get', {
+  scope: 'workspace',
+  key: 'filters',
+})
+if (result.found) console.log(result.value)
+```
+
+`storage.get` returns `{ found: true, value }` for a stored value, including a
+stored top-level `null`, and `{ found: false, value: null }` when the key is
+absent. `storage.set` replaces one value atomically and `storage.delete`
+returns whether a value was removed. Requests cannot provide a plugin ID,
+workspace ID, package version, partition path, or snapshot tier. Such fields
+are rejected rather than treated as hints.
+
+`scope: "plugin"` addresses `(authenticatedPluginId, packageVersion, tier,
+key)`. All views using that authenticated plugin/package/tier binding share the
+partition; another plugin, package version, or tier does not.
+`scope: "workspace"` addresses
+`(authenticatedPluginId, packageVersion, tier, authenticatedWorkspaceId, key)`.
+Workspace storage requires a current authenticated workspace binding and never
+falls back to the plugin partition. Missing or mismatched bindings fail closed
+with `WORKSPACE_SCOPE_VIOLATION` or `CAPABILITY_DENIED`.
+
+The Host stores data in its application-data directory with owner-only file
+permissions. Each logical `(pluginId, packageVersion, tier)` snapshot is a
+separate Host-selected directory containing one `plugin.json` file and one
+hashed workspace file per workspace. Renderer/plugin identifiers are never
+used as path components. Reads touch only the requested partition file, while
+the snapshot quota is the sum of the canonical partition-file byte lengths.
+
+The Host-owned layout is:
+
+```text
+<userData>/plugin-storage-v2/<plugin-key>/<package-key>/<tier>/
+  plugin.json
+  workspaces/<workspace-key>.json
+```
+
+`<plugin-key>`, `<package-key>`, and `<workspace-key>` are Host-generated
+SHA-256 directory/file components; the raw identities never become paths.
+Limits are measured in UTF-8 bytes: keys are at most 256 bytes, one canonical
+JSON value is at most 1 MiB, and one package-version/tier snapshot is at most
+10 MiB.
+A 12 MiB per-partition physical format guard is independent of the current
+quota. Exceeding a write-time limit returns the stable
+`STORAGE_QUOTA_EXCEEDED` error; an unsuccessful write leaves the prior value
+intact. Existing structurally valid data is not rejected merely because a
+later policy quota is lower.
+
+Durable means that the Host writes a same-directory temporary file, fsyncs the
+file, atomically renames it, and fsyncs the parent directory before reporting
+success. Deletes use the corresponding directory fsync. A corrupt partition
+is preserved and fails only calls targeting that partition; it does not make
+other plugin or workspace partitions unreadable.
+
+Candidate, active, and previous snapshot selectors are Host-owned runtime
+metadata and are part of the internal storage identity. A request can select
+only the explicitly selected tier whose package version matches the
+authenticated binding; equal package versions in two tiers remain separate
+storage directories. The selected tier is fixed for the lifetime of a runtime
+instance, so lifecycle changes destroy/reopen the instance rather than
+silently retargeting it. Plugin code never sees tier, version, or storage
+identity.
+
+Package-version upgrades do not automatically carry data forward: a new
+version starts with its own empty snapshot. Issue 28 owns the Host-only clone,
+promotion, rollback, retention, and garbage-collection orchestration. The
+adapter supplies clone and explicit-retention GC seams but does not guess
+lifecycle state. Actual uninstall removes all storage for that plugin after
+cleanup succeeds; a later reinstall does not restore the deleted data.
+
+Raw `ui.settings` remains a first-party legacy surface, not plugin storage.
+Theme, language, workbench layout, terminal runtime state, workspace files, and
+other domain data are not accessible through this API.
 
 The Host will derive every partition identity from the authenticated runtime
 binding. The `scope` argument will only select one of the two permitted
@@ -777,6 +855,7 @@ message, and optional structured details:
 | `TIMEOUT` | Host-owned deadline expired | Retry only when safe and user-visible |
 | `BACKEND_UNAVAILABLE` | Required Host/backend service is down | Disable the action and offer retry |
 | `PLUGIN_STOPPING` | Runtime is draining or restarting | Do not start new work |
+| `STORAGE_QUOTA_EXCEEDED` | A storage key, value, or package-version snapshot exceeds its Host limit | Reduce the stored data or remove old keys |
 | `INTERNAL_ERROR` | Non-actionable Host failure | Log the correlation ID; do not inspect internals |
 
 The v1 broker's `CAP_DENIED`, `UNKNOWN`, `BAD_REQUEST`, and `BACKEND_ERROR`

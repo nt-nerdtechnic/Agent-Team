@@ -2,7 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "catalogVersion": 1,
   "status": "draft",
-  "runtimeStatus": "host-enforced-by-issue-03",
+  "runtimeStatus": "host-enforced-by-issue-03-with-issue-16-storage-seam",
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        { "type": ["string", "number", "boolean", "null"] },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+      ]
+    }
+  },
   "manifestPermissionContract": {
     "shape": "system-namespace-array-plus-shell-mode",
     "scopeSource": "catalog",
@@ -19,6 +28,7 @@
     "TIMEOUT",
     "BACKEND_UNAVAILABLE",
     "PLUGIN_STOPPING",
+    "STORAGE_QUOTA_EXCEEDED",
     "INTERNAL_ERROR"
   ],
   "methods": [
@@ -150,6 +160,33 @@
       "params": { "type": "object", "additionalProperties": false, "required": ["command"], "properties": { "command": { "type": "string", "minLength": 1 } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["exitCode", "stdout", "stderr"], "properties": { "exitCode": { "type": "integer" }, "stdout": { "type": "string" }, "stderr": { "type": "string" } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "USER_CANCELLED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "storage.get",
+      "visibility": "public",
+      "permission": { "id": "storage" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["scope", "key"], "properties": { "scope": { "enum": ["plugin", "workspace"] }, "key": { "type": "string", "minLength": 1 } } },
+      "result": { "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["found", "value"], "properties": { "found": { "const": true }, "value": { "$ref": "#/$defs/jsonValue" } } },
+        { "type": "object", "additionalProperties": false, "required": ["found", "value"], "properties": { "found": { "const": false }, "value": { "const": null } } }
+      ] },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "STORAGE_QUOTA_EXCEEDED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "storage.set",
+      "visibility": "public",
+      "permission": { "id": "storage" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["scope", "key", "value"], "properties": { "scope": { "enum": ["plugin", "workspace"] }, "key": { "type": "string", "minLength": 1 }, "value": { "$ref": "#/$defs/jsonValue" } } },
+      "result": { "type": "null" },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "STORAGE_QUOTA_EXCEEDED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "storage.delete",
+      "visibility": "public",
+      "permission": { "id": "storage" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["scope", "key"], "properties": { "scope": { "enum": ["plugin", "workspace"] }, "key": { "type": "string", "minLength": 1 } } },
+      "result": { "type": "boolean" },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "STORAGE_QUOTA_EXCEEDED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     }
   ],
   "events": [

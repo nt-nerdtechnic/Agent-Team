@@ -123,6 +123,8 @@ export interface PluginIpcOptions {
     pluginId: string
     activation?: PluginActivationCatalogEntry
   }) => void
+  /** Actual uninstall boundary; rollback/quarantine paths deliberately do not call this. */
+  cleanupPluginStorage?: (pluginId: string) => Promise<void>
 }
 
 function assertPluginRemovalTarget(pluginsRoot: string, value: unknown): string {
@@ -413,12 +415,24 @@ export function registerPluginIpc(
     }
   )
 
-  ipcMain.handle('plugins:remove', (event, args: { id?: unknown } | null) => {
+  ipcMain.handle('plugins:remove', async (event, args: { id?: unknown } | null) => {
     assertAuthorized(event)
     const id = assertPluginRemovalTarget(pluginsRoot, args?.id)
-    prepared.delete(id)
+    const cleanupPluginStorage = options.cleanupPluginStorage
+    if (!cleanupPluginStorage) {
+      throw new Error('plugin storage cleanup is unavailable')
+    }
+    // Stop live instances before storage cleanup. The storage adapter drains
+    // operations already admitted for this plugin; this phase also prevents
+    // new renderer calls from being admitted while cleanup is in progress.
+    manager.preparePluginRemoval(id)
+    // Storage cleanup is an explicit uninstall operation. If it fails, keep
+    // the package and prepared state intact so the caller can retry. The
+    // manager deliberately remains registered but stopped until this succeeds.
+    await cleanupPluginStorage(id)
     removePlugin(pluginsRoot, id)
     manager.removeInstalledPlugin(id)
+    prepared.delete(id)
     options.onActivationChange?.({ pluginId: id })
     return { ok: true }
   })

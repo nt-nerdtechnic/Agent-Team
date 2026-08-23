@@ -6,6 +6,10 @@ export * from './archive.js'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
+export type StoragePartitionScope = 'plugin' | 'workspace'
+export type StorageGetResult =
+  | { found: true; value: JsonValue }
+  | { found: false; value: null }
 
 export const V2_VIEW_LOCATIONS = ['top', 'bottom', 'right', 'left', 'main', 'window'] as const
 export const V2_SYSTEM_NAMESPACES = ['fs', 'ui', 'aiCli'] as const
@@ -520,6 +524,7 @@ export const PLUGIN_ERROR_CODES = [
   'TIMEOUT',
   'BACKEND_UNAVAILABLE',
   'PLUGIN_STOPPING',
+  'STORAGE_QUOTA_EXCEEDED',
   'INTERNAL_ERROR',
 ] as const
 
@@ -552,6 +557,9 @@ export interface PublicMethodParams {
   'aiCli.interruptSession': { sessionId: string }
   'aiCli.stopSession': { sessionId: string }
   'shell.run': { command: string }
+  'storage.get': { scope: StoragePartitionScope; key: string }
+  'storage.set': { scope: StoragePartitionScope; key: string; value: JsonValue }
+  'storage.delete': { scope: StoragePartitionScope; key: string }
 }
 
 export interface PublicMethodResults {
@@ -570,6 +578,9 @@ export interface PublicMethodResults {
   'aiCli.interruptSession': Record<string, never>
   'aiCli.stopSession': Record<string, never>
   'shell.run': { exitCode: number; stdout: string; stderr: string }
+  'storage.get': StorageGetResult
+  'storage.set': null
+  'storage.delete': boolean
 }
 
 export type PublicMethod = keyof PublicMethodParams

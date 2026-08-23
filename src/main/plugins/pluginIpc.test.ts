@@ -262,7 +262,9 @@ function register(
   pluginsRoot = '/plugins',
   manager = new FrontendPluginManager()
 ): (...a: unknown[]) => unknown {
-  registerPluginIpc(manager, pluginsRoot, () => true, TRUST_CONFIG)
+  registerPluginIpc(manager, pluginsRoot, () => true, TRUST_CONFIG, undefined, {
+    cleanupPluginStorage: async () => undefined,
+  })
   const handler = handlers.get('plugins:prepareInstall')
   if (!handler) throw new Error('prepareInstall handler not registered')
   return handler
@@ -409,7 +411,7 @@ describe('plugin management sender authorization', () => {
 describe('plugins:remove boundary validation', () => {
   beforeEach(() => handlers.clear())
 
-  it('rejects malformed ids before deleting or changing activation state', () => {
+  it('rejects malformed ids before deleting or changing activation state', async () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-remove-invalid-'))
     const installedDir = join(root, 'acme.demo')
     mkdirSync(installedDir, { recursive: true })
@@ -444,9 +446,9 @@ describe('plugins:remove boundary validation', () => {
         42,
       ]
       for (const id of invalidIds) {
-        expect(() => removeHandler(null, { id })).toThrow(/invalid plugin id/)
+        await expect(removeHandler(null, { id })).rejects.toThrow(/invalid plugin id/)
       }
-      expect(() => removeHandler(null, null)).toThrow(/invalid plugin id/)
+      await expect(removeHandler(null, null)).rejects.toThrow(/invalid plugin id/)
       expect(existsSync(installedDir)).toBe(true)
       expect(removeInstalledPlugin).not.toHaveBeenCalled()
       expect(onActivationChange).not.toHaveBeenCalled()
@@ -455,11 +457,48 @@ describe('plugins:remove boundary validation', () => {
     }
   })
 
-  it('removes a valid direct-child id and clears its activation state', () => {
+  it('removes a valid direct-child id and clears its activation state', async () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-remove-valid-'))
     const installedDir = join(root, 'acme.demo')
     mkdirSync(installedDir, { recursive: true })
     const manager = new FrontendPluginManager()
+    const order: string[] = []
+    vi.spyOn(manager, 'preparePluginRemoval').mockImplementation(() => {
+      order.push('stop')
+    })
+    const removeInstalledPlugin = vi
+      .spyOn(manager, 'removeInstalledPlugin')
+      .mockImplementation(() => {
+        order.push('remove')
+      })
+    const cleanupPluginStorage = vi.fn(async () => {
+      order.push('cleanup')
+    })
+    const onActivationChange = vi.fn()
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        cleanupPluginStorage,
+        onActivationChange,
+      })
+      const removeHandler = handlers.get('plugins:remove')
+      if (!removeHandler) throw new Error('remove handler not registered')
+
+      await expect(removeHandler(null, { id: 'acme.demo' })).resolves.toEqual({ ok: true })
+      expect(existsSync(installedDir)).toBe(false)
+      expect(removeInstalledPlugin).toHaveBeenCalledWith('acme.demo')
+      expect(order).toEqual(['stop', 'cleanup', 'remove'])
+      expect(onActivationChange).toHaveBeenCalledWith({ pluginId: 'acme.demo' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses uninstall when storage cleanup is unavailable', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-remove-no-storage-cleanup-'))
+    const installedDir = join(root, 'acme.demo')
+    mkdirSync(installedDir, { recursive: true })
+    const manager = new FrontendPluginManager()
+    const preparePluginRemoval = vi.spyOn(manager, 'preparePluginRemoval')
     const removeInstalledPlugin = vi.spyOn(manager, 'removeInstalledPlugin')
     const onActivationChange = vi.fn()
     try {
@@ -469,10 +508,48 @@ describe('plugins:remove boundary validation', () => {
       const removeHandler = handlers.get('plugins:remove')
       if (!removeHandler) throw new Error('remove handler not registered')
 
-      expect(removeHandler(null, { id: 'acme.demo' })).toEqual({ ok: true })
+      await expect(removeHandler(null, { id: 'acme.demo' })).rejects.toThrow(
+        'plugin storage cleanup is unavailable'
+      )
+      expect(existsSync(installedDir)).toBe(true)
+      expect(preparePluginRemoval).not.toHaveBeenCalled()
+      expect(removeInstalledPlugin).not.toHaveBeenCalled()
+      expect(onActivationChange).not.toHaveBeenCalled()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the package installed when storage cleanup fails and permits retry', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-remove-storage-failure-'))
+    const installedDir = join(root, 'acme.demo')
+    mkdirSync(installedDir, { recursive: true })
+    const manager = new FrontendPluginManager()
+    const preparePluginRemoval = vi.spyOn(manager, 'preparePluginRemoval')
+    const removeInstalledPlugin = vi
+      .spyOn(manager, 'removeInstalledPlugin')
+      .mockImplementation(() => undefined)
+    const cleanupPluginStorage = vi
+      .fn<(pluginId: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('storage unavailable'))
+      .mockResolvedValue(undefined)
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        cleanupPluginStorage,
+      })
+      const removeHandler = handlers.get('plugins:remove')
+      if (!removeHandler) throw new Error('remove handler not registered')
+
+      await expect(removeHandler(null, { id: 'acme.demo' })).rejects.toThrow('storage unavailable')
+      expect(existsSync(installedDir)).toBe(true)
+      expect(preparePluginRemoval).toHaveBeenCalledWith('acme.demo')
+      expect(removeInstalledPlugin).not.toHaveBeenCalled()
+
+      await expect(removeHandler(null, { id: 'acme.demo' })).resolves.toEqual({ ok: true })
       expect(existsSync(installedDir)).toBe(false)
+      expect(preparePluginRemoval).toHaveBeenCalledTimes(2)
       expect(removeInstalledPlugin).toHaveBeenCalledWith('acme.demo')
-      expect(onActivationChange).toHaveBeenCalledWith({ pluginId: 'acme.demo' })
+      expect(cleanupPluginStorage).toHaveBeenCalledTimes(2)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -776,7 +853,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         provenance: 'official-registry',
       }])
 
-      expect(removeHandler(null, { id: 'acme.demo' })).toEqual({ ok: true })
+      await expect(removeHandler(null, { id: 'acme.demo' })).resolves.toEqual({ ok: true })
       expect(listHandler(null)).toEqual([])
       expect(existsSync(join(root, 'acme.demo'))).toBe(false)
     } finally {
@@ -820,6 +897,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
     try {
       const manager = new FrontendPluginManager()
       registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        cleanupPluginStorage: async () => undefined,
         onActivationChange: ({ pluginId, activation }) => {
           active.delete(pluginId)
           if (activation) active.set(pluginId, activation)
@@ -859,7 +937,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
 
       const removeHandler = handlers.get('plugins:remove')
       if (!removeHandler) throw new Error('remove handler not registered')
-      expect(removeHandler(null, { id: 'acme.demo' })).toEqual({ ok: true })
+      await expect(removeHandler(null, { id: 'acme.demo' })).resolves.toEqual({ ok: true })
       expect(projectBackendPluginActivationCatalog([...active.values()])).toEqual({
         schemaVersion: 1,
         packages: [],

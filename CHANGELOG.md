@@ -9,6 +9,11 @@ All notable released changes to Navide will be documented in this file. The form
 - Add the public Plugin Platform v2 contracts, SDK CLI, UI package boundary,
   and an external-workspace frontend package smoke workflow with fail-closed
   capability-denial coverage.
+- Add the Issue 16 Host-managed durable plugin/workspace storage adapter and
+  lifecycle seams with authenticated package/workspace identity,
+  version-matched candidate/active/previous snapshot selection, atomic JSON
+  persistence, and stable quota errors. Production grant/context wiring is
+  deferred to the later runtime integration.
 - Enforce Manifest v2 coarse `system` namespace and `shell` grants through the
   Host capability catalog, authenticated workspace binding, package-version
   approval, and fail-closed AI CLI/shell request planning.

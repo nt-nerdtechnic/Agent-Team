@@ -246,7 +246,9 @@ import { manifestV2CapabilityPolicy } from './pluginPermissions'
 import {
   HOST_EVENT_SOURCE_PLUGIN_ID,
   type HostCapabilityContext,
+  type StorageSnapshotTier,
 } from './pluginCapabilityBroker'
+import { PluginStorageError } from './pluginStorage'
 
 interface FakeWebContentsLike {
   id: number
@@ -2954,6 +2956,151 @@ describe('Manifest v2 capability runtime deferral', () => {
       ok: false,
       error: { code: 'INTERNAL_ERROR', message: 'public capability failed' },
     })
+  })
+
+  it('routes an authorized storage call to the durable storage seam', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const storageSnapshots = new Map<StorageSnapshotTier, string>([
+      ['candidate', '2.0.0'],
+      ['active', '1.0.0'],
+      ['previous', '0.9.0'],
+    ])
+    mgr.open(
+      asHost(host),
+      {
+        id: 'acme.storage',
+        packageVersion: '1.0.0',
+        requires: [],
+        capabilityPolicy: manifestV2CapabilityPolicy({ system: [] }),
+        capabilityContext: {
+          publisherEligible: false,
+          userGrant: { packageVersion: '1.0.0', system: [], storage: true },
+          runtimeBinding: {
+            pluginId: 'acme.storage',
+            packageVersion: '1.0.0',
+            workspaceId: 'workspace-1',
+            instanceId: 'instance-1',
+            audience: 'audience-1',
+          },
+          storageSnapshots,
+          storageSnapshotTier: 'active',
+        },
+        devUrl: '',
+        entryFile: '/plugins/acme.storage/index.html',
+        views: [
+          {
+            id: 'main',
+            contributionKey: 'acme.storage.main',
+            kind: 'custom',
+            location: 'main',
+            title: 'Storage',
+            entryFile: '/plugins/acme.storage/index.html',
+          },
+        ],
+      },
+      'fill'
+    )
+    const view = views[views.length - 1]
+    const executions: unknown[] = []
+    mgr.setPublicStorageHandler((execution) => {
+      executions.push(execution)
+      return null
+    })
+    const handler = ipcHandlers.get(CALL)
+    expect(handler).toBeDefined()
+
+    const response = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'storage-1',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'workspace', key: 'layout', value: { compact: true } },
+    })
+    expect(response).toEqual({ reqId: 'storage-1', ok: true, result: null })
+    expect(executions[0]).toMatchObject({
+      address: 'storage.set',
+      partition: { pluginId: 'acme.storage', workspaceId: 'workspace-1', key: 'layout' },
+      snapshot: { tier: 'active', packageVersion: '1.0.0' },
+    })
+
+    mgr.setPublicStorageHandler(() => {
+      throw new PluginStorageError('STORAGE_QUOTA_EXCEEDED', 'storage quota exceeded')
+    })
+    const failed = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'storage-2',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'workspace', key: 'layout', value: { compact: true } },
+    })
+    expect(failed).toEqual({
+      reqId: 'storage-2',
+      ok: false,
+      error: { code: 'STORAGE_QUOTA_EXCEEDED', message: 'storage quota exceeded' },
+    })
+
+    let nested: unknown = null
+    for (let index = 0; index < 129; index += 1) nested = [nested]
+    const invalidDepth = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'storage-depth',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'plugin', key: 'depth', value: nested },
+    })
+    expect(invalidDepth).toEqual({
+      reqId: 'storage-depth',
+      ok: false,
+      error: { code: 'INVALID_ARGUMENT', message: "invalid request for 'storage.set'" },
+    })
+  })
+
+  it('keeps the selected storage tier fixed for a live v2 instance', async () => {
+    const mgr = new FrontendPluginManager()
+    const activeContext: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion: '1.0.0', system: [], storage: true },
+      runtimeBinding: {
+        pluginId: 'acme.storage-tier',
+        packageVersion: '1.0.0',
+        workspaceId: 'workspace-1',
+        instanceId: null,
+        audience: 'audience-1',
+      },
+      storageSnapshots: new Map([
+        ['candidate', '1.0.0'],
+        ['active', '1.0.0'],
+      ]),
+      storageSnapshotTier: 'active',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: 'acme.storage-tier',
+      packageVersion: '1.0.0',
+      requires: [],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: [] }),
+      capabilityContext: activeContext,
+      devUrl: '',
+      entryFile: '/plugins/acme.storage-tier/index.html',
+      views: [
+        {
+          id: 'main',
+          contributionKey: 'acme.storage-tier.main',
+          kind: 'custom',
+          location: 'main',
+          title: 'Storage tier',
+          entryFile: '/plugins/acme.storage-tier/index.html',
+        },
+      ],
+    }
+    mgr.registerDescriptor(descriptor)
+    await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(new FakeBrowserWindow()),
+      bounds: 'fill',
+    })
+    expect(() =>
+      mgr.setCapabilityContext('acme.storage-tier', {
+        ...activeContext,
+        storageSnapshotTier: 'candidate',
+      })
+    ).toThrow(/tier is fixed/)
   })
 
   it('routes workspace events only with a matching Host source binding', () => {

@@ -10,10 +10,19 @@ Depending on enabled features, Navide stores:
 
 - Private per-user project intelligence and run artifacts under `<workspace>/.agent-team/`
 - Roles, pipelines, recent workspaces, UI settings, analyzer settings, and AI provider settings in the application data directory
+- Host-managed plugin storage partitions in the application data directory;
+  these are keyed by authenticated plugin/package and, for workspace scope, by
+  authenticated workspace, and are not sent to Navide or plugin registries
 - Token-attribution and deduplication metadata derived from local CLI logs
 - Optional AI provider API keys in a local settings file protected with restrictive file permissions (`0600` on supported systems)
 
 Navide does not operate a project telemetry service and does not require a Navide account.
+
+When the Issue 16 production storage integration is enabled, uninstalling a
+plugin removes its local storage after the cleanup step succeeds. A later
+reinstall does not restore that deleted storage. Until that integration is
+enabled, production plugin calls remain denied and no plugin storage is
+created through the runtime path.
 
 ## Private project intelligence
 

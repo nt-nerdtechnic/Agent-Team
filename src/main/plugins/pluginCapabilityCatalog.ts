@@ -1,3 +1,6 @@
+import type { JsonValue, StoragePartitionScope } from '../../../packages/plugin-contracts/src/index'
+import { normalizeJsonValue, utf8ByteLength } from './pluginStorageJson'
+
 /** Public Manifest v2 capability catalog used by the Host broker.
  *
  * The machine-readable JSON catalog remains the documentation/registry source
@@ -6,20 +9,50 @@
  */
 
 export type PublicCapabilityScope = 'workspace' | 'plugin'
+/** Partition class a plugin may request from a Host-managed storage call. The
+ *  Host derives the actual partition identity; the request only selects one of
+ *  these two classes. */
+export type StoragePartitionClass = StoragePartitionScope
 export type PublicCapabilityEligibility = 'public' | 'firstParty'
+
+export const STORAGE_LIMITS = {
+  maxKeyBytes: 256,
+  maxValueBytes: 1024 * 1024,
+  maxSnapshotBytes: 10 * 1024 * 1024,
+} as const
 
 /** Executable names accepted by the public shell.run allowlist mode.
  * Package identity cannot add to or bypass this Host-owned policy. */
 export const HOST_SHELL_EXECUTABLE_ALLOWLIST: readonly string[] = ['git']
 
-export interface PublicCapabilityCatalogEntry {
+interface PublicCapabilityCatalogBase {
   address: string
   kind: 'method' | 'event'
-  namespace: 'fs' | 'ui' | 'aiCli' | 'shell'
-  scope: PublicCapabilityScope
   eligibility: PublicCapabilityEligibility
   validateRequest?: (value: unknown) => value is Record<string, unknown>
 }
+
+/** Public storage entries are deliberately a separate union member: they do
+ * not have a fixed namespace scope because the request chooses plugin versus
+ * workspace while the Host derives the identity. */
+export interface PublicStorageCapabilityCatalogEntry extends PublicCapabilityCatalogBase {
+  namespace: 'storage'
+  storage: true
+  kind: 'method'
+  validateRequest: (value: unknown) => value is Record<string, unknown>
+}
+
+export interface PublicSystemCapabilityCatalogEntry extends PublicCapabilityCatalogBase {
+  namespace: 'fs' | 'ui' | 'aiCli' | 'shell'
+  /** Host-pinned scope for declared namespaces (only `ui.openExternal` is
+   *  `plugin`; storage has its own discriminated entry). */
+  scope: PublicCapabilityScope
+  storage?: false
+}
+
+export type PublicCapabilityCatalogEntry =
+  | PublicStorageCapabilityCatalogEntry
+  | PublicSystemCapabilityCatalogEntry
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -44,6 +77,48 @@ function requestWithString(
   optionalKeys: readonly string[] = []
 ): value is Record<string, unknown> {
   return isRecord(value) && hasOnlyKeys(value, [key, ...optionalKeys]) && nonEmptyString(value[key])
+}
+
+/** Storage requests contain only a partition class and key; `set` additionally
+ *  contains a JSON value. Partition identity is always Host-derived. */
+export type StorageRequestValidationError = 'INVALID_ARGUMENT' | 'STORAGE_QUOTA_EXCEEDED'
+
+export function storageRequestValidationError(
+  value: unknown,
+  address: 'storage.get' | 'storage.set' | 'storage.delete' = 'storage.get'
+): StorageRequestValidationError | null {
+  try {
+    const allowedKeys = address === 'storage.set' ? ['scope', 'key', 'value'] : ['scope', 'key']
+    if (!isRecord(value) || !hasOnlyKeys(value, allowedKeys)) return 'INVALID_ARGUMENT'
+    const record = value as Record<string, unknown>
+    const scope = record.scope
+    if (scope !== 'plugin' && scope !== 'workspace') return 'INVALID_ARGUMENT'
+    if (!nonEmptyString(record.key)) return 'INVALID_ARGUMENT'
+    if (utf8ByteLength(record.key) > STORAGE_LIMITS.maxKeyBytes) {
+      return 'STORAGE_QUOTA_EXCEEDED'
+    }
+    if (address === 'storage.set') {
+      const normalized = normalizeJsonValue(record.value)
+      if (!normalized) return 'INVALID_ARGUMENT'
+      if (normalized.bytes > STORAGE_LIMITS.maxValueBytes) {
+        return 'STORAGE_QUOTA_EXCEEDED'
+      }
+    }
+    return null
+  } catch {
+    return 'INVALID_ARGUMENT'
+  }
+}
+
+export function validateStorageRequest(
+  value: unknown,
+  address: 'storage.get' | 'storage.set' | 'storage.delete' = 'storage.get'
+): value is Record<string, unknown> & {
+  scope: StoragePartitionClass
+  key: string
+  value?: JsonValue
+} {
+  return storageRequestValidationError(value, address) === null
 }
 
 function validateEditorRequest(value: unknown): value is Record<string, unknown> {
@@ -106,6 +181,19 @@ function aiCliMethod(
   return systemMethod(address, 'aiCli', validateRequest, 'firstParty')
 }
 
+function storageMethod(
+  address: 'storage.get' | 'storage.set' | 'storage.delete'
+): PublicCapabilityCatalogEntry {
+  return {
+    address,
+    kind: 'method',
+    namespace: 'storage',
+    storage: true,
+    eligibility: 'public',
+    validateRequest: (value) => validateStorageRequest(value, address),
+  }
+}
+
 export const PUBLIC_CAPABILITY_CATALOG: Readonly<Record<string, PublicCapabilityCatalogEntry>> = {
   'fs.readFile': systemMethod('fs.readFile', 'fs', (value) => requestWithString('path', value)),
   'fs.listDirectory': systemMethod('fs.listDirectory', 'fs', (value) => requestWithString('path', value)),
@@ -113,6 +201,9 @@ export const PUBLIC_CAPABILITY_CATALOG: Readonly<Record<string, PublicCapability
   'fs.stat': systemMethod('fs.stat', 'fs', (value) => requestWithString('path', value)),
   'ui.openInEditor': systemMethod('ui.openInEditor', 'ui', validateEditorRequest),
   'ui.openExternal': systemMethod('ui.openExternal', 'ui', validateExternalRequest),
+  'storage.get': storageMethod('storage.get'),
+  'storage.set': storageMethod('storage.set'),
+  'storage.delete': storageMethod('storage.delete'),
   'aiCli.startSession': aiCliMethod('aiCli.startSession', validateStartRequest),
   'aiCli.cancelStart': aiCliMethod('aiCli.cancelStart', (value) => requestWithString('requestId', value)),
   'aiCli.reattachSession': aiCliMethod('aiCli.reattachSession', validateSessionRequest),

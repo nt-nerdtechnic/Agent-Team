@@ -7,6 +7,8 @@ import type {
   PublicEvent,
   PublicMethod,
   Result,
+  StorageGetResult,
+  StoragePartitionScope,
 } from '@navide/plugin-contracts'
 
 export { PluginError } from '@navide/plugin-contracts'
@@ -19,6 +21,8 @@ export type {
   PublicEvent,
   PublicMethod,
   Result,
+  StorageGetResult,
+  StoragePartitionScope,
 } from '@navide/plugin-contracts'
 
 export interface WorkspaceTarget {

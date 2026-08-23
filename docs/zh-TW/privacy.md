@@ -10,10 +10,16 @@ Navide 採用 **Local-first**，但不代表所有情況都完全離線。Electr
 
 - `<workspace>/.agent-team/` 中的個人私有專案智慧與 Run Artifact
 - 應用程式資料目錄中的 Role、Pipeline、Recent Workspace、UI Setting、Analyzer Setting 與 AI Provider Setting
+- 應用程式資料目錄中的 Host 管理 Plugin Storage Partition；它們依驗證過的 Plugin／Package 及（Workspace Scope）驗證過的 Workspace 分隔，不會傳送給 Navide 或 Plugin Registry
 - 從本機 CLI Log 衍生的 Token Attribution 與 Deduplication Metadata
 - 選用的 AI Provider API Key；它會儲存在受限制檔案權限保護的本機設定檔中（受支援系統上為 `0600`）
 
 Navide 不營運專案 Telemetry 服務，也不要求建立 Navide 帳號。
+
+當 Issue 16 的 Production Storage Integration 啟用後，解除安裝 Plugin 會在
+Cleanup 成功後刪除該 Plugin 的本機 Storage；之後重新安裝不會還原已刪除的
+資料。目前這項 Integration 尚未接通，因此 Production Plugin Call 仍會被
+拒絕，Runtime Path 不會建立 Plugin Storage。
 
 ## 私有專案智慧
 

@@ -15,6 +15,7 @@ import {
 } from './plugins/pluginIpc'
 import { readRegistryTrustSnapshot } from './plugins/pluginInstalledTrust'
 import { currentPluginHostTarget } from './plugins/pluginTarget'
+import { PluginStorageStore } from './plugins/pluginStorage'
 import {
   projectBackendPluginActivationCatalog,
   writeBackendPluginActivationCatalog,
@@ -469,6 +470,12 @@ let approvedInstalledPluginActivations = installedPluginLoad.activationCatalog
 for (const error of installedPluginLoad.errors) {
   console.warn(`[main] installed plugin quarantined: ${error}`)
 }
+// Manifest v2 storage is Host-owned durable state. Resolve the path lazily so
+// the development userData override below is applied before the first request;
+// the plugin request never supplies any part of it or of the partition identity.
+const pluginStorageStore = new PluginStorageStore(
+  () => join(app.getPath('userData'), 'plugin-storage-v2')
+)
 const pluginTrustRefresh = registerPluginIpc(
   frontendPluginManager,
   pluginsRoot(),
@@ -482,6 +489,7 @@ const pluginTrustRefresh = registerPluginIpc(
       )
       if (activation) approvedInstalledPluginActivations.push(activation)
     },
+    cleanupPluginStorage: (pluginId) => pluginStorageStore.cleanupPlugin(pluginId),
   }
 )
 async function refreshInstalledPluginTrust(): Promise<void> {
@@ -1002,6 +1010,8 @@ function openMiniIdeEditor(host: BrowserWindow | null, params: Record<string, st
 // through the same router as window:openEditor so the user's default-editor
 // choice applies here too, with the mini-IDE as the fallback.
 frontendPluginManager.setOpenInEditorHandler((params) => routeEditorOpen(null, params))
+
+frontendPluginManager.setPublicStorageHandler((execution) => pluginStorageStore.execute(execution))
 
 // Shell-level host capabilities (plugin broker): the Git window's remote/
 // worktree cards need the same shell actions GitPane reaches via

@@ -33,6 +33,11 @@ import {
   type PublicCapabilityExecutionPlan,
   type TerminalOutputBatcher,
 } from './pluginCapabilityBroker'
+import {
+  PluginStorageError,
+  type StorageExecution,
+  type StorageExecutionAddress,
+} from './pluginStorage'
 import { CAP_EVENTS } from './capabilityMap'
 import { PUBLIC_CAPABILITY_EVENT_ADDRESSES } from './pluginCapabilityCatalog'
 import {
@@ -253,6 +258,10 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
+function isStorageExecutionAddress(value: string): value is StorageExecutionAddress {
+  return value === 'storage.get' || value === 'storage.set' || value === 'storage.delete'
+}
+
 function nonEmptyOrNull(value: string | null): boolean {
   return value === null || nonEmptyString(value)
 }
@@ -322,6 +331,26 @@ function validateV2CapabilityContext(
   if (context.userGrant && context.userGrant.packageVersion !== packageVersion) {
     throw new Error(`capability context grant version does not match plugin '${descriptor.id}'`)
   }
+  if (context.storageSnapshots) {
+    for (const [tier, version] of context.storageSnapshots) {
+      if (
+        !['candidate', 'active', 'previous'].includes(tier) ||
+        !nonEmptyString(version)
+      ) {
+        throw new Error(
+          `capability context storage snapshot map is invalid for plugin '${descriptor.id}'`
+        )
+      }
+    }
+  }
+  if (
+    context.storageSnapshotTier !== undefined &&
+    context.storageSnapshots?.get(context.storageSnapshotTier) !== packageVersion
+  ) {
+    throw new Error(
+      `capability context selected storage tier does not match plugin '${descriptor.id}'`
+    )
+  }
   for (const [label, bindings] of [
     ['session', context.sessionBindings],
     ['pending start', context.pendingStartBindings],
@@ -369,6 +398,12 @@ export class FrontendPluginManager {
   /** Host-owned executor seam for cataloged v2 plans. */
   private publicCapabilityHandler:
     | ((plan: PublicCapabilityExecutionPlan) => unknown | Promise<unknown>)
+    | null = null
+  /** Host-owned executor for the durable storage capability. Kept separate
+   *  from the generic public handler so unimplemented public methods retain
+   *  their existing unavailable behavior. */
+  private publicStorageHandler:
+    | ((execution: StorageExecution) => unknown | Promise<unknown>)
     | null = null
   /** `terminal_session_id` → authenticated route ownership. v2 teardown
    *  clears the live instance id but retains the stable tuple as a tombstone;
@@ -424,6 +459,9 @@ export class FrontendPluginManager {
     return {
       ...context,
       runtimeBinding: context.runtimeBinding ? bind(context.runtimeBinding) : null,
+      ...(context.storageSnapshots
+        ? { storageSnapshots: new Map(context.storageSnapshots) }
+        : {}),
       ...(context.sessionBindings
         ? {
             sessionBindings: new Map(
@@ -458,6 +496,12 @@ export class FrontendPluginManager {
       plugin.hasV2DescriptorIdentity || !plugin.openedViaLegacyAdapter
         ? this.bindCapabilityContext(context, plugin.instanceId)
         : context ?? null
+    if (
+      plugin.hasV2DescriptorIdentity &&
+      plugin.capabilityContext?.storageSnapshotTier !== nextContext?.storageSnapshotTier
+    ) {
+      throw new Error('storage snapshot tier is fixed for a live plugin instance; recreate the instance')
+    }
     const preserveTerminalOwnership =
       !plugin.hasV2DescriptorIdentity ||
       (sameRuntimeBinding(
@@ -510,14 +554,49 @@ export class FrontendPluginManager {
 
       // Enforce scoping + route. A denied namespace is rejected here and never
       // reaches the backend; `ping`/unknown resolve in-process.
-      const plan = planCapabilityCall(
-        call,
-        plugin.capabilityPolicy,
-        plugin.capabilityContext ?? undefined
-      )
+      let plan: ReturnType<typeof planCapabilityCall>
+      try {
+        plan = planCapabilityCall(
+          call,
+          plugin.capabilityPolicy,
+          plugin.capabilityContext ?? undefined
+        )
+      } catch {
+        return buildError(call.reqId, 'INVALID_ARGUMENT', 'invalid capability request')
+      }
       if (plan.kind === 'respond') return plan.response
 
       if (plan.kind === 'public') {
+        if (plan.storage) {
+          const handler = this.publicStorageHandler
+          if (!handler || !isStorageExecutionAddress(plan.address)) {
+            return buildError(
+              call.reqId,
+              'BACKEND_UNAVAILABLE',
+              'storage capability broker is not connected'
+            )
+          }
+          try {
+            return buildSuccess(
+              call.reqId,
+              await handler({
+                address: plan.address,
+                args: plan.args,
+                partition: plan.storage.partition,
+                snapshot: plan.storage.snapshot,
+              })
+            )
+          } catch (error) {
+            if (error instanceof PluginStorageError) {
+              const code =
+                error.code === 'STORAGE_QUOTA_EXCEEDED' || error.code === 'INVALID_ARGUMENT'
+                  ? error.code
+                  : 'INTERNAL_ERROR'
+              return buildError(call.reqId, code, error.message)
+            }
+            return buildError(call.reqId, 'INTERNAL_ERROR', 'storage capability failed')
+          }
+        }
         const handler = this.publicCapabilityHandler
         if (!handler) {
           return buildError(
@@ -665,6 +744,15 @@ export class FrontendPluginManager {
     fn: ((plan: PublicCapabilityExecutionPlan) => unknown | Promise<unknown>) | null
   ): void {
     this.publicCapabilityHandler = fn
+  }
+
+  /** Install the Host-owned durable storage adapter for an already-authorized
+   * storage plan. The adapter receives only the derived partition and snapshot
+   * identity; it never receives the raw renderer request as an authority. */
+  setPublicStorageHandler(
+    fn: ((execution: StorageExecution) => unknown | Promise<unknown>) | null
+  ): void {
+    this.publicStorageHandler = fn
   }
 
   /** Host-only event ingress for cataloged public events. The target package id
@@ -1766,6 +1854,15 @@ export class FrontendPluginManager {
     ) {
       throw new Error(`cannot validate capability context for unregistered plugin '${pluginId}'`)
     }
+    if (
+      running.some(
+        (instance) =>
+          instance.hasV2DescriptorIdentity &&
+          instance.capabilityContext?.storageSnapshotTier !== context?.storageSnapshotTier
+      )
+    ) {
+      throw new Error('storage snapshot tier is fixed for a live plugin instance; recreate the instance')
+    }
     if (descriptor) this.descriptors.set(pluginId, { ...descriptor, capabilityContext: context })
     for (const runningInstance of running) {
       this.updateInstanceCapabilityContext(runningInstance, context)
@@ -2075,13 +2172,21 @@ export class FrontendPluginManager {
     return decisions
   }
 
+  /** Stop a plugin's live frontend runtime without unregistering its package.
+   * Destructive package-owned cleanup must use this phase before touching
+   * storage, while leaving the package registered so a failed cleanup can be
+   * retried. */
+  preparePluginRemoval(id: string): void {
+    this.destroyPluginInstances(id)
+    this.clearTerminalRoutes(id)
+  }
+
   /** Unregister a descriptor and tear down its view if it is open. Used by the
    *  remove/update flow so a removed plugin's window does not linger. Removing
    *  a marketplace override of a bundled builtin re-registers the bundled copy
    *  (recorded by {@link registerBuiltin}) so the surface keeps working. */
   removeInstalledPlugin(id: string): void {
-    this.destroyPluginInstances(id)
-    this.clearTerminalRoutes(id)
+    this.preparePluginRemoval(id)
     this.installedPackages.delete(id)
     this.descriptors.delete(id)
     const fallback = this.builtinFallbacks.get(id)
