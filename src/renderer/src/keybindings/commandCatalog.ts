@@ -266,6 +266,7 @@ export const COMMAND_IDS: readonly string[] = [
   'workbench.action.focusNextGroup',
   'workbench.action.focusNextPane',
   'workbench.action.focusPipeline',
+  'workbench.action.focusPreview',
   'workbench.action.focusPreviousGroup',
   'workbench.action.focusPreviousPane',
   'workbench.action.focusSourceControl',

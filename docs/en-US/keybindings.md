@@ -37,6 +37,7 @@ rules the editor writes.
 | `⌘⇧E` | Focus Explorer |
 | `⌘⇧G` | Open the Git window from the main window; focus the Source Control sidebar inside the Mini IDE (when find is closed) |
 | `⌘⇧I` | Open the Mini IDE window |
+| `⌥⌘V` | Focus the right rail's Preview panel (main window) |
 | `⌘J` | Toggle AI Terminal panel |
 | `⌘⇧A` | Toggle AI Terminal panel |
 | `` ⌃` `` | Toggle AI Terminal panel |

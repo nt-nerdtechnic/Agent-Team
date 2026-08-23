@@ -237,6 +237,12 @@ interface Props {
   rebuildingAll?: boolean
   /** Issue dispatch/handle status — forwarded to GitPane for badges. */
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
+  /** Left slot collapsed — swaps the panel body for a narrow icon rail. */
+  collapsed?: boolean
+  /** View ids assigned to this slot, in tab order. Omitted means "all of
+   *  them" — the layout store supplies the real list. A view moved to another
+   *  slot disappears from here, which is what keeps it a singleton. */
+  views?: string[]
 }
 
 const props = defineProps<Props>()
@@ -320,6 +326,7 @@ const emit = defineEmits<{
   (e: 'open-git-accounts'): void
   (e: 'rename-pane', paneId: string, name: string): void
   (e: 'install-cli', payload: { agentKey: string; label: string }): void
+  (e: 'update:collapsed', v: boolean): void
 }>()
 
 const renamingPaneId = ref<string | null>(null)
@@ -622,10 +629,61 @@ function backToList(): void {
 // list view (never a stale detail) — openPipelineDetail is the only path into
 // the detail view, so the panel can't render blank after the opened pipeline
 // goes away. Used by the tab buttons, Cmd+1..5, and Cmd+Shift+E/R/G.
-function selectSidebarTab(tab: SidebarTab): void {
+function showSidebarTab(tab: SidebarTab): void {
   sidebarTab.value = tab
   if (tab === 'pipeline') sidebarView.value = 'list'
 }
+
+function selectSidebarTab(tab: SidebarTab): void {
+  showSidebarTab(tab)
+  // Surfacing a tab while the slot is collapsed has to reopen it, or Cmd+1..5
+  // and the programmatic entry points would only move a highlight on the rail.
+  // Collapsing is the parent's state, so ask rather than set — the same one-way
+  // contract as TokenStatsPanel's `update:expanded`.
+  //
+  // Only this path expands, never showSidebarTab: repairing an active tab that
+  // was moved out from under us is not a request to see the panel, and a
+  // collapsed sidebar must not pop open because Settings moved a view.
+  if (props.collapsed) emit('update:collapsed', false)
+}
+
+// Rail entries mirror the tab strip. Emoji icons rather than the strip's inline
+// SVGs: the rail is 36px wide, and copying five <path> blobs to render them at
+// half size buys nothing over the icon convention TokenStatsPanel's rail set.
+// `title` keeps its shortcut hint: Cmd+1..5 are bound to SIDEBAR_TABS by
+// position in that list, not by position in the strip, so reordering the strip
+// leaves the hints correct.
+const RAIL_TABS: { id: SidebarTab; icon: string; label: string; title: string; path: string }[] = [
+  { id: 'agents', icon: '\u{1F916}', label: 'label.agents', title: 'Agents (\u23181)', path: 'M2 3.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm0 4.5a1.25 1.25 0 1 1 2.5 0A1.25 1.25 0 0 1 2 8Zm0 4.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0ZM6.5 2.75A.75.75 0 0 1 7.25 2h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5A.75.75 0 0 1 7.25 6.5h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Z' },
+  { id: 'pipeline', icon: '\u{1F500}', label: 'label.pipeline', title: 'Pipeline (\u23182)', path: 'M0 1.75C0 .784.784 0 1.75 0h3.5C6.216 0 7 .784 7 1.75v3.5A1.75 1.75 0 0 1 5.25 7H4v4a1 1 0 0 0 1 1h4v-1.25C9 9.784 9.784 9 10.75 9h3.5c.966 0 1.75.784 1.75 1.75v3.5A1.75 1.75 0 0 1 14.25 16h-3.5A1.75 1.75 0 0 1 9 14.25v-.75H5A2.5 2.5 0 0 1 2.5 11V7h-.75A1.75 1.75 0 0 1 0 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Zm9 9a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Z' },
+  { id: 'explorer', icon: '\u{1F4C1}', label: 'label.explorer', title: 'Explorer (\u23183)', path: 'M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5L6.2 1.7A1.75 1.75 0 0 0 4.96 1H1.75Z' },
+  { id: 'git', icon: '\u{1F33F}', label: 'label.git', title: 'Git (\u23184)', path: 'M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25z' },
+  { id: 'plans', icon: '\u{1F4CB}', label: 'label.plans', title: 'Plans (\u23185)', path: 'M5 2a1 1 0 0 0-1 1H2.75A1.75 1.75 0 0 0 1 4.75v9.5c0 .966.784 1.75 1.75 1.75h10.5A1.75 1.75 0 0 0 15 14.25v-9.5A1.75 1.75 0 0 0 13.25 3H12a1 1 0 0 0-1-1H5Zm0 2h6v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4Zm-2.25.5H4a2.5 2.5 0 0 0 2 1h4a2.5 2.5 0 0 0 2-1h1.25a.25.25 0 0 1 .25.25v9.5a.25.25 0 0 1-.25.25H2.75a.25.25 0 0 1-.25-.25v-9.5a.25.25 0 0 1 .25-.25Z' },
+]
+
+// Ordered by the slot, not by the table above: moving a view also reorders it.
+const visibleTabs = computed(() => {
+  const assigned = props.views
+  if (!assigned) return RAIL_TABS
+  return assigned
+    .map((id) => RAIL_TABS.find((t) => t.id === id))
+    .filter((t): t is typeof RAIL_TABS[number] => !!t)
+})
+
+// Membership as a set, for the panels that stay mounted regardless of which
+// tab is showing. Those must also disappear when their view moves to another
+// slot, or the app runs two live copies: two backend subscriptions, and a Git
+// badge fed by a panel the user can no longer see.
+const visibleTabIds = computed(() => new Set(visibleTabs.value.map((t) => t.id)))
+
+// The active tab can be moved out from under us — by this window's own
+// Settings, or by another window, since the layout is shared. Falling back to
+// the first remaining tab keeps the panel showing something; without this the
+// body renders nothing and the sidebar looks broken rather than empty.
+watch(visibleTabs, (tabs) => {
+  if (!tabs.length || tabs.some((t) => t.id === sidebarTab.value)) return
+  showSidebarTab(tabs[0].id)
+}, { immediate: true })
 
 function isPipelineRunning(pipelineId: string): boolean {
   return pipelineId === (props.activePipelineId ?? '') && props.pipeline.state === 'running'
@@ -1009,39 +1067,50 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 </script>
 
 <template>
-  <aside class="sidebar">
+  <aside class="sidebar" :class="{ 'is-collapsed': collapsed }">
+    <!-- Collapsed rail: one icon per tab — click expands and switches tab. -->
+    <div v-if="collapsed" class="rail">
+      <button
+        v-for="t in visibleTabs"
+        :key="t.id"
+        class="rail-btn"
+        :class="{ active: sidebarTab === t.id }"
+        :title="$t('layout.expand')"
+        @click="selectSidebarTab(t.id)"
+      >
+        <span class="rail-icon">{{ t.icon }}</span>
+        <span class="rail-label">{{ $t(t.label) }}</span>
+        <span v-if="t.id === 'git' && gitChangesCount > 0" class="rail-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
+      </button>
+    </div>
+
     <!-- ── Top-level tab nav (icon style, Cursor-like) ────────────────────── -->
     <div class="sidebar-tabs">
-      <button :class="['tab-btn', { active: sidebarTab === 'agents' }]" title="Agents (⌘1)" @click="selectSidebarTab('agents')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm0 4.5a1.25 1.25 0 1 1 2.5 0A1.25 1.25 0 0 1 2 8Zm0 4.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0ZM6.5 2.75A.75.75 0 0 1 7.25 2h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5A.75.75 0 0 1 7.25 6.5h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Z"/></svg>
+      <button
+        v-for="t in visibleTabs"
+        :key="t.id"
+        :class="['tab-btn', { active: sidebarTab === t.id }]"
+        :title="t.title"
+        @click="selectSidebarTab(t.id)"
+      >
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path :d="t.path"/></svg>
+        <span v-if="t.id === 'git' && gitChangesCount > 0" class="git-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
       </button>
-
-      <button :class="['tab-btn', { active: sidebarTab === 'pipeline' }]" title="Pipeline (⌘2)" @click="selectSidebarTab('pipeline')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M0 1.75C0 .784.784 0 1.75 0h3.5C6.216 0 7 .784 7 1.75v3.5A1.75 1.75 0 0 1 5.25 7H4v4a1 1 0 0 0 1 1h4v-1.25C9 9.784 9.784 9 10.75 9h3.5c.966 0 1.75.784 1.75 1.75v3.5A1.75 1.75 0 0 1 14.25 16h-3.5A1.75 1.75 0 0 1 9 14.25v-.75H5A2.5 2.5 0 0 1 2.5 11V7h-.75A1.75 1.75 0 0 1 0 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Zm9 9a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Z"/></svg>
-      </button>
-      <button :class="['tab-btn', { active: sidebarTab === 'explorer' }]" title="Explorer (⌘3)" @click="selectSidebarTab('explorer')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5L6.2 1.7A1.75 1.75 0 0 0 4.96 1H1.75Z"/></svg>
-      </button>
-      <button :class="['tab-btn', { active: sidebarTab === 'git' }]" title="Git (⌘4)" @click="selectSidebarTab('git')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25z"/></svg>
-        <span v-if="gitChangesCount > 0" class="git-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
-      </button>
-      <button :class="['tab-btn', { active: sidebarTab === 'plans' }]" title="Plans (⌘5)" @click="selectSidebarTab('plans')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2a1 1 0 0 0-1 1H2.75A1.75 1.75 0 0 0 1 4.75v9.5c0 .966.784 1.75 1.75 1.75h10.5A1.75 1.75 0 0 0 15 14.25v-9.5A1.75 1.75 0 0 0 13.25 3H12a1 1 0 0 0-1-1H5Zm0 2h6v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4Zm-2.25.5H4a2.5 2.5 0 0 0 2 1h4a2.5 2.5 0 0 0 2-1h1.25a.25.25 0 0 1 .25.25v9.5a.25.25 0 0 1-.25.25H2.75a.25.25 0 0 1-.25-.25v-9.5a.25.25 0 0 1 .25-.25Z"/></svg>
-      </button>
+      <span class="tab-spacer"></span>
+      <button class="tab-collapse" :title="$t('layout.collapse')" @click="emit('update:collapsed', true)">‹</button>
     </div>
 
     <!-- ── Explorer / Git tabs (shared split: panel on top, agent dock pinned at bottom) ── -->
     <div v-show="sidebarTab === 'explorer' || sidebarTab === 'git'" class="pane-split">
       <div class="part-top" style="flex: 1">
         <ExplorerPane
-          v-if="backend"
+          v-if="backend && visibleTabIds.has('explorer')"
           v-show="sidebarTab === 'explorer'"
           :workspace-path="workspace ?? ''"
           :backend="backend"
         />
         <MultiRepoGit
-          v-if="backend"
+          v-if="backend && visibleTabIds.has('git')"
           v-show="sidebarTab === 'git'"
           :workspace-path="workspace ?? ''"
           :analyzer-model="analyzerModel"
@@ -1060,7 +1129,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
     </div>
 
     <!-- ── Pipeline tab · list view (full-height scroll) ─────────────────── -->
-    <div v-if="sidebarTab === 'pipeline' && sidebarView === 'list'" class="pipeline-split">
+    <div v-if="visibleTabIds.has('pipeline') && sidebarTab === 'pipeline' && sidebarView === 'list'" class="pipeline-split">
     <div class="part-top">
 
     <section class="block panel-section">
@@ -1180,7 +1249,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
     </div><!-- end pipeline tab · list view -->
 
     <!-- ── Agents tab ────────────────────────────────────────────────────── -->
-    <div v-if="sidebarTab === 'agents'" class="agents-split">
+    <div v-if="visibleTabIds.has('agents') && sidebarTab === 'agents'" class="agents-split">
     <div class="part-bottom">
 
     <!-- ── Active agents ──────────────────────────────────────────────────── -->
@@ -1364,7 +1433,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
     </div><!-- end agents tab -->
 
     <!-- ── Pipeline tab · detail view (no split, full-height scroll) ──────── -->
-    <div v-if="sidebarTab === 'pipeline' && sidebarView === 'pipeline'" class="pipeline-split">
+    <div v-if="visibleTabIds.has('pipeline') && sidebarTab === 'pipeline' && sidebarView === 'pipeline'" class="pipeline-split">
     <div class="pipeline-detail-scroll">
       <section class="block pipeline-detail-header">
         <div class="pipeline-detail-nav">
@@ -1518,7 +1587,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 
     <!-- ── Plans tab (embedded PlanPane, fits the narrow sidebar) ── -->
     <PlanPane
-      v-if="backend && sidebarTab === 'plans'"
+      v-if="backend && visibleTabIds.has('plans') && sidebarTab === 'plans'"
       class="plans-split"
       :workspace-path="workspace ?? ''"
       :backend="backend"
@@ -1587,6 +1656,87 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   color: var(--text-bright);
   background: var(--bg-muted);
 }
+.tab-spacer { flex: 1; }
+/* Not a .tab-btn: that class means "a sidebar tab", and both the shortcut
+   handling and its tests index the strip by position. */
+.tab-collapse {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 30px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.tab-collapse:hover { color: var(--text-primary); background: var(--bg-elevated); }
+
+/* ── Collapsed rail ──────────────────────────────────────────────────
+   The panel body is hidden, not unmounted: ExplorerPane and GitPane hold
+   scroll position, expanded folders and in-flight backend requests that a
+   v-if would throw away every time the slot is collapsed. */
+.sidebar.is-collapsed {
+  padding: 0;
+  gap: 0;
+}
+.sidebar.is-collapsed > :not(.rail) { display: none; }
+.rail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  /* Five vertical labels overflow a short window; the sidebar hides its own
+     overflow, so without this the last tab becomes unreachable. */
+  overflow-y: auto;
+}
+.rail-btn {
+  position: relative;
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 4px;
+  width: 100%;
+}
+.rail-btn:hover { background: var(--bg-subtle); color: var(--text-bright); }
+.rail-btn.active { color: var(--accent-fg); }
+.rail-icon { font-size: 16px; }
+.rail-label {
+  /* No rotate(180deg): the bottom-up "book spine" trick flips CJK glyphs
+     upside down. Plain vertical-rl keeps CJK upright and rotates Latin 90°. */
+  writing-mode: vertical-rl;
+  letter-spacing: 1px;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.rail-badge {
+  position: absolute;
+  top: 6px;
+  right: 2px;
+  min-width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  background: var(--attention-fg);
+  color: var(--text-on-emphasis);
+  border-radius: 999px;
+  padding: 0 3px;
+}
+
 .git-badge {
   position: absolute;
   top: -2px;
