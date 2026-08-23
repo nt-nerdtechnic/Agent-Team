@@ -8,6 +8,8 @@ import type { useBackend } from '../composables/useBackend'
 import HistoryPanel from './HistoryPanel.vue'
 import TaskerPanel from './TaskerPanel.vue'
 import AgentMessagesPanel from './AgentMessagesPanel.vue'
+import PreviewPanel from '../preview/PreviewPanel.vue'
+import { usePreview } from '../preview/usePreview'
 import type { PipelineStatusView } from './ControlPane.vue'
 
 interface Stage {
@@ -32,6 +34,10 @@ interface Props {
   pipeline: PipelineStatusView
   /** Owned by the parent: this panel renders it and asks for changes. */
   expanded: boolean
+  /** View ids assigned to this slot, in tab order. Omitted means "all of
+   *  them" — the layout store supplies the real list. A view moved to another
+   *  slot disappears from here, which is what keeps it a singleton. */
+  views?: string[]
 }
 
 const props = defineProps<Props>()
@@ -54,15 +60,68 @@ function setExpanded(v: boolean): void {
 }
 
 // Active right-panel tab — the pipeline History timeline (default), token stats,
-// Tasker (machine-level crontab / LaunchAgents), or the inter-CLI message log.
+// Tasker (machine-level crontab / LaunchAgents), the inter-CLI message log, or
+// the read-only preview panel.
 // Unknown or legacy persisted values fall back to the default.
-const tab = ref<'history' | 'tokens' | 'tasker' | 'messages'>('history')
+type RightTab = 'history' | 'tokens' | 'tasker' | 'messages' | 'preview'
+
+// Icon and label per tab, in the panel's own order. Which of them actually
+// render is the layout's decision (`props.views`); this table only says how.
+const TABS: { id: RightTab; icon: string; labelKey: string }[] = [
+  { id: 'history', icon: '\u{1F4DC}', labelKey: 'label.history' },
+  { id: 'tokens', icon: '\u{1F4CA}', labelKey: 'label.tokens' },
+  { id: 'tasker', icon: '\u{1F5D3}', labelKey: 'label.tasker' },
+  { id: 'messages', icon: '\u2709', labelKey: 'label.messages' },
+  { id: 'preview', icon: '\u{1F441}', labelKey: 'label.preview' },
+]
+
+// Ordered by the slot, not by this table: moving a view also reorders it.
+const visibleTabs = computed(() => {
+  const assigned = props.views
+  if (!assigned) return TABS
+  return assigned.map((id) => TABS.find((t) => t.id === id)).filter((t): t is typeof TABS[number] => !!t)
+})
+
+const tab = ref<RightTab>('history')
 {
   const t = settingsGet<string | null>('agentTeam.rightPanel.tab', null)
-  if (t === 'history' || t === 'tokens' || t === 'tasker' || t === 'messages') tab.value = t
+  if (TABS.some((x) => x.id === t)) tab.value = t as RightTab
 }
 watch(tab, (v) => {
   settingsSet('agentTeam.rightPanel.tab', v)
+})
+
+// The active tab can be moved out from under us — by this window's own
+// Settings, or by another window, since the layout is shared. Falling back to
+// the first remaining tab keeps the panel showing something; without this the
+// body renders nothing and the panel looks broken rather than empty.
+watch(visibleTabs, (tabs) => {
+  if (!tabs.length || tabs.some((t) => t.id === tab.value)) return
+  tab.value = tabs[0].id
+}, { immediate: true })
+
+/**
+ * The tab whose body should render, or null when this slot holds nothing.
+ *
+ * Bodies key off this rather than off `tab` directly. The fallback above keeps
+ * the two equal in every normal case, but it deliberately bails when the slot
+ * has been emptied — and a body left mounted in a zero-width panel is a second
+ * live copy of a view that is supposed to be a singleton, quietly holding a
+ * backend subscription nobody can see.
+ */
+const activeTab = computed<RightTab | null>(() =>
+  visibleTabs.value.some((t) => t.id === tab.value) ? tab.value : null
+)
+
+// Any show() from usePreview (user click, agent push, plugin call) surfaces
+// the panel: switch to the Preview tab and expand the rail if collapsed.
+// Guarded on the view still living here — once it has been taken off the
+// layout, claiming the tab would leave this panel showing nothing at all.
+const preview = usePreview()
+watch(preview.focusRequest, () => {
+  if (!visibleTabs.value.some((t) => t.id === 'preview')) return
+  tab.value = 'preview'
+  setExpanded(true)
 })
 
 // ─────────────────────── Derived view models ──────────────────────────────
@@ -161,22 +220,17 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   <aside class="token-panel" :class="{ 'is-expanded': expanded, 'is-collapsed': !expanded }">
     <!-- Collapsed rail: one icon per tab — click to expand + switch tab -->
     <div v-if="!expanded" class="rail">
-      <button class="rail-btn" :class="{ active: tab === 'history' }" title="Expand pipeline history" @click="tab = 'history'; setExpanded(true)">
-        <span class="rail-icon">📜</span>
-        <span class="rail-label">{{ $t('label.history') }}</span>
-      </button>
-      <button class="rail-btn" :class="{ active: tab === 'tokens' }" :title="`Expand token stats · ${collapsedTotal} so far`" @click="tab = 'tokens'; setExpanded(true)">
-        <span class="rail-icon">📊</span>
-        <span class="rail-label">{{ $t('label.tokens') }}</span>
-        <span v-if="runTotals.calls > 0" class="rail-badge">{{ collapsedTotal }}</span>
-      </button>
-      <button class="rail-btn" :class="{ active: tab === 'tasker' }" title="Expand scheduled tasks" @click="tab = 'tasker'; setExpanded(true)">
-        <span class="rail-icon">🗓</span>
-        <span class="rail-label">{{ $t('label.tasker') }}</span>
-      </button>
-      <button class="rail-btn" :class="{ active: tab === 'messages' }" :title="$t('msg.expand-rail')" @click="tab = 'messages'; setExpanded(true)">
-        <span class="rail-icon">✉</span>
-        <span class="rail-label">{{ $t('label.messages') }}</span>
+      <button
+        v-for="t in visibleTabs"
+        :key="t.id"
+        class="rail-btn"
+        :class="{ active: tab === t.id }"
+        :title="t.id === 'tokens' ? `${$t('layout.expand')} · ${collapsedTotal}` : $t('layout.expand')"
+        @click="tab = t.id; setExpanded(true)"
+      >
+        <span class="rail-icon">{{ t.icon }}</span>
+        <span class="rail-label">{{ $t(t.labelKey) }}</span>
+        <span v-if="t.id === 'tokens' && runTotals.calls > 0" class="rail-badge">{{ collapsedTotal }}</span>
       </button>
     </div>
 
@@ -185,18 +239,29 @@ async function confirmReset(scope: ResetScope): Promise<void> {
       <header class="hdr">
         <button class="collapse" :title="$t('action.collapse')" @click="setExpanded(false)">‹</button>
         <div class="tabs">
-          <button class="tab" :class="{ active: tab === 'history' }" @click="tab = 'history'">📜 {{ $t('label.history') }}</button>
-          <button class="tab" :class="{ active: tab === 'tokens' }" @click="tab = 'tokens'">📊 {{ $t('label.tokens') }}</button>
-          <button class="tab" :class="{ active: tab === 'tasker' }" @click="tab = 'tasker'">🗓 {{ $t('label.tasker') }}</button>
-          <button class="tab" :class="{ active: tab === 'messages' }" @click="tab = 'messages'">✉ {{ $t('label.messages') }}</button>
+          <button
+            v-for="t in visibleTabs"
+            :key="t.id"
+            class="tab"
+            :class="{ active: tab === t.id }"
+            @click="tab = t.id"
+          >{{ t.icon }} {{ $t(t.labelKey) }}</button>
         </div>
       </header>
 
-      <HistoryPanel v-if="tab === 'history'" :backend="backend" :workspace-path="workspacePath" :pipeline="pipeline" />
-      <TaskerPanel v-else-if="tab === 'tasker'" :backend="backend" />
-      <AgentMessagesPanel v-else-if="tab === 'messages'" />
+      <HistoryPanel v-if="activeTab === 'history'" :backend="backend" :workspace-path="workspacePath" :pipeline="pipeline" />
+      <TaskerPanel v-else-if="activeTab === 'tasker'" :backend="backend" />
+      <AgentMessagesPanel v-else-if="activeTab === 'messages'" />
+      <PreviewPanel
+        v-else-if="activeTab === 'preview'"
+        :backend="backend"
+        :workspace-path="workspacePath"
+      />
 
-      <template v-else>
+      <!-- Named rather than a bare v-else: the fallthrough would render the
+           token stats whenever no view is active, which is exactly the case
+           the guard above exists to catch. -->
+      <template v-else-if="activeTab === 'tokens'">
       <div v-if="loading && !snapshot" class="msg">{{ $t('label.loading') }}</div>
 
       <div class="body">
