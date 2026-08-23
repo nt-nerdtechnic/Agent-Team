@@ -25,6 +25,7 @@ import {
   terminalSessionIdOf,
   terminalSessionsFromResponse,
   HOST_CAPABILITIES,
+  HOST_EVENT_SOURCE_PLUGIN_ID,
   type CapabilityCall,
   type CapabilityResponse,
   type AuthenticatedRuntimeBinding,
@@ -64,12 +65,15 @@ import {
 export interface PluginLaunchDescriptor {
   /** Manifest id, e.g. `navide.noop`. */
   id: string
+  /** Canonical package version for Manifest v2 descriptors. Legacy descriptors
+   *  omit this field because their loader identity is plugin-id keyed. */
+  packageVersion?: string
   /** Capabilities the plugin's manifest declares (drives broker scoping). */
   requires: string[]
   /** Access-aware policy for Manifest v2; omitted descriptors retain V1 behavior. */
   capabilityPolicy?: PluginCapabilityPolicy
   /** Host-authenticated v2 grant/binding context; never serialized to a plugin. */
-  capabilityContext?: HostCapabilityContext
+  capabilityContext?: HostCapabilityContext | null
   /** Dev-server URL for the plugin entry (used when running under electron-vite dev). */
   devUrl: string
   /** Absolute file path to the built plugin entry (packaged / built runs). */
@@ -117,13 +121,18 @@ export interface PluginViewOpenOptions {
   query?: string
   closeHostOnHide?: boolean
   mirrorTitle?: boolean
+  /** Host-authenticated context for this view instance. Renderer data never
+   *  supplies or overrides this value. */
+  capabilityContext?: HostCapabilityContext | null
 }
 
 interface RunningPlugin {
   instanceId: string
   id: string
-  /** True for the legacy plugin-id keyed adapter exposed by {@link open}. */
-  legacy: boolean
+  /** True when this instance was created through the plugin-id keyed {@link open} adapter. */
+  openedViaLegacyAdapter: boolean
+  /** Canonical Manifest v2 identity; this controls PTY semantics regardless of opener. */
+  hasV2DescriptorIdentity: boolean
   requires: string[]
   capabilityPolicy: PluginCapabilityPolicy
   capabilityContext: HostCapabilityContext | null
@@ -150,12 +159,44 @@ interface RunningPlugin {
   pendingTargets: Record<string, string>[]
 }
 
+interface TerminalRoute {
+  pluginId: string
+  packageVersion: string | null
+  workspaceId: string | null
+  audience: string | null
+  /** Null while a v2 view is detached and awaiting an authenticated takeover. */
+  instanceId: string | null
+  /** Legacy route mode is derived from descriptor identity, not the opener. */
+  legacy: boolean
+}
+
+interface PendingTerminalOperation {
+  operationId: string
+  instanceId: string
+  wsType: 'terminal.create' | 'terminal.reattach'
+  client: WsClient
+  paneId?: string
+  createGeneration?: string
+  route: TerminalRoute | null
+  cancelled: boolean
+  cancelSent: boolean
+  cleanupSessionIds: Set<string>
+}
+
 const IPC_CALL = 'plugin:cap:call'
 const IPC_CAST = 'plugin:cap:cast'
 const IPC_EVENT = 'plugin:cap:event'
 const IPC_READY = 'plugin:ready'
 const IPC_HIDE_SELF = 'plugin:hideSelf'
 const IPC_OPEN_TARGET = 'plugin:openTarget'
+const TERMINAL_OWNED_WS_TYPES = new Set([
+  'terminal.input',
+  'terminal.log_sent',
+  'terminal.resize',
+  'terminal.interrupt',
+  'terminal.kill',
+  'terminal.redraw',
+])
 
 /** `workspace_path` param of an entry query ('' when absent) — the view's
  *  identity in {@link FrontendPluginManager.open}. Deliberately blind to
@@ -181,13 +222,12 @@ function revealHostWindow(win: BrowserWindow): void {
   win.focus()
 }
 
-/** The `navide.` publisher namespace is reserved for first-party plugins
- *  (mini-IDE, noop, fs_probe). An id here may only be registered by the host
- *  itself (built-in/dev) or by an install whose official-key verification
- *  passed, so a third-party marketplace package cannot masquerade as — or
- *  overwrite — a trusted plugin like `navide.mini-ide`. */
+/** The `navide.` publisher namespace is reserved for first-party packages;
+ *  the internal Host event identity is never a plugin id. First-party ids may
+ *  only be registered by the host itself or an install whose official-key
+ *  verification passed. */
 export function isReservedPluginId(id: string): boolean {
-  return id === 'navide.mini-ide' || id.startsWith('navide.')
+  return id === HOST_EVENT_SOURCE_PLUGIN_ID || id.startsWith('navide.')
 }
 
 function hasOfficialRegistryAuthority(trust: InstalledRegistryTrustContext): boolean {
@@ -209,10 +249,100 @@ function toPayload(args: unknown): Record<string, unknown> {
   return typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {}
 }
 
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+function nonEmptyOrNull(value: string | null): boolean {
+  return value === null || nonEmptyString(value)
+}
+
+function hasV2DescriptorIdentity(descriptor: PluginLaunchDescriptor): boolean {
+  return descriptor.packageVersion !== undefined || descriptor.views !== undefined
+}
+
+function hasValidBindingFields(binding: AuthenticatedRuntimeBinding): boolean {
+  return (
+    nonEmptyString(binding.pluginId) &&
+    nonEmptyString(binding.packageVersion) &&
+    nonEmptyOrNull(binding.workspaceId) &&
+    nonEmptyOrNull(binding.instanceId) &&
+    nonEmptyOrNull(binding.audience)
+  )
+}
+
+function sameRuntimeBinding(
+  left: AuthenticatedRuntimeBinding | null | undefined,
+  right: AuthenticatedRuntimeBinding | null | undefined
+): boolean {
+  return (
+    left !== null &&
+    left !== undefined &&
+    right !== null &&
+    right !== undefined &&
+    left.pluginId === right.pluginId &&
+    left.packageVersion === right.packageVersion &&
+    left.workspaceId === right.workspaceId &&
+    left.instanceId === right.instanceId &&
+    left.audience === right.audience
+  )
+}
+
+function sameTerminalRoute(left: TerminalRoute | null, right: TerminalRoute | null): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.pluginId === right.pluginId &&
+    left.packageVersion === right.packageVersion &&
+    left.workspaceId === right.workspaceId &&
+    left.audience === right.audience &&
+    left.instanceId === right.instanceId &&
+    left.legacy === right.legacy
+  )
+}
+
+function validateV2CapabilityContext(
+  descriptor: PluginLaunchDescriptor,
+  context: HostCapabilityContext | null
+): void {
+  if (context === null || !hasV2DescriptorIdentity(descriptor)) return
+  const packageVersion = descriptor.packageVersion
+  if (!nonEmptyString(packageVersion) || descriptor.views === undefined) {
+    throw new Error(`Manifest v2 plugin '${descriptor.id}' is missing canonical package identity`)
+  }
+  const binding = context.runtimeBinding
+  if (
+    !binding ||
+    !hasValidBindingFields(binding) ||
+    binding.pluginId !== descriptor.id ||
+    binding.packageVersion !== packageVersion
+  ) {
+    throw new Error(`capability context identity does not match plugin '${descriptor.id}'`)
+  }
+  if (context.userGrant && context.userGrant.packageVersion !== packageVersion) {
+    throw new Error(`capability context grant version does not match plugin '${descriptor.id}'`)
+  }
+  for (const [label, bindings] of [
+    ['session', context.sessionBindings],
+    ['pending start', context.pendingStartBindings],
+  ] as const) {
+    if (!bindings) continue
+    for (const binding of bindings.values()) {
+      if (
+        !hasValidBindingFields(binding) ||
+        binding.pluginId !== descriptor.id ||
+        binding.packageVersion !== packageVersion
+      ) {
+        throw new Error(`${label} binding does not match plugin '${descriptor.id}'`)
+      }
+    }
+  }
+}
+
 export class FrontendPluginManager {
   /** Host-generated instance id → running view. */
   private readonly running = new Map<string, RunningPlugin>()
-  /** Legacy plugin id → its v1 adapter instance. New views never enter this map. */
+  /** Plugin id → instances opened through the legacy adapter; a v2 descriptor may still be here. */
   private readonly legacyInstances = new Map<string, string>()
   /** webContents.id → opaque instance id, so a call's origin can be trusted,
    *  not the payload. */
@@ -240,17 +370,27 @@ export class FrontendPluginManager {
   private publicCapabilityHandler:
     | ((plan: PublicCapabilityExecutionPlan) => unknown | Promise<unknown>)
     | null = null
-  /** `terminal_session_id` → owning pluginId. Registered from terminal.create /
-   *  terminal.reattach responses ({@link noteTerminalRoutes}); terminal.output
-   *  and terminal.exit are delivered to the owner only, falling back to the
-   *  ns-gated fan-out for unregistered sessions. Cleared on terminal.exit;
-   *  Issue 14 retains routes across view teardown at plugin scope until Issue
-   *  15 can bind them to an instance. */
-  private readonly terminalRoutes = new Map<string, string>()
+  /** `terminal_session_id` → authenticated route ownership. v2 teardown
+   *  clears the live instance id but retains the stable tuple as a tombstone;
+   *  legacy routes retain their plugin-id adapter semantics. */
+  private readonly terminalRoutes = new Map<string, TerminalRoute>()
+  /** The owner captured when a pending output batch was queued. A flush must
+   *  still match the current route, otherwise a delayed timer could deliver a
+   *  detached view's bytes to a later instance. */
+  private readonly pendingTerminalOwners = new Map<string, string>()
+  /** Host-side subscription disposers grouped by exact view instance. */
+  private readonly instanceSubscriptions = new Map<string, Set<() => void>>()
+  /** Awaiting terminal create/reattach responses. Teardown invalidates these
+   *  records before a late backend response can register a route. */
+  private readonly pendingTerminalOperations = new Map<string, PendingTerminalOperation>()
   /** Per-session micro-batcher for terminal.output (see the broker module):
    *  coalesces the dense PTY stream into one IPC send per ~12 ms per session. */
   private readonly terminalOutputBatcher: TerminalOutputBatcher = createTerminalOutputBatcher(
-    (sessionId, payload) => this.deliverTerminalEvent('terminal.output', sessionId, payload)
+    (sessionId, payload) => {
+      const owner = this.pendingTerminalOwners.get(sessionId)
+      this.pendingTerminalOwners.delete(sessionId)
+      this.deliverTerminalEvent('terminal.output', sessionId, payload, owner)
+    }
   )
 
   private resolveInstance(id: string): RunningPlugin | undefined {
@@ -262,13 +402,6 @@ export class FrontendPluginManager {
 
   private instancesForPlugin(pluginId: string): RunningPlugin[] {
     return [...this.running.values()].filter((plugin) => plugin.id === pluginId)
-  }
-
-  private hasRunningPlugin(pluginId: string): boolean {
-    for (const plugin of this.running.values()) {
-      if (plugin.id === pluginId) return true
-    }
-    return false
   }
 
   private nextInstanceId(): string {
@@ -283,11 +416,56 @@ export class FrontendPluginManager {
     context: HostCapabilityContext | null | undefined,
     instanceId: string
   ): HostCapabilityContext | null {
-    if (!context || !context.runtimeBinding) return context ?? null
+    const bind = (binding: AuthenticatedRuntimeBinding): AuthenticatedRuntimeBinding => ({
+      ...binding,
+      instanceId,
+    })
+    if (!context) return null
     return {
       ...context,
-      runtimeBinding: { ...context.runtimeBinding, instanceId },
+      runtimeBinding: context.runtimeBinding ? bind(context.runtimeBinding) : null,
+      ...(context.sessionBindings
+        ? {
+            sessionBindings: new Map(
+              [...context.sessionBindings].map(([sessionId, binding]) => [
+                sessionId,
+                bind(binding),
+              ])
+            ),
+          }
+        : {}),
+      ...(context.pendingStartBindings
+        ? {
+            pendingStartBindings: new Map(
+              [...context.pendingStartBindings].map(([requestId, binding]) => [
+                requestId,
+                bind(binding),
+              ])
+            ),
+          }
+        : {}),
     }
+  }
+
+  /** Apply a Host context to one live instance and preserve its PTY route only
+   *  when the instance is still authenticated for the same v2 tuple. Legacy
+   *  descriptors retain their plugin-id route semantics. */
+  private updateInstanceCapabilityContext(
+    plugin: RunningPlugin,
+    context: HostCapabilityContext | null | undefined
+  ): void {
+    const nextContext =
+      plugin.hasV2DescriptorIdentity || !plugin.openedViaLegacyAdapter
+        ? this.bindCapabilityContext(context, plugin.instanceId)
+        : context ?? null
+    const preserveTerminalOwnership =
+      !plugin.hasV2DescriptorIdentity ||
+      (sameRuntimeBinding(
+        plugin.capabilityContext?.runtimeBinding,
+        nextContext?.runtimeBinding
+      ) && this.hasValidTerminalBinding({ ...plugin, capabilityContext: nextContext }))
+    if (!preserveTerminalOwnership) this.releaseTerminalOwnership(plugin)
+    plugin.capabilityContext = nextContext
   }
 
   private instanceForSender(senderId: number): RunningPlugin | undefined {
@@ -361,21 +539,46 @@ export class FrontendPluginManager {
         return this.runHostAction(call, plugin)
       }
 
+      let wsPayload =
+        plan.wsType === 'terminal.reattach'
+          ? this.filterTerminalReattachPayload(plugin.instanceId, toPayload(call.args))
+          : toPayload(call.args)
+      if (plan.wsType === 'terminal.create') {
+        const generation = nonEmptyString(wsPayload.create_generation)
+          ? wsPayload.create_generation
+          : randomUUID()
+        wsPayload = { ...wsPayload, create_generation: generation }
+      }
+      if (
+        this.requiresTerminalOwnership(plan.wsType) &&
+        !this.ownsTerminalSession(plugin, wsPayload)
+      ) {
+        return buildError(
+          call.reqId,
+          'CAPABILITY_DENIED',
+          'terminal session is not owned by this view'
+        )
+      }
       const client = this.ensureBackend()
       if (!client) {
         return buildError(call.reqId, 'BACKEND_ERROR', 'backend not connected')
       }
+      const pendingOperation = this.beginTerminalOperation(plugin, plan.wsType, client, wsPayload)
       try {
         // A reattach request may not claim PTY sessions bound to a DIFFERENT
         // plugin — strip those ids before the backend re-targets their output.
-        const wsPayload =
-          plan.wsType === 'terminal.reattach'
-            ? this.filterTerminalReattachPayload(pluginId, toPayload(call.args))
-            : toPayload(call.args)
         const resp = await client.send(plan.wsType, wsPayload)
         // A successful terminal.create/reattach binds the PTY to this plugin so
         // its output/exit events are routed to this view only.
-        if (resp.ok) this.noteTerminalRoutes(pluginId, plan.wsType, resp.payload)
+        const canCommit = resp.ok && this.canCommitTerminalOperation(pendingOperation)
+        if (canCommit) {
+          this.noteTerminalRoutes(plugin.instanceId, plan.wsType, resp.payload)
+        } else if (resp.ok && pendingOperation?.wsType === 'terminal.create') {
+          // The backend sends the create response immediately before marking
+          // its transaction committed. If teardown won that race, clean up
+          // only the PTY named by this operation's correlated response.
+          this.cleanupCancelledTerminalCreate(pendingOperation, resp.payload)
+        }
         return backendResponseToCapability(call.reqId, resp)
       } catch (err) {
         return buildError(
@@ -383,6 +586,8 @@ export class FrontendPluginManager {
           'BACKEND_ERROR',
           err instanceof Error ? err.message : 'backend request failed'
         )
+      } finally {
+        if (pendingOperation) this.pendingTerminalOperations.delete(pendingOperation.operationId)
       }
     })
 
@@ -462,16 +667,27 @@ export class FrontendPluginManager {
     this.publicCapabilityHandler = fn
   }
 
-  /** Host-only event ingress for cataloged public events. A workspace event
-   * must carry the authenticated Host source binding; unbound backend fan-out
+  /** Host-only event ingress for cataloged public events. The target package id
+   * is Host-selected and never comes from renderer payload. The source binding
+   * must come from the Host producer, not the master package context: AI CLI
+   * output/exit requires the exact per-instance binding (including instanceId
+   * and audience), while workspace.filesChanged accepts the reserved Host
+   * source with matching workspace/packageVersion. Unbound shared-WS fan-out
    * is intentionally dropped by {@link dispatchEvent}. */
   dispatchPublicCapabilityEvent(
+    targetPluginId: string,
     event: string,
     payload: unknown,
     sourceBinding: AuthenticatedRuntimeBinding
   ): void {
-    if (!PUBLIC_CAPABILITY_EVENT_ADDRESSES.includes(event)) return
-    this.dispatchEvent(event, payload, sourceBinding)
+    if (
+      typeof targetPluginId !== 'string' ||
+      targetPluginId.length === 0 ||
+      !PUBLIC_CAPABILITY_EVENT_ADDRESSES.includes(event)
+    ) {
+      return
+    }
+    this.dispatchEvent(event, payload, sourceBinding, targetPluginId)
   }
 
   /** Main-registered handlers for the shell-level host capabilities
@@ -612,12 +828,115 @@ export class FrontendPluginManager {
         onStatus: (s) => this.dispatchBackendStatus(s),
       })
       for (const event of new Set([...Object.keys(CAP_EVENTS), ...PUBLIC_CAPABILITY_EVENT_ADDRESSES])) {
-        client.on(event, (payload) => this.dispatchEvent(event, payload))
+        client.on(event, (payload) => {
+          // The shared backend listener has no authenticated public-event
+          // source binding. Manifest v2 events therefore fail closed here;
+          // Host producers must use dispatchPublicCapabilityEvent().
+          this.dispatchEvent(event, payload)
+        })
       }
       client.connect(this.backendWsUrl)
       this.wsClient = client
     }
     return this.wsClient
+  }
+
+  private routeForPlugin(plugin: RunningPlugin): TerminalRoute | null {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    if (plugin.hasV2DescriptorIdentity && !this.hasValidTerminalBinding(plugin)) {
+      return null
+    }
+    return {
+      pluginId: plugin.id,
+      packageVersion: binding?.packageVersion ?? null,
+      workspaceId: binding?.workspaceId ?? null,
+      audience: binding?.audience ?? null,
+      instanceId: plugin.hasV2DescriptorIdentity ? plugin.instanceId : null,
+      legacy: !plugin.hasV2DescriptorIdentity,
+    }
+  }
+
+  private routeMatchesPlugin(route: TerminalRoute, plugin: RunningPlugin): boolean {
+    if (
+      route.pluginId !== plugin.id ||
+      route.legacy !== !plugin.hasV2DescriptorIdentity
+    ) return false
+    if (route.legacy) return true
+    const binding = plugin.capabilityContext?.runtimeBinding
+    return (
+      this.hasValidTerminalBinding(plugin) &&
+      binding !== null &&
+      binding !== undefined &&
+      route.packageVersion === binding.packageVersion &&
+      route.workspaceId === binding.workspaceId &&
+      route.audience === binding.audience
+    )
+  }
+
+  private hasValidTerminalBinding(plugin: RunningPlugin): boolean {
+    const context = plugin.capabilityContext
+    const binding = context?.runtimeBinding
+    return (
+      plugin.hasV2DescriptorIdentity &&
+      context !== null &&
+      context !== undefined &&
+      binding !== null &&
+      binding !== undefined &&
+      binding.pluginId === plugin.id &&
+      nonEmptyString(binding.packageVersion) &&
+      nonEmptyString(binding.workspaceId) &&
+      nonEmptyString(binding.instanceId) &&
+      nonEmptyString(binding.audience) &&
+      context.userGrant !== null &&
+      context.userGrant.packageVersion === binding.packageVersion
+    )
+  }
+
+  private canRouteBeClaimed(route: TerminalRoute, plugin: RunningPlugin): boolean {
+    if (!this.routeMatchesPlugin(route, plugin)) return false
+    return route.legacy || route.instanceId === null || route.instanceId === plugin.instanceId
+  }
+
+  private runningPluginForTerminalRoute(route: TerminalRoute | undefined): RunningPlugin | undefined {
+    if (!route) return undefined
+    if (route.legacy) {
+      const legacyInstanceId = this.legacyInstances.get(route.pluginId)
+      return legacyInstanceId ? this.running.get(legacyInstanceId) : undefined
+    }
+    if (!route.instanceId) return undefined
+    const plugin = this.running.get(route.instanceId)
+    return plugin && this.routeMatchesPlugin(route, plugin) ? plugin : undefined
+  }
+
+  private activeTerminalOwnerKey(route: TerminalRoute): string | null {
+    if (route.legacy) {
+      return this.runningPluginForTerminalRoute(route) ? `legacy:${route.pluginId}` : null
+    }
+    return this.runningPluginForTerminalRoute(route) ? `instance:${route.instanceId}` : null
+  }
+
+  private logDroppedTerminalEvent(
+    event: string,
+    sessionId: string,
+    route: TerminalRoute | undefined
+  ): void {
+    const owner = route?.instanceId ?? route?.pluginId
+    console.debug(
+      `[plugin] dropping ${event} for terminal session ${sessionId}: ` +
+        (owner ? `owner ${owner} is not active` : 'no active route')
+    )
+  }
+
+  private requiresTerminalOwnership(wsType: string): boolean {
+    return TERMINAL_OWNED_WS_TYPES.has(wsType)
+  }
+
+  private ownsTerminalSession(plugin: RunningPlugin, payload: unknown): boolean {
+    const sessionId = terminalSessionIdOf(payload)
+    if (!sessionId) return false
+    const route = this.terminalRoutes.get(sessionId)
+    if (!route || !this.routeMatchesPlugin(route, plugin)) return false
+    return route.legacy || route.instanceId === plugin.instanceId
   }
 
   /** Fan a backend server-push event out to every running plugin whose
@@ -628,24 +947,37 @@ export class FrontendPluginManager {
   private dispatchEvent(
     event: string,
     payload: unknown,
-    sourceBinding?: AuthenticatedRuntimeBinding
+    sourceBinding?: AuthenticatedRuntimeBinding,
+    targetPluginId?: string
   ): void {
     if (event === 'terminal.output') {
       const sessionId = terminalSessionIdOf(payload)
-      if (sessionId) {
-        this.terminalOutputBatcher.push(sessionId, toPayload(payload))
+      if (!sessionId) return
+      const route = this.terminalRoutes.get(sessionId)
+      const owner = route ? this.activeTerminalOwnerKey(route) : null
+      if (!owner) {
+        this.logDroppedTerminalEvent(event, sessionId, route)
         return
       }
+      const pendingOwner = this.pendingTerminalOwners.get(sessionId)
+      if (pendingOwner && pendingOwner !== owner) {
+        this.terminalOutputBatcher.dropSession(sessionId)
+        this.pendingTerminalOwners.delete(sessionId)
+      }
+      this.pendingTerminalOwners.set(sessionId, owner)
+      this.terminalOutputBatcher.push(sessionId, toPayload(payload))
+      return
     } else if (event === 'terminal.exit') {
       const sessionId = terminalSessionIdOf(payload)
-      if (sessionId) {
-        this.terminalOutputBatcher.flushSession(sessionId)
-        this.deliverTerminalEvent(event, sessionId, payload)
-        this.terminalRoutes.delete(sessionId)
-        return
-      }
+      if (!sessionId) return
+      this.terminalOutputBatcher.flushSession(sessionId)
+      this.deliverTerminalEvent(event, sessionId, payload)
+      this.terminalRoutes.delete(sessionId)
+      this.pendingTerminalOwners.delete(sessionId)
+      return
     }
     for (const plugin of this.running.values()) {
+      if (targetPluginId !== undefined && plugin.id !== targetPluginId) continue
       const allowed =
         plugin.capabilityPolicy.kind === 'manifest-v2'
           ? plugin.capabilityContext !== null &&
@@ -654,6 +986,7 @@ export class FrontendPluginManager {
               event,
               payload,
               plugin.capabilityContext,
+              targetPluginId ?? '',
               sourceBinding
             )
           : isEventAllowed(plugin.capabilityPolicy, event)
@@ -664,58 +997,74 @@ export class FrontendPluginManager {
   }
 
   /** Deliver a terminal.output/exit event to the session's registered owner —
-   *  and ONLY the owner. Unrouted sessions (or a dead owner view) are dropped,
-   *  never fanned out: PTY content must not leak to plugins that did not bind
-   *  the session. Registration always precedes delivery because the WS is
-   *  processed in order — the create/reattach response that feeds
-   *  noteTerminalRoutes arrives before the session's subsequent output frames
-   *  (and the renderer ignores pre-bind frames anyway). */
-  private deliverTerminalEvent(event: string, sessionId: string, payload: unknown): void {
-    const owner = this.terminalRoutes.get(sessionId)
-    if (owner && this.hasRunningPlugin(owner)) {
-      this.emit(owner, event, payload)
+   *  and ONLY the owner. Unrouted sessions, detached tombstones, and stale
+   *  batches are dropped; PTY content must not leak to a sibling or a later
+   *  instance. */
+  private deliverTerminalEvent(
+    event: string,
+    sessionId: string,
+    payload: unknown,
+    expectedOwner?: string
+  ): void {
+    const route = this.terminalRoutes.get(sessionId)
+    const owner = route ? this.activeTerminalOwnerKey(route) : null
+    if (!owner || (expectedOwner !== undefined && owner !== expectedOwner)) {
+      this.logDroppedTerminalEvent(event, sessionId, route)
       return
     }
-    console.debug(
-      `[plugin] dropping ${event} for terminal session ${sessionId}: ` +
-        (owner ? `owner ${owner} is not running` : 'no plugin bound the session')
-    )
+    const plugin = this.runningPluginForTerminalRoute(route)
+    if (plugin) {
+      this.emitToInstance(plugin.instanceId, event, payload)
+    }
   }
 
   /** Register the PTY sessions a successful terminal.create/terminal.reattach
-   *  response binds to `pluginId` (route table feeding
-   *  {@link deliverTerminalEvent}). Any other WS type is a no-op. */
-  noteTerminalRoutes(pluginId: string, wsType: string, result: unknown): void {
+   *  response binds to one authenticated view instance. Legacy callers may
+   *  still pass their plugin id through the v1 adapter. */
+  noteTerminalRoutes(instanceOrPluginId: string, wsType: string, result: unknown): void {
+    const plugin = this.resolveInstance(instanceOrPluginId)
+    if (!plugin) return
+    const route = this.routeForPlugin(plugin)
+    if (!route) return
     for (const sessionId of terminalSessionsFromResponse(wsType, result)) {
-      this.terminalRoutes.set(sessionId, pluginId)
+      const previous = this.terminalRoutes.get(sessionId)
+      if (previous && !this.canRouteBeClaimed(previous, plugin)) continue
+      const previousOwner = previous ? this.activeTerminalOwnerKey(previous) : null
+      const nextOwner = this.activeTerminalOwnerKey(route)
+      if (previousOwner && previousOwner !== nextOwner) {
+        this.terminalOutputBatcher.dropSession(sessionId)
+        this.pendingTerminalOwners.delete(sessionId)
+      }
+      this.terminalRoutes.set(sessionId, route)
     }
   }
 
   /**
-   * Strip session ids owned by ANOTHER plugin from a terminal.reattach payload
-   * so one plugin view can never hijack a PTY the broker bound to a sibling
-   * (routes are retained across view teardown precisely so only the SAME
-   * plugin re-claims its sessions after a window close/reopen or crash). Ids
-   * the table has never seen pass through — that covers legitimate re-claims
-   * after a host-app restart, and also PTYs created outside the broker (main
-   * window panes): fully isolating those needs a backend-side ownership
-   * namespace, which is documented as a residual risk in
-   * docs/en-US/plugin-development.md (marketplace prerequisite).
+   * Strip every session id that the authenticated instance cannot claim. v2
+   * reattach is fail-closed for unknown ids: the session id is not a free
+   * credential. A live legacy adapter retains its bounded v1 compatibility for
+   * unknown ids; stale/unknown senders are fail-closed even when an old route
+   * remains in memory.
    */
   filterTerminalReattachPayload(
-    pluginId: string,
+    instanceOrPluginId: string,
     payload: Record<string, unknown>
   ): Record<string, unknown> {
     const ids = payload.terminal_session_ids
     if (!Array.isArray(ids)) return payload
+    const plugin = this.resolveInstance(instanceOrPluginId)
+    if (!plugin) {
+      return { ...payload, terminal_session_ids: [] }
+    }
     const kept = ids.filter((id) => {
       if (typeof id !== 'string') return false
-      const owner = this.terminalRoutes.get(id)
-      return owner === undefined || owner === pluginId
+      const route = this.terminalRoutes.get(id)
+      if (!route) return plugin.openedViaLegacyAdapter && !plugin.hasV2DescriptorIdentity
+      return this.canRouteBeClaimed(route, plugin)
     })
     if (kept.length === ids.length) return payload
     console.debug(
-      `[plugin] reattach: stripped ${ids.length - kept.length} session id(s) owned by another plugin from ${pluginId}`
+      `[plugin] reattach: stripped ${ids.length - kept.length} session id(s) not owned by ${plugin.id}`
     )
     return { ...payload, terminal_session_ids: kept }
   }
@@ -775,28 +1124,150 @@ export class FrontendPluginManager {
       )
       return 'not-castable'
     }
+    const castPayload = toPayload(call.args)
+    if (
+      this.requiresTerminalOwnership(plan.wsType) &&
+      !this.ownsTerminalSession(plugin, castPayload)
+    ) {
+      console.debug(`[plugin] cast dropped: ${pluginId} ${plan.wsType} terminal session is not owned`)
+      return 'denied'
+    }
     const client = this.ensureBackend()
     if (!client) {
       console.debug(`[plugin] cast dropped: ${pluginId} ${plan.wsType} — backend not connected`)
       return 'no-backend'
     }
-    void client.send(plan.wsType, toPayload(call.args)).catch(() => {
+    void client.send(plan.wsType, castPayload).catch(() => {
       // Nobody is awaiting — a failed input write surfaces through the PTY
       // stream itself (or the next request/response call).
     })
     return 'dispatched'
   }
 
+  private beginTerminalOperation(
+    plugin: RunningPlugin,
+    wsType: string,
+    client: WsClient,
+    payload: Record<string, unknown>
+  ): PendingTerminalOperation | null {
+    if (wsType !== 'terminal.create' && wsType !== 'terminal.reattach') return null
+    const operation: PendingTerminalOperation = {
+      operationId: randomUUID(),
+      instanceId: plugin.instanceId,
+      wsType,
+      client,
+      route: this.routeForPlugin(plugin),
+      cancelled: false,
+      cancelSent: false,
+      cleanupSessionIds: new Set<string>(),
+      ...(wsType === 'terminal.create' && nonEmptyString(payload.pane_id)
+        ? { paneId: payload.pane_id }
+        : {}),
+      ...(wsType === 'terminal.create' && nonEmptyString(payload.create_generation)
+        ? { createGeneration: payload.create_generation }
+        : {}),
+    }
+    this.pendingTerminalOperations.set(operation.operationId, operation)
+    return operation
+  }
+
+  private canCommitTerminalOperation(operation: PendingTerminalOperation | null): boolean {
+    if (!operation || operation.cancelled) return false
+    const plugin = this.running.get(operation.instanceId)
+    if (!plugin) return false
+    return sameTerminalRoute(operation.route, this.routeForPlugin(plugin))
+  }
+
+  private cleanupCancelledTerminalCreate(
+    operation: PendingTerminalOperation,
+    result: unknown
+  ): void {
+    if (!operation.paneId || !operation.createGeneration) return
+    if (typeof result !== 'object' || result === null) return
+    const response = result as Record<string, unknown>
+    if (
+      response.pane_id !== operation.paneId ||
+      response.create_generation !== operation.createGeneration
+    ) {
+      return
+    }
+    const sessionIds = terminalSessionsFromResponse(operation.wsType, result)
+    if (sessionIds.length !== 1) return
+    const sessionId = sessionIds[0]
+    if (operation.cleanupSessionIds.has(sessionId)) return
+    operation.cleanupSessionIds.add(sessionId)
+
+    // This is Host cleanup for a create operation that could not be committed
+    // to a live view, not a plugin capability call. It intentionally bypasses
+    // the plugin authorization path and targets only this response's session.
+    void operation.client
+      .send('terminal.kill', { terminal_session_id: sessionId, force: true })
+      .then((response) => {
+        if (!response.ok) {
+          // The expected outcome when the cancellation won the race: the
+          // backend already rolled the create back and dropped its ownership,
+          // so the kill has nothing left to reclaim.
+          console.debug(`[plugin] late terminal.create cleanup was rejected for ${sessionId}`)
+        }
+      })
+      .catch(() => {
+        console.warn(`[plugin] late terminal.create cleanup failed for ${sessionId}`)
+      })
+  }
+
+  private invalidatePendingTerminalOperations(plugin: RunningPlugin): void {
+    for (const operation of this.pendingTerminalOperations.values()) {
+      if (operation.instanceId !== plugin.instanceId || operation.cancelled) continue
+      operation.cancelled = true
+      if (
+        operation.wsType === 'terminal.create' &&
+        !operation.cancelSent &&
+        operation.paneId &&
+        operation.createGeneration
+      ) {
+        operation.cancelSent = true
+        void operation.client
+          .send('terminal.create.cancel', {
+            pane_id: operation.paneId,
+            create_generation: operation.createGeneration,
+          })
+          .catch(() => {
+            // The ledger remains cancelled even if the backend is already
+            // unavailable; a late create response must never revive a route.
+          })
+      }
+    }
+  }
+
   /** Shared terminal teardown for BOTH view-death paths ({@link destroy} and
-   *  the defensive webContents 'destroyed' hook): discard the plugin's pending
-   *  output batches so they are never delivered anywhere. The route entries
-   *  themselves are RETAINED (still marked with the pluginId) — delivery
-   *  targets only live views, and a retained route both lets the same plugin
-   *  re-claim its PTY on a later reattach and blocks other plugins from
-   *  claiming it (see {@link filterTerminalReattachPayload}). */
-  private releaseTerminalOwnership(pluginId: string): void {
-    for (const [sessionId, owner] of this.terminalRoutes) {
-      if (owner === pluginId) this.terminalOutputBatcher.dropSession(sessionId)
+   *  the defensive webContents 'destroyed' hook): discard this instance's
+   *  pending output and detach only its live route ownership. The stable v2
+   *  tuple remains as a Host-owned tombstone for safe reattach. */
+  private releaseTerminalOwnership(plugin: RunningPlugin): void {
+    this.invalidatePendingTerminalOperations(plugin)
+    for (const [sessionId, route] of this.terminalRoutes) {
+      const ownsRoute = route.legacy
+        ? plugin.openedViaLegacyAdapter && route.pluginId === plugin.id
+        : route.instanceId === plugin.instanceId && this.routeMatchesPlugin(route, plugin)
+      if (!ownsRoute) continue
+      this.terminalOutputBatcher.dropSession(sessionId)
+      this.pendingTerminalOwners.delete(sessionId)
+      if (!route.legacy) {
+        this.terminalRoutes.set(sessionId, { ...route, instanceId: null })
+      }
+    }
+  }
+
+  private releaseInstanceSubscriptions(instanceId: string): void {
+    const subscriptions = this.instanceSubscriptions.get(instanceId)
+    if (!subscriptions) return
+    this.instanceSubscriptions.delete(instanceId)
+    for (const dispose of subscriptions) {
+      try {
+        dispose()
+      } catch {
+        // One broken subscription must not prevent sibling cleanup.
+      }
     }
   }
 
@@ -818,21 +1289,28 @@ export class FrontendPluginManager {
     plugin.detachHostResize = null
     plugin.detachHostClosed?.()
     plugin.detachHostClosed = null
+    this.releaseTerminalOwnership(plugin)
+    this.releaseInstanceSubscriptions(instanceId)
     this.running.delete(instanceId)
     this.bySender.delete(plugin.senderId)
     if (this.legacyInstances.get(plugin.id) === instanceId) {
       this.legacyInstances.delete(plugin.id)
     }
-    // V1 PTY ownership remains plugin-level. Only the final live instance
-    // tears down pending batches; closing one of several views must not affect
-    // a sibling instance or its legacy route.
-    if (!this.hasRunningPlugin(plugin.id)) this.releaseTerminalOwnership(plugin.id)
     return plugin
   }
 
   private destroyPluginInstances(pluginId: string): void {
     for (const plugin of this.instancesForPlugin(pluginId)) {
       this.destroyInstance(plugin.instanceId)
+    }
+  }
+
+  private clearTerminalRoutes(pluginId: string): void {
+    for (const [sessionId, route] of this.terminalRoutes) {
+      if (route.pluginId !== pluginId) continue
+      this.terminalOutputBatcher.dropSession(sessionId)
+      this.pendingTerminalOwners.delete(sessionId)
+      this.terminalRoutes.delete(sessionId)
     }
   }
 
@@ -858,34 +1336,45 @@ export class FrontendPluginManager {
         // through to a fresh create; loadEntry on a dead webContents would brick.
         this.destroyInstance(existing.instanceId)
       } else {
-        existing.capabilityContext = descriptor.capabilityContext ?? existing.capabilityContext
-        const query = descriptor.query ?? ''
-        const prevQuery = existing.query
-        existing.query = query
-        if (workspaceOf(query) !== workspaceOf(prevQuery)) {
-          // Different workspace → reload the entry with the new params (matches
-          // legacy routeEditorWindowOpen's `reload` branch). In-flight queued
-          // targets belong to the old workspace and are dropped with it.
-          existing.ready = false
-          existing.pendingTargets = []
-          this.loadEntry(existing.view, descriptor)
-        } else if (query) {
-          // Same workspace → deliver the open target in-page (legacy
-          // `editor:openFile`/`editor:openDiff` semantics: add/reveal the tab
-          // without reloading, so open tabs and unsaved buffers survive). This
-          // is also the path an out-of-workspace open takes: it carries
-          // `file_ws` in the params, which is not part of the identity above.
-          this.sendOpenTarget(existing, queryToParams(query))
+        const nextDescriptorContext =
+          descriptor.capabilityContext === undefined
+            ? existing.capabilityContext
+            : descriptor.capabilityContext
+        validateV2CapabilityContext(descriptor, nextDescriptorContext ?? null)
+        if (existing.hasV2DescriptorIdentity !== hasV2DescriptorIdentity(descriptor)) {
+          // A live instance must not switch between v1 and v2 route semantics.
+          // Recreate it so all existing routes are released under the old identity.
+          this.destroyInstance(existing.instanceId)
+        } else {
+          this.updateInstanceCapabilityContext(existing, nextDescriptorContext)
+          const query = descriptor.query ?? ''
+          const prevQuery = existing.query
+          existing.query = query
+          if (workspaceOf(query) !== workspaceOf(prevQuery)) {
+            // Different workspace → reload the entry with the new params (matches
+            // legacy routeEditorWindowOpen's `reload` branch). In-flight queued
+            // targets belong to the old workspace and are dropped with it.
+            existing.ready = false
+            existing.pendingTargets = []
+            this.loadEntry(existing.view, descriptor)
+          } else if (query) {
+            // Same workspace → deliver the open target in-page (legacy
+            // `editor:openFile`/`editor:openDiff` semantics: add/reveal the tab
+            // without reloading, so open tabs and unsaved buffers survive). This
+            // is also the path an out-of-workspace open takes: it carries
+            // `file_ws` in the params, which is not part of the identity above.
+            this.sendOpenTarget(existing, queryToParams(query))
+          }
+          existing.fill = bounds === 'fill'
+          this.applyBounds(existing, bounds)
+          this.trackHostResize(existing)
+          existing.view.setVisible(true)
+          // Surface the window that actually hosts the view. Cross-window opens
+          // keep the view on its original host, so focus that one — the open
+          // must never land invisibly behind another window.
+          revealHostWindow(existing.hostWindow)
+          return
         }
-        existing.fill = bounds === 'fill'
-        this.applyBounds(existing, bounds)
-        this.trackHostResize(existing)
-        existing.view.setVisible(true)
-        // Surface the window that actually hosts the view. Cross-window opens
-        // keep the view on its original host, so focus that one — the open
-        // must never land invisibly behind another window.
-        revealHostWindow(existing.hostWindow)
-        return
       }
     }
 
@@ -895,7 +1384,9 @@ export class FrontendPluginManager {
   /**
    * Open one validated Manifest v2 contribution as a fresh Host-owned
    * instance. The descriptor and view contribute only stable registry keys;
-   * launch data always comes from the current Host registry record.
+   * entry launch data always comes from the current Host registry record.
+   * Capability context is either that registry context or an explicitly
+   * Host-supplied per-view context; renderer data never supplies either one.
    */
   async openView(
     packageDescriptor: PluginLaunchDescriptor,
@@ -914,6 +1405,11 @@ export class FrontendPluginManager {
         `view '${view.contributionKey}' is not registered by the Host package descriptor`
       )
     }
+    const capabilityContext =
+      options.capabilityContext === undefined
+        ? registered.capabilityContext ?? null
+        : options.capabilityContext
+    validateV2CapabilityContext(registered, capabilityContext)
     this.registerIpc()
 
     const handle = this.mountView(
@@ -921,7 +1417,7 @@ export class FrontendPluginManager {
       registered,
       options.bounds,
       options.query ?? '',
-      options,
+      { ...options, capabilityContext },
       canonicalView,
       false
     )
@@ -934,10 +1430,18 @@ export class FrontendPluginManager {
     descriptor: PluginLaunchDescriptor,
     bounds: PluginViewBounds,
     query: string,
-    opts: { closeHostOnHide?: boolean; mirrorTitle?: boolean },
+    opts: {
+      closeHostOnHide?: boolean
+      mirrorTitle?: boolean
+      capabilityContext?: HostCapabilityContext | null
+    },
     viewDescriptor: PluginViewLaunchDescriptor | undefined,
-    legacy: boolean
+    openedViaLegacyAdapter: boolean
   ): PluginViewHandle {
+    const capabilityContext =
+      opts.capabilityContext === undefined ? descriptor.capabilityContext : opts.capabilityContext
+    validateV2CapabilityContext(descriptor, capabilityContext ?? null)
+    const isV2Identity = hasV2DescriptorIdentity(descriptor)
     const instanceId = this.nextInstanceId()
     const loadDescriptor: PluginLaunchDescriptor = {
       ...descriptor,
@@ -986,12 +1490,14 @@ export class FrontendPluginManager {
     const record: RunningPlugin = {
       instanceId,
       id: descriptor.id,
-      legacy,
+      openedViaLegacyAdapter,
+      hasV2DescriptorIdentity: isV2Identity,
       requires: descriptor.requires,
       capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
-      capabilityContext: legacy
-        ? descriptor.capabilityContext ?? null
-        : this.bindCapabilityContext(descriptor.capabilityContext, instanceId),
+      capabilityContext:
+        isV2Identity || !openedViaLegacyAdapter
+          ? this.bindCapabilityContext(capabilityContext, instanceId)
+          : capabilityContext ?? null,
       view,
       hostWindow,
       query,
@@ -1004,7 +1510,7 @@ export class FrontendPluginManager {
       pendingTargets: [],
     }
     this.running.set(instanceId, record)
-    if (legacy) this.legacyInstances.set(descriptor.id, instanceId)
+    if (openedViaLegacyAdapter) this.legacyInstances.set(descriptor.id, instanceId)
     this.bySender.set(record.senderId, instanceId)
     this.applyBounds(record, bounds)
     this.trackHostResize(record)
@@ -1143,6 +1649,43 @@ export class FrontendPluginManager {
     if (plugin) plugin.view.setBounds(bounds)
   }
 
+  /** Host-only/deferred integration seam: register an event/backend
+   *  subscription under one exact view instance. The returned function
+   *  unregisters and disposes it exactly once; instance teardown invokes the
+   *  same wrapper for any remaining subscription. No production v2 producer is
+   *  wired through this seam yet. */
+  registerInstanceSubscription(instanceId: string, dispose: () => void): () => void {
+    if (!this.running.has(instanceId)) {
+      try {
+        dispose()
+      } catch {
+        // A stale registration must not make a caller's cleanup path throw.
+      }
+      return () => undefined
+    }
+    const subscriptions = this.instanceSubscriptions.get(instanceId) ?? new Set<() => void>()
+    this.instanceSubscriptions.set(instanceId, subscriptions)
+    let registered = true
+    const unregister = (): void => {
+      if (!registered) return
+      registered = false
+      subscriptions.delete(unregister)
+      if (
+        subscriptions.size === 0 &&
+        this.instanceSubscriptions.get(instanceId) === subscriptions
+      ) {
+        this.instanceSubscriptions.delete(instanceId)
+      }
+      try {
+        dispose()
+      } catch {
+        // A broken subscription must not make caller or instance teardown throw.
+      }
+    }
+    subscriptions.add(unregister)
+    return unregister
+  }
+
   /** Destroy the legacy v1 instance identified by plugin id. */
   destroy(pluginId: string): void {
     const legacyInstanceId = this.legacyInstances.get(pluginId)
@@ -1155,9 +1698,6 @@ export class FrontendPluginManager {
     const plugin = this.forgetInstance(instanceId)
     if (!plugin) return
     this.detachView(plugin)
-    // Issue 14 keeps PTY route/batch ownership at plugin level. A sibling
-    // instance therefore retains the route; Issue 15 must bind this state to
-    // the instance before multi-view production wiring is enabled.
     try {
       if (!plugin.view.webContents.isDestroyed()) {
         plugin.view.webContents.close()
@@ -1173,13 +1713,16 @@ export class FrontendPluginManager {
    * Register (or replace) an available plugin descriptor. Ids under the
    * reserved `navide.` namespace may only be registered by the host itself
    * (`opts.builtin`) or by an install whose App-authorized Official Registry
-   * verification passed (`opts.official`); a third-party plugin claiming such an id (e.g.
-   * spoofing `navide.mini-ide` to hijack the trusted mini-IDE) is refused.
+   * verification passed (`opts.official`); the internal `host` identity is
+   * never a plugin id.
    */
   registerDescriptor(
     descriptor: PluginLaunchDescriptor,
     opts: { builtin?: boolean; official?: boolean } = {}
   ): void {
+    if (descriptor.id === HOST_EVENT_SOURCE_PLUGIN_ID) {
+      throw new Error(`internal Host event identity '${HOST_EVENT_SOURCE_PLUGIN_ID}' is not a plugin id`)
+    }
     if (!opts.builtin && !opts.official && isReservedPluginId(descriptor.id)) {
       throw new Error(
         `refusing to register reserved plugin id '${descriptor.id}' without official verification`
@@ -1211,11 +1754,21 @@ export class FrontendPluginManager {
    * first-party identity can never become an automatic capability grant. */
   setCapabilityContext(pluginId: string, context: HostCapabilityContext | null): void {
     const descriptor = this.descriptors.get(pluginId)
-    if (descriptor) this.descriptors.set(pluginId, { ...descriptor, capabilityContext: context ?? undefined })
-    for (const running of this.instancesForPlugin(pluginId)) {
-      running.capabilityContext = running.legacy
-        ? context
-        : this.bindCapabilityContext(context, running.instanceId)
+    const running = this.instancesForPlugin(pluginId)
+    if (descriptor) validateV2CapabilityContext(descriptor, context)
+    if (
+      context !== null &&
+      running.some(
+        (instance) =>
+          instance.hasV2DescriptorIdentity &&
+          (descriptor === undefined || !hasV2DescriptorIdentity(descriptor))
+      )
+    ) {
+      throw new Error(`cannot validate capability context for unregistered plugin '${pluginId}'`)
+    }
+    if (descriptor) this.descriptors.set(pluginId, { ...descriptor, capabilityContext: context })
+    for (const runningInstance of running) {
+      this.updateInstanceCapabilityContext(runningInstance, context)
     }
   }
 
@@ -1304,6 +1857,9 @@ export class FrontendPluginManager {
     descriptor?: PluginLaunchDescriptor,
     opts: { official?: boolean } = {}
   ): void {
+    if (summary.id === HOST_EVENT_SOURCE_PLUGIN_ID) {
+      throw new Error(`internal Host event identity '${HOST_EVENT_SOURCE_PLUGIN_ID}' is not a plugin id`)
+    }
     if (descriptor && descriptor.id !== summary.id) {
       throw new Error(
         `installed package id '${summary.id}' does not match descriptor id '${descriptor.id}'`
@@ -1316,6 +1872,7 @@ export class FrontendPluginManager {
     }
 
     this.destroyPluginInstances(summary.id)
+    this.clearTerminalRoutes(summary.id)
     this.descriptors.delete(summary.id)
     if (descriptor) this.registerDescriptor(descriptor, opts)
     this.installedPackages.set(summary.id, {
@@ -1498,6 +2055,7 @@ export class FrontendPluginManager {
           reason: 'reserved plugin id requires the App-authorized Official Registry',
         })
         this.destroyPluginInstances(pluginId)
+        this.clearTerminalRoutes(pluginId)
         this.installedPackages.delete(pluginId)
         this.descriptors.delete(pluginId)
         const fallback = this.builtinFallbacks.get(pluginId)
@@ -1507,6 +2065,7 @@ export class FrontendPluginManager {
       decisions.push({ pluginId, ...decision })
       if (decision.action === 'quarantine') {
         this.destroyPluginInstances(pluginId)
+        this.clearTerminalRoutes(pluginId)
         this.installedPackages.delete(pluginId)
         this.descriptors.delete(pluginId)
         const fallback = this.builtinFallbacks.get(pluginId)
@@ -1522,6 +2081,7 @@ export class FrontendPluginManager {
    *  (recorded by {@link registerBuiltin}) so the surface keeps working. */
   removeInstalledPlugin(id: string): void {
     this.destroyPluginInstances(id)
+    this.clearTerminalRoutes(id)
     this.installedPackages.delete(id)
     this.descriptors.delete(id)
     const fallback = this.builtinFallbacks.get(id)
@@ -1537,9 +2097,13 @@ export class FrontendPluginManager {
     }
   }
 
-  emit(pluginId: string, type: string, data: unknown): void {
-    for (const plugin of this.instancesForPlugin(pluginId)) {
-      this.emitToInstance(plugin.instanceId, type, data)
+  /** Emit to one exact Host instance when the id is an instance id; otherwise
+   *  resolve the legacy plugin-id adapter and emit to its sole v1 view. This is
+   *  intentionally not a broadcast API for v2 packages. */
+  emit(instanceOrPluginId: string, type: string, data: unknown): void {
+    const direct = this.resolveInstance(instanceOrPluginId)
+    if (direct) {
+      this.emitToInstance(direct.instanceId, type, data)
     }
   }
 }

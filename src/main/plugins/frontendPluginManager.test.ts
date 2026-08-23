@@ -178,6 +178,56 @@ vi.mock('electron', () => {
   }
 })
 
+const wsMock = vi.hoisted(() => {
+  class FakeNodeWebSocket {
+    static readonly OPEN = 1
+    static readonly CONNECTING = 0
+    static readonly CLOSED = 3
+    static instances: FakeNodeWebSocket[] = []
+    readonly url: string
+    readonly sent: string[] = []
+    readyState = FakeNodeWebSocket.CONNECTING
+    private readonly listeners = new Map<string, Array<(event: unknown) => void>>()
+
+    constructor(url: string) {
+      this.url = url
+      FakeNodeWebSocket.instances.push(this)
+    }
+
+    addEventListener(type: string, listener: (event: unknown) => void): void {
+      const listeners = this.listeners.get(type) ?? []
+      listeners.push(listener)
+      this.listeners.set(type, listeners)
+    }
+
+    send(data: string): void {
+      this.sent.push(data)
+    }
+
+    close(): void {
+      this.readyState = FakeNodeWebSocket.CLOSED
+      this.emit('close', {})
+    }
+
+    open(): void {
+      this.readyState = FakeNodeWebSocket.OPEN
+      this.emit('open', {})
+    }
+
+    receive(message: unknown): void {
+      this.emit('message', { data: JSON.stringify(message) })
+    }
+
+    private emit(type: string, event: unknown): void {
+      for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event)
+    }
+  }
+
+  return { FakeNodeWebSocket }
+})
+
+vi.mock('ws', () => ({ WebSocket: wsMock.FakeNodeWebSocket }))
+
 import * as electron from 'electron'
 import type { BrowserWindow } from 'electron'
 import {
@@ -193,6 +243,10 @@ import {
   type PluginLaunchDescriptor,
 } from './frontendPluginManager'
 import { manifestV2CapabilityPolicy } from './pluginPermissions'
+import {
+  HOST_EVENT_SOURCE_PLUGIN_ID,
+  type HostCapabilityContext,
+} from './pluginCapabilityBroker'
 
 interface FakeWebContentsLike {
   id: number
@@ -305,10 +359,11 @@ function descriptor(id: string): PluginLaunchDescriptor {
 }
 
 describe('isReservedPluginId', () => {
-  it('flags the built-in navide.* namespace, not third-party ids', () => {
+  it('flags first-party and internal Host identities, not third-party ids', () => {
     expect(isReservedPluginId('navide.mini-ide')).toBe(true)
     expect(isReservedPluginId('navide.noop')).toBe(true)
     expect(isReservedPluginId('navide.plans')).toBe(true)
+    expect(isReservedPluginId(HOST_EVENT_SOURCE_PLUGIN_ID)).toBe(true)
     expect(isReservedPluginId('acme.demo')).toBe(false)
   })
 })
@@ -345,6 +400,12 @@ describe('registerDescriptor reserved-id guard', () => {
   it('refuses a third-party plugin claiming a reserved built-in id', () => {
     const mgr = new FrontendPluginManager()
     expect(() => mgr.registerDescriptor(descriptor('navide.mini-ide'))).toThrow(/reserved/)
+    expect(() => mgr.registerDescriptor(descriptor(HOST_EVENT_SOURCE_PLUGIN_ID))).toThrow(
+      /not a plugin id/
+    )
+    expect(() =>
+      mgr.registerDescriptor(descriptor(HOST_EVENT_SOURCE_PLUGIN_ID), { builtin: true })
+    ).toThrow(/not a plugin id/)
     expect(mgr.getDescriptor('navide.mini-ide')).toBeUndefined()
   })
 
@@ -1135,30 +1196,85 @@ describe('view lifecycle (open / hideSelf / resize / death paths)', () => {
 })
 
 describe('opaque view instance ownership', () => {
-  function packageDescriptor(): PluginLaunchDescriptor {
+  function dispatchEvent(mgr: FrontendPluginManager, event: string, payload: unknown): void {
+    ;(mgr as unknown as { dispatchEvent(event: string, payload: unknown): void }).dispatchEvent(
+      event,
+      payload
+    )
+  }
+
+  function eventsOf(
+    view: FakeViewLike,
+    type: string
+  ): Array<{ type: string; data: Record<string, unknown> }> {
+    return view.webContents.sent
+      .filter((message) => message.channel === 'plugin:cap:event')
+      .map((message) => message.args[0] as { type: string; data: Record<string, unknown> })
+      .filter((event) => event.type === type)
+  }
+
+  function output(id: string, data: string): Record<string, unknown> {
+    return { terminal_session_id: id, pane_id: 'p', sequence: 1, data, stream: 'stdout' }
+  }
+
+  function packageDescriptor(id = 'acme.multi-view'): PluginLaunchDescriptor {
     return {
-      id: 'acme.multi-view',
+      id,
+      packageVersion: '1.0.0',
       requires: [],
       devUrl: '',
-      entryFile: '/plugins/acme.multi-view/fallback.html',
+      entryFile: `/plugins/${id}/fallback.html`,
       views: [
         {
           id: 'left',
-          contributionKey: 'acme.multi-view.left',
+          contributionKey: `${id}.left`,
           kind: 'custom',
           location: 'left',
           title: 'Left',
-          entryFile: '/plugins/acme.multi-view/left.html',
+          entryFile: `/plugins/${id}/left.html`,
         },
         {
           id: 'window',
-          contributionKey: 'acme.multi-view.window',
+          contributionKey: `${id}.window`,
           kind: 'custom',
           location: 'window',
           title: 'Window',
-          entryFile: '/plugins/acme.multi-view/window.html',
+          entryFile: `/plugins/${id}/window.html`,
         },
       ],
+    }
+  }
+
+  function v2Context(options: {
+    pluginId?: string
+    packageVersion?: string
+    workspaceId?: string
+    audience?: string
+    sessionId?: string
+  } = {}): HostCapabilityContext {
+    const binding = {
+      pluginId: options.pluginId ?? 'acme.multi-view',
+      packageVersion: options.packageVersion ?? '1.0.0',
+      workspaceId: options.workspaceId ?? 'workspace-1',
+      instanceId: 'host-placeholder',
+      audience: options.audience ?? 'shared-audience',
+    }
+    return {
+      publisherEligible: true,
+      userGrant: { packageVersion: binding.packageVersion, system: ['fs', 'aiCli'] },
+      runtimeBinding: binding,
+      ...(options.sessionId
+        ? { sessionBindings: new Map([[options.sessionId, binding]]) }
+        : {}),
+    }
+  }
+
+  function v2PackageDescriptor(id = 'acme.multi-view'): PluginLaunchDescriptor {
+    return {
+      ...packageDescriptor(id),
+      requires: ['terminal'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs', 'aiCli'] }),
+      capabilityContext: v2Context({ pluginId: id }),
     }
   }
 
@@ -1358,69 +1474,392 @@ describe('opaque view instance ownership', () => {
     expect(legacyView.webContents.isDestroyed()).toBe(true)
   })
 
-  it('documents deferred package-level event and PTY ownership until Issue 15', async () => {
+  it('routes v2 events to their authenticated instance and audience', async () => {
     const mgr = new FrontendPluginManager()
-    const packageDesc: PluginLaunchDescriptor = {
-      ...packageDescriptor(),
-      requires: ['terminal'],
-    }
+    const packageDesc = v2PackageDescriptor()
     mgr.registerDescriptor(packageDesc)
     const hostA = new FakeBrowserWindow()
     const hostB = new FakeBrowserWindow()
+    const leftContext = v2Context({ audience: 'left-audience', sessionId: 'left-session' })
+    const windowContext = v2Context({ audience: 'window-audience', sessionId: 'window-session' })
     const left = await mgr.openView(packageDesc, packageDesc.views![0], {
       hostWindow: asHost(hostA),
       bounds: 'fill',
+      capabilityContext: leftContext,
     })
-    await mgr.openView(packageDesc, packageDesc.views![1], {
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
       hostWindow: asHost(hostB),
       bounds: 'fill',
+      capabilityContext: windowContext,
     })
     const leftView = hostA.children[0] as FakeViewLike
     const windowView = hostB.children[0] as FakeViewLike
 
-    mgr.emit(packageDesc.id, 'deferred.event', { source: 'package' })
-    expect(
-      leftView.webContents.sent.filter((message) => message.channel === 'plugin:cap:event')
-    ).toHaveLength(1)
-    expect(
-      windowView.webContents.sent.filter((message) => message.channel === 'plugin:cap:event')
-    ).toHaveLength(1)
+    const leftSource = { ...leftContext.runtimeBinding!, instanceId: left.instanceId }
+    const windowSource = { ...windowContext.runtimeBinding!, instanceId: window.instanceId }
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'left-session', data: 'left only' },
+      leftSource
+    )
+    expect(eventsOf(leftView, 'aiCli.output')).toHaveLength(1)
+    expect(eventsOf(windowView, 'aiCli.output')).toHaveLength(0)
 
-    mgr.noteTerminalRoutes(packageDesc.id, 'terminal.create', { terminal_session_id: 't-14' })
-    leftView.webContents.close()
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'window-session', data: 'window only' },
+      windowSource
+    )
+    expect(eventsOf(leftView, 'aiCli.output')).toHaveLength(1)
+    expect(eventsOf(windowView, 'aiCli.output')).toHaveLength(1)
 
-    expect(windowView.webContents.isDestroyed()).toBe(false)
-    expect(
-      mgr.filterTerminalReattachPayload(packageDesc.id, {
-        terminal_session_ids: ['t-14'],
-      }).terminal_session_ids
-    ).toEqual(['t-14'])
-    expect(left.instanceId).toBeTruthy()
+    // Shared backend fan-out carries no authenticated public-event source and
+    // must not be treated as an AI CLI event source.
+    dispatchEvent(mgr, 'aiCli.output', { sessionId: 'left-session', data: 'unbound' })
+    expect(eventsOf(leftView, 'aiCli.output')).toHaveLength(1)
+
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'left-session', data: 'stale' },
+      { ...leftSource, instanceId: 'stale-instance' }
+    )
+    expect(eventsOf(leftView, 'aiCli.output')).toHaveLength(1)
+
+    const fileEvent = { changes: [{ path: 'README.md', kind: 'changed' }] }
+    mgr.dispatchPublicCapabilityEvent(packageDesc.id, 'workspace.filesChanged', fileEvent, {
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
+      packageVersion: '1.0.0',
+      workspaceId: 'workspace-1',
+      instanceId: null,
+      audience: null,
+    })
+    expect(eventsOf(leftView, 'workspace.filesChanged')).toHaveLength(1)
+    expect(eventsOf(windowView, 'workspace.filesChanged')).toHaveLength(1)
+
+    mgr.dispatchPublicCapabilityEvent(packageDesc.id, 'workspace.filesChanged', fileEvent, {
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
+      packageVersion: '2.0.0',
+      workspaceId: 'workspace-1',
+      instanceId: null,
+      audience: null,
+    })
+    expect(eventsOf(leftView, 'workspace.filesChanged')).toHaveLength(1)
+    expect(eventsOf(windowView, 'workspace.filesChanged')).toHaveLength(1)
   })
 
-  it('keeps a sibling pending batch alive when one v2 instance closes', async () => {
+  it('does not route workspace events across packages sharing version and workspace', async () => {
+    const mgr = new FrontendPluginManager()
+    const firstPackage = v2PackageDescriptor('acme.files-one')
+    const secondPackage = v2PackageDescriptor('acme.files-two')
+    mgr.registerDescriptor(firstPackage)
+    mgr.registerDescriptor(secondPackage)
+    const firstHost = new FakeBrowserWindow()
+    const secondHost = new FakeBrowserWindow()
+
+    await mgr.openView(firstPackage, firstPackage.views![0], {
+      hostWindow: asHost(firstHost),
+      bounds: 'fill',
+      capabilityContext: v2Context({ pluginId: firstPackage.id }),
+    })
+    await mgr.openView(secondPackage, secondPackage.views![0], {
+      hostWindow: asHost(secondHost),
+      bounds: 'fill',
+      capabilityContext: v2Context({ pluginId: secondPackage.id }),
+    })
+
+    const payload = { changes: [{ path: 'README.md', kind: 'changed' }] }
+    mgr.dispatchPublicCapabilityEvent(firstPackage.id, 'workspace.filesChanged', payload, {
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
+      packageVersion: '1.0.0',
+      workspaceId: 'workspace-1',
+      instanceId: null,
+      audience: null,
+    })
+
+    expect(eventsOf(firstHost.children[0] as FakeViewLike, 'workspace.filesChanged')).toHaveLength(1)
+    expect(eventsOf(secondHost.children[0] as FakeViewLike, 'workspace.filesChanged')).toHaveLength(0)
+  })
+
+  it('treats omitted and undefined context as the registry context, while null denies access', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = v2PackageDescriptor()
+    const registryContext = v2Context({ audience: 'registry-audience', sessionId: 'registry-session' })
+    mgr.registerDescriptor({ ...packageDesc, capabilityContext: registryContext })
+
+    const omittedHost = new FakeBrowserWindow()
+    const undefinedHost = new FakeBrowserWindow()
+    const deniedHost = new FakeBrowserWindow()
+    const omitted = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(omittedHost),
+      bounds: 'fill',
+    })
+    const withUndefined = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(undefinedHost),
+      bounds: 'fill',
+      capabilityContext: undefined,
+    })
+    await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(deniedHost),
+      bounds: 'fill',
+      capabilityContext: null,
+    })
+
+    const source = (instanceId: string) => ({
+      ...registryContext.runtimeBinding!,
+      instanceId,
+    })
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'registry-session', data: 'allowed' },
+      source(omitted.instanceId)
+    )
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'registry-session', data: 'also allowed' },
+      source(withUndefined.instanceId)
+    )
+
+    expect(eventsOf(omittedHost.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(1)
+    expect(eventsOf(undefinedHost.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(1)
+    expect(eventsOf(deniedHost.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(0)
+  })
+
+  it('rejects an override whose package identity or grant version is not canonical', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = v2PackageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+
+    for (const context of [
+      v2Context({ pluginId: 'acme.other' }),
+      v2Context({ packageVersion: '2.0.0' }),
+      {
+        ...v2Context(),
+        userGrant: { packageVersion: '2.0.0', system: ['fs', 'aiCli'] as const },
+      },
+    ]) {
+      await expect(
+        mgr.openView(packageDesc, packageDesc.views![0], {
+          hostWindow: asHost(new FakeBrowserWindow()),
+          bounds: 'fill',
+          capabilityContext: context,
+        })
+      ).rejects.toThrow(/context/i)
+    }
+  })
+
+  it('validates v2 identity and rebinds context even under a legacy policy', async () => {
+    const mgr = new FrontendPluginManager()
+    const context = v2Context({ audience: 'legacy-policy-audience' })
+    const packageDesc = { ...packageDescriptor(), capabilityContext: context }
+    mgr.registerDescriptor(packageDesc)
+    const host = new FakeBrowserWindow()
+
+    mgr.open(asHost(host), packageDesc, 'fill')
+    const legacyView = host.children[0] as FakeViewLike
+    const running = (mgr as unknown as {
+      running: Map<string, { instanceId: string; capabilityContext: HostCapabilityContext | null }>
+    }).running
+    const instance = [...running.values()].find(
+      (candidate) => candidate.capabilityContext?.runtimeBinding?.audience === 'legacy-policy-audience'
+    )
+    expect(instance?.capabilityContext?.runtimeBinding?.instanceId).toBeTruthy()
+    expect(instance?.capabilityContext?.runtimeBinding?.instanceId).not.toBe(
+      context.runtimeBinding?.instanceId
+    )
+    expect(legacyView.webContents.isDestroyed()).toBe(false)
+    expect(() =>
+      mgr.open(
+        asHost(host),
+        { ...packageDesc, capabilityContext: v2Context({ pluginId: 'acme.other' }) },
+        'fill'
+      )
+    ).toThrow(/context/i)
+
+    await expect(
+      mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(new FakeBrowserWindow()),
+        bounds: 'fill',
+        capabilityContext: v2Context({ packageVersion: '2.0.0' }),
+      })
+    ).rejects.toThrow(/context/i)
+  })
+
+  it('keeps v2 PTY restrictions when opened through the legacy adapter', () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = v2PackageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const host = new FakeBrowserWindow()
+
+    mgr.open(asHost(host), packageDesc, 'fill')
+    mgr.noteTerminalRoutes(packageDesc.id, 'terminal.create', {
+      terminal_session_id: 'legacy-open-v2-session',
+    })
+
+    expect(
+      mgr.filterTerminalReattachPayload(packageDesc.id, {
+        terminal_session_ids: ['legacy-open-v2-session', 'unknown'],
+      }).terminal_session_ids
+    ).toEqual(['legacy-open-v2-session'])
+
+    mgr.setCapabilityContext(
+      packageDesc.id,
+      v2Context({ audience: 'changed-audience' })
+    )
+
+    expect(
+      mgr.filterTerminalReattachPayload(packageDesc.id, {
+        terminal_session_ids: ['legacy-open-v2-session', 'unknown'],
+      }).terminal_session_ids
+    ).toEqual([])
+  })
+
+  it('leaves the running context unchanged when a replacement context is invalid', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = v2PackageDescriptor()
+    const context = v2Context({ audience: 'stable-audience', sessionId: 'stable-session' })
+    mgr.registerDescriptor({ ...packageDesc, capabilityContext: context })
+    const host = new FakeBrowserWindow()
+    const handle = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+    })
+
+    expect(() =>
+      mgr.setCapabilityContext(packageDesc.id, v2Context({ packageVersion: '2.0.0' }))
+    ).toThrow(/context/i)
+    const source = { ...context.runtimeBinding!, instanceId: handle.instanceId }
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'stable-session', data: 'unchanged' },
+      source
+    )
+    expect(eventsOf(host.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(1)
+  })
+
+  it('updates session bindings without detaching a route with the same live tuple', async () => {
     vi.useFakeTimers()
     try {
       const mgr = new FrontendPluginManager()
-      const packageDesc: PluginLaunchDescriptor = {
-        ...packageDescriptor(),
-        requires: ['terminal'],
-      }
+      const packageDesc = v2PackageDescriptor()
+      const oldContext = v2Context({ audience: 'same-audience', sessionId: 'old-session' })
+      mgr.registerDescriptor({ ...packageDesc, capabilityContext: oldContext })
+      const host = new FakeBrowserWindow()
+      const handle = await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+      })
+      mgr.noteTerminalRoutes(handle.instanceId, 'terminal.create', {
+        terminal_session_id: 'stable-route',
+      })
+
+      const newContext = v2Context({ audience: 'same-audience', sessionId: 'new-session' })
+      mgr.setCapabilityContext(packageDesc.id, newContext)
+      dispatchEvent(mgr, 'terminal.output', output('stable-route', 'still attached'))
+      vi.advanceTimersByTime(12)
+
+      expect(eventsOf(host.children[0] as FakeViewLike, 'terminal.output')).toHaveLength(1)
+      const source = { ...newContext.runtimeBinding!, instanceId: handle.instanceId }
+      mgr.dispatchPublicCapabilityEvent(
+        packageDesc.id,
+        'aiCli.output',
+        { sessionId: 'new-session', data: 'new binding reached the view' },
+        source
+      )
+      expect(eventsOf(host.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('detaches routes when the tuple changes or the grant is revoked', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = v2PackageDescriptor()
+      const context = v2Context({ audience: 'original-audience' })
+      mgr.registerDescriptor({ ...packageDesc, capabilityContext: context })
+      const host = new FakeBrowserWindow()
+      const handle = await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+      })
+      const view = host.children[0] as FakeViewLike
+      mgr.noteTerminalRoutes(handle.instanceId, 'terminal.create', {
+        terminal_session_id: 'detached-route',
+      })
+
+      mgr.setCapabilityContext(
+        packageDesc.id,
+        v2Context({ audience: 'new-audience' })
+      )
+      dispatchEvent(mgr, 'terminal.output', output('detached-route', 'must drop'))
+      vi.advanceTimersByTime(12)
+      expect(eventsOf(view, 'terminal.output')).toHaveLength(0)
+
+      mgr.noteTerminalRoutes(handle.instanceId, 'terminal.reattach', {
+        alive: ['detached-route'],
+      })
+      mgr.setCapabilityContext(packageDesc.id, {
+        ...v2Context({ audience: 'new-audience' }),
+        userGrant: null,
+      })
+      expect(
+        mgr.filterTerminalReattachPayload(handle.instanceId, {
+          terminal_session_ids: ['detached-route'],
+        }).terminal_session_ids
+      ).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('rejects an empty workspace or audience binding before mounting', async () => {
+    for (const context of [
+      v2Context({ workspaceId: '' }),
+      v2Context({ audience: '' }),
+    ]) {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = v2PackageDescriptor()
+      mgr.registerDescriptor({ ...packageDesc, capabilityContext: context })
+      const host = new FakeBrowserWindow()
+      await expect(
+        mgr.openView(packageDesc, packageDesc.views![0], {
+          hostWindow: asHost(host),
+          bounds: 'fill',
+        })
+      ).rejects.toThrow(/context/i)
+      expect(host.children).toHaveLength(0)
+    }
+  })
+
+  it('drops a v2 instance batch without affecting a sibling', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = v2PackageDescriptor()
       mgr.registerDescriptor(packageDesc)
       const hostA = new FakeBrowserWindow()
       const hostB = new FakeBrowserWindow()
-      await mgr.openView(packageDesc, packageDesc.views![0], {
+      const left = await mgr.openView(packageDesc, packageDesc.views![0], {
         hostWindow: asHost(hostA),
         bounds: 'fill',
+        capabilityContext: v2Context({ audience: 'left-audience' }),
       })
       await mgr.openView(packageDesc, packageDesc.views![1], {
         hostWindow: asHost(hostB),
         bounds: 'fill',
+        capabilityContext: v2Context({ audience: 'window-audience' }),
       })
       const leftView = hostA.children[0] as FakeViewLike
       const windowView = hostB.children[0] as FakeViewLike
 
-      mgr.noteTerminalRoutes(packageDesc.id, 'terminal.create', { terminal_session_id: 't-14-batch' })
+      mgr.noteTerminalRoutes(left.instanceId, 'terminal.create', { terminal_session_id: 't-14-batch' })
       ;(
         mgr as unknown as {
           dispatchEvent(event: string, payload: unknown): void
@@ -1439,14 +1878,110 @@ describe('opaque view instance ownership', () => {
         .filter((message) => message.channel === 'plugin:cap:event')
         .map((message) => message.args[0] as { type: string; data: Record<string, unknown> })
         .filter((event) => event.type === 'terminal.output')
-      expect(outputs).toHaveLength(1)
-      expect(outputs[0].data).toMatchObject({
-        terminal_session_id: 't-14-batch',
-        data: 'sibling output',
-      })
+      expect(outputs).toHaveLength(0)
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('reattaches a detached v2 PTY only with the full ownership tuple', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = v2PackageDescriptor()
+      mgr.registerDescriptor(packageDesc)
+      const originalHost = new FakeBrowserWindow()
+      const siblingHost = new FakeBrowserWindow()
+      const originalContext = v2Context({ audience: 'left-audience' })
+      const siblingContext = v2Context({ audience: 'sibling-audience' })
+      const original = await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(originalHost),
+        bounds: 'fill',
+        capabilityContext: originalContext,
+      })
+      const sibling = await mgr.openView(packageDesc, packageDesc.views![1], {
+        hostWindow: asHost(siblingHost),
+        bounds: 'fill',
+        capabilityContext: siblingContext,
+      })
+      const originalView = originalHost.children[0] as FakeViewLike
+      const siblingView = siblingHost.children[0] as FakeViewLike
+      mgr.noteTerminalRoutes(original.instanceId, 'terminal.create', {
+        terminal_session_id: 't-v2-reconnect',
+      })
+      originalView.webContents.close()
+
+      expect(
+        mgr.filterTerminalReattachPayload(sibling.instanceId, {
+          terminal_session_ids: ['t-v2-reconnect'],
+        }).terminal_session_ids
+      ).toEqual([])
+
+      for (const context of [
+        v2Context({ workspaceId: 'workspace-2', audience: 'left-audience' }),
+        v2Context({ audience: 'other-audience' }),
+      ]) {
+        const wrongOwner = await mgr.openView(packageDesc, packageDesc.views![0], {
+          hostWindow: asHost(new FakeBrowserWindow()),
+          bounds: 'fill',
+          capabilityContext: context,
+        })
+        expect(
+          mgr.filterTerminalReattachPayload(wrongOwner.instanceId, {
+            terminal_session_ids: ['t-v2-reconnect'],
+          }).terminal_session_ids
+        ).toEqual([])
+      }
+
+      const reopenedHost = new FakeBrowserWindow()
+      const reopened = await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(reopenedHost),
+        bounds: 'fill',
+        capabilityContext: v2Context({ audience: 'left-audience' }),
+      })
+      expect(
+        mgr.filterTerminalReattachPayload(reopened.instanceId, {
+          terminal_session_ids: ['t-v2-reconnect', 'unknown'],
+        }).terminal_session_ids
+      ).toEqual(['t-v2-reconnect'])
+
+      mgr.noteTerminalRoutes(reopened.instanceId, 'terminal.reattach', {
+        alive: ['t-v2-reconnect'],
+        dead: [],
+      })
+      dispatchEvent(mgr, 'terminal.output', output('t-v2-reconnect', 'reconnected'))
+      vi.advanceTimersByTime(12)
+      expect(eventsOf(reopenedHost.children[0] as FakeViewLike, 'terminal.output')).toHaveLength(1)
+      expect(eventsOf(siblingView, 'terminal.output')).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('disposes subscriptions for only the destroyed instance', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(new FakeBrowserWindow()),
+      bounds: 'fill',
+    })
+    const sibling = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(new FakeBrowserWindow()),
+      bounds: 'fill',
+    })
+    const leftDispose = vi.fn()
+    const siblingDispose = vi.fn()
+    const unregisterLeft = mgr.registerInstanceSubscription(left.instanceId, leftDispose)
+    mgr.registerInstanceSubscription(sibling.instanceId, siblingDispose)
+
+    unregisterLeft()
+    expect(leftDispose).toHaveBeenCalledTimes(1)
+
+    mgr.destroyInstance(left.instanceId)
+
+    expect(leftDispose).toHaveBeenCalledTimes(1)
+    expect(siblingDispose).not.toHaveBeenCalled()
   })
 
   it('loads each v2 contribution entry file in renderer dev mode', async () => {
@@ -1753,14 +2288,21 @@ describe('terminal PTY routing + output micro-batching', () => {
     mgr.noteTerminalRoutes('acme.term-a', 'terminal.create', { terminal_session_id: 't-1' })
     mgr.destroy('acme.term-a')
 
+    // A stale sender cannot use the retained route as an authentication token.
+    expect(
+      mgr.filterTerminalReattachPayload('acme.term-a', {
+        terminal_session_ids: ['t-1'],
+      }).terminal_session_ids
+    ).toEqual([])
+
     // Reopened view of the same plugin: its own retained id passes the filter…
+    const reopened = openTerminalPlugin(mgr, host, 'acme.term-a')
     const payload = mgr.filterTerminalReattachPayload('acme.term-a', {
       terminal_session_ids: ['t-1'],
     })
     expect(payload.terminal_session_ids).toEqual(['t-1'])
 
     // …and after the reattach response re-registers, delivery resumes.
-    const reopened = openTerminalPlugin(mgr, host, 'acme.term-a')
     mgr.noteTerminalRoutes('acme.term-a', 'terminal.reattach', { alive: ['t-1'], dead: [] })
     dispatch(mgr, 'terminal.output', output('t-1', 'back'))
     vi.advanceTimersByTime(12)
@@ -1788,6 +2330,190 @@ describe('terminal PTY routing + output micro-batching', () => {
     // A payload without an ids array passes through unchanged.
     const untouched = { cols: 80 }
     expect(mgr.filterTerminalReattachPayload('acme.term-b', untouched)).toBe(untouched)
+
+    const fresh = openTerminalPlugin(mgr, host, 'acme.term-fresh')
+    expect(
+      mgr.filterTerminalReattachPayload('acme.term-fresh', {
+        terminal_session_ids: ['after-host-restart'],
+      }).terminal_session_ids
+    ).toEqual(['after-host-restart'])
+    expect(fresh.webContents.isDestroyed()).toBe(false)
+  })
+
+  it('cancels an in-flight create and kills a late committed success exactly once', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openTerminalPlugin(mgr, host, 'acme.term-pending')
+    mgr.setBackendWsUrl('ws://plugin-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    const create = call!({ sender: { id: view.webContents.id } }, {
+      reqId: 'create',
+      ns: 'terminal',
+      method: 'create',
+      args: { pane_id: 'pane-pending', create_generation: 'generation-1' },
+    }) as Promise<unknown>
+    await Promise.resolve()
+    const createRequest = JSON.parse(socket.sent.at(-1)!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(createRequest.type).toBe('terminal.create')
+
+    mgr.destroy('acme.term-pending')
+    const cancelRequest = JSON.parse(socket.sent.at(-1)!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(cancelRequest.type).toBe('terminal.create.cancel')
+    expect(cancelRequest.payload).toEqual({
+      pane_id: 'pane-pending',
+      create_generation: 'generation-1',
+    })
+    expect(socket.sent.map((raw) => JSON.parse(raw).type)).not.toContain('terminal.kill')
+
+    socket.receive({
+      id: cancelRequest.id,
+      type: 'terminal.create.cancel',
+      ok: true,
+      payload: { cancelled: false },
+      error: null,
+      timestamp: '',
+    })
+    socket.receive({
+      id: createRequest.id,
+      type: 'terminal.create',
+      ok: true,
+      payload: {
+        terminal_session_id: 'late-session',
+        pane_id: 'pane-pending',
+        create_generation: 'generation-1',
+      },
+      error: null,
+      timestamp: '',
+    })
+    await expect(create).resolves.toMatchObject({ ok: true })
+
+    const killRequests = socket.sent
+      .map((raw) => JSON.parse(raw) as { type: string; payload: Record<string, unknown> })
+      .filter((request) => request.type === 'terminal.kill')
+    expect(killRequests).toHaveLength(1)
+    expect(killRequests[0].payload).toEqual({
+      terminal_session_id: 'late-session',
+      force: true,
+    })
+
+    // A duplicate late response cannot trigger a second cleanup request.
+    socket.receive({
+      id: createRequest.id,
+      type: 'terminal.create',
+      ok: true,
+      payload: {
+        terminal_session_id: 'late-session',
+        pane_id: 'pane-pending',
+        create_generation: 'generation-1',
+      },
+      error: null,
+      timestamp: '',
+    })
+    expect(
+      socket.sent.map((raw) => JSON.parse(raw).type).filter((type) => type === 'terminal.kill')
+    ).toHaveLength(1)
+
+    dispatch(mgr, 'terminal.output', output('late-session', 'must drop'))
+    vi.advanceTimersByTime(12)
+    expect(eventsOf(view, 'terminal.output')).toHaveLength(0)
+    expect(
+      mgr.filterTerminalReattachPayload('acme.term-pending', {
+        terminal_session_ids: ['late-session'],
+      }).terminal_session_ids
+    ).toEqual([])
+  })
+
+  it('does not kill a late create response with invalid ownership metadata', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openTerminalPlugin(mgr, host, 'acme.term-invalid-late')
+    mgr.setBackendWsUrl('ws://plugin-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    const create = call!({ sender: { id: view.webContents.id } }, {
+      reqId: 'create-invalid-late',
+      ns: 'terminal',
+      method: 'create',
+      args: { pane_id: 'pane-invalid-late', create_generation: 'generation-invalid-late' },
+    }) as Promise<unknown>
+    await Promise.resolve()
+    const createRequest = JSON.parse(socket.sent.at(-1)!) as { id: string }
+    mgr.destroy('acme.term-invalid-late')
+    const cancelRequest = JSON.parse(socket.sent.at(-1)!) as { id: string }
+
+    socket.receive({
+      id: cancelRequest.id,
+      type: 'terminal.create.cancel',
+      ok: true,
+      payload: { cancelled: false },
+      error: null,
+      timestamp: '',
+    })
+    socket.receive({
+      id: createRequest.id,
+      type: 'terminal.create',
+      ok: true,
+      payload: {
+        terminal_session_id: 42,
+        pane_id: 'pane-invalid-late',
+        create_generation: 'generation-invalid-late',
+      },
+      error: null,
+      timestamp: '',
+    })
+    await expect(create).resolves.toMatchObject({ ok: true })
+    expect(socket.sent.map((raw) => JSON.parse(raw).type)).not.toContain('terminal.kill')
+  })
+
+  it('invalidates an in-flight reattach without sending a kill or reviving its routes', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openTerminalPlugin(mgr, host, 'acme.term-reattach')
+    mgr.setBackendWsUrl('ws://plugin-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    const reattach = call!({ sender: { id: view.webContents.id } }, {
+      reqId: 'reattach',
+      ns: 'terminal',
+      method: 'reattach',
+      args: { terminal_session_ids: ['late-session'] },
+    }) as Promise<unknown>
+    await Promise.resolve()
+    const request = JSON.parse(socket.sent.at(-1)!) as { id: string; type: string }
+    expect(request.type).toBe('terminal.reattach')
+    mgr.destroy('acme.term-reattach')
+    expect(socket.sent.map((raw) => JSON.parse(raw).type)).not.toContain('terminal.kill')
+
+    socket.receive({
+      id: request.id,
+      type: 'terminal.reattach',
+      ok: true,
+      payload: { alive: ['late-session'], dead: [] },
+      error: null,
+      timestamp: '',
+    })
+    await expect(reattach).resolves.toMatchObject({ ok: true })
+    dispatch(mgr, 'terminal.output', output('late-session', 'must drop'))
+    vi.advanceTimersByTime(12)
+    expect(eventsOf(view, 'terminal.output')).toHaveLength(0)
   })
 })
 
@@ -1815,6 +2541,7 @@ describe('cast channel (IPC_CAST / handleCast)', () => {
     const mgr = new FrontendPluginManager()
     const host = new FakeBrowserWindow()
     const view = openPlugin(mgr, host, 'acme.term', ['terminal'])
+    mgr.noteTerminalRoutes('acme.term', 'terminal.create', { terminal_session_id: 't-1' })
     // No backend transport in tests — reaching 'no-backend' proves the cast
     // passed sender, shape, scoping AND the whitelist.
     expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'input'))).toBe('no-backend')
@@ -1840,6 +2567,30 @@ describe('cast channel (IPC_CAST / handleCast)', () => {
     const host = new FakeBrowserWindow()
     const view = openPlugin(mgr, host, 'acme.fsonly', ['fs'])
     expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'input'))).toBe('denied')
+  })
+
+  it('rejects terminal request controls from a sibling route owner', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const owner = openPlugin(mgr, host, 'acme.term-owner', ['terminal'])
+    const sibling = openPlugin(mgr, host, 'acme.term-sibling', ['terminal'])
+    mgr.noteTerminalRoutes('acme.term-owner', 'terminal.create', { terminal_session_id: 't-owner' })
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    await expect(
+      call!({ sender: { id: sibling.webContents.id } }, {
+        reqId: 'foreign',
+        ns: 'terminal',
+        method: 'resize',
+        args: { terminal_session_id: 't-owner', cols: 80, rows: 24 },
+      })
+    ).resolves.toEqual({
+      reqId: 'foreign',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED', message: 'terminal session is not owned by this view' },
+    })
+    expect(owner.webContents.isDestroyed()).toBe(false)
   })
 
   it('rejects unmapped methods, unknown senders and malformed payloads', () => {
@@ -2233,9 +2984,9 @@ describe('Manifest v2 capability runtime deferral', () => {
     )
     const view = views[views.length - 1]
     const eventPayload = { changes: [{ path: 'README.md', kind: 'changed' }] }
-    mgr.dispatchPublicCapabilityEvent('workspace.filesChanged', eventPayload, {
+    mgr.dispatchPublicCapabilityEvent('acme.files', 'workspace.filesChanged', eventPayload, {
       ...binding,
-      pluginId: 'host',
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
     })
     expect(view.webContents.sent).toContainEqual({
       channel: 'plugin:cap:event',
@@ -2243,9 +2994,9 @@ describe('Manifest v2 capability runtime deferral', () => {
     })
 
     const before = view.webContents.sent.length
-    mgr.dispatchPublicCapabilityEvent('workspace.filesChanged', eventPayload, {
+    mgr.dispatchPublicCapabilityEvent('acme.files', 'workspace.filesChanged', eventPayload, {
       ...binding,
-      pluginId: 'host',
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
       workspaceId: 'workspace-2',
     })
     expect(view.webContents.sent).toHaveLength(before)

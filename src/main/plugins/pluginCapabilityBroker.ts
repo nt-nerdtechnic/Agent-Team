@@ -101,6 +101,9 @@ export type PublicCapabilityDecision =
  */
 export const BUILTIN_CAPABILITIES: readonly string[] = ['ping']
 
+/** Reserved source identity used by Host-produced workspace events. */
+export const HOST_EVENT_SOURCE_PLUGIN_ID = 'host'
+
 /**
  * Scoping decision: may a plugin whose manifest declares `requires` call `ns`?
  * Built-in namespaces (see {@link BUILTIN_CAPABILITIES}) are always allowed;
@@ -492,12 +495,13 @@ export function planPublicCapabilityCall(
   }
 }
 
-/** Route a cataloged event only to the Host-authenticated session audience. */
+/** Route a cataloged event only to the Host-authenticated package audience. */
 export function isPublicCapabilityEventAllowed(
   policy: Extract<PluginCapabilityPolicy, { kind: 'manifest-v2' }>,
   event: string,
   payload: unknown,
   context: HostCapabilityContext,
+  targetPluginId: string,
   sourceBinding?: AuthenticatedRuntimeBinding
 ): boolean {
   const entry = publicCapabilityEntry(event)
@@ -514,11 +518,18 @@ export function isPublicCapabilityEventAllowed(
   ) {
     return false
   }
+  if (typeof targetPluginId !== 'string' || targetPluginId.length === 0) return false
+  if (targetPluginId !== binding.pluginId) return false
   if (event === 'workspace.filesChanged') {
     if (
       !sourceBinding ||
+      sourceBinding.pluginId !== HOST_EVENT_SOURCE_PLUGIN_ID ||
       !requiresWorkspace(sourceBinding) ||
-      sourceBinding.workspaceId !== binding.workspaceId
+      sourceBinding.packageVersion.length === 0 ||
+      sourceBinding.instanceId !== null ||
+      sourceBinding.audience !== null ||
+      sourceBinding.workspaceId !== binding.workspaceId ||
+      sourceBinding.packageVersion !== binding.packageVersion
     ) {
       return false
     }
@@ -536,6 +547,7 @@ export function isPublicCapabilityEventAllowed(
     )
   }
   if (event !== 'aiCli.output' && event !== 'aiCli.exited') return false
+  if (!sourceBinding || !sameBinding(sourceBinding, binding)) return false
   if (!requiresAiCliBinding(binding) || !isRecord(payload)) return false
   if (!context.sessionBindings) return false
   if (event === 'aiCli.output') {

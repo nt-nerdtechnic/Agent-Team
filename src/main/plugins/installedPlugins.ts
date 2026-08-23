@@ -159,6 +159,7 @@ export function manifestToDescriptor(
     }
     return {
       id: manifest.id,
+      packageVersion: manifest.version,
       requires: manifestCapabilities(manifest),
       capabilityPolicy: manifestCapabilityPolicy(manifest),
       devUrl: '',

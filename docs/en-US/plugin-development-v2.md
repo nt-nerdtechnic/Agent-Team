@@ -707,6 +707,50 @@ Filesystem calls used by the dock's `@`-file picker remain authorized by
 the public `system:fs` catalog; they are not absorbed into the AI CLI
 permission.
 
+### Issue 15 runtime boundary
+
+The raw v1 `terminal` PTY namespace is not a Manifest v2 permission and is not
+part of the public v2 catalog. Public AI CLI sessions remain Host-mediated
+through the `aiCli.*` contract above. The current instance-aware PTY and event
+logic is a Host-only integration seam for staged view productionization; no
+renderer payload can supply an instance id or capability context, and the
+shared backend event listener has no public-event source binding, so v2 events
+received there fail closed. A Host producer must call the Host ingress with an
+authenticated source: AI CLI output/exit uses the exact per-instance binding,
+while `workspace.filesChanged` uses the reserved `host` source identity with
+matching workspace and package version. The Host ingress also names the target
+package id, so the event reaches eligible views for that exact package id,
+version, and workspace; another package sharing the same version and workspace
+never receives it.
+
+If a view is torn down while `terminal.create` is still completing, the Host
+first sends the generation-scoped create cancellation. If the backend has
+already committed and later returns a successful create response, the Host
+issues one force-kill for only that response's session id; it never creates a
+route for the dead view. A cleanup failure leaves the session unrouted but
+still owned by the Host's shared backend connection, so the ownerless-PTY
+janitor cannot reclaim it while that connection lives; the PTY is released
+when the connection ends and the janitor's grace period elapses.
+
+The v2 ownership table is process-local. Within the same Host process, a view
+may reattach only with its full authenticated package-version, workspace,
+audience, and instance binding. After a Host app restart, an unknown v2 raw
+PTY id is rejected even if the backend PTY process remains alive; durable
+reattach requires a future contract covering persistent identity, version,
+revocation, expiry, and a backend ownership namespace.
+
+V2 context validation follows the descriptor's canonical package version and
+view identity, not the temporary capability-policy adapter. Host-created
+instance ids replace any supplied runtime, session, or pending-start instance
+ids before the context reaches a running view.
+
+The legacy `open()` entry point is only a lifecycle and plugin-id lookup
+adapter. If it receives a descriptor with canonical Manifest v2 identity
+(`packageVersion` and `views`), that instance uses v2 event and PTY ownership
+rules: unknown reattach ids fail closed and a changed ownership tuple detaches
+the route. V1 PTY compatibility applies only to descriptors without v2
+identity.
+
 Before install, Navide shows the declared system namespaces and shell mode,
 resolves their catalog scope, and asks for an explicit package-version grant.
 An update that adds a namespace or changes shell mode remains staged until the

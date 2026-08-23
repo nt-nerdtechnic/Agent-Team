@@ -14,6 +14,7 @@ import {
   isEventAllowed,
   planPublicCapabilityCall,
   isPublicCapabilityEventAllowed,
+  HOST_EVENT_SOURCE_PLUGIN_ID,
   shellTopLevelExecutables,
   type HostCapabilityContext,
   type CapabilityCall,
@@ -409,14 +410,22 @@ describe('Issue 03/04 public Host planner', () => {
     const session = { ...binding, instanceId: 'instance-1', audience: 'audience-1' }
     const allowed = context({ sessionBindings: new Map([['session-1', session]]) })
     expect(
-      isPublicCapabilityEventAllowed(policy, 'aiCli.output', { sessionId: 'session-1', data: 'ok' }, allowed)
+      isPublicCapabilityEventAllowed(
+        policy,
+        'aiCli.output',
+        { sessionId: 'session-1', data: 'ok' },
+        allowed,
+        'acme.ai-cli',
+        session
+      )
     ).toBe(true)
     expect(
       isPublicCapabilityEventAllowed(
         policy,
         'aiCli.output',
         { sessionId: 'session-1', data: 'ok', exitCode: 0 },
-        allowed
+        allowed,
+        'acme.ai-cli'
       )
     ).toBe(false)
     expect(
@@ -424,7 +433,8 @@ describe('Issue 03/04 public Host planner', () => {
         policy,
         'aiCli.output',
         { sessionId: 'session-1', data: 'ok' },
-        context({ runtimeBinding: { ...binding, audience: 'other-audience' }, sessionBindings: new Map([['session-1', session]]) })
+        context({ runtimeBinding: { ...binding, audience: 'other-audience' }, sessionBindings: new Map([['session-1', session]]) }),
+        'acme.ai-cli'
       )
     ).toBe(false)
   })
@@ -438,7 +448,8 @@ describe('Issue 03/04 public Host planner', () => {
         context({
           userGrant: null,
           sessionBindings: new Map([['session-1', binding]]),
-        })
+        }),
+        'acme.ai-cli'
       )
     ).toBe(false)
   })
@@ -449,16 +460,23 @@ describe('Issue 03/04 public Host planner', () => {
       userGrant: { packageVersion: '1.0.0', system: ['fs'] },
     })
     const payload = { changes: [{ path: 'README.md', kind: 'changed' }] }
-    expect(isPublicCapabilityEventAllowed(filesPolicy, 'workspace.filesChanged', payload, filesContext)).toBe(
-      false
-    )
     expect(
       isPublicCapabilityEventAllowed(
         filesPolicy,
         'workspace.filesChanged',
         payload,
         filesContext,
-        { ...binding, pluginId: 'host', instanceId: null, audience: null }
+        'acme.ai-cli'
+      )
+    ).toBe(false)
+    expect(
+      isPublicCapabilityEventAllowed(
+        filesPolicy,
+        'workspace.filesChanged',
+        payload,
+        filesContext,
+        'acme.ai-cli',
+        { ...binding, pluginId: HOST_EVENT_SOURCE_PLUGIN_ID, instanceId: null, audience: null }
       )
     ).toBe(true)
     expect(
@@ -467,7 +485,59 @@ describe('Issue 03/04 public Host planner', () => {
         'workspace.filesChanged',
         payload,
         filesContext,
-        { ...binding, pluginId: 'host', workspaceId: 'other-workspace', instanceId: null, audience: null }
+        'acme.ai-cli',
+        {
+          ...binding,
+          pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
+          workspaceId: 'other-workspace',
+          instanceId: null,
+          audience: null,
+        }
+      )
+    ).toBe(false)
+    expect(
+      isPublicCapabilityEventAllowed(
+        filesPolicy,
+        'workspace.filesChanged',
+        payload,
+        filesContext,
+        'acme.ai-cli',
+        { ...binding, pluginId: 'acme.other', instanceId: null, audience: null }
+      )
+    ).toBe(false)
+    expect(
+      isPublicCapabilityEventAllowed(
+        filesPolicy,
+        'workspace.filesChanged',
+        payload,
+        filesContext,
+        'acme.ai-cli',
+        { ...binding, pluginId: HOST_EVENT_SOURCE_PLUGIN_ID, instanceId: 'view-1', audience: null }
+      )
+    ).toBe(false)
+    expect(
+      isPublicCapabilityEventAllowed(
+        filesPolicy,
+        'workspace.filesChanged',
+        payload,
+        filesContext,
+        'acme.other',
+        { ...binding, pluginId: HOST_EVENT_SOURCE_PLUGIN_ID, instanceId: null, audience: null }
+      )
+    ).toBe(false)
+  })
+
+  it('requires the exact instance binding for AI CLI events, not the package context binding', () => {
+    const session = { ...binding, instanceId: 'instance-1', audience: 'audience-1' }
+    const allowed = context({ sessionBindings: new Map([['session-1', session]]) })
+    expect(
+      isPublicCapabilityEventAllowed(
+        policy,
+        'aiCli.output',
+        { sessionId: 'session-1', data: 'ok' },
+        allowed,
+        'acme.ai-cli',
+        { ...binding, instanceId: null, audience: null }
       )
     ).toBe(false)
   })

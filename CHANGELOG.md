@@ -71,6 +71,16 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Fixed
 
+- Harden staged plugin event and PTY ownership: stable capability-context
+  refreshes no longer detach routes, in-flight creates are cancelled on view
+  teardown and late committed creates receive one operation-scoped cleanup kill,
+  stale reattach senders fail closed, and Manifest v2 raw PTY recovery remains
+  explicitly deferred to a persistent Host ownership contract.
+- Route public workspace events to the exact Host-selected package id, apply
+  Manifest v2 PTY rules even when a descriptor is opened through the legacy
+  adapter, and make instance subscription cleanup exactly-once for both active
+  unsubscribe and view teardown.
+
 - Keep a CLI agent's Navide tools working after its pane is rebuilt around it. Reloading a window, detaching a run group or taking one back gives the pane a new id while the CLI keeps quoting the one it was launched with, which used to fail every MCP tool for that pane — plan documents included — with "this pane's id is stale". The old id now resolves to the pane the process is actually attached to, and so do the pane's Claude Stop-hook delivery and what `cli_get_status` reports. Its push channel follows a window reload and a run group returning from a detached window, but not a detach itself — the window handing the pane over releases the channel before the receiving window claims the pane, so a detached pane is typed into until its CLI is restarted (a Claude pane re-arms its own hook at the next turn end and is unaffected). An id that names no pane at all is still refused.
 
 ## [0.1.62] — 2026-07-26 — signed release
