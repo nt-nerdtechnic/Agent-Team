@@ -14,9 +14,17 @@ const props = defineProps<{
   // When set, shows the diff this commit introduced (read-only: no stage/
   // unstage/discard actions) instead of the working-tree/staged diff.
   commit?: string
+  // Hides every write action (stage / unstage / discard) without changing how
+  // the diff renders. Set by the read-only rail preview panel; commit diffs
+  // are already read-only via the check below.
+  readonly?: boolean
 }>()
 
 const emit = defineEmits<{ 'open-file': [{ filepath: string; name: string }] }>()
+
+// Write actions are available only for a live working-tree/staged diff that
+// the host has not marked read-only.
+const canEdit = computed(() => !props.commit && !props.readonly)
 
 const notify = useNotify()
 
@@ -125,6 +133,7 @@ function selectedCount(hunkIdx: number): number {
 }
 
 async function apply(patch: string, reverse: boolean, cached: boolean): Promise<void> {
+  if (!canEdit.value) return
   try {
     const resp = await props.backend.send<{ ok: boolean; error?: string }>('git.apply_patch', {
       workspace_path: props.workspacePath,
@@ -202,7 +211,7 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
         <div v-for="(hunk, hi) in parsed.hunks" :key="hi" class="dp-hunk" :class="{ active: hi === currentHunkIdx }">
           <div class="dp-hunk-head">
             <span class="dp-range">{{ hunk.header }}</span>
-            <span v-if="!commit" class="dp-actions">
+            <span v-if="canEdit" class="dp-actions">
               <template v-if="staged">
                 <button class="hk-btn" @click="unstageHunk(hunk)">{{ $t('action.unstage-hunk') }}</button>
               </template>
@@ -217,14 +226,14 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
             <template v-for="(row, ri) in toSideBySide(hunk)" :key="ri">
               <div class="dp-side left" :class="cellClass(row.left)">
                 <span class="dp-no">{{ row.left ? row.left.lineNo : '' }}</span>
-                <input v-if="!commit && !staged && row.left && row.left.kind === '-'" class="dp-check" type="checkbox" :checked="isSelected(hi, row.left.idx)" @change="toggleLine(hi, row.left.idx)" />
+                <input v-if="canEdit && !staged && row.left && row.left.kind === '-'" class="dp-check" type="checkbox" :checked="isSelected(hi, row.left.idx)" @change="toggleLine(hi, row.left.idx)" />
                 <span v-else class="dp-check-sp" />
                 <span class="dp-sign">{{ row.left ? row.left.kind : '' }}</span>
                 <span class="dp-code">{{ row.left ? row.left.text : '' }}</span>
               </div>
               <div class="dp-side right" :class="cellClass(row.right)">
                 <span class="dp-no">{{ row.right ? row.right.lineNo : '' }}</span>
-                <input v-if="!commit && !staged && row.right && row.right.kind === '+'" class="dp-check" type="checkbox" :checked="isSelected(hi, row.right.idx)" @change="toggleLine(hi, row.right.idx)" />
+                <input v-if="canEdit && !staged && row.right && row.right.kind === '+'" class="dp-check" type="checkbox" :checked="isSelected(hi, row.right.idx)" @change="toggleLine(hi, row.right.idx)" />
                 <span v-else class="dp-check-sp" />
                 <span class="dp-sign">{{ row.right ? row.right.kind : '' }}</span>
                 <span class="dp-code">{{ row.right ? row.right.text : '' }}</span>

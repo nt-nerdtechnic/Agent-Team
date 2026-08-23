@@ -6,6 +6,8 @@ import { useExplorer, type FsEntry } from '../composables/useExplorer'
 import { useGit } from '../composables/useGit'
 import { useNotify } from '../composables/useNotify'
 
+import { usePreview } from '../preview/usePreview'
+
 const props = defineProps<{
   workspacePath: string
   backend: ReturnType<typeof useBackend>
@@ -14,6 +16,8 @@ const props = defineProps<{
   embedded?: boolean
   onAskAiAboutFile?: (relPath: string) => void
 }>()
+
+const preview = usePreview()
 
 const emit = defineEmits<{
   (e: 'open-file', payload: { filepath: string; name: string }): void
@@ -218,6 +222,29 @@ async function copyPathsSelected(): Promise<void> {
   } catch {
     toast('Copy failed', { type: 'error' })
   }
+}
+
+// Send a file (or its diff) to the main window's right-rail preview panel.
+// Explicit context-menu entries rather than a click-behaviour change: a plain
+// click already opens the editor, and rebinding it would break that.
+function previewFile(entry: FsEntry): void {
+  preview.show({
+    kind: 'file',
+    workspacePath: props.workspacePath,
+    relPath: entry.rel_path,
+    source: 'user',
+  })
+}
+
+function previewDiff(entry: FsEntry): void {
+  const st = statusFor(entry.rel_path)
+  preview.show({
+    kind: 'diff',
+    workspacePath: props.workspacePath,
+    relPath: entry.rel_path,
+    staged: st?.staged ?? false,
+    source: 'user',
+  })
 }
 
 function openDiff(entry: FsEntry): void {
@@ -744,6 +771,8 @@ defineExpose({ revealFile, focusTree })
         <button class="exp-ctx-item" @click="startNew('new-folder', ctx.entry); closeCtx()">{{ $t('action.new-folder') }}</button>
         <template v-if="ctx.entry">
           <div class="exp-ctx-sep" />
+          <button v-if="!ctx.entry.is_dir && !props.embedded" class="exp-ctx-item" @click="previewFile(ctx.entry!); closeCtx()">{{ $t('preview.show-file') }}</button>
+          <button v-if="!ctx.entry.is_dir && !props.embedded" class="exp-ctx-item" @click="previewDiff(ctx.entry!); closeCtx()">{{ $t('preview.show-diff') }}</button>
           <button v-if="!ctx.entry.is_dir" class="exp-ctx-item" @click="openDiff(ctx.entry!); closeCtx()">{{ $t('action.open-diff') }}</button>
           <button v-if="!ctx.entry.is_dir" class="exp-ctx-item" @click="openInEditor(ctx.entry!); closeCtx()">{{ $t('action.open-in-editor') }}</button>
           <button v-if="!ctx.entry.is_dir && props.onAskAiAboutFile" class="exp-ctx-item" @click="props.onAskAiAboutFile!(ctx.entry!.rel_path); closeCtx()">{{ $t('action.ask-ai-about-file') }}</button>
