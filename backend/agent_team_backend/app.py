@@ -28,6 +28,7 @@ from uvicorn.protocols.utils import ClientDisconnected
 from . import __version__
 from . import agent_messaging
 from . import hook_drain
+from . import loop_watchdog
 from . import mem_probe
 from . import push_delivery
 from .analyzer import DEFAULT_MODEL as ANALYZER_DEFAULT_MODEL
@@ -1076,6 +1077,11 @@ async def _start_log_watcher() -> None:
     global _mem_probe_task
     _mem_probe_task = asyncio.create_task(mem_probe.probe_loop())
 
+    # Name a frozen backend the moment it freezes: a daemon thread logs the
+    # loop thread's stack when the loop stops turning (issue #24), instead of
+    # the freeze being reproducible only under sample(1).
+    loop_watchdog.start(asyncio.get_running_loop())
+
     global _log_watcher
     _log_watcher = LogWatcher(
         sink=_on_log_token_usage,
@@ -1154,6 +1160,7 @@ async def _stop_log_watcher() -> None:
         _ownerless_sweeper_task.cancel()
     if _mem_probe_task is not None:
         _mem_probe_task.cancel()
+    await loop_watchdog.stop()
     # PTY children are detached process groups (start_new_session=True); they
     # must be killed here or they outlive the app as CPU-spinning orphans.
     # Guarded so a sweep failure never skips the watcher/MCP teardown below.
@@ -1263,7 +1270,11 @@ def _serve_workspace_file(workspace: str, rel: str, *, allow_css: bool = False) 
 @app.get("/fs/raw")
 async def fs_raw(workspace: str, rel: str) -> FileResponse:
     """Serve a raw workspace file (query-addressed). See _serve_workspace_file."""
-    return _serve_workspace_file(workspace, rel)
+    # The helper is pure-sync and does real syscalls (_resolve_safe → resolve(),
+    # is_dir, is_file) that block for minutes on a stalled network/cloud mount.
+    # An `async def` route is not handed to FastAPI's threadpool, so it would
+    # block the event loop — offload it, same rule as the fs.* ws handlers.
+    return await asyncio.to_thread(_serve_workspace_file, workspace, rel)
 
 
 @app.get("/fs/page/{ws_b64}/{rel:path}")
@@ -1280,7 +1291,7 @@ async def fs_page(ws_b64: str, rel: str) -> FileResponse:
         workspace = base64.urlsafe_b64decode(padded).decode("utf-8")
     except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="invalid workspace encoding") from exc
-    return _serve_workspace_file(workspace, rel, allow_css=True)
+    return await asyncio.to_thread(_serve_workspace_file, workspace, rel, allow_css=True)
 
 
 @app.get("/mcp/servers")
@@ -1670,9 +1681,9 @@ async def ws(websocket: WebSocket) -> None:
             session._handler_tasks.add(task)
             task.add_done_callback(session._handler_tasks.discard)
     except WebSocketDisconnect as exc:
-        # Record who hung up. Without the code these lines cannot distinguish a
-        # frontend watchdog close (4001, see wsClient.startPing) from uvicorn
-        # timing out its own ping (1006/1011) or a window simply closing (1001).
+        # Record who hung up. Without the code these lines cannot distinguish
+        # uvicorn timing out its own ping (1006/1011) from a window simply
+        # closing (1001). The frontend no longer closes sockets on its own.
         log.info(
             "ws client disconnected code=%s reason=%s",
             exc.code,
