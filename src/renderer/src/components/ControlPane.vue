@@ -1382,6 +1382,13 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <span class="ws-icon">🗀</span>
           <span class="ws-name" :title="currentWorkspaceRow.path">{{ currentWorkspaceRow.label }}</span>
           <span class="ws-count">{{ currentWorkspaceRow.count }}</span>
+          <!-- This workspace's spawn entry point is the card at the bottom of
+               the list; the + opens it rather than duplicating the controls. -->
+          <button
+            class="ws-add"
+            :title="$t('action.add-to-grid')"
+            @click.stop="manualSpawnOpen = true"
+          >＋</button>
         </li>
         <li
           v-for="{ pane: p, depth, hasChildren, collapsed: folded } in orderedPanes"

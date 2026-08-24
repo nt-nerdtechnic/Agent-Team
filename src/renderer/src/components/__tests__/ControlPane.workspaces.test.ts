@@ -124,11 +124,17 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.emitted('reveal-workspace')?.[0]).toEqual(['/other'])
   })
 
-  it('offers add-in-workspace only on other workspaces', async () => {
+  it('every workspace heading offers a way to add an agent', () => {
+    wrapper = mountWith({ workspaces: [current(), other()] })
+    expect(wrapper.findAll('.ws-add')).toHaveLength(2)
+  })
+
+  it('only another workspace add emits — this one opens the local spawn card', async () => {
     wrapper = mountWith({ workspaces: [current(), other()] })
     const adds = wrapper.findAll('.ws-add')
-    expect(adds).toHaveLength(1)
-    await adds[0].trigger('click')
+    await adds[0].trigger('click')          // this window's own heading
+    expect(wrapper.emitted('add-in-workspace')).toBeUndefined()
+    await adds[1].trigger('click')          // the other workspace
     expect(wrapper.emitted('add-in-workspace')?.[0]).toEqual(['/other'])
   })
 })
