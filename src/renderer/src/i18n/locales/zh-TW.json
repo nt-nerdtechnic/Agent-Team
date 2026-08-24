@@ -2139,7 +2139,7 @@
   "paneStatus": {
     "running": "執行中",
     "idle": "閒置",
-    "awaiting": "快選",
+    "awaiting": "等待回應",
     "starting": "啟動中",
     "stopped": "已停止",
     "exited": "已結束",

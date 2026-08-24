@@ -2139,7 +2139,7 @@
   "paneStatus": {
     "running": "running",
     "idle": "idle",
-    "awaiting": "needs you",
+    "awaiting": "awaiting",
     "starting": "starting",
     "stopped": "stopped",
     "exited": "exited",
