@@ -42,6 +42,8 @@ Navide 將個人私有 Project Intelligence 儲存在 Workspace 內的 `.agent-t
 
 受支援的內建 Agent Key 涵蓋 13 種 coding CLI：Aider、Antigravity CLI、Claude Code、Codex、Copilot CLI、Cursor CLI、Grok CLI、Kilo Code、Kimi Code、Muse Code、OpenCode、Pi、Qwen Code。實際 CLI 行為與 Provider Billing 仍由各外部工具控制。
 
+對 Kimi Code Pane，Navide 會提供 100 ms 的 Escape Sequence 重組時間，讓方向鍵在內嵌 Terminal 中仍能可靠導覽；若環境已有 `PI_TUI_ESC_TIMEOUT`，則仍以既有值為準。
+
 ## Pipeline
 
 內建 Pipeline 涵蓋 Requirements、Planning、Design、Implementation、Security Review 與 Testing。Stage、slot、Role、Kickoff Prompt、Question 與 Completion Sentinel 都能在 Settings 中設定。
@@ -87,7 +89,7 @@ Token Stats 解析相容的本機 CLI Log，將 Usage 歸屬到 Workspace、Pane
 
 ## Git 與 Review
 
-Git View 支援 Repository Discovery、Working Tree Inspection、Staging、Commit、Branch、Remote、Issue 與相關工作流。Multi-repository Workspace 可以在偵測到的 Repository 間切換。
+Git View 支援 Repository Discovery、Working Tree Inspection、Staging、Commit、Branch、Remote、Issue 與相關工作流。Multi-repository Workspace 可以在偵測到的 Repository 間切換。Discovery Scan 不會阻塞 Backend，並會在慢速 Filesystem 上經過受限的掃描時間後回傳部分結果。
 
 Commit 前務必審查變更，特別是在 Automation 或 Parallel Run 之後。Agent 生成的變更不會因為顯示在 Git Panel 中就自動變得安全。
 

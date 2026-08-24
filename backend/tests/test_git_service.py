@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -2448,6 +2449,86 @@ class TestDiscoverRepositories:
         result = await git_service.discover_repositories(str(tmp_path / "nope"))
         assert result["ok"] is False
         assert result["repositories"] == []
+
+    @pytest.mark.asyncio
+    async def test_blocked_scan_returns_partial_result_without_blocking_loop(
+        self, tmp_path, monkeypatch
+    ):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "later").mkdir()
+        blocked = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def blocked_walk(_root):
+            try:
+                yield str(tmp_path), ["later"], []
+                blocked.set()
+                assert release.wait(0.5), "blocked walk was not released"
+                yield str(tmp_path / "later"), [], []
+            finally:
+                finished.set()
+
+        async def fake_run(*_args, **_kwargs):
+            return 0, "main\n", ""
+
+        monkeypatch.setattr(git_service.os, "walk", blocked_walk)
+        monkeypatch.setattr(git_service, "_run", fake_run)
+        monkeypatch.setattr(git_service, "_DISCOVERY_SCAN_BUDGET_S", 0.05)
+
+        loop_advanced = asyncio.Event()
+
+        async def advance_loop():
+            await asyncio.sleep(0.01)
+            loop_advanced.set()
+
+        asyncio.create_task(advance_loop())
+        started_at = asyncio.get_running_loop().time()
+        try:
+            result = await asyncio.wait_for(
+                git_service.discover_repositories(str(tmp_path)), timeout=0.25
+            )
+        finally:
+            release.set()
+
+        assert asyncio.get_running_loop().time() - started_at < 0.25
+        assert blocked.is_set()
+        assert loop_advanced.is_set()
+        assert result == {
+            "ok": True,
+            "repositories": [
+                {"rel_path": ".", "abs_path": str(tmp_path), "branch": ""}
+            ],
+            "truncated": True,
+        }
+        assert await asyncio.to_thread(finished.wait, 1.0)
+
+    @pytest.mark.asyncio
+    async def test_scan_budget_returns_partial_repositories(self, tmp_path, monkeypatch):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "later").mkdir()
+        ticks = iter((0.0, 1.0, 1.0, 6.0))
+
+        class FakeTime:
+            @staticmethod
+            def monotonic():
+                return next(ticks)
+
+        async def fake_run(*_args, **_kwargs):
+            return 0, "main\n", ""
+
+        monkeypatch.setattr(git_service, "time", FakeTime())
+        monkeypatch.setattr(git_service, "_run", fake_run)
+
+        result = await git_service.discover_repositories(str(tmp_path))
+
+        assert result == {
+            "ok": True,
+            "repositories": [
+                {"rel_path": ".", "abs_path": str(tmp_path), "branch": "main"}
+            ],
+            "truncated": True,
+        }
 
     @pytest.mark.asyncio
     async def test_no_nested_repos(self, tmp_path):

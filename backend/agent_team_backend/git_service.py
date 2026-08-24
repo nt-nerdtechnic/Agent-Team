@@ -16,6 +16,7 @@ import secrets
 import shutil
 import stat
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -35,6 +36,7 @@ _MAX_DIFF_CHARS = 8_000  # truncate staged diff before sending to Ollama
 _COMMIT_SUMMARY_FILE_THRESHOLD = 30
 _COMMIT_SUMMARY_LINE_THRESHOLD = 1_200
 _COMMIT_SUMMARY_UNTRACKED_BYTES_THRESHOLD = 32_000
+_DISCOVERY_SCAN_BUDGET_S = 5.0
 
 # Only allow https/http and SSH-style URLs; block git pseudo-protocols (ext::, fd::, file://, etc.)
 _SAFE_GIT_URL = re.compile(r"^(https?://|ssh://|git@[\w.\-]+:)")
@@ -351,30 +353,25 @@ async def get_status(workspace_path: str, include_ignored: bool = False) -> dict
     return asdict(status)
 
 
-async def discover_repositories(
-    workspace_path: str, max_depth: int = 3, limit: int = 20
-) -> dict[str, Any]:
-    """Scan *workspace_path* for git repositories, including the root itself.
-
-    ``git rev-parse`` only searches UPWARD, so nested repos inside a projects
-    folder go undetected. This walks the tree — bounded by *max_depth* and
-    *limit*, skipping noise dirs — and returns every repo root found. A directory
-    is a repo root when it contains a ``.git`` entry (dir or file; worktrees and
-    submodules use a ``.git`` file).
-
-    The root is always checked first. If it is itself a repo it is listed as
-    ``rel_path: "."`` and scanning continues into its subtree to find nested repos.
-    Nested found repos are not descended into further.
-    """
+def _discover_repository_paths(
+    workspace_path: str,
+    max_depth: int,
+    limit: int,
+    repos: list[dict[str, str]],
+    stop_requested: threading.Event,
+    deadline: float,
+) -> tuple[bool, bool]:
     from .fs_service import _NOISE_SEGMENTS
 
     root = Path(workspace_path).resolve()
     if not root.is_dir():
-        return {"ok": False, "error": "workspace not found", "repositories": []}
+        return False, False
 
-    repos: list[dict[str, str]] = []
     truncated = False
     for dirpath, dirnames, _filenames in os.walk(root):
+        if stop_requested.is_set() or time.monotonic() >= deadline:
+            truncated = True
+            break
         dirnames[:] = [d for d in dirnames if d not in _NOISE_SEGMENTS and not d.startswith(".")]
         here = Path(dirpath)
         depth = len(here.relative_to(root).parts)
@@ -391,10 +388,67 @@ async def discover_repositories(
         if depth >= max_depth:
             dirnames[:] = []  # stop descending past the depth cap
 
+    return True, truncated
+
+
+async def discover_repositories(
+    workspace_path: str, max_depth: int = 3, limit: int = 20
+) -> dict[str, Any]:
+    """Scan *workspace_path* for git repositories, including the root itself.
+
+    ``git rev-parse`` only searches UPWARD, so nested repos inside a projects
+    folder go undetected. This walks the tree — bounded by *max_depth* and
+    *limit*, skipping noise dirs — and returns every repo root found. A directory
+    is a repo root when it contains a ``.git`` entry (dir or file; worktrees and
+    submodules use a ``.git`` file).
+
+    The root is always checked first. If it is itself a repo it is listed as
+    ``rel_path: "."`` and scanning continues into its subtree to find nested repos.
+    Nested found repos are not descended into further.
+    """
+    repos: list[dict[str, str]] = []
+    stop_requested = threading.Event()
+    deadline = time.monotonic() + _DISCOVERY_SCAN_BUDGET_S
+    scan_task = asyncio.create_task(
+        asyncio.to_thread(
+            _discover_repository_paths,
+            workspace_path,
+            max_depth,
+            limit,
+            repos,
+            stop_requested,
+            deadline,
+        )
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {scan_task}, timeout=max(0.0, deadline - time.monotonic())
+        )
+        if scan_task in done:
+            found, truncated = scan_task.result()
+            scan_timed_out = False
+        else:
+            stop_requested.set()
+            found, truncated = True, True
+            repos = list(repos)
+            scan_timed_out = True
+    finally:
+        if not scan_task.done():
+            stop_requested.set()
+            scan_task.add_done_callback(
+                lambda task: None if task.cancelled() else task.exception()
+            )
+
+    if not found:
+        return {"ok": False, "error": "workspace not found", "repositories": []}
+
     # Annotate each repo with its current branch (best-effort; empty on failure).
     for repo in repos:
-        rc, out, _ = await _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo["abs_path"])
-        repo["branch"] = out.strip() if rc == 0 else ""
+        if scan_timed_out:
+            repo["branch"] = ""
+        else:
+            rc, out, _ = await _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo["abs_path"])
+            repo["branch"] = out.strip() if rc == 0 else ""
 
     return {"ok": True, "repositories": repos, "truncated": truncated}
 
