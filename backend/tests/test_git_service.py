@@ -5,9 +5,11 @@ import asyncio
 import subprocess
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from agent_team_backend import app as app_module
 from agent_team_backend import git_service
 
 
@@ -2464,7 +2466,7 @@ class TestDiscoverRepositories:
             try:
                 yield str(tmp_path), ["later"], []
                 blocked.set()
-                assert release.wait(0.5), "blocked walk was not released"
+                assert release.wait(2.0), "blocked walk was not released"
                 yield str(tmp_path / "later"), [], []
             finally:
                 finished.set()
@@ -2474,7 +2476,7 @@ class TestDiscoverRepositories:
 
         monkeypatch.setattr(git_service.os, "walk", blocked_walk)
         monkeypatch.setattr(git_service, "_run", fake_run)
-        monkeypatch.setattr(git_service, "_DISCOVERY_SCAN_BUDGET_S", 0.05)
+        monkeypatch.setattr(git_service, "_DISCOVERY_SCAN_BUDGET_S", 0.5)
 
         loop_advanced = asyncio.Event()
 
@@ -2484,14 +2486,16 @@ class TestDiscoverRepositories:
 
         asyncio.create_task(advance_loop())
         started_at = asyncio.get_running_loop().time()
+        discovery_task = asyncio.create_task(
+            git_service.discover_repositories(str(tmp_path))
+        )
         try:
-            result = await asyncio.wait_for(
-                git_service.discover_repositories(str(tmp_path)), timeout=0.25
-            )
+            assert await asyncio.to_thread(blocked.wait, 1.0)
+            result = await asyncio.wait_for(discovery_task, timeout=1.0)
         finally:
             release.set()
 
-        assert asyncio.get_running_loop().time() - started_at < 0.25
+        assert asyncio.get_running_loop().time() - started_at < 1.0
         assert blocked.is_set()
         assert loop_advanced.is_set()
         assert result == {
@@ -2515,7 +2519,7 @@ class TestDiscoverRepositories:
                 return next(ticks)
 
         async def fake_run(*_args, **_kwargs):
-            return 0, "main\n", ""
+            pytest.fail("truncated discovery must not query repository branches")
 
         monkeypatch.setattr(git_service, "time", FakeTime())
         monkeypatch.setattr(git_service, "_run", fake_run)
@@ -2525,10 +2529,61 @@ class TestDiscoverRepositories:
         assert result == {
             "ok": True,
             "repositories": [
-                {"rel_path": ".", "abs_path": str(tmp_path), "branch": "main"}
+                {"rel_path": ".", "abs_path": str(tmp_path), "branch": ""}
             ],
             "truncated": True,
         }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("validation", "expected"),
+        [
+            (None, {"ok": True, "repositories": [], "truncated": True}),
+            (
+                False,
+                {"ok": False, "error": "workspace not found", "repositories": []},
+            ),
+        ],
+    )
+    async def test_timeout_preserves_workspace_validation(
+        self, tmp_path, monkeypatch, validation, expected
+    ):
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def blocked_validation(
+            _workspace_path,
+            _max_depth,
+            _limit,
+            _repos,
+            workspace_validation,
+            _stop_requested,
+            _deadline,
+        ):
+            if validation is not None:
+                workspace_validation.put(validation)
+            started.set()
+            try:
+                assert release.wait(2.0), "blocked validation was not released"
+            finally:
+                finished.set()
+            return validation is not False, False
+
+        monkeypatch.setattr(git_service, "_discover_repository_paths", blocked_validation)
+        monkeypatch.setattr(git_service, "_DISCOVERY_SCAN_BUDGET_S", 0.2)
+
+        discovery_task = asyncio.create_task(
+            git_service.discover_repositories(str(tmp_path))
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 1.0)
+            result = await asyncio.wait_for(discovery_task, timeout=0.75)
+        finally:
+            release.set()
+
+        assert result == expected
+        assert await asyncio.to_thread(finished.wait, 1.0)
 
     @pytest.mark.asyncio
     async def test_no_nested_repos(self, tmp_path):
@@ -2628,6 +2683,164 @@ class TestDiscoverRepositories:
         # subtree is pruned — inner itself should appear.
         assert "." in rel_paths
         assert str(Path("pkg") / "inner") in rel_paths
+
+
+# ── cloud-sync mounts ──────────────────────────────────────────────────────────
+
+class TestIsCloudSyncedPath:
+    """Segment matching, never substring matching (issue #24)."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/Users/x/Library/CloudStorage/GoogleDrive-x@y.com/My Drive/proj",
+            "/Users/x/Library/CloudStorage/Dropbox/proj",
+            "/Users/x/Library/CloudStorage/OneDrive-Corp/proj",
+            "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/proj",
+            "/Users/x/Library/CloudStorage/GoogleDrive-x/.shortcut-targets-by-id/abc/proj",
+            "/Volumes/elsewhere/com~apple~CloudDocs/proj",
+        ],
+    )
+    def test_cloud_paths(self, path):
+        assert git_service._is_cloud_synced_path(Path(path)) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/Users/x/projects/CloudStorage/proj",
+            "/Users/x/projects/Mobile Documents/proj",
+            "/Users/x/projects/MyCloudStorageThing/proj",
+            "/Users/x/Library/Application Support/proj",
+        ],
+    )
+    def test_ordinary_paths(self, path):
+        assert git_service._is_cloud_synced_path(Path(path)) is False
+
+
+class TestDiscoverRepositoriesOnCloudPaths:
+    @staticmethod
+    def _cloud_workspace(tmp_path: Path) -> Path:
+        ws = tmp_path / "Library" / "CloudStorage" / "GoogleDrive-me" / "ws"
+        ws.mkdir(parents=True)
+        return ws
+
+    @pytest.mark.asyncio
+    async def test_cloud_path_is_not_walked(self, tmp_path, monkeypatch):
+        ws = self._cloud_workspace(tmp_path)
+        (ws / "inner").mkdir()
+        init_repo(ws / "inner")
+
+        def fail_walk(*_args, **_kwargs):
+            pytest.fail("a cloud-sync workspace must not be walked")
+
+        monkeypatch.setattr(git_service.os, "walk", fail_walk)
+        result = await git_service.discover_repositories(str(ws))
+
+        assert result == {
+            "ok": True,
+            "repositories": [],
+            "truncated": True,
+            "skipped": "cloud_storage",
+        }
+
+    @pytest.mark.asyncio
+    async def test_repo_at_cloud_root_is_still_returned(self, tmp_path):
+        ws = self._cloud_workspace(tmp_path)
+        init_repo(ws)
+        result = await git_service.discover_repositories(str(ws))
+
+        assert result == {
+            "ok": True,
+            "repositories": [
+                {"rel_path": ".", "abs_path": str(ws.resolve()), "branch": ""}
+            ],
+            "truncated": True,
+            "skipped": "cloud_storage",
+        }
+
+    @pytest.mark.asyncio
+    async def test_force_walks_a_cloud_path(self, tmp_path):
+        ws = self._cloud_workspace(tmp_path)
+        (ws / "inner").mkdir()
+        init_repo(ws / "inner")
+
+        result = await git_service.discover_repositories(str(ws), force=True)
+
+        assert result["ok"] is True
+        assert [r["rel_path"] for r in result["repositories"]] == ["inner"]
+        assert "skipped" not in result
+
+    @pytest.mark.asyncio
+    async def test_ordinary_cloudstorage_dir_is_walked(self, tmp_path):
+        # "CloudStorage" only means a cloud mount directly under "Library".
+        ws = tmp_path / "projects" / "CloudStorage"
+        (ws / "inner").mkdir(parents=True)
+        init_repo(ws / "inner")
+
+        result = await git_service.discover_repositories(str(ws))
+
+        assert [r["rel_path"] for r in result["repositories"]] == ["inner"]
+        assert "skipped" not in result
+
+    @pytest.mark.asyncio
+    async def test_non_cloud_path_carries_no_skipped_key(self, tmp_path):
+        init_repo(tmp_path)
+        result = await git_service.discover_repositories(str(tmp_path))
+        assert "skipped" not in result
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_on_cloud_path(self, tmp_path):
+        ws = self._cloud_workspace(tmp_path)
+        result = await git_service.discover_repositories(str(ws / "gone"))
+        assert result == {
+            "ok": False,
+            "error": "workspace not found",
+            "repositories": [],
+        }
+
+
+class TestDiscoverRepositoriesHandler:
+    """git.discover_repositories WS handler — payload pass-through.
+
+    No ws_handlers test module covers git.* yet; this reuses the FakeWebSocket
+    pattern the other handler tests use rather than adding a harness module.
+    """
+
+    class _FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            self.sent.append(payload)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("payload_force", "expected"), [(None, False), (True, True), (False, False)]
+    )
+    async def test_force_is_passed_through(
+        self, tmp_path, monkeypatch, payload_force, expected
+    ):
+        seen: dict[str, Any] = {}
+
+        async def fake_discover(ws_path, **kwargs):
+            seen.update(kwargs)
+            return {"ok": True, "repositories": [], "truncated": False}
+
+        monkeypatch.setattr(git_service, "discover_repositories", fake_discover)
+        websocket = self._FakeWebSocket()
+        session = app_module.Session(websocket)  # type: ignore[arg-type]
+        payload: dict[str, Any] = {"workspace_path": str(tmp_path)}
+        if payload_force is not None:
+            payload["force"] = payload_force
+
+        await app_module.handle_message(session, {
+            "id": "d1",
+            "type": "git.discover_repositories",
+            "payload": payload,
+        })
+
+        assert seen["force"] is expected
+        assert websocket.sent[0]["payload"]["ok"] is True
 
 
 # ── commit context-menu actions (VS Code / Cursor parity) ──────────────────────

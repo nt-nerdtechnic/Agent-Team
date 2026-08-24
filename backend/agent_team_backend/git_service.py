@@ -11,6 +11,7 @@ import functools
 import json
 import logging
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -353,11 +354,83 @@ async def get_status(workspace_path: str, include_ignored: bool = False) -> dict
     return asdict(status)
 
 
+#: Path segments that only ever appear inside a cloud-sync provider's mount.
+_CLOUD_SEGMENTS = (".shortcut-targets-by-id", "com~apple~CloudDocs")
+#: Segments that mean "cloud mount" only directly under a ``Library`` segment,
+#: so an ordinary project folder named e.g. ``CloudStorage`` is not caught.
+_CLOUD_LIBRARY_SEGMENTS = ("CloudStorage", "Mobile Documents")
+
+
+def _is_cloud_synced_path(root: Path) -> bool:
+    """True when *root* sits inside a cloud-sync provider mount.
+
+    Google Drive, Dropbox, OneDrive and iCloud Drive expose their trees through
+    macOS File Provider domains whose ``readdir()`` can block for minutes while
+    the provider materializes a directory — long enough to freeze a whole tree
+    walk (issue #24).
+
+    Deliberately no ``os.statvfs``/statfs mount-type probe: those providers are
+    File Provider domains living on the local APFS volume, so statfs reports
+    them as local and the probe would be dead code. Python's stdlib exposes no
+    filesystem type either, and the backend carries no psutil dependency (see
+    backend/pyproject.toml) — path segments are the only signal available.
+
+    Matching is on whole path segments, never substrings.
+    """
+    parts = root.parts
+    for index, segment in enumerate(parts):
+        if segment in _CLOUD_SEGMENTS:
+            return True
+        if segment in _CLOUD_LIBRARY_SEGMENTS and index > 0 and parts[index - 1] == "Library":
+            return True
+    return False
+
+
+def _discover_workspace(
+    workspace_path: str,
+    max_depth: int,
+    limit: int,
+    repos: list[dict[str, str]],
+    workspace_validation: queue.SimpleQueue[bool],
+    stop_requested: threading.Event,
+    deadline: float,
+    force: bool,
+) -> tuple[bool, bool, bool]:
+    """Cloud-mount preflight, then the tree walk. Returns (found, truncated, skipped).
+
+    Runs entirely on a worker thread: ``Path.resolve()`` and the root ``.git``
+    stat are real syscalls that hang for minutes on a stalled cloud mount, so
+    none of them may run on the event loop.
+    """
+    if not force:
+        try:
+            root = Path(workspace_path).resolve()
+        except OSError:
+            workspace_validation.put(False)
+            return False, False, False
+        if _is_cloud_synced_path(root):
+            if not root.is_dir():
+                workspace_validation.put(False)
+                return False, False, False
+            workspace_validation.put(True)
+            # No tree walk here, but a repo sitting directly on the mount must
+            # keep working — one stat for the root is cheap enough to risk.
+            if (root / ".git").exists():
+                repos.append({"rel_path": ".", "abs_path": str(root)})
+            return True, True, True
+
+    found, truncated = _discover_repository_paths(
+        workspace_path, max_depth, limit, repos, workspace_validation, stop_requested, deadline
+    )
+    return found, truncated, False
+
+
 def _discover_repository_paths(
     workspace_path: str,
     max_depth: int,
     limit: int,
     repos: list[dict[str, str]],
+    workspace_validation: queue.SimpleQueue[bool],
     stop_requested: threading.Event,
     deadline: float,
 ) -> tuple[bool, bool]:
@@ -365,7 +438,9 @@ def _discover_repository_paths(
 
     root = Path(workspace_path).resolve()
     if not root.is_dir():
+        workspace_validation.put(False)
         return False, False
+    workspace_validation.put(True)
 
     truncated = False
     for dirpath, dirnames, _filenames in os.walk(root):
@@ -392,7 +467,7 @@ def _discover_repository_paths(
 
 
 async def discover_repositories(
-    workspace_path: str, max_depth: int = 3, limit: int = 20
+    workspace_path: str, max_depth: int = 3, limit: int = 20, force: bool = False
 ) -> dict[str, Any]:
     """Scan *workspace_path* for git repositories, including the root itself.
 
@@ -405,52 +480,66 @@ async def discover_repositories(
     The root is always checked first. If it is itself a repo it is listed as
     ``rel_path: "."`` and scanning continues into its subtree to find nested repos.
     Nested found repos are not descended into further.
+
+    A workspace on a cloud-sync mount is not walked at all unless *force* — see
+    ``_is_cloud_synced_path`` — and comes back as ``skipped: "cloud_storage"``.
     """
     repos: list[dict[str, str]] = []
+    workspace_validation: queue.SimpleQueue[bool] = queue.SimpleQueue()
     stop_requested = threading.Event()
     deadline = time.monotonic() + _DISCOVERY_SCAN_BUDGET_S
     scan_task = asyncio.create_task(
         asyncio.to_thread(
-            _discover_repository_paths,
+            _discover_workspace,
             workspace_path,
             max_depth,
             limit,
             repos,
+            workspace_validation,
             stop_requested,
             deadline,
+            force,
         )
+    )
+    scan_task.add_done_callback(
+        lambda task: None if task.cancelled() else task.exception()
     )
     try:
         done, _pending = await asyncio.wait(
             {scan_task}, timeout=max(0.0, deadline - time.monotonic())
         )
         if scan_task in done:
-            found, truncated = scan_task.result()
-            scan_timed_out = False
+            found, truncated, skipped_cloud = scan_task.result()
         else:
             stop_requested.set()
-            found, truncated = True, True
+            skipped_cloud = False
+            try:
+                found = workspace_validation.get_nowait()
+            except queue.Empty:
+                # Validation itself exceeded the budget. Preserve the successful,
+                # truncated response shape without claiming the workspace is missing.
+                found = True
+            truncated = True
             repos = list(repos)
-            scan_timed_out = True
     finally:
         if not scan_task.done():
             stop_requested.set()
-            scan_task.add_done_callback(
-                lambda task: None if task.cancelled() else task.exception()
-            )
 
     if not found:
         return {"ok": False, "error": "workspace not found", "repositories": []}
 
     # Annotate each repo with its current branch (best-effort; empty on failure).
     for repo in repos:
-        if scan_timed_out:
+        if truncated:
             repo["branch"] = ""
         else:
             rc, out, _ = await _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo["abs_path"])
             repo["branch"] = out.strip() if rc == 0 else ""
 
-    return {"ok": True, "repositories": repos, "truncated": truncated}
+    result: dict[str, Any] = {"ok": True, "repositories": repos, "truncated": truncated}
+    if skipped_cloud:
+        result["skipped"] = "cloud_storage"
+    return result
 
 
 async def get_log(

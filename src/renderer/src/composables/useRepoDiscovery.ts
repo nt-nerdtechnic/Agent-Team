@@ -1,6 +1,6 @@
 import { ref, watch, onScopeDispose } from 'vue'
 import type { useBackend } from './useBackend'
-import type { DiscoveredRepo, GitStatus } from './useGit'
+import type { DiscoveredRepo, DiscoverReposResponse, GitStatus } from './useGit'
 
 export interface RepoBadge {
   branch: string
@@ -17,22 +17,30 @@ export function useRepoDiscovery(
 ) {
   const { send, on } = backend
   const repositories = ref<DiscoveredRepoWithBadge[]>([])
+  // True when the backend skipped the downward scan because the workspace lives
+  // on a cloud-synced folder (walking it can block for minutes). Only a user
+  // triggered forced scan clears it — nothing retries automatically.
+  const discoverySkipped = ref(false)
 
-  async function refresh(): Promise<void> {
+  // `force` makes the backend walk the tree even on a cloud-synced path. Pass it
+  // only from an explicit user action — the walk is what wedged the backend.
+  async function refresh(force = false): Promise<void> {
     const ws = workspacePath()
     if (!ws) {
       repositories.value = []
+      discoverySkipped.value = false
       return
     }
 
     let discovered: DiscoveredRepo[] = []
     try {
-      const resp = await send<{ ok: boolean; repositories: DiscoveredRepo[] }>(
+      const resp = await send<DiscoverReposResponse>(
         'git.discover_repositories',
-        { workspace_path: ws },
+        { workspace_path: ws, force },
       )
       if (!resp.ok || !resp.payload?.ok || workspacePath() !== ws) return
       discovered = resp.payload.repositories ?? []
+      discoverySkipped.value = resp.payload.skipped === 'cloud_storage'
     } catch {
       return
     }
@@ -92,5 +100,5 @@ export function useRepoDiscovery(
     if (_timer !== null) clearTimeout(_timer)
   })
 
-  return { repositories, refresh }
+  return { repositories, discoverySkipped, refresh }
 }

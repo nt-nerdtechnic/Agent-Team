@@ -497,6 +497,96 @@ describe('useGit', () => {
     scope.stop()
   })
 
+  describe('cloud-synced workspaces (skipped discovery)', () => {
+    const SKIPPED_RESP = {
+      ok: true,
+      repositories: [],
+      truncated: true,
+      skipped: 'cloud_storage',
+    }
+
+    function discoverCalls(mock: ReturnType<typeof createMockBackend>) {
+      return mock.sent.filter(s => s.type === 'git.discover_repositories')
+    }
+
+    function mockNonRepo() {
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.status', { is_git_repo: false })
+      mock.setResponse('git.log', { commits: [] })
+      return mock
+    }
+
+    it('leaves discoverySkipped false on a normal response', async () => {
+      const mock = mockNonRepo()
+      mock.setResponse('git.discover_repositories', {
+        ok: true,
+        repositories: [{ rel_path: 'a', abs_path: '/tmp/test-workspace/a', branch: 'main' }],
+      })
+
+      const { result, scope } = withScope(() => useGit(() => WS, mock.backend))
+      await flush()
+
+      expect(result.discoverySkipped.value).toBe(false)
+      expect(discoverCalls(mock)[0].payload.force).toBe(false)
+      scope.stop()
+    })
+
+    it('sets discoverySkipped and yields the root-only list when the backend skips', async () => {
+      const mock = mockNonRepo()
+      mock.setResponse('git.discover_repositories', {
+        ...SKIPPED_RESP,
+        repositories: [{ rel_path: '.', abs_path: WS, branch: 'main' }],
+      })
+
+      const { result, scope } = withScope(() => useGit(() => WS, mock.backend))
+      await flush()
+
+      expect(result.discoverySkipped.value).toBe(true)
+      expect(result.discoveredRepos.value).toHaveLength(1)
+      expect(result.discoveredRepos.value[0].rel_path).toBe('.')
+      scope.stop()
+    })
+
+    it('sends force: true only for an explicit forced scan, and clears the flag', async () => {
+      const mock = mockNonRepo()
+      mock.setResponse('git.discover_repositories', SKIPPED_RESP)
+
+      const { result, scope } = withScope(() => useGit(() => WS, mock.backend))
+      await flush()
+      expect(result.discoverySkipped.value).toBe(true)
+
+      mock.setResponse('git.discover_repositories', {
+        ok: true,
+        repositories: [{ rel_path: 'a', abs_path: '/tmp/test-workspace/a', branch: 'main' }],
+      })
+      await result.discoverRepositories(true)
+
+      const calls = discoverCalls(mock)
+      expect(calls[0].payload.force).toBe(false)
+      expect(calls[1].payload.force).toBe(true)
+      expect(result.discoverySkipped.value).toBe(false)
+      expect(result.discoveredRepos.value).toHaveLength(1)
+      scope.stop()
+    })
+
+    it('does not force when loadStatus re-discovers', async () => {
+      const mock = mockNonRepo()
+      mock.setResponse('git.discover_repositories', SKIPPED_RESP)
+
+      const { result, scope } = withScope(() => useGit(() => WS, mock.backend))
+      await flush()
+
+      await result.loadStatus()
+      await flush()
+
+      const calls = discoverCalls(mock)
+      expect(calls.length).toBeGreaterThan(1)
+      expect(calls.every(c => c.payload.force === false)).toBe(true)
+      expect(result.discoverySkipped.value).toBe(true)
+      scope.stop()
+    })
+  })
+
   describe('credential prompt (askpass)', () => {
     it('pairs the independent Username/Password requests by host', async () => {
       const mock = createMockBackend('connected')

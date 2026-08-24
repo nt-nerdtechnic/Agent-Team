@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { ref } from 'vue'
 import { createMockBackend, withScope, flush } from './mockBackend'
 import { useRepoDiscovery } from '../useRepoDiscovery'
 import type { GitStatus } from '../useGit'
@@ -232,5 +233,131 @@ describe('useRepoDiscovery', () => {
     await result.refresh()
     expect(result.repositories.value).toHaveLength(0)
     scope.stop()
+  })
+
+  describe('cloud-synced workspaces (skipped discovery)', () => {
+    function discoverCalls(mock: ReturnType<typeof createMockBackend>) {
+      return mock.sent.filter((s) => s.type === 'git.discover_repositories')
+    }
+
+    it('leaves discoverySkipped false on a normal response', async () => {
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.discover_repositories', makeDiscoverResp([
+        { rel_path: 'a', abs_path: '/ws/a', branch: 'main' },
+      ]))
+      mock.setResponse('git.status', { ...EMPTY_STATUS })
+
+      const { result, scope } = withScope(() =>
+        useRepoDiscovery(() => '/ws', mock.backend),
+      )
+      await flush()
+
+      expect(result.discoverySkipped.value).toBe(false)
+      expect(discoverCalls(mock)[0].payload.force).toBe(false)
+      scope.stop()
+    })
+
+    it('sets discoverySkipped and keeps the root-only list when the backend skips', async () => {
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.discover_repositories', {
+        ok: true,
+        repositories: [{ rel_path: '.', abs_path: '/ws', branch: 'main' }],
+        truncated: true,
+        skipped: 'cloud_storage',
+      })
+      mock.setResponse('git.status', { ...EMPTY_STATUS, branch: 'main' })
+
+      const { result, scope } = withScope(() =>
+        useRepoDiscovery(() => '/ws', mock.backend),
+      )
+      await flush()
+
+      expect(result.discoverySkipped.value).toBe(true)
+      expect(result.repositories.value).toHaveLength(1)
+      expect(result.repositories.value[0].rel_path).toBe('.')
+      scope.stop()
+    })
+
+    it('sends force: true only for an explicit forced refresh, and clears the flag', async () => {
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.discover_repositories', {
+        ok: true,
+        repositories: [],
+        truncated: true,
+        skipped: 'cloud_storage',
+      })
+      mock.setResponse('git.status', { ...EMPTY_STATUS })
+
+      const { result, scope } = withScope(() =>
+        useRepoDiscovery(() => '/ws', mock.backend),
+      )
+      await flush()
+      expect(result.discoverySkipped.value).toBe(true)
+
+      mock.setResponse('git.discover_repositories', makeDiscoverResp([
+        { rel_path: 'a', abs_path: '/ws/a', branch: 'main' },
+        { rel_path: 'b', abs_path: '/ws/b', branch: 'feat' },
+      ]))
+      await result.refresh(true)
+
+      const calls = discoverCalls(mock)
+      expect(calls[0].payload.force).toBe(false)
+      expect(calls[1].payload.force).toBe(true)
+      expect(result.discoverySkipped.value).toBe(false)
+      expect(result.repositories.value).toHaveLength(2)
+      scope.stop()
+    })
+
+    it('does not force on git.changed re-discovery', async () => {
+      vi.useFakeTimers()
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.discover_repositories', {
+        ok: true,
+        repositories: [],
+        truncated: true,
+        skipped: 'cloud_storage',
+      })
+      mock.setResponse('git.status', { ...EMPTY_STATUS })
+
+      const { result, scope } = withScope(() =>
+        useRepoDiscovery(() => '/ws', mock.backend),
+      )
+      await vi.runAllTimersAsync()
+
+      mock.emit('git.changed', { workspace_path: '/ws' })
+      await vi.runAllTimersAsync()
+
+      const calls = discoverCalls(mock)
+      expect(calls.length).toBeGreaterThan(1)
+      expect(calls.every((c) => c.payload.force === false)).toBe(true)
+      expect(result.discoverySkipped.value).toBe(true)
+      scope.stop()
+    })
+
+    it('does not force on a workspace switch', async () => {
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.discover_repositories', {
+        ok: true,
+        repositories: [],
+        truncated: true,
+        skipped: 'cloud_storage',
+      })
+      mock.setResponse('git.status', { ...EMPTY_STATUS })
+
+      const ws = ref('/ws')
+      const { scope } = withScope(() =>
+        useRepoDiscovery(() => ws.value, mock.backend),
+      )
+      await flush()
+
+      ws.value = '/ws2'
+      await flush()
+
+      const calls = discoverCalls(mock)
+      expect(calls.length).toBe(2)
+      expect(calls[1].payload.workspace_path).toBe('/ws2')
+      expect(calls.every((c) => c.payload.force === false)).toBe(true)
+      scope.stop()
+    })
   })
 })

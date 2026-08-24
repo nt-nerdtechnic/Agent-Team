@@ -26,6 +26,15 @@ export interface DiscoveredRepo {
   branch: string
 }
 
+export interface DiscoverReposResponse {
+  ok: boolean
+  repositories: DiscoveredRepo[]
+  truncated?: boolean
+  // Present only when the backend declined to walk the tree. On a cloud-synced
+  // folder each readdir() can block for minutes, so the scan is opt-in.
+  skipped?: 'cloud_storage'
+}
+
 export type IgnoreTarget = 'project' | 'nested' | 'local' | 'global'
 
 export interface CheckIgnoreResult {
@@ -194,6 +203,10 @@ export function useGit(
   const gitStatus = ref<GitStatus>(emptyStatus())
   // Nested git repos found by scanning downward when the root is NOT a repo.
   const discoveredRepos = ref<DiscoveredRepo[]>([])
+  // True when the backend skipped the downward scan because the workspace lives
+  // on a cloud-synced folder (walking it can block for minutes). Only a user
+  // triggered forced scan clears it — nothing retries automatically.
+  const discoverySkipped = ref(false)
   const showIgnored = ref(false)
   const gitLog = ref<GitCommit[]>([])
   // History view scope (SourceTree-style): 'all' shows every branch's commits as
@@ -278,19 +291,23 @@ export function useGit(
     }
   }
 
-  async function discoverRepositories(): Promise<void> {
+  // `force` makes the backend walk the tree even on a cloud-synced path. Pass it
+  // only from an explicit user action — the walk is what wedged the backend.
+  async function discoverRepositories(force = false): Promise<void> {
     const ws = workspacePath()
     if (!ws) {
       discoveredRepos.value = []
+      discoverySkipped.value = false
       return
     }
     try {
-      const resp = await send<{ ok: boolean; repositories: DiscoveredRepo[] }>(
+      const resp = await send<DiscoverReposResponse>(
         'git.discover_repositories',
-        { workspace_path: ws },
+        { workspace_path: ws, force },
       )
       if (resp.ok && resp.payload?.ok && workspacePath() === ws) {
         discoveredRepos.value = resp.payload.repositories ?? []
+        discoverySkipped.value = resp.payload.skipped === 'cloud_storage'
       }
     } catch {
       // transient WS error — leave previous list untouched
@@ -1694,7 +1711,7 @@ export function useGit(
 
   return {
     // state
-    gitStatus, discoveredRepos, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
+    gitStatus, discoveredRepos, discoverySkipped, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
     gitWorktrees, gitConfig,
     logScope, logOrder, logLimit, canLoadMoreLog,
     isLoadingStatus, isLoadingLog, isInitializing,

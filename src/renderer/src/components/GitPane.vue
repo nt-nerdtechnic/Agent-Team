@@ -53,7 +53,7 @@ function openBranchDiffTab(base = 'main'): void {
 }
 
 const {
-  gitStatus, loadStatus, discoveredRepos, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
+  gitStatus, loadStatus, discoveredRepos, discoverySkipped, discoverRepositories, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
   gitWorktrees, gitConfig, gitConfigAllowedKeys,
   isCommitting, isGenerating, isInitializing,
   syncOutput, syncError, gitError, clearGitError,
@@ -441,6 +441,20 @@ async function doInitInFolder(): Promise<void> {
   const r = await initRepo(true, picked)
   if (!r.ok) { initError.value = r.error || 'git init failed'; return }
   emit('open-workspace', picked)
+}
+
+// ── forced repo discovery ───────────────────────────────────────────────────────
+// Only reachable from the button below: on a cloud-synced folder the backend
+// skips the downward scan, and walking it anyway can take minutes.
+const forcingScan = ref(false)
+async function doForceScan(): Promise<void> {
+  if (forcingScan.value) return
+  forcingScan.value = true
+  try {
+    await discoverRepositories(true)
+  } finally {
+    forcingScan.value = false
+  }
 }
 
 // ── clone ───────────────────────────────────────────────────────────────────────
@@ -1561,6 +1575,15 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           {{ connecting ? $t('label.connecting') : $t('action.connect-to-remote') }}
         </button>
         <p v-if="connectError" class="err-text">{{ connectError }}</p>
+      </div>
+
+      <!-- Downward scan skipped: cloud-synced folder, user must opt in -->
+      <div v-if="discoverySkipped && !props.hideDiscoveredRepos" class="discovered-box">
+        <div class="clone-title">{{ $t('label.discovery-skipped-title') }}</div>
+        <div class="clone-hint">{{ $t('label.discovery-skipped-hint') }}</div>
+        <button class="btn-ghost w-full" style="font-size:11px" :disabled="forcingScan" @click="doForceScan">
+          {{ forcingScan ? $t('label.scanning-repos') : $t('action.scan-repos-anyway') }}
+        </button>
       </div>
 
       <!-- Nested repos found by scanning downward (git rev-parse only looks up) -->
