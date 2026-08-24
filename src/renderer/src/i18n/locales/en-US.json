@@ -1945,7 +1945,8 @@
     "editor-cursor": "Cursor",
     "editor-custom": "Custom command…",
     "preview": "Preview",
-    "spawned-by-agent": "Spawned by an agent"
+    "spawned-by-agent": "Spawned by an agent",
+    "open-in-its-window": "Open in its own window"
   },
   "layout": {
     "expand": "Expand panel",

@@ -1945,7 +1945,8 @@
     "editor-cursor": "Cursor",
     "editor-custom": "自訂命令…",
     "preview": "預覽",
-    "spawned-by-agent": "由 agent 建立"
+    "spawned-by-agent": "由 agent 建立",
+    "open-in-its-window": "在它所屬的視窗開啟"
   },
   "layout": {
     "expand": "展開面板",

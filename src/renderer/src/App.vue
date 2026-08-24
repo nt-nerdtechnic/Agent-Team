@@ -1499,6 +1499,10 @@ function mirrorMessagingHandle(pane: ActivePane): void {
       former_pane_ids: pane.formerPaneIds ?? [],
     })
     .catch(() => { /* local messaging is unaffected */ })
+  // The sidebar's other-workspace rows come from this registry, so refresh
+  // once our own entry has landed. Other windows pick the change up when they
+  // next regain focus.
+  void refreshWorkspaceRoster()
 }
 
 /** keepPersisted: pane handed off to another window (detach) — it re-registers
@@ -1509,6 +1513,7 @@ function unregisterPaneMessaging(paneId: string, opts: { keepPersisted?: boolean
   pushReadyPanes.delete(paneId)
   pushCooldownUntil.delete(paneId)
   backend.send('agent_msg.unregister', { pane_id: paneId }).catch(() => { /* best effort */ })
+  void refreshWorkspaceRoster()
   if (!opts.keepPersisted) dropPersistedMessagingName(paneId)
 }
 
@@ -2412,6 +2417,16 @@ function onPaneFirstOutput(paneId: string): void {
 
 let _syncViewsTimer: number | null = null
 onMounted(() => { _syncViewsTimer = window.setInterval(syncViews, 400) })
+
+// Cross-workspace roster: refresh on the events that can change it rather than
+// on a timer. Regaining focus is when another window's spawns become worth
+// showing; this window's own spawns and kills are handled where they happen.
+onMounted(() => {
+  if (isDetachedWindow) return
+  void refreshWorkspaceRoster()
+  window.addEventListener('focus', refreshWorkspaceRoster)
+})
+onUnmounted(() => window.removeEventListener('focus', refreshWorkspaceRoster))
 onUnmounted(() => {
   if (_syncViewsTimer !== null) clearInterval(_syncViewsTimer)
   window.removeEventListener('resize', onWindowResize)
@@ -11187,6 +11202,37 @@ const {
  *  tree at that rate; status and badges stay in paneViews and are looked up
  *  per row by the consumer. Same split as StageTabBar's structure/status
  *  computeds, and for the same reason. */
+/** One live pane anywhere on this machine, as the backend messaging registry
+ *  sees it. Panes outside this window's workspace are only ever known through
+ *  this — the window has no terminal for them and no status of its own. */
+interface RosterPane {
+  pane_id: string
+  name: string
+  workspace_path: string
+  workspace_label: string
+  agent_key: string
+  busy: boolean
+  offline: boolean
+}
+
+/** Live panes across every workspace, not just this window's.
+ *
+ *  The registry is already there and already global: agent_msg.list with no
+ *  workspace_path returns every registered pane, which is what makes a sidebar
+ *  that lists more than one project possible without a new backend surface.
+ *
+ *  Deliberately NOT polled. It refreshes on the events that can change it —
+ *  this window spawning or closing a pane, and the window regaining focus
+ *  (which is when another window's changes become worth showing). A timer here
+ *  would run against a list the user is usually not looking at. */
+const crossWorkspaceRoster = ref<RosterPane[]>([])
+
+async function refreshWorkspaceRoster(): Promise<void> {
+  if (isDetachedWindow) return
+  const resp = await sendQuiet<{ panes: RosterPane[] }>('agent_msg.list', {})
+  if (resp) crossWorkspaceRoster.value = Array.isArray(resp.panes) ? resp.panes : []
+}
+
 const paneLineage = computed<PaneLineageRow[]>(() => {
   const ids = new Set(panes.value.map((p) => p.id))
   // A parent that is no longer present (closed in another window, or a record
@@ -11215,6 +11261,97 @@ const paneLineage = computed<PaneLineageRow[]>(() => {
   // root rather than dropping it off the list entirely.
   for (const p of panes.value) {
     if (!seen.has(p.id)) rows.push({ id: p.id, depth: 0, hasChildren: false, collapsed: false })
+  }
+  return rows
+})
+
+/** Workspaces that have been folded shut in the sidebar. Per window and not
+ *  persisted: which projects you want out of the way is a property of the view
+ *  you are looking at, not of the project. */
+const collapsedWorkspaces = ref<Set<string>>(new Set())
+
+/** Bring another workspace's window to the front.
+ *
+ *  Every pane in these rows lives in a window that already has it open — the
+ *  roster only lists registered panes — so focusing that window is the whole
+ *  operation. Deliberately NOT switching this window to that workspace: two
+ *  windows on one folder would run two sets of PTY and git operations on it,
+ *  which is what focusWorkspaceWindow exists to prevent. */
+async function revealWorkspace(path: string): Promise<void> {
+  if (!path || path === currentWorkspace.value) return
+  const focused = await window.agentTeam?.focusWorkspaceWindow?.(path)
+  if (!focused) {
+    // The window went away between the roster snapshot and this click.
+    void refreshWorkspaceRoster()
+  }
+}
+
+function toggleWorkspaceCollapsed(path: string): void {
+  const next = new Set(collapsedWorkspaces.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  collapsedWorkspaces.value = next
+}
+
+/** The sidebar's outer layer: one row per workspace, this window's first.
+ *
+ *  STRUCTURE LAYER, like paneLineage — it reads ids, paths and the roster, not
+ *  paneViews, so the 400ms status sync does not rebuild it. The list renders
+ *  these rows and looks each pane's status up separately.
+ *
+ *  This window's own workspace carries lineage rows (it owns those terminals
+ *  and knows everything about them). Every other workspace carries roster
+ *  entries instead: a name, an agent and a busy flag, which is all the registry
+ *  can say about a pane living in another window. */
+interface WorkspaceGroupRow {
+  path: string
+  label: string
+  isCurrent: boolean
+  collapsed: boolean
+  count: number
+  lineage: PaneLineageRow[]
+  remote: RosterPane[]
+}
+
+const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
+  const here = currentWorkspace.value
+  const rows: WorkspaceGroupRow[] = []
+
+  const mine = paneLineage.value
+  if (here) {
+    rows.push({
+      path: here,
+      label: here.split('/').filter(Boolean).pop() ?? here,
+      isCurrent: true,
+      collapsed: collapsedWorkspaces.value.has(here),
+      count: panes.value.length,
+      lineage: mine,
+      remote: []
+    })
+  }
+
+  // Panes this window already renders must not appear twice, and neither must
+  // a pane whose workspace is the one we are in — the roster does not know
+  // this window from any other.
+  const localIds = new Set(panes.value.map((p) => p.id))
+  const byWorkspace = new Map<string, RosterPane[]>()
+  for (const entry of crossWorkspaceRoster.value) {
+    const path = entry.workspace_path
+    if (!path || path === here || localIds.has(entry.pane_id)) continue
+    const bucket = byWorkspace.get(path)
+    if (bucket) bucket.push(entry)
+    else byWorkspace.set(path, [entry])
+  }
+  for (const [path, entries] of byWorkspace) {
+    rows.push({
+      path,
+      label: entries[0]?.workspace_label || path.split('/').filter(Boolean).pop() || path,
+      isCurrent: false,
+      collapsed: collapsedWorkspaces.value.has(path),
+      count: entries.length,
+      lineage: [],
+      remote: entries
+    })
   }
   return rows
 })
@@ -12565,6 +12702,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :stages="stagesApi.stages.value"
       :panes="paneViews"
       :lineage="paneLineage"
+      :workspaces="workspaceGroups"
       :pipeline="pipelineView"
       :existing-project="existingProject"
       :workspace="currentWorkspace"
@@ -12586,6 +12724,9 @@ function paneIsCommander(p: ActivePane): boolean {
       @kill="onKill"
       @minimize="minimizePane"
       @toggle-collapsed="togglePaneCollapsed"
+      @toggle-workspace="toggleWorkspaceCollapsed"
+      @reveal-workspace="revealWorkspace"
+      @add-in-workspace="revealWorkspace"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
       @reinject="onReinject"

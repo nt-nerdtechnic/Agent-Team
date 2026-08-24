@@ -71,6 +71,33 @@ export interface PaneLineageRow {
   collapsed: boolean
 }
 
+/** A pane living in another window's workspace, as the backend registry sees
+ *  it. There is no terminal for it here, so there is no status beyond busy. */
+export interface RemotePaneRow {
+  pane_id: string
+  name: string
+  workspace_path: string
+  agent_key: string
+  busy: boolean
+  offline: boolean
+}
+
+/** One workspace section of the sidebar.
+ *
+ *  `isCurrent` marks the one this window owns: only that section has real
+ *  panes with live status, lineage and every per-pane control. The others are
+ *  registry rows — enough to see that work is running elsewhere and to jump to
+ *  it, and nothing more. */
+export interface WorkspaceGroupRow {
+  path: string
+  label: string
+  isCurrent: boolean
+  collapsed: boolean
+  count: number
+  lineage: PaneLineageRow[]
+  remote: RemotePaneRow[]
+}
+
 export interface ActivePaneView {
   id: string
   agentKey: string
@@ -263,6 +290,9 @@ interface Props {
    *  Omitted or empty renders the flat list unchanged, so every other consumer
    *  of this component keeps working. */
   lineage?: PaneLineageRow[]
+  /** Workspace sections, this window's first. Omitted renders the flat list —
+   *  which is what every other mount of this component gets. */
+  workspaces?: WorkspaceGroupRow[]
   /** View ids assigned to this slot, in tab order. Omitted means "all of
    *  them" — the layout store supplies the real list. A view moved to another
    *  slot disappears from here, which is what keeps it a singleton. */
@@ -294,6 +324,19 @@ const orderedPanes = computed(() => {
   }
   return out
 })
+
+/** This window's own workspace section, or null when the caller passed none.
+ *  It always renders first and is the only one with live panes. */
+const currentWorkspaceRow = computed<WorkspaceGroupRow | null>(
+  () => props.workspaces?.find((w) => w.isCurrent) ?? null
+)
+
+/** Every other workspace with something running in it. These rows come from
+ *  the messaging registry, so they carry a name and a busy flag and nothing
+ *  else — this window has no terminal for them. */
+const otherWorkspaceRows = computed<WorkspaceGroupRow[]>(
+  () => props.workspaces?.filter((w) => !w.isCurrent) ?? []
+)
 
 // Build tag injected at build time (electron.vite.config.ts) so the header
 // shows exactly which build is running — avoids confusion over which version
@@ -348,6 +391,13 @@ const emit = defineEmits<{
   /** Fold/unfold this pane's lineage subtree. App owns the state so every
    *  list stays in step and the choice can be persisted. */
   (e: 'toggle-collapsed', paneId: string): void
+  /** Fold/unfold a whole workspace section. */
+  (e: 'toggle-workspace', path: string): void
+  /** Bring a workspace to the front — focus its window if one has it open,
+   *  otherwise open it. */
+  (e: 'reveal-workspace', path: string): void
+  /** Open a new agent in a workspace that is not this window's. */
+  (e: 'add-in-workspace', path: string): void
   (e: 'interrupt', paneId: string): void
   (e: 'reinject', paneId: string): void
   (e: 'rebuild', paneId: string): void
@@ -1323,8 +1373,19 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       </div>
       <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
       <ul v-else class="agent-list">
+        <li v-if="currentWorkspaceRow" class="ws-head ws-head--current">
+          <button
+            class="ws-caret"
+            :title="currentWorkspaceRow.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
+            @click.stop="emit('toggle-workspace', currentWorkspaceRow.path)"
+          >{{ currentWorkspaceRow.collapsed ? '›' : '⌄' }}</button>
+          <span class="ws-icon">🗀</span>
+          <span class="ws-name" :title="currentWorkspaceRow.path">{{ currentWorkspaceRow.label }}</span>
+          <span class="ws-count">{{ currentWorkspaceRow.count }}</span>
+        </li>
         <li
           v-for="{ pane: p, depth, hasChildren, collapsed: folded } in orderedPanes"
+          v-show="!currentWorkspaceRow?.collapsed"
           :key="p.id"
           class="agent-item"
           :style="depth ? { marginLeft: depth * 13 + 'px' } : undefined"
@@ -1420,6 +1481,36 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             </div>
           </template>
         </li>
+        <!-- Workspaces open in another window. The registry knows their name,
+             agent and busy flag; everything else needs the window that owns
+             them, which is what clicking a row goes to. -->
+        <template v-for="ws in otherWorkspaceRows" :key="ws.path">
+          <li class="ws-head">
+            <button
+              class="ws-caret"
+              :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
+              @click.stop="emit('toggle-workspace', ws.path)"
+            >{{ ws.collapsed ? '›' : '⌄' }}</button>
+            <span class="ws-icon">🗀</span>
+            <span class="ws-name" :title="ws.path" @click="emit('reveal-workspace', ws.path)">{{ ws.label }}</span>
+            <span class="ws-count">{{ ws.count }}</span>
+            <button class="ws-add" :title="$t('action.add-to-grid')" @click.stop="emit('add-in-workspace', ws.path)">＋</button>
+          </li>
+          <li
+            v-for="r in ws.remote"
+            v-show="!ws.collapsed"
+            :key="r.pane_id"
+            class="agent-item remote-item"
+            :title="$t('label.open-in-its-window')"
+            @click="emit('reveal-workspace', ws.path)"
+          >
+            <div class="agent-line">
+              <span class="status-dot" :data-state="r.offline ? 'error' : (r.busy ? 'running' : 'idle')"></span>
+              <span class="agent-name">{{ r.name }}</span>
+              <span class="agent-sub">{{ r.agent_key }}</span>
+            </div>
+          </li>
+        </template>
       </ul>
 
       <div class="spawn-card">
@@ -2566,6 +2657,64 @@ button.icon-btn.muted:hover {
 }
 /* Collapsed rows are borderless one-liners; the card chrome only appears on
  * the single expanded item so a long list scans as compact rows. */
+/* Workspace section heading. The sidebar's outer layer: one per project, this
+   window's first. */
+.ws-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 4px 5px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+  user-select: none;
+}
+.ws-head:first-child { padding-top: 2px; }
+.ws-caret {
+  flex: none;
+  width: 14px;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+.ws-caret:hover { color: var(--text-bright); }
+.ws-icon { flex: none; font-size: 12px; opacity: 0.75; }
+.ws-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Only another window's name is a link — this window's own is where you are. */
+.ws-head:not(.ws-head--current) .ws-name { cursor: pointer; }
+.ws-head:not(.ws-head--current) .ws-name:hover { text-decoration: underline; }
+.ws-count {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.ws-add {
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0;
+}
+.ws-head:hover .ws-add { opacity: 1; }
+.ws-add:hover { color: var(--text-bright); }
+/* A pane in another window: shown so you know work is running there, dimmed
+   because none of this window's per-pane controls apply to it. */
+.remote-item {
+  opacity: 0.62;
+  cursor: pointer;
+}
+.remote-item:hover { opacity: 1; }
+.remote-item .agent-sub { color: var(--text-muted); font-size: 11px; }
+
 .agent-item {
   background: transparent;
   border: 1px solid transparent;
