@@ -670,6 +670,7 @@ class ProjectStore:
         pane = self._find_slot_pane(project, stage_index, slot_label)
         if pane is None:
             return project
+        self._adopt_orphans(project, pane)
         pane.spawn_status = "removed"
         pane.kickoff_status = "none"
         self.save(project)
@@ -694,6 +695,52 @@ class ProjectStore:
         for child in project.panes:
             if child.spawned_by == old_id:
                 child.spawned_by = "" if child.pane_id == new_id else new_id
+
+    @staticmethod
+    def _adopt_orphans(project: "Project", dying: "PaneRecord") -> None:
+        """Re-parent a closing pane's children onto its own parent.
+
+        Keeping partial lineage beats dropping it: the children of a closed
+        middle node stay related to the grandparent instead of all becoming
+        roots. When the dying pane was itself a root the children become roots
+        too, which is the same outcome.
+
+        This must run in the same save() as the spawn_status change, and it
+        must run here rather than in the renderer: the frontend's panes list
+        only holds the panes of ONE window, so a detached window's children —
+        or another run group's — would be missed entirely.
+        """
+        grandparent = dying.spawned_by
+        for child in project.panes:
+            if child.spawned_by != dying.pane_id:
+                continue
+            if not grandparent or grandparent == child.pane_id:
+                child.spawned_by = ""
+                continue
+            child.spawned_by = "" if ProjectStore._would_cycle(
+                project, child.pane_id, grandparent, skip=dying.pane_id
+            ) else grandparent
+
+    @staticmethod
+    def _would_cycle(
+        project: "Project", pane_id: str, parent_id: str, *, skip: str = ""
+    ) -> bool:
+        """True if making `parent_id` the parent of `pane_id` closes a loop.
+
+        Walks up from the proposed parent. `skip` is the pane being removed —
+        it is about to leave, so links through it do not count. The visited set
+        also stops a pre-existing cycle from spinning here forever.
+        """
+        by_id = {p.pane_id: p for p in project.panes}
+        seen = {pane_id}
+        cur = parent_id
+        while cur and cur != skip:
+            if cur in seen:
+                return True
+            seen.add(cur)
+            nxt = by_id.get(cur)
+            cur = nxt.spawned_by if nxt else ""
+        return False
 
     def _find_manual_pane(
         self, project: "Project", pane_id: str, previous_pane_id: str = "", session_id: str = ""
@@ -813,6 +860,7 @@ class ProjectStore:
         if not matches:
             return project
         for pane in matches:
+            self._adopt_orphans(project, pane)
             pane.spawn_status = "removed"
         self.save(project)
         self.append_event(
