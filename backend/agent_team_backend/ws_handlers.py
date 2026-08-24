@@ -183,7 +183,11 @@ async def fs_list_dir(session: "Session", msg_id: str, msg_type: str, payload: d
 
     ws_path = payload.get("workspace_path") or ""
     rel = payload.get("rel_path", "") or ""
-    app._watch_plans_workspace(ws_path, rel)
+    # Registering a watch resolves the path and schedules a recursive observer —
+    # blocking syscalls that stall for minutes on a slow/network mount, so it
+    # goes to a worker thread too. Awaited, not fired off: the watch must be in
+    # place before the scan below reports the tree it is watching.
+    await asyncio.to_thread(app._watch_plans_workspace, ws_path, rel)
     show_hidden = bool(payload.get("show_hidden", False))
     result = await asyncio.to_thread(app.fs_service.list_dir, ws_path, rel, show_hidden=show_hidden)
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -268,7 +272,9 @@ async def fs_write_file(session: "Session", msg_id: str, msg_type: str, payload:
     from . import app
 
     ws_path = payload.get("workspace_path") or ""
-    app._watch_plans_workspace(ws_path, payload.get("rel_path", "") or "")
+    await asyncio.to_thread(
+        app._watch_plans_workspace, ws_path, payload.get("rel_path", "") or ""
+    )
     expected_mtime = payload.get("expected_mtime")
     result = await asyncio.to_thread(
         app.fs_service.write_file,
@@ -286,7 +292,9 @@ async def fs_read_file(session: "Session", msg_id: str, msg_type: str, payload: 
     from . import app
 
     ws_path = payload.get("workspace_path") or ""
-    app._watch_plans_workspace(ws_path, payload.get("rel_path", "") or "")
+    await asyncio.to_thread(
+        app._watch_plans_workspace, ws_path, payload.get("rel_path", "") or ""
+    )
     enc_override = payload.get("encoding_override") or None
     result = await asyncio.to_thread(
         app.fs_service.read_file, ws_path, payload.get("rel_path", "") or "", encoding_override=enc_override
@@ -350,7 +358,7 @@ async def plans_list_docs(session: "Session", msg_id: str, msg_type: str, payloa
     ws_path = await asyncio.to_thread(
         resolve_plan_root, str(payload.get("workspace_path") or "")
     )
-    app._watch_plans_workspace_now(ws_path)
+    await asyncio.to_thread(app._watch_plans_workspace_now, ws_path)
     result = await asyncio.to_thread(app.plan_index.list_docs, ws_path)
     if isinstance(result, dict) and result.get("ok"):
         result["root"] = ws_path
@@ -455,7 +463,7 @@ async def git_status(session: "Session", msg_id: str, msg_type: str, payload: di
     # The GitPane is now looking at this workspace — start (idempotently)
     # watching it on disk so external changes refresh near-instantly.
     if app._git_watcher is not None:
-        app._git_watcher.watch(ws_path)
+        await asyncio.to_thread(app._git_watcher.watch, ws_path)
     include_ignored = bool(payload.get("include_ignored", False))
     result = await app.git_service.get_status(ws_path, include_ignored=include_ignored)
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -468,7 +476,10 @@ async def git_discover_repositories(session: "Session", msg_id: str, msg_type: s
     ws_path = payload.get("workspace_path") or ""
     max_depth = min(int(payload.get("max_depth", 3)), 8)
     limit = min(int(payload.get("limit", 20)), 100)
-    result = await app.git_service.discover_repositories(ws_path, max_depth=max_depth, limit=limit)
+    force = bool(payload.get("force", False))
+    result = await app.git_service.discover_repositories(
+        ws_path, max_depth=max_depth, limit=limit, force=force
+    )
     await session.send_json(make_response(msg_id, msg_type, result))
 
 
@@ -4129,6 +4140,23 @@ async def _terminal_create_impl(
         # that recorded the session. Resume in whichever home owns it;
         # only unknown/fresh sessions get a (new) per-pane home.
         resume_id = app._resume_id_for_agent("codex", payload.get("command"))
+        if resume_id:
+            # Repair a pin that names a sub-agent thread. Builds shipped before
+            # sub-agent rollouts were recognised could pin one, and codex
+            # refuses direct input on such a thread — the pane comes back
+            # unusable until the id is pointed at the user thread it came from.
+            repaired = await asyncio.to_thread(
+                app.codex_home_manager.resolve_user_thread_id, resume_id
+            )
+            if repaired != resume_id:
+                app.log.info(
+                    "codex resume id repaired: sub-agent %s → user thread %s",
+                    resume_id, repaired,
+                )
+                payload["command"] = codex_command_with_resume_id(
+                    payload.get("command"), resume_id, repaired
+                )
+                resume_id = repaired
         session_home = (
             await asyncio.to_thread(app.codex_home_manager.find_session_home, resume_id)
             if resume_id

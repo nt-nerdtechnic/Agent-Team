@@ -461,6 +461,12 @@ _SAFE_HOME_ID = re.compile(r"^[A-Za-z0-9_.:-]+$")
 # so an archived path would silently attribute to no pane (empty pane id).
 # Resumability is a separate question: see `find_resumable_session_home`.
 _SESSION_SUBDIRS = ("sessions", "archived_sessions")
+# Sub-agent nesting seen in the wild is depth 3; the cap only stops a
+# corrupted parent chain from looping.
+_MAX_THREAD_HOPS = 8
+# Same budget the attribution layer reads session files with.
+_META_READ_BYTES = 524_288
+
 
 class CodexHomeManager:
     """Create isolated CODEX_HOME dirs while sharing stable user config."""
@@ -695,6 +701,71 @@ class CodexHomeManager:
                 pass
         return None
 
+    def resolve_user_thread_id(self, resume_id: str) -> str:
+        """Repair a resume id that names a SUB-AGENT thread.
+
+        Builds shipped before sub-agent rollouts were recognised pinned
+        whichever thread wrote last to a pane's CODEX_HOME, which is the
+        sub-agent whenever codex spawned one. Resuming that id lands on a
+        thread the parent owns and codex refuses the pane's input outright.
+        The id the pane meant is the user thread the sub-agent descends from:
+        take the ancestor session_meta the fork replayed into its own rollout,
+        else hop to `parent_thread_id` and ask again (nesting is allowed).
+
+        Returns `resume_id` unchanged for a normal thread, an unknown id, or a
+        chain that cannot be resolved — the caller then resumes exactly what it
+        was given, as it did before.
+        """
+        rid = resume_id.strip()
+        seen: set[str] = set()
+        for _ in range(_MAX_THREAD_HOPS):
+            if not rid or rid in seen or not _SAFE_HOME_ID.match(rid):
+                return resume_id
+            seen.add(rid)
+            rollout = self._rollout_path(rid)
+            if rollout is None:
+                return resume_id
+            try:
+                text = rollout.read_text(encoding="utf-8", errors="ignore")[:_META_READ_BYTES]
+            except OSError:
+                return resume_id
+            metas = _session_meta_payloads(text)
+            if not metas or metas[0].get("thread_source") != "subagent":
+                return rid  # already a user thread
+            ancestor = next(
+                (str(m["id"]) for m in metas
+                 if m.get("thread_source") != "subagent" and m.get("id")),
+                "",
+            )
+            if ancestor:
+                return ancestor
+            rid = str(metas[0].get("parent_thread_id") or "")
+        return resume_id
+
+    def _rollout_path(self, resume_id: str) -> Path | None:
+        """The rollout file recording this session, in whichever home holds it.
+        Same search order as `_locate_session_home`, without its skills-view
+        side effect — this runs while repairing an id, not while routing one."""
+        pattern = f"rollout-*{resume_id}.jsonl"
+        roots = [self.real_home]
+        if self.panes_root.is_dir():
+            try:
+                roots.extend(sorted(self.panes_root.iterdir()))
+            except OSError:
+                pass
+        for home in roots:
+            for name in _SESSION_SUBDIRS:
+                subdir = home / name
+                if not subdir.is_dir():
+                    continue
+                try:
+                    found = next(subdir.rglob(pattern), None)
+                except OSError:
+                    continue
+                if found is not None:
+                    return found
+        return None
+
     def cleanup(self, home_id: str) -> bool:
         safe_id = self._safe_home_id(home_id)
         pane_home = (self.panes_root / safe_id).resolve()
@@ -728,7 +799,33 @@ _CODEX_PANES_ROOT_NAME = ".codex-panes"
 def _session_meta_resume_id(text: str) -> str:
     """The session_meta record's payload.id — the id `codex resume` actually
     needs (the filename stem includes a timestamp prefix and is NOT accepted).
-    '' when the expected shape isn't found."""
+    '' when the expected shape isn't found.
+
+    A sub-agent thread is never that id. Codex writes each sub-agent it spawns
+    as its own rollout inside the SAME per-pane CODEX_HOME, marked
+    `thread_source: "subagent"`; resuming one lands on a thread whose input the
+    parent owns, and codex refuses it outright ("This sub-agent is controlled
+    by its parent. Direct input is disabled."). The pane is driving the thread
+    that spawned the sub-agent, and that thread's own rollout always sits in
+    the same home — so a sub-agent file announces nothing and the parent's file
+    keeps the binding.
+    """
+    for payload in _session_meta_payloads(text):
+        if payload.get("thread_source") == "subagent":
+            return ""
+        if payload.get("id"):
+            return str(payload["id"])
+    return ""
+
+
+def _session_meta_payloads(text: str) -> list[dict]:
+    """Every session_meta payload in `text`, in file order.
+
+    A rollout normally opens with exactly one. A thread codex forked — a
+    sub-agent — replays its ancestors' session_meta records after its own, so
+    later entries describe the thread it was spawned from.
+    """
+    out: list[dict] = []
     for line in text.splitlines():
         line = line.strip()
         if not line or '"session_meta"' not in line:
@@ -739,9 +836,20 @@ def _session_meta_resume_id(text: str) -> str:
             continue
         if rec.get("type") == "session_meta":
             payload = rec.get("payload") or {}
-            if isinstance(payload, dict) and payload.get("id"):
-                return str(payload["id"])
-    return ""
+            if isinstance(payload, dict):
+                out.append(payload)
+    return out
+
+
+def command_with_resume_id(command: Any, old_id: str, new_id: str) -> Any:
+    """The launch command with `old_id` swapped for `new_id`, preserving the
+    ``[shell, '-ilc', '<cmd>']`` wrapper the frontend sends (see
+    ``command_text``)."""
+    if isinstance(command, list):
+        if not command:
+            return command
+        return [*command[:-1], str(command[-1]).replace(old_id, new_id)]
+    return str(command or "").replace(old_id, new_id)
 
 
 def _pane_id_from_home_path(file_path: str) -> str:

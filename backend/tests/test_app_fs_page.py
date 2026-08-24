@@ -6,11 +6,14 @@ text/css and font mimes to the inline allowlist.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+from agent_team_backend import app as app_module
 from agent_team_backend.app import app
 
 
@@ -126,3 +129,19 @@ def test_page_padded_base64_accepted(client, workspace):
 def test_page_missing_file_returns_404(client, workspace):
     resp = _get(client, workspace, "nope.css")
     assert resp.status_code == 404
+
+
+def test_page_offloads_the_blocking_helper(client, workspace, monkeypatch):
+    """Same reason as /fs/raw: the blocking stat work must leave the loop."""
+    threaded_fns: list[Any] = []
+    orig_to_thread = asyncio.to_thread
+
+    async def spy(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        threaded_fns.append(fn)
+        return await orig_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    resp = _get(client, workspace, "style.css")
+
+    assert resp.status_code == 200
+    assert app_module._serve_workspace_file in threaded_fns
