@@ -25,6 +25,10 @@ export interface WindowBounds {
 export interface WindowEntry {
   workspace_path: string
   bounds?: WindowBounds
+  /** Run group this window was detached for, when it is a detached child
+   *  rather than a main window. Recorded so a detached group comes back
+   *  detached instead of silently folding into the main window on relaunch. */
+  detached_group?: string
 }
 
 export interface RegistryDoc {
@@ -59,7 +63,13 @@ function sanitizeEntries(list: unknown): WindowEntry[] {
     .filter((w: unknown): w is WindowEntry =>
       typeof w === 'object' && w !== null && typeof (w as WindowEntry).workspace_path === 'string'
       && (w as WindowEntry).workspace_path.length > 0)
-    .map((w: WindowEntry) => ({ workspace_path: w.workspace_path, ...(w.bounds ? { bounds: w.bounds } : {}) }))
+    .map((w: WindowEntry) => ({
+      workspace_path: w.workspace_path,
+      ...(w.bounds ? { bounds: w.bounds } : {}),
+      ...(typeof w.detached_group === 'string' && w.detached_group
+        ? { detached_group: w.detached_group }
+        : {})
+    }))
 }
 
 /** Keep only well-formed ledger entries: workspace path → positive attempt count. */
@@ -200,8 +210,26 @@ export class WindowRegistry {
       this.entries.delete(winId)
     } else {
       const prev = this.entries.get(winId)
-      this.entries.set(winId, { workspace_path: workspacePath, ...(prev?.bounds ? { bounds: prev.bounds } : {}) })
+      this.entries.set(winId, {
+        workspace_path: workspacePath,
+        ...(prev?.bounds ? { bounds: prev.bounds } : {}),
+        ...(prev?.detached_group ? { detached_group: prev.detached_group } : {})
+      })
     }
+    this.persistNow()
+  }
+
+  /** Mark a tracked window as the detached view of one run group.
+   *
+   *  Kept separate from setWorkspace because the two arrive independently:
+   *  the renderer reports its workspace, main knows which group it detached.
+   *  A window with no entry yet is ignored — setWorkspace lands first and the
+   *  detach path re-states it right after. */
+  setDetachedGroup(winId: number, groupId: string): void {
+    const entry = this.entries.get(winId)
+    if (!entry) return
+    if (groupId) entry.detached_group = groupId
+    else delete entry.detached_group
     this.persistNow()
   }
 

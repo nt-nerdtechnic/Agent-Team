@@ -285,6 +285,14 @@ async function createWindow(
   // never track it as a standalone workspace window (no dedup focus, no restore).
   if (params.detached_group) {
     detachedWindowIds.add(winId)
+    // Tracked, but as a detached view of one group rather than as a standalone
+    // workspace window: no dedup focus, and restore reopens it detached. Before
+    // this the detached state lived only in main's memory, so every relaunch
+    // silently folded these groups back into the main window.
+    if (params.workspace_path) {
+      windowRegistry.setWorkspace(winId, params.workspace_path)
+      windowRegistry.setDetachedGroup(winId, params.detached_group)
+    }
   } else if (params.workspace_path) {
     mainWindowWorkspaces.set(win, params.workspace_path)
     windowRegistry.setWorkspace(winId, params.workspace_path)
@@ -1239,6 +1247,13 @@ ipcMain.handle('restore:apply', () => {
   // charged, so an unattended relaunch afterwards is protected again.
   const plan = windowRegistry.beginRestore(entries, { userInitiated: true })
   for (const entry of plan.restore) {
+    // A detached group comes back detached. Its window is not a workspace
+    // window, so the dedup lookup below would wrongly match the main window
+    // for the same workspace and skip reopening it entirely.
+    if (entry.detached_group) {
+      void reopenDetachedGroup(entry.workspace_path, entry.detached_group, entry.bounds)
+      continue
+    }
     // Already reopened manually → focus, don't duplicate.
     const existing = findMainWindowForWorkspace(entry.workspace_path)
     if (existing) {
@@ -1316,6 +1331,29 @@ ipcMain.handle(
  *  broadcasts group:reattached and the origin window restores the group — so
  *  there is one reattach implementation, not two.
  */
+/** Reopen a detached group's window on launch, wiring up the same bookkeeping
+ *  window:detachGroup does — including the 'closed' handler that broadcasts
+ *  group:reattached, so a restored detached window can still be merged back. */
+async function reopenDetachedGroup(
+  workspacePath: string,
+  groupId: string,
+  bounds?: WindowBounds
+): Promise<void> {
+  const already = detachedGroups.get(groupId)
+  if (already && !already.isDestroyed()) return
+  const child = await createWindow(
+    { window: 'main', workspace_path: workspacePath, detached_group: groupId, restore: '1' },
+    bounds ? { bounds } : undefined
+  )
+  detachedGroups.set(groupId, child)
+  detachedGroupWorkspace.set(groupId, workspacePath)
+  child.on('closed', () => {
+    detachedGroups.delete(groupId)
+    detachedGroupWorkspace.delete(groupId)
+    broadcastToWorkspace(workspacePath, 'group:reattached', { groupId })
+  })
+}
+
 ipcMain.handle('window:reattachGroup', (event, arg: { groupId?: string } | undefined) => {
   const requested = String(arg?.groupId ?? '')
   // A child window knows which group it is without being told; asking the
@@ -2571,7 +2609,18 @@ app.whenReady().then(async () => {
       if (plan.restore.length) {
         console.log('[main] clean-exit restore;', plan.restore.length, 'workspace window(s)')
       }
-      for (const entry of plan.restore) {
+      // Main windows first: a detached child broadcasts to its origin window,
+      // which has to exist by then for the hand-off bookkeeping to land.
+      const [detachedEntries, mainEntries] = [
+        plan.restore.filter((e) => e.detached_group),
+        plan.restore.filter((e) => !e.detached_group)
+      ]
+      for (const entry of [...mainEntries, ...detachedEntries]) {
+        if (entry.detached_group) {
+          await reopenDetachedGroup(entry.workspace_path, entry.detached_group, entry.bounds)
+          openedAny = true
+          continue
+        }
         await createWindow(
           { workspace_path: entry.workspace_path, restore: '1' },
           entry.bounds ? { bounds: entry.bounds } : undefined
