@@ -2012,7 +2012,7 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
             # escape would send a second, contradictory frame for a message the
             # caller has resolved; the worst real cost is a badge that waits for
             # the next poll, which is where it was before this announcement.
-            log.exception("usage: failed to announce the claude account switch")
+            app.log.exception("usage: failed to announce the claude account switch")
     else:
         service.request_refresh()
 
