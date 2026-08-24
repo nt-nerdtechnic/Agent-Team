@@ -10689,6 +10689,17 @@ function onDetachGroup(groupId: string, x: number, y: number): void {
   void window.agentTeam?.detachGroup?.({ groupId, workspacePath: path, bounds })
 }
 
+/** Merge this detached window's group back into the window it came from.
+ *
+ *  Main closes this window, which runs the same 'closed' path a manual close
+ *  already used — so reattach has one implementation whichever way it starts.
+ *  The PTYs stay alive in the backend either way; the origin window restores
+ *  the group when it receives group:reattached. */
+function reattachThisWindow(): void {
+  if (!isDetachedWindow) return
+  void window.agentTeam?.reattachGroup?.({ groupId: detachedGroupId })
+}
+
 /** Hand a run group off to a detached child window: drop its panes from THIS
  *  window WITHOUT killing them — onScopeDispose keeps the backend PTYs alive so
  *  the child reattaches — and hide its tab. */
@@ -12493,6 +12504,15 @@ function paneIsCommander(p: ActivePane): boolean {
         </div>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
+      <!-- Detached windows could only be merged back by closing them, which is
+           indistinguishable from "done with these panes". -->
+      <button
+        v-if="isDetachedWindow"
+        class="titlebar-ws-btn"
+        @mousedown.stop
+        @click="reattachThisWindow"
+        :title="$t('action.reattach-group')"
+      >⇲</button>
       <button class="titlebar-gear" @mousedown.stop @click="showSettings = true" title="Settings (⌘,)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>

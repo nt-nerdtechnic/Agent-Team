@@ -80,6 +80,7 @@ declare global {
       openTempFile: (filename: string, content: string) => Promise<{ ok: boolean; path?: string; error?: string }>
       detachGroup: (args: { groupId: string; workspacePath: string; bounds?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean }>
       getDetachedGroups: () => Promise<string[]>
+      reattachGroup: (args?: { groupId?: string }) => Promise<{ ok: boolean }>
       onGroupDetached: (cb: (groupId: string) => void) => void
       onGroupReattached: (cb: (groupId: string) => void) => void
       onOpenPipelineManager: (handler: (payload: { pipelineId?: string }) => void) => () => void

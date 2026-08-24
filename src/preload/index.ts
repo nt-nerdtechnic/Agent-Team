@@ -146,6 +146,10 @@ contextBridge.exposeInMainWorld('agentTeam', {
   detachGroup: (args: { groupId: string; workspacePath: string; bounds?: { x: number; y: number; width: number; height: number } }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:detachGroup', args),
   getDetachedGroups: (): Promise<string[]> => ipcRenderer.invoke('window:getDetachedGroups'),
+  /** Merge a detached group back. Omit groupId from the detached window itself
+   *  — main resolves it from the sender. */
+  reattachGroup: (args?: { groupId?: string }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('window:reattachGroup', args ?? {}),
   onGroupDetached: (cb: (groupId: string) => void): void => {
     ipcRenderer.on('group:detached', (_event, arg: { groupId: string }) => cb(arg.groupId))
   },

@@ -1308,6 +1308,35 @@ ipcMain.handle(
   }
 )
 
+/** Merge a detached group back into the window it came from.
+ *
+ *  Until now the only way back was closing the child window, which meant the
+ *  reattach was indistinguishable from "I am done with these panes". Closing
+ *  the window here reuses that exact path — the 'closed' handler above already
+ *  broadcasts group:reattached and the origin window restores the group — so
+ *  there is one reattach implementation, not two.
+ */
+ipcMain.handle('window:reattachGroup', (event, arg: { groupId?: string } | undefined) => {
+  const requested = String(arg?.groupId ?? '')
+  // A child window knows which group it is without being told; asking the
+  // sender keeps the caller honest when the id is omitted.
+  const sender = BrowserWindow.fromWebContents(event.sender)
+  let groupId = requested
+  if (!groupId && sender) {
+    for (const [id, win] of detachedGroups) {
+      if (win === sender) {
+        groupId = id
+        break
+      }
+    }
+  }
+  if (!groupId) return { ok: false }
+  const child = detachedGroups.get(groupId)
+  if (!child || child.isDestroyed()) return { ok: false }
+  child.close()
+  return { ok: true }
+})
+
 ipcMain.handle('window:getDetachedGroups', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   const ws = win ? mainWindowWorkspaces.get(win) : undefined

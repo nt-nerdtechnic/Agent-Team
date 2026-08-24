@@ -618,7 +618,9 @@
     "pull-rebase-menu": "Pull (rebase)",
     "push-set-upstream": "Push (set upstream)",
     "expand-subtree": "Expand subtree",
-    "collapse-subtree": "Collapse subtree"
+    "collapse-subtree": "Collapse subtree",
+    "detach-group": "Open in its own window",
+    "reattach-group": "Merge back"
   },
   "settings": {
     "search": {
