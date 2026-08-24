@@ -10401,11 +10401,10 @@ async function sweepIdlePanes(): Promise<void> {
     if (await reclaimIdlePane(paneId)) reclaimed++
   }
   if (reclaimed === 0) return
+  // Logged, not announced: the sweep runs on a timer the user did not ask for,
+  // so a toast interrupts work to report housekeeping. The reclaimed pane still
+  // shows as a placeholder they can click to resume.
   pipelineLog(`♻ reclaimed ${reclaimed} idle CLI pane(s) — click to resume`)
-  notifyRestore.toast(
-    i18n.global.t('pane.terminal.idle-reclaimed', { count: reclaimed }),
-    { type: 'info' }
-  )
 }
 
 /** Panes the user could reclaim right now, ignoring how long they have been

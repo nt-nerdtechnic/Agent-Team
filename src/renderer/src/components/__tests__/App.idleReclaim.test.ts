@@ -116,10 +116,13 @@ describe('idle reclaim wiring', () => {
     expect(fn).toContain('memoryAvailable.value = false')
   })
 
-  // A pane silently turning into a placeholder reads as a crash unless the app
-  // says what it did.
-  it('tells the user what was reclaimed', () => {
-    const sweep = block('async function sweepIdlePanes(', 'onMounted(() => {')
-    expect(sweep).toContain('pane.terminal.idle-reclaimed')
+  // The timed sweep is housekeeping the user did not ask for, so it logs rather
+  // than interrupting with a toast. A reclaim the user pressed for still says so.
+  it('logs the timed sweep without a toast, and reports an explicit reclaim', () => {
+    const sweep = block('async function sweepIdlePanes(', '/** Panes the user could reclaim')
+    expect(sweep).toContain('pipelineLog(')
+    expect(sweep).not.toContain('notifyRestore.toast(')
+    const onRequest = block('async function reclaimPanesNow(', 'onMounted(() => {')
+    expect(onRequest).toContain('pane.terminal.idle-reclaimed')
   })
 })
