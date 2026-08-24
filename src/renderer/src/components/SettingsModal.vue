@@ -151,7 +151,7 @@ const idleReclaimEnabledModel = computed({
   get: () => props.idleReclaimEnabled ?? true,
   set: (v: boolean) => emit('update:idleReclaimEnabled', v),
 })
-const idleReclaimMinutesModel = computed(() => props.idleReclaimMinutes ?? '180')
+const idleReclaimMinutesModel = computed(() => props.idleReclaimMinutes ?? '30')
 function onIdleReclaimMinutesChange(v: string): void {
   emit('update:idleReclaimMinutes', v)
 }

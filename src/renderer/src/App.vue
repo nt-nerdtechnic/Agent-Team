@@ -658,7 +658,7 @@ const confirmBeforeClosePane = makeStickyBool('agentTeam.confirmClosePane', true
 // returns it to the same cold-restore placeholder a restart would show, so the
 // conversation is one click away rather than gone.
 const idleReclaimEnabled = makeStickyBool('agentTeam.idleReclaim', true)
-const idleReclaimMinutes = makeStickyStr('agentTeam.idleReclaimMinutes', '180')
+const idleReclaimMinutes = makeStickyStr('agentTeam.idleReclaimMinutes', '30')
 // Push the "confirm before quit" config to main so the native dialog stays in
 // sync with the shared setting and the current locale.
 function pushQuitConfirmConfig(): void {

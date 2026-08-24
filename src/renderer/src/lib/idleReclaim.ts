@@ -94,7 +94,7 @@ export const RECLAIM_NOW_THRESHOLD_MS = 0
 /** Lower bound on the configured threshold, so a bad stored value cannot turn
  *  the sweep into "reclaim as soon as it stops typing". */
 export const IDLE_RECLAIM_MIN_MINUTES = 15
-export const IDLE_RECLAIM_DEFAULT_MINUTES = 180
+export const IDLE_RECLAIM_DEFAULT_MINUTES = 30
 
 export function idleReclaimThresholdMs(stored: string): number {
   const parsed = Number.parseInt(stored, 10)
