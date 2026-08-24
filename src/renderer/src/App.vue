@@ -42,6 +42,7 @@ import {
 } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
+import { paneStatusLabelKey } from './lib/paneStatusLabel'
 import { useBackend } from './composables/useBackend'
 import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
@@ -167,6 +168,7 @@ import {
   restoreScopeTargetIds,
   runWithConcurrency,
   stripPinnedSessionId,
+  stripDeadOpencodeAutoFlag,
   type RestoreScope,
   type RestoreSessionDecision,
   type RestoreSessionTrigger,
@@ -6987,7 +6989,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       const isResume = !!resumeCmd
       const effectiveResumeId = sessionId
       const savedFallbackCommand = saved.command && !looksLikeResumeCommand(saved.agent, saved.command)
-        ? saved.command : ''
+        ? stripDeadOpencodeAutoFlag(saved.agent, saved.command) : ''
       const fallbackCommand = savedFallbackCommand
       const commandOverride = resumeCmd || fallbackCommand || ''
       const restored = await spawnRestoredPane({
@@ -7269,7 +7271,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     const isResume = !!resumeCmd
     const effectiveResumeId = reconnectId || sessionId
     const savedFallbackCommand = saved.command && !looksLikeResumeCommand(saved.agent, saved.command)
-      ? saved.command
+      ? stripDeadOpencodeAutoFlag(saved.agent, saved.command)
       : ''
     const fallbackCommand = isResume ? savedFallbackCommand : stripPinnedSessionId(savedFallbackCommand)
     const commandOverride = resumeCmd || fallbackCommand || ''
@@ -12352,7 +12354,10 @@ function paneIsCommander(p: ActivePane): boolean {
         </template>
         <template v-else>
           <div class="boot-spinner" aria-label="loading" />
-          <div class="boot-status">{{ $t(bootStatusKey) }} {{ $t('label.boot-countdown', { seconds: bootCountdown }) }}</div>
+          <div class="boot-status">
+            <span>{{ $t(bootStatusKey) }}</span>
+            <span class="boot-elapsed">{{ $t('label.boot-countdown', { seconds: bootCountdown }) }}</span>
+          </div>
         </template>
       </div>
     </div>
@@ -12830,7 +12835,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
+            <span class="meeting-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
@@ -12890,7 +12895,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="spotlight-thumb-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="spotlight-thumb-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
+            <span class="spotlight-thumb-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
           </div>
         </div>
         <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="spotlight-strip-empty">
@@ -12963,7 +12968,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
+            <span class="meeting-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
@@ -13319,35 +13324,50 @@ function paneIsCommander(p: ActivePane): boolean {
   align-items: center;
   justify-content: center;
   background: var(--bg-base);
+  /* The shell's font-family lives on `.app`, and this overlay is its sibling,
+     not its child — without this the status line falls back to the browser
+     default and renders in a serif face. */
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
 }
 .boot-card {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 18px;
 }
 .boot-logo {
-  width: 64px;
-  height: 64px;
+  width: 72px;
+  height: 72px;
   display: block;
+  animation: boot-breathe 2.6s ease-in-out infinite;
 }
 .boot-spinner {
-  width: 26px;
-  height: 26px;
-  border: 3px solid var(--border-muted);
+  margin-top: 30px;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border-muted);
   border-top-color: var(--accent-bright);
   border-radius: 50%;
   animation: boot-spin 0.8s linear infinite;
 }
 .boot-status {
+  margin-top: 18px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   font-size: 12px;
   color: var(--text-secondary);
   letter-spacing: 0.02em;
+}
+.boot-elapsed {
+  /* Ticks once a second, so keep the digits from shifting the line around. */
+  font-variant-numeric: tabular-nums;
+  opacity: 0.55;
 }
 .boot-status-error {
   color: var(--danger-fg);
 }
 .boot-retry {
+  margin-top: 16px;
   font-size: 12px;
   padding: 6px 16px;
   border-radius: 6px;
@@ -13361,6 +13381,14 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 @keyframes boot-spin {
   to { transform: rotate(360deg); }
+}
+@keyframes boot-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.78; transform: scale(0.965); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot-logo { animation: none; }
+  .boot-spinner { animation-duration: 2.4s; }
 }
 /* Fade the overlay out (no enter transition — it's there from first paint). */
 .boot-fade-leave-active { transition: opacity 0.3s ease; }

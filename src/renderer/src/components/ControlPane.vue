@@ -5,6 +5,7 @@ import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
 import { PANE_BATCH_MIME } from '../lib/cliContext'
 import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
+import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 import RebuildIcon from './RebuildIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
@@ -1283,7 +1284,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           @drop.prevent="onAgentDrop($event, p.id)"
         >
           <div class="agent-line" role="button" title="Focus pane" draggable="true" @dragstart="onAgentDragStart($event, p.id)" @dragend="onAgentDragEnd" @click="onAgentLineClick(p.id, $event)" @contextmenu.prevent="emit('context-menu', p.id, $event)">
-            <span class="status-dot" :data-state="p.status" :title="p.status"></span>
+            <span class="status-dot" :data-state="p.status" :title="$t(paneStatusLabelKey(p.status))"></span>
             <span v-if="p.origin === 'pipeline'" class="pipe-tag">P{{ p.stageId }}</span>
             <input
               v-if="renamingPaneId === p.id"
@@ -1330,7 +1331,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <template v-if="expandedPaneId === p.id || props.focusPaneId === p.id">
             <div class="agent-role-line">
               <span>{{ agentTypeLabel(p.agentKey) }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span></span>
-              <span class="state" :data-state="p.status">{{ p.status }}</span>
+              <span class="state" :data-state="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
             </div>
             <div v-if="!p.isMinimized && p.origin === 'pipeline'" class="stage-line">
               stage {{ p.stageId }} · {{ preparationLabel(p.preparationStatus) }} · {{ injectionLabel(p.injectionStatus) }} {{ kickoffLabel(p.kickoffStatus) }}

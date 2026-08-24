@@ -12,6 +12,7 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import { i18n } from '../../i18n'
 import AgentOverviewPanel, { type AgentOverviewRow } from '../AgentOverviewPanel.vue'
 import { useStatusBarPopover } from '../../composables/useStatusBarPopover'
+import { paneStatusLabelKey } from '../../lib/paneStatusLabel'
 
 function makeRow(overrides: Partial<AgentOverviewRow> = {}): AgentOverviewRow {
   return {
@@ -84,7 +85,7 @@ describe('AgentOverviewPanel', () => {
     expect(rows.map((el) => el.attributes('data-status'))).toEqual([...statuses])
     for (const [i, status] of statuses.entries()) {
       expect(rows[i].get('[data-part="status"]').text()).toBe(
-        i18n.global.t(`agentOverview.status-${status}`)
+        i18n.global.t(paneStatusLabelKey(status))
       )
     }
   })

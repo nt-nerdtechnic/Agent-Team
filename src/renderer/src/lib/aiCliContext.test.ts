@@ -70,9 +70,12 @@ describe('resolveCliCommand', () => {
     expect(resolveCliCommand({ ...base, agentKey: 'grok', yoloStored: null })).toBe('grok')
   })
 
-  it('gives opencode --auto in YOLO mode (root command accepts it; old builds ignore it)', () => {
+  // The opencode root command rejects an unknown flag: `opencode --auto models`
+  // prints the help banner and exits 1 on 1.15.12, so a YOLO pane spawned with
+  // it died before the TUI ever opened. It must stay bare in both modes.
+  it('leaves opencode bare in YOLO mode (its TUI rejects an unknown flag)', () => {
     expect(resolveCliCommand({ ...base, agentKey: 'opencode', yoloStored: null }))
-      .toBe('opencode --auto')
+      .toBe('opencode')
     expect(resolveCliCommand({ ...base, agentKey: 'opencode', yoloStored: '0' }))
       .toBe('opencode')
   })

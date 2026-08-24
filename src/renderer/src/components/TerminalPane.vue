@@ -9,6 +9,7 @@ import { extractDropPaths, escapeDraggedPath, stabilizeDroppedPaths } from '../l
 import { CLI_CONTEXT_MIME, PANE_BATCH_MIME, PANE_ID_MIME, resolveCliDropSources, writeCliPaneDragPayload } from '../lib/cliContext'
 import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
+import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import { i18n } from '../i18n'
 import { isMacPlatform } from '../keybindings/parseKey'
@@ -248,13 +249,11 @@ const displayStatus = terminal.displayStatus
 // names which one it is: the distinction is not worth a second badge, and is
 // worth a sentence once someone stops to ask. The rest are self-evident from
 // the badge text.
-// The badge otherwise prints the raw status word, which reads fine for every
-// state that describes the AGENT ('running', 'idle', 'exited'). 'awaiting'
-// describes the READER instead — it is the one badge that is an instruction —
-// so it gets a translated label, the same exception 'stopped' already makes.
-const statusBadgeKey = computed<string>(() =>
-  displayStatus.value === 'awaiting' ? 'pane.terminal.awaiting-status-badge' : ''
-)
+// The badge text itself comes from paneStatusLabel, shared with the sidebar and
+// the agent overview. It used to print the raw status word with 'awaiting' and
+// 'stopped' as hand-made exceptions, which is how one pane ended up reading
+// "RUNNING" here and "執行中" in the overview at the same moment.
+const statusBadgeKey = computed<string>(() => paneStatusLabelKey(displayStatus.value))
 
 const statusTooltipKey = computed<string>(() => {
   if (displayStatus.value === 'idle') return 'pane.terminal.idle-status-tooltip'
@@ -585,7 +584,7 @@ onMounted(() => {
           class="status"
           :data-status="displayStatus"
           :title="statusTooltipKey ? $t(statusTooltipKey) : ''"
-        >{{ statusBadgeKey ? $t(statusBadgeKey) : displayStatus === 'stopped' ? 'STOP' : displayStatus }}</span>
+        >{{ $t(statusBadgeKey) }}</span>
         <UsageBadge v-if="agentKey" :agent-key="agentKey" :cli-profiles="cliProfiles" />
       </div>
       <div v-if="subtitle" class="header-sub">{{ subtitle }}</div>

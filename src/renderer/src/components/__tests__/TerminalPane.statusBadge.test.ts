@@ -4,6 +4,7 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import type { Ref } from 'vue'
 import TerminalPane from '../TerminalPane.vue'
 import type { DisplayStatus } from '../../composables/useTerminal'
+import { paneStatusLabelKey } from '../../lib/paneStatusLabel'
 
 // The pane-header status pill — the badge the user actually reads. Every value
 // displayStatus can report has to reach it with its own data-status hook,
@@ -44,7 +45,7 @@ function mountPane(status: DisplayStatus, kind: 'permission' | 'question' | null
   mockTerminal.awaitingKind.value = kind
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {} },
+    props: { paneId: 'pane-1', title: 'Claude', backend: {}, cliProfiles: {} },
     global: { mocks: { $t: tMock } }
   })
 }
@@ -88,12 +89,13 @@ describe('TerminalPane — status pill', () => {
     expect(wrapper!.get('.status').attributes('data-status')).toBe(status)
   })
 
-  it('prints a translated label for awaiting, not the raw status word', () => {
-    // The one badge that addresses the READER rather than describing the agent,
-    // so it is the one badge that gets translated. Every other status prints
-    // its own name (asserted below via data-status + the stopped case).
-    wrapper = mountPane('awaiting', 'question')
-    expect(wrapper!.get('.status').text()).toBe('pane.terminal.awaiting-status-badge')
+  it.each(ALL_DISPLAY_STATUSES)('prints the shared label for %s', (status) => {
+    // The pill, the sidebar pill and the agent-overview row all resolve their
+    // text through paneStatusLabelKey. It used to print the raw status word
+    // with 'awaiting' and 'stopped' as hand-made exceptions, which is how one
+    // pane read "RUNNING" here and "執行中" in the overview at the same moment.
+    wrapper = mountPane(status)
+    expect(wrapper!.get('.status').text()).toBe(paneStatusLabelKey(status))
   })
 
   it('prints the same label whichever kind of wait it is', () => {
@@ -104,13 +106,6 @@ describe('TerminalPane — status pill', () => {
     wrapper!.unmount()
     wrapper = mountPane('awaiting', 'question')
     expect(wrapper!.get('.status').text()).toBe(permission)
-  })
-
-  it('still abbreviates stopped to STOP', () => {
-    // The one status whose text is not its own name; hoisting the badge text
-    // must not have lost the special case.
-    wrapper = mountPane('stopped')
-    expect(wrapper!.get('.status').text()).toBe('STOP')
   })
 
   it('explains which kind of wait it is on hover', () => {

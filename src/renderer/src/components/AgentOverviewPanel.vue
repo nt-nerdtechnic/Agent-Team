@@ -11,17 +11,17 @@
 // jump, this component only renders rows and re-emits the click.
 import { onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { DisplayStatus } from '../composables/useTerminal'
+import { paneStatusLabelKey, type PaneStatusValue } from '../lib/paneStatusLabel'
 
 /** Status values a pane row can carry: useTerminal's `displayStatus`, plus
  *  'waiting' for a cold-restore placeholder that was never realized and
  *  'disconnected' for a pane whose backend session was lost.
  *
- *  Derived from DisplayStatus rather than restating it. It used to be a
+ *  An alias of PaneStatusValue rather than a restatement of it. It used to be a
  *  hand-copied second list kept in sync by comment, so adding a badge value
  *  silently left this one behind — and a row whose status is not in the union
  *  renders a raw i18n key. */
-export type AgentOverviewStatus = DisplayStatus | 'waiting' | 'disconnected'
+export type AgentOverviewStatus = PaneStatusValue
 
 export interface AgentOverviewRow {
   paneId: string
@@ -50,7 +50,7 @@ onMounted(() => window.addEventListener('keydown', onKeydown))
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 function statusLabel(status: AgentOverviewStatus): string {
-  return t(`agentOverview.status-${status}`)
+  return t(paneStatusLabelKey(status))
 }
 </script>
 
@@ -181,6 +181,9 @@ function statusLabel(status: AgentOverviewStatus): string {
   flex: none;
   min-width: 58px;
   text-align: right;
+  /* Same casing as the pane badge and the sidebar pill, which both uppercase
+     theirs — without it the shared label reads differently here in English. */
+  text-transform: uppercase;
   color: var(--text-secondary);
 }
 .ao-row[data-status='running'] .ao-status { color: var(--success-fg); }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import ViewPanel, { type LayoutMode } from './ViewPanel.vue'
 import type { ActivePaneView } from './ControlPane.vue'
+import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 
 defineProps<{
   panes: ActivePaneView[]
@@ -85,7 +86,7 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
           <span class="badge">{{ p.agentLabel }}</span>
           <span v-if="p.isCommander" class="manager-inline" title="Stage manager — controls flow and decides ---STAGE-DONE---">🎯 Mgr</span>
           <span v-if="p.isMinimized" class="minimized-tag">▪ sidebar</span>
-          <span v-else class="state" :data-state="p.status">{{ p.status }}</span>
+          <span v-else class="state" :data-state="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
           <span
             v-if="p.loopActive"
             class="loop-tag"

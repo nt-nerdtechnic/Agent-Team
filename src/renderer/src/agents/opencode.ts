@@ -6,15 +6,17 @@ export const SPEC = {
   agentKey: 'opencode',
   label: 'OpenCode',
   defaultCommand: 'opencode',
-  // Current opencode offers `--auto` ("auto-approve permissions that are not
-  // explicitly denied") on BOTH the root TUI command and `opencode run`.
-  // Older builds only carried it on `run` under the name
-  // `--dangerously-skip-permissions` (verified on 1.15.12); that spelling has
-  // since been dropped from the docs, so it is not used here. Those older
-  // builds silently ignore an unknown root flag — `opencode --auto --version`
-  // prints the version and exits 0 on 1.15.12 — so passing `--auto` is a
-  // no-op there rather than a breakage.
-  skipPermissionFlag: '--auto',
+  // No skipPermissionFlag: the opencode TUI has no permission-bypass flag —
+  // only the `opencode run` subcommand does, as `--dangerously-skip-permissions`
+  // (still listed under `opencode run --help` on 1.15.12).
+  //
+  // `--auto` was declared here once on the claim that an older build ignores an
+  // unknown root flag, "verified" with `opencode --auto --version`. That probe
+  // proves nothing: `--version` short-circuits inside yargs before unknown
+  // arguments are ever checked. Re-measured on 1.15.12 without it, the root
+  // command REJECTS the flag — `opencode --auto models` prints the help banner
+  // and exits 1, while bare `opencode models` exits 0 — so a YOLO-mode pane
+  // spawned `opencode --auto ...`, never reached the TUI, and died on startup.
   // id is `ses_`-prefixed.
   resumeArgs: (id) => `--session ${id}`,
   needsSessionMarker: true,
