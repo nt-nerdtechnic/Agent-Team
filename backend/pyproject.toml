@@ -50,7 +50,13 @@ target-version = "py312"
 # stalls every terminal in the app. ASYNC rules flag blocking calls
 # (subprocess, sleep, open, ...) inside `async def` — offload them via
 # asyncio.to_thread / run_in_executor instead.
-select = ["ASYNC"]
+#
+# F821 (undefined name) rides along for the same reason: it is not style
+# either. v0.1.88 shipped `NameError: codex_command_with_resume_id` — a missing
+# import on the terminal.create path that no test covered, because it only
+# fires when a codex pane actually spawns. F821 catches that class at lint
+# time; the release gates run this check before building.
+select = ["ASYNC", "F821"]
 ignore = [
     # Not freeze-class: fast pathlib metadata calls and timeout-param API
     # style. Keeping only the rules that catch event-loop stalls.

@@ -63,6 +63,7 @@ jobs:
 
       - name: Run release gates
         run: |
+          uv --project backend run ruff check backend
           pnpm typecheck
           pnpm test:run
           uv --project backend run pytest backend/tests

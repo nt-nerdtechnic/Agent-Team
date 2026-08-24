@@ -23,7 +23,12 @@ stays cheap and free of import cycles; the core service singletons live on
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Imported inside _validate_workspace_cwd at runtime (kept lazy there);
+    # named here only so its return annotation resolves for linters.
+    from pathlib import Path
 
 
 class CapabilityError(Exception):

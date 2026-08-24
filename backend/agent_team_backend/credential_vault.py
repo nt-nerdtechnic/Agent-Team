@@ -207,6 +207,12 @@ class CredentialVaultError(RuntimeError):
     """A credential read/write against the live location or a slot failed."""
 
 
+#: Shape of the injectable Keychain runner: takes the `security` argv (plus
+#: optional stdin) and returns (returncode, stdout). Named for the annotation
+#: on CredentialVault.__init__, which had no definition to resolve to.
+SecurityRunner = Callable[..., tuple[int, str]]
+
+
 def _default_security_runner(args: list[str], input_text: str | None = None) -> tuple[int, str]:
     proc = subprocess.run(
         ["/usr/bin/security", *args],
