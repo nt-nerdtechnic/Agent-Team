@@ -590,10 +590,8 @@ void window.agentTeam?.restore?.getPending().then((list) => {
 // confirm. Uses the same notify surface and the same boot-overlay wait as the
 // crash prompt above.
 //
-// NOTE: restore:getSkipped is NOT claimed on the main side, so every window
-// that boots gets the same list. This guard only stops a repeat inside THIS
-// window; cross-window de-duplication needs main to claim the list on first
-// read, the way restore:getPending does with pendingRestoreClaimed.
+// Main claims the list on first read, so only one window ever receives it.
+// This guard covers a repeat ask inside THIS window.
 let skippedNoticeShown = false
 void window.agentTeam?.restore?.getSkipped?.().then((list) => {
   if (!list?.length || skippedNoticeShown) return

@@ -1261,7 +1261,13 @@ ipcMain.handle('restore:dismiss', () => {
 })
 
 // Workspaces left unrestored by the failure breaker, for a renderer notice.
-ipcMain.handle('restore:getSkipped', () => skippedRestores)
+// Claimed by the first window to ask, like restore:getPending above — every
+// restored window boots and asks, and the notice must appear only once.
+ipcMain.handle('restore:getSkipped', () => {
+  const claimed = skippedRestores
+  skippedRestores = []
+  return claimed
+})
 
 ipcMain.handle('restore:getAutoRestore', () => windowRegistry.getRestoreOnLaunch())
 

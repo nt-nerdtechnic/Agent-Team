@@ -12,6 +12,7 @@ import zhTW from '../../i18n/locales/zh-TW.json'
 // guard for the new restore:getSkipped wiring.
 const appSource = readFileSync(resolve(process.cwd(), 'src/renderer/src/App.vue'), 'utf8')
 const preloadSource = readFileSync(resolve(process.cwd(), 'src/preload/index.ts'), 'utf8')
+const mainSource = readFileSync(resolve(process.cwd(), 'src/main/index.ts'), 'utf8')
 
 function block(startMarker: string, endMarker: string): string {
   const start = appSource.indexOf(startMarker)
@@ -26,6 +27,17 @@ describe('restore:getSkipped preload bridge', () => {
     expect(preloadSource).toContain(
       "getSkipped: (): Promise<string[]> => ipcRenderer.invoke('restore:getSkipped')"
     )
+  })
+})
+
+describe('restore:getSkipped is claimed by the first asker', () => {
+  it('main empties the list once it has been handed out', () => {
+    // Every restored window boots and asks, so an unclaimed list would show
+    // the same notice in each of them.
+    const start = mainSource.indexOf("ipcMain.handle('restore:getSkipped'")
+    expect(start, 'restore:getSkipped handler should exist').toBeGreaterThan(-1)
+    const handler = mainSource.slice(start, mainSource.indexOf('\n})', start))
+    expect(handler).toContain('skippedRestores = []')
   })
 })
 
@@ -58,8 +70,8 @@ describe('skipped-restore notice wiring in App.vue', () => {
   })
 
   it('guards against showing the notice twice in this window', () => {
-    // restore:getSkipped is not claimed on the main side, so the renderer must
-    // at least not repeat itself within one window.
+    // Main claims the list (see below), so this only covers a repeat ask
+    // within one window.
     expect(appSource).toContain('let skippedNoticeShown = false')
     expect(flow).toContain('skippedNoticeShown')
     expect(flow).toContain('skippedNoticeShown = true')
