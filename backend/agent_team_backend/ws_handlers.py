@@ -4145,9 +4145,11 @@ async def _terminal_create_impl(
             # sub-agent rollouts were recognised could pin one, and codex
             # refuses direct input on such a thread — the pane comes back
             # unusable until the id is pointed at the user thread it came from.
-            repaired = await asyncio.to_thread(
-                app.codex_home_manager.resolve_user_thread_id, resume_id
-            )
+            resolver = getattr(app.codex_home_manager, "resolve_user_thread_id", None)
+            if callable(resolver):
+                repaired = await asyncio.to_thread(resolver, resume_id)
+            else:
+                repaired = resume_id
             if repaired != resume_id:
                 app.log.info(
                     "codex resume id repaired: sub-agent %s → user thread %s",
