@@ -96,6 +96,23 @@ def _write_cumulative(seen_keys: set[str], input_total: int, output_total: int) 
 class CodexLogReader(LogReader):
     vendor: str = "codex"
 
+    #: One filesystem sweep serves every workspace in a rescan cycle. The
+    #: watcher calls session_files_for_workspace once per open workspace, so
+    #: without this the sessions trees are re-walked N times per cycle — on a
+    #: cold page cache that stalls the event loop for seconds per walk. Kept
+    #: well under the watcher's rescan interval; a rollout created inside the
+    #: window is picked up by the fs watcher, not this backfill enumeration.
+    _SESSION_FILES_TTL_S = 5.0
+
+    def __init__(self) -> None:
+        # path -> cwd from the rollout's session_meta header. The header is
+        # immutable once written, so each file is opened at most once — an
+        # entry is stored only after the meta record was actually read, and a
+        # rollout whose header has not landed yet is retried next pass.
+        self._cwd_cache: dict[str, str] = {}
+        self._files_cache: list[Path] = []
+        self._files_cached_at: float = float("-inf")
+
     def project_dirs(self) -> list[Path]:
         roots: list[Path] = []
         default_root = Path.home() / ".codex" / "sessions"
@@ -124,6 +141,9 @@ class CodexLogReader(LogReader):
         return roots
 
     def session_files(self) -> list[Path]:
+        now = time.monotonic()
+        if now - self._files_cached_at <= self._SESSION_FILES_TTL_S:
+            return list(self._files_cache)
         out: list[Path] = []
         for root in self.project_dirs():
             try:
@@ -132,7 +152,14 @@ class CodexLogReader(LogReader):
                         out.append(f)
             except OSError as err:
                 log.debug("rglob %s failed: %s", root, err)
-        return out
+        self._files_cache = out
+        self._files_cached_at = now
+        # Deleted/archived rollouts must not pin their header entries forever.
+        existing = {str(p) for p in out}
+        for k in list(self._cwd_cache):
+            if k not in existing:
+                del self._cwd_cache[k]
+        return list(out)
 
     def _cwd_from_meta(self, path: Path) -> str:
         """Read just the session_meta header for this rollout's cwd.
@@ -141,6 +168,10 @@ class CodexLogReader(LogReader):
         `session_meta` record carrying payload.cwd. We read only the first few
         lines (not the whole rollout) so per-workspace scoping stays cheap.
         """
+        key = str(path)
+        cached = self._cwd_cache.get(key)
+        if cached is not None:
+            return cached
         try:
             with path.open("r", encoding="utf-8", errors="replace") as fh:
                 for _ in range(5):  # session_meta is the first record
@@ -153,8 +184,9 @@ class CodexLogReader(LogReader):
                         continue
                     if rec.get("type") == "session_meta":
                         payload = rec.get("payload") or {}
-                        if isinstance(payload, dict):
-                            return str(payload.get("cwd") or "")
+                        cwd = str(payload.get("cwd") or "") if isinstance(payload, dict) else ""
+                        self._cwd_cache[key] = cwd
+                        return cwd
         except OSError:
             return ""
         return ""
