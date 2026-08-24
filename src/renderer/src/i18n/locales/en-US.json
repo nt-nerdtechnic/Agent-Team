@@ -616,7 +616,9 @@
     "clean-untracked-menu": "Clean untracked files…",
     "delete-files": "Delete files",
     "pull-rebase-menu": "Pull (rebase)",
-    "push-set-upstream": "Push (set upstream)"
+    "push-set-upstream": "Push (set upstream)",
+    "expand-subtree": "Expand subtree",
+    "collapse-subtree": "Collapse subtree"
   },
   "settings": {
     "search": {
@@ -1940,7 +1942,8 @@
     "editor-vscode": "Visual Studio Code",
     "editor-cursor": "Cursor",
     "editor-custom": "Custom command…",
-    "preview": "Preview"
+    "preview": "Preview",
+    "spawned-by-agent": "Spawned by an agent"
   },
   "layout": {
     "expand": "Expand panel",

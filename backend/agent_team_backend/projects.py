@@ -124,6 +124,8 @@ class PaneRecord:
     auto_name_source: str = ""      # "heuristic" | "llm"; an llm name may upgrade a heuristic one once
     output_log_file: str = ""       # conversation log path recorded at spawn time
     stopped: bool = False           # STOP badge: a stop action was issued and the user hasn't taken over yet
+    is_minimized: bool = False      # collapsed to the sidebar. The renderer has been sending this since the feature shipped; the handler was missing, so it never persisted.
+    collapsed: bool = False         # lineage subtree folded in the agent lists. Lives here, not in a Project-level id set: pane_id is regenerated every restart, so such a set would silently empty itself.
 
 
 @dataclass
@@ -1122,6 +1124,38 @@ class ProjectStore:
         if pane is None:
             return project
         pane.stopped = stopped
+        self.save(project)
+        return project
+
+    def set_pane_minimized(
+        self,
+        workspace_path: str,
+        *,
+        pane_id: str,
+        is_minimized: bool,
+    ) -> Project:
+        """Persist the collapsed-to-sidebar state. No-op if pane not found."""
+        project = self.load_or_create(workspace_path)
+        pane = next((p for p in project.panes if p.pane_id == pane_id), None)
+        if pane is None:
+            return project
+        pane.is_minimized = is_minimized
+        self.save(project)
+        return project
+
+    def set_pane_collapsed(
+        self,
+        workspace_path: str,
+        *,
+        pane_id: str,
+        collapsed: bool,
+    ) -> Project:
+        """Persist whether this pane's lineage subtree is folded in the lists."""
+        project = self.load_or_create(workspace_path)
+        pane = next((p for p in project.panes if p.pane_id == pane_id), None)
+        if pane is None:
+            return project
+        pane.collapsed = collapsed
         self.save(project)
         return project
 

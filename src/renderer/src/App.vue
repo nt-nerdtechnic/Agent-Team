@@ -9,6 +9,7 @@ import ReconnectSessionModal, { type OrphanSession } from './components/Reconnec
 import ControlPane, {
   type AgentSpec,
   type ActivePaneView,
+  type PaneLineageRow,
   type InjectionStatus,
   type KickoffStatus,
   type PreparationStatus,
@@ -2383,6 +2384,7 @@ function syncViews(): void {
       kickoffStatus: p.kickoffStatus,
       origin: p.origin,
       spawnedBy: p.spawnedBy,
+      collapsed: collapsedPanes.value.has(p.id),
       isCommander: paneIsCommander(p),
       sessionId: p.pinnedSessionId,
       slotLabel: p.slotLabel,
@@ -6299,6 +6301,7 @@ interface ProjectPane {
   auto_name?: string
   auto_name_source?: string
   is_minimized?: boolean
+  collapsed?: boolean
   output_log_file?: string
   stopped?: boolean
 }
@@ -6983,6 +6986,9 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       if (saved.is_minimized) {
         minimizedPanes.value = new Set([...minimizedPanes.value, saved.pane_id])
       }
+      if (saved.collapsed) {
+        collapsedPanes.value = new Set([...collapsedPanes.value, saved.pane_id])
+      }
     }
     syncViews()
     if (isStale?.() || currentWorkspace.value !== workspacePath) return null
@@ -7047,6 +7053,9 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       // Re-apply the persisted collapsed-to-sidebar state to the new pane id.
       if (saved.is_minimized) {
         minimizedPanes.value = new Set([...minimizedPanes.value, paneId])
+      }
+      if (saved.collapsed) {
+        collapsedPanes.value = new Set([...collapsedPanes.value, paneId])
       }
 
       // Reflect the persisted STOP badge onto the freshly-spawned pane. spawnPane
@@ -10298,6 +10307,11 @@ function truncate(s: string, n: number): string {
 const layoutMode = ref<LayoutMode>('grid')
 const focusPaneId = ref<string | null>(null)
 const minimizedPanes = ref(new Set<string>())
+/** Panes whose lineage subtree is folded in the agent lists. Persisted per
+ *  pane (PaneRecord.collapsed) rather than as a Project-level id set, because
+ *  pane_id is regenerated on every restart — such a set would silently empty
+ *  itself and the tree would always come back fully expanded. */
+const collapsedPanes = ref(new Set<string>())
 
 // ── Idle CLI reclaim ─────────────────────────────────────────────────────────
 // A CLI that has been idle for hours still holds every byte it ever allocated.
@@ -11117,6 +11131,62 @@ const {
     window.agentTeam?.cliPaneDragEnd?.(paneId, screenX, screenY, paneDragBatch(paneId))
   },
 })
+
+/** One row of the lineage tree: which pane, how deep, and whether it folds.
+ *
+ *  STRUCTURE LAYER — deliberately derived from `panes` (id / spawnedBy /
+ *  collapsed only), never from `paneViews`. syncViews() rebuilds paneViews
+ *  every 400ms, so a structure computed reading it would rebuild the whole
+ *  tree at that rate; status and badges stay in paneViews and are looked up
+ *  per row by the consumer. Same split as StageTabBar's structure/status
+ *  computeds, and for the same reason. */
+const paneLineage = computed<PaneLineageRow[]>(() => {
+  const ids = new Set(panes.value.map((p) => p.id))
+  // A parent that is no longer present (closed in another window, or a record
+  // predating lineage persistence) makes its child a root rather than hiding it.
+  const childrenOf = new Map<string, string[]>()
+  for (const p of panes.value) {
+    const parent = p.spawnedBy && ids.has(p.spawnedBy) && p.spawnedBy !== p.id ? p.spawnedBy : ''
+    const bucket = childrenOf.get(parent)
+    if (bucket) bucket.push(p.id)
+    else childrenOf.set(parent, [p.id])
+  }
+  const rows: PaneLineageRow[] = []
+  const seen = new Set<string>()
+  const walk = (parent: string, depth: number): void => {
+    for (const id of childrenOf.get(parent) ?? []) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      const collapsed = collapsedPanes.value.has(id)
+      rows.push({ id, depth, hasChildren: (childrenOf.get(id)?.length ?? 0) > 0, collapsed })
+      if (!collapsed) walk(id, depth + 1)
+    }
+  }
+  walk('', 0)
+  // Anything the walk could not reach sits in a cycle the backend guard did not
+  // catch (hand-edited state, or a record from an older build). Show it as a
+  // root rather than dropping it off the list entirely.
+  for (const p of panes.value) {
+    if (!seen.has(p.id)) rows.push({ id: p.id, depth: 0, hasChildren: false, collapsed: false })
+  }
+  return rows
+})
+
+function togglePaneCollapsed(id: string): void {
+  const next = new Set(collapsedPanes.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  collapsedPanes.value = next
+  const pane = panes.value.find((p) => p.id === id)
+  if (pane) {
+    backend.send('project.set_pane_collapsed', {
+      workspace_path: pane.workspacePath,
+      pane_id: id,
+      collapsed: next.has(id),
+    })
+  }
+  syncViews()
+}
 
 // Persist the pane's collapsed-to-sidebar state to project.json so it survives
 // a restart (mirrors project.rename_pane / custom_name).
@@ -12099,11 +12169,19 @@ const onScreenPaneIds = computed<Set<string>>(() => {
 const stageSurfaceOrderedIds = computed<string[]>(() =>
   panes.value.filter((p) => onScreenPaneIds.value.has(p.id)).map((p) => p.id)
 )
-const auxiliaryListOrderedIds = computed<string[]>(() =>
-  paneViews.value
-    .filter((v) => !v.isMinimized && tabFilteredPaneIds.value.has(v.id))
-    .map((v) => v.id)
-)
+// Shift-range selection walks this list, so it has to be the order the user
+// actually sees: the lineage tree flattened depth-first, not the flat pane
+// order. It is also collapse-aware for free — a folded subtree's children are
+// absent from paneLineage, so a range spanning a collapsed parent skips the
+// children the user cannot see.
+const auxiliaryListOrderedIds = computed<string[]>(() => {
+  const visible = new Set(
+    paneViews.value
+      .filter((v) => !v.isMinimized && tabFilteredPaneIds.value.has(v.id))
+      .map((v) => v.id)
+  )
+  return paneLineage.value.filter((r) => visible.has(r.id)).map((r) => r.id)
+})
 
 function onUserChangeLayoutMode(mode: LayoutMode): void {
   layoutMode.value = mode
@@ -12430,6 +12508,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :roles="rolesApi.roles.value"
       :stages="stagesApi.stages.value"
       :panes="paneViews"
+      :lineage="paneLineage"
       :pipeline="pipelineView"
       :existing-project="existingProject"
       :workspace="currentWorkspace"
@@ -12450,6 +12529,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @spawn-resume="onManualResume"
       @kill="onKill"
       @minimize="minimizePane"
+      @toggle-collapsed="togglePaneCollapsed"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
       @reinject="onReinject"

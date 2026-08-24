@@ -59,6 +59,18 @@ export type PreparationStatus =
   | 'ready'
   | 'failed'
 
+/** One row of the lineage tree, in display order.
+ *
+ *  Built in App (paneLineage) from pane ids alone so it does not rebuild with
+ *  every 400ms status sync. The list renders these rows and looks the matching
+ *  ActivePaneView up for status — structure and status stay separate. */
+export interface PaneLineageRow {
+  id: string
+  depth: number
+  hasChildren: boolean
+  collapsed: boolean
+}
+
 export interface ActivePaneView {
   id: string
   agentKey: string
@@ -81,6 +93,12 @@ export interface ActivePaneView {
   preparationStatus?: PreparationStatus
   kickoffStatus?: KickoffStatus
   origin: 'manual' | 'pipeline' | 'mcp'
+  /** Pane id of the parent that spawned this pane; absent for roots. Copied
+   *  verbatim — the tree itself is built in App's paneLineage, which is the
+   *  structure layer this view model must not duplicate. */
+  spawnedBy?: string
+  /** True when this pane's lineage subtree is folded in the lists. */
+  collapsed?: boolean
   /** True when this pane corresponds to a slot marked is_commander=true in
    *  the stage config — shown as 🎯 指揮官 badge in the active-agents list
    *  and the pane header. */
@@ -238,8 +256,13 @@ interface Props {
   rebuildingAll?: boolean
   /** Issue dispatch/handle status — forwarded to GitPane for badges. */
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
-  /** Left slot collapsed — swaps the panel body for a narrow icon rail. */
+  /** Left slot collapsed — swaps the panel body for a narrow icon rail.
+   *  Unrelated to a pane's own collapsed flag (see `lineage`). */
   collapsed?: boolean
+  /** Lineage rows in display order, from App's structure-layer computed.
+   *  Omitted or empty renders the flat list unchanged, so every other consumer
+   *  of this component keeps working. */
+  lineage?: PaneLineageRow[]
   /** View ids assigned to this slot, in tab order. Omitted means "all of
    *  them" — the layout store supplies the real list. A view moved to another
    *  slot disappears from here, which is what keeps it a singleton. */
@@ -247,6 +270,30 @@ interface Props {
 }
 
 const props = defineProps<Props>()
+
+/** Panes in tree order, each paired with its depth.
+ *
+ *  Joins the structure layer (`lineage`, rebuilt only when the tree actually
+ *  changes) with the status layer (`panes`, replaced every 400ms). Without a
+ *  `lineage` prop this degrades to the previous flat list, so the other
+ *  mounts of this component are unaffected.
+ *
+ *  Rows whose pane is missing are skipped rather than rendered blank: the two
+ *  props are updated in the same tick but arrive as separate reactive writes,
+ *  so a frame can see one before the other. */
+const orderedPanes = computed(() => {
+  const rows = props.lineage
+  if (!rows?.length) {
+    return props.panes.map((pane) => ({ pane, depth: 0, hasChildren: false, collapsed: false }))
+  }
+  const byId = new Map(props.panes.map((p) => [p.id, p]))
+  const out: { pane: ActivePaneView; depth: number; hasChildren: boolean; collapsed: boolean }[] = []
+  for (const r of rows) {
+    const pane = byId.get(r.id)
+    if (pane) out.push({ pane, depth: r.depth, hasChildren: r.hasChildren, collapsed: r.collapsed })
+  }
+  return out
+})
 
 // Build tag injected at build time (electron.vite.config.ts) so the header
 // shows exactly which build is running — avoids confusion over which version
@@ -298,6 +345,9 @@ const emit = defineEmits<{
   (e: 'kill', paneId: string): void
   (e: 'kill-all'): void
   (e: 'minimize', paneId: string): void
+  /** Fold/unfold this pane's lineage subtree. App owns the state so every
+   *  list stays in step and the choice can be persisted. */
+  (e: 'toggle-collapsed', paneId: string): void
   (e: 'interrupt', paneId: string): void
   (e: 'reinject', paneId: string): void
   (e: 'rebuild', paneId: string): void
@@ -1274,9 +1324,10 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
       <ul v-else class="agent-list">
         <li
-          v-for="p in panes"
+          v-for="{ pane: p, depth, hasChildren, collapsed: folded } in orderedPanes"
           :key="p.id"
           class="agent-item"
+          :style="depth ? { marginLeft: depth * 13 + 'px' } : undefined"
           :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'agent-item--selected': props.selectedPaneIds?.has(p.id), 'agent-item--dragging': draggingBatchIds.includes(p.id), 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
           @dragover="onAgentDragOver($event, p.id)"
           @dragenter="onAgentDragOver($event, p.id)"
@@ -1284,8 +1335,16 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           @drop.prevent="onAgentDrop($event, p.id)"
         >
           <div class="agent-line" role="button" title="Focus pane" draggable="true" @dragstart="onAgentDragStart($event, p.id)" @dragend="onAgentDragEnd" @click="onAgentLineClick(p.id, $event)" @contextmenu.prevent="emit('context-menu', p.id, $event)">
+            <button
+              v-if="hasChildren"
+              class="lineage-caret"
+              :title="folded ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
+              @click.stop="emit('toggle-collapsed', p.id)"
+            >{{ folded ? '▸' : '▾' }}</button>
+            <span v-else-if="depth" class="lineage-spacer"></span>
             <span class="status-dot" :data-state="p.status" :title="$t(paneStatusLabelKey(p.status))"></span>
             <span v-if="p.origin === 'pipeline'" class="pipe-tag">P{{ p.stageId }}</span>
+            <span v-else-if="p.origin === 'mcp'" class="mcp-tag" :title="$t('label.spawned-by-agent')">MCP</span>
             <input
               v-if="renamingPaneId === p.id"
               v-focus
@@ -2731,6 +2790,35 @@ button.icon-btn.muted:hover {
   color: var(--accent-bright);
   padding: 1px 5px;
   border-radius: 3px;
+}
+/* Agent-spawned pane. Distinct hue from .pipe-tag so the two provenance marks
+   are never confused; both sit in the same slot before the name. */
+.mcp-tag {
+  font-size: 9px;
+  font-weight: 700;
+  background: var(--done-muted, var(--bg-muted));
+  color: var(--done-fg, var(--text-secondary));
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex: none;
+}
+/* Fold control for a pane that has children. Sized to match .lineage-spacer so
+   a childless row at the same depth still lines up with its siblings. */
+.lineage-caret {
+  flex: none;
+  width: 12px;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+.lineage-caret:hover { color: var(--text-bright); }
+.lineage-spacer {
+  flex: none;
+  width: 12px;
 }
 .badge {
   font-weight: 600;

@@ -616,7 +616,9 @@
     "clean-untracked-menu": "清除未追蹤檔案…",
     "delete-files": "刪除檔案",
     "pull-rebase-menu": "拉取（rebase）",
-    "push-set-upstream": "推送（設定 upstream）"
+    "push-set-upstream": "推送（設定 upstream）",
+    "expand-subtree": "展開子項",
+    "collapse-subtree": "收合子項"
   },
   "settings": {
     "search": {
@@ -1940,7 +1942,8 @@
     "editor-vscode": "Visual Studio Code",
     "editor-cursor": "Cursor",
     "editor-custom": "自訂命令…",
-    "preview": "預覽"
+    "preview": "預覽",
+    "spawned-by-agent": "由 agent 建立"
   },
   "layout": {
     "expand": "展開面板",

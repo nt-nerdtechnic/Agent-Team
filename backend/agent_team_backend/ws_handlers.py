@@ -4745,6 +4745,37 @@ async def project_set_pane_stopped(session: "Session", msg_id: str, msg_type: st
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 
+@handler("project.set_pane_minimized")
+async def project_set_pane_minimized(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Collapsed-to-sidebar state.
+
+    The renderer has been sending this since the feature shipped, but no
+    handler existed — backend.send is fire-and-forget, so nothing surfaced and
+    the state silently reset on every restart.
+    """
+    from . import app
+
+    ws_raw = payload.get("workspace_path", "") or ""
+    pane_id = payload.get("pane_id", "") or ""
+    is_minimized = bool(payload.get("is_minimized", False))
+    if ws_raw and pane_id:
+        app.project_store.set_pane_minimized(ws_raw, pane_id=pane_id, is_minimized=is_minimized)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
+@handler("project.set_pane_collapsed")
+async def project_set_pane_collapsed(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Whether this pane's lineage subtree is folded in the agent lists."""
+    from . import app
+
+    ws_raw = payload.get("workspace_path", "") or ""
+    pane_id = payload.get("pane_id", "") or ""
+    collapsed = bool(payload.get("collapsed", False))
+    if ws_raw and pane_id:
+        app.project_store.set_pane_collapsed(ws_raw, pane_id=pane_id, collapsed=collapsed)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
 @handler("project.set_tab_order")
 async def project_set_tab_order(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
