@@ -512,6 +512,11 @@ const isDetachedWindow = detachedGroupId !== ''
 // Groups that THIS (main) window has handed off to a detached child window —
 // filtered out of the tab bar and pane view until the child closes.
 const detachedGroupIds = ref<Set<string>>(new Set())
+/** Resolves once main has told this window which groups are currently
+ *  detached. An ordinary restore awaits it, so the filter that skips those
+ *  groups is never consulted before the answer has arrived — otherwise the
+ *  race decides whether the main window resurrects panes the child owns. */
+let detachedGroupsKnown: Promise<void> = Promise.resolve()
 if (_bootWorkspace) {
   try {
     sessionStorage.setItem(WS_PATH_KEY, _bootWorkspace)
@@ -6864,12 +6869,23 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
     }
   }
 
+  // An ordinary main-window restore must know which groups are detached before
+  // it decides what to resume; the answer arrives asynchronously from main.
+  if (!isDetachedWindow && onlyGroupId === undefined) await detachedGroupsKnown
+
   let toRestore = allProjectPanes.filter((p) => p.spawn_status === 'spawned')
   // Detached child window restores only the panes of its scoped run group; the
   // live PTYs are kept alive by the main window's hand-off, so these reattach.
   if (isDetachedWindow) toRestore = toRestore.filter((p) => (p.run_group_id ?? '') === detachedGroupId)
   // Main-window reattach after a child closes: restore just the returning group.
   else if (onlyGroupId !== undefined) toRestore = toRestore.filter((p) => (p.run_group_id ?? '') === onlyGroupId)
+  // Ordinary main-window restore: skip groups that are currently detached —
+  // the child window owns those panes and restores them itself. Without this
+  // both windows resume the same records: the main window shows panes it does
+  // not own, and closing the child adds a second copy of each.
+  else if (detachedGroupIds.value.size > 0) {
+    toRestore = toRestore.filter((p) => !detachedGroupIds.value.has(p.run_group_id ?? ''))
+  }
   // Collapse duplicate records that resume the SAME conversation: spawning
   // several `--resume <same id>` concurrently makes the CLI fork/conflict and
   // leak processes (a source of the leftover-agent pileup).
@@ -10726,11 +10742,28 @@ function handleGroupDetached(groupId: string): void {
  *  that group's panes here (they resume against the PTYs the child released). */
 async function handleGroupReattached(groupId: string): Promise<void> {
   if (isDetachedWindow || !groupId) return
+  const path = currentWorkspace.value
+  if (!path) return
+  // Drop any of this group's panes still listed here BEFORE restoring, or the
+  // restore adds a second copy of each and the list doubles on every cycle.
+  //
+  // They should not be here at all — the group is detached, so the child window
+  // owns those panes — but a main window that launched while the group was
+  // already detached restores them from the project record before it learns
+  // which groups are detached. Removing them costs nothing when the list is
+  // already clean, and it is the same non-killing removal the detach path uses:
+  // the backend PTYs stay alive and the restore below reattaches to them.
+  for (const p of panes.value) {
+    if ((p.runGroupId ?? '') === groupId) {
+      delete paneRefs[p.id]
+      unregisterPaneMessaging(p.id, { keepPersisted: true })
+    }
+  }
+  panes.value = panes.value.filter((p) => (p.runGroupId ?? '') !== groupId)
+
   const next = new Set(detachedGroupIds.value)
   next.delete(groupId)
   detachedGroupIds.value = next
-  const path = currentWorkspace.value
-  if (!path) return
   const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
   if (resp) await restoreWorkspacePanes(resp, path, groupId)
 }
@@ -10742,9 +10775,12 @@ onMounted(() => {
   // A main window that (re)loaded while a child is already open must hide the
   // groups that are currently detached. Best-effort: no-op if the main process
   // doesn't yet know this window's workspace.
-  void window.agentTeam?.getDetachedGroups?.().then((ids) => {
-    for (const gid of ids ?? []) handleGroupDetached(gid)
-  })
+  detachedGroupsKnown = (window.agentTeam?.getDetachedGroups?.() ?? Promise.resolve([]))
+    .then((ids) => {
+      for (const gid of ids ?? []) handleGroupDetached(gid)
+    })
+    // Best-effort: a failed lookup must not stall restore for ever.
+    .catch(() => {})
 })
 
 /** Fixed id for the always-present default tab. Using a constant id (rather than
