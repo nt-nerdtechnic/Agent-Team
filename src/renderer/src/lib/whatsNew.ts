@@ -36,6 +36,27 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.90',
+    title: {
+      'zh-TW': '終端 PTY 二進位幀串流傳輸與後端日誌探索效能優化',
+      'en-US': 'Terminal PTY Binary Frame Streaming & Background Rescan Performance',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '終端 PTY 二進位幀傳輸：終端輸出全面改採 WebSocket Binary Frame 串流，避免 JSON 字串編碼與轉義負擔，巨量輸出更加極速流暢。',
+        'en-US':
+          'PTY Binary Frame Streaming: terminal outputs now stream over WebSocket binary frames, eliminating JSON escaping overhead for high-speed terminal throughput.',
+      },
+      {
+        'zh-TW':
+          '後端檔案探索非同步化：日誌監控（LogWatcher）磁碟檔案探索全面移至背景執行緒，徹底杜絕大型專案下的主事件循環延遲。',
+        'en-US':
+          'Non-blocking Rescan Discovery: moves disk session discovery into background threads, keeping the main asyncio event loop completely responsive.',
+      },
+    ],
+  },
+  {
     version: '0.1.89',
     title: {
       'zh-TW': '官方 Brand 視覺升級、Git 多倉庫選擇器、靜音閒置回收與品質守衛',
