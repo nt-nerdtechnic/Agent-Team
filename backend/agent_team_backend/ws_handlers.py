@@ -5582,6 +5582,7 @@ async def manual_pane_spawn(session: "Session", msg_id: str, msg_type: str, payl
         run_group_id=payload.get("run_group_id", ""),
         output_log_file=payload.get("output_log_file", ""),
         origin=payload.get("origin", ""),
+        spawned_by=payload.get("spawned_by", ""),
     )
     await session.send_json(
         make_response(msg_id, msg_type, app._project_payload(project))

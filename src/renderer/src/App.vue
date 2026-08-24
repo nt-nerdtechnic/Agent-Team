@@ -944,16 +944,16 @@ interface ActivePane {
    *  spawned with — which carries the id of that moment forever — still
    *  resolves to this pane. */
   formerPaneIds?: string[]
-  /** Pane id of the parent that spawned this pane via a SPAWN block. Runtime
-   *  only — deliberately NOT persisted: after a restart every pane counts as
-   *  root (spawn depth 0) again, accepted for the MVP. */
+  /** Pane id of the parent that spawned this pane via a SPAWN block.
+   *  Persisted (PaneRecord.spawned_by) and re-keyed by the backend whenever a
+   *  pane_id is regenerated, so lineage survives a restart. */
   spawnedBy?: string
   /** Messaging handle of the parent this pane owes a report to, and whether
    *  that report is still outstanding. Set together when a spawn kickoff lands
    *  and cleared by the first turn that ends — by the pane's own report if it
-   *  wrote one, by a fallback report if it did not. Runtime only, alongside
-   *  spawnedBy: a pane that outlives a restart is nobody's child any more, and
-   *  a report owed to a parent that no longer exists cannot be delivered. */
+   *  wrote one, by a fallback report if it did not. Runtime only — unlike
+   *  spawnedBy this is deliberately NOT persisted: the turn that owed the
+   *  report ended when the app closed, so a restored pane owes nothing. */
   spawnedByName?: string
   spawnReportPending?: boolean
   roleKey: RoleKey
@@ -1842,6 +1842,7 @@ async function createRequestedPane(
     run_group_id: parent.runGroupId ?? '',
     output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
     origin: 'mcp',
+    spawned_by: parent.id,
   })
   void sendQuiet('project.rename_pane', {
     workspace_path: parent.workspacePath,
@@ -2381,6 +2382,7 @@ function syncViews(): void {
       preparationStatus: p.preparationStatus,
       kickoffStatus: p.kickoffStatus,
       origin: p.origin,
+      spawnedBy: p.spawnedBy,
       isCommander: paneIsCommander(p),
       sessionId: p.pinnedSessionId,
       slotLabel: p.slotLabel,
@@ -5053,6 +5055,7 @@ async function rebuildPaneViaResume(
       slotLabel: pane.slotLabel,
       workspacePath: ws,
       origin: pane.origin,
+      spawnedBy: pane.spawnedBy,
       runGroupId: pane.runGroupId,
       sessionHomeId: pane.sessionHomeId,
       profileId: pane.profileId,
@@ -5072,6 +5075,7 @@ async function rebuildPaneViaResume(
       commandOverride: resumeCmd,
       workspacePath: snap.workspacePath,
       origin: snap.origin,
+      spawnedBy: snap.spawnedBy,
       runGroupId: snap.runGroupId || undefined,
       isResume: true,
       skipRoleInjection: true,
@@ -5082,6 +5086,10 @@ async function rebuildPaneViaResume(
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
+      // A rebuild retires the old pane id exactly like a restore does, so the
+      // in-memory lineage has to follow. The backend does its own re-key off
+      // previous_pane_id in the manual_pane.spawn below.
+      rekeyLineage(paneId, newId)
       if (opts?.offerContinue) {
         const revived = panes.value.find((p) => p.id === newId)
         if (revived) revived.resumeContinueAvailable = true
@@ -5300,6 +5308,7 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
     slotLabel: pane.slotLabel,
     workspacePath: pane.workspacePath,
     origin: pane.origin,
+    spawnedBy: pane.spawnedBy,
     runGroupId: pane.runGroupId,
   }
   for (const key of lockKeys) rebuildingPanes.add(key)
@@ -5316,11 +5325,14 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
       commandOverride: '',
       workspacePath: snap.workspacePath,
       origin: snap.origin,
+      spawnedBy: snap.spawnedBy,
       runGroupId: snap.runGroupId || undefined,
       isResume: false,
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
+      // Same reason as the resume rebuild above: the old id is retired here.
+      rekeyLineage(paneId, newId)
       if (snap.origin !== 'pipeline') {
         await sendQuiet<ProjectPayload>('manual_pane.spawn', {
           workspace_path: snap.workspacePath,
@@ -6277,6 +6289,7 @@ interface ProjectPane {
   spawn_status: string   // 'pending' | 'spawned' | 'removed'
   run_group_id?: string
   origin: 'pipeline' | 'manual' | 'mcp'
+  spawned_by?: string
   stage_id?: string
   stage_index?: number
   slot_label?: string
@@ -6371,6 +6384,21 @@ interface RestoredPaneSpawnResult {
 /** Spawn an already-decided restore and persist its new pane record. Restore
  * policy (probe, resume/fresh choice, reconnect, and stale checks) stays with
  * the eager/lazy callers; this only keeps their spawn metadata in sync. */
+/** Point every in-memory child of `oldId` at `newId`.
+ *
+ *  Mirrors the backend's _rekey_spawned_by. Any path that gives a pane a new
+ *  id — restore, rebuild — must call this, because a child still holding the
+ *  retired id is a dead pointer, and spawn-depth checks read the lineage.
+ *  Restore order is not guaranteed (a child can land before its parent), so
+ *  this runs per re-key rather than once at the end. A self-reference is
+ *  dropped: a pane that became its own parent would make the walk loop. */
+function rekeyLineage(oldId: string, newId: string): void {
+  if (!oldId || oldId === newId) return
+  for (const p of panes.value) {
+    if (p.spawnedBy === oldId) p.spawnedBy = p.id === newId ? undefined : newId
+  }
+}
+
 async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<RestoredPaneSpawnResult | null> {
   const { saved } = opts
   const paneId = await spawnPane({
@@ -6385,6 +6413,7 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     commandOverride: opts.commandOverride,
     workspacePath: opts.workspacePath,
     origin: saved.origin,
+    spawnedBy: saved.spawned_by || undefined,
     runGroupId: opts.runGroupId,
     isResume: opts.isResume,
     skipRoleInjection: opts.isResume,
@@ -6410,7 +6439,10 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     await onKill(paneId, { markRemoved: false })
     return null
   }
-  if (saved.pane_id !== paneId) dropPersistedMessagingName(saved.pane_id)
+  if (saved.pane_id !== paneId) {
+    dropPersistedMessagingName(saved.pane_id)
+    rekeyLineage(saved.pane_id, paneId)
+  }
 
   const pinnedSessionId = panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? ''
   if (saved.origin === 'pipeline') {

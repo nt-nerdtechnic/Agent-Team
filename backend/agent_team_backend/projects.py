@@ -113,6 +113,7 @@ class PaneRecord:
     spawn_status: str = "pending"   # pending / spawned / removed
     run_group_id: str = ""
     origin: str = "manual"          # "pipeline" | "manual" | "mcp"  (non-pipeline records are matched with != "pipeline")
+    spawned_by: str = ""            # pane_id of the parent that spawned this pane; "" = root. Re-keyed on restore alongside pane_id — a stale value is worse than none (see _rekey_spawned_by).
     stage_id: str = ""
     stage_index: int = -1
     slot_label: str = ""
@@ -621,6 +622,11 @@ class ProjectStore:
                               stage_id=stage.stage_id, stage_index=stage_index, slot_label=slot_label)
             project.panes.append(pane)
         self._adopt_pending_stub(project, pane, pane_id)
+        # Same re-key as the manual path: a pipeline pane has no parent of its
+        # own, but it can be one — an MCP spawn from inside it produces children
+        # whose spawned_by points here.
+        if pane.pane_id != pane_id:
+            self._rekey_spawned_by(project, pane.pane_id, pane_id)
         pane.pane_id = pane_id
         pane.spawn_status = "spawned"
         if agent: pane.agent = agent
@@ -675,6 +681,20 @@ class ProjectStore:
         )
         return project
 
+    @staticmethod
+    def _rekey_spawned_by(project: "Project", old_id: str, new_id: str) -> None:
+        """Point every child of `old_id` at `new_id`.
+
+        Called whenever a record's pane_id is rewritten (restore / rebuild).
+        Self-references are dropped rather than kept: a record that ends up its
+        own parent would make the lineage walk loop forever.
+        """
+        if not old_id or old_id == new_id:
+            return
+        for child in project.panes:
+            if child.spawned_by == old_id:
+                child.spawned_by = "" if child.pane_id == new_id else new_id
+
     def _find_manual_pane(
         self, project: "Project", pane_id: str, previous_pane_id: str = "", session_id: str = ""
     ) -> "PaneRecord | None":
@@ -717,6 +737,7 @@ class ProjectStore:
         run_group_id: str = "",
         output_log_file: str = "",
         origin: str = "",
+        spawned_by: str = "",
     ) -> Project:
         project = self.load_or_create(workspace_path)
         pane = self._find_manual_pane(project, pane_id, previous_pane_id, session_id)
@@ -724,6 +745,14 @@ class ProjectStore:
             pane = PaneRecord(pane_id=pane_id, origin=origin or "manual")
             project.panes.append(pane)
         self._adopt_pending_stub(project, pane, pane_id)
+        # pane_id is regenerated on every restart and re-linked via
+        # previous_pane_id. Any child still pointing spawned_by at this
+        # record's OLD id becomes a dead pointer the instant we overwrite it,
+        # so rewrite the children first — in this same save(), never as a
+        # follow-up RPC. A stale lineage is worse than no lineage: spawn-depth
+        # checks read it and would mis-count.
+        if pane.pane_id != pane_id:
+            self._rekey_spawned_by(project, pane.pane_id, pane_id)
         pane.pane_id = pane_id
         pane.agent = agent
         pane.role = role
@@ -737,6 +766,7 @@ class ProjectStore:
         # Guarded like the fields above: an omitted origin must not blank an
         # existing record back to "manual" (that would strip the mcp marker).
         if origin: pane.origin = origin
+        if spawned_by: pane.spawned_by = spawned_by
         # A rebuild hop owns its session: retire any OTHER spawned manual
         # record sharing it (legacy duplicate accumulation) so restore cannot
         # resurrect a ghost pane. Gated on previous_pane_id for the same
