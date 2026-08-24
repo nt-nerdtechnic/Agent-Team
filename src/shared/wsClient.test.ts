@@ -133,14 +133,16 @@ describe('createWsClient', () => {
     expect(seen).toEqual([{ workspace_path: '/repo' }])
   })
 
-  it('reconnects with backoff after an unexpected close', () => {
+  it('stays down after an unexpected close instead of reconnecting itself', () => {
     const c = makeClient()
     c.connect(URL)
     FakeWebSocket.instances[0].open()
     FakeWebSocket.instances[0].close()
     expect(statuses).toContain('disconnected')
-    vi.advanceTimersByTime(1_500) // first backoff step
-    expect(FakeWebSocket.instances).toHaveLength(2)
+    // No backoff timer exists: the socket comes back only when the caller
+    // asks for it (backend:changed → connect, system resume → reconnectNow).
+    vi.advanceTimersByTime(300_000)
+    expect(FakeWebSocket.instances).toHaveLength(1)
   })
 
   it('reset() tears down without reconnecting and rejects in-flight with the reason', async () => {
@@ -153,7 +155,7 @@ describe('createWsClient', () => {
     await expect(inflight).resolves.toMatchObject({ message: 'backend changed' })
     expect(sock.closed).toBe(true)
     vi.advanceTimersByTime(60_000)
-    expect(FakeWebSocket.instances).toHaveLength(1) // no reconnect scheduled
+    expect(FakeWebSocket.instances).toHaveLength(1) // nothing reconnects on its own
   })
 
   it('markErrored() makes sends fail fast instead of queueing', async () => {
@@ -174,32 +176,21 @@ describe('createWsClient', () => {
     expect(c.isHealthyFor(URL)).toBe(false)
   })
 
-  it('force-closes the socket after three consecutive ping failures', async () => {
+  it('never probes an idle socket and never force-closes one', async () => {
     const c = makeClient()
     c.connect(URL)
     const sock = FakeWebSocket.instances[0]
     sock.open()
-    // Each ping interval fires a ping; with no reply it times out after
-    // pingTimeoutMs. Drive three full failure cycles (async advance flushes the
-    // ping promise's rejection handler between cycles).
-    for (let i = 0; i < 3; i++) {
-      await vi.advanceTimersByTimeAsync(15_000) // ping interval → sends a ping
-      await vi.advanceTimersByTimeAsync(8_000) // ping timeout → failure
-    }
-    expect(sock.closed).toBe(true)
-    // The code is what lets backend.log attribute the disconnect.
-    expect(sock.closeCode).toBe(4001)
+    // A backend saturated by terminal output answers late or not at all. The
+    // client has no opinion about that: it sends nothing on its own and the
+    // socket is never closed from this side.
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(sock.sent).toEqual([])
+    expect(sock.closed).toBe(false)
+    expect(statuses).toEqual(['connecting', 'connected'])
   })
 
-  /** Drive one ping cycle; `withTraffic` delivers a frame while it is in flight. */
-  async function pingCycle(sock: FakeWebSocket, withTraffic: boolean): Promise<void> {
-    await vi.advanceTimersByTimeAsync(15_000) // ping interval → sends a ping
-    await vi.advanceTimersByTimeAsync(4_000)
-    if (withTraffic) sock.push('terminal.output')
-    await vi.advanceTimersByTimeAsync(4_000) // ping timeout → failure
-  }
-
-  it('reconnects immediately on reconnectNow, without waiting out the backoff', async () => {
+  it('reconnects on reconnectNow, the caller-driven recovery path', async () => {
     const c = makeClient()
     c.connect(URL)
     const first = FakeWebSocket.instances[0]
@@ -212,8 +203,8 @@ describe('createWsClient', () => {
     expect(first.closed).toBe(true)
     expect(statuses).toEqual(['connecting', 'connected', 'disconnected', 'connecting'])
 
-    // The discarded socket's close must not schedule a competing reconnect.
-    await vi.advanceTimersByTimeAsync(30_000)
+    // The discarded socket's close must not spawn a competing socket.
+    await vi.advanceTimersByTimeAsync(300_000)
     expect(FakeWebSocket.instances).toHaveLength(2)
   })
 
@@ -224,28 +215,5 @@ describe('createWsClient', () => {
     c.dispose('shutting down')
     c.reconnectNow('system resumed')
     expect(FakeWebSocket.instances).toHaveLength(1)
-  })
-
-  it('excuses late pongs while the socket is still delivering frames', async () => {
-    const c = makeClient()
-    c.connect(URL)
-    const sock = FakeWebSocket.instances[0]
-    sock.open()
-    // A backend saturated by terminal output answers pings late but keeps
-    // pushing frames. Closing here would be a false positive.
-    for (let i = 0; i < 3; i++) await pingCycle(sock, true)
-    expect(sock.closed).toBe(false)
-  })
-
-  it('still closes once the grace allowance runs out', async () => {
-    const c = makeClient()
-    c.connect(URL)
-    const sock = FakeWebSocket.instances[0]
-    sock.open()
-    // Four excused cycles, then the failure count starts climbing again and
-    // three more close it: a receive loop that is wedged rather than merely
-    // busy keeps pushing output while answering nothing.
-    for (let i = 0; i < 7; i++) await pingCycle(sock, true)
-    expect(sock.closed).toBe(true)
   })
 })

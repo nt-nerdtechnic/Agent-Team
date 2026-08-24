@@ -459,6 +459,7 @@ contextBridge.exposeInMainWorld('agentTeam', {
   },
   restore: {
     getPending: (): Promise<string[] | null> => ipcRenderer.invoke('restore:getPending'),
+    getSkipped: (): Promise<string[]> => ipcRenderer.invoke('restore:getSkipped'),
     apply: (): Promise<{ ok: boolean; opened: number }> => ipcRenderer.invoke('restore:apply'),
     dismiss: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('restore:dismiss'),
     getAutoRestore: (): Promise<boolean> => ipcRenderer.invoke('restore:getAutoRestore'),

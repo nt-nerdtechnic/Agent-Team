@@ -6,6 +6,10 @@ import { dirname, join } from 'node:path'
 // the next launch and offered for restore. A clean quit marks `cleanExit`;
 // a crash never gets the chance — that asymmetry IS the detector.
 //
+// The same file also carries a per-workspace restore failure ledger: a
+// workspace whose filesystem wedges the backend would otherwise be restored,
+// wedge the backend again, and loop forever (issue #24). See beginRestore().
+//
 // Only app-level window state lives here. Per-workspace pane state (and CLI
 // session resume) is already persisted in each workspace's .agent-team/
 // project.json and restored by the renderer when the workspace loads — this
@@ -33,6 +37,19 @@ export interface RegistryDoc {
   snapshot: WindowEntry[]
   /** User setting: reopen the last clean-exit windows on next launch. */
   restoreOnLaunch: boolean
+  /** Consecutive restore attempts charged to each workspace path that the
+   *  backend never survived. Cleared once the backend proves stable. */
+  restoreFailures: Record<string, number>
+}
+
+/** Restore attempts a single workspace may cost before it is left unrestored.
+ *  Matches backend-autorestart's attempt budget: three tries, then stop. */
+export const MAX_RESTORE_ATTEMPTS = 3
+
+/** The outcome of beginRestore(): what to open, and what was left alone. */
+export interface RestorePlan {
+  restore: WindowEntry[]
+  skipped: WindowEntry[]
 }
 
 /** Keep only well-formed workspace entries (used for both windows and snapshot). */
@@ -45,9 +62,23 @@ function sanitizeEntries(list: unknown): WindowEntry[] {
     .map((w: WindowEntry) => ({ workspace_path: w.workspace_path, ...(w.bounds ? { bounds: w.bounds } : {}) }))
 }
 
+/** Keep only well-formed ledger entries: workspace path → positive attempt count. */
+function sanitizeFailures(value: unknown): Record<string, number> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  const out: Record<string, number> = {}
+  for (const [path, count] of Object.entries(value as Record<string, unknown>)) {
+    if (!path) continue
+    if (typeof count !== 'number' || !Number.isFinite(count) || count < 1) continue
+    out[path] = Math.floor(count)
+  }
+  return out
+}
+
 /** Parse a registry file's text, tolerating missing/corrupt content. */
 export function parseRegistryDoc(text: string | null): RegistryDoc {
-  const empty: RegistryDoc = { version: 1, cleanExit: true, windows: [], snapshot: [], restoreOnLaunch: true }
+  const empty: RegistryDoc = {
+    version: 1, cleanExit: true, windows: [], snapshot: [], restoreOnLaunch: true, restoreFailures: {},
+  }
   if (!text) return empty
   try {
     const data = JSON.parse(text)
@@ -59,6 +90,8 @@ export function parseRegistryDoc(text: string | null): RegistryDoc {
       snapshot: sanitizeEntries(data.snapshot),
       // Missing/undefined defaults to true (feature on); only explicit false disables.
       restoreOnLaunch: data.restoreOnLaunch !== false,
+      // Missing key (doc written before the breaker existed) → empty ledger.
+      restoreFailures: sanitizeFailures(data.restoreFailures),
     }
   } catch {
     return empty
@@ -78,6 +111,7 @@ export class WindowRegistry {
   private snapshot: WindowEntry[] = []
   private restoreOnLaunch = true
   private lastCleanRestore: WindowEntry[] = []
+  private restoreFailures = new Map<string, number>()
   private persistTimer: ReturnType<typeof setTimeout> | null = null
 
   // Accepts a path PROVIDER so the location can be resolved lazily: the dev
@@ -101,6 +135,10 @@ export class WindowRegistry {
     // empty state. Crash pending and clean-exit restore are mutually exclusive:
     // cleanExit gates which one is non-empty.
     this.restoreOnLaunch = doc.restoreOnLaunch
+    // The failure ledger must also survive the reset — it is the only record
+    // that the previous launch charged a workspace an attempt it never
+    // finished paying off.
+    this.restoreFailures = new Map(Object.entries(doc.restoreFailures))
     this.lastCleanRestore = (doc.cleanExit && doc.restoreOnLaunch) ? doc.snapshot : []
     const pending = pendingFromDoc(doc)
     this.persistNow()
@@ -112,6 +150,47 @@ export class WindowRegistry {
    *  setting is off, or nothing was open. */
   cleanExitRestore(): WindowEntry[] {
     return this.lastCleanRestore
+  }
+
+  /** Charge every candidate workspace one restore attempt BEFORE any window is
+   *  created, then split the list into what may be opened and what has burned
+   *  its budget. The charge is persisted immediately and on purpose: a
+   *  workspace on a wedged filesystem can hang the backend hard enough that
+   *  this launch never exits cleanly, so a counter written only on success
+   *  could never fire. The increment on disk is the whole mechanism —
+   *  clearRestoreFailures() is what pays it back.
+   *
+   *  `userInitiated` marks an explicit user action (the crash-restore banner's
+   *  Apply): consent overrides the skip, and resets that workspace's tally so
+   *  asking for a workspace can never leave the user locked out of it. */
+  beginRestore(entries: WindowEntry[], opts?: { userInitiated?: boolean }): RestorePlan {
+    const userInitiated = opts?.userInitiated === true
+    const plan: RestorePlan = { restore: [], skipped: [] }
+    for (const entry of entries) {
+      const failures = userInitiated ? 0 : (this.restoreFailures.get(entry.workspace_path) ?? 0)
+      if (failures >= MAX_RESTORE_ATTEMPTS) {
+        plan.skipped.push(entry)
+        continue
+      }
+      this.restoreFailures.set(entry.workspace_path, failures + 1)
+      plan.restore.push(entry)
+    }
+    this.persistNow()
+    return plan
+  }
+
+  /** Wipe the ledger: the backend has stayed up long enough to prove the
+   *  restored workspaces did not kill it. Driven by backend-autorestart's
+   *  stability window, so there is only one notion of "healthy" in the app. */
+  clearRestoreFailures(): void {
+    if (this.restoreFailures.size === 0) return
+    this.restoreFailures.clear()
+    this.persistNow()
+  }
+
+  /** Attempts currently charged to each workspace (diagnostics/tests). */
+  restoreFailureCounts(): Record<string, number> {
+    return Object.fromEntries(this.restoreFailures)
   }
 
   /** Record/replace the workspace for a window; empty path (back to Welcome)
@@ -163,6 +242,7 @@ export class WindowRegistry {
       windows: [...this.entries.values()],
       snapshot: this.snapshot,
       restoreOnLaunch: this.restoreOnLaunch,
+      restoreFailures: Object.fromEntries(this.restoreFailures),
     }
   }
 

@@ -222,6 +222,9 @@ declare global {
       reportWorkspace: (workspacePath: string) => void
       restore?: {
         getPending: () => Promise<string[] | null>
+        /** Workspaces the restore failure breaker refused to reopen this
+         *  launch. Not one-shot on the main side — see App.vue's notice. */
+        getSkipped: () => Promise<string[]>
         apply: () => Promise<{ ok: boolean; opened: number }>
         dismiss: () => Promise<{ ok: boolean }>
         getAutoRestore: () => Promise<boolean>

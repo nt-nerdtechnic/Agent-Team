@@ -27,6 +27,10 @@ export interface BackendAutoRestartOptions {
   /** Called when the attempt budget is exhausted, so the caller can move to a
    *  terminal error state. */
   onGiveUp?: (attempts: number) => void
+  /** Called when a backend has stayed up for the full stability window — the
+   *  app's single definition of "the backend is fine". Fires even when no
+   *  restart was ever needed, so a clean first boot counts as stable too. */
+  onStable?: () => void
   delaysMs?: number[]
   stableMs?: number
   setTimer?: (fn: () => void, ms: number) => TimerHandle
@@ -39,7 +43,9 @@ export interface BackendAutoRestart {
    *  exhausted — the caller then goes to a terminal error. */
   onCrash(): number | null
   /** Report that a backend is up. Starts the stability window that clears the
-   *  attempt budget. */
+   *  attempt budget and fires onStable. Call it on every successful start,
+   *  including the first one of the run — with no attempts spent the budget
+   *  reset is a no-op, but onStable still needs the signal. */
   onHealthy(): void
   /** Drop any pending attempt and reset the budget. Used by deliberate
    *  stop/restart/quit paths, where the exit is not a crash and a manual
@@ -98,11 +104,11 @@ export function createBackendAutoRestart(opts: BackendAutoRestartOptions): Backe
   }
 
   function onHealthy(): void {
-    if (attempts === 0) return
     clearStable()
     stableTimer = setTimer(() => {
       stableTimer = null
       attempts = 0
+      opts.onStable?.()
     }, stableMs)
   }
 

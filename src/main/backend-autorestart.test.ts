@@ -148,6 +148,36 @@ describe('createBackendAutoRestart', () => {
     expect(restart).toHaveBeenCalledTimes(1)
   })
 
+  it('fires onStable once a backend completes the window, first boot included', () => {
+    const t = fakeTimers()
+    const onStable = vi.fn()
+    const auto = createBackendAutoRestart({
+      restart: vi.fn(), onStable, setTimer: t.setTimer, clearTimer: t.clearTimer,
+    })
+
+    // No crash ever happened: the very first successful start must still count
+    // as stable — that is the signal that clears the restore failure ledger.
+    auto.onHealthy()
+    t.advance(DEFAULT_STABLE_MS - 1)
+    expect(onStable).not.toHaveBeenCalled()
+    t.advance(1)
+    expect(onStable).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not fire onStable for a backend that dies inside the window', () => {
+    const t = fakeTimers()
+    const onStable = vi.fn()
+    const auto = createBackendAutoRestart({
+      restart: vi.fn(), stableMs: 1_000, setTimer: t.setTimer, clearTimer: t.clearTimer, onStable,
+    })
+
+    auto.onHealthy()
+    t.advance(500)
+    auto.onCrash()
+    t.advance(10_000)
+    expect(onStable).not.toHaveBeenCalled()
+  })
+
   it('reports the attempt limit for status display', () => {
     const auto = createBackendAutoRestart({ restart: vi.fn(), delaysMs: [1, 2] })
     expect(auto.maxAttempts()).toBe(2)

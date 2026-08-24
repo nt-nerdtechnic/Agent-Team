@@ -71,6 +71,7 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Fixed
 
+- Keep Codex panes resumable after spawning sub-agents by excluding read-only thread-spawn child rollouts from the pane's persisted root session id.
 - Keep Kimi Code's arrow-key navigation reliable in the embedded terminal by allowing 100 ms to reassemble split escape sequences while preserving an explicit `PI_TUI_ESC_TIMEOUT` override.
 - Keep repository discovery responsive on slow filesystems by moving scans off the
   backend event loop and returning partial results after a bounded scan period.

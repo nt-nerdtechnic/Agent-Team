@@ -215,6 +215,7 @@ import { useKeybindings, registerCommand, setContext } from './keybindings/useKe
 import { useUiActionBus } from './composables/useUiActionBus'
 import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
 import { useStatusBarPopover } from './composables/useStatusBarPopover'
+import navideMark from './assets/navide-mark.png'
 
 // Modals/wizard that only render behind a v-if (settings opened, run completed,
 // first-run onboarding) — defer them off the main shell's first-paint bundle.
@@ -580,6 +581,32 @@ void window.agentTeam?.restore?.getPending().then((list) => {
     else void window.agentTeam?.restore?.dismiss()
   }
   // The boot overlay (z-9000) covers the confirm dialog (z-2100) — wait it out.
+  if (!booting.value) { void show(); return }
+  const stop = watch(booting, (b) => { if (!b) { stop(); void show() } })
+})
+
+// Workspaces the restore failure breaker left closed this launch (issue #24).
+// Informational only — there is nothing to apply, so it's an alert, not a
+// confirm. Uses the same notify surface and the same boot-overlay wait as the
+// crash prompt above.
+//
+// NOTE: restore:getSkipped is NOT claimed on the main side, so every window
+// that boots gets the same list. This guard only stops a repeat inside THIS
+// window; cross-window de-duplication needs main to claim the list on first
+// read, the way restore:getPending does with pendingRestoreClaimed.
+let skippedNoticeShown = false
+void window.agentTeam?.restore?.getSkipped?.().then((list) => {
+  if (!list?.length || skippedNoticeShown) return
+  skippedNoticeShown = true
+  const show = async (): Promise<void> => {
+    await notifyRestore.alert(
+      `${i18n.global.t('restore.skipped-message', { count: list.length })}\n\n${list.join('\n')}`,
+      {
+        title: i18n.global.t('restore.skipped-title'),
+        confirmText: i18n.global.t('restore.skipped-ack'),
+      }
+    )
+  }
   if (!booting.value) { void show(); return }
   const stop = watch(booting, (b) => { if (!b) { stop(); void show() } })
 })
@@ -11727,6 +11754,14 @@ const colWidths = ref<number[]>(
 const rowHeights = ref<number[]>(
   (() => { try { const v = JSON.parse(settingsGet('agentTeam.rowHeights', '')); if (Array.isArray(v)) return v as number[] } catch {} return [1] })()
 )
+/** The Active agents list's natural width in Sidebar mode, and the width below
+ *  which it stops being readable. `.auto-meeting-list`'s own `min-width` is the
+ *  same number — the track reserves the space so the item never has to overflow
+ *  to keep it. */
+const MEETING_LIST_WIDTH_PX = 220
+const MEETING_LIST_MIN_PX = 140
+const MEETING_LIST_TRACK = `minmax(${MEETING_LIST_MIN_PX}px, ${MEETING_LIST_WIDTH_PX}px)`
+
 // Sidebar left column width in pixels (0 = default: fill remaining space)
 const sidebarLeftPx = ref<number>(
   parseInt(settingsGet('agentTeam.sidebarLeftPx', '0')) || 0
@@ -11811,11 +11846,25 @@ const gridTemplateColumns = computed(() => {
       return '1fr'
     }
     case 'sidebar': {
+      // Every fixed track is a minmax with a zero floor, and the agents list
+      // carries its own.
+      //
+      // `sidebarLeftPx` is an absolute width the user dragged once, clamped
+      // against the stage width *at that moment* and never re-checked. Anything
+      // that later narrows the stage — expanding the right panel, opening the
+      // left one, resizing the window — leaves the pane column at its old px
+      // while the list is squeezed to its `min-width`, so the row is wider than
+      // the stage. `.stage` hides its overflow, so the list is not shrunk but
+      // *cut off* at the stage's right edge, which reads as the right panel
+      // covering it. minmax makes the pane column give ground instead, and the
+      // stored width is untouched so it comes back when there is room again.
       if (dualFocusActive.value) {
-        const l = dualFocusSplitPx.value > 0 ? `${dualFocusSplitPx.value}px` : '1fr'
-        return `${l} 1fr 220px`
+        const l = dualFocusSplitPx.value > 0 ? `minmax(0, ${dualFocusSplitPx.value}px)` : '1fr'
+        return `${l} minmax(0, 1fr) ${MEETING_LIST_TRACK}`
       }
-      return sidebarLeftPx.value > 0 ? `${sidebarLeftPx.value}px 1fr` : '1fr 220px'
+      return sidebarLeftPx.value > 0
+        ? `minmax(0, ${sidebarLeftPx.value}px) minmax(${MEETING_LIST_MIN_PX}px, 1fr)`
+        : `minmax(0, 1fr) ${MEETING_LIST_TRACK}`
     }
     default: {
       const ws = colWidths.value.length === numCols.value ? colWidths.value : Array(numCols.value).fill(1)
@@ -11862,7 +11911,13 @@ const rowHandlePositions = computed<string[]>(() => {
 
 // Sidebar handle: matches the grid template split exactly — no clientWidth needed.
 const sidebarHandlePos = computed(() => {
-  return sidebarLeftPx.value > 0 ? `${sidebarLeftPx.value}px` : 'calc(100% - 220px)'
+  // Mirrors the clamp in the track above. Without the min() the handle would be
+  // drawn at the stored width while the real boundary sat further left — the
+  // same "position duplicated from a track definition" hazard the shell's own
+  // handles used to have.
+  return sidebarLeftPx.value > 0
+    ? `min(${sidebarLeftPx.value}px, calc(100% - ${MEETING_LIST_MIN_PX}px))`
+    : `calc(100% - ${MEETING_LIST_WIDTH_PX}px)`
 })
 
 type GridHandleAxis = 'col' | 'row' | 'sidebar' | 'dual-focus'
@@ -11892,7 +11947,7 @@ function onGridHandleStart(e: MouseEvent, axis: GridHandleAxis, index: number): 
     _gA = sidebarLeftPx.value > 0 ? sidebarLeftPx.value : (el?.clientWidth ?? 800) - 220
     _gSize = el?.clientWidth ?? 800
   } else {
-    const meetingW = effectiveLayoutMode.value === 'sidebar' ? 220 : 0
+    const meetingW = effectiveLayoutMode.value === 'sidebar' ? MEETING_LIST_WIDTH_PX : 0
     _gSize = (el?.clientWidth ?? 800) - meetingW
     _gA = dualFocusSplitPx.value > 0 ? dualFocusSplitPx.value : _gSize / 2
     _gB = 0
@@ -11925,7 +11980,9 @@ function onGridHandleMove(e: MouseEvent): void {
     rowHeights.value = next
   } else if (_gAxis === 'sidebar') {
     const dx = e.clientX - _gStartX
-    sidebarLeftPx.value = Math.max(200, Math.min(_gSize - 140, _gA + dx))
+    // Same floor the track reserves, so the drag cannot write a width the
+    // rendered layout will then clamp away underneath it.
+    sidebarLeftPx.value = Math.max(200, Math.min(_gSize - MEETING_LIST_MIN_PX, _gA + dx))
   } else if (_gAxis === 'dual-focus') {
     const dx = e.clientX - _gStartX
     dualFocusSplitPx.value = Math.max(150, Math.min(_gSize - 150, _gA + dx))
@@ -12064,7 +12121,7 @@ function cycleFocusedPane(direction: CycleDirection): void {
 
 const dualFocusHandlePos = computed(() => {
   if (dualFocusSplitPx.value > 0) return `${dualFocusSplitPx.value}px`
-  const meetingW = effectiveLayoutMode.value === 'sidebar' ? 220 : 0
+  const meetingW = effectiveLayoutMode.value === 'sidebar' ? MEETING_LIST_WIDTH_PX : 0
   return meetingW > 0 ? `calc((100% - ${meetingW}px) / 2)` : '50%'
 })
 watch(dualFocusActive, (active) => { if (!active) dualFocusSplitPx.value = 0 })
@@ -12286,11 +12343,11 @@ function paneIsCommander(p: ActivePane): boolean {
     @cancel="settleRestoreScope(null)"
   />
   <!-- First-boot loading overlay: covers the shell until the backend settles,
-       then fades out. Brand-only text so no i18n keys are needed. -->
+       then fades out. Brand mark only, so no i18n keys are needed. -->
   <Transition name="boot-fade">
     <div v-if="booting" class="boot-overlay">
       <div class="boot-card">
-        <div class="boot-wordmark">Agent-Team</div>
+        <img class="boot-logo" :src="navideMark" alt="Navide" />
         <template v-if="bootError">
           <div class="boot-status boot-status-error">{{ $t('error.backend-start-failed') }}</div>
           <button class="boot-retry" @click="retryBackend">{{ $t('action.retry') }}</button>
@@ -13271,11 +13328,10 @@ function paneIsCommander(p: ActivePane): boolean {
   align-items: center;
   gap: 18px;
 }
-.boot-wordmark {
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--text-primary);
+.boot-logo {
+  width: 64px;
+  height: 64px;
+  display: block;
 }
 .boot-spinner {
   width: 26px;
@@ -13314,9 +13370,24 @@ function paneIsCommander(p: ActivePane): boolean {
 
 .app {
   display: grid;
-  /* Three columns: controls · terminal grid · token stats panel
-     Both left and token-panel widths are driven by CSS vars set inline. */
-  grid-template-columns: var(--left-width, 360px) 1fr var(--token-panel-width, 36px);
+  /* Three columns: controls · terminal grid · token stats panel, with both
+     side widths driven by CSS vars set inline.
+
+     minmax, not bare lengths. A bare `360px` track keeps its full width even
+     when the window is narrower than the panels put together: the `1fr` stage
+     collapses to zero, the grid overflows, and `overflow: hidden` clips the
+     right column off-screen — along with the drag handle that would have let
+     the user shrink the panel again. With minmax the side panels give ground
+     instead, so nothing is ever pushed out of reach.
+
+     The stage keeps a floor so the terminal never disappears outright; the
+     side panels are what yield. Their stored widths are untouched — only what
+     is rendered shrinks, so the layout returns to normal when the window
+     widens again. */
+  grid-template-columns:
+    minmax(0, var(--left-width, 360px))
+    minmax(var(--stage-min-width, 220px), 1fr)
+    minmax(0, var(--token-panel-width, 36px));
   /* Three rows: the up slot, the stage, the down slot. Both horizontal slots
      ship empty, and an empty slot resolves to 0px — so the default shell is
      the same single-row layout it has always been, to the pixel.
@@ -13326,7 +13397,10 @@ function paneIsCommander(p: ActivePane): boolean {
      rows it used to open an implicit second row instead, which is the failure
      that put the handles off-screen. Both are silent, so the placements below
      are load-bearing rather than tidy. */
-  grid-template-rows: var(--up-height, 0px) minmax(0, 1fr) var(--down-height, 0px);
+  grid-template-rows:
+    minmax(0, var(--up-height, 0px))
+    minmax(var(--stage-min-height, 140px), 1fr)
+    minmax(0, var(--down-height, 0px));
   position: relative;
   height: 100vh;
   background: var(--bg-inset);
@@ -13965,6 +14039,8 @@ function paneIsCommander(p: ActivePane): boolean {
   overflow-y: auto;
   padding: 8px 6px;
   background: var(--bg-base);
+  /* Same number as MEETING_LIST_MIN_PX. The track reserves at least this much,
+     so this floor is a backstop rather than a source of overflow. */
   min-width: 140px;
 }
 .meeting-item {

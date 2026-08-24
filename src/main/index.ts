@@ -24,7 +24,7 @@ import { lockPageZoom } from './web-contents-zoom'
 import { installContextMenu, registerTerminalContextMenu } from './context-menu'
 import { initUpdater } from './updater'
 import { withDeadline } from './deadline'
-import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
+import { MAX_RESTORE_ATTEMPTS, WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
 import { setWindowDockTileBadge } from './dock-tile-badge'
 import { BackendBroadcastTracker } from './backend-broadcast'
 import { createResumeGate } from './resume-gate'
@@ -229,6 +229,10 @@ function getGitAccountsStore(): GitAccountsStore {
 // renderer that asks via restore:getPending; cleared on apply/dismiss.
 let pendingRestore: WindowEntry[] | null = null
 let pendingRestoreClaimed = false
+// Workspaces the restore failure breaker refused to reopen this launch (see
+// window-registry.ts). Unlike the crash banner above this is not one-shot: it
+// describes this whole run, so any window may ask for it at any time.
+let skippedRestores: string[] = []
 
 function loadWindow(win: BrowserWindow, params: Record<string, string>): void {
   const qs = new URLSearchParams(params).toString()
@@ -246,6 +250,12 @@ async function createWindow(
   const win = new BrowserWindow({
     width: opts?.bounds?.width ?? 1280,
     height: opts?.bounds?.height ?? 800,
+    // Second line of defence for the shell layout. The side panels can be
+    // dragged to 560 + 520 px between them; below this the stage would be down
+    // to its floor with the panels squeezed, which is usable but not pleasant,
+    // and there is no reason to let the window go narrower than that.
+    minWidth: 640,
+    minHeight: 420,
     ...(opts?.bounds ? { x: opts.bounds.x, y: opts.bounds.y } : {}),
     title: 'Navide',
     titleBarStyle: 'hidden',
@@ -647,6 +657,9 @@ const backendAutoRestart = createBackendAutoRestart({
   onGiveUp: (attempts) => {
     console.error(`[main] backend auto-restart gave up after ${attempts} attempts`)
   },
+  // A backend that survived the stability window vindicates whatever
+  // workspaces this launch restored — pay back their attempt charges.
+  onStable: () => { windowRegistry.clearRestoreFailures() },
 })
 
 /** One scheduled respawn attempt. A deliberate restart/stop already in flight
@@ -1220,7 +1233,12 @@ ipcMain.handle('restore:getPending', () => {
 ipcMain.handle('restore:apply', () => {
   const entries = pendingRestore ?? []
   pendingRestore = null
-  for (const entry of entries) {
+  // An explicit Apply is consent: it overrides the failure breaker and resets
+  // the tally of every workspace it names, so a workspace that once wedged the
+  // backend can never become permanently unopenable. The attempt is still
+  // charged, so an unattended relaunch afterwards is protected again.
+  const plan = windowRegistry.beginRestore(entries, { userInitiated: true })
+  for (const entry of plan.restore) {
     // Already reopened manually → focus, don't duplicate.
     const existing = findMainWindowForWorkspace(entry.workspace_path)
     if (existing) {
@@ -1234,13 +1252,16 @@ ipcMain.handle('restore:apply', () => {
       )
     }
   }
-  return { ok: true, opened: entries.length }
+  return { ok: true, opened: plan.restore.length }
 })
 
 ipcMain.handle('restore:dismiss', () => {
   pendingRestore = null
   return { ok: true }
 })
+
+// Workspaces left unrestored by the failure breaker, for a renderer notice.
+ipcMain.handle('restore:getSkipped', () => skippedRestores)
 
 ipcMain.handle('restore:getAutoRestore', () => windowRegistry.getRestoreOnLaunch())
 
@@ -2468,6 +2489,9 @@ app.whenReady().then(async () => {
       backend = b
       backendLastError = null
       watchBackendCrash(b)
+      // Starts the stability window whose completion clears the restore
+      // failure ledger (onStable, above); a no-op for the restart budget here.
+      backendAutoRestart.onHealthy()
       console.log(`[main] backend ready at ${b.host}:${b.port}`)
       broadcastBackendChanged()
     })
@@ -2496,14 +2520,28 @@ app.whenReady().then(async () => {
   if (!openedAny) {
     const autoRestore = windowRegistry.cleanExitRestore()
     if (autoRestore.length) {
-      console.log('[main] clean-exit restore;', autoRestore.length, 'workspace window(s)')
-      for (const entry of autoRestore) {
+      // Charge each workspace an attempt before opening anything, and drop the
+      // ones that already spent their budget: a workspace whose filesystem
+      // wedges the backend must not be restored into the same wedge forever
+      // (issue #24). The charge is paid back once the backend proves stable.
+      const plan = windowRegistry.beginRestore(autoRestore)
+      skippedRestores = plan.skipped.map((w) => w.workspace_path)
+      for (const path of skippedRestores) {
+        console.warn(`[main] restore skipped: ${path} failed to restore ${MAX_RESTORE_ATTEMPTS} times in a row`)
+      }
+      if (plan.restore.length) {
+        console.log('[main] clean-exit restore;', plan.restore.length, 'workspace window(s)')
+      }
+      for (const entry of plan.restore) {
         await createWindow(
           { workspace_path: entry.workspace_path, restore: '1' },
           entry.bounds ? { bounds: entry.bounds } : undefined
         )
+        // Only a window that actually opened counts — when every workspace is
+        // skipped this stays false and the empty Welcome window below runs, so
+        // the app is never left with no window at all.
+        openedAny = true
       }
-      openedAny = true
     }
   }
   if (!openedAny) await createWindow()

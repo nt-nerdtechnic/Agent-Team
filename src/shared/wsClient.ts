@@ -50,37 +50,27 @@ export interface WsClientOptions {
   onError?: (message: string) => void
   /** WebSocket constructor override; defaults to `globalThis.WebSocket`. */
   WebSocketImpl?: WsCtor
-  /** Liveness ping interval; 0 disables the probe. Default 15000. */
-  pingIntervalMs?: number
-  /** Per-ping timeout. Default 8000. */
-  pingTimeoutMs?: number
-  /** Consecutive ping failures before the socket is force-closed. Default 3. */
-  pingFailureThreshold?: number
-  /** How many ping failures may be excused while inbound frames still arrive
-   *  (see `startPing`). 0 disables the reprieve. Default 4. */
-  pingGraceLimit?: number
-  /** Bound on the reconnect send queue. Default 200. */
+  /** Bound on the queue holding sends issued while a connect is in flight.
+   *  Default 200. */
   maxSendQueue?: number
-  /** Reconnect backoff base / cap (ms). Defaults 1500 / 30000. */
-  reconnectBaseMs?: number
-  reconnectMaxMs?: number
 }
 
 export interface WsClient {
   /** Issue a request; resolves with the response envelope, rejects on
-   *  timeout / closed-for-good. Queued while mid-reconnect. */
+   *  timeout / closed-for-good. Queued while a connect is in flight. */
   send<T = unknown>(type: string, payload?: Record<string, unknown>, timeoutMs?: number): Promise<WsResponse<T>>
   /** Subscribe to server-pushed events of `type`. Returns a disposer. */
   on(type: string, cb: (payload: unknown) => void): () => void
   /** (Re)connect to `url`. Clears any prior errored/fail-fast state. */
   connect(url: string): void
-  /** Tear down the socket + timers and reject everything in flight with
-   *  `reason`, WITHOUT scheduling a reconnect or emitting a status. The caller
-   *  decides the next state (see `useBackend.applyBackendChanged`). */
+  /** Tear down the socket and reject everything in flight with `reason`,
+   *  without emitting a status. The caller decides the next state (see
+   *  `useBackend.applyBackendChanged`). */
   reset(reason: string): void
-  /** Tear down and reconnect immediately, skipping the backoff. For when the
-   *  socket is known-dead but hasn't reported it yet — after a system resume,
-   *  the old TCP connection is gone while `readyState` still reads OPEN. */
+  /** Tear down and reconnect immediately. The client never reconnects on its
+   *  own, so this (or `connect`) is how a dropped socket comes back: after a
+   *  system resume the old TCP connection is gone while `readyState` still
+   *  reads OPEN, and the caller drives the reconnect explicitly. */
   reconnectNow(reason: string): void
   /** Put the client into fail-fast mode: subsequent sends reject instead of
    *  queueing (used when the backend has errored for good). */
@@ -101,24 +91,13 @@ function uuid(): string {
 }
 
 export function createWsClient(opts: WsClientOptions = {}): WsClient {
-  const pingIntervalMs = opts.pingIntervalMs ?? 15_000
-  const pingTimeoutMs = opts.pingTimeoutMs ?? 8_000
-  const pingFailureThreshold = opts.pingFailureThreshold ?? 3
-  const pingGraceLimit = opts.pingGraceLimit ?? 4
   const maxSendQueue = opts.maxSendQueue ?? 200
-  const reconnectBaseMs = opts.reconnectBaseMs ?? 1_500
-  const reconnectMaxMs = opts.reconnectMaxMs ?? 30_000
 
   let url = ''
   let socket: WsLike | null = null
   let activeCtor: WsCtor | null = null
   let disposed = false
   let errored = false
-  let pingTimer: ReturnType<typeof setInterval> | null = null
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let reconnectAttempts = 0
-  /** When the socket last delivered a frame — proof of life for `startPing`. */
-  let lastInboundAt = 0
 
   interface PendingEntry { resolve: (resp: WsResponse) => void; reject: (err: Error) => void }
   const pending = new Map<string, PendingEntry>()
@@ -179,14 +158,10 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     return sock !== null && ctor !== null && sock.readyState === ctor.OPEN
   }
 
-  // Low-level send used by both the public `send` and the internal ping probe.
-  // `allowQueue` is false for the ping probe (a wedged socket must observe a
-  // closed connection as failure, never park behind a reconnect).
   function rawSend<T>(
     type: string,
     payload: Record<string, unknown>,
-    timeoutMs: number,
-    allowQueue: boolean
+    timeoutMs: number
   ): Promise<WsResponse<T>> {
     return new Promise((resolve, reject) => {
       const req: WsRequest = { id: uuid(), type, payload, timestamp: nowIso() }
@@ -197,15 +172,14 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
       }
       const canSend = isOpen(socket, activeCtor)
 
-      // Fail fast when there is no reconnect to wait for (disposed / errored) or
-      // when queueing is disallowed (the ping probe).
-      if (!canSend && (!allowQueue || disposed || errored)) {
+      // Fail fast when no connect can arrive to drain the queue.
+      if (!canSend && (disposed || errored)) {
         reject(new Error('ws not open'))
         return
       }
 
       // One timer covers queue-wait plus in-flight; on fire, drop the request
-      // from wherever it sits so a later reconnect can't replay it.
+      // from wherever it sits so a later connect can't replay it.
       timerId = setTimeout(() => {
         pending.delete(req.id)
         const qi = sendQueue.findIndex((q) => q.req.id === req.id)
@@ -229,51 +203,19 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     payload: Record<string, unknown> = {},
     timeoutMs = 10_000
   ): Promise<WsResponse<T>> {
-    return rawSend<T>(type, payload, timeoutMs, true)
+    return rawSend<T>(type, payload, timeoutMs)
   }
 
-  function clearTimers(): void {
-    if (pingTimer !== null) { clearInterval(pingTimer); pingTimer = null }
-    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null }
-  }
-
-  function startPing(sock: WsLike): void {
-    if (pingIntervalMs <= 0) return
-    if (pingTimer !== null) clearInterval(pingTimer)
-    // A wedged connection can stay TCP-open for minutes while every frame
-    // fails. Three consecutive ping failures force a close so the reconnect
-    // path takes over immediately. The threshold stays above 2 so a
-    // busy-but-alive connection with late pongs isn't misread as wedged.
-    //
-    // Failure count alone still misreads a saturated backend as a dead one:
-    // every send on a session serialises behind one lock, so a pong queues
-    // behind whatever 64 KB terminal chunk is in flight, and a few busy panes
-    // can hold it past the timeout three times running. Inbound frames still
-    // arriving prove the socket is alive, so those failures are excused --
-    // but only `pingGraceLimit` times, because a backend whose receive loop is
-    // wedged can keep pushing PTY output while answering nothing.
-    let pingFailures = 0
-    let graceUsed = 0
-    pingTimer = setInterval(() => {
-      rawSend('ping', { t: Date.now() }, pingTimeoutMs, false)
-        .then(() => { pingFailures = 0; graceUsed = 0 })
-        .catch((err) => {
-          if (Date.now() - lastInboundAt < pingTimeoutMs && graceUsed < pingGraceLimit) {
-            graceUsed++
-            console.warn('[wsClient] pong late, frames still arriving', err)
-            return
-          }
-          console.warn('[wsClient] ping failed', err)
-          if (++pingFailures >= pingFailureThreshold) {
-            pingFailures = 0
-            graceUsed = 0
-            // Close with a private code so backend.log can name the culprit
-            // instead of showing an indistinguishable disconnect.
-            try { sock.close(4001, 'ping watchdog') } catch { /* close handler reconnects */ }
-          }
-        })
-    }, pingIntervalMs)
-  }
+  // There is deliberately no liveness probe and no automatic reconnect. A
+  // client-side watchdog cannot tell a saturated backend from a dead one: every
+  // send on a session serialises behind one lock, so a pong queues behind
+  // whatever 64 KB terminal chunk is in flight and a few busy panes hold it
+  // past any timeout. Killing that socket costs a full reattach (PTY, git
+  // status, settings reconcile, pane re-registration) and makes the stall
+  // worse. Genuinely dead connections are the backend's to detect -- uvicorn
+  // runs its own heartbeat (ws_ping_interval / ws_ping_timeout in __main__.py)
+  // -- and are brought back explicitly via `connect` (main process broadcasts
+  // a new backend) or `reconnectNow` (system resume).
 
   function connect(url_?: string): void {
     if (url_ !== undefined) url = url_
@@ -288,15 +230,10 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     sock.addEventListener('open', () => {
       if (socket !== sock) return // superseded by a reset/reconnect swap
       setStatus('connected')
-      reconnectAttempts = 0
-      // Don't let a previous socket's traffic vouch for this one.
-      lastInboundAt = Date.now()
       flushSendQueue(sock)
-      startPing(sock)
     })
 
     sock.addEventListener('message', (ev) => {
-      lastInboundAt = Date.now()
       const data = (ev as { data?: unknown }).data
       let msg: WsResponse
       try {
@@ -316,20 +253,15 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
 
     sock.addEventListener('close', () => {
       // A reset/reconnect swap reassigns `socket` before closing this one; if
-      // we're no longer the active socket, ignore the close so it can't
-      // schedule a competing reconnect.
+      // we're no longer the active socket, ignore the close.
       if (socket !== sock) return
       socket = null
-      if (pingTimer !== null) { clearInterval(pingTimer); pingTimer = null }
       for (const [, entry] of pending) entry.reject(new Error('WebSocket closed'))
       pending.clear()
       if (disposed) return
       errored = false
+      // The socket stays down until someone calls `connect`/`reconnectNow`.
       setStatus('disconnected')
-      // Exponential backoff: 1.5 s → 3 s → 6 s → … capped at 30 s.
-      const delay = Math.min(reconnectBaseMs * Math.pow(2, reconnectAttempts), reconnectMaxMs)
-      reconnectAttempts++
-      reconnectTimer = setTimeout(() => connect(), delay)
     })
 
     sock.addEventListener('error', () => {
@@ -341,8 +273,6 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   }
 
   function reset(reason: string): void {
-    clearTimers()
-    reconnectAttempts = 0
     const old = socket
     socket = null // so the old socket's close handler is a no-op
     if (old) { try { old.close() } catch { /* already torn down */ } }
@@ -354,7 +284,7 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   function reconnectNow(reason: string): void {
     if (disposed || !url) return
     // reset() nulls `socket` first, so the old socket's close handler is a
-    // no-op and cannot schedule a competing backoff reconnect.
+    // no-op and cannot race this connect.
     reset(reason)
     setStatus('disconnected')
     connect()
@@ -375,7 +305,6 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
 
   function dispose(reason: string): void {
     disposed = true
-    clearTimers()
     rejectSendQueue(new Error(reason))
     const old = socket
     socket = null

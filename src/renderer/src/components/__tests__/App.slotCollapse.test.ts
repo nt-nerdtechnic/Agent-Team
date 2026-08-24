@@ -18,11 +18,30 @@ const appSource = readFileSync(
 )
 
 describe('App shell grid', () => {
-  it('declares a row for each horizontal slot', () => {
+  it('declares a track for each slot, and a row for each horizontal one', () => {
     const at = appSource.indexOf('.app {')
     const block = appSource.slice(at, appSource.indexOf('}', at))
-    expect(block).toContain('grid-template-columns: var(--left-width, 360px) 1fr var(--token-panel-width, 36px)')
-    expect(block).toContain('grid-template-rows: var(--up-height, 0px) minmax(0, 1fr) var(--down-height, 0px)')
+    expect(block).toContain('minmax(0, var(--left-width, 360px))')
+    expect(block).toContain('minmax(0, var(--token-panel-width, 36px))')
+    expect(block).toContain('minmax(0, var(--up-height, 0px))')
+    expect(block).toContain('minmax(0, var(--down-height, 0px))')
+  })
+
+  it('lets the side panels give ground rather than pushing the stage off-screen', () => {
+    // A bare `360px` track keeps its width even when the window is narrower
+    // than the panels put together: the stage collapses to zero, the grid
+    // overflows, and `overflow: hidden` clips the right column away — together
+    // with the handle that would have let the user shrink the panel again.
+    // Every fixed track must therefore be a minmax with a zero floor, and the
+    // stage must hold a floor of its own so the terminal never vanishes.
+    const at = appSource.indexOf('.app {')
+    const block = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(block).toContain('minmax(var(--stage-min-width, 220px), 1fr)')
+    expect(block).toContain('minmax(var(--stage-min-height, 140px), 1fr)')
+    // No bare fixed track survives: each var-driven track carries a 0 floor.
+    for (const v of ['--left-width', '--token-panel-width', '--up-height', '--down-height']) {
+      expect(block, v).not.toMatch(new RegExp(`(?<!minmax\\(0, )var\\(${v}`))
+    }
   })
 
   it('places every in-flow grid item explicitly', () => {
@@ -61,6 +80,43 @@ describe('App shell grid', () => {
   it('drops the status bar row when the layout hides it', () => {
     expect(appSource).toContain('<div v-if="shellLayout.chrome.statusbar" class="statusbar">')
     expect(appSource).toContain("'--chrome-bottom': shellLayout.chrome.statusbar ? '24px' : '0px'")
+  })
+})
+
+describe('Sidebar layout mode — the Active agents list', () => {
+  // `sidebarLeftPx` is an absolute width dragged once and clamped against the
+  // stage width at that moment. Anything that narrows the stage afterwards —
+  // expanding the right panel, opening the left one, resizing the window —
+  // used to leave the pane column at its stored px while the list was squeezed
+  // to its min-width, making the row wider than the stage. `.stage` hides its
+  // overflow, so the list was cut off at the stage's right edge rather than
+  // shrunk, which reads as the right-hand panel covering it.
+  it('lets the pane column give ground so the list is never cut off', () => {
+    const at = appSource.indexOf("case 'sidebar': {")
+    expect(at).toBeGreaterThan(-1)
+    const block = appSource.slice(at, appSource.indexOf('\n    }', at))
+    expect(block).toContain('minmax(0, ${sidebarLeftPx.value}px)')
+    expect(block).toContain('minmax(0, ${dualFocusSplitPx.value}px)')
+    expect(block).toContain('minmax(${MEETING_LIST_MIN_PX}px, 1fr)')
+    // No bare px track survives in this mode.
+    expect(block).not.toMatch(/`\$\{[a-zA-Z.]+\}px 1fr/)
+  })
+
+  it('keeps the split handle on the boundary the track actually renders', () => {
+    // Positioning duplicated from a track definition drifts the moment the
+    // track is clamped — the same hazard the shell's own handles once had.
+    const at = appSource.indexOf('const sidebarHandlePos')
+    const block = appSource.slice(at, appSource.indexOf('\n})', at))
+    expect(block).toContain('min(${sidebarLeftPx.value}px, calc(100% - ${MEETING_LIST_MIN_PX}px))')
+  })
+
+  it('drives every copy of the list width from one constant', () => {
+    // The track, the drag clamp, the stage-width arithmetic and the CSS floor
+    // all encode the same two numbers; a literal left behind is a silent drift.
+    expect(appSource).toContain('const MEETING_LIST_WIDTH_PX = 220')
+    expect(appSource).toContain('const MEETING_LIST_MIN_PX = 140')
+    expect(appSource).not.toContain("=== 'sidebar' ? 220 : 0")
+    expect(appSource).not.toContain('_gSize - 140')
   })
 })
 
