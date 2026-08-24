@@ -50,27 +50,28 @@ export interface WsClientOptions {
   onError?: (message: string) => void
   /** WebSocket constructor override; defaults to `globalThis.WebSocket`. */
   WebSocketImpl?: WsCtor
-  /** Bound on the queue holding sends issued while a connect is in flight.
-   *  Default 200. */
+  /** Bound on the reconnect send queue. Default 200. */
   maxSendQueue?: number
+  /** Reconnect backoff base / cap (ms). Defaults 1500 / 30000. */
+  reconnectBaseMs?: number
+  reconnectMaxMs?: number
 }
 
 export interface WsClient {
   /** Issue a request; resolves with the response envelope, rejects on
-   *  timeout / closed-for-good. Queued while a connect is in flight. */
+   *  timeout / closed-for-good. Queued while mid-reconnect. */
   send<T = unknown>(type: string, payload?: Record<string, unknown>, timeoutMs?: number): Promise<WsResponse<T>>
   /** Subscribe to server-pushed events of `type`. Returns a disposer. */
   on(type: string, cb: (payload: unknown) => void): () => void
   /** (Re)connect to `url`. Clears any prior errored/fail-fast state. */
   connect(url: string): void
-  /** Tear down the socket and reject everything in flight with `reason`,
-   *  without emitting a status. The caller decides the next state (see
-   *  `useBackend.applyBackendChanged`). */
+  /** Tear down the socket + timers and reject everything in flight with
+   *  `reason`, WITHOUT scheduling a reconnect or emitting a status. The caller
+   *  decides the next state (see `useBackend.applyBackendChanged`). */
   reset(reason: string): void
-  /** Tear down and reconnect immediately. The client never reconnects on its
-   *  own, so this (or `connect`) is how a dropped socket comes back: after a
-   *  system resume the old TCP connection is gone while `readyState` still
-   *  reads OPEN, and the caller drives the reconnect explicitly. */
+  /** Tear down and reconnect immediately, skipping the backoff. For when the
+   *  socket is known-dead but hasn't reported it yet — after a system resume,
+   *  the old TCP connection is gone while `readyState` still reads OPEN. */
   reconnectNow(reason: string): void
   /** Put the client into fail-fast mode: subsequent sends reject instead of
    *  queueing (used when the backend has errored for good). */
@@ -92,12 +93,16 @@ function uuid(): string {
 
 export function createWsClient(opts: WsClientOptions = {}): WsClient {
   const maxSendQueue = opts.maxSendQueue ?? 200
+  const reconnectBaseMs = opts.reconnectBaseMs ?? 1_500
+  const reconnectMaxMs = opts.reconnectMaxMs ?? 30_000
 
   let url = ''
   let socket: WsLike | null = null
   let activeCtor: WsCtor | null = null
   let disposed = false
   let errored = false
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectAttempts = 0
 
   interface PendingEntry { resolve: (resp: WsResponse) => void; reject: (err: Error) => void }
   const pending = new Map<string, PendingEntry>()
@@ -172,14 +177,14 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
       }
       const canSend = isOpen(socket, activeCtor)
 
-      // Fail fast when no connect can arrive to drain the queue.
+      // Fail fast when there is no reconnect to wait for (disposed / errored).
       if (!canSend && (disposed || errored)) {
         reject(new Error('ws not open'))
         return
       }
 
       // One timer covers queue-wait plus in-flight; on fire, drop the request
-      // from wherever it sits so a later connect can't replay it.
+      // from wherever it sits so a later reconnect can't replay it.
       timerId = setTimeout(() => {
         pending.delete(req.id)
         const qi = sendQueue.findIndex((q) => q.req.id === req.id)
@@ -206,16 +211,19 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     return rawSend<T>(type, payload, timeoutMs)
   }
 
-  // There is deliberately no liveness probe and no automatic reconnect. A
-  // client-side watchdog cannot tell a saturated backend from a dead one: every
-  // send on a session serialises behind one lock, so a pong queues behind
-  // whatever 64 KB terminal chunk is in flight and a few busy panes hold it
-  // past any timeout. Killing that socket costs a full reattach (PTY, git
-  // status, settings reconcile, pane re-registration) and makes the stall
-  // worse. Genuinely dead connections are the backend's to detect -- uvicorn
-  // runs its own heartbeat (ws_ping_interval / ws_ping_timeout in __main__.py)
-  // -- and are brought back explicitly via `connect` (main process broadcasts
-  // a new backend) or `reconnectNow` (system resume).
+  function clearTimers(): void {
+    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  }
+
+  // There is deliberately no client-side liveness probe. One cannot tell a
+  // saturated backend from a dead one: every send on a session serialises
+  // behind one lock, so a pong queues behind whatever 64 KB terminal chunk is
+  // in flight and a few busy panes hold it past any timeout. Force-closing
+  // there costs a full reattach (PTY, git status, settings reconcile, pane
+  // re-registration) and makes the stall worse. Detecting a genuinely dead
+  // connection is the backend's job -- uvicorn runs its own protocol-level
+  // heartbeat (ws_ping_interval / ws_ping_timeout in __main__.py) and closes
+  // the socket, which lands in the close handler below and reconnects.
 
   function connect(url_?: string): void {
     if (url_ !== undefined) url = url_
@@ -230,6 +238,7 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     sock.addEventListener('open', () => {
       if (socket !== sock) return // superseded by a reset/reconnect swap
       setStatus('connected')
+      reconnectAttempts = 0
       flushSendQueue(sock)
     })
 
@@ -253,15 +262,19 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
 
     sock.addEventListener('close', () => {
       // A reset/reconnect swap reassigns `socket` before closing this one; if
-      // we're no longer the active socket, ignore the close.
+      // we're no longer the active socket, ignore the close so it can't
+      // schedule a competing reconnect.
       if (socket !== sock) return
       socket = null
       for (const [, entry] of pending) entry.reject(new Error('WebSocket closed'))
       pending.clear()
       if (disposed) return
       errored = false
-      // The socket stays down until someone calls `connect`/`reconnectNow`.
       setStatus('disconnected')
+      // Exponential backoff: 1.5 s → 3 s → 6 s → … capped at 30 s.
+      const delay = Math.min(reconnectBaseMs * Math.pow(2, reconnectAttempts), reconnectMaxMs)
+      reconnectAttempts++
+      reconnectTimer = setTimeout(() => connect(), delay)
     })
 
     sock.addEventListener('error', () => {
@@ -273,6 +286,8 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   }
 
   function reset(reason: string): void {
+    clearTimers()
+    reconnectAttempts = 0
     const old = socket
     socket = null // so the old socket's close handler is a no-op
     if (old) { try { old.close() } catch { /* already torn down */ } }
@@ -284,7 +299,7 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   function reconnectNow(reason: string): void {
     if (disposed || !url) return
     // reset() nulls `socket` first, so the old socket's close handler is a
-    // no-op and cannot race this connect.
+    // no-op and cannot schedule a competing backoff reconnect.
     reset(reason)
     setStatus('disconnected')
     connect()
@@ -305,6 +320,7 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
 
   function dispose(reason: string): void {
     disposed = true
+    clearTimers()
     rejectSendQueue(new Error(reason))
     const old = socket
     socket = null

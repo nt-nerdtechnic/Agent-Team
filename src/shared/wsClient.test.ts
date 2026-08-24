@@ -133,16 +133,14 @@ describe('createWsClient', () => {
     expect(seen).toEqual([{ workspace_path: '/repo' }])
   })
 
-  it('stays down after an unexpected close instead of reconnecting itself', () => {
+  it('reconnects with backoff after an unexpected close', () => {
     const c = makeClient()
     c.connect(URL)
     FakeWebSocket.instances[0].open()
     FakeWebSocket.instances[0].close()
     expect(statuses).toContain('disconnected')
-    // No backoff timer exists: the socket comes back only when the caller
-    // asks for it (backend:changed → connect, system resume → reconnectNow).
-    vi.advanceTimersByTime(300_000)
-    expect(FakeWebSocket.instances).toHaveLength(1)
+    vi.advanceTimersByTime(1_500) // first backoff step
+    expect(FakeWebSocket.instances).toHaveLength(2)
   })
 
   it('reset() tears down without reconnecting and rejects in-flight with the reason', async () => {
@@ -155,7 +153,7 @@ describe('createWsClient', () => {
     await expect(inflight).resolves.toMatchObject({ message: 'backend changed' })
     expect(sock.closed).toBe(true)
     vi.advanceTimersByTime(60_000)
-    expect(FakeWebSocket.instances).toHaveLength(1) // nothing reconnects on its own
+    expect(FakeWebSocket.instances).toHaveLength(1) // no reconnect scheduled
   })
 
   it('markErrored() makes sends fail fast instead of queueing', async () => {
@@ -176,21 +174,21 @@ describe('createWsClient', () => {
     expect(c.isHealthyFor(URL)).toBe(false)
   })
 
-  it('never probes an idle socket and never force-closes one', async () => {
+  it('never probes an idle socket and never closes one from this side', async () => {
     const c = makeClient()
     c.connect(URL)
     const sock = FakeWebSocket.instances[0]
     sock.open()
-    // A backend saturated by terminal output answers late or not at all. The
-    // client has no opinion about that: it sends nothing on its own and the
-    // socket is never closed from this side.
+    // A backend saturated by terminal output answers late or not at all. That
+    // is not this client's call to make: it sends nothing unprompted, and the
+    // socket is only ever closed by the peer (or by reset/dispose).
     await vi.advanceTimersByTimeAsync(300_000)
     expect(sock.sent).toEqual([])
     expect(sock.closed).toBe(false)
     expect(statuses).toEqual(['connecting', 'connected'])
   })
 
-  it('reconnects on reconnectNow, the caller-driven recovery path', async () => {
+  it('reconnects immediately on reconnectNow, without waiting out the backoff', async () => {
     const c = makeClient()
     c.connect(URL)
     const first = FakeWebSocket.instances[0]
@@ -203,8 +201,8 @@ describe('createWsClient', () => {
     expect(first.closed).toBe(true)
     expect(statuses).toEqual(['connecting', 'connected', 'disconnected', 'connecting'])
 
-    // The discarded socket's close must not spawn a competing socket.
-    await vi.advanceTimersByTimeAsync(300_000)
+    // The discarded socket's close must not schedule a competing reconnect.
+    await vi.advanceTimersByTimeAsync(30_000)
     expect(FakeWebSocket.instances).toHaveLength(2)
   })
 
