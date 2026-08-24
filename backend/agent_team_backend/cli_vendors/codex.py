@@ -24,6 +24,7 @@ import os
 import tempfile
 import re
 import shutil
+import threading
 import time
 
 from .base import Dep, McpWiring, SkillsWiring, VendorSpec, command_text
@@ -105,14 +106,27 @@ class CodexLogReader(LogReader):
     #: window is picked up by the fs watcher, not this backfill enumeration.
     _SESSION_FILES_TTL_S = 5.0
 
+    #: A rollout's session_meta is its FIRST record, written at creation. A
+    #: file this much older than its last write and still headerless will
+    #: never grow one (rollouts only append), so the miss is cached instead
+    #: of re-opening the file on every rescan of every workspace forever.
+    #: Fresh files stay uncached: their header may simply not have landed.
+    _HEADER_GRACE_S = 60.0
+
     def __init__(self) -> None:
         # path -> cwd from the rollout's session_meta header. The header is
         # immutable once written, so each file is opened at most once — an
-        # entry is stored only after the meta record was actually read, and a
-        # rollout whose header has not landed yet is retried next pass.
+        # entry is stored once the meta record was read, or as "" once the
+        # file aged past _HEADER_GRACE_S without one; a rollout whose header
+        # has not landed yet is retried next pass.
         self._cwd_cache: dict[str, str] = {}
         self._files_cache: list[Path] = []
         self._files_cached_at: float = float("-inf")
+        # Discovery runs concurrently from the rescan worker thread and the
+        # executor threads behind register_pane/force_rescan. The lock keeps
+        # the TTL coherent so overlapping callers share one tree walk instead
+        # of each paying a cold rglob.
+        self._discovery_lock = threading.Lock()
 
     def project_dirs(self) -> list[Path]:
         roots: list[Path] = []
@@ -142,25 +156,26 @@ class CodexLogReader(LogReader):
         return roots
 
     def session_files(self) -> list[Path]:
-        now = time.monotonic()
-        if now - self._files_cached_at <= self._SESSION_FILES_TTL_S:
-            return list(self._files_cache)
-        out: list[Path] = []
-        for root in self.project_dirs():
-            try:
-                for f in root.rglob("rollout-*.jsonl"):
-                    if f.is_file():
-                        out.append(f)
-            except OSError as err:
-                log.debug("rglob %s failed: %s", root, err)
-        self._files_cache = out
-        self._files_cached_at = now
-        # Deleted/archived rollouts must not pin their header entries forever.
-        existing = {str(p) for p in out}
-        for k in list(self._cwd_cache):
-            if k not in existing:
-                del self._cwd_cache[k]
-        return list(out)
+        with self._discovery_lock:
+            now = time.monotonic()
+            if now - self._files_cached_at <= self._SESSION_FILES_TTL_S:
+                return list(self._files_cache)
+            out: list[Path] = []
+            for root in self.project_dirs():
+                try:
+                    for f in root.rglob("rollout-*.jsonl"):
+                        if f.is_file():
+                            out.append(f)
+                except OSError as err:
+                    log.debug("rglob %s failed: %s", root, err)
+            self._files_cache = out
+            self._files_cached_at = now
+            # Deleted/archived rollouts must not pin their header entries forever.
+            existing = {str(p) for p in out}
+            for k in list(self._cwd_cache):
+                if k not in existing:
+                    del self._cwd_cache[k]
+            return list(out)
 
     def _cwd_from_meta(self, path: Path) -> str:
         """Read just the session_meta header for this rollout's cwd.
@@ -170,27 +185,37 @@ class CodexLogReader(LogReader):
         lines (not the whole rollout) so per-workspace scoping stays cheap.
         """
         key = str(path)
-        cached = self._cwd_cache.get(key)
-        if cached is not None:
-            return cached
-        try:
-            with path.open("r", encoding="utf-8", errors="replace") as fh:
-                for _ in range(5):  # session_meta is the first record
-                    line = fh.readline()
-                    if not line:
-                        break
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("type") == "session_meta":
-                        payload = rec.get("payload") or {}
-                        cwd = str(payload.get("cwd") or "") if isinstance(payload, dict) else ""
-                        self._cwd_cache[key] = cwd
-                        return cwd
-        except OSError:
+        with self._discovery_lock:
+            cached = self._cwd_cache.get(key)
+            if cached is not None:
+                return cached
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as fh:
+                    for _ in range(5):  # session_meta is the first record
+                        line = fh.readline()
+                        if not line:
+                            break
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if rec.get("type") == "session_meta":
+                            payload = rec.get("payload") or {}
+                            cwd = str(payload.get("cwd") or "") if isinstance(payload, dict) else ""
+                            self._cwd_cache[key] = cwd
+                            return cwd
+            except OSError:
+                return ""
+            # No header in the first records. Once the file is old enough
+            # that the header must have landed if it ever will, cache the
+            # miss — otherwise this rollout is re-opened by every rescan of
+            # every workspace for as long as it exists.
+            try:
+                if time.time() - path.stat().st_mtime >= self._HEADER_GRACE_S:
+                    self._cwd_cache[key] = ""
+            except OSError:
+                pass
             return ""
-        return ""
 
     def session_files_for_workspace(self, workspace_path: str) -> list[Path]:
         """Only rollouts whose session_meta.cwd matches this workspace.

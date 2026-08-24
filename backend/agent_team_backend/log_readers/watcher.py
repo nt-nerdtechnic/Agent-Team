@@ -546,7 +546,14 @@ class LogWatcher:
             # unexpected file shape) skips this cycle, not all future ones.
             try:
                 self._watch_new_dirs()
-                for path in self._files_to_scan():
+                # Discovery is disk-bound (vendor tree walks, per-file header
+                # reads, one stat per candidate) and must stay off the event
+                # loop: on a cold page cache a sweep takes seconds, and the
+                # loop freezing that long suspends every PTY reader and WS
+                # send. Only the enqueue runs back on the loop. _scan_mtimes
+                # stays safe: this coroutine is its only writer, and the
+                # sweep below runs strictly after the thread returns.
+                for path in await asyncio.to_thread(self._files_to_scan):
                     self._queue.put_nowait((path, ""))
                 if self._loop is not None:
                     self._sweep_activity_seen(self._loop.time())

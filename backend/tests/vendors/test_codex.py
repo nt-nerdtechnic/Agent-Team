@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -493,6 +495,39 @@ def test_missing_header_is_retried_not_cached(fake_codex_session: Path) -> None:
     assert reader.session_files_for_workspace("/ws") == []
 
     _write_jsonl(fake_codex_session, [_meta("/ws"), _token_count_event(1, 0, 1, 0)])
+    _expire_files_cache(reader)
+    assert reader.session_files_for_workspace("/ws") == [fake_codex_session]
+
+
+def test_stale_missing_header_is_negatively_cached(fake_codex_session: Path) -> None:
+    reader = CodexLogReader()
+    _write_jsonl(fake_codex_session, [_token_count_event(1, 0, 1, 0)])
+    stale = time.time() - CodexLogReader._HEADER_GRACE_S - 1
+    os.utime(fake_codex_session, (stale, stale))
+    assert reader.session_files_for_workspace("/ws") == []
+
+    # The miss is cached: a real rollout only appends, so an old headerless
+    # file never gains a header — even this rewrite must not be re-read.
+    _write_jsonl(fake_codex_session, [_meta("/ws")])
+    _expire_files_cache(reader)
+    assert reader.session_files_for_workspace("/ws") == []
+
+
+def test_deleted_rollout_drops_its_negative_header_cache(
+    fake_codex_session: Path,
+) -> None:
+    reader = CodexLogReader()
+    _write_jsonl(fake_codex_session, [_token_count_event(1, 0, 1, 0)])
+    stale = time.time() - CodexLogReader._HEADER_GRACE_S - 1
+    os.utime(fake_codex_session, (stale, stale))
+    assert reader.session_files_for_workspace("/ws") == []
+
+    fake_codex_session.unlink()
+    _expire_files_cache(reader)
+    assert reader.session_files() == []  # prunes the stale miss entry
+
+    # Same path reborn as a fresh rollout must be read for real.
+    _write_jsonl(fake_codex_session, [_meta("/ws")])
     _expire_files_cache(reader)
     assert reader.session_files_for_workspace("/ws") == [fake_codex_session]
 
