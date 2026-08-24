@@ -80,7 +80,7 @@ export interface ActivePaneView {
   injectionStatus: InjectionStatus
   preparationStatus?: PreparationStatus
   kickoffStatus?: KickoffStatus
-  origin: 'manual' | 'pipeline'
+  origin: 'manual' | 'pipeline' | 'mcp'
   /** True when this pane corresponds to a slot marked is_commander=true in
    *  the stage config — shown as 🎯 指揮官 badge in the active-agents list
    *  and the pane header. */

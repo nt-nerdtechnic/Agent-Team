@@ -963,7 +963,7 @@ interface ActivePane {
   slotLabel: string
   command: string
   workspacePath: string
-  origin: 'manual' | 'pipeline'
+  origin: 'manual' | 'pipeline' | 'mcp'
   /** Which pipeline run group this pane belongs to. Undefined = unassigned (manual). */
   runGroupId?: string
   injectionStatus: InjectionStatus
@@ -1822,7 +1822,7 @@ async function createRequestedPane(
     customName: req.name,
     commandOverride: '',
     workspacePath: parent.workspacePath,
-    origin: 'manual',
+    origin: 'mcp',
     runGroupId: parent.runGroupId,
     preferredMessagingName: req.name,
     spawnedBy: parent.id,
@@ -1841,6 +1841,7 @@ async function createRequestedPane(
     session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
     run_group_id: parent.runGroupId ?? '',
     output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
+    origin: 'mcp',
   })
   void sendQuiet('project.rename_pane', {
     workspace_path: parent.workspacePath,
@@ -1894,7 +1895,7 @@ async function createStandaloneRequestedPane(
     customName: req.name,
     commandOverride: '',
     workspacePath,
-    origin: 'manual',
+    origin: 'mcp',
     runGroupId: runGroupId || undefined,
     preferredMessagingName: req.name,
   })
@@ -1909,6 +1910,7 @@ async function createStandaloneRequestedPane(
     session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
     run_group_id: runGroupId,
     output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
+    origin: 'mcp',
   })
   void sendQuiet('project.rename_pane', {
     workspace_path: workspacePath,
@@ -3682,7 +3684,7 @@ async function persistPaneSession(pane: ActivePane, sessionId: string): Promise<
   const key = `${pane.id}:${id}`
   if (persistedPaneSessions.has(key)) return
   let saved: unknown = null
-  if (pane.origin === 'manual') {
+  if (pane.origin !== 'pipeline') {
     const resp = await sendQuiet<ProjectPayload>('manual_pane.session', {
       workspace_path: pane.workspacePath,
       pane_id: pane.id,
@@ -3780,7 +3782,7 @@ function scheduleInjection(pane: ActivePane): void {
       setPrepStatus(pane, 'ready')
       syncViews()
       pipelineLog(`${tag} ⏸ no role selected — skipping role injection`)
-      if (pane.origin === 'manual' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
+      if (pane.origin !== 'pipeline' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
         void persistPaneSession(pane, pane.pinnedSessionId)
       }
       return
@@ -3847,7 +3849,7 @@ function scheduleInjection(pane: ActivePane): void {
     pane.injectionStatus = ok ? 'sent' : 'failed'
     setPrepStatus(pane, ok ? 'ready' : 'failed')
     syncViews()
-    if (ok && pane.origin === 'manual' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
+    if (ok && pane.origin !== 'pipeline' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
       void persistPaneSession(pane, pane.pinnedSessionId)
     }
     if (!ok) {
@@ -3938,7 +3940,7 @@ interface SpawnInternal {
   slotLabel?: string
   commandOverride: string
   workspacePath: string
-  origin: 'manual' | 'pipeline'
+  origin: 'manual' | 'pipeline' | 'mcp'
   runGroupId?: string
   previousPaneId?: string
   kickoffPrompt?: string
@@ -4290,7 +4292,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     if (loginCommandFor(opts.agentKey) != null) startLoginExpiredWatcher(id)
 
     if ((ref.status as unknown as string) === 'running') {
-      if (pane.origin === 'manual' && !pane.roleKey && !pane.kickoffPrompt) {
+      if (pane.origin !== 'pipeline' && !pane.roleKey && !pane.kickoffPrompt) {
         pane.injectionStatus = 'skipped'
         setPrepStatus(pane, 'ready')
         syncViews()
@@ -5084,7 +5086,7 @@ async function rebuildPaneViaResume(
         const revived = panes.value.find((p) => p.id === newId)
         if (revived) revived.resumeContinueAvailable = true
       }
-      if (snap.origin === 'manual') {
+      if (snap.origin !== 'pipeline') {
         await sendQuiet<ProjectPayload>('manual_pane.spawn', {
           workspace_path: snap.workspacePath,
           pane_id: newId,
@@ -5319,7 +5321,7 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
-      if (snap.origin === 'manual') {
+      if (snap.origin !== 'pipeline') {
         await sendQuiet<ProjectPayload>('manual_pane.spawn', {
           workspace_path: snap.workspacePath,
           pane_id: newId,
@@ -6067,7 +6069,7 @@ async function resolveHistoryLogPath(
   const ws = entry.workspacePath || currentWorkspace.value
   if (!ws) return undefined
   let logPath = entry.outputLogFile
-  if (!logPath && entry.origin === 'manual' && api?.findManualLog) {
+  if (!logPath && entry.origin !== 'pipeline' && api?.findManualLog) {
     const found = await api.findManualLog(ws, manualLogFileName(entry.agentKey, entry.paneId))
     logPath = found.ok ? found.path ?? undefined : undefined
   }
@@ -6274,7 +6276,7 @@ interface ProjectPane {
   profile_id?: string
   spawn_status: string   // 'pending' | 'spawned' | 'removed'
   run_group_id?: string
-  origin: 'pipeline' | 'manual'
+  origin: 'pipeline' | 'manual' | 'mcp'
   stage_id?: string
   stage_index?: number
   slot_label?: string
@@ -7031,7 +7033,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
 
   // Backfill removed manual panes into spawnHistory so Agent History shows past sessions.
   const removedManual = allProjectPanes.filter(
-    (p) => p.origin === 'manual' && p.spawn_status === 'removed'
+    (p) => p.origin !== 'pipeline' && p.spawn_status === 'removed'
   )
   const existingPaneIds = new Set(spawnHistory.value.map((e) => e.paneId))
   const fallbackTs = payload.project?.updated_at ?? new Date().toISOString()
@@ -8876,7 +8878,7 @@ backend.on('session.detected', (raw) => {
   syncViews()
   const histSd = spawnHistory.value.find((e) => e.paneId === ev.pane_id)
   if (histSd) histSd.sessionId = sessionId
-  if (pane.origin === 'manual') {
+  if (pane.origin !== 'pipeline') {
     pipelineLog(`Manual ${pane.agentKey} 🔖 session 已綁定`)
     void persistPaneSession(pane, sessionId)
     return

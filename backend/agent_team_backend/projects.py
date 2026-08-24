@@ -112,7 +112,7 @@ class PaneRecord:
     profile_id: str = ""            # CLI account pin: the profile this pane was spawned on ("__default__" = real home; "" = legacy/unpinned). Restore re-spawns in the SAME account regardless of the current active default.
     spawn_status: str = "pending"   # pending / spawned / removed
     run_group_id: str = ""
-    origin: str = "manual"          # "pipeline" | "manual"
+    origin: str = "manual"          # "pipeline" | "manual" | "mcp"  (non-pipeline records are matched with != "pipeline")
     stage_id: str = ""
     stage_index: int = -1
     slot_label: str = ""
@@ -495,7 +495,7 @@ class ProjectStore:
             for s in stage_blueprint
         ]
         # Clear stale pipeline panes from previous runs; preserve manual panes.
-        project.panes = [p for p in project.panes if p.origin == "manual"]
+        project.panes = [p for p in project.panes if p.origin != "pipeline"]
         # Each pipeline run gets its own log file.
         project.log_file_name = _make_log_filename(task_description)
         self.save(project)
@@ -690,7 +690,7 @@ class ProjectStore:
         # re-key is moving onto that id — otherwise the old record survives as
         # a spawned ghost that restore resurrects. Match the real record first;
         # _adopt_pending_stub then folds the stub into it.
-        manual = [p for p in project.panes if p.origin == "manual"]
+        manual = [p for p in project.panes if p.origin != "pipeline"]
         for match in (
             lambda p: p.pane_id == pane_id and p.spawn_status != "pending",
             lambda p: bool(previous_pane_id) and p.pane_id == previous_pane_id,
@@ -716,11 +716,12 @@ class ProjectStore:
         profile_id: str = "",
         run_group_id: str = "",
         output_log_file: str = "",
+        origin: str = "",
     ) -> Project:
         project = self.load_or_create(workspace_path)
         pane = self._find_manual_pane(project, pane_id, previous_pane_id, session_id)
         if pane is None:
-            pane = PaneRecord(pane_id=pane_id, origin="manual")
+            pane = PaneRecord(pane_id=pane_id, origin=origin or "manual")
             project.panes.append(pane)
         self._adopt_pending_stub(project, pane, pane_id)
         pane.pane_id = pane_id
@@ -733,6 +734,9 @@ class ProjectStore:
         if profile_id: pane.profile_id = profile_id
         if run_group_id: pane.run_group_id = run_group_id
         if output_log_file: pane.output_log_file = output_log_file
+        # Guarded like the fields above: an omitted origin must not blank an
+        # existing record back to "manual" (that would strip the mcp marker).
+        if origin: pane.origin = origin
         # A rebuild hop owns its session: retire any OTHER spawned manual
         # record sharing it (legacy duplicate accumulation) so restore cannot
         # resurrect a ghost pane. Gated on previous_pane_id for the same
@@ -740,7 +744,7 @@ class ProjectStore:
         # with a live pane on purpose.
         if previous_pane_id and session_id:
             for other in project.panes:
-                if (other is not pane and other.origin == "manual"
+                if (other is not pane and other.origin != "pipeline"
                         and other.session_id == session_id
                         and other.spawn_status == "spawned"):
                     other.spawn_status = "removed"
@@ -772,7 +776,7 @@ class ProjectStore:
         sid = session_id.strip()
         matches = [
             p for p in project.panes
-            if p.origin == "manual"
+            if p.origin != "pipeline"
             and p.spawn_status != "removed"
             and (p.pane_id == pane_id or (sid and p.session_id == sid))
         ]
