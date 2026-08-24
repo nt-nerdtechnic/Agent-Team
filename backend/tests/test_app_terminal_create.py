@@ -536,6 +536,86 @@ async def test_terminal_create_kimi_resume_claims_resume_id(
 
 
 @pytest.mark.asyncio
+async def test_terminal_create_kimi_sets_escape_timeout_without_affecting_other_clis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PI_TUI_ESC_TIMEOUT", raising=False)
+    monkeypatch.setattr(app, "attribution", FakeAttribution())
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+
+    kimi_session = _session()
+    await app.handle_message(kimi_session, {
+        "id": "kimi-default",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "kimi-pane",
+            "agent_key": "kimi",
+            "command": "kimi --yolo",
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+    kimi_created = kimi_session.terminals.created[0]  # type: ignore[attr-defined]
+    assert kimi_created["env"]["PI_TUI_ESC_TIMEOUT"] == "100"
+
+    qwen_session = _session()
+    await app.handle_message(qwen_session, {
+        "id": "qwen-default",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "qwen-pane",
+            "agent_key": "qwen",
+            "command": "qwen --yolo",
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+    qwen_created = qwen_session.terminals.created[0]  # type: ignore[attr-defined]
+    assert qwen_created["env"] is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_kimi_preserves_explicit_escape_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PI_TUI_ESC_TIMEOUT", "300")
+    monkeypatch.setattr(app, "attribution", FakeAttribution())
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "kimi-explicit",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "kimi-pane",
+            "agent_key": "kimi",
+            "command": "kimi --yolo",
+            "cwd": "/ws",
+            "env": {"PI_TUI_ESC_TIMEOUT": "250"},
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+
+    created = session.terminals.created[0]  # type: ignore[attr-defined]
+    assert created["env"]["PI_TUI_ESC_TIMEOUT"] == "250"
+
+    inherited_session = _session()
+    await app.handle_message(inherited_session, {
+        "id": "kimi-inherited",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "kimi-inherited-pane",
+            "agent_key": "kimi",
+            "command": "kimi --yolo",
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+    inherited_created = inherited_session.terminals.created[0]  # type: ignore[attr-defined]
+    assert inherited_created["env"] is None
+
+
+@pytest.mark.asyncio
 async def test_terminal_create_qwen_resume_claims_resume_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

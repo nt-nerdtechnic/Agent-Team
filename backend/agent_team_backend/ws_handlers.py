@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import threading
 import time
@@ -4052,6 +4053,11 @@ async def _terminal_create_impl(
     metadata = payload.get("metadata") or {}
     agent_key = payload.get("agent_key") or ""
     env = dict(payload.get("env") or {})
+    vendor_spec = cli_vendor(agent_key)
+    if vendor_spec is not None:
+        for key, value in vendor_spec.spawn_env_defaults:
+            if key not in os.environ:
+                env.setdefault(key, value)
     await app._ensure_fresh_path_for_spawn(agent_key)
     payload["command"] = app._command_with_persisted_cli_binary(
         agent_key, payload.get("command")
@@ -4302,7 +4308,6 @@ async def _terminal_create_impl(
         # file); the elif chain below is the legacy fallback, deleted one
         # vendor at a time. Codex stays out of both paths here — its resume
         # id is claimed via the per-pane CODEX_HOME flow.
-        vendor_spec = cli_vendor(agent_key)
         if (not explicit_session_id and agent_key != "codex"
                 and vendor_spec is not None
                 and vendor_spec.resume_id_from_command is not None):

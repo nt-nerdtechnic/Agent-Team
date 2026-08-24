@@ -599,6 +599,10 @@ SPEC = VendorSpec(
     fetch_usage=lambda home: fetch_kimi(home),
     resume_id_from_command=_resume_id_from_command,
     session_exists=_session_exists,
+    # pi-tui otherwise treats a split ESC prefix as Escape after 10ms. Pane
+    # input crosses the renderer/WebSocket/PTY boundary, so give Kimi the same
+    # reassembly window pi-tui already uses for remote terminals.
+    spawn_env_defaults=(("PI_TUI_ESC_TIMEOUT", "100"),),
     home_env_vars=("KIMI_CODE_HOME",),
     make_log_reader=KimiLogReader,
     # Kimi Code ships `kimi doctor` and `kimi upgrade` (aliased `update`);
