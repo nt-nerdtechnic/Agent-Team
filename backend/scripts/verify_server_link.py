@@ -1168,11 +1168,11 @@ async def check_account_flow() -> None:
     print("\n== 16. 帳號註冊與登入 ==")
     stamp = RUN
     email = f"verify-{stamp}@example.com"
-    password = "verify-passw0rd"
+    dummy_pass = f"verify-pwd-{secrets.token_hex(8)}"
 
     try:
         created = await server_link.account_request(
-            URL, "auth.register", {"email": email, "password": password, "tenantName": f"verify {stamp}"}
+            URL, "auth.register", {"email": email, "password": dummy_pass, "tenantName": f"verify {stamp}"}
         )
     except Exception as err:  # noqa: BLE001
         check(False, f"註冊失敗：{err}")
@@ -1186,20 +1186,20 @@ async def check_account_flow() -> None:
 
     # Same email twice must not silently create a second account.
     try:
-        await server_link.account_request(URL, "auth.register", {"email": email, "password": password})
+        await server_link.account_request(URL, "auth.register", {"email": email, "password": dummy_pass})
         check(False, "重複 email 應該被拒")
     except server_link.AccountError as err:
         check(err.code == "EMAIL_TAKEN", "重複 email → EMAIL_TAKEN", err.code)
 
     try:
-        await server_link.account_request(URL, "auth.login", {"email": email, "password": "wrong-one"})
+        await server_link.account_request(URL, "auth.login", {"email": email, "password": f"wrong-{stamp}"})
         check(False, "錯誤密碼應該被拒")
     except server_link.AccountError as err:
         check(err.code == "AUTH_REJECTED", "錯誤密碼 → AUTH_REJECTED", err.code)
 
     try:
         signed_in = await server_link.account_request(
-            URL, "auth.login", {"email": email, "password": password}
+            URL, "auth.login", {"email": email, "password": dummy_pass}
         )
     except Exception as err:  # noqa: BLE001
         check(False, f"登入失敗：{err}")
