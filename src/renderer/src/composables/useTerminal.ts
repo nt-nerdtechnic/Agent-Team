@@ -1099,7 +1099,7 @@ function webglAvailable(): boolean {
   if (!_webglProbe) {
     console.info(
       '[terminal] WebGL unavailable — terminals run on the DOM renderer. ' +
-        'On desktop this means hardware acceleration is off (see NAVIDE_ENABLE_GPU).'
+        'On desktop GPU acceleration is on by default; NAVIDE_DISABLE_GPU=1 turns it off.'
     )
   }
   return _webglProbe
@@ -1805,18 +1805,34 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // not rAF: rAF is paused in packaged Electron when the window is occluded,
   // which would leave output stuck in _pendingOutput.)
   const _BACKGROUND_COALESCE_MS = 100
-  let _pendingOutput = ''
+  // Output arrives as raw PTY bytes (binary WS frames); legacy string chunks
+  // are still accepted defensively. Chunks are queued as-is — xterm.js takes
+  // Uint8Array natively and runs its own streaming UTF-8 decoder.
+  let _pendingOutput: (string | Uint8Array)[] = []
   let _outputTimer: ReturnType<typeof setTimeout> | null = null
+  // Streaming decoder for appendClean's text-side consumers (badge/liveness):
+  // a chunk may end mid-character, so the decoder must carry state across
+  // chunks. Recreated per session so a dead session's tail state never bleeds
+  // into the next one.
+  let _cleanDecoder = new TextDecoder('utf-8')
+
+  function _chunkText(chunk: string | Uint8Array): string {
+    return typeof chunk === 'string' ? chunk : _cleanDecoder.decode(chunk, { stream: true })
+  }
 
   function _flushPendingOutput(): void {
     if (_outputTimer) { clearTimeout(_outputTimer); _outputTimer = null }
-    const chunk = _pendingOutput
-    _pendingOutput = ''
-    if (!chunk) return
+    const chunks = _pendingOutput
+    _pendingOutput = []
+    if (!chunks.length) return
     const onFirstOutput = !firstOutputSeen ? opts?.onFirstOutput : undefined
     firstOutputSeen = true
-    term.write(chunk, onFirstOutput)
-    appendClean(chunk)
+    for (let i = 0; i < chunks.length; i++) {
+      // Callback on the last write: it fires once ALL pending chunks are
+      // processed, matching the old single-string-write semantics.
+      term.write(chunks[i], i === chunks.length - 1 ? onFirstOutput : undefined)
+    }
+    appendClean(chunks.map(_chunkText).join(''))
   }
   let mounted = false
   let mountedEl: HTMLElement | null = null
@@ -3204,7 +3220,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     })
 
     outputUnsub = backend.on('terminal.output', (raw) => {
-      const payload = raw as { terminal_session_id: string; data: string }
+      // data is a Uint8Array (binary frame path); a plain string is accepted
+      // defensively for legacy JSON events (and the test mocks).
+      const payload = raw as { terminal_session_id: string; data: string | Uint8Array }
       if (payload.terminal_session_id !== sessionId.value) return
       if (_keystrokeSentAt) {
         const roundTrip = Date.now() - _keystrokeSentAt
@@ -3213,7 +3231,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           _echoDiag(`pane=${paneId} keystroke round-trip ${roundTrip}ms`, 'warning')
         }
       }
-      _pendingOutput += payload.data
+      _pendingOutput.push(payload.data)
       if (_ownsTerminalFocus) {
         // The user is typing in this pane — render the echo now.
         _flushPendingOutput()
@@ -4051,10 +4069,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // buffer to keep in step here; the exit handler sets snapshotDiscarded when
     // this session's scrollback must not be persisted at all.
     if (_outputTimer) { clearTimeout(_outputTimer); _outputTimer = null }
-    if (_pendingOutput) {
-      term.write(_pendingOutput)
-      _pendingOutput = ''
+    if (_pendingOutput.length) {
+      for (const chunk of _pendingOutput) term.write(chunk)
+      _pendingOutput = []
     }
+    // Drop any partial-character state so it cannot bleed into a new session.
+    _cleanDecoder = new TextDecoder('utf-8')
   }
 
   onScopeDispose(() => {

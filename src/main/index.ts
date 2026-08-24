@@ -2192,6 +2192,10 @@ ipcMain.handle('git-accounts:getCredential', (event, workspacePath: string) => {
 // Caveat on that evidence: the quits were driven by SIGTERM, not a user Cmd+Q.
 // NAVIDE_DISABLE_GPU=1 restores the old behaviour if the shutdown crash ever
 // resurfaces.
+// Verified 2026-08-24 (Apple M4, Electron from this tree): under this default
+// configuration an offscreen probe created a hardware webgl2 context (ANGLE
+// Metal, gpu_compositing enabled), so terminals get the WebGL renderer unless
+// NAVIDE_DISABLE_GPU=1 is set.
 const gpuDisabled = process.env.NAVIDE_DISABLE_GPU === '1'
 if (gpuDisabled) {
   app.disableHardwareAcceleration()

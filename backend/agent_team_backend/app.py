@@ -87,7 +87,7 @@ from .roles_store import RolesStore
 from .stages_store import StagesStore
 from .db import DB_FILENAME, Database, WorkspaceDatabases
 from .store_migrations import run_startup_migrations, version_change
-from .terminals import TerminalService
+from .terminals import TerminalService, output_frame_session_id
 from .tokens_store import TokensStore
 from .ui_settings import UiSettingsStore
 from .history_store import HistoryStore
@@ -380,6 +380,28 @@ class Session:
             # read like a truncated error.
             log.debug("ws peer gone (%s); marking session %#x dead", type(err).__name__, id(self))
 
+    async def send_bytes(self, data: bytes) -> None:
+        """Serialized binary websocket send — shares send_json's lock (one
+        writer per connection) and its dead-peer semantics: never raises, the
+        first failure marks the session dead and later calls silently no-op.
+        Used for terminal-output frames (see terminals._build_output_frame).
+        """
+        if self.dead:
+            return
+        started = time.monotonic()
+        try:
+            async with self._send_lock:
+                acquired = time.monotonic()
+                # Re-check under the lock — same disconnect swarm as send_json.
+                if self.dead:
+                    return
+                await self.websocket.send_bytes(data)
+            self._note_send_timing(started, acquired, time.monotonic())
+        except (RuntimeError, WebSocketDisconnect, ClientDisconnected) as err:
+            self.dead = True
+            _SESSIONS.discard(self)
+            log.debug("ws peer gone (%s); marking session %#x dead", type(err).__name__, id(self))
+
     def _note_send_timing(self, started: float, acquired: float, done: float) -> None:
         """Split a slow send into lock contention vs transport backpressure.
 
@@ -579,8 +601,24 @@ def _cancel_pane_unregister(pane_id: str) -> None:
         handle.cancel()
 
 
-async def _active_emit(event: dict[str, Any]) -> None:
-    """Output sink: route each PTY's output to its owning Session."""
+async def _active_emit(event: dict[str, Any] | bytes) -> None:
+    """Output sink: route each PTY's output to its owning Session.
+
+    Terminal output arrives as a pre-built binary frame (bytes); everything
+    else (e.g. terminal.exit) stays a JSON event dict. Routing and the
+    detached-pane drop behave identically for both.
+    """
+    if isinstance(event, (bytes, bytearray)):
+        frame = bytes(event)
+        session_id = output_frame_session_id(frame)
+        sess = _PTY_OWNERS.get(session_id) if session_id else None
+        if sess is None:
+            return  # detached: drop output, PTY keeps running, TUI redraws on reattach
+        try:
+            await sess.send_bytes(frame)
+        except Exception as err:  # noqa: BLE001
+            log.warning("terminal output send failed: %s", err)
+        return
     payload = event.get("payload", {})
     # Runs before the owner check: cleanup applies even when the pane is
     # detached.

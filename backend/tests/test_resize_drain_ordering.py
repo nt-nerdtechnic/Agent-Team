@@ -13,14 +13,30 @@ from agent_team_backend.terminals import TerminalSession
 
 
 class OrderRecordingWS:
-    """Records every outbound frame in send order — output events and the
-    resize ack share one list so their relative order can be asserted."""
+    """Records every outbound frame in send order — binary output frames and
+    the JSON resize ack share one list so their relative order can be
+    asserted."""
 
     def __init__(self) -> None:
-        self.sent: list[dict[str, Any]] = []
+        self.sent: list[dict[str, Any] | bytes] = []
 
     async def send_json(self, payload: dict[str, Any]) -> None:
         self.sent.append(payload)
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.sent.append(data)
+
+
+def _frame_data(frame: bytes) -> bytes:
+    """Raw PTY bytes of a binary terminal-output frame (skip the header)."""
+    assert frame[0] == 0x01
+    off = 6 + frame[5]          # past sessionId
+    off += 1 + frame[off]       # past paneId
+    return frame[off:]
+
+
+def _type_of(msg: dict[str, Any] | bytes) -> str:
+    return "terminal.output" if isinstance(msg, bytes) else msg["type"]
 
 
 def _fake_session_entry(session: app.Session, sid: str) -> tuple[int, int]:
@@ -55,7 +71,7 @@ async def test_resize_drains_buffered_output_before_ack() -> None:
     try:
         # Old-width output sitting behind the 50ms batch timer (simulated with a
         # long delay so it would NOT fire on its own during the test).
-        svc._out_buffers[sid] = ["OLD_WIDTH_OUTPUT"]
+        svc._out_buffers[sid] = [b"OLD_WIDTH_OUTPUT"]
         svc._out_handles[sid] = svc._loop.call_later(10, svc._flush_output, svc._sessions[sid])
 
         await app.handle_message(session, {
@@ -67,14 +83,14 @@ async def test_resize_drains_buffered_output_before_ack() -> None:
         os.close(master)
         os.close(slave)
 
-    types = [m["type"] for m in ws.sent]
+    types = [_type_of(m) for m in ws.sent]
     assert "terminal.output" in types, "buffered output was never flushed"
     assert "terminal.resize.result" in types, "resize was never acked"
     assert types.index("terminal.output") < types.index("terminal.resize.result"), (
         f"output must precede the resize ack, got order: {types}"
     )
-    out_event = next(m for m in ws.sent if m["type"] == "terminal.output")
-    assert out_event["payload"]["data"] == "OLD_WIDTH_OUTPUT"
+    out_frame = next(m for m in ws.sent if isinstance(m, bytes))
+    assert _frame_data(out_frame) == b"OLD_WIDTH_OUTPUT"
     # The pending batch timer was cancelled by the drain, so it must not have
     # re-emitted the same output a second time.
     assert types.count("terminal.output") == 1

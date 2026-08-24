@@ -36,7 +36,9 @@ RAW_SEND_RE = re.compile(r"\b(?:websocket|ws)\.send(?:_json|_text|_bytes)?\(")
 #: call deliberately does not use (it runs before a token exists, so that link
 #: is not connected yet).
 SINGLE_WRITERS = {
-    "app.py": [("Session", "send_json")],
+    # send_json and send_bytes share Session._send_lock — one writer, two
+    # frame kinds (JSON events vs binary terminal-output frames).
+    "app.py": [("Session", "send_json"), ("Session", "send_bytes")],
     "server_link.py": [("ServerLink", "_send_frame"), (None, "account_request")],
 }
 

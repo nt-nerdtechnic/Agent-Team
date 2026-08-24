@@ -83,6 +83,43 @@ export interface WsClient {
   dispose(reason: string): void
 }
 
+/** Parsed form of a binary terminal-output frame (see below). */
+export interface TerminalOutputFrame {
+  terminal_session_id: string
+  pane_id: string
+  sequence: number
+  /** Raw PTY bytes — xterm.js accepts Uint8Array directly and runs its own
+   *  streaming UTF-8 decoder, so no string round-trip happens on this path. */
+  data: Uint8Array
+}
+
+// Non-streaming decoder for the short id fields only; payload bytes are
+// handed to consumers undecoded.
+const frameIdDecoder = new TextDecoder('utf-8')
+
+/**
+ * Parse a binary `terminal.output` WS frame (little-endian):
+ *   u8 frameType=0x01 | u32 sequence | u8 sidLen | sid utf8 |
+ *   u8 paneIdLen | paneId utf8 | rest = raw PTY bytes.
+ * Returns null for anything that is not a well-formed output frame.
+ */
+export function parseTerminalOutputFrame(raw: ArrayBuffer | Uint8Array): TerminalOutputFrame | null {
+  const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw)
+  if (bytes.length < 7 || bytes[0] !== 0x01) return null
+  const sequence = (bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)) >>> 0
+  const sidLen = bytes[5]
+  let off = 6
+  if (bytes.length < off + sidLen + 1) return null
+  const terminal_session_id = frameIdDecoder.decode(bytes.subarray(off, off + sidLen))
+  off += sidLen
+  const paneLen = bytes[off]
+  off += 1
+  if (bytes.length < off + paneLen) return null
+  const pane_id = paneLen ? frameIdDecoder.decode(bytes.subarray(off, off + paneLen)) : ''
+  off += paneLen
+  return { terminal_session_id, pane_id, sequence, data: bytes.subarray(off) }
+}
+
 function nowIso(): string {
   return new Date().toISOString()
 }
@@ -232,6 +269,10 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     const ctor = resolveCtor()
     setStatus('connecting')
     const sock = new ctor(url)
+    // Binary frames carry raw terminal output. 'arraybuffer' is supported by
+    // both browser WebSocket and the `ws` package (main process); the test
+    // Fake simply ignores the assignment.
+    ;(sock as { binaryType?: string }).binaryType = 'arraybuffer'
     socket = sock
     activeCtor = ctor
 
@@ -244,6 +285,13 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
 
     sock.addEventListener('message', (ev) => {
       const data = (ev as { data?: unknown }).data
+      // Binary frame: raw terminal output, bypassing JSON entirely.
+      if (data instanceof ArrayBuffer || data instanceof Uint8Array) {
+        const frame = parseTerminalOutputFrame(data)
+        if (frame) emit('terminal.output', frame)
+        else console.error('[wsClient] unrecognized binary frame')
+        return
+      }
       let msg: WsResponse
       try {
         msg = JSON.parse(typeof data === 'string' ? data : '') as WsResponse

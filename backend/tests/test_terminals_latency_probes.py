@@ -115,7 +115,7 @@ async def test_slow_echo_is_reported(caplog):
     svc._sessions["t-lag"] = session
     try:
         svc._echo_probe["t-lag"] = svc._loop.time() - (_ECHO_LAG_WARN_MS + 50) / 1000
-        svc._out_buffers["t-lag"] = ["echo"]
+        svc._out_buffers["t-lag"] = [b"echo"]
         with caplog.at_level(logging.WARNING):
             svc._flush_output(session)
         assert "input echo lag" in caplog.text
@@ -138,7 +138,7 @@ async def test_prompt_echo_is_silent(caplog):
     svc._sessions["t-quick"] = session
     try:
         svc._echo_probe["t-quick"] = svc._loop.time()
-        svc._out_buffers["t-quick"] = ["echo"]
+        svc._out_buffers["t-quick"] = [b"echo"]
         with caplog.at_level(logging.WARNING):
             svc._flush_output(session)
         assert "input echo lag" not in caplog.text
@@ -160,7 +160,7 @@ async def test_output_long_after_the_keystroke_is_not_called_an_echo(caplog):
     svc._sessions["t-busy"] = session
     try:
         svc._echo_probe["t-busy"] = svc._loop.time() - (_ECHO_LAG_MAX_MS + 1000) / 1000
-        svc._out_buffers["t-busy"] = ["late output"]
+        svc._out_buffers["t-busy"] = [b"late output"]
         with caplog.at_level(logging.WARNING):
             svc._flush_output(session)
         assert "input echo lag" not in caplog.text
@@ -205,7 +205,7 @@ async def test_long_reader_suspension_is_reported(caplog):
     session = _make_session("t-held", r)
     svc._sessions["t-held"] = session
     try:
-        svc._out_buffers["t-held"] = ["payload"]
+        svc._out_buffers["t-held"] = [b"payload"]
         with caplog.at_level(logging.WARNING):
             svc._flush_output(session)
             await asyncio.sleep(hold + 0.05)
@@ -224,7 +224,7 @@ async def test_fast_drain_is_silent(caplog):
     session = _make_session("t-fastdrain", r)
     svc._sessions["t-fastdrain"] = session
     try:
-        svc._out_buffers["t-fastdrain"] = ["payload"]
+        svc._out_buffers["t-fastdrain"] = [b"payload"]
         with caplog.at_level(logging.WARNING):
             svc._flush_output(session)
             await asyncio.sleep(0.02)
