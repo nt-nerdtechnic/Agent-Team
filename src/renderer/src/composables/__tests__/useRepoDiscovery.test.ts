@@ -334,6 +334,90 @@ describe('useRepoDiscovery', () => {
       scope.stop()
     })
 
+    it('adopt() takes over a forced result without walking the tree again', async () => {
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.discover_repositories', {
+        ok: true,
+        repositories: [],
+        truncated: true,
+        skipped: 'cloud_storage',
+      })
+      mock.setResponse('git.status', { ...EMPTY_STATUS, branch: 'main' })
+
+      const { result, scope } = withScope(() =>
+        useRepoDiscovery(() => '/ws', mock.backend),
+      )
+      await flush()
+      expect(result.discoverySkipped.value).toBe(true)
+      const before = discoverCalls(mock).length
+
+      // GitPane already paid for the walk and hands the result over.
+      await result.adopt([
+        { rel_path: 'a', abs_path: '/ws/a', branch: 'main' },
+        { rel_path: 'b', abs_path: '/ws/b', branch: 'feat' },
+      ])
+
+      expect(discoverCalls(mock)).toHaveLength(before)
+      expect(result.repositories.value.map((r) => r.rel_path)).toEqual(['a', 'b'])
+      expect(result.repositories.value[0].badge.branch).toBe('main')
+      expect(result.discoverySkipped.value).toBe(false)
+      scope.stop()
+    })
+
+    it('keeps an adopted list when a later automatic refresh comes back skipped', async () => {
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.discover_repositories', {
+        ok: true,
+        repositories: [],
+        truncated: true,
+        skipped: 'cloud_storage',
+      })
+      mock.setResponse('git.status', { ...EMPTY_STATUS })
+
+      const { result, scope } = withScope(() =>
+        useRepoDiscovery(() => '/ws', mock.backend),
+      )
+      await flush()
+      await result.adopt([{ rel_path: 'a', abs_path: '/ws/a', branch: 'main' }])
+      expect(result.repositories.value).toHaveLength(1)
+
+      // Automatic re-discovery: the backend skips again, but the list the user
+      // paid a tree walk for must not be thrown away.
+      await result.refresh()
+
+      expect(result.repositories.value.map((r) => r.rel_path)).toEqual(['a'])
+      expect(discoverCalls(mock).every((c) => c.payload.force === false)).toBe(true)
+      scope.stop()
+    })
+
+    it('adopt() does not pin the list across a workspace switch', async () => {
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.discover_repositories', {
+        ok: true,
+        repositories: [],
+        truncated: true,
+        skipped: 'cloud_storage',
+      })
+      mock.setResponse('git.status', { ...EMPTY_STATUS })
+
+      const ws = ref('/ws')
+      const { result, scope } = withScope(() =>
+        useRepoDiscovery(() => ws.value, mock.backend),
+      )
+      await flush()
+      await result.adopt([{ rel_path: 'a', abs_path: '/ws/a', branch: 'main' }])
+      expect(result.repositories.value).toHaveLength(1)
+
+      ws.value = '/ws2'
+      await flush()
+
+      // The new workspace gets its own (skipped) answer, not the old list.
+      expect(result.repositories.value).toHaveLength(0)
+      expect(result.discoverySkipped.value).toBe(true)
+      expect(discoverCalls(mock).every((c) => c.payload.force === false)).toBe(true)
+      scope.stop()
+    })
+
     it('does not force on a workspace switch', async () => {
       const mock = createMockBackend('connected')
       mock.setResponse('git.discover_repositories', {

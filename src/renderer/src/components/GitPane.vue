@@ -3,7 +3,7 @@ import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '../lib/settings'
 import { useGit } from '../composables/useGit'
-import type { IgnoreTarget, GitWorktree } from '../composables/useGit'
+import type { IgnoreTarget, GitWorktree, DiscoveredRepo } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
 import type { IssueDetail } from '../composables/useIssues'
 import { useGitAccounts } from '../composables/useGitAccounts'
@@ -40,6 +40,9 @@ const emit = defineEmits<{
   (e: 'dispatch-issue', payload: { paneId: string; issue: IssueDetail }): void
   (e: 'focus-pane', paneId: string): void
   (e: 'open-git-accounts'): void
+  // Result of a user-triggered forced scan, handed to a host that keeps its own
+  // discovery list (MultiRepoGit) so it never has to repeat the walk.
+  (e: 'force-discovered', repos: DiscoveredRepo[]): void
 }>()
 
 function openBranchDiffTab(base = 'main'): void {
@@ -452,6 +455,9 @@ async function doForceScan(): Promise<void> {
   forcingScan.value = true
   try {
     await discoverRepositories(true)
+    // Hand the freshly walked list to the host instead of letting it run its
+    // own forced scan — one click must cost exactly one tree walk.
+    emit('force-discovered', [...discoveredRepos.value])
   } finally {
     forcingScan.value = false
   }

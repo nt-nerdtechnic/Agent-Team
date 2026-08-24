@@ -8,7 +8,7 @@ import MultiRepoGit from '../MultiRepoGit.vue'
 const mockRepositories = ref<{ rel_path: string; abs_path: string; branch: string; badge: { branch: string; dirtyCount: number } }[]>([])
 
 vi.mock('../../composables/useRepoDiscovery', () => ({
-  useRepoDiscovery: () => ({ repositories: mockRepositories, refresh: vi.fn() }),
+  useRepoDiscovery: () => ({ repositories: mockRepositories, refresh: vi.fn(), adopt: vi.fn() }),
 }))
 
 vi.mock('vue-i18n', () => ({
