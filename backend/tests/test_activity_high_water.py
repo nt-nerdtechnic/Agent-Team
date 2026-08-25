@@ -227,3 +227,132 @@ def test_partial_write_does_not_re_emit_once_the_line_lands(tmp_path: Path) -> N
     replayed = [e for e in events if int(e.dedup_key.split(":")[-1]) <= covered]
     assert replayed == [], f"re-emitted {len(replayed)} already-parsed line(s)"
     assert events, "expected the lines past the mark to be delivered"
+
+
+# ── the partial trailing line the high-water mark used to swallow ────────
+#
+# GitHub #21: the mark advanced before the line was parsed, so a poll that
+# caught the CLI mid-append moved past a half-written line and never came
+# back to it. When the line it skipped was the turn's end record, the pane's
+# `paneTurnCompleteAt` never advanced and `isTurnInFlight` — unbounded for
+# vendors that report a turn end — held it "mid-turn" for the whole session.
+
+_ALL = ["claude", "codex", "kimi", "muse"]
+
+
+def _reader(vendor: str):
+    from agent_team_backend.cli_vendors import codex, kimi, muse
+    return {
+        "claude": ClaudeLogReader,
+        "codex": codex.CodexLogReader,
+        "kimi": kimi.KimiLogReader,
+        "muse": muse.MuseLogReader,
+    }[vendor]()
+
+
+def _vendor_path(tmp_path: Path, vendor: str) -> Path:
+    """A path each reader will actually parse.
+
+    muse gates on the filename (`_is_main_session_file`) and returns early for
+    anything else — a generic name makes its cases pass without ever entering
+    the loop under test.
+    """
+    return tmp_path / ("session.jsonl" if vendor == "muse" else f"{vendor}.jsonl")
+
+
+def test_partial_trailing_line_is_left_for_the_next_poll(tmp_path: Path) -> None:
+    """The regression itself: a half-written last line must not be stepped over."""
+    reader = ClaudeLogReader()
+    path = _transcript(tmp_path, 2)
+    seen: set[str] = set()
+    reader.parse_activity(path, seen)
+    assert activity_high_water(seen) == 2
+
+    complete = json.dumps({
+        "type": "assistant", "timestamp": "2026-08-26T00:00:03Z",
+        "message": {"stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "turn 3"}]},
+    })
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(complete[:40])           # CLI is still writing line 3
+
+    assert reader.parse_activity(path, seen) == []
+    assert activity_high_water(seen) == 2, "the mark must stay behind the partial line"
+
+
+def test_completed_line_still_delivers_its_turn(tmp_path: Path) -> None:
+    """The consequence that mattered: turn_complete must not be lost."""
+    reader = ClaudeLogReader()
+    path = _transcript(tmp_path, 2)
+    seen: set[str] = set()
+    reader.parse_activity(path, seen)
+
+    complete = json.dumps({
+        "type": "assistant", "timestamp": "2026-08-26T00:00:03Z",
+        "message": {"stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "turn 3"}]},
+    })
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(complete[:40])
+    reader.parse_activity(path, seen)                     # sees the partial line
+
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(complete[40:] + "\n")                    # CLI finishes it
+    events = reader.parse_activity(path, seen)
+
+    assert "turn_complete" in [e.event_type for e in events]
+    assert activity_high_water(seen) == 3
+
+
+@pytest.mark.parametrize("vendor", _ALL)
+def test_no_vendor_advances_past_a_partial_line(tmp_path: Path, vendor: str) -> None:
+    """All four readers that mark before parsing shared the same defect."""
+    reader = _reader(vendor)
+    path = _vendor_path(tmp_path, vendor)
+    path.write_text('{"type": "x"}\n', encoding="utf-8")
+    seen: set[str] = set()
+    reader.parse_activity(path, seen)
+    before = activity_high_water(seen)
+
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('{"type": "assis')                       # truncated, no newline
+    reader.parse_activity(path, seen)
+
+    assert activity_high_water(seen) == before, f"{vendor} stepped over a partial line"
+
+
+@pytest.mark.parametrize("vendor", _ALL)
+def test_terminated_corrupt_line_is_still_skipped_for_good(
+    tmp_path: Path, vendor: str
+) -> None:
+    """Unchanged behaviour, and the reason the fix tests for the newline.
+
+    A corrupt line that IS terminated will never become valid. Holding the mark
+    behind it would re-read — and re-emit — everything after it on every poll.
+    """
+    reader = _reader(vendor)
+    path = _vendor_path(tmp_path, vendor)
+    path.write_text('{"type": "x"}\nNOT JSON AT ALL\n', encoding="utf-8")
+    seen: set[str] = set()
+    reader.parse_activity(path, seen)
+
+    assert activity_high_water(seen) == 2, f"{vendor} stalled on a corrupt line"
+
+
+def test_corrupt_line_does_not_replay_later_events(tmp_path: Path) -> None:
+    """The failure mode the newline test exists to avoid, end to end."""
+    reader = ClaudeLogReader()
+    path = tmp_path / "sess.jsonl"
+    good = json.dumps({
+        "type": "assistant", "timestamp": "2026-08-26T00:00:09Z",
+        "message": {"stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "after the corruption"}]},
+    })
+    path.write_text("BROKEN\n" + good + "\n", encoding="utf-8")
+    seen: set[str] = set()
+
+    first = reader.parse_activity(path, seen)
+    second = reader.parse_activity(path, seen)
+
+    assert first, "the good line after a corrupt one must still be delivered"
+    assert second == [], "and must not be delivered a second time"
