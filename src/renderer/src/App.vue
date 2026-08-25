@@ -5743,6 +5743,13 @@ const workspaceBaseName = computed(() => {
   return parts.filter(Boolean).at(-1) || 'Navide'
 })
 
+/** The workspace's path for the titlebar, home collapsed to ~. Empty until
+ *  the home directory arrives, which only means it renders in full a moment
+ *  later — never a bare path where a shortened one was expected. */
+const workspaceDisplayPath = computed(() =>
+  currentWorkspace.value ? collapseHomePath(currentWorkspace.value, homeDir.value) : ''
+)
+
 // Reflect the open workspace in the real window title (document.title) so each
 // main window is distinguishable in macOS Mission Control / the Dock. Without
 // this every main window shows the static index.html <title>. Follows the
@@ -13004,6 +13011,14 @@ function paneIsCommander(p: ActivePane): boolean {
              and with several workspaces in one window, switching between them
              changed everything below and nothing up here. -->
         <span class="titlebar-name titlebar-name--ws" :title="currentWorkspace">{{ workspaceBaseName }}</span>
+        <!-- Two projects can share a folder name, so the name alone does not
+             say which one this is. Home is collapsed to ~, the same shortening
+             the sidebar's paths use. -->
+        <span
+          v-if="workspaceDisplayPath"
+          class="titlebar-path"
+          :title="currentWorkspace"
+        >{{ workspaceDisplayPath }}</span>
         <span class="titlebar-spacer"></span>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
@@ -14133,6 +14148,19 @@ function paneIsCommander(p: ActivePane): boolean {
   max-width: 40%;
   padding: 0 8px;
   color: var(--text-primary);
+}
+/* Sits after the name and gives way first: the name is what the user reads,
+   the path only disambiguates it. Both are sized to their text so the pair
+   stays centred between the spacers. */
+.titlebar-path {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* Fills the bar between the traffic lights and the gear, and stays draggable
    so the empty stretch still moves the window. */

@@ -253,6 +253,24 @@ describe('cross-workspace roster', () => {
     expect(appSource.slice(at, at + 120)).toContain('flex: 0 1 auto')
   })
 
+  it('puts the path after that name', () => {
+    // Two projects can share a folder name, so the name alone does not say
+    // which one the window is looking at. Same shortening as the sidebar's
+    // paths — home collapsed to ~ — rather than a second convention.
+    expect(appSource).toContain('class="titlebar-path"')
+    expect(appSource).toContain('{{ workspaceDisplayPath }}')
+    expect(appSource).toContain('collapseHomePath(currentWorkspace.value, homeDir.value)')
+    // After the name in the markup, so it reads as the name's qualifier.
+    expect(appSource.indexOf('class="titlebar-name titlebar-name--ws"')).toBeLessThan(
+      appSource.indexOf('class="titlebar-path"')
+    )
+    // Gives way before the name does: the name is what is read, the path only
+    // disambiguates it.
+    const at = appSource.indexOf('.titlebar-path {')
+    expect(at).toBeGreaterThan(-1)
+    expect(appSource.slice(at, at + 200)).toContain('text-overflow: ellipsis')
+  })
+
   it('asks before a switch stops a running pipeline', () => {
     // Panes survive a switch; a pipeline cannot — `pipeline` is one per window,
     // so entering another project overwrites the state tracking this one's run
