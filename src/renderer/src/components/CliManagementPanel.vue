@@ -213,17 +213,17 @@ function formatTime(value: string): string {
 .cm-message { font-size: 12px; color: var(--text-muted, #8b95a3); margin: 0; word-break: break-all; }
 
 .cm-row {
-  border: 1px solid var(--border, #2c323e); border-radius: 10px;
+  border: 1px solid var(--border-default); border-radius: 10px;
   padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
 }
 .cm-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cm-name { font-weight: 700; font-size: 13.5px; }
-.cm-badge { font-size: 11px; border-radius: 99px; padding: 1px 8px; background: var(--surface-2, #232833); }
+.cm-badge { font-size: 11px; border-radius: 99px; padding: 1px 8px; background: var(--bg-muted); }
 .cm-badge.ok { color: #2b8a3e; }
 .cm-badge.missing { color: #8b95a3; }
 .cm-badge.outdated { color: #c77400; }
 .cm-version, .cm-method, .cm-scope { font-size: 11.5px; color: var(--text-muted, #8b95a3); }
-.cm-method { border: 1px solid var(--border, #2c323e); border-radius: 99px; padding: 0 8px; }
+.cm-method { border: 1px solid var(--border-default); border-radius: 99px; padding: 0 8px; }
 .cm-path {
   font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
   color: var(--text-muted, #8b95a3); overflow-x: auto; white-space: nowrap;
@@ -242,7 +242,7 @@ function formatTime(value: string): string {
 .cm-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cm-btn {
   font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
-  border: 1px solid var(--border, #2c323e); background: var(--surface-2, #232833);
+  border: 1px solid var(--border-default); background: var(--bg-muted);
   color: inherit; text-decoration: none;
 }
 .cm-btn:disabled { opacity: 0.5; cursor: default; }

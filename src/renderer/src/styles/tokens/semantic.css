@@ -26,6 +26,76 @@
   --font-page-title: 20px;
   --font-row-title: 15px;
   --font-row-desc: 13px;
+
+  /* ── Font families ──────────────────────────────────────────── */
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang TC', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ── Type scale (6 steps) ───────────────────────────────────── */
+  --font-2xs: 11px;  /* badges / tags */
+  --font-xs: 12px;   /* secondary captions */
+  --font-sm: 13px;   /* list body (= --font-row-desc) */
+  --font-md: 14px;   /* primary body */
+  --font-lg: 16px;   /* section titles */
+  --font-xl: 20px;   /* page titles (= --font-page-title) */
+
+  /* ── Line heights (3 steps) ─────────────────────────────────── */
+  --lh-tight: 1.3;   /* single-line badges / tabs */
+  --lh-base: 1.5;    /* lists / forms */
+  --lh-loose: 1.65;  /* prose paragraphs */
+
+  /* ── Radius scale (4 steps + existing --radius-pill) ────────── */
+  --radius-xs: 4px;  /* badges / small tags */
+  --radius-sm: 6px;  /* buttons / inputs */
+  --radius-md: 8px;  /* popovers / menus / cards */
+  --radius-lg: 12px; /* modals / large panels (= --radius-card) */
+
+  /* ── Elevation shadows (color part resolves per theme) ──────── */
+  --shadow-popover: 0 8px 28px var(--shadow-overlay);
+  --shadow-modal: 0 16px 48px var(--shadow-scrim);
+  --shadow-floating: 0 2px 8px var(--shadow-overlay);
+
+  /*
+   * ── Z-index layers ──────────────────────────────────────────
+   * Add-only for now — do NOT bulk-replace existing z-index values.
+   * Migrate in small batches with a visual stacking check per batch.
+   * Intended mapping of today's magic numbers:
+   *   1-10            → --z-base    (in-pane layering)
+   *   20-300          → --z-sticky  (titlebar / statusbar / tab bar)
+   *   999-2100        → --z-popover (menus / popovers / tooltips)
+   *   5000-9560       → --z-modal   (dialogs and their scrims)
+   *   9998-10100      → --z-toast   (notifications, always on top)
+   */
+  --z-base: 1;
+  --z-sticky: 100;
+  --z-popover: 1000;
+  --z-modal: 2000;
+  --z-toast: 3000;
+
+  /* ── Motion (2 durations + 1 curve) ─────────────────────────── */
+  --motion-fast: 120ms; /* hover / active / color changes */
+  --motion-base: 200ms; /* panel in-out / expand-collapse */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ── Icon button containers (3 sizes) ───────────────────────── */
+  --icon-btn-sm: 20px;
+  --icon-btn-md: 24px;
+  --icon-btn-lg: 28px;
+
+  /* ── Window chrome scale ────────────────────────────────────── */
+  --chrome-titlebar: 38px;
+  --chrome-tabbar: 36px;
+  --chrome-statusbar: 24px;
+  --chrome-trafficlight: 80px;
+}
+
+/* Zero out motion tokens when the OS asks for reduced motion; covers
+ * every consumer of --motion-* in one place. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
 }
 
 :root,

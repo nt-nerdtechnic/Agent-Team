@@ -414,7 +414,7 @@ defineExpose({ isEditing, cancelEdit, scrollToAnchor })
   align-items: baseline;
   gap: 10px;
   padding: 5px 0;
-  border-bottom: 1px dashed var(--border, rgba(128, 128, 128, 0.2));
+  border-bottom: 1px dashed var(--border-default);
 }
 .pmb-todo:last-child {
   border-bottom: none;

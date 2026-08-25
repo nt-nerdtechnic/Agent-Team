@@ -106,7 +106,7 @@ const MermaidBlock = defineComponent({
 .mp-quote {
   margin: 0 0 8px;
   padding-left: 10px;
-  border-left: 2px solid var(--border, #3a3a3a);
+  border-left: 2px solid var(--border-default);
   opacity: 0.85;
 }
 .mp-code {

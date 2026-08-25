@@ -193,7 +193,7 @@ function openInEditor(relPath?: string, name?: string): void {
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--border, #2c323e);
+  border-bottom: 1px solid var(--border-default);
   flex: none;
 }
 .pv-kind {
@@ -225,7 +225,7 @@ function openInEditor(relPath?: string, name?: string): void {
   font-size: 10px;
   padding: 2px 7px;
   border-radius: 5px;
-  border: 1px solid var(--border, #2c323e);
+  border: 1px solid var(--border-default);
   background: transparent;
   color: inherit;
   opacity: 0.75;
@@ -254,7 +254,7 @@ function openInEditor(relPath?: string, name?: string): void {
   gap: 8px;
   align-items: center;
   padding: 4px 8px;
-  border-top: 1px solid var(--border, #2c323e);
+  border-top: 1px solid var(--border-default);
   font-size: 10px;
   opacity: 0.7;
 }
@@ -288,7 +288,7 @@ function openInEditor(relPath?: string, name?: string): void {
   width: 38px;
   height: 38px;
   border-radius: 10px;
-  border: 1.5px dashed var(--border, #2c323e);
+  border: 1.5px dashed var(--border-default);
 }
 .pv-empty-title {
   font-size: 12px;
