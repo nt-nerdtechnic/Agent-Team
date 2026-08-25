@@ -159,6 +159,30 @@ describe('ControlPane – workspace sections', () => {
     expect(own.attributes('disabled')).toBeDefined()
   })
 
+  it('moves rebuild-all and history onto the workspace row', async () => {
+    // Both act on one workspace's panes, so grouped they belong on its row —
+    // and the section header must not keep a second copy.
+    wrapper = mountWith({ workspaces: [current()] })
+    const acts = wrapper.find('.ws-head--current').findAll('.ws-act')
+    expect(acts).toHaveLength(2)
+    expect(wrapper.find('.agent-header-actions').exists()).toBe(false)
+    await acts[1].trigger('click')
+    expect(wrapper.emitted('open-history')).toBeTruthy()
+  })
+
+  it('keeps them in the header while nothing is grouped', () => {
+    wrapper = mountWith({})
+    expect(wrapper.find('.agent-header-actions').exists()).toBe(true)
+    expect(wrapper.findAll('.ws-act')).toHaveLength(0)
+  })
+
+  it('another workspace row gets no rebuild or history', () => {
+    // This window cannot rebuild panes it does not own.
+    wrapper = mountWith({ workspaces: [current(), other()] })
+    const rows = wrapper.findAll('.ws-head')
+    expect(rows[1].findAll('.ws-act')).toHaveLength(0)
+  })
+
   it('titles the section Workspace once workspaces are grouped', () => {
     wrapper = mountWith({ workspaces: [current()] })
     expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.workspace')

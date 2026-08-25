@@ -11351,6 +11351,19 @@ interface WorkspaceGroupRow {
   remote: RosterPane[]
 }
 
+/** The folder a workspace sits IN, home collapsed to `~`.
+ *
+ *  The heading already shows the last segment as the name, so repeating it in
+ *  the path costs a whole row's width and identifies nothing. What tells two
+ *  projects of the same name apart is where they live. */
+function workspaceParentPath(path: string): string {
+  const trimmed = path.replace(/\/+$/, '')
+  const cut = trimmed.lastIndexOf('/')
+  // A root-level folder has no parent worth showing; fall back to itself.
+  if (cut <= 0) return collapseHomePath(trimmed || path, homeDir.value)
+  return collapseHomePath(trimmed.slice(0, cut), homeDir.value)
+}
+
 const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
   const here = currentWorkspace.value
   const rows: WorkspaceGroupRow[] = []
@@ -11360,7 +11373,7 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
     rows.push({
       path: here,
       label: here.split('/').filter(Boolean).pop() ?? here,
-      displayPath: collapseHomePath(here, homeDir.value),
+      displayPath: workspaceParentPath(here),
       isCurrent: true,
       collapsed: collapsedWorkspaces.value.has(here),
       count: panes.value.length,
@@ -11385,7 +11398,7 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
     rows.push({
       path,
       label: entries[0]?.workspace_label || path.split('/').filter(Boolean).pop() || path,
-      displayPath: collapseHomePath(path, homeDir.value),
+      displayPath: workspaceParentPath(path),
       isCurrent: false,
       collapsed: collapsedWorkspaces.value.has(path),
       count: entries.length,

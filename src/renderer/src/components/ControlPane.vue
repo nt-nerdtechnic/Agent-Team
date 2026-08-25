@@ -7,6 +7,7 @@ import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 import RebuildIcon from './RebuildIcon.vue'
+import FolderIcon from './FolderIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
 import type { DisplayStatus } from '../composables/useTerminal'
@@ -1018,14 +1019,20 @@ watch(addMenuOpen, (open) => {
     void refreshCliStatus()
     document.addEventListener('click', closeAddMenu)
     document.addEventListener('keydown', onAddMenuKeydown)
+    // Capture: the pane list is the element that scrolls, and its scroll
+    // events do not bubble. Without this the menu would hang in mid-air over
+    // whatever scrolled into the button's old place.
+    document.addEventListener('scroll', closeAddMenu, true)
   } else {
     document.removeEventListener('click', closeAddMenu)
     document.removeEventListener('keydown', onAddMenuKeydown)
+    document.removeEventListener('scroll', closeAddMenu, true)
   }
 })
 onUnmounted(() => {
   document.removeEventListener('click', closeAddMenu)
   document.removeEventListener('keydown', onAddMenuKeydown)
+  document.removeEventListener('scroll', closeAddMenu, true)
 })
 
 function spawn(): void {
@@ -1451,7 +1458,10 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <!-- Each workspace row carries its own count now, so the header is a
              plain section title rather than a running/total tally. -->
         <label class="lbl">{{ workspaces?.length ? $t('label.workspace') : $t('label.active-agents', { running: runningCount, total: panes.length }) }}</label>
-        <div class="agent-header-actions">
+        <!-- Both of these act on one workspace's panes, so once the list is
+             grouped they belong on that workspace's own row. This is the
+             ungrouped fallback. -->
+        <div v-if="!workspaces?.length" class="agent-header-actions">
           <button
             class="agent-rebuild-all-btn"
             :class="{ busy: rebuildingAll }"
@@ -1473,12 +1483,23 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             :title="currentWorkspaceRow.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
             @click.stop="emit('toggle-workspace', currentWorkspaceRow.path)"
           >{{ currentWorkspaceRow.collapsed ? '›' : '⌄' }}</button>
-          <span class="ws-icon">🗀</span>
+          <span class="ws-icon"><FolderIcon /></span>
           <span class="ws-text" :title="currentWorkspaceRow.path">
             <span class="ws-name">{{ currentWorkspaceRow.label }}</span>
             <span class="ws-path">{{ currentWorkspaceRow.displayPath }}</span>
           </span>
           <span class="ws-count">{{ currentWorkspaceRow.count }}</span>
+          <button
+            class="ws-act"
+            :class="{ busy: rebuildingAll }"
+            :disabled="!canRebuildAll || rebuildingAll"
+            :title="$t('action.rebuild-all-cli-panes')"
+            :aria-label="$t('action.rebuild-all-cli-panes')"
+            @click.stop="emit('rebuild-all')"
+          >
+            <RebuildIcon />
+          </button>
+          <button class="ws-act" :title="$t('label.history')" @click.stop="emit('open-history')">📋</button>
           <!-- Opens the same CLI and role the spawn card holds, so it works
                the same whether the card is open or folded shut. Disabled for
                the same reasons the card's own button is. -->
@@ -1598,7 +1619,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
               @click.stop="emit('toggle-workspace', ws.path)"
             >{{ ws.collapsed ? '›' : '⌄' }}</button>
-            <span class="ws-icon">🗀</span>
+            <span class="ws-icon"><FolderIcon /></span>
             <span class="ws-text" :title="ws.path" @click="emit('reveal-workspace', ws.path)">
               <span class="ws-name">{{ ws.label }}</span>
               <span class="ws-path">{{ ws.displayPath }}</span>
@@ -2797,15 +2818,15 @@ button.icon-btn.muted:hover {
    window's first. */
 .ws-head {
   display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 9px 4px 5px;
-  font-size: 13px;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 4px 3px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--text-bright);
   user-select: none;
 }
-.ws-head:first-child { padding-top: 2px; }
+.ws-head:first-child { padding-top: 1px; }
 .ws-caret {
   flex: none;
   width: 14px;
@@ -2818,19 +2839,34 @@ button.icon-btn.muted:hover {
   color: var(--text-secondary);
 }
 .ws-caret:hover { color: var(--text-bright); }
-.ws-icon { flex: none; font-size: 12px; opacity: 0.75; align-self: flex-start; margin-top: 2px; }
-.ws-text { min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
-.ws-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The path disambiguates two projects that share a folder name. Truncated from
-   the LEFT: the tail is the part that identifies the project. */
+.ws-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  opacity: 0.7;
+}
+.ws-icon svg { display: block; }
+/* Name and path on ONE line: the row is a heading, not a card. The name keeps
+   its natural width and the path gives way first. */
+.ws-text {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  line-height: 1.35;
+}
+.ws-name { flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The path disambiguates two projects that share a folder name. It is the
+   part that gets dropped when the row runs out of width; the full path is on
+   the row's tooltip either way. */
 .ws-path {
+  min-width: 0;
   font-weight: 400;
   font-size: 10.5px;
   color: var(--text-muted);
   overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;
-  text-align: left;
 }
 /* Only another window's name is a link — this window's own is where you are. */
 .ws-head:not(.ws-head--current) .ws-text { cursor: pointer; }
@@ -2850,10 +2886,34 @@ button.icon-btn.muted:hover {
   font-size: 12px;
   line-height: 1;
   color: var(--text-muted);
-  opacity: 0;
+  opacity: 0.65;
 }
 .ws-head:hover .ws-add { opacity: 1; }
 .ws-add:hover { color: var(--text-bright); }
+
+/* Rebuild-all and history, moved off the section header: both act on one
+   workspace's panes. Sized to the row rather than the 32px header button. */
+.ws-act {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0.65;
+}
+.ws-head:hover .ws-act { opacity: 1; }
+.ws-act:hover:not(:disabled) { color: var(--text-bright); }
+.ws-act:disabled { opacity: 0.3; cursor: default; }
+.ws-act :deep(svg) { width: 11px; height: 11px; }
+.ws-act.busy :deep(svg) { animation: agent-rebuild-spin 0.8s linear infinite; }
 /* Kept visible while its menu is open, so the menu has a visible origin. */
 .ws-add[aria-expanded='true'] { opacity: 1; color: var(--text-bright); }
 

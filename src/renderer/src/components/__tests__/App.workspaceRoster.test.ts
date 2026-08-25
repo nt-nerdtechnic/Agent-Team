@@ -83,6 +83,22 @@ describe('cross-workspace roster', () => {
     expect(appSource).toContain('_disposeSpawnRequested')
   })
 
+  it('shows the folder a workspace sits in, not the workspace itself', () => {
+    // The heading already renders the last segment as the name; repeating it
+    // in the path costs a row's width and tells you nothing.
+    const start = appSource.indexOf('function workspaceParentPath')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('lastIndexOf')
+    expect(body).toContain('collapseHomePath')
+    // Both rows must go through it — a raw collapseHomePath would show the
+    // full path again.
+    const gStart = appSource.indexOf('const workspaceGroups = computed')
+    const groups = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
+    expect(groups.match(/displayPath: workspaceParentPath\(/g)).toHaveLength(2)
+    expect(groups).not.toContain('displayPath: collapseHomePath')
+  })
+
   it('focuses the owning window rather than switching this one', () => {
     const start = appSource.indexOf('async function revealWorkspace')
     expect(start).toBeGreaterThan(-1)

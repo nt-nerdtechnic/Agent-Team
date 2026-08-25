@@ -148,6 +148,16 @@ describe('ControlPane – the ＋ menu', () => {
     expect(wrapper.find('.ws-add-menu').exists()).toBe(false)
   })
 
+  it('closes when the list scrolls out from under it', async () => {
+    // The menu is positioned at a point measured from the button; scrolling
+    // the pane list would leave it hanging over whatever took that place.
+    wrapper = mountWith()
+    await openMenu(wrapper)
+    document.dispatchEvent(new Event('scroll'))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.ws-add-menu').exists()).toBe(false)
+  })
+
   it('closes after a spawn', async () => {
     wrapper = mountWith()
     await openMenu(wrapper)
