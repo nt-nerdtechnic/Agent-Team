@@ -2966,7 +2966,9 @@ button.icon-btn.muted:hover {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  /* This list is the sidebar's main content and repeats per agent, so the gap
+     is paid once per row. 1px still separates the hover backgrounds. */
+  gap: 1px;
 }
 /* Collapsed rows are borderless one-liners; the card chrome only appears on
  * the single expanded item so a long list scans as compact rows. */
@@ -3248,7 +3250,10 @@ button.icon-btn.muted:hover {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 26px;
+  /* The tallest thing in the row is the agent badge at 10px + 2px padding,
+     so ~16px of content. 22 keeps a comfortable margin without the row
+     reading as a paragraph. */
+  min-height: 22px;
   cursor: pointer;
   border-radius: 4px;
   padding: 1px 2px;
