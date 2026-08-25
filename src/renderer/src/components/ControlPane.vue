@@ -2818,15 +2818,24 @@ button.icon-btn.muted:hover {
    window's first. */
 .ws-head {
   display: flex;
-  align-items: center;
+  /* Everything lines up with the NAME, not with the two-line block: a control
+     centred against both rows would sit against the path instead. */
+  align-items: flex-start;
   gap: 5px;
-  padding: 5px 4px 3px;
+  padding: 3px 4px 2px;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text-bright);
   user-select: none;
 }
 .ws-head:first-child { padding-top: 1px; }
+/* Height of the name's line box — every control matches it so they centre on
+   that row rather than on the block. */
+.ws-head > .ws-caret,
+.ws-head > .ws-icon,
+.ws-head > .ws-count,
+.ws-head > .ws-act,
+.ws-head > .ws-add { height: 16px; align-self: flex-start; }
 .ws-caret {
   flex: none;
   width: 14px;
@@ -2843,26 +2852,31 @@ button.icon-btn.muted:hover {
   flex: none;
   display: flex;
   align-items: center;
+  justify-content: center;
   opacity: 0.7;
 }
 .ws-icon svg { display: block; }
-/* Name and path on ONE line: the row is a heading, not a card. The name keeps
-   its natural width and the path gives way first. */
+/* Name over path. Both line-heights are set tight — this row repeats down the
+   sidebar, so every pixel of leading is paid for many times over. */
 .ws-text {
   min-width: 0;
   display: flex;
-  align-items: baseline;
-  gap: 6px;
-  line-height: 1.35;
+  flex-direction: column;
 }
-.ws-name { flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 16px;
+}
 /* The path disambiguates two projects that share a folder name. It is the
    part that gets dropped when the row runs out of width; the full path is on
    the row's tooltip either way. */
 .ws-path {
   min-width: 0;
   font-weight: 400;
-  font-size: 10.5px;
+  font-size: 9.5px;
+  line-height: 11px;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
