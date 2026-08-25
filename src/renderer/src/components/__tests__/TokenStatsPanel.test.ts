@@ -167,11 +167,31 @@ describe('TokenStatsPanel', () => {
   })
 
   it('renders only the tabs the layout assigns to this slot, in that order', async () => {
+    // The strip is icon-only (mirroring ControlPane), so the accessible name \u2014
+    // not the button text \u2014 is what identifies a tab.
     const { w } = mountPanel({ views: ['messages', 'history'] })
-    expect(w.findAll('.hdr .tab').map((b) => b.text())).toEqual([
-      '\u2709 label.messages',
-      '\u{1F4DC} label.history',
+    expect(w.findAll('.hdr .tab').map((b) => b.attributes('title'))).toEqual([
+      'label.messages',
+      'label.history',
     ])
+    expect(w.findAll('.hdr .tab').map((b) => b.attributes('aria-label'))).toEqual([
+      'label.messages',
+      'label.history',
+    ])
+    w.unmount()
+  })
+
+  it('draws every tab as a glyph rather than an emoji-and-label pair', async () => {
+    // An icon-only strip is the whole point of matching the left sidebar: a
+    // regression that reinstates the labels would still pass the order test
+    // above, since title/aria-label survive either rendering.
+    const { w } = mountPanel({ views: ['history', 'tokens'] })
+    const buttons = w.findAll('.hdr .tab')
+    expect(buttons).toHaveLength(2)
+    for (const b of buttons) {
+      expect(b.find('svg').exists()).toBe(true)
+      expect(b.text()).toBe('')
+    }
     w.unmount()
   })
 
