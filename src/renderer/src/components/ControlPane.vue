@@ -3189,7 +3189,14 @@ button.icon-btn.muted:hover {
   cursor: pointer;
 }
 .ws-ctx-opt:hover { background: var(--bg-hover, rgb(255 255 255 / 7%)); }
-.ws-ctx-opt.danger { color: var(--danger, #e05252); }
+/* A menu row, not a button. `button.danger` elsewhere paints a filled red
+   background with light text; this selector is more specific and was only
+   overriding the colour, leaving red on red — the label vanished. */
+.ws-ctx-opt.danger {
+  background: none;
+  color: var(--danger-bright, #e05252);
+}
+.ws-ctx-opt.danger:hover { background: var(--danger-subtle, rgb(224 82 82 / 12%)); }
 /* A pane in another window: shown so you know work is running there, dimmed
    because none of this window's per-pane controls apply to it. */
 .remote-item {
