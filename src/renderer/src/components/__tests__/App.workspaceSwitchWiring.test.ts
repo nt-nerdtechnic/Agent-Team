@@ -78,6 +78,22 @@ describe('workspace switch — how the parts fit together', () => {
       .toBeLessThan(fn.indexOf('await switchToWorkspace(target)'))
   })
 
+  it('takes every jump-to-a-pane path through the same switch', () => {
+    // Three ways to land on a pane: the sidebar list, the status-bar overview,
+    // and the history modal. Each can name a pane in a workspace that is not
+    // on screen, and each would otherwise focus something the grid filters
+    // out — the blank main area, three times over.
+    expect(body('onAgentOverviewJump')).toContain('onSidebarFocusPane(paneId)')
+    for (const fn of ['onSidebarFocusPane', 'onFocusHistoryPane']) {
+      const b = body(fn)
+      expect(b, fn).toContain('await switchToWorkspace(target)')
+      expect(b, fn).toContain('isLocalWorkspace(target)')
+      // A declined switch stops before the focus.
+      expect(b.indexOf('if (normWs(currentWorkspace.value) !== normWs(target)) return'), fn)
+        .toBeGreaterThan(-1)
+    }
+  })
+
   it('shows a picked workspace instead of only listing it', () => {
     const pick = body('openWorkspaceFromPicker')
     expect(pick).toContain('adoptWorkspace(path)')

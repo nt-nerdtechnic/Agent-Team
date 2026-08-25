@@ -6217,7 +6217,7 @@ async function onPreviewHistoryAgent(entry: SpawnHistoryEntry): Promise<void> {
 /** Agent History → jump to the still-running pane behind an active entry.
  *  Mirrors cycleFocusedPane's placeholder handling: a cold-restored pane has no
  *  TerminalPane ref yet, so focus has to be re-claimed once it realizes. */
-function onFocusHistoryPane(entry: SpawnHistoryEntry): void {
+async function onFocusHistoryPane(entry: SpawnHistoryEntry): Promise<void> {
   // The record can outlive its pane (killed while the modal was open), and
   // reconciliation only stamps removedAt on hydrate — re-check against panes.
   const pane = panes.value.find((p) => p.id === entry.paneId)
@@ -6229,6 +6229,14 @@ function onFocusHistoryPane(entry: SpawnHistoryEntry): void {
     return
   }
   showHistory.value = false
+  // Its workspace may not be the one on screen — history follows the primary,
+  // and a switch reloads it, but the modal can outlive that. Focusing a pane
+  // the grid filters out draws nothing at all.
+  const target = pane.workspacePath ?? ''
+  if (target && isLocalWorkspace(target) && normWs(target) !== normWs(currentWorkspace.value)) {
+    await switchToWorkspace(target)
+    if (normWs(currentWorkspace.value) !== normWs(target)) return
+  }
   // A minimized pane is skipped by effectiveFocusPaneId, so focusing it alone
   // would silently land on a different pane.
   if (minimizedPanes.value.has(entry.paneId)) restorePane(entry.paneId)
