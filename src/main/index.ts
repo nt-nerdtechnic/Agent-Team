@@ -1230,6 +1230,20 @@ ipcMain.handle('workspace:focusExisting', (event, workspacePath: string) => {
   return true
 })
 
+// The sidebar's ＋ on another workspace's heading. That workspace's agents and
+// roles live in ITS window, not this one, so this hands the request over rather
+// than spawning remotely: the owning window comes forward with its spawn card
+// open. Same "already open elsewhere" contract as focusExisting above — false
+// means no other window has that workspace.
+ipcMain.handle('workspace:requestSpawn', (event, workspacePath: string) => {
+  const self = BrowserWindow.fromWebContents(event.sender)
+  const existing = findMainWindowForWorkspace(String(workspacePath ?? ''))
+  if (!existing || existing === self) return false
+  revealMainWindow(existing)
+  existing.webContents.send('workspace:spawnRequested')
+  return true
+})
+
 // ── Crash-restore prompt (see window-registry.ts) ────────────────────────────
 // The first window to ask claims the banner; apply/dismiss both clear it.
 ipcMain.handle('restore:getPending', () => {

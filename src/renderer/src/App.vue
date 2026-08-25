@@ -2427,6 +2427,15 @@ onMounted(() => {
   window.addEventListener('focus', refreshWorkspaceRoster)
 })
 onUnmounted(() => window.removeEventListener('focus', refreshWorkspaceRoster))
+
+// The receiving half of addAgentInWorkspace: another window's sidebar ＋ on our
+// workspace. Main has already brought us forward by the time this arrives.
+let _disposeSpawnRequested: (() => void) | null = null
+onMounted(() => {
+  if (isDetachedWindow) return
+  _disposeSpawnRequested = window.agentTeam?.onSpawnRequested?.(() => { spawnCardNonce.value++ }) ?? null
+})
+onUnmounted(() => { _disposeSpawnRequested?.(); _disposeSpawnRequested = null })
 onUnmounted(() => {
   if (_syncViewsTimer !== null) clearInterval(_syncViewsTimer)
   window.removeEventListener('resize', onWindowResize)
@@ -11295,6 +11304,25 @@ async function revealWorkspace(path: string): Promise<void> {
   }
 }
 
+/** Bumped when another window asks this one to open an agent. ControlPane
+ *  watches it and opens its spawn card; a counter rather than a boolean so a
+ *  second request while the card is already open still registers. */
+const spawnCardNonce = ref(0)
+
+/** The ＋ on another workspace's heading.
+ *
+ *  Spawning it from here would use THIS window's agent and role selection for a
+ *  project it knows nothing about, so the owning window is asked to do it
+ *  instead: it comes forward with its spawn card open and the user picks there. */
+async function addAgentInWorkspace(path: string): Promise<void> {
+  if (!path || path === currentWorkspace.value) return
+  const handed = await window.agentTeam?.requestSpawnInWorkspace?.(path)
+  if (!handed) {
+    // Its window closed between the roster snapshot and this click.
+    void refreshWorkspaceRoster()
+  }
+}
+
 function toggleWorkspaceCollapsed(path: string): void {
   const next = new Set(collapsedWorkspaces.value)
   if (next.has(path)) next.delete(path)
@@ -12725,6 +12753,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :selected-pane-ids="selectedPaneIds"
       :can-rebuild-all="rebuildableAllPaneCount > 0"
       :rebuilding-all="rebuildingTabPanes"
+      :spawn-card-nonce="spawnCardNonce"
       @spawn="onManualSpawn"
       @spawn-resume="onManualResume"
       @kill="onKill"
@@ -12732,7 +12761,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @toggle-collapsed="togglePaneCollapsed"
       @toggle-workspace="toggleWorkspaceCollapsed"
       @reveal-workspace="revealWorkspace"
-      @add-in-workspace="revealWorkspace"
+      @add-in-workspace="addAgentInWorkspace"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
       @reinject="onReinject"

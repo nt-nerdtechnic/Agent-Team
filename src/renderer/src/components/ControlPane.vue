@@ -297,6 +297,8 @@ interface Props {
   /** Workspace sections, this window's first. Omitted renders the flat list —
    *  which is what every other mount of this component gets. */
   workspaces?: WorkspaceGroupRow[]
+  /** Bumped when another window's sidebar asks this one to open an agent. */
+  spawnCardNonce?: number
   /** View ids assigned to this slot, in tab order. Omitted means "all of
    *  them" — the layout store supplies the real list. A view moved to another
    *  slot disappears from here, which is what keeps it a singleton. */
@@ -904,6 +906,17 @@ function resumeAgent(): void {
   })
 }
 
+// Another window's ＋ on our workspace heading. Same landing as showResumeError:
+// the card only mounts on the Agents tab, so switch there before opening it.
+watch(
+  () => props.spawnCardNonce,
+  (next, prev) => {
+    if (next === undefined || prev === undefined || next === prev) return
+    selectSidebarTab('agents')
+    manualSpawnOpen.value = true
+  }
+)
+
 function showResumeError(message: string): void {
   resumeNotice.value = message
   // The notice renders inside the spawn card body, which only mounts on the
@@ -1360,7 +1373,9 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
     <!-- ── Active agents ──────────────────────────────────────────────────── -->
     <section class="block panel-section">
       <div class="row between agent-list-hdr">
-        <label class="lbl">{{ $t('label.active-agents', { running: runningCount, total: panes.length }) }}</label>
+        <!-- Each workspace row carries its own count now, so the header is a
+             plain section title rather than a running/total tally. -->
+        <label class="lbl">{{ workspaces?.length ? $t('label.workspace') : $t('label.active-agents', { running: runningCount, total: panes.length }) }}</label>
         <div class="agent-header-actions">
           <button
             class="agent-rebuild-all-btn"
@@ -1389,12 +1404,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             <span class="ws-path">{{ currentWorkspaceRow.displayPath }}</span>
           </span>
           <span class="ws-count">{{ currentWorkspaceRow.count }}</span>
-          <!-- This workspace's spawn entry point is the card at the bottom of
-               the list; the + opens it rather than duplicating the controls. -->
+          <!-- Same action as the card's Open Agent button, using whatever
+               agent and role the card currently has selected — the heading is
+               just a second way to reach it. Disabled for the same reasons. -->
           <button
             class="ws-add"
-            :title="$t('action.add-to-grid')"
-            @click.stop="manualSpawnOpen = true"
+            :disabled="!canSpawn"
+            :title="canSpawn ? $t('action.add-to-grid') : $t('label.set-workspace-first')"
+            @click.stop="spawn()"
           >＋</button>
         </li>
         <li

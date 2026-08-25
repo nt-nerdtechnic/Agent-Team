@@ -139,12 +139,39 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.findAll('.ws-add')).toHaveLength(2)
   })
 
-  it('only another workspace add emits — this one opens the local spawn card', async () => {
+  it('only another workspace add hands over — this one spawns locally', async () => {
+    // This window owns its workspace's agent and role selection, so its ＋ runs
+    // the same spawn the card's button does. No other window knows that
+    // selection, so theirs is a request, not a spawn.
     wrapper = mountWith({ workspaces: [current(), other()] })
     const adds = wrapper.findAll('.ws-add')
     await adds[0].trigger('click')          // this window's own heading
     expect(wrapper.emitted('add-in-workspace')).toBeUndefined()
     await adds[1].trigger('click')          // the other workspace
     expect(wrapper.emitted('add-in-workspace')?.[0]).toEqual(['/other'])
+  })
+
+  it('this window own add is the spawn action, not just a card toggle', () => {
+    wrapper = mountWith({ workspaces: [current()] })
+    const own = wrapper.findAll('.ws-add')[0]
+    // Guarded by the same condition as the card's button: with no agent
+    // selected there is nothing to spawn, so it must not look clickable.
+    expect(own.attributes('disabled')).toBeDefined()
+  })
+
+  it('titles the section Workspace once workspaces are grouped', () => {
+    wrapper = mountWith({ workspaces: [current()] })
+    expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.workspace')
+    wrapper.unmount()
+    wrapper = mountWith({})
+    expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.active-agents')
+  })
+
+  it('opens the spawn card when another window asks it to', async () => {
+    // The receiving half of another window's ＋: a counter, so a second request
+    // while the card is already open still lands.
+    wrapper = mountWith({ workspaces: [current()], spawnCardNonce: 0 })
+    await wrapper.setProps({ spawnCardNonce: 1 } as never)
+    expect(wrapper.find('.spawn-card-body').exists()).toBe(true)
   })
 })

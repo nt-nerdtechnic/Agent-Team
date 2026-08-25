@@ -66,6 +66,23 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('localIds.has(entry.pane_id)')
   })
 
+  it('hands a cross-workspace add to the window that owns it', () => {
+    // Spawning from here would apply THIS window's agent and role selection to
+    // a project it has never opened. The owning window is asked instead.
+    const start = appSource.indexOf('async function addAgentInWorkspace')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('requestSpawnInWorkspace')
+    expect(body).not.toContain('onManualSpawn')
+  })
+
+  it('opens its own spawn card when another window asks', () => {
+    expect(appSource).toContain('onSpawnRequested')
+    expect(appSource).toContain('spawnCardNonce.value++')
+    // Registered once and disposed — the listener outlives a reload otherwise.
+    expect(appSource).toContain('_disposeSpawnRequested')
+  })
+
   it('focuses the owning window rather than switching this one', () => {
     const start = appSource.indexOf('async function revealWorkspace')
     expect(start).toBeGreaterThan(-1)
