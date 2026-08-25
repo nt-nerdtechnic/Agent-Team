@@ -4,6 +4,7 @@ import ViewPanel, { type LayoutMode } from './components/ViewPanel.vue'
 import TerminalPane from './components/TerminalPane.vue'
 import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
 import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups'
+import { buildPaneLineage } from './lib/paneLineage'
 import MemoryPanel, { type MemoryPaneRow } from './components/MemoryPanel.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
@@ -11335,37 +11336,9 @@ async function refreshWorkspaceRoster(): Promise<void> {
   if (resp) crossWorkspaceRoster.value = Array.isArray(resp.panes) ? resp.panes : []
 }
 
-const paneLineage = computed<PaneLineageRow[]>(() => {
-  const ids = new Set(panes.value.map((p) => p.id))
-  // A parent that is no longer present (closed in another window, or a record
-  // predating lineage persistence) makes its child a root rather than hiding it.
-  const childrenOf = new Map<string, string[]>()
-  for (const p of panes.value) {
-    const parent = p.spawnedBy && ids.has(p.spawnedBy) && p.spawnedBy !== p.id ? p.spawnedBy : ''
-    const bucket = childrenOf.get(parent)
-    if (bucket) bucket.push(p.id)
-    else childrenOf.set(parent, [p.id])
-  }
-  const rows: PaneLineageRow[] = []
-  const seen = new Set<string>()
-  const walk = (parent: string, depth: number): void => {
-    for (const id of childrenOf.get(parent) ?? []) {
-      if (seen.has(id)) continue
-      seen.add(id)
-      const collapsed = collapsedPanes.value.has(id)
-      rows.push({ id, depth, hasChildren: (childrenOf.get(id)?.length ?? 0) > 0, collapsed })
-      if (!collapsed) walk(id, depth + 1)
-    }
-  }
-  walk('', 0)
-  // Anything the walk could not reach sits in a cycle the backend guard did not
-  // catch (hand-edited state, or a record from an older build). Show it as a
-  // root rather than dropping it off the list entirely.
-  for (const p of panes.value) {
-    if (!seen.has(p.id)) rows.push({ id: p.id, depth: 0, hasChildren: false, collapsed: false })
-  }
-  return rows
-})
+const paneLineage = computed<PaneLineageRow[]>(() =>
+  buildPaneLineage(panes.value, collapsedPanes.value)
+)
 
 /** Workspaces that have been folded shut in the sidebar. Per window and not
  *  persisted: which projects you want out of the way is a property of the view
