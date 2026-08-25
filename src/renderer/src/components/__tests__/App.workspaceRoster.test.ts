@@ -369,6 +369,26 @@ describe('cross-workspace roster', () => {
     expect(appSource.slice(rStart, appSource.indexOf('\n}', rStart))).toContain('await onKillAll()')
   })
 
+  it('has no unguarded teardown anywhere on the browse path', () => {
+    // The previous test names the one call that tears panes down. This one
+    // says there is no second: onWorkspaceBrowse is shared with the Welcome
+    // picker, where a clean slate IS wanted, so anything destructive added
+    // here later would reach the switch too — and a switch destroying the
+    // workspace it leaves is exactly the bug that made this necessary.
+    const bStart = appSource.indexOf('async function onWorkspaceBrowse')
+    const browse = appSource.slice(bStart, appSource.indexOf('\n}', bStart))
+    const destructive = browse.match(/onKillAll\(\)|onPipelineReset\(\)|onKill\(/g) ?? []
+    expect(destructive).toEqual(['onPipelineReset()'])
+    expect(browse).toContain('if (!opts?.keepPanes) await onPipelineReset()')
+    // The rest of the path is clean, which is why nothing else is guarded.
+    for (const fn of ['async function onPipelineAbort', 'function cancelAllWatchers']) {
+      const start = appSource.indexOf(fn)
+      expect(start, fn).toBeGreaterThan(-1)
+      const body = appSource.slice(start, appSource.indexOf('\n}', start))
+      expect(/onKillAll|onKill\(/.test(body), fn).toBe(false)
+    }
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')
