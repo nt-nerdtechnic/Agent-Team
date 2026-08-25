@@ -11346,7 +11346,20 @@ const EXTRA_WS_KEY = 'agentTeam.extraWorkspaces'
  *  one". Panes can start in any of them — a pane carries its own
  *  workspacePath — while the IDE surfaces (git, explorer, plans, the terminal
  *  cwd) stay with currentWorkspace, which is this window's primary. */
-const extraWorkspaces = ref<string[]>(readExtraWorkspaces())
+/** Every workspace this window holds, in the order it took them on — the
+ *  order the sidebar lists them in.
+ *
+ *  Which one is on screen is currentWorkspace and nothing more. Deriving the
+ *  order from it instead (viewed one first) made the list reshuffle on every
+ *  switch: two rows swapping places under the cursor, so the next click lands
+ *  on the wrong project. */
+const workspaceOrder = ref<string[]>(readExtraWorkspaces())
+
+/** The ones that are not on screen. Everything that holds panes back or asks
+ *  "is this ours?" reads this or workspaceOrder; nothing derives order. */
+const extraWorkspaces = computed<string[]>(() =>
+  workspaceOrder.value.filter((w) => normWs(w) !== normWs(currentWorkspace.value))
+)
 
 function readExtraWorkspaces(): string[] {
   try {
@@ -11368,26 +11381,26 @@ function isLocalWorkspace(path: string): boolean {
   const target = normWs(path)
   return (
     target === normWs(currentWorkspace.value) ||
-    extraWorkspaces.value.some((w) => normWs(w) === target)
+    workspaceOrder.value.some((w) => normWs(w) === target)
   )
 }
 
 function adoptWorkspace(path: string): void {
   if (!path || isLocalWorkspace(path)) return
-  extraWorkspaces.value = [...extraWorkspaces.value, path]
+  workspaceOrder.value = [...workspaceOrder.value, path]
   persistExtraWorkspaces()
 }
 
 function persistExtraWorkspaces(): void {
   try {
-    sessionStorage.setItem(EXTRA_WS_KEY, JSON.stringify(extraWorkspaces.value))
+    sessionStorage.setItem(EXTRA_WS_KEY, JSON.stringify(workspaceOrder.value))
   } catch {
     /* a lost list costs a re-pick, not work */
   }
   // Main answers "is this folder already open?" for every other window's
   // picker; without this it would only know about primaries and a second
   // window could open a folder this one is already running.
-  if (!isDetachedWindow) window.agentTeam?.reportAdoptedWorkspaces?.([...extraWorkspaces.value])
+  if (!isDetachedWindow) window.agentTeam?.reportAdoptedWorkspaces?.([...workspaceOrder.value])
 }
 
 /** Workspaces open in other windows.
@@ -11410,8 +11423,8 @@ onMounted(() => {
   //  · a relaunch — sessionStorage is empty and the registry has the list.
   // sessionStorage wins when both exist: it is this window's live state, while
   // the registry's copy is from before the restart.
-  if (extraWorkspaces.value.length) {
-    window.agentTeam?.reportAdoptedWorkspaces?.([...extraWorkspaces.value])
+  if (workspaceOrder.value.length) {
+    window.agentTeam?.reportAdoptedWorkspaces?.([...workspaceOrder.value])
   } else {
     void (async () => {
       const restored = (await window.agentTeam?.takeRestoredAdoptedWorkspaces?.()) ?? []
@@ -11481,13 +11494,14 @@ async function switchToWorkspace(path: string): Promise<void> {
     if (!ok) return
   }
   const leaving = currentWorkspace.value
-  // Swap the two in the adopted list: the one we are leaving joins it, the one
-  // we are entering becomes the primary and drops out of it.
-  extraWorkspaces.value = [
-    ...extraWorkspaces.value.filter((w) => normWs(w) !== normWs(path)),
-    ...(leaving && normWs(leaving) !== normWs(path) ? [leaving] : []),
-  ]
-  persistExtraWorkspaces()
+  // The window holds the same set either way — only which one is on screen
+  // changes — so the list is untouched and the sidebar does not reshuffle.
+  // The one being left is already in it; make sure the one being entered is
+  // too, for a primary that was never adopted.
+  if (leaving && !workspaceOrder.value.some((w) => normWs(w) === normWs(leaving))) {
+    workspaceOrder.value = [leaving, ...workspaceOrder.value]
+    persistExtraWorkspaces()
+  }
   await onWorkspaceBrowse(path)
   // onWorkspaceBrowse has its own reasons to decline — chiefly finding the
   // workspace open in some other window — and it declines by returning, which
@@ -11495,11 +11509,6 @@ async function switchToWorkspace(path: string): Promise<void> {
   // does nothing is the worst outcome: the sidebar still says one thing and
   // the screen another. Undo the list swap and say so.
   if (normWs(currentWorkspace.value) !== normWs(path)) {
-    extraWorkspaces.value = [
-      ...extraWorkspaces.value.filter((w) => normWs(w) !== normWs(leaving)),
-      path,
-    ]
-    persistExtraWorkspaces()
     notifyRestore.toast(
       i18n.global.t('switchWorkspace.failed', {
         name: path.split('/').filter(Boolean).pop() ?? path,
@@ -11508,6 +11517,13 @@ async function switchToWorkspace(path: string): Promise<void> {
     )
     return
   }
+  // Load the entered workspace NOW. ControlPane reaches onWorkspaceCheck
+  // through a 400ms debounce on its workspace field — right for someone typing
+  // a path, wrong for a click: for those 400ms the window pairs the new
+  // workspace with the old run groups, so every tab filter misses and the list
+  // and grid blink empty on the way through. The debounced call still arrives
+  // and is a no-op by then.
+  await onWorkspaceCheck(path)
   // The focused pane is very likely one this window just stopped showing. In
   // grid mode that is harmless, but sidebar and spotlight render the focused
   // pane and nothing else, so they would come up blank. Same landing as
@@ -11532,7 +11548,7 @@ async function closeWorkspace(path: string): Promise<void> {
   if (!extraWorkspaces.value.some((w) => normWs(w) === normWs(path))) return
   const doomed = panes.value.filter((p) => normWs(p.workspacePath) === normWs(path))
   for (const pane of doomed) await onKill(pane.id)
-  extraWorkspaces.value = extraWorkspaces.value.filter((w) => normWs(w) !== normWs(path))
+  workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
   persistExtraWorkspaces()
   const next = new Set(collapsedWorkspaces.value)
   next.delete(path)
@@ -11619,7 +11635,9 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
 
   // This window's own workspaces: the one it was opened with, then any it has
   // adopted. All of them have live panes and full controls.
-  const localPaths = here ? [here, ...extraWorkspaces.value] : [...extraWorkspaces.value]
+  // Stable order, not viewed-first: see workspaceOrder. `here` is appended for
+  // a primary the list has not caught up with yet (the very first render).
+  const localPaths = [...workspaceOrder.value, ...(here ? [here] : [])]
   const seenLocal = new Set<string>()
   for (const path of localPaths) {
     if (!path || seenLocal.has(norm(path))) continue

@@ -127,7 +127,7 @@ describe('cross-workspace roster', () => {
     const pStart = appSource.indexOf('function isLocalWorkspace')
     const pred = appSource.slice(pStart, appSource.indexOf('\n}', pStart))
     expect(pred).toContain('normWs(currentWorkspace.value)')
-    expect(pred).toContain('extraWorkspaces.value.some')
+    expect(pred).toContain('workspaceOrder.value.some')
     expect(appSource).toContain('sessionStorage.setItem(EXTRA_WS_KEY')
   })
 
@@ -331,8 +331,9 @@ describe('cross-workspace roster', () => {
     const body = appSource.slice(start, appSource.indexOf('\n}', start))
     expect(body).toContain('normWs(currentWorkspace.value) !== normWs(path)')
     expect(body).toContain("switchWorkspace.failed")
-    // And the list swap is undone, so the sidebar still matches the screen.
-    expect(body).toContain('normWs(w) !== normWs(leaving)')
+    // Nothing to undo: the list is the same either way, which is the point of
+    // keeping order out of "which one is on screen".
+    expect(body).not.toContain('extraWorkspaces.value =')
   })
 
   it('falls back to a pane the screen can actually render', () => {
@@ -354,18 +355,34 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('await switchToWorkspace(path)')
   })
 
-  it('switching keeps the workspace it leaves', () => {
+  it('switching moves the view, not the list', () => {
     const start = appSource.indexOf('async function switchToWorkspace')
     expect(start).toBeGreaterThan(-1)
     const body = appSource.slice(start, appSource.indexOf('\n}', start))
-    // The two swap places in the adopted list rather than one being dropped.
-    expect(body).toContain('extraWorkspaces.value = [')
-    expect(body).toContain('leaving')
+    // The window holds the same set either way. Deriving order from "which is
+    // on screen" reshuffled the sidebar on every switch — two rows swapping
+    // places under the cursor, so the next click lands on the wrong project.
+    // The doc comment sits above the declaration, so read from it.
+    const order = appSource.slice(
+      appSource.indexOf('Every workspace this window holds'),
+      appSource.indexOf('const extraWorkspaces = computed'),
+    )
+    expect(order).toContain('the order it took them on')
+    expect(order).toContain('const workspaceOrder = ref')
+    expect(body).toContain('workspaceOrder.value.some((w) => normWs(w) === normWs(leaving))')
     // Everything that follows currentWorkspace moves with it, which is what
     // onWorkspaceBrowse already does — no second implementation.
     expect(body).toContain('onWorkspaceBrowse(path)')
     // Never for a workspace this window does not hold.
     expect(body).toContain('isLocalWorkspace(path)')
+  })
+
+  it('lists the workspaces in the order they were taken on', () => {
+    const gStart = appSource.indexOf('const workspaceGroups = computed')
+    const groups = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
+    expect(groups).toContain('const localPaths = [...workspaceOrder.value')
+    // Not viewed-first.
+    expect(groups).not.toContain('[here, ...extraWorkspaces.value]')
   })
 
   it('does not leave the focus on a pane it just hid', () => {
@@ -397,7 +414,7 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('reportAdoptedWorkspaces')
     // A reload restores the list from sessionStorage without going through
     // adoptWorkspace, so it has to be re-reported on mount.
-    expect(appSource).toContain('if (extraWorkspaces.value.length) {')
+    expect(appSource).toContain('if (workspaceOrder.value.length) {')
   })
 
   it('answers an external spawn for any workspace it holds', () => {
@@ -416,7 +433,7 @@ describe('cross-workspace roster', () => {
     expect(appSource).toContain('takeRestoredAdoptedWorkspaces')
     const at = appSource.indexOf('takeRestoredAdoptedWorkspaces')
     const around = appSource.slice(at - 700, at + 500)
-    expect(around).toContain('if (extraWorkspaces.value.length) {')
+    expect(around).toContain('if (workspaceOrder.value.length) {')
     // And their agents come back, the same way a picked workspace's do.
     expect(around).toContain("'project.peek'")
     expect(around).toContain('restoreWorkspacePanes')
