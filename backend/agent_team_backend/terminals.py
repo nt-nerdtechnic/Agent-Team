@@ -412,10 +412,6 @@ class TerminalService:
         # maxlen only bounds memory against pathological tiny reads; the
         # window itself is trimmed by time in _window_bytes.
         self._recent_chunks: dict[str, deque[tuple[float, int]]] = {}
-        # Temporary Phase B probe (plan residual-cli-latency-fix-plan_4b8e2f):
-        # per-session rolling counters for fast-path saturation reporting.
-        # Remove with _note_fastpath_stats once the measurement round is done.
-        self._fastpath_stats: dict[str, dict[str, float]] = {}
         # Latency probe state (see _ECHO_LAG_WARN_MS).  session_id -> loop time
         # of the keystroke whose echo is still outstanding.  Only the FIRST
         # keystroke of a burst is timed: a fast typist would otherwise keep
@@ -1138,7 +1134,6 @@ class TerminalService:
         window = self._recent_chunks.setdefault(session.id, deque(maxlen=512))
         now = self._loop.time()
         window.append((now, nbytes))
-        self._note_fastpath_stats(session, nbytes, now)
         buf_size = self._out_buf_bytes.get(session.id, 0) + len(chunk)
         self._out_buf_bytes[session.id] = buf_size
         if buf_size >= _BUF_CAP:
@@ -1149,53 +1144,30 @@ class TerminalService:
             self._flush_output(session)
         elif session.id not in self._out_handles:
             handle = self._loop.call_later(
-                self._flush_delay(session.id),
+                self._flush_delay(session.id, now=now),
                 self._flush_output,
                 session,
             )
             self._out_handles[session.id] = handle
 
-    def _note_fastpath_stats(
-        self, session: TerminalSession, nbytes: int, now: float
-    ) -> None:
-        """Temporary Phase B probe (plan residual-cli-latency-fix-plan_4b8e2f):
-        once per ~5s per session, report how many PTY chunks arrived with the
-        fast-path window already saturated (i.e. would be flushed on the 50ms
-        batch delay), so laggy CLIs can be checked against the byte envelope.
-        Silent while nothing saturates. Remove after measurement."""
-        st = self._fastpath_stats.setdefault(
-            session.id, {"t0": now, "chunks": 0, "bytes": 0, "max": 0, "batched": 0}
-        )
-        st["chunks"] += 1
-        st["bytes"] += nbytes
-        st["max"] = max(st["max"], nbytes)
-        if self._window_bytes(session.id) > _FAST_PATH_MAX_BYTES:
-            st["batched"] += 1
-        if now - st["t0"] >= 5.0:
-            if st["batched"]:
-                log.info(
-                    "fastpath-stats session=%s agent=%s chunks=%d bytes=%d "
-                    "maxchunk=%d batched=%d window=%.1fs",
-                    session.id, session.agent_key, st["chunks"], st["bytes"],
-                    st["max"], st["batched"], now - st["t0"],
-                )
-            self._fastpath_stats.pop(session.id, None)
-
-    def _window_bytes(self, session_id: str) -> int:
+    def _window_bytes(self, session_id: str, *, now: float | None = None) -> int:
         """Bytes read from this PTY within the last _FAST_PATH_WINDOW_S,
-        dropping entries that fell out of the window."""
+        dropping entries that fell out of the window.  `now` lets the caller
+        reuse a loop time it already took instead of paying a second call."""
         window = self._recent_chunks.get(session_id)
         if not window:
             return 0
-        cutoff = self._loop.time() - _FAST_PATH_WINDOW_S
+        if now is None:
+            now = self._loop.time()
+        cutoff = now - _FAST_PATH_WINDOW_S
         while window and window[0][0] < cutoff:
             window.popleft()
         return sum(nbytes for _, nbytes in window)
 
-    def _flush_delay(self, session_id: str) -> float:
+    def _flush_delay(self, session_id: str, *, now: float | None = None) -> float:
         """Batch delay for the next flush: _COALESCE_MS while the output rate
         looks interactive, _OUTPUT_BATCH_MS once it looks like a stream."""
-        if self._window_bytes(session_id) > _FAST_PATH_MAX_BYTES:
+        if self._window_bytes(session_id, now=now) > _FAST_PATH_MAX_BYTES:
             return _OUTPUT_BATCH_MS / 1000
         return _COALESCE_MS / 1000
 
@@ -1309,9 +1281,6 @@ class TerminalService:
             )
         )
 
-    def _send_chunk(self, session: TerminalSession, data: bytes) -> None:
-        self._loop.create_task(self._emit(self._build_output_frame(session, data)))
-
     def _close(self, session: TerminalSession, *, reason: str) -> None:
         if session.closed:
             return
@@ -1325,7 +1294,6 @@ class TerminalService:
         self._unwatch_writable(session)
         self._in_buffers.pop(session.id, None)
         self._recent_chunks.pop(session.id, None)
-        self._fastpath_stats.pop(session.id, None)
         self._echo_probe.pop(session.id, None)
         self._input_blocked.discard(session.id)
         try:

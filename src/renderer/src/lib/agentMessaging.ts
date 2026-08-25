@@ -475,6 +475,21 @@ export function defaultMessagingName(agentKey: string, taken: Iterable<string>):
  *  where silence is the only available signal. See {@link isTurnInFlight}. */
 export const TURN_SILENCE_MS = 20_000
 
+/** Upper bound on "mid-turn" for vendors that DO report a turn end.
+ *
+ *  Their turn-end record is the trusted signal, so this is not a detection
+ *  heuristic — it is a fuse. A single lost `turn_complete` used to park a pane
+ *  outside inter-CLI messaging permanently, with no path back (GitHub #21):
+ *  the reporter's panes sat `busy: true` for 8.5 hours next to an idle prompt.
+ *  Losing one is not hypothetical — AskUserQuestion ends no turn, ESC aborts
+ *  one, and a reader can miss the record — so the cost of a miss has to be
+ *  bounded even though the signal is trustworthy.
+ *
+ *  Deliberately far above the badge's own 10s idle confirmation: injecting
+ *  into a pane that is still working costs an interrupted prompt, so this errs
+ *  well past any plausible gap between a turn's own output. */
+export const TURN_STALE_MS = 120_000
+
 /** CLIs whose reported turn end cannot be trusted as a boundary, because their
  *  logs carry no end-of-turn record and the reader synthesizes one from its own
  *  quiet window. They do emit `turn_complete` — the question is what it is made
@@ -493,7 +508,11 @@ export const VENDORS_WITHOUT_TURN_END: ReadonlySet<string> = new Set(
  * `lastTurnCompleteAt` only advances once their reader's own quiet window has
  * elapsed, so it can lag arbitrarily far behind the activity it should close —
  * those panes would stop accepting inter-CLI messages while they sit idle — so
- * there, and only there, a long enough silence is taken to mean the turn ended.
+ * there, a short silence is taken to mean the turn ended.
+ *
+ * Vendors that DO report a turn end trust that record, but not unconditionally:
+ * a lost `turn_complete` would otherwise pin the pane mid-turn for the life of
+ * the session. {@link TURN_STALE_MS} bounds that.
  */
 export function isTurnInFlight(
   lastActiveAt: number,
@@ -502,8 +521,12 @@ export function isTurnInFlight(
   opts: { inferEndFromSilence?: boolean; silenceMs?: number } = {},
 ): boolean {
   if (lastActiveAt <= lastTurnCompleteAt) return false
-  if (!opts.inferEndFromSilence) return true
-  return now - lastActiveAt < (opts.silenceMs ?? TURN_SILENCE_MS)
+  // Both branches are bounded, for different reasons: silence IS the signal
+  // for the first, and is only a fuse for the second. See TURN_STALE_MS.
+  const bound = opts.inferEndFromSilence
+    ? (opts.silenceMs ?? TURN_SILENCE_MS)
+    : TURN_STALE_MS
+  return now - lastActiveAt < bound
 }
 
 /**
