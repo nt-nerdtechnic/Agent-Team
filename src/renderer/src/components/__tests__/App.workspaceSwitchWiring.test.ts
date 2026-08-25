@@ -51,7 +51,12 @@ describe('workspace switch — how the parts fit together', () => {
   })
 
   it('orders the sidebar independently of what is on screen', () => {
-    expect(body('workspaceGroups', '\n})')).toContain('const localPaths = [...workspaceOrder.value')
+    // The ordering rule lives in lib/workspaceGroups now and is tested there
+    // by running it. What this file guards is that App hands the builder the
+    // stable list rather than something derived from currentWorkspace.
+    const g = body('workspaceGroups', '\n)')
+    expect(g).toContain('order: workspaceOrder.value')
+    expect(g).not.toContain('currentWorkspace.value, ...')
   })
 
   it('renders and focuses from the same filtered list', () => {

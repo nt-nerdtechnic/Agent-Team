@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, provi
 import ViewPanel, { type LayoutMode } from './components/ViewPanel.vue'
 import TerminalPane from './components/TerminalPane.vue'
 import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
+import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups'
 import MemoryPanel, { type MemoryPaneRow } from './components/MemoryPanel.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
@@ -11693,97 +11694,20 @@ interface WorkspaceGroupRow {
   remote: RosterPane[]
 }
 
-/** The folder a workspace sits IN, home collapsed to `~`.
- *
- *  The heading already shows the last segment as the name, so repeating it in
- *  the path costs a whole row's width and identifies nothing. What tells two
- *  projects of the same name apart is where they live. */
-function workspaceParentPath(path: string): string {
-  const trimmed = path.replace(/\/+$/, '')
-  const cut = trimmed.lastIndexOf('/')
-  // A root-level folder has no parent worth showing; fall back to itself.
-  if (cut <= 0) return collapseHomePath(trimmed || path, homeDir.value)
-  return collapseHomePath(trimmed.slice(0, cut), homeDir.value)
-}
 
-const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
-  const here = currentWorkspace.value
-  const rows: WorkspaceGroupRow[] = []
-  const norm = (p: string): string => p.replace(/\/+$/, '')
 
-  // A pane records the workspace it was started in, and an MCP child inherits
-  // its parent's, so each workspace's panes form whole subtrees of the lineage
-  // — filtering it per workspace cannot orphan a child from its parent.
-  const paneWorkspace = new Map(panes.value.map((p) => [p.id, norm(p.workspacePath)]))
-  const lineageFor = (path: string): PaneLineageRow[] =>
-    paneLineage.value.filter((r) => paneWorkspace.get(r.id) === norm(path))
-
-  // This window's own workspaces: the one it was opened with, then any it has
-  // adopted. All of them have live panes and full controls.
-  // Stable order, not viewed-first: see workspaceOrder. `here` is still
-  // appended in case this runs before the watch that adds it — seenLocal below
-  // keeps that from listing it twice.
-  const localPaths = [...workspaceOrder.value, ...(here ? [here] : [])]
-  const seenLocal = new Set<string>()
-  for (const path of localPaths) {
-    if (!path || seenLocal.has(norm(path))) continue
-    seenLocal.add(norm(path))
-    const lineage = lineageFor(path)
-    rows.push({
-      path,
-      label: path.split('/').filter(Boolean).pop() ?? path,
-      displayPath: workspaceParentPath(path),
-      isCurrent: true,
-      collapsed: collapsedWorkspaces.value.has(path),
-      count: lineage.length,
-      lineage,
-      remote: []
-    })
-  }
-
-  // Panes this window already renders must not appear twice, and neither must
-  // a pane whose workspace is the one we are in — the roster does not know
-  // this window from any other.
-  const localIds = new Set(panes.value.map((p) => p.id))
-  const byWorkspace = new Map<string, RosterPane[]>()
-  for (const entry of crossWorkspaceRoster.value) {
-    const path = entry.workspace_path
-    if (!path || seenLocal.has(norm(path)) || localIds.has(entry.pane_id)) continue
-    const bucket = byWorkspace.get(path)
-    if (bucket) bucket.push(entry)
-    else byWorkspace.set(path, [entry])
-  }
-  for (const [path, entries] of byWorkspace) {
-    rows.push({
-      path,
-      label: entries[0]?.workspace_label || path.split('/').filter(Boolean).pop() || path,
-      displayPath: workspaceParentPath(path),
-      isCurrent: false,
-      collapsed: collapsedWorkspaces.value.has(path),
-      count: entries.length,
-      lineage: [],
-      remote: entries
-    })
-  }
-
-  // A window that is open but has started no CLI yet.
-  const listed = new Set(rows.map((r) => norm(r.path)))
-  for (const path of openWorkspacePaths.value) {
-    if (!path || listed.has(norm(path))) continue
-    listed.add(norm(path))
-    rows.push({
-      path,
-      label: path.split('/').filter(Boolean).pop() || path,
-      displayPath: workspaceParentPath(path),
-      isCurrent: false,
-      collapsed: collapsedWorkspaces.value.has(path),
-      count: 0,
-      lineage: [],
-      remote: []
-    })
-  }
-  return rows
-})
+const workspaceGroups = computed<WorkspaceGroupRow[]>(() =>
+  buildWorkspaceGroups({
+    here: currentWorkspace.value,
+    order: workspaceOrder.value,
+    panes: panes.value,
+    lineage: paneLineage.value,
+    roster: crossWorkspaceRoster.value,
+    openPaths: openWorkspacePaths.value,
+    collapsed: collapsedWorkspaces.value,
+    homeDir: homeDir.value,
+  })
+)
 
 function togglePaneCollapsed(id: string): void {
   const next = new Set(collapsedPanes.value)

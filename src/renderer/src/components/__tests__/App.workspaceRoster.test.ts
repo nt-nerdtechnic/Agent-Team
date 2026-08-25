@@ -56,16 +56,27 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('isDetachedWindow')
   })
 
-  it('never lists this window own panes twice', () => {
-    // The roster does not distinguish this window from any other, so both the
-    // current workspace and any pane already rendered here must be filtered.
+  it('feeds the grouping builder every input it needs', () => {
+    // The grouping itself moved to lib/workspaceGroups and is tested by
+    // running it — App.vue cannot be mounted, so it could only ever be
+    // grepped from here. What remains App's job is passing the right things
+    // in: a missing input silently drops a whole band of the sidebar.
     const start = appSource.indexOf('const workspaceGroups = computed')
     expect(start).toBeGreaterThan(-1)
-    const body = appSource.slice(start, appSource.indexOf('\n})', start))
-    // Every workspace this window runs panes in, not just its primary — it can
-    // have adopted others from the picker.
-    expect(body).toContain('seenLocal.has(norm(path))')
-    expect(body).toContain('localIds.has(entry.pane_id)')
+    const body = appSource.slice(start, appSource.indexOf('\n)', start))
+    expect(body).toContain('buildWorkspaceGroups({')
+    for (const input of [
+      'here: currentWorkspace.value',
+      'order: workspaceOrder.value',
+      'panes: panes.value',
+      'lineage: paneLineage.value',
+      'roster: crossWorkspaceRoster.value',
+      'openPaths: openWorkspacePaths.value',
+      'collapsed: collapsedWorkspaces.value',
+      'homeDir: homeDir.value',
+    ]) {
+      expect(body, input).toContain(input)
+    }
   })
 
   it('hands a cross-workspace add to the window that owns it', () => {
@@ -83,24 +94,6 @@ describe('cross-workspace roster', () => {
     expect(appSource).toContain('spawnCardNonce.value++')
     // Registered once and disposed — the listener outlives a reload otherwise.
     expect(appSource).toContain('_disposeSpawnRequested')
-  })
-
-  it('shows the folder a workspace sits in, not the workspace itself', () => {
-    // The heading already renders the last segment as the name; repeating it
-    // in the path costs a row's width and tells you nothing.
-    const start = appSource.indexOf('function workspaceParentPath')
-    expect(start).toBeGreaterThan(-1)
-    const body = appSource.slice(start, appSource.indexOf('\n}', start))
-    expect(body).toContain('lastIndexOf')
-    expect(body).toContain('collapseHomePath')
-    // Both rows must go through it — a raw collapseHomePath would show the
-    // full path again.
-    const gStart = appSource.indexOf('const workspaceGroups = computed')
-    const groups = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
-    // Every row source must go through it, however many there are — a raw
-    // collapseHomePath anywhere would put the full path back on that row.
-    const uses = new Set(groups.match(/displayPath: \w+/g) ?? [])
-    expect(uses).toEqual(new Set(['displayPath: workspaceParentPath']))
   })
 
   it('adds a picked workspace to THIS sidebar, not a new window', () => {
@@ -131,17 +124,6 @@ describe('cross-workspace roster', () => {
     expect(appSource).toContain('sessionStorage.setItem(EXTRA_WS_KEY')
   })
 
-  it('groups panes by the workspace each was started in', () => {
-    // A pane records its own workspacePath, so a second workspace's panes must
-    // land under its heading rather than swelling the primary's count.
-    const gStart = appSource.indexOf('const workspaceGroups = computed')
-    const groups = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
-    expect(groups).toContain('p.workspacePath')
-    expect(groups).toContain('lineageFor(path)')
-    // The count is that group's panes, not every pane in the window.
-    expect(groups).not.toContain('count: panes.value.length')
-  })
-
   it('reuses the Welcome picker rather than a second copy of it', () => {
     // Browse / New / Home, the recent list, pinning, the already-open badge —
     // a rebuilt picker would drift from all of it.
@@ -149,19 +131,6 @@ describe('cross-workspace roster', () => {
     expect(appSource).toContain('@select="openWorkspaceFromPicker"')
     // Startup keeps its own non-dismissible instance.
     expect(appSource).toContain('v-if="!workspaceSelected"')
-  })
-
-  it('lists a window that is open but has no agent yet', () => {
-    // The roster only knows workspaces with a REGISTERED PANE. Without main's
-    // window registry, a workspace opened from the picker is absent from the
-    // sidebar until its first CLI starts — which reads as "it did not open".
-    expect(appSource).toContain('listOpenWorkspaces')
-    const gStart = appSource.indexOf('const workspaceGroups = computed')
-    const groups = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
-    expect(groups).toContain('openWorkspacePaths.value')
-    expect(groups).toContain('count: 0')
-    // …and never twice: a workspace with panes is already in the list.
-    expect(groups).toContain('listed.has(norm(path))')
   })
 
   it('refreshes that list when a window opens or closes', () => {
@@ -469,14 +438,6 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('onWorkspaceBrowse(path, { keepPanes: true })')
     // Never for a workspace this window does not hold.
     expect(body).toContain('isLocalWorkspace(path)')
-  })
-
-  it('lists the workspaces in the order they were taken on', () => {
-    const gStart = appSource.indexOf('const workspaceGroups = computed')
-    const groups = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
-    expect(groups).toContain('const localPaths = [...workspaceOrder.value')
-    // Not viewed-first.
-    expect(groups).not.toContain('[here, ...extraWorkspaces.value]')
   })
 
   it('does not leave the focus on a pane it just hid', () => {

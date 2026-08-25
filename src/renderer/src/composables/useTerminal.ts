@@ -603,11 +603,10 @@ export function expandHomePath(fp: string, home: string): string {
   return home.replace(/\/+$/, '') + fp.slice(1)
 }
 
-export function collapseHomePath(p: string, home: string): string {
-  if (!home) return p
-  const h = home.replace(/\/+$/, '')
-  return p === h || p.startsWith(`${h}/`) ? `~${p.slice(h.length)}` : p
-}
+// Moved to lib/paths so a caller that only wants the string helper does not
+// load this module. Re-exported because every existing import names it here.
+import { collapseHomePath } from '../lib/paths'
+export { collapseHomePath } from '../lib/paths'
 
 export interface PickerItem {
   abs: string
