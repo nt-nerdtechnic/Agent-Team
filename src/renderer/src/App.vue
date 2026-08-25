@@ -11423,6 +11423,17 @@ async function switchToWorkspace(path: string): Promise<void> {
   ]
   persistExtraWorkspaces()
   await onWorkspaceBrowse(path)
+  // The focused pane is very likely one this window just stopped showing. In
+  // grid mode that is harmless, but sidebar and spotlight render the focused
+  // pane and nothing else, so they would come up blank. Same landing as
+  // onUserSelectTab: keep the focus if it survived the filter, else take the
+  // first pane that did.
+  await nextTick()
+  const visible = tabVisiblePanes.value
+  if (!visible.some((p) => p.id === focusPaneId.value)) {
+    const first = visible[0]?.id
+    if (first) selectPane(first, { userInitiated: false })
+  }
 }
 
 /** Take an adopted workspace back out of this window.

@@ -235,6 +235,24 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('isLocalWorkspace(path)')
   })
 
+  it('does not leave the focus on a pane it just hid', () => {
+    // Grid mode would cope, but sidebar and spotlight render the focused pane
+    // and nothing else — they would come up blank.
+    const start = appSource.indexOf('async function switchToWorkspace')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('tabVisiblePanes.value')
+    expect(body).toContain('selectPane(first')
+  })
+
+  it('keeps hidden panes alive rather than tearing them down', () => {
+    // v-show, not v-if: switching away must not destroy the terminal or end
+    // the CLI. This is what makes "keeps running, just not shown" true.
+    const at = appSource.indexOf('<TerminalPane')
+    const tag = appSource.slice(at, at + 200)
+    expect(tag).toContain('v-show="onScreenPaneIds.has(p.id)"')
+    expect(tag).not.toContain('v-if="onScreenPaneIds')
+  })
+
   it('still ties the history pane to the primary workspace', () => {
     // Deliberately NOT widened: spawn history follows the workspace the window
     // was opened with.
