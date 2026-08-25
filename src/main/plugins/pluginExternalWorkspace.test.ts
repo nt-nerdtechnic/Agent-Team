@@ -12,7 +12,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { planPublicCapabilityCall } from './pluginCapabilityBroker'
@@ -26,7 +26,13 @@ type CommandResult = {
 }
 
 function packageManager(): { command: string; prefix: string[] } {
-  const configured = process.env.NAVIDE_PNPM ?? process.env.npm_execpath
+  // Every invocation below is pnpm-specific — --store-dir, --lockfile=false,
+  // workspace resolution — so npm_execpath is only useful when it actually IS
+  // pnpm. Under npx or npm it points at npm, which then fails deep in the run
+  // complaining about flags it does not have, a long way from the cause.
+  // NAVIDE_PNPM stays an explicit override for a pnpm somewhere else.
+  const inherited = process.env.npm_execpath ?? ''
+  const configured = process.env.NAVIDE_PNPM ?? (/pnpm/i.test(inherited) ? inherited : '')
   if (!configured) return { command: 'pnpm', prefix: [] }
   if (configured.endsWith('.js') || configured.endsWith('.cjs')) {
     return { command: process.execPath, prefix: [configured] }
@@ -184,8 +190,15 @@ describe('third-party plugin external workspace', () => {
             .map((line) => line.trim())
             .find((line) => line.endsWith('.tgz'))
           if (!tarball) throw new Error(`pnpm pack did not report a tarball for ${packageName}`)
+          // pnpm reports the absolute path it wrote; npm reports the bare
+          // filename. Either way the tarball is in `artifacts` — that is what
+          // --pack-destination above just asked for — so a bare name resolves
+          // there, not against the directory it was packed FROM. Which packer
+          // runs depends on npm_execpath, so resolving against packageDirectory
+          // made the test pass under `pnpm test:run` and fail under any other
+          // launcher.
           packageTarballs[`@navide/${packageName}`] = realpathSync(
-            tarball.startsWith('/') ? tarball : join(packageDirectory, tarball)
+            isAbsolute(tarball) ? tarball : join(artifacts, tarball)
           )
         }
 
