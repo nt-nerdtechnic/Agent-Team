@@ -114,6 +114,19 @@ describe('buildWorkspaceGroups', () => {
     expect(other?.label).toBe('gamma')
   })
 
+  it('names another workspace from the first entry that carries a label', () => {
+    // They all name the same workspace, but a registration made before the
+    // label was known omits it — taking entries[0] blindly showed the folder
+    // basename or the real name depending on arrival order.
+    const rows = build({ roster: [remote('r1', C), remote('r2', C, 'gamma')] })
+    expect(rows.find((r) => r.path === C)?.label).toBe('gamma')
+  })
+
+  it('falls back to the folder name when no entry has a label', () => {
+    const rows = build({ roster: [remote('r1', C)] })
+    expect(rows.find((r) => r.path === C)?.label).toBe('gamma')
+  })
+
   it('never lists a workspace this window holds as another window\'s', () => {
     // The roster does not distinguish this window from any other.
     const rows = build({

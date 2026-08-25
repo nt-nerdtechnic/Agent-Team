@@ -126,7 +126,11 @@ export function buildWorkspaceGroups<R extends RosterEntry>(
   for (const [path, entries] of byWorkspace) {
     rows.push({
       path,
-      label: entries[0]?.workspace_label || basename(path),
+      // The first entry that carries one, not the first entry: they all name
+      // the same workspace, but a registration made before the label was
+      // known omits it, and falling back to the basename there would show a
+      // different name for the same project depending on arrival order.
+      label: entries.find((e) => e.workspace_label)?.workspace_label || basename(path),
       displayPath: workspaceParentPath(path, homeDir),
       isCurrent: false,
       collapsed: collapsed.has(path),
