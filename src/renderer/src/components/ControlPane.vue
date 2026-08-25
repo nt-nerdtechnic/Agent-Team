@@ -953,6 +953,12 @@ function emitSpawn(): void {
   })
 }
 
+/** What the heading's ＋ will open. The spawn card can be folded shut, so the
+ *  button has to say which agent it is about to run. */
+const pickedAgentLabel = computed(
+  () => manualAgentSpecs.value.find((s) => s.agentKey === pickedAgent.value)?.label ?? pickedAgent.value
+)
+
 function spawn(): void {
   if (!canSpawn.value) return
   // Spawning a CLI we know is missing only produces a pane that dies with 127.
@@ -1410,7 +1416,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <button
             class="ws-add"
             :disabled="!canSpawn"
-            :title="canSpawn ? $t('action.add-to-grid') : $t('label.set-workspace-first')"
+            :title="canSpawn ? `${$t('action.add-to-grid')} · ${pickedAgentLabel}` : $t('label.set-workspace-first')"
             @click.stop="spawn()"
           >＋</button>
         </li>
