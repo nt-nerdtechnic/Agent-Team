@@ -1734,7 +1734,19 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
         // `replyTo` is the correlation id this agent echoed back from the
         // envelope it is answering; absent for a message that starts a thread.
         if (isBroadcastTarget(msg.target)) {
-          messaging.sendBroadcast(senderName, msg.content, { replyTo: msg.replyTo })
+          // `all` means the sender's own workspace. The menu stops offering
+          // the keyword once a window holds more than one, but the bare-line
+          // protocol is typed by the agent and cannot be gated that way — so
+          // the scope is applied here, where the sender's workspace is known.
+          const from = panes.value.find((pn) => pn.id === paneId)?.workspacePath ?? ''
+          messaging.sendBroadcast(senderName, msg.content, {
+            replyTo: msg.replyTo,
+            only: (targetPaneId) => {
+              if (!from) return true
+              const to = panes.value.find((pn) => pn.id === targetPaneId)?.workspacePath ?? ''
+              return !to || normWs(to) === normWs(from)
+            },
+          })
         } else {
           messaging.sendMessage(senderName, msg.target, msg.content, { replyTo: msg.replyTo })
         }

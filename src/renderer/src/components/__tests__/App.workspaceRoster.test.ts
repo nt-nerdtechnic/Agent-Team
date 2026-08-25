@@ -421,6 +421,22 @@ describe('cross-workspace roster', () => {
     expect(body).not.toContain('panes.value.map((p) => p.id)')
   })
 
+  it('scopes the all keyword to the sender\'s own workspace', () => {
+    // The menu stops offering the keyword once a window holds more than one
+    // workspace, but the bare-line protocol is typed by the agent and cannot
+    // be gated that way. sendBroadcast reaches every pane the WINDOW
+    // registers, so the scope is applied at the call site, which knows the
+    // sender's workspace — the registry only knows names and agents.
+    const at = appSource.indexOf('messaging.sendBroadcast(')
+    expect(at).toBeGreaterThan(-1)
+    const call = appSource.slice(at - 400, at + 500)
+    expect(call).toContain('only: (targetPaneId)')
+    expect(call).toContain('normWs(to) === normWs(from)')
+    // A pane in neither list — a manual resume can pull a session in from any
+    // folder — stays a recipient, as it always was.
+    expect(call).toContain('return !to || ')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')
