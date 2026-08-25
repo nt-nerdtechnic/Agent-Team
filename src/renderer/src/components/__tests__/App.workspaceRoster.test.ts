@@ -253,6 +253,16 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('const ids = panesInView.value')
   })
 
+  it('stops offering the all keyword once here is ambiguous', () => {
+    // sendBroadcast reaches every pane the WINDOW registers, and `all` is
+    // documented as workspace-local. Rather than teach the messaging registry
+    // about workspaces, the menu stops offering the keyword — typing it by
+    // hand still broadcasts window-wide, which the comment says out loud.
+    const start = appSource.indexOf('function mentionCandidatesFor')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('extraWorkspaces.value.length === 0')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')

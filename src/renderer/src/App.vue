@@ -2730,7 +2730,15 @@ function mentionCandidatesFor(paneId: string): string[] {
   // Offer the broadcast keyword first once there are ≥2 recipients — picking it
   // sends to every other pane at once (see isBroadcastTarget / sendBroadcast).
   // `all` stays workspace-local; cross-workspace sends are always explicit.
-  const local = others.length >= 2 ? ['all', ...others] : others
+  //
+  // sendBroadcast reaches every pane THIS WINDOW registers, which is one
+  // workspace's worth until the sidebar adopts another. Rather than reach into
+  // the messaging registry to teach it about workspaces, the menu simply stops
+  // offering `all` once the window holds more than one: a keyword that means
+  // "everyone here" is not worth keeping when "here" became ambiguous. Typing
+  // it by hand still broadcasts window-wide.
+  const canBroadcast = others.length >= 2 && extraWorkspaces.value.length === 0
+  const local = canBroadcast ? ['all', ...others] : others
   return [...local, ...remoteMessagingTargets.value]
 }
 
