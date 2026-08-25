@@ -106,6 +106,26 @@ describe('workspace switch — how the parts fit together', () => {
     expect(body('onWorkspaceBrowse')).toContain('if (!opts?.keepPanes) await onPipelineReset()')
   })
 
+  it('keeps the structure layer off paneViews', () => {
+    // syncViews rebuilds paneViews every 400ms from each pane's live status.
+    // Anything structural that reads it is rebuilt on that timer too — the
+    // sidebar's grouping, the lineage tree and the grid's filter would all
+    // recompute four times a second for a status dot that ticked.
+    //
+    // The rule is easy to break by reaching for a field that happens to be on
+    // the view object, and a comment cannot enforce it.
+    for (const name of [
+      'panesInView',
+      'workspaceGroups',
+      'paneLineage',
+      'tabFilteredPaneIds',
+      'stageTabShapes',
+      'sidebarOrderedPaneIds',
+    ]) {
+      expect(body(name, '\n})'), name).not.toContain('paneViews')
+    }
+  })
+
   it('shows a picked workspace instead of only listing it', () => {
     const pick = body('openWorkspaceFromPicker')
     expect(pick).toContain('adoptWorkspace(path)')
