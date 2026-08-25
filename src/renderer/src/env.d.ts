@@ -1,12 +1,9 @@
 /// <reference types="vite/client" />
 
-import type { UpdateActionResult, UpdateSettingsResult, UpdaterSettings, UpdateState } from '../../shared/updater'
-
-declare module '*.vue' {
-  import type { DefineComponent } from 'vue'
-  const component: DefineComponent<Record<string, unknown>, Record<string, unknown>, unknown>
-  export default component
-}
+type UpdateActionResult = import('../../shared/updater').UpdateActionResult
+type UpdateSettingsResult = import('../../shared/updater').UpdateSettingsResult
+type UpdaterSettings = import('../../shared/updater').UpdaterSettings
+type UpdateState = import('../../shared/updater').UpdateState
 
 interface BackendInfo {
   status: 'starting' | 'ready' | 'error'
@@ -89,7 +86,21 @@ declare global {
         filepath?: string
         staged?: boolean
         commit?: string
+        base?: string
+        compare?: string
       }) => Promise<{ ok: boolean }>
+      openBranchDiffWindow?: (args: { workspace_path: string; base: string }) => Promise<{ ok: boolean }>
+      openGitLeftView: (args: {
+        workspace_path: string
+        bounds: { x: number; y: number; width: number; height: number }
+      }) => Promise<{ ok: boolean; fallback?: 'legacy' }>
+      updateGitLeftView: (args: {
+        bounds: { x: number; y: number; width: number; height: number }
+        visible: boolean
+      }) => Promise<{ ok: boolean; fallback?: 'legacy' }>
+      closeGitLeftView: () => Promise<{ ok: boolean }>
+      getZoomFactor?: () => Promise<number>
+      onZoomChanged?: (cb: () => void) => () => void
       onPlanOpenDoc: (handler: (relPath: string) => void) => () => void
       openDiffWindow: (args: {
         workspace_path: string
@@ -219,6 +230,18 @@ declare global {
       reportTerminalSelection?: (selection: string) => void
       setBadgeCount: (count: number) => void
       reportWorkspace: (workspacePath: string) => void
+      setGitContributionState?: (state: {
+        workspacePath: string
+        analyzerModel: string
+        dispatchTargets: { id: string; label: string }[]
+        availableAgents: { key: string; label: string }[]
+        issueHandoffs: Record<string, { paneId: string; mode: string; state: string }>
+      }) => void
+      clearGitContributionState?: () => void
+      onGitContributionAction?: (handler: (action: {
+        operation: string
+        payload?: Record<string, unknown>
+      }) => void) => () => void
       restore?: {
         getPending: () => Promise<string[] | null>
         apply: () => Promise<{ ok: boolean; opened: number }>

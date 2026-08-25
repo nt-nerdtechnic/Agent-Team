@@ -6,6 +6,12 @@ const rendererRoot = resolve(process.cwd(), 'src/renderer/src')
 // GitWindowApp is bundled as the navide.git plugin, so Issue 12 owns that
 // composition rather than the Host entry router.
 const issue12OwnedSources = new Set(['GitWindowApp.vue'])
+const v2GitHostCompositionSources = new Set([
+  'components/ControlPane.vue',
+  'components/GitPluginHostSlot.vue',
+])
+// EditorWindowApp remains a separate legacy editor composition; Issue 19's
+// ownership boundary covers only the v2 Git left/window contribution path.
 
 function collectProductionSources(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true })
@@ -28,6 +34,14 @@ function gitPaneMounts(source: string): string[] {
 }
 
 describe('Host Git composition', () => {
+  it('routes the main ControlPane Git tab through the package contribution slot', () => {
+    const controlPane = readFileSync(join(rendererRoot, 'components', 'ControlPane.vue'), 'utf8')
+    expect(controlPane).toContain("import GitPluginHostSlot from './GitPluginHostSlot.vue'")
+    expect(controlPane).toContain('<GitPluginHostSlot')
+    expect(controlPane).not.toContain('MultiRepoGit')
+    expect(controlPane).not.toContain('<GitPane')
+  })
+
   it('keeps the plugin-owned GitWindowApp outside the Host entry router', () => {
     const mainSource = readFileSync(join(rendererRoot, 'main.ts'), 'utf8')
     expect(mainSource).not.toMatch(/GitWindowApp/)
@@ -54,5 +68,19 @@ describe('Host Git composition', () => {
       expect(source, relativePath).not.toMatch(rawGitCall)
       expect(source, relativePath).not.toMatch(rawRepoDiscoveryCall)
     }
+  })
+
+  it('limits direct legacy Git imports in the v2 Host composition to the named recovery adapter', () => {
+    const directGitImplementationImport = /from ['"][^'"]*(?:GitPane|MultiRepoGit|GitHistoryModal|GitCredentialModal)\.vue['"]/
+    const recoveryAdapter = 'components/GitLegacyLeftFallback.vue'
+    const directImporters = collectProductionSources(rendererRoot)
+      .filter((sourcePath) => v2GitHostCompositionSources.has(relative(rendererRoot, sourcePath)))
+      .filter((sourcePath) => relative(rendererRoot, sourcePath) !== recoveryAdapter)
+      .filter((sourcePath) => directGitImplementationImport.test(readFileSync(sourcePath, 'utf8')))
+      .map((sourcePath) => relative(rendererRoot, sourcePath))
+
+    expect(directImporters).toEqual([])
+    expect(readFileSync(join(rendererRoot, recoveryAdapter), 'utf8'))
+      .toContain("import MultiRepoGit from './MultiRepoGit.vue'")
   })
 })

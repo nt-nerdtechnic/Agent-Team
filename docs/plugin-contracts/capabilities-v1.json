@@ -18,7 +18,7 @@
     "duplicateObjectKeys": "reject-before-schema-validation",
     "unknownPermissionOrAccess": "reject"
   },
-  "hostShellExecutableAllowlist": ["git"],
+  "hostShellExecutableAllowlist": ["git", "gh", "glab"],
   "errors": [
     "CAPABILITY_DENIED",
     "METHOD_NOT_FOUND",
@@ -49,6 +49,30 @@
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
     {
+      "address": "fs.writeFile",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "fs", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path", "content"], "properties": { "path": { "type": "string" }, "content": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["ok"], "properties": { "ok": { "type": "boolean" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "fs.readImage",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "fs", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["ok"], "properties": { "ok": { "type": "boolean" }, "data_url": { "type": "string" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "fs.listFilesFlat",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "fs", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "properties": { "query": { "type": "string" }, "maxResults": { "type": "integer", "minimum": 1 } } },
+      "result": { "type": "object", "additionalProperties": false, "properties": { "files": { "type": "array", "items": { "type": "string" } } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
       "address": "fs.glob",
       "visibility": "public",
       "permission": { "id": "system", "access": "fs", "scope": "workspace" },
@@ -62,6 +86,14 @@
       "permission": { "id": "system", "access": "fs", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["kind", "size", "modifiedAt"], "properties": { "kind": { "enum": ["file", "directory"] }, "size": { "type": "integer", "minimum": 0 }, "modifiedAt": { "type": "string", "format": "date-time" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "fs.statPath",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "fs", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["exists"], "properties": { "exists": { "type": "boolean" } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
     {
@@ -86,7 +118,7 @@
       "visibility": "public",
       "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["profileId", "cols", "rows"], "properties": { "profileId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
+      "params": { "type": "object", "additionalProperties": false, "required": ["profileId", "cols", "rows"], "properties": { "profileId": { "type": "string", "minLength": 1 }, "requestId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "USER_CANCELLED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },

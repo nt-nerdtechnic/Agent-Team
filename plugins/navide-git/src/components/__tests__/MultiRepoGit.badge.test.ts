@@ -2,14 +2,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { ref, nextTick } from 'vue'
-import MultiRepoGit from '../MultiRepoGit.vue'
 
 // Control the discovered repo list.
 const mockRepositories = ref<{ rel_path: string; abs_path: string; branch: string; badge: { branch: string; dirtyCount: number } }[]>([])
+const stubSurfacePorts = {
+  gitTransport: {
+    status: { value: 'connected' },
+    send: vi.fn(),
+    on: vi.fn(() => () => {}),
+  },
+} as never
 
-vi.mock('../../composables/useRepoDiscovery', () => ({
-  useRepoDiscovery: () => ({ repositories: mockRepositories, refresh: vi.fn() }),
-}))
+import MultiRepoGit from '../MultiRepoGit.vue'
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({ t: (k: string) => k }),
@@ -22,13 +26,13 @@ vi.mock('vue-i18n', () => ({
 const gitPaneStub = {
   name: 'GitPane',
   props: ['workspacePath'],
-  emits: ['changes-count'],
+  emits: ['changes-count', 'open-file', 'open-conflict', 'open-diff', 'open-branch-diff'],
   template: '<div class="gitpane-stub" :data-ws="workspacePath"></div>',
 }
 
 function mountRepo() {
   return mount(MultiRepoGit, {
-    props: { workspacePath: '/ws', backend: makeBackend() },
+    props: { workspacePath: '/ws', backend: makeBackend(), surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     global: { stubs: { GitPane: gitPaneStub } },
   })
 }
@@ -68,6 +72,42 @@ beforeEach(() => {
 })
 
 describe('MultiRepoGit – badge staleness fixes', () => {
+  it('attaches the emitting repo workspace to forwarded Git actions', async () => {
+    mockRepositories.value = [
+      makeRepo('.', '/ws'),
+      makeRepo('sub', '/ws/sub', 'dev'),
+    ]
+    const wrapper = mountRepo()
+    await flushPromises()
+
+    const rootPane = panes(wrapper).find((c) => c.props('workspacePath') === '/ws')
+    expect(rootPane).toBeDefined()
+    rootPane!.vm.$emit('open-file', { filepath: 'README.md', name: 'README.md' })
+    expect(wrapper.emitted('open-file')).toEqual([[
+      { workspace_path: '/ws', filepath: 'README.md', name: 'README.md' },
+    ]])
+
+    await wrapper.findAll('.repo-tab')[1].trigger('click')
+    await flushPromises()
+    const subPane = panes(wrapper).find((c) => c.props('workspacePath') === '/ws/sub')
+    expect(subPane).toBeDefined()
+    subPane!.vm.$emit('open-diff', {
+      filepath: 'src/app.ts',
+      staged: false,
+      name: 'app.ts',
+      commit: 'abc123',
+    })
+    expect(wrapper.emitted('open-diff')).toEqual([[
+      {
+        workspace_path: '/ws/sub',
+        filepath: 'src/app.ts',
+        staged: false,
+        name: 'app.ts',
+        commit: 'abc123',
+      },
+    ]])
+  })
+
   it('prunes a departed repo count so the total drops the vanished repo', async () => {
     // Three repos → multi mode.
     mockRepositories.value = [

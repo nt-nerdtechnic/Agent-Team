@@ -49,6 +49,19 @@ export interface GitCredential {
   token: string
 }
 
+export interface GitContributionState {
+  workspacePath: string
+  analyzerModel: string
+  dispatchTargets: { id: string; label: string }[]
+  availableAgents: { key: string; label: string }[]
+  issueHandoffs: Record<string, { paneId: string; mode: string; state: string }>
+}
+
+export interface GitContributionActionEnvelope {
+  operation: string
+  payload?: Record<string, unknown>
+}
+
 export type PermissionKey = 'automation' | 'notifications' | 'folders' | 'fullDisk'
 export type PermissionStatus = 'granted' | 'denied' | 'unknown' | 'not-applicable'
 
@@ -162,13 +175,34 @@ contextBridge.exposeInMainWorld('agentTeam', {
     filepath?: string
     staged?: boolean
     commit?: string
+    base?: string
+    compare?: string
   }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:openGit', {
       workspace_path: args.workspace_path,
       ...(args.filepath
         ? { filepath: args.filepath, staged: String(args.staged ?? false), commit: args.commit ?? '' }
         : {}),
+      ...(args.base === undefined ? {} : { base: args.base }),
+      ...(args.compare === undefined ? {} : { compare: args.compare }),
     }),
+  openGitLeftView: (args: {
+    workspace_path: string
+    bounds: { x: number; y: number; width: number; height: number }
+  }): Promise<{ ok: boolean; fallback?: 'legacy' }> =>
+    ipcRenderer.invoke('window:openGitLeft', args),
+  updateGitLeftView: (args: {
+    bounds: { x: number; y: number; width: number; height: number }
+    visible: boolean
+  }): Promise<{ ok: boolean; fallback?: 'legacy' }> =>
+    ipcRenderer.invoke('window:updateGitLeft', args),
+  closeGitLeftView: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('window:closeGitLeft'),
+  getZoomFactor: (): Promise<number> => ipcRenderer.invoke('window:getZoomFactor'),
+  onZoomChanged: (cb: () => void): (() => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on('window:zoom-changed', listener)
+    return () => ipcRenderer.removeListener('window:zoom-changed', listener)
+  },
   // Plan-window side receiver: main asks an already-open plan window to switch
   // to a newly clicked plan instead of reopening the window. Returns a disposer.
   onPlanOpenDoc: (handler: (relPath: string) => void): (() => void) => {
@@ -449,6 +483,17 @@ contextBridge.exposeInMainWorld('agentTeam', {
   },
   reportWorkspace: (workspacePath: string): void => {
     ipcRenderer.send('window:reportWorkspace', workspacePath)
+  },
+  setGitContributionState: (state: GitContributionState): void => {
+    ipcRenderer.send('git:contribution-state', state)
+  },
+  clearGitContributionState: (): void => {
+    ipcRenderer.send('git:contribution-state-clear')
+  },
+  onGitContributionAction: (handler: (action: GitContributionActionEnvelope) => void): (() => void) => {
+    const listener = (_event: unknown, action: GitContributionActionEnvelope): void => handler(action)
+    ipcRenderer.on('git:contribution-action', listener)
+    return () => ipcRenderer.removeListener('git:contribution-action', listener)
   },
   restore: {
     getPending: (): Promise<string[] | null> => ipcRenderer.invoke('restore:getPending'),

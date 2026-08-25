@@ -84,7 +84,9 @@
       "add-new": "新增帳號…",
       "save-and-bind": "儲存為帳號並綁定此工作區",
       "credential-invalid": "此工作區綁定帳號的憑證可能已失效——請至「設定 › Accounts」更新。"
-    }
+    },
+    "left-view-unavailable": "嵌入式 Git View 暫時無法使用。",
+    "open-workspace": "請先開啟工作區以使用 Git。"
   },
   "pane": {
     "git": {

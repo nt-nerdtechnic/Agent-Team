@@ -53,6 +53,7 @@ import ConflictPane from './editor/ConflictPane.vue'
 // Shared right-side CLI agent dock (rail toggle + resize + embedded PTY).
 import AiCliDock from './components/AiCliDock.vue'
 import { aiTerminalPaneId, bracketedPaste } from './lib/aiCliContext'
+import { closeGitWindowMenuOnEscape } from './lib/gitMenuEscape'
 
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager
 // gitQuery). A getter is what useGit expects.
@@ -238,6 +239,7 @@ let offThemeSettingsChange: (() => void) | null = null
 
 onMounted(() => {
   if (repoName.value) document.title = `${repoName.value} — Git`
+  document.addEventListener('keydown', closeMenuOnEscape)
   loadTheme()
   offThemeSettingsChange = onSettingsChanged((keys) => {
     if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {
@@ -261,6 +263,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('keydown', closeMenuOnEscape)
   offThemeSettingsChange?.()
 })
 
@@ -316,6 +319,10 @@ function openMenu(e: MouseEvent, items: MenuItem[]): void {
 function runMenuItem(item: MenuItem): void {
   menu.value = null
   item.action()
+}
+
+function closeMenuOnEscape(event: KeyboardEvent): void {
+  closeGitWindowMenuOnEscape(event, Boolean(menu.value), () => { menu.value = null })
 }
 
 // ── UI hand-offs (mini-IDE / shell actions) ──────────────────────────────────
@@ -1954,7 +1961,6 @@ registerCommand('git.focusAgent', () => {
               :compare="diffCompare"
               :git-transport="gitTransport"
               :branch-diff="branchDiff"
-              :credentials="credentialPort"
             />
             <div v-else class="empty-hint">{{ $t('hint.pick-two-branches') }}</div>
           </div>

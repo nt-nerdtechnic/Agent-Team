@@ -35,6 +35,7 @@ from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID, vault_to_thread
+from .host_shell import parse_allowlisted_command, run_allowlisted_text
 from .mcp_settings import (
     MCPSettingsConflictError,
     MCPSettingsError,
@@ -1287,6 +1288,7 @@ async def git_clone(session: "Session", msg_id: str, msg_type: str, payload: dic
         target_dir,
         on_credential_request=app.build_credential_request_emitter(ws_path),
         on_credential_settled=app.build_credential_settled_emitter(ws_path),
+        credential=app._git_credential(payload),
     )
     await session.send_json(make_response(msg_id, msg_type, result))
 
@@ -3510,8 +3512,11 @@ async def issues_set_state(session: "Session", msg_id: str, msg_type: str, paylo
 
 # ── Shell run (shell.run) ───────────────────────────────────────────────────
 # Security notes:
-# - Uses create_subprocess_exec('/bin/sh', '-c', cmd) instead of
-#   create_subprocess_shell to avoid implicit shell injection.
+# - Manifest v2 public calls take the ``host_mode=allowlist`` branch above and
+#   use the Host shell broker. The shell-backed branch below is retained for
+#   legacy terminal.run compatibility until that later migration removes it.
+# - The legacy branch uses create_subprocess_exec('/bin/sh', '-c', cmd) instead
+#   of create_subprocess_shell to avoid implicit shell injection.
 # - ws_path is resolved and validated to be an existing directory.
 # - Frontend shows full command in confirm dialog before invoking.
 # - This is a local-only Electron app; the WebSocket server binds to
@@ -3522,6 +3527,36 @@ async def shell_run(session: "Session", msg_id: str, msg_type: str, payload: dic
 
     ws_path = payload.get("workspace_path") or ""
     cmd = payload.get("command", "") or ""
+    if payload.get("host_mode") == "allowlist":
+        if not isinstance(ws_path, str) or not ws_path.strip():
+            await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "workspace path is required"}))
+            return
+        try:
+            argv = parse_allowlisted_command(cmd)
+        except ValueError as exc:
+            await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": str(exc)}))
+            return
+        resolved_cwd = app.Path(ws_path).resolve()
+        known_roots = [app.Path(w).resolve() for w in app.attribution.known_workspaces()]
+        cwd_allowed = any(
+            resolved_cwd == root or resolved_cwd.is_relative_to(root)
+            for root in known_roots
+        )
+        if not cwd_allowed:
+            await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "workspace path not registered"}))
+            return
+        if resolved_cwd and not resolved_cwd.is_dir():
+            await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "invalid workspace path"}))
+            return
+        rc, stdout, stderr = await run_allowlisted_text(argv, str(resolved_cwd), timeout=30.0)
+        await session.send_json(make_response(msg_id, msg_type, {
+            "ok": True,
+            "output": stdout[:8000],
+            "stdout": stdout[:8000],
+            "stderr": stderr[:8000],
+            "exit_code": rc,
+        }))
+        return
     if not cmd:
         await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "no command"}))
     else:

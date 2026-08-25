@@ -1,0 +1,89 @@
+/**
+ * dark-midnight.css — Deep blue-tinted dark theme.
+ * Overrides semantic roles only; primitives stay in base.css.
+ */
+
+:root[data-theme='dark-midnight'] {
+  /* Backgrounds — cooler, deeper blues */
+  --bg-base: #0a0e14;
+  --bg-inset: #060910;
+  --bg-subtle: #11161f;
+  --bg-muted: #1b2230;
+  --bg-elevated: #161b22;
+  --bg-overlay: #11161f;
+  --bg-hover: rgba(120, 160, 220, 0.08);
+  --bg-active: rgba(120, 160, 220, 0.12);
+  --bg-selected: rgba(56, 139, 253, 0.2);
+  --bg-hover-faint: rgba(120, 160, 220, 0.05);
+  --bg-hover-strong: rgba(120, 160, 220, 0.16);
+
+  /* Text */
+  --text-primary: #c5d0e6;
+  --text-bright: #e8eef7;
+  --text-secondary: #8693a8;
+  --text-muted: #5d6878;
+  --text-disabled: #404a5c;
+  --text-on-emphasis: #ffffff;
+
+  /* Borders */
+  --border-default: #232b3a;
+  --border-muted: #1b2230;
+  --border-strong: #3a4458;
+
+  /* Accent */
+  --accent-fg: #6cb0ff;
+  --accent-bright: #8fc8ff;
+  --accent-focus: #4d8ff0;
+  --accent-emphasis: #2563eb;
+  --accent-muted: #1e3a6b;
+  --accent-subtle: #0d1d3d;
+
+  /* Success */
+  --success-fg: #4ad07a;
+  --success-bright: #6ee894;
+  --success-strong: #2a9a52;
+  --success-emphasis: #1f8a4c;
+  --success-muted: #1a5e38;
+  --success-subtle: #0a2418;
+
+  /* Danger */
+  --danger-fg: #ff6b66;
+  --danger-bright: #ff9590;
+  --danger-emphasis: #d13838;
+  --danger-muted: #7a2626;
+  --danger-deep: #5e1c1c;
+  --danger-subtle: #340c0c;
+
+  /* Attention */
+  --attention-fg: #e0b341;
+  --attention-bright: #f0cb6a;
+  --attention-emphasis: #9a7212;
+  --attention-muted: #6b5a1f;
+  --attention-subtle: #2a2208;
+  --warning-fg: #f59042;
+
+  /* Done */
+  --done-fg: #c79dff;
+  --done-emphasis: #9d5cf0;
+
+  /* Diff */
+  --diff-add-fg: #4ad07a;
+  --diff-add-bg: rgba(74, 208, 122, 0.12);
+  --diff-del-fg: #ff6b66;
+  --diff-del-bg: rgba(255, 107, 102, 0.12);
+
+  /* Shadows */
+  --shadow-overlay: rgba(0, 0, 0, 0.7);
+  --shadow-scrim: rgba(3, 6, 14, 0.88);
+
+  /* Syntax */
+  --syntax-keyword: #ff8a82;
+  --syntax-string: #b8e0ff;
+  --syntax-comment: #5d6878;
+  --syntax-number: #8fc8ff;
+  --syntax-function: #c79dff;
+  --syntax-operator: #ff8a82;
+  --syntax-type: #f0cb6a;
+  --syntax-variable: #6cb0ff;
+  --syntax-invalid: #ff6b66;
+}

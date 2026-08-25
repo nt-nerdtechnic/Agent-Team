@@ -543,12 +543,16 @@ export class PluginError extends Error {
 
 export interface PublicMethodParams {
   'fs.readFile': { path: string }
+  'fs.writeFile': { path: string; content: string }
+  'fs.readImage': { path: string }
   'fs.listDirectory': { path: string }
+  'fs.listFilesFlat': { query?: string; maxResults?: number }
   'fs.glob': { pattern: string }
   'fs.stat': { path: string }
+  'fs.statPath': { path: string }
   'ui.openInEditor': { path: string; line?: number; column?: number }
   'ui.openExternal': { url: string }
-  'aiCli.startSession': { profileId: string; cols: number; rows: number }
+  'aiCli.startSession': { profileId: string; requestId?: string; cols: number; rows: number }
   'aiCli.cancelStart': { requestId: string }
   'aiCli.reattachSession': { sessionId: string }
   'aiCli.sendInput': { sessionId: string; data: string }
@@ -564,9 +568,13 @@ export interface PublicMethodParams {
 
 export interface PublicMethodResults {
   'fs.readFile': { content: string }
+  'fs.writeFile': { ok: boolean }
+  'fs.readImage': { ok: boolean; data_url?: string }
   'fs.listDirectory': { entries: Array<{ name: string; kind: 'file' | 'directory' }> }
+  'fs.listFilesFlat': { files?: string[] }
   'fs.glob': { paths: string[] }
   'fs.stat': { kind: 'file' | 'directory'; size: number; modifiedAt: string }
+  'fs.statPath': { exists: boolean }
   'ui.openInEditor': { opened: boolean }
   'ui.openExternal': { opened: boolean }
   'aiCli.startSession': { sessionId: string }

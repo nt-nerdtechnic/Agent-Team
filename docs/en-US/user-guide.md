@@ -87,7 +87,7 @@ Token Stats parses compatible local CLI logs and attributes usage to workspaces,
 
 ## Git and review
 
-The Git view supports repository discovery, working-tree inspection, staging, commits, branches, remotes, issues, and related workflows. Multi-repository workspaces can switch between discovered repositories.
+The Git view supports repository discovery, working-tree inspection, staging, commits, branches, remotes, issues, and related workflows. Multi-repository workspaces can switch between discovered repositories. The production Git package supplies both the embedded left view and the dedicated Git window from the same active package version. Repository operations stay local to Navide's Host/backend boundary; GitHub and GitLab issue detection uses the configured `gh` or `glab` CLI when available. If the embedded view cannot be created or updated, it reports a recoverable unavailable state with a manual Retry action rather than retrying on every geometry change.
 
 Review changes before committing, especially after automated or parallel runs. Navide does not make an agent-generated change safe merely because it appears in the Git panel.
 

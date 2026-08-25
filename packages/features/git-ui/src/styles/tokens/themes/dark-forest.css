@@ -1,0 +1,93 @@
+/**
+ * dark-forest.css — Green-tinted dark theme.
+ * Overrides semantic roles only; primitives stay in base.css.
+ */
+
+:root[data-theme='dark-forest'] {
+  /* Backgrounds — warm, deep greens */
+  --bg-base: #0c130d;
+  --bg-inset: #070b07;
+  --bg-subtle: #121a13;
+  --bg-muted: #1d2a1e;
+  --bg-elevated: #18221a;
+  --bg-overlay: #121a13;
+  --bg-hover: rgba(140, 200, 150, 0.08);
+  --bg-active: rgba(140, 200, 150, 0.12);
+  --bg-selected: rgba(46, 160, 67, 0.18);
+  --bg-hover-faint: rgba(140, 200, 150, 0.05);
+  --bg-hover-strong: rgba(140, 200, 150, 0.16);
+
+  /* Text */
+  --text-primary: #cbd9c9;
+  --text-bright: #e9f2e7;
+  --text-secondary: #8ba089;
+  --text-muted: #62785f;
+  --text-disabled: #45563f;
+  --text-on-emphasis: #ffffff;
+
+  /* Borders */
+  --border-default: #283a29;
+  --border-muted: #1d2a1e;
+  --border-strong: #45583f;
+
+  /* Accent — keep blue but slightly cooled */
+  --accent-fg: #6fc28a;
+  --accent-bright: #8fd8a5;
+  --accent-focus: #4cae6a;
+  --accent-emphasis: #2ea043;
+  --accent-muted: #1f5e34;
+  --accent-subtle: #0d2818;
+  --status-starting-subtle: #0d1d3d;
+  --status-starting-muted: #1e3a6b;
+  --status-starting-fg: #6cb0ff;
+  --status-starting-emphasis: #2563eb;
+
+  /* Success */
+  --success-fg: #56d364;
+  --success-bright: #7ee88a;
+  --success-strong: #2ea043;
+  --success-emphasis: #238636;
+  --success-muted: #1f6f43;
+  --success-subtle: #0a2414;
+
+  /* Danger */
+  --danger-fg: #f0776e;
+  --danger-bright: #ff9b93;
+  --danger-emphasis: #c93c38;
+  --danger-muted: #7a2a26;
+  --danger-deep: #5e1c1c;
+  --danger-subtle: #2e0e0c;
+
+  /* Attention */
+  --attention-fg: #d4ad3f;
+  --attention-bright: #e8c66a;
+  --attention-emphasis: #8f6e12;
+  --attention-muted: #5e5320;
+  --attention-subtle: #241f08;
+  --warning-fg: #e8893f;
+
+  /* Done */
+  --done-fg: #b59ae8;
+  --done-emphasis: #9468d6;
+
+  /* Diff */
+  --diff-add-fg: #56d364;
+  --diff-add-bg: rgba(86, 211, 100, 0.12);
+  --diff-del-fg: #f0776e;
+  --diff-del-bg: rgba(240, 119, 110, 0.12);
+
+  /* Shadows */
+  --shadow-overlay: rgba(0, 0, 0, 0.7);
+  --shadow-scrim: rgba(4, 8, 4, 0.88);
+
+  /* Syntax */
+  --syntax-keyword: #f0897f;
+  --syntax-string: #bce8c5;
+  --syntax-comment: #62785f;
+  --syntax-number: #8fd8a5;
+  --syntax-function: #b59ae8;
+  --syntax-operator: #f0897f;
+  --syntax-type: #e8c66a;
+  --syntax-variable: #6fc28a;
+  --syntax-invalid: #f0776e;
+}

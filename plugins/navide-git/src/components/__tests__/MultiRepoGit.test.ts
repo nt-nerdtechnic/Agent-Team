@@ -1,19 +1,27 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
 import { shallowMount, flushPromises } from '@vue/test-utils'
 import { ref } from 'vue'
-import MultiRepoGit from '../MultiRepoGit.vue'
 
 // Stub useRepoDiscovery so we can control the repositories list.
 const mockRepositories = ref<{ rel_path: string; abs_path: string; branch: string; badge: { branch: string; dirtyCount: number } }[]>([])
 
-vi.mock('../../composables/useRepoDiscovery', () => ({
-  useRepoDiscovery: () => ({ repositories: mockRepositories, refresh: vi.fn() }),
-}))
+import MultiRepoGit from '../MultiRepoGit.vue'
 
 // Stub vue-i18n.
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({ t: (k: string) => k }),
+}))
+
+// MultiRepoGit owns the lazy composition boundary; the repo-tab tests do not
+// need to load GitPane's transport, menus, or terminal graph. Keeping that
+// boundary mocked also prevents an async child import from outliving a test
+// environment when the full suite runs in parallel.
+vi.mock('../GitPane.vue', () => ({
+  default: {
+    name: 'GitPane',
+    setup: () => () => null,
+  },
 }))
 
 function makeRepo(relPath: string, absPath: string, branch = 'main', dirtyCount = 0) {
@@ -31,17 +39,36 @@ function makeBackend(project: { ui_git_tab_repo?: string } | null = null) {
 }
 
 const stubBackend = makeBackend().backend
+const stubSurfacePorts = {
+  gitTransport: {
+    status: { value: 'connected' },
+    send: vi.fn(),
+    on: vi.fn(() => () => {}),
+  },
+} as never
 
 beforeEach(() => {
   mockRepositories.value = []
   try { localStorage.clear() } catch { /* ignore */ }
 })
 
+const mountedWrappers: Array<{ unmount: () => void }> = []
+
+function mountMultiRepo(options: Parameters<typeof shallowMount>[1]) {
+  const wrapper = shallowMount(MultiRepoGit, options)
+  mountedWrappers.push(wrapper)
+  return wrapper
+}
+
+afterEach(() => {
+  for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount()
+})
+
 describe('MultiRepoGit – single-repo passthrough', () => {
   it('renders a single GitPane stub and no tab bar when 0 repos discovered', () => {
     mockRepositories.value = []
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: stubBackend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     expect(wrapper.find('.repo-tab-bar').exists()).toBe(false)
     // Shallow stub renders as <git-pane-stub> (or similar).
@@ -52,8 +79,8 @@ describe('MultiRepoGit – single-repo passthrough', () => {
 
   it('renders no tab bar when only 1 repo discovered', () => {
     mockRepositories.value = [makeRepo('.', '/ws', 'main')]
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: stubBackend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     expect(wrapper.find('.repo-tab-bar').exists()).toBe(false)
   })
@@ -65,8 +92,8 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('.', '/ws', 'main', 2),
       makeRepo('sub', '/ws/sub', 'dev', 0),
     ]
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: stubBackend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     expect(wrapper.find('.repo-tab-bar').exists()).toBe(true)
     expect(wrapper.findAll('.repo-tab')).toHaveLength(2)
@@ -77,8 +104,8 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('.', '/ws', 'main'),
       makeRepo('sub', '/ws/sub', 'dev'),
     ]
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: stubBackend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     const tabs = wrapper.findAll('.repo-tab')
     expect(tabs[0].classes()).toContain('active')
@@ -90,8 +117,8 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('.', '/ws', 'main', 5),
       makeRepo('sub', '/ws/sub', 'dev', 0),
     ]
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: stubBackend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     const firstTab = wrapper.findAll('.repo-tab')[0]
     expect(firstTab.find('.repo-tab-badge').exists()).toBe(true)
@@ -106,8 +133,8 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('.', '/ws', 'main'),
       makeRepo('sub', '/ws/sub', 'dev'),
     ]
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: stubBackend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     const tabs = wrapper.findAll('.repo-tab')
     await tabs[1].trigger('click')
@@ -120,8 +147,8 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('.', '/ws', 'main'),
       makeRepo('pkg', '/ws/pkg', 'dev'),
     ]
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: stubBackend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     const firstTabName = wrapper.findAll('.repo-tab-name')[0].text()
     // Our stub t() returns the key itself.
@@ -138,8 +165,8 @@ describe('MultiRepoGit – persisted repo tab (project.json ui_git_tab_repo)', (
   it('restores the backend-saved repo tab', async () => {
     mockRepositories.value = TWO_REPOS
     const { backend } = makeBackend({ ui_git_tab_repo: '/ws/sub' })
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     const tabs = wrapper.findAll('.repo-tab')
@@ -149,8 +176,8 @@ describe('MultiRepoGit – persisted repo tab (project.json ui_git_tab_repo)', (
   it('clicking a tab persists the selection via project.set_ui_state', async () => {
     mockRepositories.value = TWO_REPOS
     const { backend, send } = makeBackend()
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     await wrapper.findAll('.repo-tab')[1].trigger('click')
@@ -164,8 +191,8 @@ describe('MultiRepoGit – persisted repo tab (project.json ui_git_tab_repo)', (
     localStorage.setItem('agentTeam.gitTabRepo./ws', '/ws/sub')
     mockRepositories.value = TWO_REPOS
     const { backend, send } = makeBackend()
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     // Legacy value restored and pushed to the backend, local copy deleted after ack.
@@ -181,8 +208,8 @@ describe('MultiRepoGit – persisted repo tab (project.json ui_git_tab_repo)', (
     localStorage.setItem('agentTeam.gitTabRepo./ws', '/ws/stale')
     mockRepositories.value = TWO_REPOS
     const { backend, send } = makeBackend({ ui_git_tab_repo: '/ws/sub' })
-    shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend },
+    mountMultiRepo({
+      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     expect(localStorage.getItem('agentTeam.gitTabRepo./ws')).toBeNull()
@@ -196,8 +223,8 @@ describe('MultiRepoGit – persisted repo tab (project.json ui_git_tab_repo)', (
       if (type === 'project.peek') return new Promise((r) => { resolvePeek = r })
       return Promise.resolve({ ok: true, payload: { ok: true } })
     })
-    const wrapper = shallowMount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: { send } as never },
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend: { send } as never, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     // User picks the root tab while the restore is still in flight.
     await wrapper.findAll('.repo-tab')[0].trigger('click')

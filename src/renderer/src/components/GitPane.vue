@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '../lib/settings'
 import { useGit } from '../composables/useGit'
@@ -17,6 +17,7 @@ import type {
 import { useNotify } from '../composables/useNotify'
 import { computeGraph, laneColor } from '../lib/git-graph'
 import { guardedDiscard } from '../lib/discardConfirm'
+import { closeGitPaneMenusOnEscape } from '../lib/gitMenuEscape'
 import GitCredentialModal from './GitCredentialModal.vue'
 
 const props = defineProps<{
@@ -40,6 +41,12 @@ const props = defineProps<{
   // Issue dispatch/handle status — shows badges on issue rows.
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
 }>()
+
+const paneRoot = ref<HTMLElement | null>(null)
+let nextMenuOwnerId = 0
+const menuOwnerId = `git-pane-${++nextMenuOwnerId}`
+const openMenuOwners = new Set<string>()
+let activeMenuOwnerId: string | null = null
 
 const emit = defineEmits<{
   (e: 'changes-count', n: number): void
@@ -708,6 +715,9 @@ onUnmounted(() => {
   _clearAutoTimer()
   document.removeEventListener('mousemove', onGitDividerMove)
   document.removeEventListener('mouseup', onGitDividerEnd)
+  document.removeEventListener('keydown', closeMenusOnEscape)
+  openMenuOwners.delete(menuOwnerId)
+  if (activeMenuOwnerId === menuOwnerId) activeMenuOwnerId = [...openMenuOwners].at(-1) ?? null
 })
 
 // ── remote actions ────────────────────────────────────────────────────────────
@@ -979,6 +989,56 @@ function openChangesSectionMenu(e: MouseEvent): void {
   changesSectionMenu.value = { show: true, x: e.clientX, y: e.clientY }
 }
 function closeChangesSectionMenu(): void { changesSectionMenu.value.show = false }
+
+watch(
+  () => [
+    ctxMenu.value.show,
+    stagedSectionMenu.value.show,
+    changesSectionMenu.value.show,
+    showCommitMenu.value,
+    showRemoteMenu.value,
+    showAccountMenu.value,
+    showViewMenu.value,
+  ],
+  (states) => {
+    if (states.some(Boolean)) {
+      openMenuOwners.delete(menuOwnerId)
+      openMenuOwners.add(menuOwnerId)
+      activeMenuOwnerId = menuOwnerId
+      return
+    }
+    if (!openMenuOwners.delete(menuOwnerId)) return
+    if (activeMenuOwnerId === menuOwnerId) activeMenuOwnerId = [...openMenuOwners].at(-1) ?? null
+  },
+)
+
+function closeMenusOnEscape(event: KeyboardEvent): void {
+  const open =
+    ctxMenu.value.show ||
+    stagedSectionMenu.value.show ||
+    changesSectionMenu.value.show ||
+    showCommitMenu.value ||
+    showRemoteMenu.value ||
+    showAccountMenu.value ||
+    showViewMenu.value
+  closeGitPaneMenusOnEscape(event, {
+    root: paneRoot.value,
+    menuOwnerId,
+    activeMenuOwnerId,
+    isMenuOpen: open,
+    close: () => {
+      ctxMenu.value.show = false
+      stagedSectionMenu.value.show = false
+      changesSectionMenu.value.show = false
+      showCommitMenu.value = false
+      showRemoteMenu.value = false
+      showAccountMenu.value = false
+      showViewMenu.value = false
+    },
+  })
+}
+
+onMounted(() => document.addEventListener('keydown', closeMenusOnEscape))
 
 // ── stash ─────────────────────────────────────────────────────────────────────
 const stashExpanded = ref(false), stashMessage = ref(''), stashError = ref('')
@@ -1508,7 +1568,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 </script>
 
 <template>
-  <div class="git-pane" @click="showViewMenu = false; showCommitMenu = false; clearSelection()">
+  <div ref="paneRoot" class="git-pane" :data-git-pane-owner="menuOwnerId" @click="showViewMenu = false; showCommitMenu = false; clearSelection()">
 
     <div v-if="!workspacePath" class="empty-state">{{ $t('label.select-workspace') }}</div>
 
@@ -1616,8 +1676,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         <!-- Sort menu -->
         <button class="hdr-btn" :title="$t('action.more-options')" @click.stop="openViewMenu($event)">···</button>
         <Teleport to="body">
-          <div v-if="showViewMenu" class="tp-backdrop" @click="showViewMenu = false" />
-          <div v-if="showViewMenu" class="tp-dropdown" :style="{ top: viewMenuPos.top + 'px', right: viewMenuPos.right + 'px' }" @click.stop>
+          <div v-if="showViewMenu" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="showViewMenu = false" />
+          <div v-if="showViewMenu" class="tp-dropdown" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: viewMenuPos.top + 'px', right: viewMenuPos.right + 'px' }" @click.stop>
             <div class="menu-group-label">{{ $t('label.view') }}</div>
             <button class="menu-item" @click="viewMode = 'list'; showViewMenu = false">
               <span class="menu-check">{{ viewMode === 'list' ? '✓' : '' }}</span> {{ $t('action.view-as-list') }}
@@ -1693,8 +1753,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           </button>
           <button class="commit-arrow-btn" :disabled="!hasStaged && !gitLog.length" :title="$t('action.commit-more-options')" @click.stop="openCommitMenu($event)">▾</button>
           <Teleport to="body">
-            <div v-if="showCommitMenu" class="tp-backdrop" @click="showCommitMenu = false" />
-            <div v-if="showCommitMenu" class="tp-dropdown" :style="{ top: showCommitMenuPos.top + 'px', right: showCommitMenuPos.right + 'px' }" @click.stop>
+            <div v-if="showCommitMenu" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="showCommitMenu = false" />
+            <div v-if="showCommitMenu" class="tp-dropdown" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: showCommitMenuPos.top + 'px', right: showCommitMenuPos.right + 'px' }" @click.stop>
               <button class="menu-item" :disabled="!canCommit" @click="runCommit()">✓ {{ $t('action.commit') }}</button>
               <button class="menu-item" :disabled="!gitLog.length" @click="runCommit({ amend: true })">✎ {{ $t('action.amend-commit') }}</button>
               <div class="menu-sep" />
@@ -2084,8 +2144,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         </button>
         <button class="remote-btn" :title="$t('action.more-pull-push')" :disabled="!!remoteBusy" @click.stop="openRemoteMenu($event)">▾</button>
         <Teleport to="body">
-          <div v-if="showRemoteMenu" class="tp-backdrop" @click="showRemoteMenu = false" />
-          <div v-if="showRemoteMenu" class="tp-dropdown" :style="{ top: remoteMenuPos.top + 'px', right: remoteMenuPos.right + 'px' }" @click.stop>
+          <div v-if="showRemoteMenu" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="showRemoteMenu = false" />
+          <div v-if="showRemoteMenu" class="tp-dropdown" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: remoteMenuPos.top + 'px', right: remoteMenuPos.right + 'px' }" @click.stop>
             <button class="menu-item" @click="doPull(); showRemoteMenu = false">↓ {{ $t('action.pull') }}</button>
             <button class="menu-item" @click="doPullRebase">↓ {{ $t('action.pull-rebase') }}</button>
             <div class="menu-sep" />
@@ -2104,8 +2164,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           </div>
         </Teleport>
         <Teleport to="body">
-          <div v-if="showAccountMenu" class="tp-backdrop" @click="showAccountMenu = false" />
-          <div v-if="showAccountMenu" class="tp-dropdown" :style="{ top: accountMenuPos.top + 'px', right: accountMenuPos.right + 'px' }" @click.stop>
+          <div v-if="showAccountMenu" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="showAccountMenu = false" />
+          <div v-if="showAccountMenu" class="tp-dropdown" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: accountMenuPos.top + 'px', right: accountMenuPos.right + 'px' }" @click.stop>
             <div class="menu-group-label">{{ $t('git.account.selector-title') }}</div>
             <button class="menu-item" :class="{ active: !boundAccountId }" @click="selectAccount(null)">
               {{ $t('git.account.unbound') }}
@@ -2544,16 +2604,16 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 
     <!-- ── Staged section context menu ──────────────────────────────────── -->
     <Teleport to="body">
-      <div v-if="stagedSectionMenu.show" class="tp-backdrop" @click="closeStagedSectionMenu" @contextmenu.prevent="closeStagedSectionMenu" />
-      <div v-if="stagedSectionMenu.show" class="ctx-menu" :style="{ top: stagedSectionMenu.y + 'px', left: stagedSectionMenu.x + 'px' }" @click.stop>
+      <div v-if="stagedSectionMenu.show" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="closeStagedSectionMenu" @contextmenu.prevent="closeStagedSectionMenu" />
+      <div v-if="stagedSectionMenu.show" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: stagedSectionMenu.y + 'px', left: stagedSectionMenu.x + 'px' }" @click.stop>
         <button v-if="hasStaged" class="menu-item" @click="doUnstageAll(); closeStagedSectionMenu()">{{ $t('action.unstage-all') }}</button>
       </div>
     </Teleport>
 
     <!-- ── Changes section context menu ─────────────────────────────────── -->
     <Teleport to="body">
-      <div v-if="changesSectionMenu.show" class="tp-backdrop" @click="closeChangesSectionMenu" @contextmenu.prevent="closeChangesSectionMenu" />
-      <div v-if="changesSectionMenu.show" class="ctx-menu" :style="{ top: changesSectionMenu.y + 'px', left: changesSectionMenu.x + 'px' }" @click.stop>
+      <div v-if="changesSectionMenu.show" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="closeChangesSectionMenu" @contextmenu.prevent="closeChangesSectionMenu" />
+      <div v-if="changesSectionMenu.show" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: changesSectionMenu.y + 'px', left: changesSectionMenu.x + 'px' }" @click.stop>
         <button class="menu-item" @click="openStashPrompt(); closeChangesSectionMenu()">{{ $t('action.save-draft') }}</button>
         <div class="menu-sep" />
         <button v-if="hasChanges" class="menu-item" @click="stageAll(); closeChangesSectionMenu()">{{ $t('action.stage-all') }}</button>
@@ -2563,15 +2623,15 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 
     <!-- ── File context menu (right-click) ──────────────────────────────── -->
     <Teleport to="body">
-      <div v-if="ctxMenu.show" class="tp-backdrop" @click="closeCtxMenu" @contextmenu.prevent="closeCtxMenu" />
+      <div v-if="ctxMenu.show" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="closeCtxMenu" @contextmenu.prevent="closeCtxMenu" />
       <!-- Multi-select menu -->
-      <div v-if="ctxMenu.show && selectedKeys.size > 1" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
+      <div v-if="ctxMenu.show && selectedKeys.size > 1" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
         <button v-if="selectedChangesPaths.length > 0" class="menu-item" @click="stageSelected(); closeCtxMenu()">{{ $t('action.stage-files', { count: selectedChangesPaths.length }) }}</button>
         <button v-if="selectedStagedPaths.length > 0" class="menu-item" @click="unstageSelected(); closeCtxMenu()">{{ $t('action.unstage-files', { count: selectedStagedPaths.length }) }}</button>
         <button v-if="selectedChangesPaths.length > 0" class="menu-item danger" @click="discardSelected(); closeCtxMenu()">{{ $t('action.discard-files', { count: selectedChangesPaths.length }) }}</button>
       </div>
       <!-- File menu -->
-      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'file'" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
+      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'file'" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
         <button class="menu-item" @click="ctxOpenChanges">{{ $t('action.open-changes') }}</button>
         <button class="menu-item" @click="ctxOpenInEditor">{{ $t('action.open-in-editor') }}</button>
         <button class="menu-item" @click="ctxOpenFile">{{ $t('action.open-file-plain') }}</button>
@@ -2604,7 +2664,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       </div>
 
       <!-- Folder menu (applies to all changed files under the folder) -->
-      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'folder'" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
+      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'folder'" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
         <button v-if="ctxMenu.staged" class="menu-item" @click="ctxFolderUnstage">{{ $t('action.unstage-changes') }}</button>
         <template v-else>
           <button class="menu-item" @click="ctxFolderStage">{{ $t('action.stage-changes') }}</button>
@@ -2627,7 +2687,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       </div>
 
       <!-- Branch menu -->
-      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'branch'" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
+      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'branch'" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
         <button class="menu-item" @click="doMergeInto(ctxMenu.branch)">{{ $t('action.merge-current-into', { branch: ctxMenu.branch }) }}</button>
         <button class="menu-item" @click="doMergeIntoAndPush(ctxMenu.branch)">{{ $t('action.merge-current-into-push', { branch: ctxMenu.branch }) }}</button>
         <div class="menu-sep" />

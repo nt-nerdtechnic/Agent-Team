@@ -19,6 +19,12 @@ All notable released changes to Navide will be documented in this file. The form
   approval, and fail-closed AI CLI/shell request planning.
 - Allow the canonical `git` executable through Manifest v2 `shell.run`
   allowlist mode without adding a Git permission or first-party bypass.
+- Ship the official first-party `navide.git` Manifest v2 production package
+  with isolated left and window custom views from one active package version,
+  Host-owned Git contribution/account bridges, workspace storage continuity,
+  and a retained legacy rollback path. Git-specific production source now lives
+  in the plugin package; remote credentials remain Host-injected and the
+  lifecycle selector uses a crash-safe atomic write.
 - Configurable lazy CLI restore: resume one CLI, the first Grid page, or the active tab when opening a workspace; preserve manual-tab grouping and recover uniquely attributable missing Claude conversations on realization.
 - Add Meta Muse Code as a spawnable CLI agent, including install detection and one-click install. Resume, log reading and credential switching remain unavailable for it until they are verified against a real installation.
 - Validate Manifest v2 frontend contributions consistently in the App and marketplace registry, including strict view discovery and package-entry checks.
@@ -75,6 +81,13 @@ All notable released changes to Navide will be documented in this file. The form
 - Write every injection into a CLI pane as a bracketed paste for the vendors whose TUI keeps the mode on, instead of only multi-line ones, and send the paste guards as whole writes so a chunk boundary can never cut one in half.
 
 ### Fixed
+
+- Restore Git contribution parity across the embedded and dedicated views,
+  including AI CLI file/external opens, semantic resize/redraw/force controls,
+  change badges, and Escape-to-close behavior without affecting sibling
+  instances. GitHub/GitLab Issue calls remain Host-owned through the shared
+  `git`/`gh`/`glab` executable allowlist. Embedded left-view failures now fail
+  closed with a manual Retry state and ignore stale geometry completions.
 
 - Harden staged plugin event and PTY ownership: stable capability-context
   refreshes no longer detach routes, in-flight creates are cancelled on view

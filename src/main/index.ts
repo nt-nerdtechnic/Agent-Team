@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process'
 import { startBackend, getResolvedUserPath, type BackendHandle } from './backend'
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
-import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
+import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
 import {
   isTrustedPluginManagementSender,
   registerPluginIpc,
@@ -16,6 +16,8 @@ import {
 import { readRegistryTrustSnapshot } from './plugins/pluginInstalledTrust'
 import { currentPluginHostTarget } from './plugins/pluginTarget'
 import { PluginStorageStore } from './plugins/pluginStorage'
+import { migrateBundledGitPreferences } from './plugins/gitStorageMigration'
+import { GitStorageLifecycleSelector } from './plugins/gitStorageLifecycle'
 import {
   projectBackendPluginActivationCatalog,
   writeBackendPluginActivationCatalog,
@@ -26,6 +28,7 @@ import { installContextMenu, registerTerminalContextMenu } from './context-menu'
 import { initUpdater } from './updater'
 import { withDeadline } from './deadline'
 import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
+import { registeredGitLeftWorkspace, trustedGitLeftWindow } from './gitLeftIpc'
 import { setWindowDockTileBadge } from './dock-tile-badge'
 import { BackendBroadcastTracker } from './backend-broadcast'
 import { stabilizeDroppedPaths, pruneDroppedFiles, saveClipboardImage } from './dropped-file-store'
@@ -225,6 +228,22 @@ function getGitAccountsStore(): GitAccountsStore {
   }
   return gitAccountsStore
 }
+
+// The production Git package reaches account storage through the private
+// first-party bridge. Keep safeStorage and decrypted credentials in main; the
+// renderer-facing package receives only masked accounts or one authenticated
+// workspace-bound credential response.
+frontendPluginManager.setGitAccountHandlers({
+  available: () => getGitAccountsStore().available,
+  list: () => getGitAccountsStore().list(),
+  add: (input) => getGitAccountsStore().add(input),
+  update: (id, patch) => getGitAccountsStore().update(id, patch),
+  remove: (id) => getGitAccountsStore().remove(id),
+  bind: (workspacePath, accountId) => getGitAccountsStore().bind(workspacePath, accountId),
+  unbind: (workspacePath) => getGitAccountsStore().unbind(workspacePath),
+  getBinding: (workspacePath) => getGitAccountsStore().getBinding(workspacePath),
+  getCredential: (workspacePath) => getGitAccountsStore().getCredentialForWorkspace(workspacePath),
+})
 // Windows from the previous (uncleanly exited) run, offered to the FIRST
 // renderer that asks via restore:getPending; cleared on apply/dismiss.
 let pendingRestore: WindowEntry[] | null = null
@@ -476,6 +495,9 @@ for (const error of installedPluginLoad.errors) {
 const pluginStorageStore = new PluginStorageStore(
   () => join(app.getPath('userData'), 'plugin-storage-v2')
 )
+const gitStorageLifecycle = new GitStorageLifecycleSelector(
+  join(app.getPath('userData'), 'plugin-storage-v2', 'lifecycle.json'),
+)
 const pluginTrustRefresh = registerPluginIpc(
   frontendPluginManager,
   pluginsRoot(),
@@ -578,9 +600,10 @@ if (!bundledPlans.registered) {
 }
 
 // Bundled Git — the official builtin standalone Git client surface, shipped
-// inside the app package (resources/plugins/git) and built from dist-plugins in
-// dev. Mirrors the mini-IDE / Plans registration above; see registerBundledGit
-// for precedence.
+// inside the app package (resources/plugins/navide-git) and built from
+// dist-plugins in dev. Mirrors the mini-IDE / Plans registration above; see
+// registerBundledGit for precedence. The legacy resources/plugins/git bundle
+// remains available only through the explicit recovery path.
 const bundledGit = registerBundledGit(frontendPluginManager, {
   isPackaged: app.isPackaged,
   resourcesPath: process.resourcesPath,
@@ -838,6 +861,21 @@ function currentUiTheme(): string {
   return typeof theme === 'string' ? theme : ''
 }
 
+async function migrateGitStorageForWorkspace(workspacePath: string): Promise<void> {
+  const descriptor = frontendPluginManager.getDescriptor('navide.git')
+  const packageVersion = descriptor?.packageVersion
+  if (!packageVersion) return
+  const context = frontendPluginManager.gitCapabilityContext(packageVersion, workspacePath, 'git-migration')
+  const migration = await migrateBundledGitPreferences(pluginStorageStore, {
+    packageVersion,
+    sourceSnapshot: gitStorageLifecycle.sourceFor(packageVersion),
+    workspaceId: context.runtimeBinding?.workspaceId ?? null,
+    workspacePath,
+    legacySettings: readUiSettings(),
+  })
+  if (migration.completed) gitStorageLifecycle.rememberActive(packageVersion)
+}
+
 const DEFAULT_EDITOR_SETTING_KEY = 'agentTeam.defaultEditor'
 const DEFAULT_EDITOR_COMMAND_KEY = 'agentTeam.defaultEditor.customCommand'
 
@@ -1011,6 +1049,13 @@ function openMiniIdeEditor(host: BrowserWindow | null, params: Record<string, st
 // choice applies here too, with the mini-IDE as the fallback.
 frontendPluginManager.setOpenInEditorHandler((params) => routeEditorOpen(null, params))
 
+// Manifest v2 plans are executed by the Host-owned adapters. In particular,
+// Git's public fs/ui/aiCli calls resolve their workspace and executable/profile
+// identities here; the package never receives a backend socket or raw shell.
+frontendPluginManager.setPublicCapabilityHandler((plan) =>
+  frontendPluginManager.executePublicCapability(plan)
+)
+
 frontendPluginManager.setPublicStorageHandler((execution) => pluginStorageStore.execute(execution))
 
 // Shell-level host capabilities (plugin broker): the Git window's remote/
@@ -1159,6 +1204,20 @@ ipcMain.on('window:reportWorkspace', (event, workspacePath: string) => {
   broadcastOpenWorkspacesChanged()
 })
 
+ipcMain.on('git:contribution-state', (event, state: unknown) => {
+  const hostWindow = BrowserWindow.fromWebContents(event.sender)
+  if (!isTrustedPluginManagementSender(event, mainWindows) ||
+    !hostWindow || typeof state !== 'object' || state === null || Array.isArray(state)) return
+  frontendPluginManager.setGitContributionState(hostWindow, state as Parameters<typeof frontendPluginManager.setGitContributionState>[1])
+})
+
+ipcMain.on('git:contribution-state-clear', (event) => {
+  const hostWindow = BrowserWindow.fromWebContents(event.sender)
+  if (isTrustedPluginManagementSender(event, mainWindows) && hostWindow) {
+    frontendPluginManager.clearGitContributionState(hostWindow)
+  }
+})
+
 // Renderers push the latest recent-workspaces list so the native File > Open
 // Recent submenu stays in sync. Every window pushes on each change, so skip the
 // rebuild when the list is unchanged.
@@ -1281,12 +1340,13 @@ ipcMain.handle('window:openDiff', (event, args: Record<string, string>) => {
 // The standalone Git client plugin view — its own dedicated window (mini-IDE
 // parity), opened from the main window's "open standalone Git" entry. Resolves
 // the backend HTTP base + current theme like openMiniIdeEditor.
-function openGitWindow(workspacePath: string, extraParams: Record<string, string> = {}): boolean {
+async function openGitWindow(workspacePath: string, extraParams: Record<string, string> = {}): Promise<boolean> {
+  await migrateGitStorageForWorkspace(workspacePath)
   const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
   return openGitPluginView(workspacePath, httpUrl, currentUiTheme(), extraParams)
 }
 
-ipcMain.handle('window:openGit', (_event, args: Record<string, string>) => {
+ipcMain.handle('window:openGit', async (_event, args: Record<string, string>) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }
   // Optional diff target: focus the Git window on a file's diff (shown in its
@@ -1298,8 +1358,62 @@ ipcMain.handle('window:openGit', (_event, args: Record<string, string>) => {
     extraParams.git_diff_staged = args.staged ?? ''
     extraParams.git_diff_commit = args.commit ?? ''
   }
-  const ok = openGitWindow(workspacePath, extraParams)
+  if (args.base) extraParams.git_diff_base = args.base
+  if (args.compare) extraParams.git_diff_compare = args.compare
+  const ok = await openGitWindow(workspacePath, extraParams)
   return { ok }
+})
+
+function pluginBoundsFrom(value: unknown): { x: number; y: number; width: number; height: number } | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const values = [record.x, record.y, record.width, record.height]
+  if (!values.every((entry) => typeof entry === 'number' && Number.isFinite(entry))) return null
+  if (Number(record.width) <= 0 || Number(record.height) <= 0) return null
+  return {
+    x: Math.round(Number(record.x)),
+    y: Math.round(Number(record.y)),
+    width: Math.round(Number(record.width)),
+    height: Math.round(Number(record.height)),
+  }
+}
+
+// The renderer supplies layout geometry and a workspace assertion. The main
+// process resolves the registered workspace and actual left contribution;
+// neither the workspace authority nor the opaque instance handle comes from
+// renderer input.
+ipcMain.handle('window:openGitLeft', async (event, args: Record<string, unknown>) => {
+  const hostWindow = trustedGitLeftWindow(event, mainWindows, detachedWindowIds)
+  const requestedWorkspace = typeof args?.workspace_path === 'string' ? args.workspace_path : ''
+  const registeredWorkspace = hostWindow
+    ? registeredGitLeftWorkspace(hostWindow, requestedWorkspace, mainWindowWorkspaces, normalizeWorkspacePath)
+    : null
+  const bounds = pluginBoundsFrom(args?.bounds)
+  if (!hostWindow || !registeredWorkspace || !bounds) return { ok: false }
+  const workspacePath = normalizeWorkspacePath(registeredWorkspace)
+  if (!workspacePath) return { ok: false }
+  await migrateGitStorageForWorkspace(workspacePath)
+  const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
+  return openGitLeftPluginView(hostWindow, workspacePath, bounds, httpUrl, currentUiTheme())
+})
+
+ipcMain.handle('window:updateGitLeft', (event, args: Record<string, unknown>) => {
+  const hostWindow = trustedGitLeftWindow(event, mainWindows, detachedWindowIds)
+  const bounds = pluginBoundsFrom(args?.bounds)
+  if (!hostWindow || !bounds) return { ok: false }
+  return updateGitLeftPluginView(hostWindow, bounds, args?.visible === true)
+})
+
+ipcMain.handle('window:closeGitLeft', (event) => {
+  const hostWindow = trustedGitLeftWindow(event, mainWindows, detachedWindowIds)
+  return hostWindow ? closeGitLeftPluginView(hostWindow) : { ok: false }
+})
+
+ipcMain.handle('window:getZoomFactor', (event) => {
+  const hostWindow = trustedGitLeftWindow(event, mainWindows, detachedWindowIds)
+  if (!hostWindow) return 1
+  const factor = hostWindow.webContents.getZoomFactor()
+  return Number.isFinite(factor) && factor > 0 ? factor : 1
 })
 
 function openBranchDiffWindow(host: BrowserWindow | null, params: Record<string, string>): void {
@@ -1489,10 +1603,10 @@ ipcMain.handle('window:openPlans', (_event, args: { workspace_path?: string; rel
 
 // Git History: routes to the unified Git plugin window (its History view). The
 // dedicated `?window=githistory` renderer it used to open is gone.
-ipcMain.handle('window:openGitHistory', (_event, args: { workspace_path?: string }) => {
+ipcMain.handle('window:openGitHistory', async (_event, args: { workspace_path?: string }) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }
-  const ok = openGitWindow(workspacePath)
+  const ok = await openGitWindow(workspacePath)
   return { ok }
 })
 
@@ -2279,7 +2393,9 @@ function isAppNavigation(url: string): boolean {
 app.on('web-contents-created', (_e, contents) => {
   // Pane zoom changes terminal/editor font size only. Never let a retained
   // Chromium/Electron page zoom scale the entire Navide interface.
-  lockPageZoom(contents)
+  lockPageZoom(contents, () => {
+    if (!contents.isDestroyed()) contents.send('window:zoom-changed')
+  })
   // Electron has no default right-click menu; without this one, right-click is
   // inert everywhere and there is no fallback path for copy/paste.
   installContextMenu(contents)
@@ -2324,14 +2440,15 @@ app.whenReady().then(async () => {
         '[main] AGENT_TEAM_PLUGIN_DEV=1 but Plans dev bundle is missing — run `pnpm run build:plans`'
       )
     }
-    // Dev-only: register the locally built Git plugin (dist-plugins/git), same
-    // gate and override semantics as the mini-IDE / Plans above.
+    // Dev-only: register the locally built Manifest v2 Git plugin
+    // (dist-plugins/navide-git), same gate and override semantics as the
+    // mini-IDE / Plans above.
     const devGitDescriptor = devGitPluginDescriptor()
     if (existsSync(devGitDescriptor.entryFile)) {
       frontendPluginManager.registerDeveloperDescriptor(devGitDescriptor)
     } else {
       console.warn(
-        '[main] AGENT_TEAM_PLUGIN_DEV=1 but Git dev bundle is missing — run `pnpm run build:git`'
+        '[main] AGENT_TEAM_PLUGIN_DEV=1 but Git dev bundle is missing — run `pnpm run build:git:v2`'
       )
     }
     const explicitPackageDir = process.env['AGENT_TEAM_PLUGIN_DEV_PATH']

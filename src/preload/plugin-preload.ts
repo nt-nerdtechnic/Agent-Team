@@ -40,6 +40,16 @@ const nav = {
       reqId: globalThis.crypto.randomUUID(),
     })
   },
+  /** Fixed Host-owned first-party action bridge used by the bundled Git
+   *  package for its existing Git/Issues adapters. The main process validates
+   *  the sender, action, method, and workspace before dispatch. */
+  callHostAction(action: string, args?: unknown): Promise<CapabilityResponse> {
+    return ipcRenderer.invoke('plugin:host:call', {
+      action,
+      args,
+      reqId: globalThis.crypto.randomUUID(),
+    })
+  },
   /** Fire-and-forget capability call: no response envelope ever comes back.
    *  Used for the per-keystroke terminal.input path, where a request/response
    *  round-trip per key would eat the typing-latency budget. Scoping is still

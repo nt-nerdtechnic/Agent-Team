@@ -27,6 +27,7 @@ import httpx
 
 from agent_team_backend.applog import app_data_dir
 from agent_team_backend import commit_message_prompt
+from agent_team_backend.host_shell import run_allowlisted, run_allowlisted_text
 from agent_team_backend.pending_registry import TIMEOUT, PendingRegistry
 
 log = logging.getLogger("agent_team_backend.git_service")
@@ -199,53 +200,18 @@ def _git_proc_semaphore() -> asyncio.Semaphore:
 
 async def _run(args: list[str], cwd: str) -> tuple[int, str, str]:
     """Run a git command; return (returncode, stdout, stderr)."""
-    try:
-        async with _git_proc_semaphore():
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-        return proc.returncode or 0, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
-        return 128, "", "git command timed out"
-    except FileNotFoundError:
-        return 128, "", "git executable not found"
-    except Exception as exc:
-        return 128, "", str(exc)
+    async with _git_proc_semaphore():
+        rc, stdout, stderr = await run_allowlisted_text(args, cwd, timeout=15.0)
+    return rc, stdout, stderr
 
 
 async def _run_with_input(args: list[str], cwd: str, stdin_text: str) -> tuple[int, str, str]:
     """Run a git command feeding *stdin_text* to stdin; return (rc, stdout, stderr)."""
-    try:
-        async with _git_proc_semaphore():
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=cwd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(stdin_text.encode("utf-8")), timeout=15.0)
-        return proc.returncode or 0, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
-        return 128, "", "git command timed out"
-    except FileNotFoundError:
-        return 128, "", "git executable not found"
-    except Exception as exc:
-        return 128, "", str(exc)
+    async with _git_proc_semaphore():
+        rc, stdout, stderr = await run_allowlisted_text(
+            args, cwd, timeout=15.0, input_text=stdin_text
+        )
+    return rc, stdout, stderr
 
 
 async def _run_bytes(args: list[str], cwd: str) -> tuple[int, bytes, str]:
@@ -255,27 +221,10 @@ async def _run_bytes(args: list[str], cwd: str) -> tuple[int, bytes, str]:
     binary blobs; conflict stages must be inspected as bytes to tell text from
     binary before any decoding happens.
     """
-    try:
-        async with _git_proc_semaphore():
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-        return proc.returncode or 0, stdout, stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
-        return 128, b"", "git command timed out"
-    except FileNotFoundError:
-        return 128, b"", "git executable not found"
-    except Exception as exc:
-        return 128, b"", str(exc)
+    async with _git_proc_semaphore():
+        rc, stdout, stderr = await run_allowlisted(args, cwd, timeout=15.0)
+    decoded = stderr.decode("utf-8", errors="replace")
+    return rc, stdout, decoded
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -2064,30 +2013,8 @@ async def stage_all(workspace_path: str) -> dict[str, Any]:
 async def _run_with_timeout(
     args: list[str], cwd: str, timeout: float = 30.0, env: dict[str, str] | None = None
 ) -> tuple[int, str, str]:
-    proc: asyncio.subprocess.Process | None = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return proc.returncode or 0, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        return 1, "", f"timed out after {int(timeout)}s"
-    except FileNotFoundError:
-        return 128, "", "git executable not found"
-    except Exception as exc:
-        return 128, "", str(exc)
-    finally:
-        if proc is not None and proc.returncode is None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
+    rc, stdout, stderr = await run_allowlisted_text(args, cwd, timeout=timeout, env=env)
+    return rc, stdout, stderr
 
 
 async def check_staged(workspace_path: str) -> dict[str, Any]:
@@ -2304,6 +2231,7 @@ async def clone_repo(
     *,
     on_credential_request: Callable[[str, str], Awaitable[None]] | None = None,
     on_credential_settled: Callable[[str, str | None], Awaitable[None]] | None = None,
+    credential: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Clone *url* into *target_dir*.
 
@@ -2327,9 +2255,12 @@ async def clone_repo(
     # Run from the parent dir so a relative/new target works; pass paths via `--`.
     # Uses _run_with_timeout (not _run) so a GIT_ASKPASS env can be injected for
     # private repos, same as the other network-writing git operations below.
-    async with _askpass_env(on_credential_request, on_credential_settled) as env:
+    async with _askpass_env(on_credential_request, on_credential_settled, credential) as env:
         rc, out, stderr = await _run_with_timeout(
-            ["git", "clone", "--", url, str(dest)], str(dest.parent), timeout=60.0, env=env
+            _git_base(credential) + ["clone", "--", url, str(dest)],
+            str(dest.parent),
+            timeout=60.0,
+            env=env,
         )
     if rc != 0:
         return {"ok": False, "path": "", "error": stderr.strip() or out.strip()}

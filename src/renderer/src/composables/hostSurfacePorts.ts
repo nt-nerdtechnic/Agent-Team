@@ -148,7 +148,7 @@ type HostAgentTeam = {
     diff: string
     error?: string
   }>
-  gitAccounts?: { getCredential?: (workspacePath: string) => Promise<{ ok?: boolean; credential?: string }> }
+  gitAccounts?: { getCredential?: (workspacePath: string) => Promise<{ ok?: boolean; credential?: { username: string; token: string } | null }> }
 }
 
 function hostAgentTeam(): HostAgentTeam | undefined {
@@ -180,7 +180,7 @@ export function createHostGitBranchDiffPort(backend: HostBackend): GitBranchDiff
 
 export function createHostGitCredentialPort(): GitCredentialPort {
   return {
-    async getCredential(workspacePath: string): Promise<string | null> {
+    async getCredential(workspacePath: string): Promise<{ username: string; token: string } | null> {
       try {
         const result = await hostAgentTeam()?.gitAccounts?.getCredential?.(workspacePath)
         return result?.ok && result.credential ? result.credential : null

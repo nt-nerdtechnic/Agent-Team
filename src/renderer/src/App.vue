@@ -62,6 +62,7 @@ import { usePaneReorderDrag } from './composables/usePaneReorderDrag'
 import { cliHealthGuideForLaunch, type CliHealthStatus, type OnboardStatus } from './composables/useOnboarding'
 import { playDoneSound, playAttentionSound } from './composables/useSoundNotify'
 import { formatIssueForDispatch, buildIssueKickoff, type IssueDetail, type Issue, type IssueProvider, type IssueHandlerMode } from './composables/useIssues'
+import { normalizeGitContributionAction, type GitContributionAction } from './ports/gitContribution'
 import type { RoleKey } from './data/roles'
 import {
   renderSlotKickoff,
@@ -514,6 +515,7 @@ const currentWorkspace = ref<string>(
     }
   })()
 )
+const gitChangesCount = ref(0)
 const workspaceSelected = ref<boolean>(
   _bootWorkspace !== '' ||
   (() => {
@@ -3380,6 +3382,98 @@ async function onHandleIssue(payload: {
     issueHandoffs.value.set(issue.url, { paneId, mode, state: 'handling' })
   }
 }
+
+/** Host-only action receiver for the package-owned Git left contribution. The
+ *  package never receives App callbacks or a generic renderer event channel;
+ *  the main process validates the fixed operation and forwards this typed
+ *  envelope to the active main window. */
+function onGitContributionAction(envelope: {
+  operation: string
+  payload?: Record<string, unknown>
+}): void {
+  const typedAction = normalizeGitContributionAction(envelope)
+  switch (typedAction.operation) {
+    case 'open_path':
+      void window.agentTeam?.openPath?.(typedAction.path)
+      return
+    case 'open_temp_file':
+      void window.agentTeam?.openTempFile?.(typedAction.name, typedAction.content)
+      return
+    case 'open_main_window':
+      void window.agentTeam?.openMainWindow?.({ workspace_path: typedAction.workspace_path })
+      return
+    case 'open_branch_diff_window':
+      void window.agentTeam?.openBranchDiffWindow?.({ workspace_path: typedAction.workspace_path, base: typedAction.base })
+      return
+    case 'open_git_window':
+      void window.agentTeam?.openGitWindow?.({
+        workspace_path: typedAction.workspace_path,
+        ...(typedAction.filepath === undefined ? {} : { filepath: typedAction.filepath }),
+        ...(typedAction.staged === undefined ? {} : { staged: typedAction.staged }),
+        ...(typedAction.commit === undefined ? {} : { commit: typedAction.commit }),
+        ...(typedAction.base === undefined ? {} : { base: typedAction.base }),
+        ...(typedAction.compare === undefined ? {} : { compare: typedAction.compare }),
+      })
+      return
+    case 'open_git_history_window':
+      void window.agentTeam?.openGitHistoryWindow?.({ workspace_path: typedAction.workspace_path })
+      return
+    case 'changes_count':
+      gitChangesCount.value = typedAction.count
+      return
+    case 'open_workspace':
+      void window.agentTeam?.openMainWindow?.({ workspace_path: typedAction.path })
+      return
+    case 'open_file':
+      void window.agentTeam?.openEditorWindow?.({
+        workspace_path: typedAction.payload.workspace_path,
+        filepath: typedAction.payload.filepath,
+        name: typedAction.payload.name,
+      })
+      return
+    case 'open_conflict':
+      void window.agentTeam?.openGitWindow?.({
+        workspace_path: typedAction.payload.workspace_path,
+        filepath: typedAction.payload.filepath,
+      })
+      return
+    case 'open_diff':
+      void window.agentTeam?.openGitWindow?.({
+        workspace_path: typedAction.payload.workspace_path,
+        filepath: typedAction.payload.filepath,
+        staged: typedAction.payload.staged,
+        commit: typedAction.payload.commit,
+      })
+      return
+    case 'open_branch_diff':
+      void window.agentTeam?.openBranchDiffWindow?.({
+        workspace_path: typedAction.payload.workspace_path,
+        base: typedAction.payload.base,
+      })
+      return
+    case 'dispatch_issue':
+      void onDispatchIssue(typedAction.payload)
+      return
+    case 'spawn_for_issue':
+      void onHandleIssue(typedAction.payload)
+      return
+    case 'focus_pane':
+      onSidebarFocusPane(typedAction.paneId)
+      return
+    case 'open_git_accounts':
+      openSettingsAccounts()
+      return
+  }
+}
+
+let stopGitContributionActions: (() => void) | null = null
+onMounted(() => {
+  stopGitContributionActions = window.agentTeam?.onGitContributionAction?.(onGitContributionAction) ?? null
+})
+onUnmounted(() => {
+  stopGitContributionActions?.()
+  stopGitContributionActions = null
+})
 
 // Default delay if no startup trust dialog is observed.
 const ROLE_PROMPT_DELAY_MS = 4000
@@ -12127,6 +12221,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :pipelines="pipelinesApi.pipelines.value"
       :active-pipeline-id="pipelinesApi.activePipelineId.value"
       :backend="backend"
+      :git-changes-count="gitChangesCount"
       v-model:yolo-enabled="yoloEnabled"
       v-model:analyzer-model="analyzerModel"
       v-model:auto-answer-enabled="autoAnswerEnabled"
@@ -12155,6 +12250,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @pipeline-restart="onPipelineRestart"
       @refresh-analyzer="onRefreshAnalyzer"
       @focus-pane="onSidebarFocusPane"
+      @changes-count="gitChangesCount = $event"
       @reorder-pane="reorderPane"
       @open-settings="showSettings = true"
       @open-pipeline-manager="openPipelineManager"

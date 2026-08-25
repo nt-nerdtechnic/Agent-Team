@@ -1,0 +1,78 @@
+/**
+ * base.css — GitHub Primer color palette (Level 1 tokens)
+ *
+ * Raw color values for the GitHub-inspired default theme (dark-github).
+ * semantic.css and dark-github reference these; other themes (dark-midnight,
+ * dark-forest, etc.) define their own hex values directly — that is intentional,
+ * as each theme has its own distinct palette that doesn't map to these scales.
+ * Components must NOT use these directly; use the semantic tokens instead.
+ *
+ * Naming follows GitHub Primer-style scales (lower = darker).
+ */
+
+:root {
+  /* Gray scale */
+  --gray-0: #ffffff;
+  --gray-1: #f0f6fc;
+  --gray-2: #c9d1d9;
+  --gray-3: #e6edf3;
+  --gray-4: #8b949e;
+  --gray-5: #6e7681;
+  --gray-6: #484f58;
+  --gray-7: #444d56;
+  --gray-8: #30363d;
+  --gray-9: #21262d;
+  --gray-10: #1c2128;
+  --gray-11: #161b22;
+  --gray-12: #0d1117;
+  --gray-13: #010409;
+
+  /* Blue scale (accent) */
+  --blue-0: #cae8ff;
+  --blue-1: #79c0ff;
+  --blue-2: #58a6ff;
+  --blue-3: #388bfd;
+  --blue-4: #2f81f7;
+  --blue-5: #1f6feb;
+  --blue-6: #1f3a5f;
+  --blue-7: #0d2845;
+
+  /* Green scale (success) */
+  --green-0: #d2f4dc;
+  --green-1: #56d364;
+  --green-2: #3fb950;
+  --green-3: #2ea043;
+  --green-4: #238636;
+  --green-5: #1a6b27;
+  --green-6: #1f6f43;
+  --green-7: #0d2818;
+
+  /* Red scale (danger) */
+  --red-0: #f4d2d2;
+  --red-1: #ffa198;
+  --red-2: #ff7b72;
+  --red-3: #f85149;
+  --red-4: #da3633;
+  --red-5: #8a2929;
+  --red-6: #6f1f1f;
+  --red-7: #3d0d0d;
+
+  /* Yellow / orange scale (attention) */
+  --yellow-0: #f4ecd2;
+  --yellow-1: #e3b341;
+  --yellow-2: #d8b46d;
+  --yellow-3: #d29922;
+  --yellow-4: #f0883e;
+  --yellow-5: #9e6a03;
+  --yellow-6: #6f5b1f;
+  --yellow-7: #2d2100;
+
+  /* Purple / pink scale (done / sponsors) */
+  --purple-0: #bc8cff;
+  --purple-1: #a855f7;
+  --purple-2: #db61a2;
+
+  /* Cyan scale */
+  --cyan-0: #56d4dd;
+  --cyan-1: #06b6d4;
+}

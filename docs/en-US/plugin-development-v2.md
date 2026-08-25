@@ -23,6 +23,13 @@
 > **Migration decision:** Plan B (the B0-B9 checkpoint path) was approved on
 > 2026-08-13. Plans A and C are not active implementation alternatives.
 
+> **Issue 19 production first-party package:** The approved Plan B Git
+> migration is now implemented as the bundled `navide.git` production case.
+> It is one Manifest v2 package with two isolated `custom` views (`left` and
+> `window`), and both views use the same active package version. This does not
+> open third-party publishing or complete the later Plans/Skills migration,
+> marketplace lifecycle, or legacy-removal work.
+
 ## What is public
 
 Third-party plugins may depend only on these public package names:
@@ -637,11 +644,12 @@ Host-approved storage grant for its authenticated package version, but must not
 declare a new `storage` permission in its manifest.
 
 Current runtime status: the Electron main-process adapter and Host-only
-planning/lifecycle seams are implemented, but the production source of
-`storage` grants and authenticated snapshot context is not connected yet.
-Until that integration lands, production calls receive `CAPABILITY_DENIED`;
-the API below describes the contract and the adapter seam, not an enabled
-third-party runtime feature.
+planning/lifecycle seams are implemented. The production source of `storage`
+grants and authenticated snapshot context is connected for the first-party
+`navide.git` migration; ordinary third-party production calls still receive
+`CAPABILITY_DENIED` until their own grant/context integration is delivered.
+The API below remains the public contract and does not expose the first-party
+storage migration seam to third-party packages.
 
 The SDK calls accept only a partition class and key; the Host derives the
 plugin identity, workspace identity, package version, and storage location
@@ -718,12 +726,16 @@ instance, so lifecycle changes destroy/reopen the instance rather than
 silently retargeting it. Plugin code never sees tier, version, or storage
 identity.
 
-Package-version upgrades do not automatically carry data forward: a new
-version starts with its own empty snapshot. Issue 28 owns the Host-only clone,
-promotion, rollback, retention, and garbage-collection orchestration. The
-adapter supplies clone and explicit-retention GC seams but does not guess
-lifecycle state. Actual uninstall removes all storage for that plugin after
-cleanup succeeds; a later reinstall does not restore the deleted data.
+Package-version upgrades do not automatically carry data forward for ordinary
+public packages: a new version starts with its own empty snapshot. The
+first-party `navide.git` migration is an explicit Host-owned exception: before
+its current package version is promoted, the Host may clone the prior active
+Git snapshot into the current candidate, then retain the prior snapshot for
+rollback. Plugin code cannot select or read the old tier. Issue 28 still owns
+the general Host-only clone, promotion, rollback, retention, and
+garbage-collection orchestration. Actual uninstall removes all storage for
+that plugin after cleanup succeeds; a later reinstall does not restore the
+deleted data.
 
 Raw `ui.settings` remains a first-party legacy surface, not plugin storage.
 Theme, language, workbench layout, terminal runtime state, workspace files, and
@@ -742,16 +754,46 @@ execution plan is returned.
 
 First-party identity affects eligibility only. It never grants a namespace,
 selects a package version, or bypasses the user grant. Git is not an
-independent permission. The Host shell executable allowlist contains `git`;
-all packages, including `navide.git`, must still declare `shell: "allowlist"`
-and pass the same package-version grant and authenticated binding checks.
-The allowlist matches only the canonical top-level executable name: it does
-not accept wrappers, aliases, or path-qualified replacements. It only confirms
-that the top-level executable is `git`; it does not restrict Git subcommands or
-arguments and is not a process sandbox. Git's pager, aliases, SSH command
-configuration, hooks, and similar mechanisms may indirectly execute other
-programs. Therefore `shell: "allowlist"` combined with Git remains a
-high-trust grant.
+independent permission. The Host shell executable allowlist contains the
+canonical top-level executables `git`, `gh`, and `glab`; all packages,
+including `navide.git`, must still declare `shell: "allowlist"` and pass the
+same package-version grant and authenticated binding checks. This is one
+shared catalog allowlist: adding `gh` and `glab` for Host-owned GitHub/GitLab
+Issue detection also makes those executables available to every package that
+already has the generic allowlist grant. The allowlist matches only the
+canonical top-level executable name: it does not accept wrappers, aliases, or
+path-qualified replacements. It does not restrict subcommands or arguments
+and is not a process sandbox. Git and the `gh`/`glab` CLIs may use pagers,
+aliases, SSH configuration, hooks, tokens, or other mechanisms that indirectly
+execute or contact other programs and services. Therefore
+`shell: "allowlist"` combined with these executables remains a high-trust
+grant.
+
+### First-party production Git package (Issue 19)
+
+The official `navide.git` package is the first production consumer of the
+Manifest v2 custom-view and Host-owned storage seams. Its `left` contribution
+is embedded in the workbench and its `window` contribution is opened in the
+dedicated Git window; the Host resolves both from one active package
+descriptor/version. The package uses custom views only. It does not add a
+tree/provider contribution or a public `git` or `issues` permission namespace.
+
+Repository Git operations remain the existing Host/backend service, reached
+through a typed first-party bridge and the Host shell broker. GitHub and GitLab
+Issue provider detection and JSON normalization remain Host-owned; their
+`gh`/`glab` calls use the same shell allowlist described above. The package
+cannot provide an executable, raw command, working directory, environment, or
+raw terminal access through this bridge. Its AI CLI dock uses the public
+`system.aiCli` semantic contract, including Host-generated session identity,
+terminal dimensions, redraw dimensions, and stop force semantics.
+
+The bridge also preserves the existing Git contribution behavior (repository
+tabs, change counts, issue dispatch/spawn handoffs, pane focus, account
+settings, and Git window targets) while keeping workspace and view identity
+Host-owned. The legacy Git renderer remains available as a rollback path until
+the replacement is independently reviewed and manually verified. Issue 19
+does not remove the legacy implementation or implement later Plans/Skills
+migration or marketplace lifecycle work.
 
 ### Embedded AI CLI public mapping
 
@@ -773,8 +815,11 @@ catalog exposes only the Host-mediated AI CLI addresses below:
 `aiCli.startSession` accepts only an allowlisted `profileId` and terminal
 display dimensions. The Host derives the command, arguments, working directory,
 environment, credentials, workspace, pane metadata, session ID, view instance,
-and event audience. Every control call validates the opaque session against the
-authenticated plugin, package version, workspace, view instance, and audience.
+and event audience. Resize and redraw carry validated positive terminal
+dimensions, and stop carries an explicit force value; neither permits raw PTY
+or process control. Every control call validates the opaque session against
+the authenticated plugin, package version, workspace, view instance, and
+audience.
 Directed output and exit events are delivered only to the authenticated
 audience that created or reattached the session.
 `shell.run`, raw command/executable/arguments/environment/working-directory

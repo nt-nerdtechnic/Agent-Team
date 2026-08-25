@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { generateKeyPairSync, sign as edSign } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -236,6 +236,8 @@ import {
   isReservedPluginId,
   devPlansPluginDescriptor,
   openMiniIdePluginView,
+  openGitLeftPluginView,
+  closeGitLeftPluginView,
   PLANS_PLUGIN_ID,
   MINI_IDE_PLUGIN_ID,
   bundledMiniIdeDir,
@@ -3147,5 +3149,670 @@ describe('Manifest v2 capability runtime deferral', () => {
       workspaceId: 'workspace-2',
     })
     expect(view.webContents.sent).toHaveLength(before)
+  })
+})
+
+describe('first-party Git private bridge', () => {
+  const HOST_CALL = 'plugin:host:call'
+
+  function gitDescriptor(mgr: FrontendPluginManager, workspacePath = '/workspace'): PluginLaunchDescriptor {
+    return {
+      id: 'navide.git',
+      packageVersion: '1.0.0',
+      requires: ['terminal'],
+      capabilityPolicy: manifestV2CapabilityPolicy({
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+      }),
+      capabilityContext: mgr.gitCapabilityContext('1.0.0', workspacePath, 'git-left'),
+      devUrl: '',
+      entryFile: '/plugins/navide.git/index.html',
+      views: [
+        {
+          id: 'left',
+          contributionKey: 'navide.git.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Git',
+          entryFile: '/plugins/navide.git/left.html',
+        },
+      ],
+    }
+  }
+
+  async function openGitView(workspacePath = '/workspace'): Promise<{
+    mgr: FrontendPluginManager
+    view: FakeViewLike
+    host: FakeBrowserWindow
+    sent: Array<{ channel: string; args: unknown[] }>
+  }> {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr, workspacePath)
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    const sent: Array<{ channel: string; args: unknown[] }> = []
+    ;(host as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => sent.push({ channel, args }),
+    }
+    const handle = await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext: descriptor.capabilityContext,
+    })
+    return { mgr, view: host.children[0] as FakeViewLike, host, sent }
+  }
+
+  async function call(
+    view: FakeViewLike,
+    action: string,
+    args: Record<string, unknown>,
+    reqId = 'git-1'
+  ): Promise<Record<string, unknown>> {
+    const handler = ipcHandlers.get(HOST_CALL)
+    expect(handler).toBeDefined()
+    return (await handler!({ sender: { id: view.webContents.id } }, {
+      reqId,
+      action,
+      args,
+    })) as Record<string, unknown>
+  }
+
+  it('routes a validated contribution to its own Host window only', async () => {
+    const first = await openGitView()
+    const descriptor = gitDescriptor(first.mgr)
+    const secondHost = new FakeBrowserWindow()
+    const secondSent: Array<{ channel: string; args: unknown[] }> = []
+    ;(secondHost as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => secondSent.push({ channel, args }),
+    }
+    await first.mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(secondHost),
+      bounds: 'fill',
+      workspacePath: '/other',
+      capabilityContext: first.mgr.gitCapabilityContext('1.0.0', '/other', 'git-window'),
+    })
+
+    const response = await call(first.view, 'git.contribution', {
+      operation: 'changes_count',
+      payload: { count: 4, workspace_path: '/workspace' },
+    })
+
+    expect(response).toEqual({ reqId: 'git-1', ok: true, result: { accepted: true } })
+    expect(first.sent).toEqual([{
+      channel: 'git:contribution-action',
+      args: [{ operation: 'changes_count', payload: { count: 4, workspace_path: '/workspace' } }],
+    }])
+    expect(secondSent).toEqual([])
+
+    const windowResponse = await call(secondHost.children[0] as FakeViewLike, 'git.contribution', {
+      operation: 'changes_count',
+      payload: { count: 1, workspace_path: '/other' },
+    }, 'git-window-contribution')
+    expect(windowResponse).toMatchObject({
+      reqId: 'git-window-contribution',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+
+    const handler = ipcHandlers.get(HOST_CALL)
+    const rejected = await handler!({ sender: { id: first.view.webContents.id } }, {
+      reqId: 'git-2',
+      action: 'git.contribution',
+      args: {
+        operation: 'changes_count',
+        payload: { count: 2, workspace_path: '/other' },
+      },
+      instanceId: 'forged',
+    }) as Record<string, unknown>
+    expect(rejected).toEqual({
+      reqId: '',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'instance identity is Host-owned' },
+    })
+  })
+
+  it('requires nested Git actions to carry the bound workspace', async () => {
+    const { view, sent } = await openGitView()
+
+    const missingWorkspace = await call(view, 'git.contribution', {
+      operation: 'open_file',
+      payload: { filepath: 'src/app.ts', name: 'app.ts' },
+    }, 'git-missing-workspace')
+    expect(missingWorkspace).toMatchObject({
+      reqId: 'git-missing-workspace',
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+
+    const outsideWorkspace = await call(view, 'git.contribution', {
+      operation: 'open_diff',
+      payload: {
+        workspace_path: '/other',
+        filepath: 'src/app.ts',
+        staged: false,
+        name: 'app.ts',
+      },
+    }, 'git-outside-workspace')
+    expect(outsideWorkspace).toMatchObject({
+      reqId: 'git-outside-workspace',
+      ok: false,
+      error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+    })
+
+    const accepted = await call(view, 'git.contribution', {
+      operation: 'open_branch_diff',
+      payload: { workspace_path: '/workspace/repo', base: 'main', compare: 'feature' },
+    }, 'git-bound-workspace')
+    expect(accepted).toEqual({ reqId: 'git-bound-workspace', ok: true, result: { accepted: true } })
+    expect(sent.at(-1)).toEqual({
+      channel: 'git:contribution-action',
+      args: [{
+        operation: 'open_branch_diff',
+        payload: { workspace_path: '/workspace/repo', base: 'main', compare: 'feature' },
+      }],
+    })
+  })
+
+  it.each([
+    ['open_file', { workspace_path: '/workspace', filepath: '../../outside.txt', name: 'outside.txt' }],
+    ['open_conflict', { workspace_path: '/workspace', filepath: '../../outside.txt', name: 'outside.txt' }],
+    ['open_diff', { workspace_path: '/workspace', filepath: '../../outside.txt', staged: false, name: 'outside.txt' }],
+    ['open_git_window', { workspace_path: '/workspace', filepath: '../../outside.txt' }],
+    ['open_file', { workspace_path: '/workspace', filepath: '/absolute/outside.txt', name: 'outside.txt' }],
+    ['open_conflict', { workspace_path: '/workspace', filepath: '/absolute/outside.txt', name: 'outside.txt' }],
+    ['open_diff', { workspace_path: '/workspace', filepath: '/absolute/outside.txt', staged: false, name: 'outside.txt' }],
+    ['open_git_window', { workspace_path: '/workspace', filepath: '/absolute/outside.txt' }],
+  ] as const)('rejects an out-of-workspace %s filepath (%s)', async (operation, payload) => {
+    const { view, sent } = await openGitView()
+
+    const response = await call(view, 'git.contribution', { operation, payload }, `git-outside-file-${operation}`)
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+    })
+    expect(sent).toEqual([])
+  })
+
+  it('accepts an in-workspace relative contribution filepath', async () => {
+    const { view, sent } = await openGitView()
+
+    const response = await call(view, 'git.contribution', {
+      operation: 'open_file',
+      payload: { workspace_path: '/workspace', filepath: 'src/app.ts', name: 'app.ts' },
+    }, 'git-in-workspace-file')
+
+    expect(response).toEqual({ reqId: 'git-in-workspace-file', ok: true, result: { accepted: true } })
+    expect(sent).toEqual([{
+      channel: 'git:contribution-action',
+      args: [{
+        operation: 'open_file',
+        payload: { workspace_path: '/workspace', filepath: 'src/app.ts', name: 'app.ts' },
+      }],
+    }])
+  })
+
+  it('rejects Git contribution paths through a symlink to an outside target', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-workspace-'))
+    const outsidePath = mkdtempSync(join(tmpdir(), 'navide-git-outside-'))
+    try {
+      writeFileSync(join(outsidePath, 'secret.txt'), 'secret')
+      symlinkSync(outsidePath, join(workspacePath, 'link'), 'dir')
+      const { view, sent } = await openGitView(workspacePath)
+      const actions = [
+        {
+          operation: 'open_file',
+          payload: { workspace_path: workspacePath, filepath: 'link/secret.txt', name: 'secret.txt' },
+        },
+        {
+          operation: 'open_conflict',
+          payload: { workspace_path: workspacePath, filepath: 'link/secret.txt', name: 'secret.txt' },
+        },
+        {
+          operation: 'open_diff',
+          payload: { workspace_path: workspacePath, filepath: 'link/secret.txt', staged: false, name: 'secret.txt' },
+        },
+        {
+          operation: 'open_git_window',
+          payload: { workspace_path: workspacePath, filepath: 'link/secret.txt' },
+        },
+        {
+          operation: 'open_path',
+          payload: { path: join(workspacePath, 'link', 'secret.txt') },
+        },
+      ] as const
+
+      for (const [index, action] of actions.entries()) {
+        const response = await call(view, 'git.contribution', action, `git-symlink-outside-${index}`)
+        expect(response).toMatchObject({
+          ok: false,
+          error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+        })
+      }
+      expect(sent).toEqual([])
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+      rmSync(outsidePath, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects Git contribution paths through a dangling symlink', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-workspace-'))
+    const outsidePath = mkdtempSync(join(tmpdir(), 'navide-git-outside-'))
+    try {
+      symlinkSync(join(outsidePath, 'missing-target'), join(workspacePath, 'dangling'), 'file')
+      const { view, sent } = await openGitView(workspacePath)
+      const actions = [
+        {
+          operation: 'open_file',
+          payload: { workspace_path: workspacePath, filepath: 'dangling/secret.txt', name: 'secret.txt' },
+        },
+        {
+          operation: 'open_path',
+          payload: { path: join(workspacePath, 'dangling', 'secret.txt') },
+        },
+      ] as const
+
+      for (const [index, action] of actions.entries()) {
+        const response = await call(view, 'git.contribution', action, `git-symlink-dangling-${index}`)
+        expect(response).toMatchObject({
+          ok: false,
+          error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+        })
+      }
+      expect(sent).toEqual([])
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+      rmSync(outsidePath, { recursive: true, force: true })
+    }
+  })
+
+  it('allows an internal symlink and a missing ordinary leaf inside the workspace', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-workspace-'))
+    try {
+      mkdirSync(join(workspacePath, 'real-dir'))
+      writeFileSync(join(workspacePath, 'real-dir', 'app.ts'), 'export {}')
+      symlinkSync(join(workspacePath, 'real-dir'), join(workspacePath, 'inside-link'), 'dir')
+      const { view, sent } = await openGitView(workspacePath)
+
+      const internalLink = await call(view, 'git.contribution', {
+        operation: 'open_file',
+        payload: { workspace_path: workspacePath, filepath: 'inside-link/app.ts', name: 'app.ts' },
+      }, 'git-symlink-inside')
+      expect(internalLink).toMatchObject({ ok: true, result: { accepted: true } })
+
+      const missingLeaf = await call(view, 'git.contribution', {
+        operation: 'open_path',
+        payload: { path: join(workspacePath, 'new-dir', 'new-file.ts') },
+      }, 'git-missing-leaf')
+      expect(missingLeaf).toMatchObject({ ok: true, result: { accepted: true } })
+      expect(sent).toHaveLength(2)
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps account credentials Host-owned and workspace-scoped', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [{ id: 'account-1', label: 'GitHub', host: 'github.com', username: 'alice', tokenLast4: '1234' }],
+      add: () => ({ id: 'account-2', label: 'GitLab', host: 'gitlab.com', username: 'bob', tokenLast4: '5678' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => 'account-1',
+      getCredential: () => ({ username: 'alice', token: 'secret-token' }),
+    })
+
+    const listed = await call(view, 'git.account', { operation: 'list', payload: {} }, 'git-list')
+    expect(listed).toEqual({
+      reqId: 'git-list',
+      ok: true,
+      result: {
+        available: true,
+        accounts: [{ id: 'account-1', label: 'GitHub', host: 'github.com', username: 'alice' }],
+      },
+    })
+
+    const response = await call(view, 'git.account', {
+      operation: 'get_credential',
+      payload: { workspace_path: '/workspace' },
+    })
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+
+    const denied = await call(view, 'git.account', {
+      operation: 'get_credential',
+      payload: { workspace_path: '/other' },
+    }, 'git-2')
+    expect(denied).toMatchObject({
+      reqId: 'git-2',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('requires the first-party allowlist shell policy and grant for Git requests', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr)
+    descriptor.capabilityPolicy = manifestV2CapabilityPolicy({
+      system: ['fs', 'ui', 'aiCli'],
+    })
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    const handle = await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: descriptor.capabilityContext,
+    })
+
+    const response = await call(host.children[0] as FakeViewLike, 'git.request', {
+      type: 'git.status',
+      payload: { workspace_path: '/workspace' },
+    })
+    expect(handle.instanceId).toBeTruthy()
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('requires publisher eligibility and an allowlist grant for Issues requests', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr)
+    descriptor.capabilityContext = {
+      ...descriptor.capabilityContext!,
+      publisherEligible: false,
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: descriptor.capabilityContext,
+    })
+
+    const response = await call(host.children[0] as FakeViewLike, 'issues.request', {
+      type: 'issues.list',
+      payload: { workspace_path: '/workspace', limit: 10 },
+    })
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('rejects Git requests when the shell mode is full instead of allowlist', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr)
+    descriptor.capabilityPolicy = manifestV2CapabilityPolicy({
+      system: ['fs', 'ui', 'aiCli'],
+      shell: 'full',
+    })
+    descriptor.capabilityContext = {
+      ...descriptor.capabilityContext!,
+      userGrant: { ...descriptor.capabilityContext!.userGrant!, shell: 'full' },
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: descriptor.capabilityContext,
+    })
+
+    const response = await call(host.children[0] as FakeViewLike, 'git.request', {
+      type: 'git.status',
+      payload: { workspace_path: '/workspace' },
+    })
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('rejects Git requests when the package grant omits shell access', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr)
+    descriptor.capabilityContext = {
+      ...descriptor.capabilityContext!,
+      userGrant: {
+        packageVersion: '1.0.0',
+        system: ['fs', 'ui', 'aiCli'],
+        storage: true,
+      },
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: descriptor.capabilityContext,
+    })
+
+    const response = await call(host.children[0] as FakeViewLike, 'git.request', {
+      type: 'git.status',
+      payload: { workspace_path: '/workspace' },
+    })
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('injects the bound credential only into Host-to-backend remote Git requests', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setBackendWsUrl('ws://git-credential-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => 'account-1',
+      getCredential: (workspacePath) => workspacePath === '/workspace'
+        ? { username: 'alice', token: 'secret-token' }
+        : null,
+    })
+
+    const operation = call(view, 'git.request', {
+      type: 'git.push',
+      payload: { workspace_path: '/workspace', remote: 'origin', branch: 'main' },
+    })
+    await Promise.resolve()
+    const request = JSON.parse(socket.sent.at(-1)!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(request.type).toBe('git.push')
+    expect(request.payload).toEqual({
+      workspace_path: '/workspace',
+      remote: 'origin',
+      branch: 'main',
+      credential: { username: 'alice', token: 'secret-token' },
+    })
+    socket.receive({
+      id: request.id,
+      type: request.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(operation).resolves.toMatchObject({ ok: true })
+
+    const rawCredential = await call(view, 'git.request', {
+      type: 'git.push',
+      payload: {
+        workspace_path: '/workspace',
+        credential: { username: 'mallory', token: 'plugin-supplied' },
+      },
+    }, 'git-raw-credential')
+    expect(rawCredential).toMatchObject({
+      reqId: 'git-raw-credential',
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+    expect(socket.sent.map((raw) => JSON.parse(raw).payload.credential?.token)).not.toContain('plugin-supplied')
+  })
+
+  it('fails closed before backend dispatch when a remote Git credential is unavailable', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setBackendWsUrl('ws://git-credential-required-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const getCredential = vi.fn(() => null)
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => null,
+      getCredential,
+    })
+
+    await expect(call(view, 'git.request', {
+      type: 'git.push',
+      payload: { workspace_path: '/workspace', remote: 'origin', branch: 'main' },
+    }, 'git-credential-required')).resolves.toMatchObject({
+      reqId: 'git-credential-required',
+      ok: false,
+      error: { code: 'CREDENTIAL_REQUIRED' },
+    })
+    expect(getCredential).toHaveBeenCalledWith('/workspace')
+    expect(socket.sent).toEqual([])
+  })
+
+  it('does not inject a credential into Issues requests', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setBackendWsUrl('ws://git-issues-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const getCredential = vi.fn(() => ({ username: 'alice', token: 'secret-token' }))
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => 'account-1',
+      getCredential,
+    })
+
+    const operation = call(view, 'issues.request', {
+      type: 'issues.list',
+      payload: { workspace_path: '/workspace', limit: 10 },
+    })
+    await Promise.resolve()
+    const request = JSON.parse(socket.sent.at(-1)!) as { id: string; type: string; payload: Record<string, unknown> }
+    expect(request.payload).toEqual({ workspace_path: '/workspace', limit: 10 })
+    expect(getCredential).not.toHaveBeenCalled()
+    socket.receive({
+      id: request.id,
+      type: request.type,
+      ok: true,
+      payload: { ok: true, issues: [] },
+      error: null,
+      timestamp: '',
+    })
+    await expect(operation).resolves.toMatchObject({ ok: true })
+
+    const localOperation = call(view, 'git.request', {
+      type: 'git.status',
+      payload: { workspace_path: '/workspace' },
+    }, 'git-local-no-credential')
+    await Promise.resolve()
+    const localRequest = JSON.parse(socket.sent.at(-1)!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(localRequest.type).toBe('git.status')
+    expect(localRequest.payload).toEqual({ workspace_path: '/workspace' })
+    socket.receive({
+      id: localRequest.id,
+      type: localRequest.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(localOperation).resolves.toMatchObject({ ok: true })
+    expect(getCredential).not.toHaveBeenCalled()
+  })
+})
+
+describe('Git left legacy rollback composition', () => {
+  it('returns an explicit legacy fallback after replacing a live v2 left view', async () => {
+    const host = new FakeBrowserWindow()
+    Object.defineProperty(host, 'id', { value: 77 })
+    const v2: PluginLaunchDescriptor = {
+      id: 'navide.git',
+      packageVersion: '2.0.0',
+      requires: ['terminal'],
+      capabilityPolicy: manifestV2CapabilityPolicy({
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+      }),
+      capabilityContext: frontendPluginManager.gitCapabilityContext('2.0.0', '/workspace', 'git-left'),
+      devUrl: '',
+      entryFile: '/plugins/navide-git/index.html',
+      views: [
+        {
+          id: 'left',
+          contributionKey: 'navide.git.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Git',
+          entryFile: '/plugins/navide-git/left.html',
+        },
+      ],
+    }
+    const legacy: PluginLaunchDescriptor = {
+      id: 'navide.git',
+      requires: [],
+      devUrl: '',
+      entryFile: '/plugins/git/index.html',
+    }
+
+    frontendPluginManager.replaceBuiltinForRecovery(v2)
+    await expect(openGitLeftPluginView(
+      asHost(host),
+      '/workspace',
+      { x: 0, y: 0, width: 400, height: 300 },
+    )).resolves.toEqual({ ok: true })
+
+    frontendPluginManager.replaceBuiltinForRecovery(legacy)
+    await expect(openGitLeftPluginView(
+      asHost(host),
+      '/workspace',
+      { x: 0, y: 0, width: 400, height: 300 },
+    )).resolves.toEqual({ ok: true, fallback: 'legacy' })
+    expect(host.children).toHaveLength(0)
+    expect(closeGitLeftPluginView(asHost(host))).toEqual({ ok: true })
   })
 })

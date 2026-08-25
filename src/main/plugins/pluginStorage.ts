@@ -48,6 +48,8 @@ export interface HostStorageSnapshotIdentity {
   tier: StorageSnapshotTier
 }
 
+export interface StorageSnapshotIdentitySummary extends HostStorageSnapshotIdentity {}
+
 /** A format-level guard independent from the current snapshot quota. */
 export const MAX_PARTITION_FILE_BYTES = 12 * 1024 * 1024
 
@@ -597,6 +599,56 @@ export class PluginStorageStore {
           maintenanceError(error, 'storage snapshot clone failed')
         }
       })
+    })
+  }
+
+  /** List snapshot identities discovered by the Host from durable partition
+   * metadata. Package code never receives this method; it exists so a Host
+   * lifecycle can select the previous active version before opening a new
+   * candidate without guessing from hashed directory names. */
+  async listSnapshotIdentities(pluginId: string): Promise<StorageSnapshotIdentitySummary[]> {
+    assertNonEmptyString(pluginId, 'plugin id')
+    return this.withPluginOperation(pluginId, async () => {
+      const result: StorageSnapshotIdentitySummary[] = []
+      const pluginDirectory = join(this.resolvedRoot(), safeKey(pluginId))
+      for (const packageDirectoryName of await this.fs.readdir(pluginDirectory)) {
+        const packageDirectory = join(pluginDirectory, packageDirectoryName)
+        const packageStat = await this.fs.stat(packageDirectory)
+        if (!packageStat || packageStat.kind !== 'directory') continue
+        for (const tier of VALID_TIERS) {
+          const tierDirectory = join(packageDirectory, tier)
+          const tierStat = await this.fs.stat(tierDirectory)
+          if (!tierStat || tierStat.kind !== 'directory') continue
+          const paths = [join(tierDirectory, 'plugin.json')]
+          const workspaceDirectory = join(tierDirectory, 'workspaces')
+          for (const name of await this.fs.readdir(workspaceDirectory)) {
+            if (name.endsWith('.json')) paths.push(join(workspaceDirectory, name))
+          }
+          for (const path of paths) {
+            const fileStat = await this.fs.stat(path)
+            if (!fileStat || fileStat.kind !== 'file') continue
+            try {
+              const parsed = JSON.parse(await this.fs.readFile(path)) as Record<string, unknown>
+              if (
+                parsed.pluginId === pluginId &&
+                typeof parsed.packageVersion === 'string' &&
+                parsed.packageVersion.length > 0 &&
+                parsed.tier === tier
+              ) {
+                result.push({ pluginId, packageVersion: parsed.packageVersion, tier })
+              }
+            } catch {
+              // A malformed partition is surfaced by a normal storage read;
+              // discovery skips it so an unrelated broken tier cannot select
+              // itself as an upgrade source.
+            }
+            break
+          }
+        }
+      }
+      return [...new Map(result.map((identity) => [
+        JSON.stringify(identity), identity,
+      ])).values()]
     })
   }
 

@@ -87,7 +87,7 @@ Token Stats 解析相容的本機 CLI Log，將 Usage 歸屬到 Workspace、Pane
 
 ## Git 與 Review
 
-Git View 支援 Repository Discovery、Working Tree Inspection、Staging、Commit、Branch、Remote、Issue 與相關工作流。Multi-repository Workspace 可以在偵測到的 Repository 間切換。
+Git View 支援 Repository Discovery、Working Tree Inspection、Staging、Commit、Branch、Remote、Issue 與相關工作流。Multi-repository Workspace 可以在偵測到的 Repository 間切換。Production Git Package 同時提供嵌入式左側 View 與獨立 Git Window，兩者由同一個 Active Package Version 提供。Repository Operation 仍經由 Navide Host／Backend 邊界處理；GitHub 與 GitLab Issue Detection 在可用時使用設定的 `gh` 或 `glab` CLI。若嵌入式 View 無法建立或更新，會顯示可恢復的不可用狀態並提供手動 Retry，不會因每次 geometry 變更而自動重試。
 
 Commit 前務必審查變更，特別是在 Automation 或 Parallel Run 之後。Agent 生成的變更不會因為顯示在 Git Panel 中就自動變得安全。
 

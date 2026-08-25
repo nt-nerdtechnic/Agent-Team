@@ -305,11 +305,12 @@ describe('AiCliDock — start guards and spawn path', () => {
     await flushPromises()
     expect(termSpies.spawn).toHaveBeenCalledTimes(1)
     expect(termSpies.spawn).toHaveBeenCalledWith({
-      // backend.shell is '' → 'bash' fallback; yolo unset → default ON.
+      // backend.shell is '' → 'bash' fallback; yolo is explicitly enabled by
+      // the Host composition's default setting.
       command: ['bash', '-lc', 'claude --dangerously-skip-permissions'],
       cwd: '/tmp/ws',
       agentKey: 'claude',
-      metadata: { workspace_path: '/tmp/ws', origin: 'test-window' },
+      metadata: { workspace_path: '/tmp/ws', origin: 'test-window', yolo: true },
       skipReattach: true,
     })
   })

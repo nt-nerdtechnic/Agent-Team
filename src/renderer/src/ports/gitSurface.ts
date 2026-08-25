@@ -78,7 +78,7 @@ export interface GitBranchDiffPort {
 }
 
 export interface GitCredentialPort {
-  getCredential?(workspacePath: string): Promise<string | null>
+  getCredential?(workspacePath: string): Promise<{ username: string; token: string } | null>
 }
 
 export interface GitAccountPublic {
@@ -156,10 +156,10 @@ export interface GitSurfacePorts {
   gitTransport: GitTransport
   fileAccess: GitFileAccessPort
   ui: GitWindowUiPort
-  paneUi?: GitPaneUiPort
+  paneUi: GitPaneUiPort
   branchDiff: GitBranchDiffPort
-  credentials: GitCredentialPort
-  accounts: GitAccountViewPort
+  credentials?: GitCredentialPort
+  accounts: GitAccountPort
   issues: IssuePort
   settings?: GitSettingsPort
 }

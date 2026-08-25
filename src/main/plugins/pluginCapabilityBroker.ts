@@ -51,6 +51,7 @@ export type CapabilityErrorCode =
   | 'TIMEOUT'
   | 'BACKEND_UNAVAILABLE'
   | 'PLUGIN_STOPPING'
+  | 'CREDENTIAL_REQUIRED'
   | 'STORAGE_QUOTA_EXCEEDED'
   | 'INTERNAL_ERROR'
 

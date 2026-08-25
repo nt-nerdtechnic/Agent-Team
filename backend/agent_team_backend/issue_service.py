@@ -23,6 +23,8 @@ import logging
 import re
 from typing import Any
 
+from agent_team_backend.host_shell import run_allowlisted_text
+
 log = logging.getLogger("agent_team_backend.issue_service")
 
 # Issue calls hit the network — allow more headroom than git_service's 15s.
@@ -54,30 +56,7 @@ async def _run(args: list[str], cwd: str) -> tuple[int, str, str]:
     A missing executable maps to rc 127 so callers can distinguish
     "CLI not installed" from a normal non-zero exit.
     """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT)
-        return (
-            proc.returncode or 0,
-            stdout.decode("utf-8", errors="replace"),
-            stderr.decode("utf-8", errors="replace"),
-        )
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.wait()  # reap the killed child so it doesn't linger as a zombie
-        except Exception:
-            pass
-        return 128, "", f"{args[0]} timed out"
-    except FileNotFoundError:
-        return 127, "", f"{args[0]} not found"
-    except Exception as exc:
-        return 128, "", str(exc)
+    return await run_allowlisted_text(args, cwd, timeout=_TIMEOUT)
 
 
 # ─── provider detection ───────────────────────────────────────────────────────

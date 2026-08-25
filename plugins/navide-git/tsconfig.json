@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowJs": false,
+    "baseUrl": ".",
+    "paths": {
+      "@navide/git-shared/*": ["../../packages/features/git-ui/src/*"],
+      "@navide/git-feature": ["../../packages/features/git/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue", "tests/**/*.ts", "../../packages/features/git-ui/src/**/*.ts", "../../packages/features/git-ui/src/**/*.vue"]
+}

@@ -23,7 +23,7 @@ export const STORAGE_LIMITS = {
 
 /** Executable names accepted by the public shell.run allowlist mode.
  * Package identity cannot add to or bypass this Host-owned policy. */
-export const HOST_SHELL_EXECUTABLE_ALLOWLIST: readonly string[] = ['git']
+export const HOST_SHELL_EXECUTABLE_ALLOWLIST: readonly string[] = ['git', 'gh', 'glab']
 
 interface PublicCapabilityCatalogBase {
   address: string
@@ -136,12 +136,44 @@ function validateExternalRequest(value: unknown): value is Record<string, unknow
 }
 
 function validateStartRequest(value: unknown): value is Record<string, unknown> {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['profileId', 'cols', 'rows'])) return false
-  return nonEmptyString(value.profileId) && positiveInteger(value.cols) && positiveInteger(value.rows)
+  if (!isRecord(value) || !hasOnlyKeys(value, ['profileId', 'requestId', 'cols', 'rows', 'paneId', 'yolo'])) return false
+  return (
+    nonEmptyString(value.profileId) &&
+    (value.requestId === undefined || nonEmptyString(value.requestId)) &&
+    positiveInteger(value.cols) &&
+    positiveInteger(value.rows) &&
+    (value.paneId === undefined || nonEmptyString(value.paneId)) &&
+    (value.yolo === undefined || typeof value.yolo === 'boolean')
+  )
+}
+
+function validateWriteFileRequest(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && hasOnlyKeys(value, ['path', 'content']) &&
+    nonEmptyString(value.path) && typeof value.content === 'string'
+}
+
+function validateListFilesRequest(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['query', 'maxResults'])) return false
+  return (
+    (value.query === undefined || typeof value.query === 'string') &&
+    (value.maxResults === undefined || positiveInteger(value.maxResults))
+  )
 }
 
 function validateSessionRequest(value: unknown): value is Record<string, unknown> {
   return requestWithString('sessionId', value)
+}
+
+function validateReattachRequest(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['sessionId', 'cols', 'rows'])) return false
+  return nonEmptyString(value.sessionId) &&
+    ((positiveInteger(value.cols) && positiveInteger(value.rows)) ||
+      (value.cols === 0 && value.rows === 0))
+}
+
+function validateStopRequest(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['sessionId', 'force'])) return false
+  return nonEmptyString(value.sessionId) && typeof value.force === 'boolean'
 }
 
 function validateInputRequest(value: unknown): value is Record<string, unknown> {
@@ -196,9 +228,13 @@ function storageMethod(
 
 export const PUBLIC_CAPABILITY_CATALOG: Readonly<Record<string, PublicCapabilityCatalogEntry>> = {
   'fs.readFile': systemMethod('fs.readFile', 'fs', (value) => requestWithString('path', value)),
+  'fs.writeFile': systemMethod('fs.writeFile', 'fs', validateWriteFileRequest),
+  'fs.readImage': systemMethod('fs.readImage', 'fs', (value) => requestWithString('path', value)),
   'fs.listDirectory': systemMethod('fs.listDirectory', 'fs', (value) => requestWithString('path', value)),
+  'fs.listFilesFlat': systemMethod('fs.listFilesFlat', 'fs', validateListFilesRequest),
   'fs.glob': systemMethod('fs.glob', 'fs', (value) => requestWithString('pattern', value)),
   'fs.stat': systemMethod('fs.stat', 'fs', (value) => requestWithString('path', value)),
+  'fs.statPath': systemMethod('fs.statPath', 'fs', (value) => requestWithString('path', value)),
   'ui.openInEditor': systemMethod('ui.openInEditor', 'ui', validateEditorRequest),
   'ui.openExternal': systemMethod('ui.openExternal', 'ui', validateExternalRequest),
   'storage.get': storageMethod('storage.get'),
@@ -206,12 +242,12 @@ export const PUBLIC_CAPABILITY_CATALOG: Readonly<Record<string, PublicCapability
   'storage.delete': storageMethod('storage.delete'),
   'aiCli.startSession': aiCliMethod('aiCli.startSession', validateStartRequest),
   'aiCli.cancelStart': aiCliMethod('aiCli.cancelStart', (value) => requestWithString('requestId', value)),
-  'aiCli.reattachSession': aiCliMethod('aiCli.reattachSession', validateSessionRequest),
+  'aiCli.reattachSession': aiCliMethod('aiCli.reattachSession', validateReattachRequest),
   'aiCli.sendInput': aiCliMethod('aiCli.sendInput', validateInputRequest),
   'aiCli.resizeSession': aiCliMethod('aiCli.resizeSession', validateResizeRequest),
-  'aiCli.redrawSession': aiCliMethod('aiCli.redrawSession', validateSessionRequest),
+  'aiCli.redrawSession': aiCliMethod('aiCli.redrawSession', validateResizeRequest),
   'aiCli.interruptSession': aiCliMethod('aiCli.interruptSession', validateSessionRequest),
-  'aiCli.stopSession': aiCliMethod('aiCli.stopSession', validateSessionRequest),
+  'aiCli.stopSession': aiCliMethod('aiCli.stopSession', validateStopRequest),
   'shell.run': {
     address: 'shell.run',
     kind: 'method',

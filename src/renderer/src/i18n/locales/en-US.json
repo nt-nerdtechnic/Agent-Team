@@ -84,7 +84,9 @@
       "add-new": "Add new account…",
       "save-and-bind": "Save as account & bind this workspace",
       "credential-invalid": "This workspace's bound account credential may be invalid — update it in Settings › Accounts."
-    }
+    },
+    "left-view-unavailable": "The embedded Git view is temporarily unavailable.",
+    "open-workspace": "Open a workspace to use Git."
   },
   "pane": {
     "git": {

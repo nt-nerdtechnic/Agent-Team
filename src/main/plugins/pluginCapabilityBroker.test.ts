@@ -297,8 +297,8 @@ describe('Issue 03/04 public Host planner', () => {
     ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
   })
 
-  it('records Git as the only Host-maintained shell executable', () => {
-    expect(HOST_SHELL_EXECUTABLE_ALLOWLIST).toEqual(['git'])
+  it('records the approved Host-maintained shell executables', () => {
+    expect(HOST_SHELL_EXECUTABLE_ALLOWLIST).toEqual(['git', 'gh', 'glab'])
     expect(
       planPublicCapabilityCall(
         call({ ns: 'shell', method: 'run', args: { command: 'git status' } }),

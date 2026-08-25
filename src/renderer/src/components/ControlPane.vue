@@ -7,6 +7,7 @@ import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import RebuildIcon from './RebuildIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
+import GitPluginHostSlot from './GitPluginHostSlot.vue'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
 import type { DisplayStatus } from '../composables/useTerminal'
 import type { Role, RoleKey } from '../data/roles'
@@ -16,11 +17,6 @@ import { registerCommand } from '../keybindings/useKeybindings'
 import { useUpdater } from '../composables/useUpdater'
 import { i18n } from '../i18n'
 import { useNotify } from '../composables/useNotify'
-
-// MultiRepoGit wraps GitPane and adds a repo tab bar when 2+ repos are found.
-// Loaded async (same reasoning as GitPane: ~276KB, off first-paint path).
-// Kept v-show (not v-if) so its changes-count badge stays live while Explorer tab is showing.
-const MultiRepoGit = defineAsyncComponent(() => import('./MultiRepoGit.vue'))
 
 // PlanPane: the plan review surface (drill-down list → preview) embedded in the
 // Plans sidebar tab. Async-loaded (off first-paint path, pulls in plan machinery).
@@ -237,6 +233,8 @@ interface Props {
   rebuildingAll?: boolean
   /** Issue dispatch/handle status — forwarded to GitPane for badges. */
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
+  /** Change count published by the package-owned Git contribution. */
+  gitChangesCount?: number
 }
 
 const props = defineProps<Props>()
@@ -318,6 +316,7 @@ const emit = defineEmits<{
   (e: 'dispatch-issue', payload: { paneId: string; issue: IssueDetail }): void
   (e: 'spawn-for-issue', payload: { agentKey: string; mode: IssueHandlerMode; issue: Issue; provider: IssueProvider }): void
   (e: 'open-git-accounts'): void
+  (e: 'changes-count', count: number): void
   (e: 'rename-pane', paneId: string, name: string): void
   (e: 'install-cli', payload: { agentKey: string; label: string }): void
 }>()
@@ -598,8 +597,9 @@ for (let i = 1; i <= 9; i++) {
   })
 }
 
-// Git tab badge — updated by GitPane via changes-count event
-const gitChangesCount = ref(0)
+// The v2 Git contribution owns its own refresh lifecycle. Keep the badge slot
+// until the package publishes a first-party change-count event.
+const gitChangesCount = computed(() => props.gitChangesCount ?? 0)
 
 // ── Pipeline two-layer navigation ─────────────────────────────────────────────
 const sidebarView = ref<'list' | 'pipeline'>('list')
@@ -846,6 +846,24 @@ const dispatchTargets = computed(() =>
     .map((p) => ({ id: p.id, label: p.slotLabel || p.roleLabel || p.agentLabel }))
 )
 
+function publishGitContributionState(): void {
+  window.agentTeam?.setGitContributionState?.({
+    workspacePath: workspacePath.value,
+    analyzerModel: props.analyzerModel,
+    dispatchTargets: dispatchTargets.value,
+    availableAgents: availableAgents.value,
+    issueHandoffs: props.issueHandoffs ?? {},
+  })
+}
+
+watch(
+  [workspacePath, () => props.analyzerModel, dispatchTargets, availableAgents, () => props.issueHandoffs],
+  publishGitContributionState,
+  { immediate: true, deep: true },
+)
+
+onUnmounted(() => window.agentTeam?.clearGitContributionState?.())
+
 const pipelineProgress = computed(() => {
   const total = props.pipeline.totalStages || props.stages.length || 1
   if (props.pipeline.state === 'idle') return 0
@@ -1040,16 +1058,17 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           :workspace-path="workspace ?? ''"
           :backend="backend"
         />
-        <MultiRepoGit
+        <GitPluginHostSlot
           v-if="backend"
           v-show="sidebarTab === 'git'"
           :workspace-path="workspace ?? ''"
-          :analyzer-model="analyzerModel"
+          :visible="sidebarTab === 'git'"
           :backend="backend"
+          :analyzer-model="analyzerModel"
           :dispatch-targets="dispatchTargets"
           :available-agents="availableAgents"
           :issue-handoffs="issueHandoffs"
-          @changes-count="gitChangesCount = $event"
+          @changes-count="$emit('changes-count', $event)"
           @open-workspace="$emit('workspace-browse', $event)"
           @dispatch-issue="$emit('dispatch-issue', $event)"
           @spawn-for-issue="$emit('spawn-for-issue', $event)"
