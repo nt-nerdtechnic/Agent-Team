@@ -6656,8 +6656,24 @@ function buildExistingProjectInfo(payload: ProjectPayload | null): ExistingProje
   }
 }
 
+/** Guards against the same workspace being checked twice in quick succession.
+ *
+ *  ControlPane reaches here through a 400ms debounce on its workspace field,
+ *  and a switch calls it directly so the window does not spend those 400ms
+ *  pairing the new workspace with the old run groups. Both fire for one
+ *  switch — and the second bumps workspaceCheckSeq, which is exactly the
+ *  condition the first one's restore bails on. It gave up midway and the
+ *  workspace came up with none of its panes. */
+let lastWorkspaceCheck = { path: '', at: 0 }
+const WORKSPACE_RECHECK_MS = 1500
+
 async function onWorkspaceCheck(path: string): Promise<void> {
   if (!path && currentWorkspace.value) return
+  if (path) {
+    const now = Date.now()
+    if (path === lastWorkspaceCheck.path && now - lastWorkspaceCheck.at < WORKSPACE_RECHECK_MS) return
+    lastWorkspaceCheck = { path, at: now }
+  }
   const seq = ++workspaceCheckSeq
   if (!path) {
     existingProject.value = null
@@ -11490,10 +11506,12 @@ async function openWorkspaceFromPicker(path: string): Promise<void> {
   }
   if (await window.agentTeam?.focusWorkspaceWindow?.(path)) return
   adoptWorkspace(path)
-  // Agents are persisted per workspace, so opening one here has to bring them
-  // back — otherwise a project with work in it shows up empty.
-  const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
-  if (resp) await restoreWorkspacePanes(resp, path)
+  // And look at it. Picking a project from a list that says "Open Workspace"
+  // means "show me that one" — adding a row to the sidebar and leaving the
+  // window on the previous project reads as nothing having happened. The
+  // switch also loads it, which brings its persisted agents back: a project
+  // with work in it must not come up empty.
+  await switchToWorkspace(path)
 }
 
 /** Look at another of this window's workspaces.

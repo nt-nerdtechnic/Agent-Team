@@ -176,13 +176,17 @@ describe('cross-workspace roster', () => {
     expect(appSource).not.toContain('titlebar-workspace')
   })
 
-  it('brings an adopted workspace\'s agents back with it', () => {
-    // Agents are persisted per workspace. Adopting one without restoring them
-    // shows a project with work in it as empty.
+  it('opens a picked workspace by actually going to it', () => {
+    // A list headed "Open Workspace" that adds a sidebar row and leaves the
+    // window on the previous project reads as nothing having happened. The
+    // switch also loads it, which is what brings its persisted agents back —
+    // a project with work in it must not come up empty.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')
     const body = appSource.slice(start, appSource.indexOf('\n}', start))
-    expect(body).toContain("'project.peek'")
-    expect(body).toContain('restoreWorkspacePanes')
+    expect(body).toContain('adoptWorkspace(path)')
+    expect(body).toContain('await switchToWorkspace(path)')
+    // The restore rides on the switch rather than being done twice.
+    expect(body).not.toContain('restoreWorkspacePanes')
   })
 
   it('lets restore run for any workspace this window holds', () => {
@@ -387,6 +391,23 @@ describe('cross-workspace roster', () => {
       const body = appSource.slice(start, appSource.indexOf('\n}', start))
       expect(/onKillAll|onKill\(/.test(body), fn).toBe(false)
     }
+  })
+
+  it('does not check the same workspace twice for one switch', () => {
+    // ControlPane reaches onWorkspaceCheck through a 400ms debounce, and a
+    // switch calls it directly so the window does not spend those 400ms
+    // pairing the new workspace with the old run groups. Both fire for one
+    // switch, and the second bumps workspaceCheckSeq — which is exactly the
+    // condition the first one's restore bails on. It gave up midway and the
+    // workspace came up with none of its panes.
+    const start = appSource.indexOf('async function onWorkspaceCheck')
+    const body = appSource.slice(start, appSource.indexOf('\n  const seq =', start))
+    expect(body).toContain('lastWorkspaceCheck.path')
+    expect(body).toContain('WORKSPACE_RECHECK_MS')
+    // The bail condition it protects is still there — this is not guarding a
+    // mechanism that has since gone away.
+    const full = appSource.slice(start, appSource.indexOf('\nasync function', start + 20))
+    expect(full).toContain('seq !== workspaceCheckSeq')
   })
 
   it('picking a workspace it already holds just looks at it', () => {
