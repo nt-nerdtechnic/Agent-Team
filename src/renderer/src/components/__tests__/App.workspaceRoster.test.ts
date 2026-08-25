@@ -322,6 +322,19 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('if (existing) continue')
   })
 
+  it('says so when a switch does not take', () => {
+    // onWorkspaceBrowse declines by returning — chiefly on finding the
+    // workspace open in another window — which from the caller is
+    // indistinguishable from having worked. A switch that quietly does nothing
+    // leaves the sidebar saying one thing and the screen another.
+    const start = appSource.indexOf('async function switchToWorkspace')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('normWs(currentWorkspace.value) !== normWs(path)')
+    expect(body).toContain("switchWorkspace.failed")
+    // And the list swap is undone, so the sidebar still matches the screen.
+    expect(body).toContain('normWs(w) !== normWs(leaving)')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')

@@ -11489,6 +11489,25 @@ async function switchToWorkspace(path: string): Promise<void> {
   ]
   persistExtraWorkspaces()
   await onWorkspaceBrowse(path)
+  // onWorkspaceBrowse has its own reasons to decline — chiefly finding the
+  // workspace open in some other window — and it declines by returning, which
+  // from here is indistinguishable from having worked. A switch that quietly
+  // does nothing is the worst outcome: the sidebar still says one thing and
+  // the screen another. Undo the list swap and say so.
+  if (normWs(currentWorkspace.value) !== normWs(path)) {
+    extraWorkspaces.value = [
+      ...extraWorkspaces.value.filter((w) => normWs(w) !== normWs(leaving)),
+      path,
+    ]
+    persistExtraWorkspaces()
+    notifyRestore.toast(
+      i18n.global.t('switchWorkspace.failed', {
+        name: path.split('/').filter(Boolean).pop() ?? path,
+      }),
+      { type: 'error' },
+    )
+    return
+  }
   // The focused pane is very likely one this window just stopped showing. In
   // grid mode that is harmless, but sidebar and spotlight render the focused
   // pane and nothing else, so they would come up blank. Same landing as

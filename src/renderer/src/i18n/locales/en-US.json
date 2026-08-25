@@ -2298,6 +2298,7 @@
     "empty": "CLI pane has no output yet"
   },
   "switchWorkspace": {
+    "failed": "Could not switch to {name}. It may have been opened in another window in the meantime — the sidebar will say so.",
     "confirmTitle": "Stop the running pipeline?",
     "confirm": "The pipeline running in this project will be stopped — a pipeline belongs to the project it was started in and cannot keep running in the background. Its agents stay open, and so does everything in the other projects.",
     "confirmBtn": "Switch and stop"
