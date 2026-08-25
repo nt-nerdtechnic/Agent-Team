@@ -316,11 +316,13 @@ describe('cross-workspace roster', () => {
     // onScreenPaneIds checks it against the workspace-filtered list. Answering
     // with a pane from another workspace renders nothing at all — a blank
     // main area with a full agent list beside it.
+    // The fallback itself is lib/paneFocus, tested by running it. App's job is
+    // handing it the workspace on screen rather than every pane in the window.
     const start = appSource.indexOf('const effectiveFocusPaneId = computed')
     expect(start).toBeGreaterThan(-1)
-    const body = appSource.slice(start, appSource.indexOf('\n})', start))
-    expect(body).toContain('const here = panesInView.value')
-    expect(body).not.toContain('panes.value.find')
+    const body = appSource.slice(start, appSource.indexOf('\n)', start))
+    expect(body).toContain('panesInView.value')
+    expect(body).not.toContain('panes.value')
   })
 
   it('never tears down the panes of the workspace it leaves', () => {

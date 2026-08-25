@@ -99,7 +99,7 @@ describe('workspace switch — how the parts fit together', () => {
     )
 
     for (const [name, end] of [
-      ['effectiveFocusPaneId', '\n})'],
+      ['effectiveFocusPaneId', '\n)'],
       ['tabFilteredPaneIds', '\n)'],
       ['stageTabShapes', '\n)'],
       ['onKillAll', undefined],
@@ -130,7 +130,7 @@ describe('workspace switch — how the parts fit together', () => {
       ['paneLineage', '\n)'],
       ['tabFilteredPaneIds', '\n)'],
       ['stageTabShapes', '\n)'],
-      ['sidebarOrderedPaneIds', '\n})'],
+      ['sidebarOrderedPaneIds', '\n)'],
     ] as const) {
       expect(body(name, end), name).not.toContain('paneViews')
     }

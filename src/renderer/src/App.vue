@@ -7,6 +7,7 @@ import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups
 import { buildPaneLineage } from './lib/paneLineage'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
+import { flattenSidebarOrder, resolveFocusedPane } from './lib/paneFocus'
 import MemoryPanel, { type MemoryPaneRow } from './components/MemoryPanel.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
@@ -11766,14 +11767,9 @@ function rangeSelectPanes(toId: string, orderedIds?: string[]): void {
  *  matching further once it gained workspace sections.
  *
  *  STRUCTURE LAYER: workspaceGroups and its lineages, never paneViews. */
-const sidebarOrderedPaneIds = computed<string[]>(() => {
-  const out: string[] = []
-  for (const ws of workspaceGroups.value) {
-    if (!ws.isCurrent) continue // remote rows have no selectable panes here
-    for (const row of ws.lineage) out.push(row.id)
-  }
-  return out
-})
+const sidebarOrderedPaneIds = computed<string[]>(() =>
+  flattenSidebarOrder(workspaceGroups.value)
+)
 
 async function onSidebarFocusPane(paneId: string, ev?: MouseEvent): Promise<void> {
   if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey)) {
@@ -12593,19 +12589,11 @@ function onGridHandleEnd(): void {
 }
 
 // Resolved focus pane: skips minimized panes, falls back to first visible
-const effectiveFocusPaneId = computed(() => {
-  // Of the workspace on screen. Sidebar and spotlight render this pane and
-  // nothing else, and onScreenPaneIds checks it against the same filtered list
-  // — so answering with a pane from another workspace renders nothing at all.
-  // Identical to reading every pane whenever the window holds one workspace.
-  const here = panesInView.value
-  if (focusPaneId.value
-    && here.find((p) => p.id === focusPaneId.value)
-    && !minimizedPanes.value.has(focusPaneId.value)) {
-    return focusPaneId.value
-  }
-  return here.find((p) => !minimizedPanes.value.has(p.id))?.id ?? null
-})
+const effectiveFocusPaneId = computed(() =>
+  // Of the workspace on screen — naming a pane from another one renders
+  // nothing at all, since sidebar and spotlight draw this pane and no other.
+  resolveFocusedPane(focusPaneId.value, panesInView.value, minimizedPanes.value)
+)
 
 // ── Dual-focus: show 2 running panes side-by-side in non-grid modes ───────────
 const runningPaneIds = computed(() => {

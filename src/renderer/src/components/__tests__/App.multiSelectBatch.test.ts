@@ -106,13 +106,13 @@ describe('App CLI-pane multi-select + batch context menu', () => {
     // spawn order, which stopped matching the moment the list gained
     // indentation and stopped matching further once it gained sections.
     expect(appSource).toContain('onSetFocus(paneId, ev, sidebarOrderedPaneIds.value)')
+    // The flattening moved to lib/paneFocus, which is tested by running it —
+    // including that rows from another window are skipped, since this window
+    // has no terminal for their panes. Here: App feeds it the grouped rows.
     const start = appSource.indexOf('const sidebarOrderedPaneIds = computed')
     expect(start).toBeGreaterThan(-1)
-    const body = appSource.slice(start, appSource.indexOf('\n})', start))
-    expect(body).toContain('workspaceGroups.value')
-    expect(body).toContain('ws.lineage')
-    // Remote rows list panes this window has no terminal for.
-    expect(body).toContain('if (!ws.isCurrent) continue')
+    const body = appSource.slice(start, appSource.indexOf('\n)', start))
+    expect(body).toContain('flattenSidebarOrder(workspaceGroups.value)')
     // ControlPane forwards the native MouseEvent and paints the selection,
     // without toggling the accordion on a modifier click.
     expect(controlPaneSource).toContain('@click="onAgentLineClick(p.id, $event)"')
