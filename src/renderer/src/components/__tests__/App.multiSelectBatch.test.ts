@@ -96,7 +96,11 @@ describe('App CLI-pane multi-select + batch context menu', () => {
     // modifier-aware handler (plain clicks keep the focus + scroll behavior).
     expect(appSource).toContain(':selected-pane-ids="selectedPaneIds"')
     expect(appSource).toContain('@focus-pane="onSidebarFocusPane"')
-    expect(appSource).toContain('function onSidebarFocusPane(paneId: string, ev?: MouseEvent): void')
+    // async since a plain click may first switch to the pane's workspace —
+    // the sidebar lists panes the grid is filtering out.
+    expect(appSource).toContain(
+      'async function onSidebarFocusPane(paneId: string, ev?: MouseEvent): Promise<void>'
+    )
     // Sidebar ranges over the order it actually renders: each workspace
     // section in turn, each one's lineage flattened. paneViews is the flat
     // spawn order, which stopped matching the moment the list gained

@@ -62,6 +62,22 @@ describe('workspace switch — how the parts fit together', () => {
     }
   })
 
+  it('goes to a pane\'s workspace before focusing it', () => {
+    // The sidebar lists every workspace the window holds, so a click can land
+    // on a pane the grid is filtering out. Focusing one the screen will not
+    // draw is the blank-main-area bug again, reached by clicking rather than
+    // by switching.
+    const fn = body('onSidebarFocusPane')
+    expect(fn).toContain('isLocalWorkspace(target)')
+    expect(fn).toContain('await switchToWorkspace(target)')
+    // A declined switch must not fall through to the focus.
+    expect(fn.indexOf('if (normWs(currentWorkspace.value) !== normWs(target)) return'))
+      .toBeLessThan(fn.indexOf('onFocusPane(paneId)'))
+    // Modifier clicks are range/toggle selection and skip all of this.
+    expect(fn.indexOf('onSetFocus(paneId, ev, sidebarOrderedPaneIds.value)'))
+      .toBeLessThan(fn.indexOf('await switchToWorkspace(target)'))
+  })
+
   it('shows a picked workspace instead of only listing it', () => {
     const pick = body('openWorkspaceFromPicker')
     expect(pick).toContain('adoptWorkspace(path)')

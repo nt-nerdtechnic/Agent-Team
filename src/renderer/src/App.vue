@@ -11875,13 +11875,25 @@ const sidebarOrderedPaneIds = computed<string[]>(() => {
   return out
 })
 
-function onSidebarFocusPane(paneId: string, ev?: MouseEvent): void {
+async function onSidebarFocusPane(paneId: string, ev?: MouseEvent): Promise<void> {
   if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey)) {
     onSetFocus(paneId, ev, sidebarOrderedPaneIds.value)
     return
   }
   selectedPaneIds.value = new Set()
   lastClickPaneId.value = paneId
+  // The sidebar lists every workspace this window holds, so a click can land
+  // on a pane the grid is currently filtering out. Go to its workspace first —
+  // focusing a pane the screen will not draw is the blank-main-area bug again,
+  // reached by clicking instead of by switching.
+  const pane = panes.value.find((p) => p.id === paneId)
+  const target = pane?.workspacePath ?? ''
+  if (target && isLocalWorkspace(target) && normWs(target) !== normWs(currentWorkspace.value)) {
+    await switchToWorkspace(target)
+    // Declined (a running pipeline the user chose to keep): stay put rather
+    // than focus something that is still filtered out.
+    if (normWs(currentWorkspace.value) !== normWs(target)) return
+  }
   onFocusPane(paneId)
 }
 
