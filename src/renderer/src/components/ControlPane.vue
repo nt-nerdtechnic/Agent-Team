@@ -423,6 +423,7 @@ const emit = defineEmits<{
   /** Open a new agent in a workspace that is not this window's. */
   (e: 'add-in-workspace', path: string): void
   (e: 'open-workspace-picker'): void
+  (e: 'switch-to-workspace', path: string): void
   (e: 'close-workspace', path: string): void
   (e: 'reveal-workspace-folder', path: string): void
   (e: 'interrupt', paneId: string): void
@@ -1554,14 +1555,24 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
       <ul v-else class="agent-list">
         <template v-for="ws in localWorkspaceRows" :key="ws?.path ?? '\u0000ungrouped'">
-        <li v-if="ws" class="ws-head ws-head--current" @contextmenu="openWsMenu($event, ws.path, ws.path === workspacePath)">
+        <li
+          v-if="ws"
+          class="ws-head ws-head--current"
+          :class="{ 'ws-head--viewing': ws.path === workspacePath }"
+          @contextmenu="openWsMenu($event, ws.path, ws.path === workspacePath)"
+        >
           <button
             class="ws-caret"
             :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
             @click.stop="emit('toggle-workspace', ws.path)"
           >{{ ws.collapsed ? '›' : '⌄' }}</button>
           <span class="ws-icon"><FolderIcon /></span>
-          <span class="ws-text" :title="ws.path">
+          <span
+            class="ws-text"
+            :class="{ 'ws-text--switchable': ws.path !== workspacePath }"
+            :title="ws.path"
+            @click="ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
+          >
             <span class="ws-line">
               <span class="ws-name">{{ ws.label }}</span>
               <span class="ws-count">{{ ws.count }}</span>
@@ -3008,6 +3019,11 @@ button.icon-btn.muted:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The workspace on screen. The others in this window keep running; their
+   headings read as links to switch to. */
+.ws-head--viewing .ws-name { color: var(--accent-bright, var(--text-bright)); }
+.ws-text--switchable { cursor: pointer; }
+.ws-text--switchable:hover .ws-name { text-decoration: underline; }
 /* Only another window's name is a link — this window's own is where you are. */
 .ws-head:not(.ws-head--current) .ws-text { cursor: pointer; }
 .ws-head:not(.ws-head--current) .ws-text:hover .ws-name { text-decoration: underline; }

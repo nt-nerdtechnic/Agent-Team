@@ -11080,17 +11080,30 @@ const stageTabs = computed<TabItem[]>(() => {
 const tabFilteredPaneIds = computed<Set<string>>(() => {
   // Structure, not stageTabs: this drives pane visibility and grid sizing, and
   // must not re-run when a status dot ticks.
+  //
+  // The grid shows ONE workspace — the one you switched to. Panes belonging to
+  // the others this window holds keep running; they are simply not on screen,
+  // and the sidebar still lists them under their own headings. Tabs are a
+  // workspace's own run groups, so a tab id never matches across workspaces
+  // and the filter has to come first.
+  // Only the OTHER adopted workspaces are held back. A pane whose workspace is
+  // in neither list — a manual resume can pull a session in from any folder —
+  // stays visible exactly as it did before workspaces were a layer.
+  const held = new Set(extraWorkspaces.value.map(normWs))
+  const here = held.size
+    ? panes.value.filter((p) => !held.has(normWs(p.workspacePath)))
+    : panes.value
   if (stageTabShapes.value.length === 0) {
-    return new Set(panes.value.map((p) => p.id))
+    return new Set(here.map((p) => p.id))
   }
   if (activeTab.value === 'manual') {
-    return new Set(panes.value.filter((p) => !p.runGroupId).map((p) => p.id))
+    return new Set(here.filter((p) => !p.runGroupId).map((p) => p.id))
   }
   if (activeTab.value && runGroups.value.some((g) => g.id === activeTab.value)) {
-    return new Set(panes.value.filter((p) => p.runGroupId === activeTab.value).map((p) => p.id))
+    return new Set(here.filter((p) => p.runGroupId === activeTab.value).map((p) => p.id))
   }
-  // Fallback: show all
-  return new Set(panes.value.map((p) => p.id))
+  // Fallback: show all of this workspace's
+  return new Set(here.map((p) => p.id))
 })
 
 // Panes visible under both tab filter and minimize filter — drives grid sizing
@@ -11390,6 +11403,26 @@ async function openWorkspaceFromPicker(path: string): Promise<void> {
   // back — otherwise a project with work in it shows up empty.
   const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
   if (resp) await restoreWorkspacePanes(resp, path)
+}
+
+/** Look at another of this window's workspaces.
+ *
+ *  The one being left stays in the window — its agents keep running and its
+ *  heading stays in the sidebar — so this is a change of view, not a close.
+ *  Everything that follows currentWorkspace (the tab row, the grid, git,
+ *  explorer, plans, the terminal cwd) moves with it. */
+async function switchToWorkspace(path: string): Promise<void> {
+  if (!path || normWs(path) === normWs(currentWorkspace.value)) return
+  if (!isLocalWorkspace(path)) return
+  const leaving = currentWorkspace.value
+  // Swap the two in the adopted list: the one we are leaving joins it, the one
+  // we are entering becomes the primary and drops out of it.
+  extraWorkspaces.value = [
+    ...extraWorkspaces.value.filter((w) => normWs(w) !== normWs(path)),
+    ...(leaving && normWs(leaving) !== normWs(path) ? [leaving] : []),
+  ]
+  persistExtraWorkspaces()
+  await onWorkspaceBrowse(path)
 }
 
 /** Take an adopted workspace back out of this window.
@@ -12916,6 +12949,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @reveal-workspace="revealWorkspace"
       @add-in-workspace="addAgentInWorkspace"
       @open-workspace-picker="workspacePickerOpen = true"
+      @switch-to-workspace="switchToWorkspace"
       @close-workspace="closeWorkspace"
       @reveal-workspace-folder="revealWorkspaceFolder"
       @interrupt="onInterrupt"

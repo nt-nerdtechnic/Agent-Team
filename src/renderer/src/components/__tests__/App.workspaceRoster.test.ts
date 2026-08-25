@@ -210,6 +210,31 @@ describe('cross-workspace roster', () => {
     expect(leaks).toEqual([])
   })
 
+  it('shows one workspace in the grid at a time', () => {
+    // Switching is a change of view: the workspaces left behind keep running
+    // and keep their sidebar headings, they are just not on screen.
+    const start = appSource.indexOf('const tabFilteredPaneIds = computed')
+    const body = appSource.slice(start, appSource.indexOf('\n})', start))
+    expect(body).toContain('extraWorkspaces.value.map(normWs)')
+    // A pane whose workspace is in neither list — a manual resume can pull one
+    // in from any folder — must stay visible as it always did.
+    expect(body).toContain('held.size')
+  })
+
+  it('switching keeps the workspace it leaves', () => {
+    const start = appSource.indexOf('async function switchToWorkspace')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    // The two swap places in the adopted list rather than one being dropped.
+    expect(body).toContain('extraWorkspaces.value = [')
+    expect(body).toContain('leaving')
+    // Everything that follows currentWorkspace moves with it, which is what
+    // onWorkspaceBrowse already does — no second implementation.
+    expect(body).toContain('onWorkspaceBrowse(path)')
+    // Never for a workspace this window does not hold.
+    expect(body).toContain('isLocalWorkspace(path)')
+  })
+
   it('still ties the history pane to the primary workspace', () => {
     // Deliberately NOT widened: spawn history follows the workspace the window
     // was opened with.

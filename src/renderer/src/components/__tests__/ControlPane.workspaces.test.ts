@@ -284,6 +284,25 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.find('.ws-ctx-menu').exists()).toBe(false)
   })
 
+  it('switches to another of this window\'s workspaces by name', async () => {
+    const other = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), other] })
+    const texts = wrapper.findAll('.ws-head--current .ws-text')
+    // The one on screen is inert; the other is the switch.
+    await texts[0].trigger('click')
+    expect(wrapper.emitted('switch-to-workspace')).toBeUndefined()
+    await texts[1].trigger('click')
+    expect(wrapper.emitted('switch-to-workspace')?.[0]).toEqual(['/Users/me/Desktop/Other'])
+  })
+
+  it('marks which workspace is on screen', () => {
+    const other = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), other] })
+    const heads = wrapper.findAll('.ws-head--current')
+    expect(heads[0].classes()).toContain('ws-head--viewing')
+    expect(heads[1].classes()).not.toContain('ws-head--viewing')
+  })
+
   it('titles the section Workspace once workspaces are grouped', () => {
     wrapper = mountWith({ workspaces: [current()] })
     expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.workspace')
