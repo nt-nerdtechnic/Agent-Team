@@ -444,8 +444,6 @@
     "interrupt": "Interrupt",
     "interrupt-not-running": "Cannot interrupt: agent is not running",
     "reapply-role": "Reapply role",
-    "reapply-role-no-role": "Cannot reapply: no role assigned to this agent",
-    "reapply-role-not-running": "Cannot reapply: agent is not running",
     "selected-count": "{count} selected",
     "dragging-panes": "Moving {count} agents",
     "interrupt-selected": "Interrupt selected",

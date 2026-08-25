@@ -18,7 +18,6 @@ const emit = defineEmits<{
   (e: 'context-menu', paneId: string, ev: MouseEvent): void
   (e: 'kill', paneId: string): void
   (e: 'interrupt', paneId: string): void
-  (e: 'reinject', paneId: string): void
   (e: 'restore', paneId: string): void
 }>()
 
@@ -114,9 +113,6 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
           <template v-else>
             <button class="ghost" @click="emit('interrupt', p.id)" :disabled="p.status !== 'running'">
               {{ $t('action.interrupt') }}
-            </button>
-            <button class="ghost" @click="emit('reinject', p.id)" :disabled="p.status !== 'running' || !p.roleKey">
-              {{ $t('action.reapply-role') }}
             </button>
             <button class="danger" @click="emit('kill', p.id)">{{ $t('action.remove') }}</button>
           </template>

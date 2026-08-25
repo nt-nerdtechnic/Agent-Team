@@ -827,10 +827,10 @@ ipcMain.handle('workspace:pick', async (_event, defaultPath?: string) => {
 
 ipcMain.handle('workspace:new', async () => {
   const opts: Electron.OpenDialogOptions = {
-    title: 'New workspace folder',
+    title: 'Choose where to create the workspace',
     defaultPath: app.getPath('home'),
     properties: ['openDirectory', 'createDirectory'],
-    buttonLabel: 'Use this folder'
+    buttonLabel: 'Create here'
   }
 
   const result = mainWindow
@@ -838,7 +838,25 @@ ipcMain.handle('workspace:new', async () => {
     : await dialog.showOpenDialog(opts)
 
   if (result.canceled || result.filePaths.length === 0) return null
-  return result.filePaths[0]
+
+  // Create a fresh empty folder inside the chosen location. mkdir without
+  // `recursive` fails with EEXIST on a taken name, so bumping the suffix never
+  // adopts a folder that already holds someone else's files.
+  const parent = result.filePaths[0]
+  const base = 'navide-workspace'
+  for (let n = 1; n <= 100; n++) {
+    const dir = join(parent, n === 1 ? base : `${base}-${n}`)
+    try {
+      await mkdir(dir)
+      return dir
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue
+      console.error('[workspace:new] failed to create', dir, err)
+      return null
+    }
+  }
+  console.error('[workspace:new] no free workspace folder name under', parent)
+  return null
 })
 
 ipcMain.handle('app:home-dir', () => app.getPath('home'))

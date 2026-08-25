@@ -444,8 +444,6 @@
     "interrupt": "中斷",
     "interrupt-not-running": "無法中斷：Agent 目前未在執行中",
     "reapply-role": "重新套用角色",
-    "reapply-role-no-role": "無法套用：此 Agent 未設定角色",
-    "reapply-role-not-running": "無法套用：Agent 目前未在執行中",
     "selected-count": "已選 {count} 個",
     "dragging-panes": "移動 {count} 個 Agent",
     "interrupt-selected": "中斷所選",

@@ -12920,7 +12920,6 @@ function paneIsCommander(p: ActivePane): boolean {
       @reveal-workspace-folder="revealWorkspaceFolder"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
-      @reinject="onReinject"
       @rebuild="rebuildPaneViaResume"
       @rebuild-all="rebuildPanesViaResume('all')"
       @restore="restorePane"
