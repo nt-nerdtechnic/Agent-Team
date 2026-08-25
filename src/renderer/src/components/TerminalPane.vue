@@ -312,6 +312,7 @@ defineExpose({
   clearQuestion: terminal.clearQuestion,
   markBufferPosition: terminal.markBufferPosition,
   recleanBuffer: terminal.recleanBuffer,
+  flushPendingClean: terminal.flushPendingClean,
   readRenderedText: terminal.readRenderedText,
   readScreenTail: terminal.readScreenTail,
   readLineBeforeCursor: terminal.readLineBeforeCursor,

@@ -1543,13 +1543,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   const BUFFER_CAP = 128 * 1024
   const redrawGuard = createRedrawGuard()
 
+  // Only ever called from flushPendingClean, with the decoded text of every
+  // chunk that arrived inside one CLEAN_COALESCE_MS window. The raw-activity
+  // clock is NOT touched here: it is bumped per chunk in _flushPendingOutput,
+  // so liveness never waits on the coalescing timer.
   function appendClean(chunk: string): void {
-    // ANY byte counts as "process still alive" — spinners included. This feeds
-    // liveness/stall detection (App.vue safety net, resize-quiet gate) ONLY. It
-    // deliberately does NOT drive the RUNNING badge: an idle CLI that merely
-    // repaints its footer/cursor emits raw bytes too, and those must not look
-    // like work. The badge burst is built from CLEANED content below.
-    if (chunk.length > 0) lastRawActivityAt.value = Date.now()
     const cleaned = dropTuiNoise(stripAnsi(chunk))
     if (!cleaned) return
     // A focus/resize repaint re-emits content already on screen; after noise
@@ -1615,6 +1613,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    *  boundary from a record — opencode a `step-finish` reason, antigravity a
    *  completed step that carries a reply. */
   function markTurnComplete(): void {
+    // turn_complete is a synchronous chain (App.vue agent.activity → here →
+    // judgeTurnText → onStageSlotCompleted → cleanBuffer read): the turn's
+    // last chunk usually lands inside the coalesce window, so settle it now.
+    // Otherwise the deferred clean pass would run AFTER the latch is dropped
+    // below, re-latch RUNNING, and the handoff would miss the final text.
+    flushPendingClean()
     turnCompleteAt.value = Date.now()
     runningLatched.value = false
     // A turn that ended is not waiting on anyone: clear the flag so a stale
@@ -1653,12 +1657,14 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   }
 
   function markBufferPosition(): number {
+    flushPendingClean()
     return cleanBuffer.value.length
   }
 
   /** Retroactively scrub TUI noise from the existing buffer — useful when
    *  the noise-filter rules change (HMR) or a watcher arms on an old pane. */
   function recleanBuffer(): void {
+    flushPendingClean()
     cleanBuffer.value = dropTuiNoise(cleanBuffer.value)
     redrawGuard.reset(cleanBuffer.value)
   }
@@ -1854,6 +1860,19 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // not rAF: rAF is paused in packaged Electron when the window is occluded,
   // which would leave output stuck in _pendingOutput.)
   const _BACKGROUND_COALESCE_MS = 100
+  // The text side path (decode → stripAnsi/dropTuiNoise → cleanBuffer → badge
+  // burst) is NOT needed per chunk: its consumers are the RUNNING/IDLE
+  // hysteresis (BURST_GAP_MS / IDLE_CONFIRM_MS, seconds) and App.vue
+  // watchers/polls, none of which read cleanBuffer synchronously with output.
+  // Under a flood (cat of a big file, TUI repaint) a focused pane sees dozens
+  // of chunks per keystroke, and running the regex passes on each one competes
+  // with rendering for the main thread. So chunks are queued and the whole
+  // window is cleaned once, CLEAN_COALESCE_MS after the first chunk. This
+  // only applies to the focused pane's immediate writes: a background flush is
+  // already one batch per _BACKGROUND_COALESCE_MS and cleans inline, so no
+  // pane ever waits longer than 100ms to reflect output. Far below every
+  // timing gate that reads the result; sync readers call flushPendingClean().
+  const CLEAN_COALESCE_MS = 50
   // Output arrives as raw PTY bytes (binary WS frames); legacy string chunks
   // are still accepted defensively. Chunks are queued as-is — xterm.js takes
   // Uint8Array natively and runs its own streaming UTF-8 decoder.
@@ -1869,7 +1888,25 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     return typeof chunk === 'string' ? chunk : _cleanDecoder.decode(chunk, { stream: true })
   }
 
-  function _flushPendingOutput(): void {
+  // Chunks already written to xterm but not yet run through appendClean.
+  let _pendingClean: (string | Uint8Array)[] = []
+  let _cleanTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** Run the text side path over every queued chunk now, in arrival order.
+   *  Synchronous: after it returns cleanBuffer/badge state reflect everything
+   *  written to xterm so far. */
+  function flushPendingClean(): void {
+    if (_cleanTimer) { clearTimeout(_cleanTimer); _cleanTimer = null }
+    const chunks = _pendingClean
+    if (!chunks.length) return
+    _pendingClean = []
+    // Feed the ONE streaming decoder chunk by chunk so a multi-byte character
+    // split across chunks still decodes correctly, then clean the joined text
+    // once — an escape sequence split across chunks is stripped whole here.
+    appendClean(chunks.map(_chunkText).join(''))
+  }
+
+  function _flushPendingOutput(immediateClean = false): void {
     if (_outputTimer) { clearTimeout(_outputTimer); _outputTimer = null }
     const chunks = _pendingOutput
     _pendingOutput = []
@@ -1880,8 +1917,17 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // Callback on the last write: it fires once ALL pending chunks are
       // processed, matching the old single-string-write semantics.
       term.write(chunks[i], i === chunks.length - 1 ? onFirstOutput : undefined)
+      // ANY byte counts as "process still alive" — spinners included. This
+      // feeds liveness/stall detection (App.vue safety net, resize-quiet gate)
+      // ONLY and stays on the chunk path; it deliberately does NOT drive the
+      // RUNNING badge: an idle CLI that merely repaints its footer/cursor emits
+      // raw bytes too. The badge burst is built from CLEANED content, batched
+      // by flushPendingClean.
+      if (chunks[i].length > 0) lastRawActivityAt.value = Date.now()
+      _pendingClean.push(chunks[i])
     }
-    appendClean(chunks.map(_chunkText).join(''))
+    if (immediateClean) flushPendingClean()
+    else if (!_cleanTimer) _cleanTimer = setTimeout(flushPendingClean, CLEAN_COALESCE_MS)
   }
   let mounted = false
   let mountedEl: HTMLElement | null = null
@@ -3315,7 +3361,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         // The user is typing in this pane — render the echo now.
         _flushPendingOutput()
       } else if (!_outputTimer) {
-        _outputTimer = setTimeout(_flushPendingOutput, _BACKGROUND_COALESCE_MS)
+        _outputTimer = setTimeout(() => _flushPendingOutput(true), _BACKGROUND_COALESCE_MS)
       }
     })
 
@@ -4152,6 +4198,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       for (const chunk of _pendingOutput) term.write(chunk)
       _pendingOutput = []
     }
+    // Chunks that DID reach xterm must reach cleanBuffer too before the
+    // decoder below is reset, or the session's tail is lost to every reader.
+    flushPendingClean()
     // Drop any partial-character state so it cannot bleed into a new session.
     _cleanDecoder = new TextDecoder('utf-8')
   }
@@ -4244,6 +4293,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     clearQuestion,
     markBufferPosition,
     recleanBuffer,
+    flushPendingClean,
     readRenderedText,
     readScreenTail,
     readLineBeforeCursor,
