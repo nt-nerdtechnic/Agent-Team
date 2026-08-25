@@ -263,6 +263,18 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('extraWorkspaces.value.length === 0')
   })
 
+  it('names the workspace being viewed in the titlebar', () => {
+    // With several workspaces in one window, switching changed everything
+    // below the titlebar and nothing in it. document.title already carried the
+    // name for Mission Control; the bar itself said nothing.
+    expect(appSource).toContain('class="titlebar-name titlebar-name--ws"')
+    expect(appSource).toContain('{{ workspaceBaseName }}')
+    // Sized to its text, centred by the spacers either side.
+    expect(appSource).toContain('.titlebar-name--ws {')
+    const at = appSource.indexOf('.titlebar-name--ws {')
+    expect(appSource.slice(at, at + 120)).toContain('flex: 0 1 auto')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')

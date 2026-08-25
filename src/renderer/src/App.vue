@@ -12975,6 +12975,12 @@ function paneIsCommander(p: ActivePane): boolean {
            them — Welcome's recent list still has it on its context menu. -->
       <template v-if="workspaceSelected">
         <span class="titlebar-spacer"></span>
+        <!-- Which project the window is looking at. document.title already
+             carries it for Mission Control, but the bar itself said nothing —
+             and with several workspaces in one window, switching between them
+             changed everything below and nothing up here. -->
+        <span class="titlebar-name titlebar-name--ws" :title="currentWorkspace">{{ workspaceBaseName }}</span>
+        <span class="titlebar-spacer"></span>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
       <!-- Detached windows could only be merged back by closing them, which is
@@ -14086,12 +14092,21 @@ function paneIsCommander(p: ActivePane): boolean {
 .titlebar-name {
   flex: 1;
   text-align: center;
+  min-width: 0;
   font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Sized to its text, with the two spacers either side doing the centring —
+   `flex: 1` would let it take a third of the bar and drift as they change. */
+.titlebar-name--ws {
+  flex: 0 1 auto;
+  max-width: 40%;
+  padding: 0 8px;
+  color: var(--text-primary);
 }
 /* Fills the bar between the traffic lights and the gear, and stays draggable
    so the empty stretch still moves the window. */
