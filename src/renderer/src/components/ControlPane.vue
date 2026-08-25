@@ -423,6 +423,8 @@ const emit = defineEmits<{
   /** Open a new agent in a workspace that is not this window's. */
   (e: 'add-in-workspace', path: string): void
   (e: 'open-workspace-picker'): void
+  (e: 'close-workspace', path: string): void
+  (e: 'reveal-workspace-folder', path: string): void
   (e: 'interrupt', paneId: string): void
   (e: 'reinject', paneId: string): void
   (e: 'rebuild', paneId: string): void
@@ -985,6 +987,46 @@ const pickedAgentLabel = computed(
 const addMenuOpen = ref<boolean>(false)
 /** Which workspace heading opened the menu, so a pick starts there. */
 const addMenuWorkspace = ref<string>('')
+
+// ── Right-click on a workspace heading ───────────────────────────────────
+const wsMenu = ref<{ path: string; isPrimary: boolean; x: number; y: number } | null>(null)
+
+function openWsMenu(ev: MouseEvent, path: string, isPrimary: boolean): void {
+  ev.preventDefault()
+  addMenuOpen.value = false
+  wsMenu.value = { path, isPrimary, x: ev.clientX, y: ev.clientY }
+}
+function closeWsMenu(): void {
+  wsMenu.value = null
+}
+function onWsMenuKeydown(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') closeWsMenu()
+}
+watch(wsMenu, (open) => {
+  if (open) {
+    document.addEventListener('click', closeWsMenu)
+    document.addEventListener('keydown', onWsMenuKeydown)
+    document.addEventListener('scroll', closeWsMenu, true)
+  } else {
+    document.removeEventListener('click', closeWsMenu)
+    document.removeEventListener('keydown', onWsMenuKeydown)
+    document.removeEventListener('scroll', closeWsMenu, true)
+  }
+})
+onUnmounted(() => {
+  document.removeEventListener('click', closeWsMenu)
+  document.removeEventListener('keydown', onWsMenuKeydown)
+  document.removeEventListener('scroll', closeWsMenu, true)
+})
+
+function wsMenuAction(kind: 'reveal' | 'copy' | 'close'): void {
+  const m = wsMenu.value
+  if (!m) return
+  closeWsMenu()
+  if (kind === 'reveal') emit('reveal-workspace-folder', m.path)
+  else if (kind === 'copy') void navigator.clipboard?.writeText(m.path)
+  else emit('close-workspace', m.path)
+}
 // Fixed, not absolute: the pane list scrolls under `overflow-y: auto`, which
 // would clip a menu positioned inside it.
 const addMenuAnchor = ref<{ top: number; bottom: number; right: number } | null>(null)
@@ -1519,7 +1561,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
       <ul v-else class="agent-list">
         <template v-for="ws in localWorkspaceRows" :key="ws?.path ?? '\u0000ungrouped'">
-        <li v-if="ws" class="ws-head ws-head--current">
+        <li v-if="ws" class="ws-head ws-head--current" @contextmenu="openWsMenu($event, ws.path, ws.path === workspacePath)">
           <button
             class="ws-caret"
             :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
@@ -1657,7 +1699,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
              agent and busy flag; everything else needs the window that owns
              them, which is what clicking a row goes to. -->
         <template v-for="ws in otherWorkspaceRows" :key="ws.path">
-          <li class="ws-head">
+          <li class="ws-head" @contextmenu="openWsMenu($event, ws.path, false)">
             <button
               class="ws-caret"
               :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
@@ -1689,6 +1731,25 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           </li>
         </template>
       </ul>
+
+      <div
+        v-if="wsMenu"
+        class="ws-ctx-menu"
+        :style="{ top: `${wsMenu.y}px`, left: `${wsMenu.x}px` }"
+        @click.stop
+      >
+        <button class="ws-ctx-opt" @click="wsMenuAction('reveal')">{{ $t('action.open-in-finder') }}</button>
+        <button class="ws-ctx-opt" @click="wsMenuAction('copy')">{{ $t('action.copy-path') }}</button>
+        <!-- The primary workspace is what this window was opened with; closing
+             it would leave the window with no root. Switch or close the window
+             instead. -->
+        <template v-if="!wsMenu.isPrimary">
+          <div class="ws-add-div"></div>
+          <button class="ws-ctx-opt danger" @click="wsMenuAction('close')">
+            {{ $t('action.close-workspace') }}
+          </button>
+        </template>
+      </div>
 
       <div v-if="addMenuOpen" class="ws-add-menu" :style="addMenuStyle" @click.stop>
         <select v-model="pickedRole" class="ws-add-role">
@@ -3056,6 +3117,33 @@ button.icon-btn.muted:hover {
 .ws-add-ck { flex: none; width: 10px; font-size: 10px; }
 .ws-add-lb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-add-more { color: var(--text-secondary); padding-left: 26px; }
+
+/* Right-click menu on a workspace heading. Fixed at the pointer, same reason
+   the ＋ menu is fixed: the pane list scrolls. */
+.ws-ctx-menu {
+  position: fixed;
+  z-index: 61;
+  min-width: 150px;
+  padding: 4px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated, var(--bg-secondary));
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  font-size: 12px;
+}
+.ws-ctx-opt {
+  display: block;
+  width: 100%;
+  padding: 3px 12px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.ws-ctx-opt:hover { background: var(--bg-hover, rgb(255 255 255 / 7%)); }
+.ws-ctx-opt.danger { color: var(--danger, #e05252); }
 /* A pane in another window: shown so you know work is running there, dimmed
    because none of this window's per-pane controls apply to it. */
 .remote-item {

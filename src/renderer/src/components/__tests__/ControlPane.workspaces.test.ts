@@ -243,6 +243,47 @@ describe('ControlPane – workspace sections', () => {
     expect(hidden).toHaveLength(1)
   })
 
+  it('offers a context menu on a workspace heading', async () => {
+    wrapper = mountWith({ workspaces: [current()] })
+    await wrapper.find('.ws-head--current').trigger('contextmenu')
+    const menu = wrapper.find('.ws-ctx-menu')
+    expect(menu.exists()).toBe(true)
+    expect(menu.findAll('.ws-ctx-opt').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('will not offer to close the workspace the window was opened with', async () => {
+    // Closing the primary would leave the window with no root.
+    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current()] })
+    await wrapper.find('.ws-head--current').trigger('contextmenu')
+    expect(wrapper.find('.ws-ctx-opt.danger').exists()).toBe(false)
+  })
+
+  it('closes an adopted workspace from that menu', async () => {
+    const adopted = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), adopted] })
+    await wrapper.findAll('.ws-head--current')[1].trigger('contextmenu')
+    const close = wrapper.find('.ws-ctx-opt.danger')
+    expect(close.exists()).toBe(true)
+    await close.trigger('click')
+    expect(wrapper.emitted('close-workspace')?.[0]).toEqual(['/Users/me/Desktop/Other'])
+  })
+
+  it('reveals a workspace folder from that menu', async () => {
+    // The titlebar button that used to do this is gone.
+    wrapper = mountWith({ workspaces: [current()] })
+    await wrapper.find('.ws-head--current').trigger('contextmenu')
+    await wrapper.findAll('.ws-ctx-opt')[0].trigger('click')
+    expect(wrapper.emitted('reveal-workspace-folder')?.[0]).toEqual(['/Users/me/Desktop/Agent-Team'])
+  })
+
+  it('closes that menu on Escape', async () => {
+    wrapper = mountWith({ workspaces: [current()] })
+    await wrapper.find('.ws-head--current').trigger('contextmenu')
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.ws-ctx-menu').exists()).toBe(false)
+  })
+
   it('titles the section Workspace once workspaces are grouped', () => {
     wrapper = mountWith({ workspaces: [current()] })
     expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.workspace')

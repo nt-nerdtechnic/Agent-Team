@@ -121,10 +121,14 @@ describe('cross-workspace roster', () => {
     const start = appSource.indexOf('function adoptWorkspace')
     expect(start).toBeGreaterThan(-1)
     const body = appSource.slice(start, appSource.indexOf('\n}', start))
-    // Never the primary, never twice.
-    expect(body).toContain('norm(currentWorkspace.value)')
-    expect(body).toContain('extraWorkspaces.value.some')
-    expect(body).toContain('sessionStorage.setItem')
+    // Never the primary, never twice — both come from the one predicate.
+    expect(body).toContain('isLocalWorkspace(path)')
+    expect(body).toContain('persistExtraWorkspaces')
+    const pStart = appSource.indexOf('function isLocalWorkspace')
+    const pred = appSource.slice(pStart, appSource.indexOf('\n}', pStart))
+    expect(pred).toContain('normWs(currentWorkspace.value)')
+    expect(pred).toContain('extraWorkspaces.value.some')
+    expect(appSource).toContain('sessionStorage.setItem(EXTRA_WS_KEY')
   })
 
   it('groups panes by the workspace each was started in', () => {
@@ -170,6 +174,43 @@ describe('cross-workspace roster', () => {
     // there; the sidebar's Workspace section is where they live now.
     expect(appSource).not.toContain('titlebarRevealWorkspace')
     expect(appSource).not.toContain('titlebar-workspace')
+  })
+
+  it('brings an adopted workspace\'s agents back with it', () => {
+    // Agents are persisted per workspace. Adopting one without restoring them
+    // shows a project with work in it as empty.
+    const start = appSource.indexOf('async function openWorkspaceFromPicker')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain("'project.peek'")
+    expect(body).toContain('restoreWorkspacePanes')
+  })
+
+  it('lets restore run for any workspace this window holds', () => {
+    // restoreWorkspacePanes and its helpers guarded on currentWorkspace, which
+    // an adopted workspace is not — every one of those became isLocalWorkspace.
+    const start = appSource.indexOf('async function restoreWorkspacePanes')
+    const body = appSource.slice(start, appSource.indexOf('\nasync function restoreSessionDecision', start))
+    expect(body).not.toContain('currentWorkspace.value !== workspacePath')
+    expect(body).toContain('isLocalWorkspace(workspacePath)')
+  })
+
+  it('still ties the history pane to the primary workspace', () => {
+    // Deliberately NOT widened: spawn history follows the workspace the window
+    // was opened with.
+    const start = appSource.indexOf('function hydrateSpawnHistory')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('currentWorkspace.value !== workspacePath')
+  })
+
+  it('closing an adopted workspace takes its panes with it', () => {
+    const start = appSource.indexOf('async function closeWorkspace')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    // Panes started in it would otherwise sit in the list with no heading.
+    expect(body).toContain('onKill')
+    expect(body).toContain('persistExtraWorkspaces')
+    // The primary is what the window was opened with — closing it leaves no root.
+    expect(body).toContain('normWs(currentWorkspace.value)')
   })
 
   it('focuses the owning window rather than switching this one', () => {

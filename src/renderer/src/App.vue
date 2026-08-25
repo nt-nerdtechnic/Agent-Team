@@ -5553,7 +5553,7 @@ const restoreScopePrompt = ref<RestoreScopePrompt | null>(null)
 const showRestoreScopeModal = computed(() => restoreScopePrompt.value !== null)
 
 function askRestoreScope(workspacePath: string, count: number): Promise<RestoreScopeSelection> {
-  if (currentWorkspace.value !== workspacePath) return Promise.resolve(null)
+  if (!isLocalWorkspace(workspacePath)) return Promise.resolve(null)
   return new Promise((resolve) => {
     const current = restoreScopePrompt.value
     if (current?.workspacePath === workspacePath) {
@@ -6839,7 +6839,7 @@ watch(
 async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: string, onlyGroupId?: string, isStale?: () => boolean): Promise<ColdRestoreBatch | null> {
   // Don't restore if pipeline is active or paused — panes are already alive.
   if (pipeline.state === 'running' || pipeline.state === 'aborted') return null
-  if (isStale?.() || currentWorkspace.value !== workspacePath) return null
+  if (isStale?.() || !isLocalWorkspace(workspacePath)) return null
 
   // Build unified pane list. Prefer project.panes[] (new format); fall back to
   // migrating stages[].slots[] + manual_panes[] for old project.json files that
@@ -7031,7 +7031,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       }
     }
     syncViews()
-    if (isStale?.() || currentWorkspace.value !== workspacePath) return null
+    if (isStale?.() || !isLocalWorkspace(workspacePath)) return null
   }
 
   // Detached/only-group restores keep the existing eager behaviour. Cold
@@ -7055,11 +7055,11 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         : (saved.origin === 'pipeline' ? ensureRestoreGroup() : '')
 
       const canResume = await canResumeSession(saved.agent, workspacePath, sessionId)
-      if (isStale?.() || currentWorkspace.value !== workspacePath) return
+      if (isStale?.() || !isLocalWorkspace(workspacePath)) return
       if (shouldPreserveMissingSessionOnRestore(saved.agent, sessionId, canResume === true)) return
       const attemptResume = shouldAttemptResume(canResume)
       const chatHistoryFile = await savedHistoryFile(saved.agent, workspacePath, saved.pane_id)
-      if (isStale?.() || currentWorkspace.value !== workspacePath) return
+      if (isStale?.() || !isLocalWorkspace(workspacePath)) return
       const resumeCmd = attemptResume
         ? commandWithSelectedBinary(
             saved.agent,
@@ -7150,7 +7150,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       try {
         type HistSnap = { events: Array<{ ts: string; summary: string }> }
         const histResp = await sendQuiet<HistSnap>('history.snapshot', { workspace_path: workspacePath })
-        if (isStale?.() || currentWorkspace.value !== workspacePath) return
+        if (isStale?.() || !isLocalWorkspace(workspacePath)) return
         const events = histResp?.events
         if (Array.isArray(events)) {
           const paneRe = /\[pane ([a-f0-9]{8})\]/
@@ -7188,7 +7188,7 @@ function deferredPaneStillCurrent(
   deferred: DeferredRestoreMetadata,
 ): ActivePane | null {
   const { workspacePath } = deferred
-  if (currentWorkspace.value !== workspacePath) return null
+  if (!isLocalWorkspace(workspacePath)) return null
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane || pane.realized || pane.workspacePath !== workspacePath) return null
   return pane.deferredRestore === deferred ? pane : null
@@ -11320,11 +11320,27 @@ function readExtraWorkspaces(): string[] {
   }
 }
 
+const normWs = (p: string): string => p.replace(/\/+$/, '')
+
+/** Does this window run panes in that workspace? Its primary, or one it has
+ *  adopted. Restore and the other per-workspace operations ask this rather
+ *  than comparing against currentWorkspace alone. */
+function isLocalWorkspace(path: string): boolean {
+  if (!path) return false
+  const target = normWs(path)
+  return (
+    target === normWs(currentWorkspace.value) ||
+    extraWorkspaces.value.some((w) => normWs(w) === target)
+  )
+}
+
 function adoptWorkspace(path: string): void {
-  const norm = (p: string): string => p.replace(/\/+$/, '')
-  if (!path || norm(path) === norm(currentWorkspace.value)) return
-  if (extraWorkspaces.value.some((w) => norm(w) === norm(path))) return
+  if (!path || isLocalWorkspace(path)) return
   extraWorkspaces.value = [...extraWorkspaces.value, path]
+  persistExtraWorkspaces()
+}
+
+function persistExtraWorkspaces(): void {
   try {
     sessionStorage.setItem(EXTRA_WS_KEY, JSON.stringify(extraWorkspaces.value))
   } catch {
@@ -11367,9 +11383,37 @@ const workspacePickerOpen = ref(false)
  *  and its panes live in the window that owns them. */
 async function openWorkspaceFromPicker(path: string): Promise<void> {
   workspacePickerOpen.value = false
-  if (!path || path === currentWorkspace.value) return
+  if (!path || isLocalWorkspace(path)) return
   if (await window.agentTeam?.focusWorkspaceWindow?.(path)) return
   adoptWorkspace(path)
+  // Agents are persisted per workspace, so opening one here has to bring them
+  // back — otherwise a project with work in it shows up empty.
+  const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
+  if (resp) await restoreWorkspacePanes(resp, path)
+}
+
+/** Take an adopted workspace back out of this window.
+ *
+ *  Its panes go with it — they were started in it and belong to it, and
+ *  leaving them behind would put panes in the list with no heading to sit
+ *  under. The primary workspace cannot be closed this way: it is what the
+ *  window was opened with, so closing it would leave no root. */
+async function closeWorkspace(path: string): Promise<void> {
+  if (!path || normWs(path) === normWs(currentWorkspace.value)) return
+  if (!extraWorkspaces.value.some((w) => normWs(w) === normWs(path))) return
+  const doomed = panes.value.filter((p) => normWs(p.workspacePath) === normWs(path))
+  for (const pane of doomed) await onKill(pane.id)
+  extraWorkspaces.value = extraWorkspaces.value.filter((w) => normWs(w) !== normWs(path))
+  persistExtraWorkspaces()
+  const next = new Set(collapsedWorkspaces.value)
+  next.delete(path)
+  collapsedWorkspaces.value = next
+}
+
+/** Reveal a workspace's folder — the titlebar button that used to do this is
+ *  gone, and a project row is where it belongs anyway. */
+function revealWorkspaceFolder(path: string): void {
+  if (path) void window.agentTeam?.openPath?.(path)
 }
 
 /** Bumped when another window asks this one to open an agent. ControlPane
@@ -12872,6 +12916,8 @@ function paneIsCommander(p: ActivePane): boolean {
       @reveal-workspace="revealWorkspace"
       @add-in-workspace="addAgentInWorkspace"
       @open-workspace-picker="workspacePickerOpen = true"
+      @close-workspace="closeWorkspace"
+      @reveal-workspace-folder="revealWorkspaceFolder"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
       @reinject="onReinject"

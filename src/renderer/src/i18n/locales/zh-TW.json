@@ -516,6 +516,7 @@
     "clear-pipeline": "清除流程狀態並關閉所有 Agent 面板",
     "remove-from-history": "從歷史記錄中移除",
     "double-click-rename": "雙擊重新命名",
+    "close-workspace": "關閉工作區",
     "open-workspace-picker": "開啟工作區…",
     "switch-workspace": "切換／關閉工作區（返回歡迎頁）",
     "discard-progress": "捨棄所有階段進度並從第 01 階段重新執行",
