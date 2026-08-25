@@ -82,6 +82,30 @@ describe('workspace switch — how the parts fit together', () => {
     }
   })
 
+  it('leaves one-workspace behaviour exactly as it was', () => {
+    // Nearly every commit on this feature claims it. The claim rests on
+    // panesInView returning panes.value ITSELF when nothing is adopted — not a
+    // copy, not an equivalent filter — so every derived read is a no-op. A
+    // mixed read anywhere would differ even with a single workspace.
+    const piv = body('panesInView', '\n})')
+    expect(piv).toContain('if (!held.size) return panes.value')
+
+    for (const [name, end] of [
+      ['effectiveFocusPaneId', '\n})'],
+      ['tabFilteredPaneIds', '\n})'],
+      ['stageTabShapes', '\n  const shapes'],
+      ['onKillAll', undefined],
+      ['persistPaneOrder', undefined],
+    ] as const) {
+      const b = body(name, end)
+      expect(b, name).toContain('panesInView.value')
+      expect(b, name).not.toContain('panes.value')
+    }
+
+    // Opt-in flags: absent means the old path.
+    expect(body('onWorkspaceBrowse')).toContain('if (!opts?.keepPanes) await onPipelineReset()')
+  })
+
   it('shows a picked workspace instead of only listing it', () => {
     const pick = body('openWorkspaceFromPicker')
     expect(pick).toContain('adoptWorkspace(path)')
