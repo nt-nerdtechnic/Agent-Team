@@ -4,8 +4,29 @@ import type { useBackend } from '../composables/useBackend'
 import { useEditorTargets } from '../composables/useEditorTargets'
 import { useRecentWorkspaces, type RecentWorkspace } from '../composables/useRecentWorkspaces'
 
-const props = defineProps<{ backend: ReturnType<typeof useBackend> }>()
-const emit = defineEmits<{ (e: 'select', path: string): void; (e: 'open-settings'): void }>()
+const props = defineProps<{
+  backend: ReturnType<typeof useBackend>
+  /** Opened from the sidebar rather than shown at startup: gets a close
+   *  button, Escape and a backdrop click. Off by default — there is nothing
+   *  behind the startup screen to dismiss it to. */
+  dismissible?: boolean
+}>()
+const emit = defineEmits<{
+  (e: 'select', path: string): void
+  (e: 'open-settings'): void
+  (e: 'close'): void
+}>()
+
+function dismiss(): void {
+  if (props.dismissible) emit('close')
+}
+function onDismissKey(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') dismiss()
+}
+onMounted(() => {
+  if (props.dismissible) document.addEventListener('keydown', onDismissKey)
+})
+onBeforeUnmount(() => document.removeEventListener('keydown', onDismissKey))
 
 const { recent, loaded, error, touch, pin, unpin, remove } = useRecentWorkspaces(props.backend)
 
@@ -192,9 +213,10 @@ function ctxCopyPath(): void {
 </script>
 
 <template>
-  <div class="welcome-overlay">
+  <div class="welcome-overlay" :class="{ 'welcome-overlay--modal': dismissible }" @click.self="dismiss">
     <div class="welcome-card">
       <header class="w-head">
+        <button v-if="dismissible" class="w-close" :aria-label="$t('action.close')" @click="dismiss">✕</button>
         <h1>Navide</h1>
         <p class="tagline">{{ $t('label.tagline') }}</p>
       </header>
@@ -303,6 +325,23 @@ function ctxCopyPath(): void {
   justify-content: center;
   z-index: 5000;
 }
+/* Opened over a working window, so the app stays visible behind it — the
+   startup screen's opaque inset would read as "the workspace closed". */
+.welcome-overlay--modal { background: rgb(0 0 0 / 45%); }
+.w-head { position: relative; }
+.w-close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  border: none;
+  background: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-muted);
+}
+.w-close:hover { color: var(--text-bright); }
 .welcome-card {
   width: 560px;
   max-height: 86vh;

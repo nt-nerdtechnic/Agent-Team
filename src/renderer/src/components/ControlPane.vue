@@ -405,6 +405,7 @@ const emit = defineEmits<{
   (e: 'reveal-workspace', path: string): void
   /** Open a new agent in a workspace that is not this window's. */
   (e: 'add-in-workspace', path: string): void
+  (e: 'open-workspace-picker'): void
   (e: 'interrupt', paneId: string): void
   (e: 'reinject', paneId: string): void
   (e: 'rebuild', paneId: string): void
@@ -1467,6 +1468,15 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <!-- Each workspace row carries its own count now, so the header is a
              plain section title rather than a running/total tally. -->
         <label class="lbl">{{ workspaces?.length ? $t('label.workspace') : $t('label.active-agents', { running: runningCount, total: panes.length }) }}</label>
+        <!-- Adds a WORKSPACE, not an agent: the per-workspace ＋ below opens
+             an agent inside one. Always present — the section is a list of
+             projects whether or not any is grouped yet. -->
+        <button
+          class="hdr-add-ws"
+          :title="$t('action.open-workspace-picker')"
+          :aria-label="$t('action.open-workspace-picker')"
+          @click="emit('open-workspace-picker')"
+        >＋</button>
         <!-- Both of these act on one workspace's panes, so once the list is
              grouped they belong on that workspace's own row. This is the
              ungrouped fallback. -->
@@ -2341,6 +2351,9 @@ button.link {
   padding: 2px 4px;
   text-align: left;
 }
+/* Title left, controls right: the row is space-between, and without this the
+   ＋ lands in the middle of it. */
+.agent-list-hdr > .lbl { margin-right: auto; }
 .agent-list-hdr {
   position: sticky;
   top: 0;
@@ -2355,6 +2368,19 @@ button.link {
   gap: 2px;
   align-items: center;
 }
+/* Sized to the header's text, not to the 32px action buttons beside it: once
+   the list is grouped this is the only control left up here. */
+.hdr-add-ws {
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-muted);
+}
+.hdr-add-ws:hover { color: var(--text-bright); }
 button.history-btn {
   background: transparent;
   border: 1px solid var(--border-default);

@@ -183,6 +183,23 @@ describe('ControlPane – workspace sections', () => {
     expect(rows[1].findAll('.ws-act')).toHaveLength(0)
   })
 
+  it('offers a way to open another workspace from the section header', async () => {
+    // Orca's Projects header adds a project; the per-workspace ＋ below adds an
+    // agent inside one. Two different things, so two different buttons.
+    wrapper = mountWith({ workspaces: [current()] })
+    const add = wrapper.find('.hdr-add-ws')
+    expect(add.exists()).toBe(true)
+    await add.trigger('click')
+    expect(wrapper.emitted('open-workspace-picker')).toBeTruthy()
+  })
+
+  it('keeps that button even before anything is grouped', async () => {
+    // The section is a list of projects either way.
+    wrapper = mountWith({})
+    await wrapper.find('.hdr-add-ws').trigger('click')
+    expect(wrapper.emitted('open-workspace-picker')).toBeTruthy()
+  })
+
   it('titles the section Workspace once workspaces are grouped', () => {
     wrapper = mountWith({ workspaces: [current()] })
     expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.workspace')

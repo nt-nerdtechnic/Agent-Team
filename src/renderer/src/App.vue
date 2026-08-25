@@ -11304,6 +11304,23 @@ async function revealWorkspace(path: string): Promise<void> {
   }
 }
 
+/** The ＋ on the sidebar's Workspace heading: the Welcome picker, reopened
+ *  over a window that already has a workspace. */
+const workspacePickerOpen = ref(false)
+
+/** Open a workspace picked from that picker.
+ *
+ *  In its OWN window, not this one. The sidebar lists several workspaces side
+ *  by side, so picking one is "also open that", not "leave what I am doing" —
+ *  and two windows on one folder would run two sets of PTY and git operations
+ *  on it, which is why an already-open workspace is focused instead. */
+async function openWorkspaceFromPicker(path: string): Promise<void> {
+  workspacePickerOpen.value = false
+  if (!path || path === currentWorkspace.value) return
+  if (await window.agentTeam?.focusWorkspaceWindow?.(path)) return
+  await window.agentTeam?.openMainWindow?.({ workspace_path: path })
+}
+
 /** Bumped when another window asks this one to open an agent. ControlPane
  *  watches it and opens its spawn card; a counter rather than a boolean so a
  *  second request while the card is already open still registers. */
@@ -12775,6 +12792,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @toggle-workspace="toggleWorkspaceCollapsed"
       @reveal-workspace="revealWorkspace"
       @add-in-workspace="addAgentInWorkspace"
+      @open-workspace-picker="workspacePickerOpen = true"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
       @reinject="onReinject"
@@ -13368,6 +13386,15 @@ function paneIsCommander(p: ActivePane): boolean {
       :backend="backend"
       @select="onWorkspaceSelected"
       @open-settings="showSettings = true"
+    />
+    <!-- Same picker, reopened from the sidebar over a working window. -->
+    <Welcome
+      v-else-if="workspacePickerOpen"
+      :backend="backend"
+      dismissible
+      @select="openWorkspaceFromPicker"
+      @open-settings="showSettings = true"
+      @close="workspacePickerOpen = false"
     />
     <Teleport v-if="confirmCloseWorkspace" to="body">
       <div class="stall-overlay" @click.self="confirmCloseWorkspace = false">

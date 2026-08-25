@@ -516,6 +516,7 @@
     "clear-pipeline": "Clear pipeline state and close all agent panes",
     "remove-from-history": "Remove from history",
     "double-click-rename": "Double-click to rename",
+    "open-workspace-picker": "Open workspace…",
     "switch-workspace": "Switch / close workspace (back to Welcome)",
     "discard-progress": "Discard all stage progress and re-run from Stage 01",
     "recheck-file-exists": "Re-check whether the file exists",

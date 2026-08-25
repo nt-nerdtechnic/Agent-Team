@@ -99,6 +99,27 @@ describe('cross-workspace roster', () => {
     expect(groups).not.toContain('displayPath: collapseHomePath')
   })
 
+  it('opens a picked workspace in its own window, never in this one', () => {
+    // The sidebar lists workspaces side by side, so picking one is "also open
+    // that", not "leave what I am doing" — and two windows on one folder would
+    // run two sets of PTY and git operations on it.
+    const start = appSource.indexOf('async function openWorkspaceFromPicker')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('focusWorkspaceWindow')
+    expect(body).toContain('openMainWindow')
+    expect(body).not.toContain('currentWorkspace.value =')
+  })
+
+  it('reuses the Welcome picker rather than a second copy of it', () => {
+    // Browse / New / Home, the recent list, pinning, the already-open badge —
+    // a rebuilt picker would drift from all of it.
+    expect(appSource).toContain('v-else-if="workspacePickerOpen"')
+    expect(appSource).toContain('@select="openWorkspaceFromPicker"')
+    // Startup keeps its own non-dismissible instance.
+    expect(appSource).toContain('v-if="!workspaceSelected"')
+  })
+
   it('focuses the owning window rather than switching this one', () => {
     const start = appSource.indexOf('async function revealWorkspace')
     expect(start).toBeGreaterThan(-1)
