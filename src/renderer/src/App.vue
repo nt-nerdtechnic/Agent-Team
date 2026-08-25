@@ -4858,8 +4858,12 @@ const rebuildablePaneCount = computed(
 )
 
 /** Rebuildable panes across all tabs — drives the sidebar's rebuild-all button. */
+// "All" means the workspace on screen. The button for it sits on that
+// workspace's heading, and restarting another project's CLIs from there would
+// be a surprise — those panes are not even visible. Identical to the old
+// behaviour whenever this window holds a single workspace.
 const rebuildableAllPaneCount = computed(
-  () => panes.value.filter((p) => p.realized && paneCanRebuild(p)).length
+  () => panesInView.value.filter((p) => p.realized && paneCanRebuild(p)).length
 )
 
 // Panes report a lost PTY one at a time, as each one's reattach probe answers.
@@ -5281,7 +5285,7 @@ async function restartAgentPanes(agentKey: string): Promise<void> {
 async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
   if (rebuildingTabPanes.value) return
   // Rebuild replaces pane ids, so capture the batch up front.
-  const ids = panes.value
+  const ids = panesInView.value
     .filter((p) => p.realized && (scope === 'all' || tabFilteredPaneIds.value.has(p.id)) && paneCanRebuild(p))
     .map((pane) => pane.id)
   if (!ids.length) return
@@ -5424,7 +5428,9 @@ async function onInterrupt(paneId: string): Promise<void> {
 }
 
 async function onKillAll(): Promise<void> {
-  for (const p of [...panes.value]) await onKill(p.id, { markRemoved: false })
+  // The workspace on screen only. Killing another project's agents from a
+  // button attached to this one's list would be unrecoverable and unasked for.
+  for (const p of [...panesInView.value]) await onKill(p.id, { markRemoved: false })
 }
 
 // ── Batch actions on the multi-select set (right-click a selected pane) ───────

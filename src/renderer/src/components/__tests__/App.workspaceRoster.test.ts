@@ -237,6 +237,22 @@ describe('cross-workspace roster', () => {
     expect(grid).toContain('const here = panesInView.value')
   })
 
+  it('keeps the sweeping actions inside the workspace on screen', () => {
+    // Rebuild-all and kill-all hang off one workspace's heading. Reaching into
+    // another project's agents from there is a surprise at best, and kill is
+    // unrecoverable. Unchanged whenever the window holds a single workspace.
+    for (const anchor of ['const rebuildableAllPaneCount', 'async function onKillAll']) {
+      const start = appSource.indexOf(anchor)
+      expect(start, anchor).toBeGreaterThan(-1)
+      const body = appSource.slice(start, appSource.indexOf('\n}', start))
+      expect(body, anchor).toContain('panesInView.value')
+      expect(body, anchor).not.toContain('panes.value')
+    }
+    const start = appSource.indexOf('async function rebuildPanesViaResume')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('const ids = panesInView.value')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')
