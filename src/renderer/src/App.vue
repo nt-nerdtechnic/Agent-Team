@@ -12418,7 +12418,6 @@ function paneIsCommander(p: ActivePane): boolean {
       @minimize="minimizePane"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
-      @reinject="onReinject"
       @rebuild="rebuildPaneViaResume"
       @rebuild-all="rebuildPanesViaResume('all')"
       @restore="restorePane"

@@ -299,7 +299,6 @@ const emit = defineEmits<{
   (e: 'kill-all'): void
   (e: 'minimize', paneId: string): void
   (e: 'interrupt', paneId: string): void
-  (e: 'reinject', paneId: string): void
   (e: 'rebuild', paneId: string): void
   (e: 'rebuild-all'): void
   (e: 'restore', paneId: string): void
@@ -732,12 +731,6 @@ watch(
 
 function openPipelineManager(pipelineId?: string): void {
   emit('open-pipeline-manager', pipelineId)
-}
-
-function reapplyRoleTooltip(p: ActivePaneView): string {
-  if (!p.roleKey) return i18n.global.t('action.reapply-role-no-role')
-  if (p.status !== 'running') return i18n.global.t('action.reapply-role-not-running')
-  return i18n.global.t('action.reapply-role')
 }
 
 function interruptTooltip(p: ActivePaneView): string {
@@ -1352,9 +1345,6 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               <template v-else>
                 <button class="ghost" @click="emit('interrupt', p.id)" :disabled="p.status !== 'running'" :title="interruptTooltip(p)">
                   {{ $t('action.interrupt') }}
-                </button>
-                <button class="ghost" @click="emit('reinject', p.id)" :disabled="p.status !== 'running' || !p.roleKey" :title="reapplyRoleTooltip(p)">
-                  {{ $t('action.reapply-role') }}
                 </button>
                 <button class="danger" @click="emit('kill', p.id)">{{ $t('action.remove') }}</button>
               </template>
