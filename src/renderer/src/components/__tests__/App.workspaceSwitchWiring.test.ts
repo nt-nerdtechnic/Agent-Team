@@ -92,12 +92,15 @@ describe('workspace switch — how the parts fit together', () => {
     // panesInView returning panes.value ITSELF when nothing is adopted — not a
     // copy, not an equivalent filter — so every derived read is a no-op. A
     // mixed read anywhere would differ even with a single workspace.
-    const piv = body('panesInView', '\n})')
-    expect(piv).toContain('if (!held.size) return panes.value')
+    // The identity return lives in lib/paneVisibility and is asserted there;
+    // what App must not do is reach past it back to the full list.
+    expect(body('panesInView', '\n)')).toContain(
+      'panesOfViewedWorkspace(panes.value, extraWorkspaces.value)',
+    )
 
     for (const [name, end] of [
       ['effectiveFocusPaneId', '\n})'],
-      ['tabFilteredPaneIds', '\n})'],
+      ['tabFilteredPaneIds', '\n)'],
       ['stageTabShapes', '\n  const shapes'],
       ['onKillAll', undefined],
       ['persistPaneOrder', undefined],

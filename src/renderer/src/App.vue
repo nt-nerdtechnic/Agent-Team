@@ -5,6 +5,7 @@ import TerminalPane from './components/TerminalPane.vue'
 import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
 import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups'
 import { buildPaneLineage } from './lib/paneLineage'
+import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import MemoryPanel, { type MemoryPaneRow } from './components/MemoryPanel.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
@@ -11088,11 +11089,9 @@ type StageTabShape = Omit<TabItem, 'status'> & { paneIds: string[] }
  *  Only the OTHER adopted workspaces are held back. A pane whose workspace is
  *  in neither list — a manual resume can pull a session in from any folder —
  *  stays visible exactly as it did before workspaces were a layer. */
-const panesInView = computed<ActivePane[]>(() => {
-  const held = new Set(extraWorkspaces.value.map(normWs))
-  if (!held.size) return panes.value
-  return panes.value.filter((p) => !held.has(normWs(p.workspacePath)))
-})
+const panesInView = computed<readonly ActivePane[]>(() =>
+  panesOfViewedWorkspace(panes.value, extraWorkspaces.value)
+)
 
 const stageTabShapes = computed<StageTabShape[]>(() => {
   // Group panes by their persisted RunGroup; panes without runGroupId are
@@ -11162,26 +11161,15 @@ const stageTabs = computed<TabItem[]>(() => {
   return next
 })
 
-const tabFilteredPaneIds = computed<Set<string>>(() => {
+const tabFilteredPaneIds = computed<Set<string>>(() =>
   // Structure, not stageTabs: this drives pane visibility and grid sizing, and
   // must not re-run when a status dot ticks.
-  //
-  // The grid shows ONE workspace — the one you switched to. Panes belonging to
-  // the others this window holds keep running; they are simply not on screen,
-  // and the sidebar still lists them under their own headings.
-  const here = panesInView.value
-  if (stageTabShapes.value.length === 0) {
-    return new Set(here.map((p) => p.id))
-  }
-  if (activeTab.value === 'manual') {
-    return new Set(here.filter((p) => !p.runGroupId).map((p) => p.id))
-  }
-  if (activeTab.value && runGroups.value.some((g) => g.id === activeTab.value)) {
-    return new Set(here.filter((p) => p.runGroupId === activeTab.value).map((p) => p.id))
-  }
-  // Fallback: show all of this workspace's
-  return new Set(here.map((p) => p.id))
-})
+  panesOfActiveTab(panesInView.value, {
+    hasTabs: stageTabShapes.value.length > 0,
+    activeTab: activeTab.value,
+    groupIds: runGroups.value.map((g) => g.id),
+  })
+)
 
 // Panes visible under both tab filter and minimize filter — drives grid sizing
 const tabVisiblePanes = computed(() =>
