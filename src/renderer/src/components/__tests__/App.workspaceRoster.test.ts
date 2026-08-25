@@ -348,6 +348,27 @@ describe('cross-workspace roster', () => {
     expect(body).not.toContain('panes.value.find')
   })
 
+  it('never tears down the panes of the workspace it leaves', () => {
+    // onWorkspaceBrowse resets the pipeline, and onPipelineReset is
+    // `await onKillAll()` — browsing has always meant LEAVING, so a clean
+    // slate was right. Switching is not leaving: the sidebar goes on listing
+    // that workspace and its agents go on running. Without keepPanes the
+    // switch destroyed exactly the work it was meant to leave running.
+    const start = appSource.indexOf('async function switchToWorkspace')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('onWorkspaceBrowse(path, { keepPanes: true })')
+
+    const bStart = appSource.indexOf('async function onWorkspaceBrowse')
+    const browse = appSource.slice(bStart, appSource.indexOf('\n}', bStart))
+    expect(browse).toContain('if (!opts?.keepPanes) await onPipelineReset()')
+    // The pipeline still stops either way — one per window.
+    expect(browse).toContain("if (pipeline.state === 'running') await onPipelineAbort()")
+
+    // And the teardown really is in there, so this is not guarding a no-op.
+    const rStart = appSource.indexOf('async function onPipelineReset')
+    expect(appSource.slice(rStart, appSource.indexOf('\n}', rStart))).toContain('await onKillAll()')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')
@@ -369,10 +390,15 @@ describe('cross-workspace roster', () => {
     )
     expect(order).toContain('the order it took them on')
     expect(order).toContain('const workspaceOrder = ref')
-    expect(body).toContain('workspaceOrder.value.some((w) => normWs(w) === normWs(leaving))')
+    // The one being left is already in the list — the workspace a window opens
+    // with joins it at the front, so it never sorts below something adopted
+    // later.
+    expect(appSource).toContain('workspaceOrder.value = [ws, ...workspaceOrder.value]')
+    expect(body).not.toContain('workspaceOrder.value = [')
     // Everything that follows currentWorkspace moves with it, which is what
-    // onWorkspaceBrowse already does — no second implementation.
-    expect(body).toContain('onWorkspaceBrowse(path)')
+    // onWorkspaceBrowse already does — no second implementation. keepPanes is
+    // asserted on its own below.
+    expect(body).toContain('onWorkspaceBrowse(path, { keepPanes: true })')
     // Never for a workspace this window does not hold.
     expect(body).toContain('isLocalWorkspace(path)')
   })

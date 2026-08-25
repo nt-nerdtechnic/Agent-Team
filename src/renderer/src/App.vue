@@ -8370,14 +8370,24 @@ function openPlansWindow(): void {
   controlPaneRef.value?.selectSidebarTab('plans')
 }
 
-async function onWorkspaceBrowse(path: string): Promise<void> {
+/** @param opts.keepPanes  Leave the panes of the workspace being left alone.
+ *
+ *  Browsing to a workspace has always meant LEAVING this one, so it resets the
+ *  pipeline — and onPipelineReset tears down every pane to return the
+ *  workspace to a clean slate. Switching between workspaces the window already
+ *  holds is not that: the sidebar goes on listing the one being left and its
+ *  agents go on running, so tearing them down would silently destroy the work
+ *  the switch was supposed to leave running. */
+async function onWorkspaceBrowse(path: string, opts?: { keepPanes?: boolean }): Promise<void> {
   if (path === currentWorkspace.value) return
   // Already open in another window → focus that window, keep this one as-is
   // (a duplicate open would run two sets of PTY/git operations on one folder).
   if (await window.agentTeam?.focusWorkspaceWindow?.(path)) return
+  // The pipeline still stops either way: it is one per window, so entering
+  // another workspace overwrites the state tracking this one's run.
   if (pipeline.state === 'running') await onPipelineAbort()
   pipeline.workspacePath = ''
-  await onPipelineReset()
+  if (!opts?.keepPanes) await onPipelineReset()
   existingProject.value = null
   currentMode.value = 'spawn'
   pipeline.workspacePath = path
@@ -11385,6 +11395,21 @@ function isLocalWorkspace(path: string): boolean {
   )
 }
 
+// The workspace the window was opened with belongs in the list too, and it was
+// there first — otherwise it sorts after everything adopted later, which reads
+// as the sidebar putting the newcomer above the project you started in. A
+// switch finds it already present and changes nothing.
+watch(
+  currentWorkspace,
+  (ws) => {
+    if (!ws || isDetachedWindow) return
+    if (workspaceOrder.value.some((w) => normWs(w) === normWs(ws))) return
+    workspaceOrder.value = [ws, ...workspaceOrder.value]
+    persistExtraWorkspaces()
+  },
+  { immediate: true },
+)
+
 function adoptWorkspace(path: string): void {
   if (!path || isLocalWorkspace(path)) return
   workspaceOrder.value = [...workspaceOrder.value, path]
@@ -11493,16 +11518,11 @@ async function switchToWorkspace(path: string): Promise<void> {
     })
     if (!ok) return
   }
-  const leaving = currentWorkspace.value
   // The window holds the same set either way — only which one is on screen
   // changes — so the list is untouched and the sidebar does not reshuffle.
-  // The one being left is already in it; make sure the one being entered is
-  // too, for a primary that was never adopted.
-  if (leaving && !workspaceOrder.value.some((w) => normWs(w) === normWs(leaving))) {
-    workspaceOrder.value = [leaving, ...workspaceOrder.value]
-    persistExtraWorkspaces()
-  }
-  await onWorkspaceBrowse(path)
+  // Both are already in it: the one being left through the watch above, the
+  // one being entered through adoptWorkspace.
+  await onWorkspaceBrowse(path, { keepPanes: true })
   // onWorkspaceBrowse has its own reasons to decline — chiefly finding the
   // workspace open in some other window — and it declines by returning, which
   // from here is indistinguishable from having worked. A switch that quietly
@@ -11635,8 +11655,9 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
 
   // This window's own workspaces: the one it was opened with, then any it has
   // adopted. All of them have live panes and full controls.
-  // Stable order, not viewed-first: see workspaceOrder. `here` is appended for
-  // a primary the list has not caught up with yet (the very first render).
+  // Stable order, not viewed-first: see workspaceOrder. `here` is still
+  // appended in case this runs before the watch that adds it — seenLocal below
+  // keeps that from listing it twice.
   const localPaths = [...workspaceOrder.value, ...(here ? [here] : [])]
   const seenLocal = new Set<string>()
   for (const path of localPaths) {
