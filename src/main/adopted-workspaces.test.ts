@@ -70,12 +70,15 @@ describe('adopted workspaces', () => {
   })
 
   it('survive a workspace switch, which rebuilds the entry', () => {
-    // setWorkspace replaces the entry outright — bounds and detached_group are
-    // carried across by hand, and switching workspaces goes through it, so an
-    // omission here would drop the list on the first switch.
+    // setWorkspace replaces the entry outright, and switching workspaces goes
+    // through it. It used to list the fields to carry over one by one, which
+    // made every new field a silent data-loss bug waiting for a forgotten
+    // line; it spreads the previous entry now, so this holds for whatever is
+    // added next as well.
     const at = registrySource.indexOf('setWorkspace(winId: number')
     const body = registrySource.slice(at, registrySource.indexOf('\n  }', at))
-    expect(body).toContain('prev?.adopted_workspaces')
+    expect(body).toContain('{ ...prev, workspace_path: workspacePath }')
+    expect(body).not.toContain('prev?.bounds ?')
   })
 
   it('are handed to the window restored for them, once', () => {

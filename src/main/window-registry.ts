@@ -213,15 +213,12 @@ export class WindowRegistry {
     if (!workspacePath) {
       this.entries.delete(winId)
     } else {
+      // Everything else on the entry survives a workspace change: bounds,
+      // detached_group, adopted_workspaces, and whatever gets added next.
+      // This used to list them one by one, which meant every new field was a
+      // silent data-loss bug waiting for someone to forget a line.
       const prev = this.entries.get(winId)
-      this.entries.set(winId, {
-        workspace_path: workspacePath,
-        ...(prev?.bounds ? { bounds: prev.bounds } : {}),
-        ...(prev?.detached_group ? { detached_group: prev.detached_group } : {}),
-        ...(prev?.adopted_workspaces?.length
-          ? { adopted_workspaces: prev.adopted_workspaces }
-          : {})
-      })
+      this.entries.set(winId, { ...prev, workspace_path: workspacePath })
     }
     this.persistNow()
   }
