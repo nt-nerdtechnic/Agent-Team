@@ -204,6 +204,29 @@ describe('TokenStatsPanel', () => {
     w.unmount()
   })
 
+  it('scales past M so a workspace worth billions of tokens stays readable', async () => {
+    // The tiers stopped at M, so 77 billion rendered as "77059.4M" and the
+    // fixed-width cell clipped it to "77059...." — IN and TOTAL went
+    // unreadable exactly on the workspaces that had used the most.
+    const snap = snapshot({
+      cumulative: {
+        totals: bucket(77_059_400_000, 329_000_000, 369_287),
+        by_vendor: {}, by_stage: {},
+      },
+    })
+    snap.global.all_time = bucket(2_500_000_000_000, 0, 0)
+    const { w, emit } = mountPanel()
+    emit('tokens.changed', snap)
+    await w.findAll('.hdr .tab')[1].trigger('click')  // tokens
+
+    const cellsOf = (title: string) =>
+      w.findAll('.block').find((b) => b.text().includes(title))!
+        .findAll('.cell .big').map((n) => n.text())
+    expect(cellsOf('label.workspace-cumulative')).toEqual(['77.1B', '329.0M', '77.4B', '369287'])
+    expect(cellsOf('label.all-time-global')[0]).toBe('2.5T')
+    w.unmount()
+  })
+
   it('ignores a preview push once preview has been taken off the layout', async () => {
     // Claiming the tab would leave the panel showing nothing at all.
     const { w } = mountPanel({ expanded: false, views: ['history'] })

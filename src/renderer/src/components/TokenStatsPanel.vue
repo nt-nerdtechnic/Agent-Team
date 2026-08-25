@@ -195,10 +195,16 @@ const collapsedTotal = computed(() => fmt(runTotals.value.input + runTotals.valu
 
 // ─────────────────────── Formatting helpers ───────────────────────────────
 
+// Every tier caps at six characters ("999.9M"), which is what the fixed-width
+// cells fit. Stopping at M was the bug: a workspace past a billion tokens
+// rendered "77059.4M" and the cell clipped it to "77059...." — the IN and
+// TOTAL figures became unreadable exactly once they got interesting.
 function fmt(n: number): string {
   if (n < 1000) return String(n)
   if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0) + 'k'
-  return (n / 1_000_000).toFixed(1) + 'M'
+  if (n < 1_000_000_000) return (n / 1_000_000).toFixed(1) + 'M'
+  if (n < 1_000_000_000_000) return (n / 1_000_000_000).toFixed(1) + 'B'
+  return (n / 1_000_000_000_000).toFixed(1) + 'T'
 }
 
 // ─────────────────────── Reset confirmations ──────────────────────────────
