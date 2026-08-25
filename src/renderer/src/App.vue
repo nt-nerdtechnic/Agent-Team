@@ -10942,9 +10942,14 @@ async function persistPaneRunGroup(pane: ActivePane, runGroupId: string): Promis
 async function persistPaneOrder(): Promise<void> {
   const ws = currentWorkspace.value
   if (!ws) return
+  // This workspace's panes only. `panes` holds every workspace the window
+  // runs, so sending all of them would file another project's pane ids under
+  // this one — and leave that project's own order unwritten, since nothing
+  // else writes it. Identical to sending them all when the window holds one
+  // workspace.
   await sendQuiet('project.set_pane_order', {
     workspace_path: ws,
-    pane_ids: panes.value.map((p) => p.id),
+    pane_ids: panesInView.value.map((p) => p.id),
   })
 }
 

@@ -410,6 +410,17 @@ describe('cross-workspace roster', () => {
     expect(full).toContain('seq !== workspaceCheckSeq')
   })
 
+  it('files pane order under the workspace whose panes they are', () => {
+    // `panes` holds every workspace the window runs. Sending all of them files
+    // another project's pane ids under this one, and leaves that project's own
+    // order unwritten — nothing else writes it.
+    const start = appSource.indexOf('async function persistPaneOrder')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('panesInView.value.map((p) => p.id)')
+    expect(body).not.toContain('panes.value.map((p) => p.id)')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')
