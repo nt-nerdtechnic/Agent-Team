@@ -17,6 +17,8 @@ function body(name: string): string {
   return mainSource.slice(at, mainSource.indexOf('\n}', at))
 }
 
+const registrySource = readFileSync(resolve(process.cwd(), 'src/main/window-registry.ts'), 'utf8')
+
 describe('adopted workspaces', () => {
   it('are tracked apart from the window primary', () => {
     // Everything that means "this window's own workspace" — the registry, the
@@ -55,5 +57,35 @@ describe('adopted workspaces', () => {
     const teardown = mainSource.indexOf('mainWindows.delete(win)')
     expect(teardown).toBeGreaterThan(-1)
     expect(mainSource.slice(teardown, teardown + 300)).toContain('adoptedWorkspaces.delete(win)')
+  })
+
+  it('survive a relaunch', () => {
+    // A window that was running three projects should come back running three,
+    // not one. The registry is the only thing that outlives the process.
+    expect(registrySource).toContain('adopted_workspaces?: string[]')
+    expect(registrySource).toContain('setAdoptedWorkspaces(winId: number, paths: string[])')
+    const at = mainSource.indexOf("ipcMain.on('window:reportAdoptedWorkspaces'")
+    const handler = mainSource.slice(at, mainSource.indexOf('\n})', at))
+    expect(handler).toContain('windowRegistry.setAdoptedWorkspaces')
+  })
+
+  it('survive a workspace switch, which rebuilds the entry', () => {
+    // setWorkspace replaces the entry outright — bounds and detached_group are
+    // carried across by hand, and switching workspaces goes through it, so an
+    // omission here would drop the list on the first switch.
+    const at = registrySource.indexOf('setWorkspace(winId: number')
+    const body = registrySource.slice(at, registrySource.indexOf('\n  }', at))
+    expect(body).toContain('prev?.adopted_workspaces')
+  })
+
+  it('are handed to the window restored for them, once', () => {
+    // Taken, not read: a reload must not resurrect a list the user has since
+    // emptied.
+    const at = mainSource.indexOf("ipcMain.handle('window:takeRestoredAdopted'")
+    expect(at).toBeGreaterThan(-1)
+    const handler = mainSource.slice(at, mainSource.indexOf('\n})', at))
+    expect(handler).toContain('pendingAdoptedWorkspaces.delete(win.id)')
+    // Both restore paths — the crash prompt and the clean-exit snapshot.
+    expect(mainSource.match(/pendingAdoptedWorkspaces\.set\(/g)).toHaveLength(2)
   })
 })

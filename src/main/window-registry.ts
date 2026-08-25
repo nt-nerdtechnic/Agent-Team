@@ -29,6 +29,10 @@ export interface WindowEntry {
    *  rather than a main window. Recorded so a detached group comes back
    *  detached instead of silently folding into the main window on relaunch. */
   detached_group?: string
+  /** Workspaces this window took on from its sidebar beyond `workspace_path`.
+   *  Restored with it, so a window that was running three projects comes back
+   *  running three projects rather than one. */
+  adopted_workspaces?: string[]
 }
 
 export interface RegistryDoc {
@@ -213,7 +217,10 @@ export class WindowRegistry {
       this.entries.set(winId, {
         workspace_path: workspacePath,
         ...(prev?.bounds ? { bounds: prev.bounds } : {}),
-        ...(prev?.detached_group ? { detached_group: prev.detached_group } : {})
+        ...(prev?.detached_group ? { detached_group: prev.detached_group } : {}),
+        ...(prev?.adopted_workspaces?.length
+          ? { adopted_workspaces: prev.adopted_workspaces }
+          : {})
       })
     }
     this.persistNow()
@@ -230,6 +237,19 @@ export class WindowRegistry {
     if (!entry) return
     if (groupId) entry.detached_group = groupId
     else delete entry.detached_group
+    this.persistNow()
+  }
+
+  /** Record the workspaces a window has taken on beyond its own.
+   *
+   *  Like setDetachedGroup: the renderer reports this independently of the
+   *  workspace, and a window with no entry yet is ignored — a Welcome window
+   *  has nothing to adopt into. */
+  setAdoptedWorkspaces(winId: number, paths: string[]): void {
+    const entry = this.entries.get(winId)
+    if (!entry) return
+    if (paths.length) entry.adopted_workspaces = [...paths]
+    else delete entry.adopted_workspaces
     this.persistNow()
   }
 

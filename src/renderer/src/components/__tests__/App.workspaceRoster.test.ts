@@ -277,6 +277,18 @@ describe('cross-workspace roster', () => {
     expect(body).not.toContain('ev.target_workspace !== currentWorkspace.value')
   })
 
+  it('takes back its adopted workspaces after a relaunch', () => {
+    // sessionStorage wins when both exist: it is this window's live state,
+    // while the registry's copy is from before the restart.
+    expect(appSource).toContain('takeRestoredAdoptedWorkspaces')
+    const at = appSource.indexOf('takeRestoredAdoptedWorkspaces')
+    const around = appSource.slice(at - 700, at + 500)
+    expect(around).toContain('if (extraWorkspaces.value.length) {')
+    // And their agents come back, the same way a picked workspace's do.
+    expect(around).toContain("'project.peek'")
+    expect(around).toContain('restoreWorkspacePanes')
+  })
+
   it('still ties the history pane to the primary workspace', () => {
     // Deliberately NOT widened: spawn history follows the workspace the window
     // was opened with.

@@ -11384,10 +11384,23 @@ async function refreshOpenWorkspaces(): Promise<void> {
 
 onMounted(() => {
   if (isDetachedWindow) return
-  // A reload restores the list from sessionStorage without going through
-  // adoptWorkspace, so main has not heard about it.
+  // Two ways this window can already hold workspaces before anyone clicks:
+  //  · a reload — sessionStorage kept the list, but main has not heard it;
+  //  · a relaunch — sessionStorage is empty and the registry has the list.
+  // sessionStorage wins when both exist: it is this window's live state, while
+  // the registry's copy is from before the restart.
   if (extraWorkspaces.value.length) {
     window.agentTeam?.reportAdoptedWorkspaces?.([...extraWorkspaces.value])
+  } else {
+    void (async () => {
+      const restored = (await window.agentTeam?.takeRestoredAdoptedWorkspaces?.()) ?? []
+      for (const path of restored) adoptWorkspace(path)
+      // Their agents come back the same way a picked workspace's do.
+      for (const path of extraWorkspaces.value) {
+        const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
+        if (resp) await restoreWorkspacePanes(resp, path)
+      }
+    })()
   }
   void refreshOpenWorkspaces()
   disposeOpenWorkspacesChanged =

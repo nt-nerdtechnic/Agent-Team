@@ -141,6 +141,9 @@ const detachedWindowIds = new Set<number>()                      // child window
 // open somewhere?" answers below consult it, which is the whole point: a
 // second window must not open a folder this one is already running.
 const adoptedWorkspaces = new Map<BrowserWindow, string[]>()
+// Adopted lists waiting to be claimed by the window being restored for them.
+// Keyed by window id because the renderer asks for its own after mounting.
+const pendingAdoptedWorkspaces = new Map<number, string[]>()
 
 // Send an event to every non-detached main window bound to a workspace (used to
 // hand a run group off to / back from a detached child window).
@@ -1243,7 +1246,19 @@ ipcMain.on('window:reportAdoptedWorkspaces', (event, paths: string[]) => {
     .filter(Boolean)
   if (list.length) adoptedWorkspaces.set(win, list)
   else adoptedWorkspaces.delete(win)
+  windowRegistry.setAdoptedWorkspaces(win.id, list)
   broadcastOpenWorkspacesChanged()
+})
+
+// A restored window asks once, on mount, for the list it had when the app was
+// last running. Taken rather than read: a reload must not resurrect a list the
+// user has since emptied.
+ipcMain.handle('window:takeRestoredAdopted', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win) return []
+  const list = pendingAdoptedWorkspaces.get(win.id) ?? []
+  pendingAdoptedWorkspaces.delete(win.id)
+  return list
 })
 
 // Renderers push the latest recent-workspaces list so the native File > Open
@@ -1328,7 +1343,11 @@ ipcMain.handle('restore:apply', () => {
       void createWindow(
         { workspace_path: entry.workspace_path, restore: '1' },
         entry.bounds ? { bounds: entry.bounds } : undefined
-      )
+      ).then((win) => {
+        if (entry.adopted_workspaces?.length) {
+          pendingAdoptedWorkspaces.set(win.id, entry.adopted_workspaces)
+        }
+      })
     }
   }
   return { ok: true, opened: plan.restore.length }
@@ -2685,10 +2704,13 @@ app.whenReady().then(async () => {
           openedAny = true
           continue
         }
-        await createWindow(
+        const restored = await createWindow(
           { workspace_path: entry.workspace_path, restore: '1' },
           entry.bounds ? { bounds: entry.bounds } : undefined
         )
+        if (entry.adopted_workspaces?.length) {
+          pendingAdoptedWorkspaces.set(restored.id, entry.adopted_workspaces)
+        }
         // Only a window that actually opened counts — when every workspace is
         // skipped this stays false and the empty Welcome window below runs, so
         // the app is never left with no window at all.

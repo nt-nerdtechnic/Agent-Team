@@ -131,6 +131,8 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.invoke('workspace:requestSpawn', workspacePath),
   reportAdoptedWorkspaces: (paths: string[]): void =>
     ipcRenderer.send('window:reportAdoptedWorkspaces', paths),
+  takeRestoredAdoptedWorkspaces: (): Promise<string[]> =>
+    ipcRenderer.invoke('window:takeRestoredAdopted'),
   // Returns a disposer, like the workspace listener below.
   onSpawnRequested: (cb: () => void): (() => void) => {
     const listener = (): void => cb()
