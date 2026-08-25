@@ -275,6 +275,21 @@ describe('cross-workspace roster', () => {
     expect(appSource.slice(at, at + 120)).toContain('flex: 0 1 auto')
   })
 
+  it('asks before a switch stops a running pipeline', () => {
+    // Panes survive a switch; a pipeline cannot — `pipeline` is one per window,
+    // so entering another project overwrites the state tracking this one's run
+    // and onWorkspaceBrowse aborts it. Right call, but everything else about a
+    // switch keeps running, so nobody would expect this one thing to stop.
+    const start = appSource.indexOf('async function switchToWorkspace')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain("pipeline.state === 'running'")
+    expect(body).toContain('notifyRestore.confirm')
+    // Declining leaves the window where it is.
+    expect(body).toContain('if (!ok) return')
+    // The abort itself still lives in onWorkspaceBrowse — no second copy.
+    expect(body).not.toContain('onPipelineAbort')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')

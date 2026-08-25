@@ -2295,6 +2295,11 @@
     "fetch-failed": "Could not fetch CLI pane output",
     "empty": "CLI pane has no output yet"
   },
+  "switchWorkspace": {
+    "confirmTitle": "Stop the running pipeline?",
+    "confirm": "The pipeline running in this project will be stopped — a pipeline belongs to the project it was started in and cannot keep running in the background. Its agents stay open, and so does everything in the other projects.",
+    "confirmBtn": "Switch and stop"
+  },
   "closeAll": {
     "label": "close all",
     "title": "Close all sessions and tabs (history kept)",

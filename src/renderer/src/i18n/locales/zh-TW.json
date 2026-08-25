@@ -2295,6 +2295,11 @@
     "fetch-failed": "無法取得 CLI pane 的輸出",
     "empty": "CLI pane 尚無輸出"
   },
+  "switchWorkspace": {
+    "confirmTitle": "要停掉正在跑的 pipeline 嗎？",
+    "confirm": "這個專案正在跑的 pipeline 會被停止——pipeline 屬於它啟動時的專案，沒辦法留在背景繼續跑。它的 agent 會留著，其他專案的東西也都不受影響。",
+    "confirmBtn": "切換並停止"
+  },
   "closeAll": {
     "label": "全部關閉",
     "title": "關閉所有 session 與分頁（保留紀錄）",

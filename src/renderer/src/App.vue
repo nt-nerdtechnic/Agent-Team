@@ -11467,6 +11467,19 @@ async function openWorkspaceFromPicker(path: string): Promise<void> {
 async function switchToWorkspace(path: string): Promise<void> {
   if (!path || normWs(path) === normWs(currentWorkspace.value)) return
   if (!isLocalWorkspace(path)) return
+  // Panes survive a switch; a pipeline cannot. `pipeline` is one per window,
+  // so entering another project overwrites the state tracking this one's run
+  // and onWorkspaceBrowse aborts it rather than lose track of it. That is the
+  // right call, but it must not happen silently — everything else about a
+  // switch keeps running, so nobody would expect this one thing to stop.
+  if (pipeline.state === 'running') {
+    const ok = await notifyRestore.confirm(i18n.global.t('switchWorkspace.confirm'), {
+      title: i18n.global.t('switchWorkspace.confirmTitle'),
+      confirmText: i18n.global.t('switchWorkspace.confirmBtn'),
+      cancelText: i18n.global.t('restore.dismiss'),
+    })
+    if (!ok) return
+  }
   const leaving = currentWorkspace.value
   // Swap the two in the adopted list: the one we are leaving joins it, the one
   // we are entering becomes the primary and drops out of it.
