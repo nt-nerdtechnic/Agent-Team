@@ -97,8 +97,18 @@ describe('App CLI-pane multi-select + batch context menu', () => {
     expect(appSource).toContain(':selected-pane-ids="selectedPaneIds"')
     expect(appSource).toContain('@focus-pane="onSidebarFocusPane"')
     expect(appSource).toContain('function onSidebarFocusPane(paneId: string, ev?: MouseEvent): void')
-    // Sidebar ranges over its own full list order.
-    expect(appSource).toContain('onSetFocus(paneId, ev, paneViews.value.map((v) => v.id))')
+    // Sidebar ranges over the order it actually renders: each workspace
+    // section in turn, each one's lineage flattened. paneViews is the flat
+    // spawn order, which stopped matching the moment the list gained
+    // indentation and stopped matching further once it gained sections.
+    expect(appSource).toContain('onSetFocus(paneId, ev, sidebarOrderedPaneIds.value)')
+    const start = appSource.indexOf('const sidebarOrderedPaneIds = computed')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n})', start))
+    expect(body).toContain('workspaceGroups.value')
+    expect(body).toContain('ws.lineage')
+    // Remote rows list panes this window has no terminal for.
+    expect(body).toContain('if (!ws.isCurrent) continue')
     // ControlPane forwards the native MouseEvent and paints the selection,
     // without toggling the accordion on a modifier click.
     expect(controlPaneSource).toContain('@click="onAgentLineClick(p.id, $event)"')

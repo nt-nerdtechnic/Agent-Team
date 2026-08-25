@@ -11765,9 +11765,25 @@ function rangeSelectPanes(toId: string, orderedIds?: string[]): void {
 // Sidebar agent-list clicks: a modifier click joins the same multi-select as
 // the pane surfaces (ranging over the sidebar's full list order); a plain
 // click keeps the original focus + scroll behavior.
+/** The order the sidebar actually renders panes in: each workspace section in
+ *  turn, each one's lineage flattened depth-first. Shift-range selection walks
+ *  this, so it has to be what the eye sees — paneViews is the flat spawn order,
+ *  which stopped matching the moment the list gained indentation, and stopped
+ *  matching further once it gained workspace sections.
+ *
+ *  STRUCTURE LAYER: workspaceGroups and its lineages, never paneViews. */
+const sidebarOrderedPaneIds = computed<string[]>(() => {
+  const out: string[] = []
+  for (const ws of workspaceGroups.value) {
+    if (!ws.isCurrent) continue // remote rows have no selectable panes here
+    for (const row of ws.lineage) out.push(row.id)
+  }
+  return out
+})
+
 function onSidebarFocusPane(paneId: string, ev?: MouseEvent): void {
   if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey)) {
-    onSetFocus(paneId, ev, paneViews.value.map((v) => v.id))
+    onSetFocus(paneId, ev, sidebarOrderedPaneIds.value)
     return
   }
   selectedPaneIds.value = new Set()
