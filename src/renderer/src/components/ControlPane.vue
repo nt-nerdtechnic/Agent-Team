@@ -959,6 +959,75 @@ const pickedAgentLabel = computed(
   () => manualAgentSpecs.value.find((s) => s.agentKey === pickedAgent.value)?.label ?? pickedAgent.value
 )
 
+// ── The ＋ menu on this window's workspace heading ────────────────────────────
+// A second way into the spawn card's CLI and role, for when the card is folded
+// shut. It reads and writes pickedAgent/pickedRole directly rather than keeping
+// its own copy — two stores would let the card say Codex while ＋ opens Claude.
+const addMenuOpen = ref<boolean>(false)
+// Fixed, not absolute: the pane list scrolls under `overflow-y: auto`, which
+// would clip a menu positioned inside it.
+const addMenuAnchor = ref<{ top: number; bottom: number; right: number } | null>(null)
+const ADD_MENU_MAX_H = 300
+
+const addMenuStyle = computed(() => {
+  const a = addMenuAnchor.value
+  if (!a) return {}
+  // Flip upwards when there is not enough room below the button.
+  const below = window.innerHeight - a.bottom
+  return below < ADD_MENU_MAX_H && a.top > below
+    ? { bottom: `${window.innerHeight - a.top + 4}px`, right: `${a.right}px` }
+    : { top: `${a.bottom + 4}px`, right: `${a.right}px` }
+})
+
+function toggleAddMenu(ev: MouseEvent): void {
+  if (!canSpawn.value) return
+  if (addMenuOpen.value) {
+    addMenuOpen.value = false
+    return
+  }
+  const r = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  addMenuAnchor.value = { top: r.top, bottom: r.bottom, right: window.innerWidth - r.right }
+  addMenuOpen.value = true
+}
+
+/** Pick a CLI from the menu and open it. Writing pickedAgent first means the
+ *  card agrees with what just happened, and that spawn() takes its usual path —
+ *  including the guided install for a CLI that is not there. */
+function spawnAs(agentKey: string): void {
+  pickedAgent.value = agentKey
+  addMenuOpen.value = false
+  spawn()
+}
+
+function openSpawnCardFromMenu(): void {
+  addMenuOpen.value = false
+  manualSpawnOpen.value = true
+}
+
+function onAddMenuKeydown(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') addMenuOpen.value = false
+}
+function closeAddMenu(): void {
+  addMenuOpen.value = false
+}
+
+watch(addMenuOpen, (open) => {
+  if (open) {
+    // The badge on a missing CLI is only as fresh as the last check, and the
+    // card refreshes on its dropdown's focus — this menu has no dropdown.
+    void refreshCliStatus()
+    document.addEventListener('click', closeAddMenu)
+    document.addEventListener('keydown', onAddMenuKeydown)
+  } else {
+    document.removeEventListener('click', closeAddMenu)
+    document.removeEventListener('keydown', onAddMenuKeydown)
+  }
+})
+onUnmounted(() => {
+  document.removeEventListener('click', closeAddMenu)
+  document.removeEventListener('keydown', onAddMenuKeydown)
+})
+
 function spawn(): void {
   if (!canSpawn.value) return
   // Spawning a CLI we know is missing only produces a pane that dies with 127.
@@ -1410,14 +1479,15 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             <span class="ws-path">{{ currentWorkspaceRow.displayPath }}</span>
           </span>
           <span class="ws-count">{{ currentWorkspaceRow.count }}</span>
-          <!-- Same action as the card's Open Agent button, using whatever
-               agent and role the card currently has selected — the heading is
-               just a second way to reach it. Disabled for the same reasons. -->
+          <!-- Opens the same CLI and role the spawn card holds, so it works
+               the same whether the card is open or folded shut. Disabled for
+               the same reasons the card's own button is. -->
           <button
             class="ws-add"
             :disabled="!canSpawn"
+            :aria-expanded="addMenuOpen"
             :title="canSpawn ? `${$t('action.add-to-grid')} · ${pickedAgentLabel}` : $t('label.set-workspace-first')"
-            @click.stop="spawn()"
+            @click.stop="toggleAddMenu"
           >＋</button>
         </li>
         <li
@@ -1552,6 +1622,32 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           </li>
         </template>
       </ul>
+
+      <div v-if="addMenuOpen" class="ws-add-menu" :style="addMenuStyle" @click.stop>
+        <select v-model="pickedRole" class="ws-add-role">
+          <option value="">{{ $t('label.select-role') }}</option>
+          <option v-for="r in roles" :key="r.key" :value="r.key">{{ r.label }}</option>
+        </select>
+        <div class="ws-add-div"></div>
+        <div class="ws-add-scroll">
+          <button
+            v-for="spec in manualAgentSpecs"
+            :key="spec.agentKey"
+            class="ws-add-opt"
+            :class="{ on: spec.agentKey === pickedAgent }"
+            @click="spawnAs(spec.agentKey)"
+          >
+            <span class="ws-add-ck">{{ spec.agentKey === pickedAgent ? '✓' : '' }}</span>
+            <span class="ws-add-lb">
+              {{ missingClis.has(spec.agentKey) ? $t('label.agent-not-installed', { label: spec.label }) : spec.label }}
+            </span>
+          </button>
+        </div>
+        <div class="ws-add-div"></div>
+        <button class="ws-add-opt ws-add-more" @click="openSpawnCardFromMenu">
+          {{ $t('label.manual-spawn') }}…
+        </button>
+      </div>
 
       <div class="spawn-card">
         <div class="spawn-card-hdr" @click="manualSpawnOpen = !manualSpawnOpen">
@@ -2758,6 +2854,48 @@ button.icon-btn.muted:hover {
 }
 .ws-head:hover .ws-add { opacity: 1; }
 .ws-add:hover { color: var(--text-bright); }
+/* Kept visible while its menu is open, so the menu has a visible origin. */
+.ws-add[aria-expanded='true'] { opacity: 1; color: var(--text-bright); }
+
+/* The ＋ menu. Fixed rather than absolute: the pane list scrolls, and an
+   absolute menu inside it would be clipped by that scroll container. */
+.ws-add-menu {
+  position: fixed;
+  z-index: 60;
+  width: 200px;
+  max-width: calc(100vw - 24px);
+  padding: 5px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated, var(--bg-secondary));
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  font-size: 12px;
+}
+.ws-add-role {
+  width: calc(100% - 12px);
+  margin: 2px 6px 4px;
+  font-size: 11.5px;
+}
+.ws-add-div { height: 1px; margin: 4px 0; background: var(--border-muted); }
+.ws-add-scroll { max-height: 200px; overflow-y: auto; }
+.ws-add-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 10px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.ws-add-opt:hover { background: var(--bg-hover, rgb(255 255 255 / 7%)); }
+.ws-add-opt.on { color: var(--text-bright); font-weight: 600; }
+.ws-add-ck { flex: none; width: 10px; font-size: 10px; }
+.ws-add-lb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-add-more { color: var(--text-secondary); padding-left: 26px; }
 /* A pane in another window: shown so you know work is running there, dimmed
    because none of this window's per-pane controls apply to it. */
 .remote-item {
