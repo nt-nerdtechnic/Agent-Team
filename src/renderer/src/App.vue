@@ -6620,19 +6620,26 @@ const controlPaneRef = ref<InstanceType<typeof ControlPane> | null>(null)
 //   otherwise         → spawn
 const currentMode = ref<WorkspaceMode>('spawn')
 let workspaceCheckSeq = 0
-// A session exists for one actual workspace open. Re-entrant checks reuse its
-// fixed settings snapshot and decision; switching workspaces replaces it.
-let activeRestoreSession: RestoreSession | null = null
+// One session per workspace this window holds. Re-entrant checks reuse a
+// workspace's fixed settings snapshot and decision.
+//
+// This was a single variable, which two workspaces restoring at once stole
+// from each other: realizing any pane reassigns the session to THAT pane's
+// workspace, so the other session's next await saw a different object and
+// abandoned its whole batch. Nothing failed loudly — the remaining panes just
+// stayed placeholders, and the workspace looked like it had lost its agents.
+const restoreSessions = new Map<string, RestoreSession>()
 
 function workspaceRestoreSession(workspacePath: string): RestoreSession {
-  if (activeRestoreSession?.workspacePath !== workspacePath) {
-    activeRestoreSession = createWorkspaceRestoreSession({
-      workspacePath,
-      behavior: settingsGet(RESUME_BEHAVIOR_SETTING_KEY, 'always'),
-      scope: settingsGet(RESTORE_SCOPE_SETTING_KEY, 'single'),
-    })
-  }
-  return activeRestoreSession
+  const existing = restoreSessions.get(workspacePath)
+  if (existing) return existing
+  const created = createWorkspaceRestoreSession({
+    workspacePath,
+    behavior: settingsGet(RESUME_BEHAVIOR_SETTING_KEY, 'always'),
+    scope: settingsGet(RESTORE_SCOPE_SETTING_KEY, 'single'),
+  })
+  restoreSessions.set(workspacePath, created)
+  return created
 }
 // Cold-boot race guard: a workspace window mounts (firing workspace-check ~400ms
 // in) seconds before the backend WS connects — and with several windows
@@ -6710,10 +6717,14 @@ async function onWorkspaceCheck(path: string): Promise<void> {
     existingProject.value = null
     currentMode.value = 'spawn'
     pipeline.workspacePath = ''
-    activeRestoreSession = null
+    restoreSessions.clear()
     return
   }
-  if (activeRestoreSession?.workspacePath !== path) activeRestoreSession = null
+  // Only sessions for workspaces this window no longer holds. Dropping "every
+  // session but this one" is what made two workspaces cancel each other.
+  for (const key of [...restoreSessions.keys()]) {
+    if (key !== path && !isLocalWorkspace(key)) restoreSessions.delete(key)
+  }
   const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
   if (seq !== workspaceCheckSeq) return
   if (resp === null) {
@@ -7286,26 +7297,40 @@ async function restoreSessionDecision(
 }
 
 function restoreSessionScopeTargets(session: RestoreSession, trigger: RestoreSessionTrigger): string[] {
+  // The active tab and the Grid page describe the workspace on screen. For any
+  // other workspace this window holds they list someone else's panes, which
+  // mixed two workspaces together: 'single'/'page'/'tab' intersected to nothing,
+  // while 'all' — the one scope that ignores visibility — added a background
+  // workspace's entire pending list on top of the foreground one, so the CLIs a
+  // window could start at once became the sum of every workspace it held.
+  const onScreen = normWs(session.workspacePath) === normWs(currentWorkspace.value)
   return restoreScopeTargetIds({
     scope: session.scope,
     pendingPaneIds: pendingRestorePaneIds(panes.value, session.workspacePath),
-    activeTabPaneIds: tabVisiblePanes.value.map((pane) => pane.id),
-    gridPagePaneIds: gridPagePanes.value.map((pane) => pane.id),
+    activeTabPaneIds: onScreen ? tabVisiblePanes.value.map((pane) => pane.id) : [],
+    gridPagePaneIds: onScreen ? gridPagePanes.value.map((pane) => pane.id) : [],
     minimizedPaneIds: minimizedPanes.value,
-    focusedPaneId: focusPaneId.value,
+    focusedPaneId: onScreen ? focusPaneId.value : null,
     trigger,
   })
 }
 
 async function advanceRestoreSession(trigger: RestoreSessionTrigger, coldBatch?: ColdRestoreBatch): Promise<void> {
-  const session = activeRestoreSession
+  // A UI trigger means the workspace on screen — an active tab and a Grid page
+  // are properties of what is being looked at. A cold trigger names its own.
+  const path = coldBatch?.workspacePath ?? currentWorkspace.value
+  const session = restoreSessions.get(path)
   if (!session || !isLocalWorkspace(session.workspacePath)) return
   const batch = coldBatch ?? panes.value.find(
     (pane) => !pane.realized && pane.deferredRestore?.workspacePath === session.workspacePath,
   )?.deferredRestore?.batch
   if (!batch) return
   const decision = await restoreSessionDecision(session, batch)
-  if (decision === 'cancelled' || activeRestoreSession !== session || !isLocalWorkspace(session.workspacePath)) return
+  if (
+    decision === 'cancelled' ||
+    restoreSessions.get(session.workspacePath) !== session ||
+    !isLocalWorkspace(session.workspacePath)
+  ) return
   const ids = decision === 'fresh'
     ? (trigger === 'cold'
       ? pendingRestorePaneIds(panes.value, session.workspacePath)
