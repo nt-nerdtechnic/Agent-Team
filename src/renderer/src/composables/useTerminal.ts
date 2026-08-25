@@ -289,10 +289,11 @@ let _selectionGlobalInstalled = false
 
 /** The focused pane's "⌘C copied nothing" reporter — only it may answer, for
  *  the same reason `_focusOwner` exists. */
-let _emptyCopyReporter: (() => void) | undefined
+let _emptyCopyReporter: ((origin?: string) => void) | undefined
 let _copyEmptyBridgeInstalled = false
 
 /** One ⌘C can reach both the menu accelerator and this handler; collapse them. */
+const EMPTY_COPY_DEDUPE_MS = 300
 let _lastEmptyCopyAt = 0
 
 /** When a copy last succeeded here. A renderer too busy to answer main's 300ms
@@ -300,6 +301,14 @@ let _lastEmptyCopyAt = 0
  *  this page just copied fine — without this, that reports a failure over a
  *  copy the user watched work. */
 let _lastCopyOkAt = 0
+
+/** How long a success here silences a copy-empty from main. It must be
+ *  comfortably LONGER than main's own selection deadline (menu.ts's
+ *  SELECTION_READ_TIMEOUT_MS, 300ms): the notification this suppresses is
+ *  emitted when that deadline expires, so a window of the same length lands
+ *  exactly on the boundary and suppresses or not depending on task ordering
+ *  we do not control. */
+const COPY_OK_SUPPRESS_MS = 1_000
 
 function installTerminalSelectionGlobal(): void {
   if (_selectionGlobalInstalled) return
@@ -318,9 +327,14 @@ function installTerminalSelectionGlobal(): void {
  *  the bridge is absent (older preload, or a plugin view). */
 function installTerminalCopyEmptyBridge(): void {
   if (_copyEmptyBridgeInstalled) return
-  _copyEmptyBridgeInstalled = true
+  // Claim the flag only once the subscription actually happened. Setting it
+  // first would burn the single attempt on a bridge that was not up yet and
+  // leave main unable to reach this page for the rest of the session — the
+  // same shape as the write-once hint flag this whole change exists to fix.
+  if (!window.agentTeam?.onTerminalCopyEmpty) return
   try {
-    window.agentTeam?.onTerminalCopyEmpty?.(() => { _emptyCopyReporter?.() })
+    window.agentTeam.onTerminalCopyEmpty((branch) => { _emptyCopyReporter?.(branch) })
+    _copyEmptyBridgeInstalled = true
   } catch { /* no bridge — the renderer's own ⌘C handler still reports */ }
 }
 
@@ -2073,18 +2087,22 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   /** ⌘C produced nothing. Say so — and, where a plain drag cannot select at
    *  all, say what to do about it. Reached from this pane's own key handler and
    *  from main when the Edit > Copy accelerator claimed the key first. */
-  function reportEmptyCopy(): void {
+  function reportEmptyCopy(origin?: string): void {
     const now = Date.now()
-    if (now - _lastEmptyCopyAt < 300) return
-    if (now - _lastCopyOkAt < 300) return  // this page already copied it
+    if (now - _lastEmptyCopyAt < EMPTY_COPY_DEDUPE_MS) return
+    if (now - _lastCopyOkAt < COPY_OK_SUPPRESS_MS) return  // this page already copied it
     _lastEmptyCopyAt = now
+    // menu.ts distinguishes a renderer too busy to answer its 300ms selection
+    // read from a page that promptly said there was nothing selected. Only the
+    // first scales with CLI output, so the log has to keep them apart.
+    const from = origin ? ` (main: ${origin})` : ''
     if (term.modes.mouseTrackingMode !== 'none') {
       // The once-ever flag is deliberately bypassed: being unable to rediscover
       // ⌥-drag after the first six seconds is the bug this fixes.
       showOptionSelectHint()
-      _clipboardFailure(`pane=${paneId} Cmd+C copied nothing — the CLI captures the mouse and there is no selection`, 'copy-mouse-captured')
+      _clipboardFailure(`pane=${paneId} Cmd+C copied nothing — the CLI captures the mouse and there is no selection${from}`, 'copy-mouse-captured')
     } else {
-      _clipboardFailure(`pane=${paneId} Cmd+C copied nothing — no selection`, 'copy-no-selection')
+      _clipboardFailure(`pane=${paneId} Cmd+C copied nothing — no selection${from}`, 'copy-no-selection')
     }
   }
 

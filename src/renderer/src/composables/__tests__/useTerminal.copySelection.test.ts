@@ -322,6 +322,44 @@ describe('useTerminal — Cmd+C copies the terminal selection', () => {
       expect(opts.reasons).toEqual([])
       scope.stop()
     })
+
+    // The bridge to main is installed once per page. Claiming that single
+    // attempt before the subscription actually happens strands main for the
+    // rest of the session — the same write-once trap as the hint flag.
+    it('keeps trying to reach main until the bridge is really there', async () => {
+      const saved = window.agentTeam
+      window.agentTeam = undefined as unknown as typeof window.agentTeam
+      const first = await spawnedTerminal()
+      first.scope.stop()
+
+      const subscribe = vi.fn()
+      window.agentTeam = { onTerminalCopyEmpty: subscribe } as unknown as typeof window.agentTeam
+      const second = await spawnedTerminal()
+
+      expect(subscribe).toHaveBeenCalledTimes(1)
+      second.scope.stop()
+      window.agentTeam = saved
+    })
+
+    // The notice being suppressed is emitted when main's own 300ms selection
+    // deadline expires, so the suppression window has to outlast that deadline.
+    // A window of the same length lands exactly on the boundary and holds or
+    // not depending on task ordering neither process controls.
+    it('stays silent when main reports in only after its 300ms deadline', async () => {
+      const opts = failureRecorder()
+      const { scope } = await spawnedTerminal(opts)
+      captured.selection = 'npm run build'
+      captured.keyHandler!(keyEvent({ key: 'c', metaKey: true }))
+      await settle()
+
+      clockOffset += 400 // main gave up at 300ms and is only now saying so
+      captured.selection = ''
+      captured.keyHandler!(keyEvent({ key: 'c', metaKey: true }))
+      await settle()
+
+      expect(opts.reasons).toEqual([])
+      scope.stop()
+    })
   })
 
   it('keeps the selection on screen after copying', async () => {
