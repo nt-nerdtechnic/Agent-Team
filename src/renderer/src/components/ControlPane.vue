@@ -1560,10 +1560,18 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
       <ul v-else class="agent-list">
         <template v-for="ws in localWorkspaceRows" :key="ws?.path ?? '\u0000ungrouped'">
+        <!-- The row is the switch. It was the name alone, which is a few
+             characters wide with nothing to say it does anything — the caret,
+             the two actions and ＋ all stop propagation, so they keep working. -->
         <li
           v-if="ws"
           class="ws-head ws-head--current"
-          :class="{ 'ws-head--viewing': ws.path === workspacePath }"
+          :class="{
+            'ws-head--viewing': ws.path === workspacePath,
+            'ws-head--switchable': ws.path !== workspacePath,
+          }"
+          :title="ws.path !== workspacePath ? $t('label.workspace-switch-hint') : ''"
+          @click="ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
           @contextmenu="openWsMenu($event, ws.path, ws.path !== workspacePath)"
         >
           <button
@@ -1572,12 +1580,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             @click.stop="emit('toggle-workspace', ws.path)"
           >{{ ws.collapsed ? '›' : '⌄' }}</button>
           <span class="ws-icon"><FolderIcon /></span>
-          <span
-            class="ws-text"
-            :class="{ 'ws-text--switchable': ws.path !== workspacePath }"
-            :title="ws.path !== workspacePath ? `${ws.path}\n${$t('label.workspace-switch-hint')}` : ws.path"
-            @click="ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
-          >
+          <span class="ws-text" :title="ws.path">
             <span class="ws-line">
               <span class="ws-name">{{ ws.label }}</span>
               <span class="ws-count">{{ ws.count }}</span>
@@ -1705,18 +1708,21 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
              agent and busy flag; everything else needs the window that owns
              them, which is what clicking a row goes to. -->
         <template v-for="ws in otherWorkspaceRows" :key="ws.path">
-          <li class="ws-head" @contextmenu="openWsMenu($event, ws.path, false)"><!-- canClose: false — that window's to close -->
+          <!-- canClose: false — that window's to close. Whole row again, but
+               this one goes to the window that owns the panes. -->
+          <li
+            class="ws-head ws-head--switchable"
+            :title="$t('label.workspace-elsewhere-hint')"
+            @click="emit('reveal-workspace', ws.path)"
+            @contextmenu="openWsMenu($event, ws.path, false)"
+          >
             <button
               class="ws-caret"
               :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
               @click.stop="emit('toggle-workspace', ws.path)"
             >{{ ws.collapsed ? '›' : '⌄' }}</button>
             <span class="ws-icon"><FolderIcon /></span>
-            <span
-              class="ws-text"
-              :title="`${ws.path}\n${$t('label.workspace-elsewhere-hint')}`"
-              @click="emit('reveal-workspace', ws.path)"
-            >
+            <span class="ws-text" :title="ws.path">
               <span class="ws-line">
                 <span class="ws-name">{{ ws.label }}</span>
                 <!-- Its agents live in the window that owns it, so clicking
@@ -3035,7 +3041,9 @@ button.icon-btn.muted:hover {
 /* The workspace on screen. The others in this window keep running; their
    headings read as links to switch to. */
 .ws-head--viewing .ws-name { color: var(--accent-bright, var(--text-bright)); }
-.ws-text--switchable { cursor: pointer; }
+.ws-head--switchable { cursor: pointer; border-radius: 4px; }
+.ws-head--switchable:hover { background: var(--bg-hover); }
+.ws-head--switchable:hover .ws-name { text-decoration: underline; }
 /* This window has no terminal for that project's panes — the row goes to the
    window that does. */
 .ws-elsewhere {

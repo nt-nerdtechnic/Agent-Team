@@ -296,15 +296,40 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.find('.ws-ctx-menu').exists()).toBe(false)
   })
 
-  it('switches to another of this window\'s workspaces by name', async () => {
+  it('switches when the row is clicked, not just the name', async () => {
+    // The name alone is a few characters wide with nothing to say it does
+    // anything — the whole row is the target.
     const other = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
     wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), other] })
-    const texts = wrapper.findAll('.ws-head--current .ws-text')
-    // The one on screen is inert; the other is the switch.
-    await texts[0].trigger('click')
+    const rows = wrapper.findAll('.ws-head--current')
+    // The one on screen is inert and not marked clickable.
+    expect(rows[0].classes()).not.toContain('ws-head--switchable')
+    await rows[0].trigger('click')
     expect(wrapper.emitted('switch-to-workspace')).toBeUndefined()
-    await texts[1].trigger('click')
+    expect(rows[1].classes()).toContain('ws-head--switchable')
+    await rows[1].trigger('click')
     expect(wrapper.emitted('switch-to-workspace')?.[0]).toEqual(['/Users/me/Desktop/Other'])
+  })
+
+  it('the row controls keep working without switching', async () => {
+    // caret, rebuild, history and ＋ all stop propagation.
+    const other = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), other] })
+    const row = wrapper.findAll('.ws-head--current')[1]
+    await row.find('.ws-caret').trigger('click')
+    expect(wrapper.emitted('toggle-workspace')?.[0]).toEqual(['/Users/me/Desktop/Other'])
+    expect(wrapper.emitted('switch-to-workspace')).toBeUndefined()
+    await row.findAll('.ws-act')[1].trigger('click')
+    expect(wrapper.emitted('open-history')).toBeTruthy()
+    expect(wrapper.emitted('switch-to-workspace')).toBeUndefined()
+  })
+
+  it('another window\'s row goes to that window from anywhere on it', async () => {
+    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), other()] })
+    const remote = wrapper.findAll('.ws-head')[1]
+    expect(remote.classes()).toContain('ws-head--switchable')
+    await remote.trigger('click')
+    expect(wrapper.emitted('reveal-workspace')?.[0]).toEqual(['/other'])
   })
 
   it('marks which workspace is on screen', () => {
