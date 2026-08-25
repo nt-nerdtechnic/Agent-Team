@@ -47,6 +47,8 @@ const focused = {
     return focused.selection
   },
   copy: (): void => { focused.copyCalls++ },
+  sent: [] as { channel: string, args: unknown[] }[],
+  send: (channel: string, ...args: unknown[]): void => { focused.sent.push({ channel, args }) },
   reloadCalls: 0,
   reload: (): void => { focused.reloadCalls++ }
 }
@@ -102,6 +104,7 @@ describe('installApplicationMenu', () => {
     focused.hangs = false
     focused.copyCalls = 0
     focused.evalCalls = 0
+    focused.sent.length = 0
     focused.reloadCalls = 0
     forgetTerminalSelection(FOCUSED_ID) // module state outlives a single case
     h.focusedWebContents = focused
@@ -304,6 +307,25 @@ describe('installApplicationMenu', () => {
         focused.selection = 'selected terminal text'
         await clickCopy()
         expect(warnings.filter((w) => w.includes('[menu] Copy:'))).toEqual([])
+      })
+    })
+
+    // Issue #20: the console warning above is for a maintainer reading a log.
+    // The person who pressed ⌘C sees nothing, and the page is the only place
+    // that can tell them — so main names the branch it fell through on.
+    describe('tells the page that Copy produced nothing', () => {
+      it('sends terminal:copy-empty, and still runs the built-in copy', async () => {
+        focused.selection = ''
+        await clickCopy()
+        expect(focused.sent).toEqual([{ channel: 'terminal:copy-empty', args: ['no-selection'] }])
+        expect(focused.copyCalls).toBe(1)
+      })
+
+      it('sends nothing when the copy succeeded', async () => {
+        focused.selection = 'selected terminal text'
+        await clickCopy()
+        expect(focused.sent).toEqual([])
+        expect(clipboardWrites).toEqual(['selected terminal text'])
       })
     })
   })

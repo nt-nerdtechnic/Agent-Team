@@ -167,11 +167,31 @@ describe('TokenStatsPanel', () => {
   })
 
   it('renders only the tabs the layout assigns to this slot, in that order', async () => {
+    // The strip is icon-only (mirroring ControlPane), so the accessible name \u2014
+    // not the button text \u2014 is what identifies a tab.
     const { w } = mountPanel({ views: ['messages', 'history'] })
-    expect(w.findAll('.hdr .tab').map((b) => b.text())).toEqual([
-      '\u2709 label.messages',
-      '\u{1F4DC} label.history',
+    expect(w.findAll('.hdr .tab').map((b) => b.attributes('title'))).toEqual([
+      'label.messages',
+      'label.history',
     ])
+    expect(w.findAll('.hdr .tab').map((b) => b.attributes('aria-label'))).toEqual([
+      'label.messages',
+      'label.history',
+    ])
+    w.unmount()
+  })
+
+  it('draws every tab as a glyph rather than an emoji-and-label pair', async () => {
+    // An icon-only strip is the whole point of matching the left sidebar: a
+    // regression that reinstates the labels would still pass the order test
+    // above, since title/aria-label survive either rendering.
+    const { w } = mountPanel({ views: ['history', 'tokens'] })
+    const buttons = w.findAll('.hdr .tab')
+    expect(buttons).toHaveLength(2)
+    for (const b of buttons) {
+      expect(b.find('svg').exists()).toBe(true)
+      expect(b.text()).toBe('')
+    }
     w.unmount()
   })
 
@@ -201,6 +221,29 @@ describe('TokenStatsPanel', () => {
     expect(w.findAll('.hdr .tab')).toHaveLength(0)
     expect(w.findComponent({ name: 'HistoryPanel' }).exists()).toBe(false)
     expect(w.find('.body').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('scales past M so a workspace worth billions of tokens stays readable', async () => {
+    // The tiers stopped at M, so 77 billion rendered as "77059.4M" and the
+    // fixed-width cell clipped it to "77059...." — IN and TOTAL went
+    // unreadable exactly on the workspaces that had used the most.
+    const snap = snapshot({
+      cumulative: {
+        totals: bucket(77_059_400_000, 329_000_000, 369_287),
+        by_vendor: {}, by_stage: {},
+      },
+    })
+    snap.global.all_time = bucket(2_500_000_000_000, 0, 0)
+    const { w, emit } = mountPanel()
+    emit('tokens.changed', snap)
+    await w.findAll('.hdr .tab')[1].trigger('click')  // tokens
+
+    const cellsOf = (title: string) =>
+      w.findAll('.block').find((b) => b.text().includes(title))!
+        .findAll('.cell .big').map((n) => n.text())
+    expect(cellsOf('label.workspace-cumulative')).toEqual(['77.1B', '329.0M', '77.4B', '369287'])
+    expect(cellsOf('label.all-time-global')[0]).toBe('2.5T')
     w.unmount()
   })
 

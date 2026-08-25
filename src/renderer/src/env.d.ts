@@ -223,6 +223,9 @@ declare global {
       ) => () => void
       showTerminalContextMenu: (selection: string) => void
       reportTerminalSelection?: (selection: string) => void
+      /** Edit > Copy produced an unchanged clipboard; `branch` is 'timeout' or
+       *  'no-selection'. Absent on an older preload and in plugin views. */
+      onTerminalCopyEmpty?: (cb: (branch: string) => void) => void
       setBadgeCount: (count: number) => void
       reportWorkspace: (workspacePath: string) => void
       restore?: {

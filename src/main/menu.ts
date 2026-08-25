@@ -180,6 +180,10 @@ export function installApplicationMenu(
                 : `[menu] Copy: page reported no terminal selection in ${Date.now() - startedAt}ms — falling back to webContents.copy()`
             )
           }
+          // Tell the page which branch this was: webContents.copy() leaves the
+          // clipboard unchanged over a terminal, and the pane is the only place
+          // that can say so to the person who pressed the key.
+          target.send('terminal:copy-empty', selection === SELECTION_TIMED_OUT ? 'timeout' : 'no-selection')
           target.copy()
         }
       } catch { /* window torn down mid-copy — nothing useful to do */ }
