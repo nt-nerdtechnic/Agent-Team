@@ -101,6 +101,14 @@ class _LoopWatchdog:
                     "event loop recovered after %.1fs stalled", last_tick - stall_started_at
                 )
                 stall_started_at = None
+        # A stop can land between the loop turning again and the next poll, so
+        # settle a pending stall here rather than dropping the recovery report.
+        if stall_started_at is not None:
+            last_tick = self._last_tick
+            if time.monotonic() - last_tick < STALL_THRESHOLD_S:
+                log.warning(
+                    "event loop recovered after %.1fs stalled", last_tick - stall_started_at
+                )
 
     def _loop_stack(self) -> str:
         thread_id = self._loop_thread_id
