@@ -983,12 +983,17 @@ const addMenuOpen = ref<boolean>(false)
 const addMenuWorkspace = ref<string>('')
 
 // ── Right-click on a workspace heading ───────────────────────────────────
-const wsMenu = ref<{ path: string; isPrimary: boolean; x: number; y: number } | null>(null)
+const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | null>(null)
 
-function openWsMenu(ev: MouseEvent, path: string, isPrimary: boolean): void {
+/** `canClose` is the answer to "would closing this do anything?", not "is this
+ *  the primary?". Only a workspace THIS window adopted can be closed here: the
+ *  primary is what the window was opened with, and another window's is that
+ *  window's to close. Offering it on those two produced a menu item that
+ *  silently did nothing. */
+function openWsMenu(ev: MouseEvent, path: string, canClose: boolean): void {
   ev.preventDefault()
   addMenuOpen.value = false
-  wsMenu.value = { path, isPrimary, x: ev.clientX, y: ev.clientY }
+  wsMenu.value = { path, canClose, x: ev.clientX, y: ev.clientY }
 }
 function closeWsMenu(): void {
   wsMenu.value = null
@@ -1559,7 +1564,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           v-if="ws"
           class="ws-head ws-head--current"
           :class="{ 'ws-head--viewing': ws.path === workspacePath }"
-          @contextmenu="openWsMenu($event, ws.path, ws.path === workspacePath)"
+          @contextmenu="openWsMenu($event, ws.path, ws.path !== workspacePath)"
         >
           <button
             class="ws-caret"
@@ -1570,7 +1575,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <span
             class="ws-text"
             :class="{ 'ws-text--switchable': ws.path !== workspacePath }"
-            :title="ws.path"
+            :title="ws.path !== workspacePath ? `${ws.path}\n${$t('label.workspace-switch-hint')}` : ws.path"
             @click="ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
           >
             <span class="ws-line">
@@ -1700,16 +1705,24 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
              agent and busy flag; everything else needs the window that owns
              them, which is what clicking a row goes to. -->
         <template v-for="ws in otherWorkspaceRows" :key="ws.path">
-          <li class="ws-head" @contextmenu="openWsMenu($event, ws.path, false)">
+          <li class="ws-head" @contextmenu="openWsMenu($event, ws.path, false)"><!-- canClose: false — that window's to close -->
             <button
               class="ws-caret"
               :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
               @click.stop="emit('toggle-workspace', ws.path)"
             >{{ ws.collapsed ? '›' : '⌄' }}</button>
             <span class="ws-icon"><FolderIcon /></span>
-            <span class="ws-text" :title="ws.path" @click="emit('reveal-workspace', ws.path)">
+            <span
+              class="ws-text"
+              :title="`${ws.path}\n${$t('label.workspace-elsewhere-hint')}`"
+              @click="emit('reveal-workspace', ws.path)"
+            >
               <span class="ws-line">
                 <span class="ws-name">{{ ws.label }}</span>
+                <!-- Its agents live in the window that owns it, so clicking
+                     goes there rather than switching this window. Without this
+                     mark the row is indistinguishable from a switchable one. -->
+                <span class="ws-elsewhere" :title="$t('label.workspace-elsewhere-hint')">⧉</span>
                 <span class="ws-count">{{ ws.count }}</span>
               </span>
               <span class="ws-path">{{ ws.displayPath }}</span>
@@ -1744,7 +1757,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <!-- The primary workspace is what this window was opened with; closing
              it would leave the window with no root. Switch or close the window
              instead. -->
-        <template v-if="!wsMenu.isPrimary">
+        <template v-if="wsMenu.canClose">
           <div class="ws-add-div"></div>
           <button class="ws-ctx-opt danger" @click="wsMenuAction('close')">
             {{ $t('action.close-workspace') }}
@@ -3023,6 +3036,15 @@ button.icon-btn.muted:hover {
    headings read as links to switch to. */
 .ws-head--viewing .ws-name { color: var(--accent-bright, var(--text-bright)); }
 .ws-text--switchable { cursor: pointer; }
+/* This window has no terminal for that project's panes — the row goes to the
+   window that does. */
+.ws-elsewhere {
+  flex: none;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0.8;
+}
 .ws-text--switchable:hover .ws-name { text-decoration: underline; }
 /* Only another window's name is a link — this window's own is where you are. */
 .ws-head:not(.ws-head--current) .ws-text { cursor: pointer; }

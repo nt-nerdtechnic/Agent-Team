@@ -1594,6 +1594,8 @@
     "messages": "Messages",
     "current-run": "Current run",
     "no-active-run": "No active run.",
+    "workspace-elsewhere-hint": "Open in another window — click to go there",
+    "workspace-switch-hint": "Click to switch this window to it",
     "workspace-cumulative": "Workspace cumulative",
     "all-time-global": "All time (global)",
     "by-vendor": "By vendor",

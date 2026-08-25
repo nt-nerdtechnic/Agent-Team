@@ -258,6 +258,18 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.find('.ws-ctx-opt.danger').exists()).toBe(false)
   })
 
+  it("never offers to close a workspace another window owns", async () => {
+    // closeWorkspace only acts on workspaces THIS window adopted, so offering
+    // it on someone else's row produced a menu item that silently did nothing.
+    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), other()] })
+    const rows = wrapper.findAll('.ws-head')
+    await rows[1].trigger('contextmenu')   // the remote row
+    expect(wrapper.find('.ws-ctx-menu').exists()).toBe(true)
+    expect(wrapper.find('.ws-ctx-opt.danger').exists()).toBe(false)
+    // The other two entries still work on it.
+    expect(wrapper.findAll('.ws-ctx-opt').length).toBe(2)
+  })
+
   it('closes an adopted workspace from that menu', async () => {
     const adopted = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
     wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), adopted] })
