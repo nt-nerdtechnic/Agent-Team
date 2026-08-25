@@ -335,6 +335,18 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('normWs(w) !== normWs(leaving)')
   })
 
+  it('falls back to a pane the screen can actually render', () => {
+    // Sidebar and spotlight render effectiveFocusPaneId and nothing else, and
+    // onScreenPaneIds checks it against the workspace-filtered list. Answering
+    // with a pane from another workspace renders nothing at all — a blank
+    // main area with a full agent list beside it.
+    const start = appSource.indexOf('const effectiveFocusPaneId = computed')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n})', start))
+    expect(body).toContain('const here = panesInView.value')
+    expect(body).not.toContain('panes.value.find')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')

@@ -12629,12 +12629,17 @@ function onGridHandleEnd(): void {
 
 // Resolved focus pane: skips minimized panes, falls back to first visible
 const effectiveFocusPaneId = computed(() => {
+  // Of the workspace on screen. Sidebar and spotlight render this pane and
+  // nothing else, and onScreenPaneIds checks it against the same filtered list
+  // — so answering with a pane from another workspace renders nothing at all.
+  // Identical to reading every pane whenever the window holds one workspace.
+  const here = panesInView.value
   if (focusPaneId.value
-    && panes.value.find((p) => p.id === focusPaneId.value)
+    && here.find((p) => p.id === focusPaneId.value)
     && !minimizedPanes.value.has(focusPaneId.value)) {
     return focusPaneId.value
   }
-  return panes.value.find((p) => !minimizedPanes.value.has(p.id))?.id ?? null
+  return here.find((p) => !minimizedPanes.value.has(p.id))?.id ?? null
 })
 
 // ── Dual-focus: show 2 running panes side-by-side in non-grid modes ───────────
