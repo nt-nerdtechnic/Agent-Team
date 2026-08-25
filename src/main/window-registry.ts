@@ -72,8 +72,19 @@ function sanitizeEntries(list: unknown): WindowEntry[] {
       ...(w.bounds ? { bounds: w.bounds } : {}),
       ...(typeof w.detached_group === 'string' && w.detached_group
         ? { detached_group: w.detached_group }
+        : {}),
+      ...(adopted(w.adopted_workspaces).length
+        ? { adopted_workspaces: adopted(w.adopted_workspaces) }
         : {})
     }))
+}
+
+/** The adopted-workspace list of a stored entry, or [] when it is missing or
+ *  malformed. Non-string and empty items are dropped rather than failing the
+ *  whole entry: the window still restores, just without that one workspace. */
+function adopted(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((p): p is string => typeof p === 'string' && p.length > 0)
 }
 
 /** Keep only well-formed ledger entries: workspace path → positive attempt count. */
