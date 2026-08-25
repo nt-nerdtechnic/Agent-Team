@@ -1008,6 +1008,15 @@ function openSpawnCardFromMenu(): void {
 function onAddMenuKeydown(ev: KeyboardEvent): void {
   if (ev.key === 'Escape') addMenuOpen.value = false
 }
+
+function onSpawnModalKeydown(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') manualSpawnOpen.value = false
+}
+watch(manualSpawnOpen, (open) => {
+  if (open) document.addEventListener('keydown', onSpawnModalKeydown)
+  else document.removeEventListener('keydown', onSpawnModalKeydown)
+})
+onUnmounted(() => document.removeEventListener('keydown', onSpawnModalKeydown))
 function closeAddMenu(): void {
   addMenuOpen.value = false
 }
@@ -1485,10 +1494,12 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           >{{ currentWorkspaceRow.collapsed ? '›' : '⌄' }}</button>
           <span class="ws-icon"><FolderIcon /></span>
           <span class="ws-text" :title="currentWorkspaceRow.path">
-            <span class="ws-name">{{ currentWorkspaceRow.label }}</span>
+            <span class="ws-line">
+              <span class="ws-name">{{ currentWorkspaceRow.label }}</span>
+              <span class="ws-count">{{ currentWorkspaceRow.count }}</span>
+            </span>
             <span class="ws-path">{{ currentWorkspaceRow.displayPath }}</span>
           </span>
-          <span class="ws-count">{{ currentWorkspaceRow.count }}</span>
           <button
             class="ws-act"
             :class="{ busy: rebuildingAll }"
@@ -1621,10 +1632,12 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             >{{ ws.collapsed ? '›' : '⌄' }}</button>
             <span class="ws-icon"><FolderIcon /></span>
             <span class="ws-text" :title="ws.path" @click="emit('reveal-workspace', ws.path)">
-              <span class="ws-name">{{ ws.label }}</span>
+              <span class="ws-line">
+                <span class="ws-name">{{ ws.label }}</span>
+                <span class="ws-count">{{ ws.count }}</span>
+              </span>
               <span class="ws-path">{{ ws.displayPath }}</span>
             </span>
-            <span class="ws-count">{{ ws.count }}</span>
             <button class="ws-add" :title="$t('action.add-to-grid')" @click.stop="emit('add-in-workspace', ws.path)">＋</button>
           </li>
           <li
@@ -1670,12 +1683,16 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         </button>
       </div>
 
-      <div class="spawn-card">
-        <div class="spawn-card-hdr" @click="manualSpawnOpen = !manualSpawnOpen">
-          <span class="spawn-caret">{{ manualSpawnOpen ? '▾' : '▸' }}</span>
+      <!-- A dialog rather than a permanent card: the sidebar is a list of what
+           is running, and a form for starting something new sat in it all day
+           whether or not it was wanted. Every control inside is unchanged. -->
+      <div v-if="manualSpawnOpen" class="spawn-modal-backdrop" @click.self="manualSpawnOpen = false">
+        <div class="spawn-card spawn-card--modal" role="dialog" aria-modal="true">
+        <div class="spawn-card-hdr">
           <span>{{ $t('label.manual-spawn') }}</span>
+          <button class="spawn-modal-close" :aria-label="$t('action.close')" @click="manualSpawnOpen = false">✕</button>
         </div>
-        <div v-if="manualSpawnOpen" class="spawn-card-body">
+        <div class="spawn-card-body">
           <div class="row two-col">
             <select v-model="pickedAgent" @focus="refreshCliStatus">
               <option v-for="spec in manualAgentSpecs" :key="spec.agentKey" :value="spec.agentKey">
@@ -1733,6 +1750,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               <button class="ghost" @click="emit('open-settings')">⚙ {{ $t('action.settings') }}</button>
             </div>
           </div>
+        </div>
         </div>
       </div>
     </section>
@@ -2833,7 +2851,6 @@ button.icon-btn.muted:hover {
    that row rather than on the block. */
 .ws-head > .ws-caret,
 .ws-head > .ws-icon,
-.ws-head > .ws-count,
 .ws-head > .ws-act,
 .ws-head > .ws-add { height: 16px; align-self: flex-start; }
 .ws-caret {
@@ -2860,8 +2877,17 @@ button.icon-btn.muted:hover {
    sidebar, so every pixel of leading is paid for many times over. */
 .ws-text {
   min-width: 0;
+  margin-right: auto;
   display: flex;
   flex-direction: column;
+}
+/* The name's own line, so the count sits against the name however long the
+   path below it happens to be. */
+.ws-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 .ws-name {
   overflow: hidden;
@@ -2885,11 +2911,22 @@ button.icon-btn.muted:hover {
 /* Only another window's name is a link — this window's own is where you are. */
 .ws-head:not(.ws-head--current) .ws-text { cursor: pointer; }
 .ws-head:not(.ws-head--current) .ws-text:hover .ws-name { text-decoration: underline; }
+/* Same pill as StageTabBar's tab-count: a pane tally means the same thing in
+   both places, so it should not look like two different things. */
 .ws-count {
-  margin-left: auto;
-  font-weight: 400;
-  font-size: 11px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--bg-muted);
   color: var(--text-muted);
+  font-weight: 400;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 .ws-add {
   flex: none;
@@ -3406,13 +3443,44 @@ button.icon-btn.muted:hover {
   font-weight: 600;
   color: var(--text-primary);
 }
-.spawn-card-hdr:hover { background: var(--bg-elevated); }
-.spawn-caret {
-  font-size: 9px;
-  color: var(--text-muted);
-  width: 10px;
-  flex-shrink: 0;
+/* The header is a dialog title now, not a fold toggle. */
+.spawn-card-hdr { cursor: default; }
+.spawn-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 45%);
 }
+.spawn-card--modal {
+  width: 320px;
+  max-width: 100%;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated, var(--bg-secondary));
+  box-shadow: 0 16px 48px rgb(0 0 0 / 50%);
+}
+.spawn-card--modal .spawn-card-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: default;
+}
+.spawn-modal-close {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted);
+}
+.spawn-modal-close:hover { color: var(--text-bright); }
 .spawn-card-body {
   padding: 10px;
   display: flex;

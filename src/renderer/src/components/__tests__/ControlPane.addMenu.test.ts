@@ -105,8 +105,9 @@ describe('ControlPane – the ＋ menu', () => {
     wrapper = mountWith()
     await openMenu(wrapper)
     await wrapper.findAll('.ws-add-scroll .ws-add-opt')[1].trigger('click')
-    // Open the card and read its dropdown.
-    await wrapper.find('.spawn-card-hdr').trigger('click')
+    // Reopen the menu, go into the full dialog, and read its dropdown.
+    await openMenu(wrapper)
+    await wrapper.find('.ws-add-more').trigger('click')
     expect((wrapper.find('.spawn-card-body select').element as HTMLSelectElement).value).toBe('codex')
   })
 
@@ -179,13 +180,48 @@ describe('ControlPane – the ＋ menu', () => {
     expect(wrapper.find('.ws-add-menu').exists()).toBe(false)
   })
 
-  it('leaves the spawn card intact', async () => {
-    // The menu is an addition; every control the card had still has to be there.
+  it('leaves every spawn-card control intact inside the dialog', async () => {
+    // Manual spawn became a dialog; it must not have lost a control on the way.
     wrapper = mountWith()
-    await wrapper.find('.spawn-card-hdr').trigger('click')
+    await openMenu(wrapper)
+    await wrapper.find('.ws-add-more').trigger('click')
     const body = wrapper.find('.spawn-card-body')
     expect(body.findAll('select')).toHaveLength(2)      // CLI + role
     expect(body.find('.terminal-btn').exists()).toBe(true)
     expect(body.find('.resume-btn').exists()).toBe(true)
+    expect(body.find('.resume-input').exists()).toBe(true)
+  })
+
+  it('the dialog is not in the sidebar until something opens it', () => {
+    // The old card sat in the list all day whether or not it was wanted.
+    wrapper = mountWith()
+    expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(false)
+    expect(wrapper.find('.spawn-card').exists()).toBe(false)
+  })
+
+  it('closes on Escape, the close button, and a click on the backdrop', async () => {
+    wrapper = mountWith()
+
+    const open = async (): Promise<void> => {
+      await openMenu(wrapper)
+      await wrapper.find('.ws-add-more').trigger('click')
+      expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(true)
+    }
+
+    await open()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(false)
+
+    await open()
+    await wrapper.find('.spawn-modal-close').trigger('click')
+    expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(false)
+
+    await open()
+    // .self — clicking the card inside it must NOT close the dialog.
+    await wrapper.find('.spawn-card--modal').trigger('click')
+    expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(true)
+    await wrapper.find('.spawn-modal-backdrop').trigger('click')
+    expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(false)
   })
 })
