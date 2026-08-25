@@ -213,12 +213,35 @@ describe('cross-workspace roster', () => {
   it('shows one workspace in the grid at a time', () => {
     // Switching is a change of view: the workspaces left behind keep running
     // and keep their sidebar headings, they are just not on screen.
-    const start = appSource.indexOf('const tabFilteredPaneIds = computed')
+    const start = appSource.indexOf('const panesInView = computed')
+    expect(start).toBeGreaterThan(-1)
     const body = appSource.slice(start, appSource.indexOf('\n})', start))
     expect(body).toContain('extraWorkspaces.value.map(normWs)')
     // A pane whose workspace is in neither list — a manual resume can pull one
     // in from any folder — must stay visible as it always did.
-    expect(body).toContain('held.size')
+    expect(body).toContain('if (!held.size) return panes.value')
+  })
+
+  it('counts a tab over the same panes the tab will show', () => {
+    // stageTabShapes built its counts from every pane in the window. After a
+    // switch, the other workspace's ungrouped panes landed in this one's
+    // manual-tab count while the grid filter — correctly — refused to show
+    // them: a tab reading "3" with nothing behind it.
+    const start = appSource.indexOf('const stageTabShapes = computed')
+    const shapes = appSource.slice(start, appSource.indexOf('\n  const shapes', start))
+    expect(shapes).toContain('for (const p of panesInView.value)')
+    expect(shapes).not.toContain('for (const p of panes.value)')
+    // And the grid filter reads the same source rather than rebuilding it.
+    const gStart = appSource.indexOf('const tabFilteredPaneIds = computed')
+    const grid = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
+    expect(grid).toContain('const here = panesInView.value')
+  })
+
+  it('picking a workspace it already holds just looks at it', () => {
+    // Nothing happened before: adopt refused it and no switch was attempted.
+    const start = appSource.indexOf('async function openWorkspaceFromPicker')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('await switchToWorkspace(path)')
   })
 
   it('switching keeps the workspace it leaves', () => {

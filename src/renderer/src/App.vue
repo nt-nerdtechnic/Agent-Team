@@ -11013,13 +11013,28 @@ async function deleteRunGroup(id: string): Promise<void> {
  *  2.5 times a second. */
 type StageTabShape = Omit<TabItem, 'status'> & { paneIds: string[] }
 
+/** The panes of the workspace currently on screen.
+ *
+ *  STRUCTURE LAYER — ids and paths only, never paneViews, so the 400ms status
+ *  sync does not rebuild it. Both the tab shapes and the grid filter read this:
+ *  counting a pane on a tab that will not show it is worse than either alone.
+ *
+ *  Only the OTHER adopted workspaces are held back. A pane whose workspace is
+ *  in neither list — a manual resume can pull a session in from any folder —
+ *  stays visible exactly as it did before workspaces were a layer. */
+const panesInView = computed<ActivePane[]>(() => {
+  const held = new Set(extraWorkspaces.value.map(normWs))
+  if (!held.size) return panes.value
+  return panes.value.filter((p) => !held.has(normWs(p.workspacePath)))
+})
+
 const stageTabShapes = computed<StageTabShape[]>(() => {
   // Group panes by their persisted RunGroup; panes without runGroupId are
   // surfaced through the synthetic "手動" tab, even when no real RunGroup
   // remains.
   const groupPaneIds = new Map<string, string[]>()
   const unassignedPaneIds: string[] = []
-  for (const p of panes.value) {
+  for (const p of panesInView.value) {
     if (p.runGroupId) {
       const list = groupPaneIds.get(p.runGroupId)
       if (list) list.push(p.id)
@@ -11087,16 +11102,8 @@ const tabFilteredPaneIds = computed<Set<string>>(() => {
   //
   // The grid shows ONE workspace — the one you switched to. Panes belonging to
   // the others this window holds keep running; they are simply not on screen,
-  // and the sidebar still lists them under their own headings. Tabs are a
-  // workspace's own run groups, so a tab id never matches across workspaces
-  // and the filter has to come first.
-  // Only the OTHER adopted workspaces are held back. A pane whose workspace is
-  // in neither list — a manual resume can pull a session in from any folder —
-  // stays visible exactly as it did before workspaces were a layer.
-  const held = new Set(extraWorkspaces.value.map(normWs))
-  const here = held.size
-    ? panes.value.filter((p) => !held.has(normWs(p.workspacePath)))
-    : panes.value
+  // and the sidebar still lists them under their own headings.
+  const here = panesInView.value
   if (stageTabShapes.value.length === 0) {
     return new Set(here.map((p) => p.id))
   }
@@ -11422,7 +11429,13 @@ const workspacePickerOpen = ref(false)
  *  and its panes live in the window that owns them. */
 async function openWorkspaceFromPicker(path: string): Promise<void> {
   workspacePickerOpen.value = false
-  if (!path || isLocalWorkspace(path)) return
+  if (!path) return
+  // Already one of ours: picking it from the list means "show me that one",
+  // which is the same thing clicking its heading does.
+  if (isLocalWorkspace(path)) {
+    await switchToWorkspace(path)
+    return
+  }
   if (await window.agentTeam?.focusWorkspaceWindow?.(path)) return
   adoptWorkspace(path)
   // Agents are persisted per workspace, so opening one here has to bring them
