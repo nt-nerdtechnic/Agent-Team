@@ -38,14 +38,13 @@ in-repo docs above.
 5. **Giant files** — any file over ~2K lines: Grep tool to locate → Read with
    offset/limit → batch edits through one subagent. Never whole-file Read,
    never bash/python inline search. The largest are `src/renderer/src/App.vue`
-   (~12.1K lines), `backend/agent_team_backend/ws_handlers.py` (~5.2K),
+   (~15.3K lines), `backend/agent_team_backend/ws_handlers.py` (~6.5K),
+   `src/renderer/src/components/SettingsModal.vue` (~4.7K),
+   `src/renderer/src/composables/useTerminal.ts` (~4.2K),
+   `src/renderer/src/components/ControlPane.vue` (~3.8K),
    `src/renderer/src/components/GitPane.vue` (~3.5K),
-   `src/renderer/src/components/SettingsModal.vue` (~3.0K),
-   `backend/agent_team_backend/usage_service.py` (~2.9K),
-   `src/renderer/src/components/ControlPane.vue` (~2.8K),
-   `backend/agent_team_backend/git_service.py` (~2.7K),
-   `src/renderer/src/EditorWindowApp.vue` (~2.7K), and
-   `src/renderer/src/composables/useTerminal.ts` (~2.6K). Check with `wc -l`
+   `backend/agent_team_backend/git_service.py` (~3.0K), and
+   `src/renderer/src/EditorWindowApp.vue` (~2.9K). Check with `wc -l`
    rather than trusting this list — it drifts. Per-vendor CLI code lives in
    `backend/agent_team_backend/cli_vendors/` (one file per vendor; see
    `docs/adding-a-cli-vendor.md`).
