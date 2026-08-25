@@ -194,6 +194,22 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('isLocalWorkspace(workspacePath)')
   })
 
+  it('leaves no restore path comparing against currentWorkspace', () => {
+    // The one-workspace-per-window assumption was spelled four different ways
+    // — workspacePath, session.workspacePath, deferred.workspacePath,
+    // batch.workspacePath — so the first sweep missed some and a restored
+    // placeholder in an adopted workspace silently would not start. Anything
+    // still comparing a *.workspacePath against currentWorkspace inside the
+    // restore/realize functions is a missed one.
+    const region = appSource.slice(
+      appSource.indexOf('async function restoreWorkspacePanes'),
+      appSource.indexOf('const paneLineage = computed')
+    )
+    expect(region.length).toBeGreaterThan(0)
+    const leaks = region.match(/currentWorkspace\.value [!=]==? \w*\.?workspacePath/g) ?? []
+    expect(leaks).toEqual([])
+  })
+
   it('still ties the history pane to the primary workspace', () => {
     // Deliberately NOT widened: spawn history follows the workspace the window
     // was opened with.

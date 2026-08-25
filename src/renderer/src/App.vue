@@ -7234,13 +7234,13 @@ function restoreSessionScopeTargets(session: RestoreSession, trigger: RestoreSes
 
 async function advanceRestoreSession(trigger: RestoreSessionTrigger, coldBatch?: ColdRestoreBatch): Promise<void> {
   const session = activeRestoreSession
-  if (!session || currentWorkspace.value !== session.workspacePath) return
+  if (!session || !isLocalWorkspace(session.workspacePath)) return
   const batch = coldBatch ?? panes.value.find(
     (pane) => !pane.realized && pane.deferredRestore?.workspacePath === session.workspacePath,
   )?.deferredRestore?.batch
   if (!batch) return
   const decision = await restoreSessionDecision(session, batch)
-  if (decision === 'cancelled' || activeRestoreSession !== session || currentWorkspace.value !== session.workspacePath) return
+  if (decision === 'cancelled' || activeRestoreSession !== session || !isLocalWorkspace(session.workspacePath)) return
   const ids = decision === 'fresh'
     ? (trigger === 'cold'
       ? pendingRestorePaneIds(panes.value, session.workspacePath)
@@ -7282,7 +7282,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
 
   const saved = deferred.saved
   const batch = deferred.batch
-  if (currentWorkspace.value !== deferred.workspacePath) return
+  if (!isLocalWorkspace(deferred.workspacePath)) return
   const session = workspaceRestoreSession(batch.workspacePath)
   const sessionId = normalizeResumeSessionId(saved.agent, (saved.session_id ?? '').trim())
   placeholder.restoring = true
@@ -7378,7 +7378,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
       replacePaneId: paneId,
       restoring: true,
       shouldPersist: (newPaneId) =>
-        currentWorkspace.value === batch.workspacePath && panes.value.some((p) => p.id === newPaneId),
+        isLocalWorkspace(batch.workspacePath) && panes.value.some((p) => p.id === newPaneId),
     })
     if (!restored) return
     const { paneId: newId } = restored
