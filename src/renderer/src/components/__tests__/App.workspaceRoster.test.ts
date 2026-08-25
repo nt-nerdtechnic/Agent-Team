@@ -290,6 +290,38 @@ describe('cross-workspace roster', () => {
     expect(body).not.toContain('onPipelineAbort')
   })
 
+  it('never tears down panes while entering a workspace', () => {
+    // The third leg of "switch away and back, the agents are still there".
+    // The other two are v-show on TerminalPane (asserted above) and restore
+    // skipping any pane_id already in the list. This one is the easiest to
+    // break by accident: a tidy-up added to either function would end the CLIs
+    // of every workspace not being entered, and nothing else would complain.
+    const REMOVAL = /panes\.value\s*=|panes\.value\.splice|panes\.value\.filter|unregisterPaneMessaging|onKill\(|delete paneRefs/
+    // Up to the next top-level declaration — anchoring on a named one further
+    // down would sweep in whatever sits between.
+    const bodyOf = (fn: string): string => {
+      const start = appSource.indexOf(fn)
+      expect(start, fn).toBeGreaterThan(-1)
+      const after = start + fn.length
+      const ends = ['\nasync function ', '\nfunction ', '\nconst ']
+        .map((m) => appSource.indexOf(m, after))
+        .filter((i) => i > -1)
+      expect(ends.length, `${fn} end`).toBeGreaterThan(0)
+      return appSource.slice(start, Math.min(...ends))
+    }
+    for (const fn of ['async function restoreWorkspacePanes', 'async function onWorkspaceCheck']) {
+      expect(REMOVAL.test(bodyOf(fn)), fn).toBe(false)
+    }
+  })
+
+  it('skips a pane the list already holds rather than spawning it twice', () => {
+    // Switching back re-runs restore for a workspace whose panes never left.
+    const start = appSource.indexOf('async function restoreWorkspacePanes')
+    const body = appSource.slice(start, appSource.indexOf('\nasync function restoreSessionDecision', start))
+    expect(body).toContain('const existing = panes.value.find((p) => p.id === saved.pane_id)')
+    expect(body).toContain('if (existing) continue')
+  })
+
   it('picking a workspace it already holds just looks at it', () => {
     // Nothing happened before: adopt refused it and no switch was attempted.
     const start = appSource.indexOf('async function openWorkspaceFromPicker')
