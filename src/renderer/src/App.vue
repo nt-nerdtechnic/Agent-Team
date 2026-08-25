@@ -11427,6 +11427,10 @@ watch(
 )
 
 function adoptWorkspace(path: string): void {
+  // A detached window is one run group's view of ONE workspace. Taking on
+  // another would give it a workspace its own registry entry does not name,
+  // and its report to main is suppressed, so nothing else would know.
+  if (isDetachedWindow) return
   if (!path || isLocalWorkspace(path)) return
   workspaceOrder.value = [...workspaceOrder.value, path]
   persistExtraWorkspaces()
@@ -11521,6 +11525,7 @@ async function openWorkspaceFromPicker(path: string): Promise<void> {
  *  Everything that follows currentWorkspace (the tab row, the grid, git,
  *  explorer, plans, the terminal cwd) moves with it. */
 async function switchToWorkspace(path: string): Promise<void> {
+  if (isDetachedWindow) return // see adoptWorkspace
   if (!path || normWs(path) === normWs(currentWorkspace.value)) return
   if (!isLocalWorkspace(path)) return
   // Panes survive a switch; a pipeline cannot. `pipeline` is one per window,
@@ -13120,6 +13125,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :can-rebuild-all="rebuildableAllPaneCount > 0"
       :rebuilding-all="rebuildingTabPanes"
       :spawn-card-nonce="spawnCardNonce"
+      :detached-window="isDetachedWindow"
       @spawn="onManualSpawn"
       @spawn-resume="onManualResume"
       @kill="onKill"

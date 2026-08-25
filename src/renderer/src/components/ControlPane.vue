@@ -300,6 +300,13 @@ interface Props {
   workspaces?: WorkspaceGroupRow[]
   /** Bumped when another window's sidebar asks this one to open an agent. */
   spawnCardNonce?: number
+  /** True in a detached window: it is one run group's view of ONE workspace,
+   *  so it neither opens others nor switches between them — the controls are
+   *  hidden rather than left to do nothing.
+   *
+   *  Phrased as the exception because Vue casts an absent boolean prop to
+   *  false, which would have made the permissive spelling deny by default. */
+  detachedWindow?: boolean
   /** View ids assigned to this slot, in tab order. Omitted means "all of
    *  them" — the layout store supplies the real list. A view moved to another
    *  slot disappears from here, which is what keeps it a singleton. */
@@ -1535,6 +1542,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
              an agent inside one. Always present — the section is a list of
              projects whether or not any is grouped yet. -->
         <button
+          v-if="!detachedWindow"
           class="hdr-add-ws"
           :title="$t('action.open-workspace-picker')"
           :aria-label="$t('action.open-workspace-picker')"
@@ -1568,10 +1576,10 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           class="ws-head ws-head--current"
           :class="{
             'ws-head--viewing': ws.path === workspacePath,
-            'ws-head--switchable': ws.path !== workspacePath,
+            'ws-head--switchable': !detachedWindow && ws.path !== workspacePath,
           }"
-          :title="ws.path !== workspacePath ? $t('label.workspace-switch-hint') : ''"
-          @click="ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
+          :title="!detachedWindow && ws.path !== workspacePath ? $t('label.workspace-switch-hint') : ''"
+          @click="!detachedWindow && ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
           @contextmenu="openWsMenu($event, ws.path, ws.path !== workspacePath)"
         >
           <button

@@ -183,6 +183,22 @@ describe('ControlPane – workspace sections', () => {
     expect(rows[1].findAll('.ws-act')).toHaveLength(0)
   })
 
+  it('offers neither opening nor switching in a detached window', async () => {
+    // A detached window is one run group's view of ONE workspace. Both actions
+    // are refused in App anyway; hiding them beats letting them do nothing.
+    const other = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({
+      workspace: '/Users/me/Desktop/Agent-Team',
+      workspaces: [current(), other],
+      detachedWindow: true,
+    })
+    expect(wrapper.find('.hdr-add-ws').exists()).toBe(false)
+    const rows = wrapper.findAll('.ws-head--current')
+    expect(rows[1].classes()).not.toContain('ws-head--switchable')
+    await rows[1].trigger('click')
+    expect(wrapper.emitted('switch-to-workspace')).toBeUndefined()
+  })
+
   it('offers a way to open another workspace from the section header', async () => {
     // Orca's Projects header adds a project; the per-workspace ＋ below adds an
     // agent inside one. Two different things, so two different buttons.
