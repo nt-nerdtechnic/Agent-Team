@@ -62,35 +62,23 @@ describe('workspace switch — how the parts fit together', () => {
     }
   })
 
-  it('goes to a pane\'s workspace before focusing it', () => {
-    // The sidebar lists every workspace the window holds, so a click can land
-    // on a pane the grid is filtering out. Focusing one the screen will not
-    // draw is the blank-main-area bug again, reached by clicking rather than
-    // by switching.
-    const fn = body('onSidebarFocusPane')
-    expect(fn).toContain('isLocalWorkspace(target)')
-    expect(fn).toContain('await switchToWorkspace(target)')
-    // A declined switch must not fall through to the focus.
-    expect(fn.indexOf('if (normWs(currentWorkspace.value) !== normWs(target)) return'))
-      .toBeLessThan(fn.indexOf('onFocusPane(paneId)'))
-    // Modifier clicks are range/toggle selection and skip all of this.
-    expect(fn.indexOf('onSetFocus(paneId, ev, sidebarOrderedPaneIds.value)'))
-      .toBeLessThan(fn.indexOf('await switchToWorkspace(target)'))
-  })
-
   it('takes every jump-to-a-pane path through the same switch', () => {
-    // Three ways to land on a pane: the sidebar list, the status-bar overview,
-    // and the history modal. Each can name a pane in a workspace that is not
-    // on screen, and each would otherwise focus something the grid filters
-    // out — the blank main area, three times over.
+    // Four ways to land on a pane: the sidebar list, the status-bar overview,
+    // the history modal, and a message notification. Each can name one in a
+    // workspace that is not on screen, and each would otherwise focus
+    // something the grid filters out — the blank main area, four times over.
+    // One helper, so a fifth entry point is easy to get right.
+    const helper = body('ensurePaneWorkspaceOnScreen')
+    expect(helper).toContain('isLocalWorkspace(target)')
+    expect(helper).toContain('await switchToWorkspace(target)')
+    expect(helper).toContain('return normWs(currentWorkspace.value) === normWs(target)')
+
     expect(body('onAgentOverviewJump')).toContain('onSidebarFocusPane(paneId)')
-    for (const fn of ['onSidebarFocusPane', 'onFocusHistoryPane']) {
+    for (const fn of ['onSidebarFocusPane', 'onFocusHistoryPane', 'focusPaneFromNotification']) {
       const b = body(fn)
-      expect(b, fn).toContain('await switchToWorkspace(target)')
-      expect(b, fn).toContain('isLocalWorkspace(target)')
-      // A declined switch stops before the focus.
-      expect(b.indexOf('if (normWs(currentWorkspace.value) !== normWs(target)) return'), fn)
-        .toBeGreaterThan(-1)
+      // Called, and its answer respected — an ignored false focuses a pane the
+      // grid is still filtering out.
+      expect(b, fn).toContain('if (!(await ensurePaneWorkspaceOnScreen(')
     }
   })
 

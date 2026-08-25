@@ -270,7 +270,7 @@ onMounted(() => {
   window.agentTeam?.onQuitConfirmDisabled?.(() => { confirmBeforeClose.value = false })
   // Clicking a system notification focuses the originating pane.
   window.agentTeam?.onFocusPane?.((paneId) => {
-    focusPaneFromNotification(paneId)
+    void focusPaneFromNotification(paneId)
   })
   // Plan window "execute" dispatch routed to this workspace's window.
   window.agentTeam?.onPlanExecutionDispatch?.((payload) => { void onPlanExecutionDispatch(payload) })
@@ -6098,7 +6098,11 @@ function onFocusPane(paneId: string): void {
   selectPane(paneId, { userInitiated: true, scrollIntoView: true })
 }
 
-function focusPaneFromNotification(paneId: string): void {
+async function focusPaneFromNotification(paneId: string): Promise<void> {
+  // A message from an agent in another of this window's workspaces is the
+  // ordinary case, not an edge one. revealPaneTab only knows how to change
+  // tabs, and a tab id never matches across workspaces.
+  if (!(await ensurePaneWorkspaceOnScreen(paneId))) return
   revealPaneTab(paneId)
   selectPane(paneId, { userInitiated: false, scrollIntoView: true })
 }
@@ -6229,14 +6233,9 @@ async function onFocusHistoryPane(entry: SpawnHistoryEntry): Promise<void> {
     return
   }
   showHistory.value = false
-  // Its workspace may not be the one on screen — history follows the primary,
-  // and a switch reloads it, but the modal can outlive that. Focusing a pane
-  // the grid filters out draws nothing at all.
-  const target = pane.workspacePath ?? ''
-  if (target && isLocalWorkspace(target) && normWs(target) !== normWs(currentWorkspace.value)) {
-    await switchToWorkspace(target)
-    if (normWs(currentWorkspace.value) !== normWs(target)) return
-  }
+  // History follows the primary workspace and a switch reloads it, but the
+  // modal can outlive that.
+  if (!(await ensurePaneWorkspaceOnScreen(entry.paneId))) return
   // A minimized pane is skipped by effectiveFocusPaneId, so focusing it alone
   // would silently land on a different pane.
   if (minimizedPanes.value.has(entry.paneId)) restorePane(entry.paneId)
@@ -11532,6 +11531,24 @@ async function openWorkspaceFromPicker(path: string): Promise<void> {
  *  heading stays in the sidebar — so this is a change of view, not a close.
  *  Everything that follows currentWorkspace (the tab row, the grid, git,
  *  explorer, plans, the terminal cwd) moves with it. */
+/** Bring the workspace that owns `paneId` on screen, if this window holds it.
+ *
+ *  Returns false only when a switch was needed and did not happen, so callers
+ *  stop instead of focusing a pane the grid filters out — sidebar and
+ *  spotlight render the focused pane and nothing else, so that draws an empty
+ *  main area next to a full agent list.
+ *
+ *  Four places jump to a pane by id (the sidebar list, the status-bar
+ *  overview, the history modal, a message notification) and every one of them
+ *  can name a pane in a workspace that is not on screen. */
+async function ensurePaneWorkspaceOnScreen(paneId: string): Promise<boolean> {
+  const target = panes.value.find((p) => p.id === paneId)?.workspacePath ?? ''
+  if (!target || !isLocalWorkspace(target)) return true
+  if (normWs(target) === normWs(currentWorkspace.value)) return true
+  await switchToWorkspace(target)
+  return normWs(currentWorkspace.value) === normWs(target)
+}
+
 async function switchToWorkspace(path: string): Promise<void> {
   if (isDetachedWindow) return // see adoptWorkspace
   if (!path || normWs(path) === normWs(currentWorkspace.value)) return
@@ -11891,17 +11908,8 @@ async function onSidebarFocusPane(paneId: string, ev?: MouseEvent): Promise<void
   selectedPaneIds.value = new Set()
   lastClickPaneId.value = paneId
   // The sidebar lists every workspace this window holds, so a click can land
-  // on a pane the grid is currently filtering out. Go to its workspace first —
-  // focusing a pane the screen will not draw is the blank-main-area bug again,
-  // reached by clicking instead of by switching.
-  const pane = panes.value.find((p) => p.id === paneId)
-  const target = pane?.workspacePath ?? ''
-  if (target && isLocalWorkspace(target) && normWs(target) !== normWs(currentWorkspace.value)) {
-    await switchToWorkspace(target)
-    // Declined (a running pipeline the user chose to keep): stay put rather
-    // than focus something that is still filtered out.
-    if (normWs(currentWorkspace.value) !== normWs(target)) return
-  }
+  // on a pane the grid is currently filtering out.
+  if (!(await ensurePaneWorkspaceOnScreen(paneId))) return
   onFocusPane(paneId)
 }
 
