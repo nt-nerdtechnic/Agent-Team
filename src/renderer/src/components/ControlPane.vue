@@ -432,6 +432,7 @@ const emit = defineEmits<{
   (e: 'open-workspace-picker'): void
   (e: 'switch-to-workspace', path: string): void
   (e: 'close-workspace', path: string): void
+  (e: 'detach-workspace', path: string, x: number, y: number): void
   (e: 'reveal-workspace-folder', path: string): void
   (e: 'interrupt', paneId: string): void
   (e: 'rebuild', paneId: string): void
@@ -997,6 +998,34 @@ const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | n
  *  primary is what the window was opened with, and another window's is that
  *  window's to close. Offering it on those two produced a menu item that
  *  silently did nothing. */
+// Drag-out: dragging a workspace heading and releasing OUTSIDE this window
+// gives that workspace its own window. Deliberately the same gesture as a stage
+// tab in StageTabBar — both mean "pull this out of here", so both are a drag to
+// nowhere rather than one drag and one menu item.
+//
+// Only when this window holds more than one: dragging out the only workspace
+// would empty this window to fill a new one, which is a no-op the long way
+// round. A detached window is already one group of one workspace.
+const canDetachWorkspace = computed(
+  () => !props.detachedWindow && localWorkspaceRows.value.length > 1
+)
+function onWsDragStart(e: DragEvent, path: string): void {
+  if (!canDetachWorkspace.value) {
+    e.preventDefault()
+    return
+  }
+  // Its own data type, so this never reads as a pane drag to the drop targets
+  // in this list (which check application/x-pane-id).
+  e.dataTransfer?.setData('application/x-workspace-path', path)
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+}
+function onWsDragEnd(e: DragEvent, path: string): void {
+  if (!canDetachWorkspace.value) return
+  const outside =
+    e.clientX < 0 || e.clientY < 0 || e.clientX > window.innerWidth || e.clientY > window.innerHeight
+  if (outside) emit('detach-workspace', path, e.screenX, e.screenY)
+}
+
 function openWsMenu(ev: MouseEvent, path: string, canClose: boolean): void {
   ev.preventDefault()
   addMenuOpen.value = false
@@ -1579,6 +1608,9 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             'ws-head--switchable': !detachedWindow && ws.path !== workspacePath,
           }"
           :title="!detachedWindow && ws.path !== workspacePath ? $t('label.workspace-switch-hint') : ''"
+          :draggable="canDetachWorkspace"
+          @dragstart="onWsDragStart($event, ws.path)"
+          @dragend="onWsDragEnd($event, ws.path)"
           @click="!detachedWindow && ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
           @contextmenu="openWsMenu($event, ws.path, ws.path !== workspacePath)"
         >

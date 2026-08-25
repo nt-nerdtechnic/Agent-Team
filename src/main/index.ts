@@ -1406,6 +1406,35 @@ ipcMain.handle(
   }
 )
 
+// Pull a workspace out of the window that adopted it and give it its own main
+// window. Its panes are alive in the backend and belong to the workspace, not
+// to the window, so the new window restores them the ordinary way — which is
+// why this does NOT set `duplicate`, the flag window:openMain uses to skip
+// restore for a cloned window whose sessions are still shown elsewhere.
+ipcMain.handle(
+  'window:detachWorkspace',
+  async (e, arg: { workspacePath?: string; bounds?: WindowBounds }) => {
+    const workspacePath = String(arg?.workspacePath ?? '').trim()
+    if (!workspacePath) return { ok: false }
+    // The caller drops it from its adopted list before invoking this, but that
+    // report travels on a send rather than this invoke, so skip the caller
+    // outright: adopted workspaces count as held, and finding the source window
+    // here would turn the drag into a focus of the window it came from.
+    const source = BrowserWindow.fromWebContents(e.sender)
+    const found = findMainWindowForWorkspace(workspacePath)
+    const existing = found && found !== source ? found : null
+    if (existing) {
+      revealMainWindow(existing)
+      return { ok: true }
+    }
+    await createWindow(
+      { window: 'main', workspace_path: workspacePath },
+      arg.bounds ? { bounds: arg.bounds } : undefined
+    )
+    return { ok: true }
+  }
+)
+
 /** Merge a detached group back into the window it came from.
  *
  *  Until now the only way back was closing the child window, which meant the

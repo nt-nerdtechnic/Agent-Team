@@ -83,6 +83,7 @@ declare global {
       openTerminal: (command: string) => Promise<{ ok: boolean; error?: string }>
       openTempFile: (filename: string, content: string) => Promise<{ ok: boolean; path?: string; error?: string }>
       detachGroup: (args: { groupId: string; workspacePath: string; bounds?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean }>
+      detachWorkspace: (args: { workspacePath: string; bounds?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean }>
       getDetachedGroups: () => Promise<string[]>
       reattachGroup: (args?: { groupId?: string }) => Promise<{ ok: boolean }>
       onGroupDetached: (cb: (groupId: string) => void) => void

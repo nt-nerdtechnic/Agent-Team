@@ -11578,6 +11578,38 @@ async function closeWorkspace(path: string): Promise<void> {
   collapsedWorkspaces.value = next
 }
 
+/** Drag a workspace heading out of the window → give it its own window.
+ *
+ *  The inverse of adopting one, and deliberately not closeWorkspace: that kills
+ *  the panes because closing says the user is finished with them, while this
+ *  hands them over. Panes are keyed by workspace in the backend and belong to
+ *  it rather than to a window, so dropping the workspace here and opening a
+ *  window on it lets the ordinary restore pick the same panes up — nothing is
+ *  killed and no PTY restarts.
+ */
+async function detachWorkspace(path: string, x: number, y: number): Promise<void> {
+  if (isDetachedWindow || !path) return
+  // Pulling out the only workspace would empty this window to fill a new one.
+  if (workspaceOrder.value.length < 2) return
+  // Detaching the one on screen would leave this window viewing a workspace it
+  // no longer holds, so step off it first — onto one it keeps.
+  if (normWs(path) === normWs(currentWorkspace.value)) {
+    const fallback = workspaceOrder.value.find((w) => normWs(w) !== normWs(path))
+    if (!fallback) return
+    await switchToWorkspace(fallback)
+    if (normWs(currentWorkspace.value) === normWs(path)) return
+  }
+  workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
+  const next = new Set(collapsedWorkspaces.value)
+  next.delete(path)
+  collapsedWorkspaces.value = next
+  // Also reports the shortened adopted list to main, which is how the new
+  // window avoids being answered with a focus of this one.
+  persistExtraWorkspaces()
+  const bounds = { x: Math.round(x), y: Math.round(y), width: 1200, height: 800 }
+  await window.agentTeam?.detachWorkspace?.({ workspacePath: path, bounds })
+}
+
 /** Reveal a workspace's folder — the titlebar button that used to do this is
  *  gone, and a project row is where it belongs anyway. */
 function revealWorkspaceFolder(path: string): void {
@@ -13030,6 +13062,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @open-workspace-picker="workspacePickerOpen = true"
       @switch-to-workspace="switchToWorkspace"
       @close-workspace="closeWorkspace"
+      @detach-workspace="detachWorkspace"
       @reveal-workspace-folder="revealWorkspaceFolder"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
