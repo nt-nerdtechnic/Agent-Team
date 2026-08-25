@@ -287,6 +287,20 @@ function isTerminalReport(data: string): boolean {
 let _focusOwner: Terminal | null = null
 let _selectionGlobalInstalled = false
 
+/** The focused pane's "⌘C copied nothing" reporter — only it may answer, for
+ *  the same reason `_focusOwner` exists. */
+let _emptyCopyReporter: (() => void) | undefined
+let _copyEmptyBridgeInstalled = false
+
+/** One ⌘C can reach both the menu accelerator and this handler; collapse them. */
+let _lastEmptyCopyAt = 0
+
+/** When a copy last succeeded here. A renderer too busy to answer main's 300ms
+ *  selection read sends main down its "nothing selected" branch even though
+ *  this page just copied fine — without this, that reports a failure over a
+ *  copy the user watched work. */
+let _lastCopyOkAt = 0
+
 function installTerminalSelectionGlobal(): void {
   if (_selectionGlobalInstalled) return
   _selectionGlobalInstalled = true
@@ -297,6 +311,17 @@ function installTerminalSelectionGlobal(): void {
       return ''  // disposed terminal — let main run the built-in copy
     }
   }
+}
+
+/** Main tells the page when Edit > Copy's accelerator fell through to a copy
+ *  that cannot work over a terminal. Installed once per page, and a no-op where
+ *  the bridge is absent (older preload, or a plugin view). */
+function installTerminalCopyEmptyBridge(): void {
+  if (_copyEmptyBridgeInstalled) return
+  _copyEmptyBridgeInstalled = true
+  try {
+    window.agentTeam?.onTerminalCopyEmpty?.(() => { _emptyCopyReporter?.() })
+  } catch { /* no bridge — the renderer's own ⌘C handler still reports */ }
 }
 
 export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error' | 'stopped'
@@ -1076,6 +1101,10 @@ export type ClipboardFailureReason =
   | 'send-failed'
   /** Every chunk failed the same way — nothing of this paste reached the pane. */
   | 'send-failed-all'
+  /** ⌘C with no selection while the CLI holds the mouse — a plain drag cannot select. */
+  | 'copy-mouse-captured'
+  /** ⌘C with no selection and no mouse capture — nothing was highlighted. */
+  | 'copy-no-selection'
 
 // Whether this renderer process can create a WebGL context at all, probed once.
 //
@@ -1187,6 +1216,7 @@ function releaseResumeSpawnSlot(): void {
 export function useTerminal(paneId: string, backend: ReturnType<typeof useBackend>, opts?: UseTerminalOptions) {
   installTerminalZoomShortcuts()
   installTerminalSelectionGlobal()
+  installTerminalCopyEmptyBridge()
 
   const term = new Terminal({
     // Option+drag forces normal text selection even while a TUI has mouse
@@ -1267,6 +1297,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     _hintDragX = -1  // one shot per drag
     if (settingsGet(OPTION_SELECT_HINT_KEY, false)) return
     settingsSet(OPTION_SELECT_HINT_KEY, true)
+    showOptionSelectHint()
+  }
+
+  /** Show the hint for its usual dwell, restarting the timer if it is already up. */
+  function showOptionSelectHint(): void {
+    if (_hintTimer) clearTimeout(_hintTimer)
     optionSelectHint.value = true
     _hintTimer = setTimeout(() => { optionSelectHint.value = false }, 6000)
   }
@@ -1907,6 +1943,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     _ownsTerminalFocus = false
     if (_focusOwner === term) {
       _focusOwner = null
+      _emptyCopyReporter = undefined
       _cancelSelectionPush()
       _reportSelection('') // main must not answer Copy from a pane that lost focus
     }
@@ -1916,6 +1953,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     _blurredWithWindow = false
     _ownsTerminalFocus = true
     _focusOwner = term  // answers Edit > Copy for this window
+    _emptyCopyReporter = reportEmptyCopy  // …and reports a Copy that found nothing
     // Publish what is already highlighted, so Copy is right from the first
     // press rather than only after the next selection change.
     _reportSelection(term.hasSelection() ? term.getSelection() : '')
@@ -2031,6 +2069,24 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   ): void => {
     _clipboardDiag(logMessage, 'warning')
     opts?.onClipboardFailure?.(reason, chars)
+  }
+
+  /** ⌘C produced nothing. Say so — and, where a plain drag cannot select at
+   *  all, say what to do about it. Reached from this pane's own key handler and
+   *  from main when the Edit > Copy accelerator claimed the key first. */
+  function reportEmptyCopy(): void {
+    const now = Date.now()
+    if (now - _lastEmptyCopyAt < 300) return
+    if (now - _lastCopyOkAt < 300) return  // this page already copied it
+    _lastEmptyCopyAt = now
+    if (term.modes.mouseTrackingMode !== 'none') {
+      // The once-ever flag is deliberately bypassed: being unable to rediscover
+      // ⌥-drag after the first six seconds is the bug this fixes.
+      showOptionSelectHint()
+      _clipboardFailure(`pane=${paneId} Cmd+C copied nothing — the CLI captures the mouse and there is no selection`, 'copy-mouse-captured')
+    } else {
+      _clipboardFailure(`pane=${paneId} Cmd+C copied nothing — no selection`, 'copy-no-selection')
+    }
   }
 
   // Set when a reattached pane is waiting to repaint. We never force_redraw at
@@ -2308,6 +2364,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         const selection = term.getSelection()
         if (selection) {
           e.preventDefault()
+          _lastCopyOkAt = Date.now()  // suppresses a late copy-empty from main
           // Two things this has to report. Chromium rejects writeText when the
           // document is not focused, and the key is already swallowed by then,
           // so a rejection is a copy the user believes happened and did not.
@@ -2336,6 +2393,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
             }
           )
           return false
+        } else {
+          // Falls through untouched — the menu path still runs exactly as it
+          // does today. All this adds is a word about the empty clipboard the
+          // user is otherwise left to discover on the next paste.
+          reportEmptyCopy()
         }
       }
 
@@ -2397,7 +2459,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           // clipboard returned from here without a trace, which is the exact
           // shape of "I pasted and the text just disappeared".
           _clipboardFailure(
-            `pane=${paneId} paste ignored — the clipboard held neither text nor an image`,
+            `pane=${paneId} paste ignored — the clipboard is empty (a copy that selected nothing is the usual cause)`,
             'empty'
           )
           return
@@ -4100,6 +4162,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     _cancelSelectionPush()
     if (_focusOwner === term) {
       _focusOwner = null
+      _emptyCopyReporter = undefined
       _reportSelection('') // a disposed pane must not keep answering Copy
     }
     document.querySelector('.term-file-picker-root')?.remove()

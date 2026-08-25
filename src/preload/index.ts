@@ -451,6 +451,10 @@ contextBridge.exposeInMainWorld('agentTeam', {
   reportTerminalSelection: (selection: string): void => {
     ipcRenderer.send('terminal:selection-changed', selection)
   },
+  // Edit > Copy fell through to a copy that cannot work over a terminal, so the
+  // clipboard is unchanged. The focused pane turns this into a visible notice.
+  onTerminalCopyEmpty: (cb: (branch: string) => void) =>
+    ipcRenderer.on('terminal:copy-empty', (_event, branch: string) => cb(branch)),
   setBadgeCount: (count: number): void => {
     ipcRenderer.send('window:setBadgeCount', count)
   },
