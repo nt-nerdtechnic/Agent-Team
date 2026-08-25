@@ -8342,11 +8342,6 @@ async function doCloseWorkspace(): Promise<void> {
 }
 
 // Titlebar 📁 button: open the current workspace folder in Finder.
-async function titlebarRevealWorkspace(): Promise<void> {
-  if (!currentWorkspace.value || !window.agentTeam?.openPath) return
-  await window.agentTeam.openPath(currentWorkspace.value)
-}
-
 // Titlebar 📋 button: reveal the current workspace's plans. Plans now live in
 // the main-window left sidebar as their own tab (embedded PlanPane), not a
 // detached window — so this just switches ControlPane's sidebar tab to 'plans'
@@ -11304,6 +11299,30 @@ async function revealWorkspace(path: string): Promise<void> {
   }
 }
 
+/** Workspaces open in other windows.
+ *
+ *  The roster below only knows workspaces that have a REGISTERED PANE, so a
+ *  window opened a moment ago — no CLI started yet — would be missing from the
+ *  sidebar entirely. Main's window registry knows about it immediately. */
+const openWorkspacePaths = ref<string[]>([])
+let disposeOpenWorkspacesChanged: (() => void) | null = null
+
+async function refreshOpenWorkspaces(): Promise<void> {
+  if (isDetachedWindow) return
+  openWorkspacePaths.value = (await window.agentTeam?.listOpenWorkspaces?.()) ?? []
+}
+
+onMounted(() => {
+  if (isDetachedWindow) return
+  void refreshOpenWorkspaces()
+  disposeOpenWorkspacesChanged =
+    window.agentTeam?.onOpenWorkspacesChanged?.(() => void refreshOpenWorkspaces()) ?? null
+})
+onUnmounted(() => {
+  disposeOpenWorkspacesChanged?.()
+  disposeOpenWorkspacesChanged = null
+})
+
 /** The ＋ on the sidebar's Workspace heading: the Welcome picker, reopened
  *  over a window that already has a workspace. */
 const workspacePickerOpen = ref(false)
@@ -11421,6 +11440,26 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
       count: entries.length,
       lineage: [],
       remote: entries
+    })
+  }
+
+  // A window that is open but has started no CLI yet. Without this the
+  // workspace you just opened from the picker is nowhere in the sidebar until
+  // its first pane registers, which reads as "it did not open".
+  const norm = (p: string): string => p.replace(/\/+$/, '')
+  const listed = new Set(rows.map((r) => norm(r.path)))
+  for (const path of openWorkspacePaths.value) {
+    if (!path || listed.has(norm(path))) continue
+    listed.add(norm(path))
+    rows.push({
+      path,
+      label: path.split('/').filter(Boolean).pop() || path,
+      displayPath: workspaceParentPath(path),
+      isCurrent: false,
+      collapsed: collapsedWorkspaces.value.has(path),
+      count: 0,
+      lineage: [],
+      remote: []
     })
   }
   return rows
@@ -12730,15 +12769,12 @@ function paneIsCommander(p: ActivePane): boolean {
   <div class="app" :style="{ '--token-panel-width': tokenPanelWidth, '--left-width': leftTrackWidth, '--up-height': upTrackHeight, '--down-height': downTrackHeight, '--rail-size': RAIL_SIZE + 'px', '--chrome-bottom': shellLayout.chrome.statusbar ? '24px' : '0px' }" :class="{ 'is-resizing-shell': isShellDragging, 'is-resizing-grid': isGridDragging }">
     <!-- Custom titlebar: traffic lights on left (via hiddenInset), name centre, gear right -->
     <div class="titlebar">
-      <!-- The workspace path used to fill this bar. The sidebar now shows it
-           under the project name, where it sits next to the agents it applies
-           to, so only the two actions remain here. -->
+      <!-- The path and the workspace switcher both used to live here; the
+           sidebar's Workspace section carries them now (the path under each
+           project name, ＋ to open another one). Reveal-in-Finder went with
+           them — Welcome's recent list still has it on its context menu. -->
       <template v-if="workspaceSelected">
-        <div class="titlebar-workspace">
-          <span class="titlebar-spacer"></span>
-          <button class="titlebar-ws-btn" @mousedown.stop @click="titlebarRevealWorkspace" :title="$t('action.open-in-finder')">📁</button>
-          <button class="titlebar-ws-btn" @mousedown.stop @click="onSwitchWorkspace" :title="$t('action.switch-workspace')">↺</button>
-        </div>
+        <span class="titlebar-spacer"></span>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
       <!-- Detached windows could only be merged back by closing them, which is
@@ -13855,21 +13891,13 @@ function paneIsCommander(p: ActivePane): boolean {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.titlebar-workspace {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-/* Takes the width the path field used to occupy, and stays draggable — the
-   buttons opt out individually below, so the empty bar still moves the window. */
+/* Fills the bar between the traffic lights and the gear, and stays draggable
+   so the empty stretch still moves the window. */
 .titlebar-spacer {
   flex: 1;
   min-width: 0;
   -webkit-app-region: drag;
 }
-.titlebar-workspace > button { -webkit-app-region: no-drag; }
 .titlebar-ws-input {
   flex: 1;
   min-width: 0;

@@ -199,6 +199,18 @@ describe('ControlPane – the ＋ menu', () => {
     expect(wrapper.find('.spawn-card').exists()).toBe(false)
   })
 
+  it('does not open itself on a spawn-mode workspace', async () => {
+    // As a card, spawn mode opened it expanded. As a dialog that same default
+    // puts it over the app at startup, unasked.
+    wrapper = mountWith({ mode: 'spawn' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(false)
+    // Nor when the mode changes under it.
+    await wrapper.setProps({ mode: 'pipeline' } as never)
+    await wrapper.setProps({ mode: 'spawn' } as never)
+    expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(false)
+  })
+
   it('closes on Escape, the close button, and a click on the backdrop', async () => {
     wrapper = mountWith()
 

@@ -813,16 +813,10 @@ watch(() => props.pipelines?.length, () => { pipelinePage.value = 0 })
 const previewOpen = ref<boolean>(false)
 const manualSpawnOpen = ref<boolean>(false)
 const pipelineOpen = ref<boolean>(true)
-// Mode-driven default: spawn workspaces lead with manual spawn expanded;
-// pipeline / completed workspaces collapse it so the pipeline controls lead.
-// Only sets the default on mode changes — the user can toggle freely after.
-watch(
-  () => props.mode,
-  (m) => {
-    if (m) manualSpawnOpen.value = m === 'spawn'
-  },
-  { immediate: true }
-)
+// Manual spawn used to be a card, and a spawn-mode workspace opened with it
+// already expanded. As a dialog that same default means it appears over the
+// app at startup, unasked. It now opens only when something asks it to: the
+// ＋ menu, Ctrl+<n>, a resume error, or another window's request.
 
 const currentRole = computed<Role | undefined>(() =>
   props.roles.find((r) => r.key === pickedRole.value)
@@ -3048,6 +3042,10 @@ button.icon-btn.muted:hover {
   border-radius: 4px;
   padding: 0 4px;
 }
+/* Panes sit under the workspace that owns them. The sibling selector is what
+   scopes this: an ungrouped list has no .ws-head, so nothing indents and that
+   layout is untouched. Lineage children add their own margin on top of it. */
+.ws-head ~ .agent-item { padding-left: 22px; }
 .agent-item.expanded {
   background: var(--bg-subtle);
   border-color: var(--border-muted);

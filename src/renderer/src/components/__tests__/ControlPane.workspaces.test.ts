@@ -200,6 +200,15 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.emitted('open-workspace-picker')).toBeTruthy()
   })
 
+  it('lists a workspace with no agents at all', () => {
+    // A window opened a moment ago. Its heading has to be there even with an
+    // empty count, or opening it looks like it failed.
+    wrapper = mountWith({ workspaces: [current(), other({ count: 0, remote: [] })] })
+    const names = wrapper.findAll('.ws-name').map((n) => n.text())
+    expect(names).toEqual(['Agent-Team', 'DealPilot'])
+    expect(wrapper.findAll('.ws-count')[1].text()).toBe('0')
+  })
+
   it('titles the section Workspace once workspaces are grouped', () => {
     wrapper = mountWith({ workspaces: [current()] })
     expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.workspace')

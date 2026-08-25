@@ -95,8 +95,10 @@ describe('cross-workspace roster', () => {
     // full path again.
     const gStart = appSource.indexOf('const workspaceGroups = computed')
     const groups = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
-    expect(groups.match(/displayPath: workspaceParentPath\(/g)).toHaveLength(2)
-    expect(groups).not.toContain('displayPath: collapseHomePath')
+    // Every row source must go through it, however many there are — a raw
+    // collapseHomePath anywhere would put the full path back on that row.
+    const uses = new Set(groups.match(/displayPath: \w+/g) ?? [])
+    expect(uses).toEqual(new Set(['displayPath: workspaceParentPath']))
   })
 
   it('opens a picked workspace in its own window, never in this one', () => {
@@ -118,6 +120,31 @@ describe('cross-workspace roster', () => {
     expect(appSource).toContain('@select="openWorkspaceFromPicker"')
     // Startup keeps its own non-dismissible instance.
     expect(appSource).toContain('v-if="!workspaceSelected"')
+  })
+
+  it('lists a window that is open but has no agent yet', () => {
+    // The roster only knows workspaces with a REGISTERED PANE. Without main's
+    // window registry, a workspace opened from the picker is absent from the
+    // sidebar until its first CLI starts — which reads as "it did not open".
+    expect(appSource).toContain('listOpenWorkspaces')
+    const gStart = appSource.indexOf('const workspaceGroups = computed')
+    const groups = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
+    expect(groups).toContain('openWorkspacePaths.value')
+    expect(groups).toContain('count: 0')
+    // …and never twice: a workspace with panes is already in the list.
+    expect(groups).toContain('listed.has(norm(path))')
+  })
+
+  it('refreshes that list when a window opens or closes', () => {
+    expect(appSource).toContain('onOpenWorkspacesChanged')
+    expect(appSource).toContain('disposeOpenWorkspacesChanged')
+  })
+
+  it('the titlebar no longer duplicates what the sidebar carries', () => {
+    // Path, reveal-in-Finder and the workspace switcher all used to sit up
+    // there; the sidebar's Workspace section is where they live now.
+    expect(appSource).not.toContain('titlebarRevealWorkspace')
+    expect(appSource).not.toContain('titlebar-workspace')
   })
 
   it('focuses the owning window rather than switching this one', () => {
