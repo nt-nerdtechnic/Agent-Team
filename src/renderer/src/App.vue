@@ -29,7 +29,7 @@ import { usePreview } from './preview/usePreview'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
-import { agentUsesBracketedPaste, migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
+import { agentUsesBracketedPaste, collapseHomePath, migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
 import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
 import type { PushOutcome, RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
@@ -11227,6 +11227,15 @@ interface RosterPane {
  *  would run against a list the user is usually not looking at. */
 const crossWorkspaceRoster = ref<RosterPane[]>([])
 
+/** Home directory, for shortening the paths shown under each workspace name.
+ *  Fetched once; an empty value just means paths render in full. */
+const homeDir = ref('')
+onMounted(async () => {
+  try {
+    homeDir.value = (await window.agentTeam?.getHomeDir?.()) || ''
+  } catch { /* paths stay absolute */ }
+})
+
 async function refreshWorkspaceRoster(): Promise<void> {
   if (isDetachedWindow) return
   const resp = await sendQuiet<{ panes: RosterPane[] }>('agent_msg.list', {})
@@ -11306,6 +11315,7 @@ function toggleWorkspaceCollapsed(path: string): void {
 interface WorkspaceGroupRow {
   path: string
   label: string
+  displayPath: string
   isCurrent: boolean
   collapsed: boolean
   count: number
@@ -11322,6 +11332,7 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
     rows.push({
       path: here,
       label: here.split('/').filter(Boolean).pop() ?? here,
+      displayPath: collapseHomePath(here, homeDir.value),
       isCurrent: true,
       collapsed: collapsedWorkspaces.value.has(here),
       count: panes.value.length,
@@ -11346,6 +11357,7 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
     rows.push({
       path,
       label: entries[0]?.workspace_label || path.split('/').filter(Boolean).pop() || path,
+      displayPath: collapseHomePath(path, homeDir.value),
       isCurrent: false,
       collapsed: collapsedWorkspaces.value.has(path),
       count: entries.length,
@@ -12660,18 +12672,12 @@ function paneIsCommander(p: ActivePane): boolean {
   <div class="app" :style="{ '--token-panel-width': tokenPanelWidth, '--left-width': leftTrackWidth, '--up-height': upTrackHeight, '--down-height': downTrackHeight, '--rail-size': RAIL_SIZE + 'px', '--chrome-bottom': shellLayout.chrome.statusbar ? '24px' : '0px' }" :class="{ 'is-resizing-shell': isShellDragging, 'is-resizing-grid': isGridDragging }">
     <!-- Custom titlebar: traffic lights on left (via hiddenInset), name centre, gear right -->
     <div class="titlebar">
+      <!-- The workspace path used to fill this bar. The sidebar now shows it
+           under the project name, where it sits next to the agents it applies
+           to, so only the two actions remain here. -->
       <template v-if="workspaceSelected">
         <div class="titlebar-workspace">
-          <!-- Read-only: the workspace changes only through the buttons beside
-               it, so a stray edit here cannot move the whole window. -->
-          <input
-            :value="currentWorkspace"
-            type="text"
-            class="titlebar-ws-input"
-            spellcheck="false"
-            autocorrect="off"
-            readonly
-          />
+          <span class="titlebar-spacer"></span>
           <button class="titlebar-ws-btn" @mousedown.stop @click="titlebarRevealWorkspace" :title="$t('action.open-in-finder')">📁</button>
           <button class="titlebar-ws-btn" @mousedown.stop @click="onSwitchWorkspace" :title="$t('action.switch-workspace')">↺</button>
         </div>
@@ -13785,9 +13791,16 @@ function paneIsCommander(p: ActivePane): boolean {
   display: flex;
   align-items: center;
   gap: 4px;
-  -webkit-app-region: no-drag;
   min-width: 0;
 }
+/* Takes the width the path field used to occupy, and stays draggable — the
+   buttons opt out individually below, so the empty bar still moves the window. */
+.titlebar-spacer {
+  flex: 1;
+  min-width: 0;
+  -webkit-app-region: drag;
+}
+.titlebar-workspace > button { -webkit-app-region: no-drag; }
 .titlebar-ws-input {
   flex: 1;
   min-width: 0;

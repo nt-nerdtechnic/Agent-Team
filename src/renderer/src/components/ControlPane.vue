@@ -91,6 +91,10 @@ export interface RemotePaneRow {
 export interface WorkspaceGroupRow {
   path: string
   label: string
+  /** Same path with the home directory collapsed to `~`. Shown under the name
+   *  because two projects can share a folder name — the path is what tells
+   *  them apart. */
+  displayPath: string
   isCurrent: boolean
   collapsed: boolean
   count: number
@@ -1380,7 +1384,10 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             @click.stop="emit('toggle-workspace', currentWorkspaceRow.path)"
           >{{ currentWorkspaceRow.collapsed ? '›' : '⌄' }}</button>
           <span class="ws-icon">🗀</span>
-          <span class="ws-name" :title="currentWorkspaceRow.path">{{ currentWorkspaceRow.label }}</span>
+          <span class="ws-text" :title="currentWorkspaceRow.path">
+            <span class="ws-name">{{ currentWorkspaceRow.label }}</span>
+            <span class="ws-path">{{ currentWorkspaceRow.displayPath }}</span>
+          </span>
           <span class="ws-count">{{ currentWorkspaceRow.count }}</span>
           <!-- This workspace's spawn entry point is the card at the bottom of
                the list; the + opens it rather than duplicating the controls. -->
@@ -1499,7 +1506,10 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               @click.stop="emit('toggle-workspace', ws.path)"
             >{{ ws.collapsed ? '›' : '⌄' }}</button>
             <span class="ws-icon">🗀</span>
-            <span class="ws-name" :title="ws.path" @click="emit('reveal-workspace', ws.path)">{{ ws.label }}</span>
+            <span class="ws-text" :title="ws.path" @click="emit('reveal-workspace', ws.path)">
+              <span class="ws-name">{{ ws.label }}</span>
+              <span class="ws-path">{{ ws.displayPath }}</span>
+            </span>
             <span class="ws-count">{{ ws.count }}</span>
             <button class="ws-add" :title="$t('action.add-to-grid')" @click.stop="emit('add-in-workspace', ws.path)">＋</button>
           </li>
@@ -2668,7 +2678,7 @@ button.icon-btn.muted:hover {
    window's first. */
 .ws-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   padding: 9px 4px 5px;
   font-size: 13px;
@@ -2689,11 +2699,23 @@ button.icon-btn.muted:hover {
   color: var(--text-secondary);
 }
 .ws-caret:hover { color: var(--text-bright); }
-.ws-icon { flex: none; font-size: 12px; opacity: 0.75; }
+.ws-icon { flex: none; font-size: 12px; opacity: 0.75; align-self: flex-start; margin-top: 2px; }
+.ws-text { min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
 .ws-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The path disambiguates two projects that share a folder name. Truncated from
+   the LEFT: the tail is the part that identifies the project. */
+.ws-path {
+  font-weight: 400;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
 /* Only another window's name is a link — this window's own is where you are. */
-.ws-head:not(.ws-head--current) .ws-name { cursor: pointer; }
-.ws-head:not(.ws-head--current) .ws-name:hover { text-decoration: underline; }
+.ws-head:not(.ws-head--current) .ws-text { cursor: pointer; }
+.ws-head:not(.ws-head--current) .ws-text:hover .ws-name { text-decoration: underline; }
 .ws-count {
   margin-left: auto;
   font-weight: 400;

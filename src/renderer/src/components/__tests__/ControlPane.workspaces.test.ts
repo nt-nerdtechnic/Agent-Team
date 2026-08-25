@@ -47,11 +47,13 @@ function mountWith(extra: Record<string, unknown>): VueWrapper {
 }
 
 const current = (over: Record<string, unknown> = {}) => ({
-  path: '/here', label: 'Agent-Team', isCurrent: true, collapsed: false,
+  path: '/Users/me/Desktop/Agent-Team', label: 'Agent-Team',
+  displayPath: '~/Desktop/Agent-Team', isCurrent: true, collapsed: false,
   count: 2, lineage: [], remote: [], ...over
 })
 const other = (over: Record<string, unknown> = {}) => ({
-  path: '/other', label: 'DealPilot', isCurrent: false, collapsed: false,
+  path: '/other', label: 'DealPilot',
+  displayPath: '/other', isCurrent: false, collapsed: false,
   count: 1, lineage: [], remote: [remote('分析後台')], ...over
 })
 
@@ -97,10 +99,18 @@ describe('ControlPane – workspace sections', () => {
     expect(states).toEqual(['running', 'error'])
   })
 
+  it('shows the path under the name, with home collapsed', () => {
+    // Two projects can share a folder name; the path is what tells them apart.
+    wrapper = mountWith({ workspaces: [current()] })
+    const path = wrapper.find('.ws-path')
+    expect(path.exists()).toBe(true)
+    expect(path.text()).toBe('~/Desktop/Agent-Team')
+  })
+
   it('emits toggle-workspace from the caret', async () => {
     wrapper = mountWith({ workspaces: [current()] })
     await wrapper.find('.ws-caret').trigger('click')
-    expect(wrapper.emitted('toggle-workspace')?.[0]).toEqual(['/here'])
+    expect(wrapper.emitted('toggle-workspace')?.[0]).toEqual(['/Users/me/Desktop/Agent-Team'])
   })
 
   it('hides a collapsed workspace rows but keeps its heading', () => {
