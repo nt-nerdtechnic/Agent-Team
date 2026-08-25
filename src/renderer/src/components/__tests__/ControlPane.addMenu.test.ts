@@ -130,6 +130,50 @@ describe('ControlPane – the ＋ menu', () => {
     expect(wrapper.emitted('install-cli')?.[0]?.[0]).toMatchObject({ agentKey: 'codex' })
   })
 
+  it('spawns into the workspace whose heading opened it', async () => {
+    // Two local workspaces: the ＋ on the second must not start a pane in the
+    // first, which is what a single window-wide workspacePath would do.
+    wrapper = mountWith({
+      workspaces: [
+        { ...workspaceRow, lineage: [] },
+        {
+          path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop',
+          isCurrent: true, collapsed: false, count: 0, lineage: [], remote: []
+        }
+      ]
+    })
+    const adds = wrapper.findAll('.ws-add')
+    expect(adds).toHaveLength(2)
+    await adds[1].trigger('click')
+    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[0].trigger('click')
+    expect(wrapper.emitted('spawn')?.[0]?.[0]).toMatchObject({
+      workspacePath: '/Users/me/Desktop/Other'
+    })
+  })
+
+  it("the card's own button still means this window's workspace", async () => {
+    // The override is per-request; it must not leak into the next spawn.
+    wrapper = mountWith({
+      workspaces: [
+        { ...workspaceRow, lineage: [] },
+        {
+          path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop',
+          isCurrent: true, collapsed: false, count: 0, lineage: [], remote: []
+        }
+      ]
+    })
+    const adds = wrapper.findAll('.ws-add')
+    await adds[1].trigger('click')
+    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[0].trigger('click')
+    // Now spawn from the dialog instead.
+    await adds[0].trigger('click')
+    await wrapper.find('.ws-add-more').trigger('click')
+    await wrapper.find('.spawn-card-body .primary').trigger('click')
+    expect(wrapper.emitted('spawn')?.[1]?.[0]).toMatchObject({
+      workspacePath: '/Users/me/Desktop/Agent-Team'
+    })
+  })
+
   it('closes on Escape', async () => {
     wrapper = mountWith()
     await openMenu(wrapper)

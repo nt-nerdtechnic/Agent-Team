@@ -11299,6 +11299,39 @@ async function revealWorkspace(path: string): Promise<void> {
   }
 }
 
+const EXTRA_WS_KEY = 'agentTeam.extraWorkspaces'
+
+/** Workspaces this window has taken on beyond the one it was opened with.
+ *
+ *  Picking one from the sidebar adds it here rather than opening a window for
+ *  it: the sidebar is a list of projects, so "open" means "also show me that
+ *  one". Panes can start in any of them — a pane carries its own
+ *  workspacePath — while the IDE surfaces (git, explorer, plans, the terminal
+ *  cwd) stay with currentWorkspace, which is this window's primary. */
+const extraWorkspaces = ref<string[]>(readExtraWorkspaces())
+
+function readExtraWorkspaces(): string[] {
+  try {
+    const raw = sessionStorage.getItem(EXTRA_WS_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function adoptWorkspace(path: string): void {
+  const norm = (p: string): string => p.replace(/\/+$/, '')
+  if (!path || norm(path) === norm(currentWorkspace.value)) return
+  if (extraWorkspaces.value.some((w) => norm(w) === norm(path))) return
+  extraWorkspaces.value = [...extraWorkspaces.value, path]
+  try {
+    sessionStorage.setItem(EXTRA_WS_KEY, JSON.stringify(extraWorkspaces.value))
+  } catch {
+    /* a lost list costs a re-pick, not work */
+  }
+}
+
 /** Workspaces open in other windows.
  *
  *  The roster below only knows workspaces that have a REGISTERED PANE, so a
@@ -11327,17 +11360,16 @@ onUnmounted(() => {
  *  over a window that already has a workspace. */
 const workspacePickerOpen = ref(false)
 
-/** Open a workspace picked from that picker.
+/** Open a workspace picked from that picker — in THIS window's sidebar.
  *
- *  In its OWN window, not this one. The sidebar lists several workspaces side
- *  by side, so picking one is "also open that", not "leave what I am doing" —
- *  and two windows on one folder would run two sets of PTY and git operations
- *  on it, which is why an already-open workspace is focused instead. */
+ *  A workspace already open in another window is focused there instead: two
+ *  windows on one folder would run two sets of PTY and git operations on it,
+ *  and its panes live in the window that owns them. */
 async function openWorkspaceFromPicker(path: string): Promise<void> {
   workspacePickerOpen.value = false
   if (!path || path === currentWorkspace.value) return
   if (await window.agentTeam?.focusWorkspaceWindow?.(path)) return
-  await window.agentTeam?.openMainWindow?.({ workspace_path: path })
+  adoptWorkspace(path)
 }
 
 /** Bumped when another window asks this one to open an agent. ControlPane
@@ -11403,17 +11435,31 @@ function workspaceParentPath(path: string): string {
 const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
   const here = currentWorkspace.value
   const rows: WorkspaceGroupRow[] = []
+  const norm = (p: string): string => p.replace(/\/+$/, '')
 
-  const mine = paneLineage.value
-  if (here) {
+  // A pane records the workspace it was started in, and an MCP child inherits
+  // its parent's, so each workspace's panes form whole subtrees of the lineage
+  // — filtering it per workspace cannot orphan a child from its parent.
+  const paneWorkspace = new Map(panes.value.map((p) => [p.id, norm(p.workspacePath)]))
+  const lineageFor = (path: string): PaneLineageRow[] =>
+    paneLineage.value.filter((r) => paneWorkspace.get(r.id) === norm(path))
+
+  // This window's own workspaces: the one it was opened with, then any it has
+  // adopted. All of them have live panes and full controls.
+  const localPaths = here ? [here, ...extraWorkspaces.value] : [...extraWorkspaces.value]
+  const seenLocal = new Set<string>()
+  for (const path of localPaths) {
+    if (!path || seenLocal.has(norm(path))) continue
+    seenLocal.add(norm(path))
+    const lineage = lineageFor(path)
     rows.push({
-      path: here,
-      label: here.split('/').filter(Boolean).pop() ?? here,
-      displayPath: workspaceParentPath(here),
+      path,
+      label: path.split('/').filter(Boolean).pop() ?? path,
+      displayPath: workspaceParentPath(path),
       isCurrent: true,
-      collapsed: collapsedWorkspaces.value.has(here),
-      count: panes.value.length,
-      lineage: mine,
+      collapsed: collapsedWorkspaces.value.has(path),
+      count: lineage.length,
+      lineage,
       remote: []
     })
   }
@@ -11425,7 +11471,7 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
   const byWorkspace = new Map<string, RosterPane[]>()
   for (const entry of crossWorkspaceRoster.value) {
     const path = entry.workspace_path
-    if (!path || path === here || localIds.has(entry.pane_id)) continue
+    if (!path || seenLocal.has(norm(path)) || localIds.has(entry.pane_id)) continue
     const bucket = byWorkspace.get(path)
     if (bucket) bucket.push(entry)
     else byWorkspace.set(path, [entry])
@@ -11443,10 +11489,7 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() => {
     })
   }
 
-  // A window that is open but has started no CLI yet. Without this the
-  // workspace you just opened from the picker is nowhere in the sidebar until
-  // its first pane registers, which reads as "it did not open".
-  const norm = (p: string): string => p.replace(/\/+$/, '')
+  // A window that is open but has started no CLI yet.
   const listed = new Set(rows.map((r) => norm(r.path)))
   for (const path of openWorkspacePaths.value) {
     if (!path || listed.has(norm(path))) continue

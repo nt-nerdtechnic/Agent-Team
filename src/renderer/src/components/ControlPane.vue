@@ -332,11 +332,28 @@ const orderedPanes = computed(() => {
   return out
 })
 
-/** This window's own workspace section, or null when the caller passed none.
- *  It always renders first and is the only one with live panes. */
-const currentWorkspaceRow = computed<WorkspaceGroupRow | null>(
-  () => props.workspaces?.find((w) => w.isCurrent) ?? null
-)
+/** The workspaces this window runs panes in — the one it was opened with plus
+ *  any adopted from the picker. A single `null` entry stands for the ungrouped
+ *  list: no heading, every pane under it, which is what this looked like
+ *  before workspaces were a layer at all. */
+const localWorkspaceRows = computed<(WorkspaceGroupRow | null)[]>(() => {
+  const rows = props.workspaces?.filter((w) => w.isCurrent) ?? []
+  return rows.length ? rows : [null]
+})
+
+/** The panes belonging to one section, in lineage order. */
+function panesOf(
+  ws: WorkspaceGroupRow | null
+): { pane: ActivePaneView; depth: number; hasChildren: boolean; collapsed: boolean }[] {
+  if (!ws) return orderedPanes.value
+  const byId = new Map(props.panes.map((pane) => [pane.id, pane]))
+  const out: { pane: ActivePaneView; depth: number; hasChildren: boolean; collapsed: boolean }[] = []
+  for (const r of ws.lineage) {
+    const pane = byId.get(r.id)
+    if (pane) out.push({ pane, depth: r.depth, hasChildren: r.hasChildren, collapsed: r.collapsed })
+  }
+  return out
+}
 
 /** Every other workspace with something running in it. These rows come from
  *  the messaging registry, so they carry a name and a busy flag and nothing
@@ -940,13 +957,19 @@ const canRunPipeline = computed(
     effectiveStageCount.value > 0
 )
 
+/** Set while a spawn is on its way from a workspace heading other than this
+ *  window's primary. Cleared once the request is out — the card's own button
+ *  always means "here". */
+const spawnWorkspaceOverride = ref<string>('')
+
 function emitSpawn(): void {
   emit('spawn', {
     agentKey: pickedAgent.value,
     roleKey: pickedRole.value,
     stageId: '',
-    workspacePath: workspacePath.value
+    workspacePath: spawnWorkspaceOverride.value || workspacePath.value
   })
+  spawnWorkspaceOverride.value = ''
 }
 
 /** What the heading's ＋ will open. The spawn card can be folded shut, so the
@@ -960,6 +983,8 @@ const pickedAgentLabel = computed(
 // shut. It reads and writes pickedAgent/pickedRole directly rather than keeping
 // its own copy — two stores would let the card say Codex while ＋ opens Claude.
 const addMenuOpen = ref<boolean>(false)
+/** Which workspace heading opened the menu, so a pick starts there. */
+const addMenuWorkspace = ref<string>('')
 // Fixed, not absolute: the pane list scrolls under `overflow-y: auto`, which
 // would clip a menu positioned inside it.
 const addMenuAnchor = ref<{ top: number; bottom: number; right: number } | null>(null)
@@ -975,14 +1000,15 @@ const addMenuStyle = computed(() => {
     : { top: `${a.bottom + 4}px`, right: `${a.right}px` }
 })
 
-function toggleAddMenu(ev: MouseEvent): void {
+function toggleAddMenu(ev: MouseEvent, wsPath = ''): void {
   if (!canSpawn.value) return
-  if (addMenuOpen.value) {
+  if (addMenuOpen.value && addMenuWorkspace.value === wsPath) {
     addMenuOpen.value = false
     return
   }
   const r = (ev.currentTarget as HTMLElement).getBoundingClientRect()
   addMenuAnchor.value = { top: r.top, bottom: r.bottom, right: window.innerWidth - r.right }
+  addMenuWorkspace.value = wsPath
   addMenuOpen.value = true
 }
 
@@ -991,6 +1017,7 @@ function toggleAddMenu(ev: MouseEvent): void {
  *  including the guided install for a CLI that is not there. */
 function spawnAs(agentKey: string): void {
   pickedAgent.value = agentKey
+  spawnWorkspaceOverride.value = addMenuWorkspace.value
   addMenuOpen.value = false
   spawn()
 }
@@ -1059,6 +1086,7 @@ async function spawnOrOfferInstall(): Promise<void> {
     return
   }
   const spec = manualAgentSpecs.value.find((s) => s.agentKey === pickedAgent.value)
+  spawnWorkspaceOverride.value = ''
   emit('install-cli', { agentKey: pickedAgent.value, label: spec?.label ?? pickedAgent.value })
 }
 
@@ -1490,19 +1518,20 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       </div>
       <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
       <ul v-else class="agent-list">
-        <li v-if="currentWorkspaceRow" class="ws-head ws-head--current">
+        <template v-for="ws in localWorkspaceRows" :key="ws?.path ?? '\u0000ungrouped'">
+        <li v-if="ws" class="ws-head ws-head--current">
           <button
             class="ws-caret"
-            :title="currentWorkspaceRow.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
-            @click.stop="emit('toggle-workspace', currentWorkspaceRow.path)"
-          >{{ currentWorkspaceRow.collapsed ? '›' : '⌄' }}</button>
+            :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
+            @click.stop="emit('toggle-workspace', ws.path)"
+          >{{ ws.collapsed ? '›' : '⌄' }}</button>
           <span class="ws-icon"><FolderIcon /></span>
-          <span class="ws-text" :title="currentWorkspaceRow.path">
+          <span class="ws-text" :title="ws.path">
             <span class="ws-line">
-              <span class="ws-name">{{ currentWorkspaceRow.label }}</span>
-              <span class="ws-count">{{ currentWorkspaceRow.count }}</span>
+              <span class="ws-name">{{ ws.label }}</span>
+              <span class="ws-count">{{ ws.count }}</span>
             </span>
-            <span class="ws-path">{{ currentWorkspaceRow.displayPath }}</span>
+            <span class="ws-path">{{ ws.displayPath }}</span>
           </span>
           <button
             class="ws-act"
@@ -1515,20 +1544,19 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             <RebuildIcon />
           </button>
           <button class="ws-act" :title="$t('label.history')" @click.stop="emit('open-history')">📋</button>
-          <!-- Opens the same CLI and role the spawn card holds, so it works
-               the same whether the card is open or folded shut. Disabled for
-               the same reasons the card's own button is. -->
+          <!-- Opens the same CLI and role the spawn card holds, in THIS
+               workspace — the menu remembers which heading opened it. -->
           <button
             class="ws-add"
             :disabled="!canSpawn"
-            :aria-expanded="addMenuOpen"
+            :aria-expanded="addMenuOpen && addMenuWorkspace === ws.path"
             :title="canSpawn ? `${$t('action.add-to-grid')} · ${pickedAgentLabel}` : $t('label.set-workspace-first')"
-            @click.stop="toggleAddMenu"
+            @click.stop="toggleAddMenu($event, ws.path)"
           >＋</button>
         </li>
         <li
-          v-for="{ pane: p, depth, hasChildren, collapsed: folded } in orderedPanes"
-          v-show="!currentWorkspaceRow?.collapsed"
+          v-for="{ pane: p, depth, hasChildren, collapsed: folded } in panesOf(ws)"
+          v-show="!ws?.collapsed"
           :key="p.id"
           class="agent-item"
           :style="depth ? { marginLeft: depth * 13 + 'px' } : undefined"
@@ -1624,6 +1652,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             </div>
           </template>
         </li>
+        </template>
         <!-- Workspaces open in another window. The registry knows their name,
              agent and busy flag; everything else needs the window that owns
              them, which is what clicking a row goes to. -->

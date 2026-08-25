@@ -62,7 +62,9 @@ describe('cross-workspace roster', () => {
     const start = appSource.indexOf('const workspaceGroups = computed')
     expect(start).toBeGreaterThan(-1)
     const body = appSource.slice(start, appSource.indexOf('\n})', start))
-    expect(body).toContain('path === here')
+    // Every workspace this window runs panes in, not just its primary — it can
+    // have adopted others from the picker.
+    expect(body).toContain('seenLocal.has(norm(path))')
     expect(body).toContain('localIds.has(entry.pane_id)')
   })
 
@@ -101,16 +103,39 @@ describe('cross-workspace roster', () => {
     expect(uses).toEqual(new Set(['displayPath: workspaceParentPath']))
   })
 
-  it('opens a picked workspace in its own window, never in this one', () => {
-    // The sidebar lists workspaces side by side, so picking one is "also open
-    // that", not "leave what I am doing" — and two windows on one folder would
-    // run two sets of PTY and git operations on it.
+  it('adds a picked workspace to THIS sidebar, not a new window', () => {
     const start = appSource.indexOf('async function openWorkspaceFromPicker')
     expect(start).toBeGreaterThan(-1)
     const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('adoptWorkspace')
+    expect(body).not.toContain('openMainWindow')
+    // One already open elsewhere is still focused there: its panes live in the
+    // window that owns them, and two windows on one folder would run two sets
+    // of PTY and git operations on it.
     expect(body).toContain('focusWorkspaceWindow')
-    expect(body).toContain('openMainWindow')
+    // And it never repoints this window at it.
     expect(body).not.toContain('currentWorkspace.value =')
+  })
+
+  it('keeps adopted workspaces deduped and remembered', () => {
+    const start = appSource.indexOf('function adoptWorkspace')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    // Never the primary, never twice.
+    expect(body).toContain('norm(currentWorkspace.value)')
+    expect(body).toContain('extraWorkspaces.value.some')
+    expect(body).toContain('sessionStorage.setItem')
+  })
+
+  it('groups panes by the workspace each was started in', () => {
+    // A pane records its own workspacePath, so a second workspace's panes must
+    // land under its heading rather than swelling the primary's count.
+    const gStart = appSource.indexOf('const workspaceGroups = computed')
+    const groups = appSource.slice(gStart, appSource.indexOf('\n})', gStart))
+    expect(groups).toContain('p.workspacePath')
+    expect(groups).toContain('lineageFor(path)')
+    // The count is that group's panes, not every pane in the window.
+    expect(groups).not.toContain('count: panes.value.length')
   })
 
   it('reuses the Welcome picker rather than a second copy of it', () => {

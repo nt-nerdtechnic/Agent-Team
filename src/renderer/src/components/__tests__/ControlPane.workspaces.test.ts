@@ -209,6 +209,40 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.findAll('.ws-count')[1].text()).toBe('0')
   })
 
+  it('renders a section per local workspace, each with its own panes', () => {
+    // Two projects in one window: each heading owns the panes its own lineage
+    // names, and neither shows the other's.
+    const second = current({
+      path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop',
+      count: 1, lineage: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }]
+    })
+    wrapper = mountWith({
+      workspaces: [
+        current({ lineage: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }], count: 1 }),
+        second
+      ]
+    })
+    const heads = wrapper.findAll('.ws-head--current')
+    expect(heads).toHaveLength(2)
+    expect(wrapper.findAll('.ws-name').map((n) => n.text())).toEqual(['Agent-Team', 'Other'])
+    // One pane under each, not both under the first.
+    expect(wrapper.findAll('.agent-item')).toHaveLength(2)
+  })
+
+  it('collapsing one local workspace leaves the other alone', () => {
+    wrapper = mountWith({
+      workspaces: [
+        current({ lineage: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }], count: 1, collapsed: true }),
+        current({
+          path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop', count: 1,
+          lineage: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }]
+        })
+      ]
+    })
+    const hidden = wrapper.findAll('.agent-item').filter((r) => r.attributes('style')?.includes('display: none'))
+    expect(hidden).toHaveLength(1)
+  })
+
   it('titles the section Workspace once workspaces are grouped', () => {
     wrapper = mountWith({ workspaces: [current()] })
     expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.workspace')
