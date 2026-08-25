@@ -11104,7 +11104,9 @@ const stageTabShapes = computed<StageTabShape[]>(() =>
     isDetached: isDetachedWindow,
     detachedGroupId,
     detachedGroupIds: detachedGroupIds.value,
-    manualLabel: '手動',
+    // Was hard-coded, so an English UI showed a Chinese tab. The key has
+    // existed all along.
+    manualLabel: i18n.global.t('label.manual'),
   })
 )
 

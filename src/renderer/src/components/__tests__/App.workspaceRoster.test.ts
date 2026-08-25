@@ -206,6 +206,9 @@ describe('cross-workspace roster', () => {
     const shapes = appSource.slice(start, appSource.indexOf('\n)', start))
     expect(shapes).toContain('panes: panesInView.value')
     expect(shapes).not.toContain('panes: panes.value')
+    // The synthetic tab's label was hard-coded Chinese, so an English UI
+    // showed a Chinese tab. The key had existed all along.
+    expect(shapes).toContain("manualLabel: i18n.global.t('label.manual')")
     // And the grid filter narrows the same source rather than rebuilding it.
     const gStart = appSource.indexOf('const tabFilteredPaneIds = computed')
     const grid = appSource.slice(gStart, appSource.indexOf('\n)', gStart))
