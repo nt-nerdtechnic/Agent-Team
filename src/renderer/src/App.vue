@@ -6,6 +6,7 @@ import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
 import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups'
 import { buildPaneLineage } from './lib/paneLineage'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
+import { buildStageTabs } from './lib/stageTabs'
 import MemoryPanel, { type MemoryPaneRow } from './components/MemoryPanel.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
@@ -11093,46 +11094,18 @@ const panesInView = computed<readonly ActivePane[]>(() =>
   panesOfViewedWorkspace(panes.value, extraWorkspaces.value)
 )
 
-const stageTabShapes = computed<StageTabShape[]>(() => {
-  // Group panes by their persisted RunGroup; panes without runGroupId are
-  // surfaced through the synthetic "手動" tab, even when no real RunGroup
-  // remains.
-  const groupPaneIds = new Map<string, string[]>()
-  const unassignedPaneIds: string[] = []
-  for (const p of panesInView.value) {
-    if (p.runGroupId) {
-      const list = groupPaneIds.get(p.runGroupId)
-      if (list) list.push(p.id)
-      else groupPaneIds.set(p.runGroupId, [p.id])
-    } else {
-      unassignedPaneIds.push(p.id)
-    }
-  }
-
-  const shapes: StageTabShape[] = []
-  for (const group of runGroups.value) {
-    // Detached child window shows ONLY its own group; a main window hides any
-    // group it has handed off to a detached child. Both filters are inert for a
-    // normal window (isDetachedWindow=false, empty detachedGroupIds).
-    if (isDetachedWindow) {
-      if (group.id !== detachedGroupId) continue
-    } else if (detachedGroupIds.value.has(group.id)) {
-      continue
-    }
-    const paneIds = groupPaneIds.get(group.id) ?? []
-    shapes.push({ key: group.id, label: group.name, count: paneIds.length, type: 'stage', paneIds })
-  }
-  if (!isDetachedWindow && unassignedPaneIds.length > 0) {
-    shapes.push({
-      key: 'manual',
-      label: '手動',
-      count: unassignedPaneIds.length,
-      type: 'manual',
-      paneIds: unassignedPaneIds
-    })
-  }
-  return shapes
-})
+const stageTabShapes = computed<StageTabShape[]>(() =>
+  // Structure, not stageTabs: no live status is read, so a status dot ticking
+  // does not rebuild the strip.
+  buildStageTabs({
+    panes: panesInView.value,
+    groups: runGroups.value,
+    isDetached: isDetachedWindow,
+    detachedGroupId,
+    detachedGroupIds: detachedGroupIds.value,
+    manualLabel: '手動',
+  })
+)
 
 // Previous stageTabs result, returned unchanged when a status tick produced an
 // identical tab bar. See sameRenderedTabs.

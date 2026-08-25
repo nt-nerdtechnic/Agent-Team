@@ -101,7 +101,7 @@ describe('workspace switch — how the parts fit together', () => {
     for (const [name, end] of [
       ['effectiveFocusPaneId', '\n})'],
       ['tabFilteredPaneIds', '\n)'],
-      ['stageTabShapes', '\n  const shapes'],
+      ['stageTabShapes', '\n)'],
       ['onKillAll', undefined],
       ['persistPaneOrder', undefined],
     ] as const) {
@@ -122,15 +122,17 @@ describe('workspace switch — how the parts fit together', () => {
     //
     // The rule is easy to break by reaching for a field that happens to be on
     // the view object, and a comment cannot enforce it.
-    for (const name of [
-      'panesInView',
-      'workspaceGroups',
-      'paneLineage',
-      'tabFilteredPaneIds',
-      'stageTabShapes',
-      'sidebarOrderedPaneIds',
-    ]) {
-      expect(body(name, '\n})'), name).not.toContain('paneViews')
+    // Most of these are now one-line calls into lib/, so their bodies end at
+    // the call's closing paren rather than a computed's `})`.
+    for (const [name, end] of [
+      ['panesInView', '\n)'],
+      ['workspaceGroups', '\n)'],
+      ['paneLineage', '\n)'],
+      ['tabFilteredPaneIds', '\n)'],
+      ['stageTabShapes', '\n)'],
+      ['sidebarOrderedPaneIds', '\n})'],
+    ] as const) {
+      expect(body(name, end), name).not.toContain('paneViews')
     }
   })
 

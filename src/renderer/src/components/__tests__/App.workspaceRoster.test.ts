@@ -199,10 +199,13 @@ describe('cross-workspace roster', () => {
     // switch, the other workspace's ungrouped panes landed in this one's
     // manual-tab count while the grid filter — correctly — refused to show
     // them: a tab reading "3" with nothing behind it.
+    // The strip's shape is lib/stageTabs, tested by running it. What App must
+    // do is feed it the workspace-filtered panes — the bug was a count taken
+    // over every pane in the window while the stage filtered by workspace.
     const start = appSource.indexOf('const stageTabShapes = computed')
-    const shapes = appSource.slice(start, appSource.indexOf('\n  const shapes', start))
-    expect(shapes).toContain('for (const p of panesInView.value)')
-    expect(shapes).not.toContain('for (const p of panes.value)')
+    const shapes = appSource.slice(start, appSource.indexOf('\n)', start))
+    expect(shapes).toContain('panes: panesInView.value')
+    expect(shapes).not.toContain('panes: panes.value')
     // And the grid filter narrows the same source rather than rebuilding it.
     const gStart = appSource.indexOf('const tabFilteredPaneIds = computed')
     const grid = appSource.slice(gStart, appSource.indexOf('\n)', gStart))
