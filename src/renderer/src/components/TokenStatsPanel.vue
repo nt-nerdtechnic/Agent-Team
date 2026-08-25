@@ -369,15 +369,18 @@ async function confirmReset(scope: ResetScope): Promise<void> {
         <section class="block">
           <div class="block-hdr"><span class="block-title">{{ $t('label.by-vendor') }}</span></div>
           <table class="grid">
-            <tr v-for="row in vendorRows" :key="row.key">
-              <th>{{ row.label }}</th>
-              <td>{{ fmt(row.bucket.input) }}</td>
-              <td>{{ fmt(row.bucket.output) }}</td>
-              <td class="dim">{{ row.bucket.calls }}</td>
-            </tr>
-            <tr class="head">
-              <th></th><td>{{ $t('label.in') }}</td><td>{{ $t('label.out') }}</td><td class="dim">{{ $t('label.calls') }}</td>
-            </tr>
+            <tbody>
+              <tr v-for="row in vendorRows" :key="row.key">
+                <th>{{ row.label }}</th>
+                <td>{{ fmt(row.bucket.input) }}</td>
+                <td>{{ fmt(row.bucket.output) }}</td>
+                <td class="dim">{{ row.bucket.calls }}</td>
+              </tr>
+              <tr class="head">
+                <th></th><td>{{ $t('label.in') }}</td><td>{{ $t('label.out') }}</td><td class="dim">{{ $t('label.calls') }}</td>
+              </tr>
+          
+            </tbody>
           </table>
         </section>
 
@@ -386,12 +389,15 @@ async function confirmReset(scope: ResetScope): Promise<void> {
           <div class="block-hdr"><span class="block-title">{{ $t('label.by-stage') }}</span></div>
           <div v-if="!stageRows.length" class="muted">{{ $t('label.no-stages') }}</div>
           <table v-else class="grid">
-            <tr v-for="row in stageRows" :key="row.id">
-              <th>{{ row.label }}</th>
-              <td>{{ fmt(row.bucket.input) }}</td>
-              <td>{{ fmt(row.bucket.output) }}</td>
-              <td class="dim">{{ row.bucket.calls }}</td>
-            </tr>
+            <tbody>
+              <tr v-for="row in stageRows" :key="row.id">
+                <th>{{ row.label }}</th>
+                <td>{{ fmt(row.bucket.input) }}</td>
+                <td>{{ fmt(row.bucket.output) }}</td>
+                <td class="dim">{{ row.bucket.calls }}</td>
+              </tr>
+          
+            </tbody>
           </table>
         </section>
 
@@ -400,12 +406,15 @@ async function confirmReset(scope: ResetScope): Promise<void> {
           <div class="block-hdr"><span class="block-title">{{ $t('label.by-pane') }}</span></div>
           <div v-if="!paneRows.length" class="muted">{{ $t('label.no-active-panes') }}</div>
           <table v-else class="grid">
-            <tr v-for="row in paneRows" :key="row.id">
-              <th :title="row.sub">{{ row.label }}</th>
-              <td>{{ fmt(row.bucket.input) }}</td>
-              <td>{{ fmt(row.bucket.output) }}</td>
-              <td class="dim">{{ row.bucket.calls }}</td>
-            </tr>
+            <tbody>
+              <tr v-for="row in paneRows" :key="row.id">
+                <th :title="row.sub">{{ row.label }}</th>
+                <td>{{ fmt(row.bucket.input) }}</td>
+                <td>{{ fmt(row.bucket.output) }}</td>
+                <td class="dim">{{ row.bucket.calls }}</td>
+              </tr>
+          
+            </tbody>
           </table>
         </section>
       </div>
