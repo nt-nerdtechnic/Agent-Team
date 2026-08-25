@@ -253,6 +253,30 @@ describe('cross-workspace roster', () => {
     expect(tag).not.toContain('v-if="onScreenPaneIds')
   })
 
+  it('tells main which workspaces this window has taken on', () => {
+    // Main answers "is this folder already open?" for every other window's
+    // picker. Knowing only primaries, a second window could open a folder this
+    // one is already running — two sets of PTY and git operations on one
+    // checkout, which is the thing the whole design avoids.
+    const start = appSource.indexOf('function persistExtraWorkspaces')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    expect(body).toContain('reportAdoptedWorkspaces')
+    // A reload restores the list from sessionStorage without going through
+    // adoptWorkspace, so it has to be re-reported on mount.
+    expect(appSource).toContain('if (extraWorkspaces.value.length) {')
+  })
+
+  it('answers an external spawn for any workspace it holds', () => {
+    // cli_open_agent with a workspace_path is addressed by workspace, not by a
+    // parent pane. Only the window holding it may answer — and now exactly one
+    // does, because findMainWindowForWorkspace covers adopted ones.
+    const start = appSource.indexOf('async function handleMcpSpawnRequest')
+    const body = appSource.slice(start, appSource.indexOf('\n  const report', start))
+    expect(body).toContain('isLocalWorkspace(ev.target_workspace')
+    expect(body).not.toContain('ev.target_workspace !== currentWorkspace.value')
+  })
+
   it('still ties the history pane to the primary workspace', () => {
     // Deliberately NOT widened: spawn history follows the workspace the window
     // was opened with.

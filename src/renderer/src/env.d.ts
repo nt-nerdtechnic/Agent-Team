@@ -65,6 +65,7 @@ declare global {
       listOpenWorkspaces: () => Promise<string[]>
       focusWorkspaceWindow: (workspacePath: string) => Promise<boolean>
       requestSpawnInWorkspace: (workspacePath: string) => Promise<boolean>
+      reportAdoptedWorkspaces: (paths: string[]) => void
       onSpawnRequested: (cb: () => void) => () => void
       onOpenWorkspacesChanged: (cb: () => void) => () => void
       openPath: (target: string) => Promise<{ ok: boolean; revealed?: boolean; error?: string }>

@@ -2063,7 +2063,11 @@ async function handleMcpSpawnRequest(ev: {
   let parent: ActivePane | undefined
   let parentName: string
   if (standalone) {
-    if (ev.target_workspace !== currentWorkspace.value) return // not our workspace — another window will answer
+    // Any workspace this window holds. Exactly one window holds a given
+    // workspace — findMainWindowForWorkspace covers adopted ones now, so a
+    // second window is sent to this one rather than opening it too — which is
+    // what keeps this from being answered twice.
+    if (!isLocalWorkspace(ev.target_workspace ?? '')) return // not ours — another window will answer
     parentName = ev.target_workspace as string
   } else {
     parent = panes.value.find((p) => p.id === ev.requester_pane_id)
@@ -11359,6 +11363,10 @@ function persistExtraWorkspaces(): void {
   } catch {
     /* a lost list costs a re-pick, not work */
   }
+  // Main answers "is this folder already open?" for every other window's
+  // picker; without this it would only know about primaries and a second
+  // window could open a folder this one is already running.
+  if (!isDetachedWindow) window.agentTeam?.reportAdoptedWorkspaces?.([...extraWorkspaces.value])
 }
 
 /** Workspaces open in other windows.
@@ -11376,6 +11384,11 @@ async function refreshOpenWorkspaces(): Promise<void> {
 
 onMounted(() => {
   if (isDetachedWindow) return
+  // A reload restores the list from sessionStorage without going through
+  // adoptWorkspace, so main has not heard about it.
+  if (extraWorkspaces.value.length) {
+    window.agentTeam?.reportAdoptedWorkspaces?.([...extraWorkspaces.value])
+  }
   void refreshOpenWorkspaces()
   disposeOpenWorkspacesChanged =
     window.agentTeam?.onOpenWorkspacesChanged?.(() => void refreshOpenWorkspaces()) ?? null

@@ -134,6 +134,13 @@ const mainWindowWorkspaces = new Map<BrowserWindow, string>()
 const detachedGroups = new Map<string, BrowserWindow>()          // groupId → child window
 const detachedGroupWorkspace = new Map<string, string>()         // groupId → workspace_path
 const detachedWindowIds = new Set<number>()                      // child window ids
+// Workspaces a window has taken on from its sidebar, beyond the one it was
+// opened with. Kept apart from mainWindowWorkspaces so everything that means
+// "this window's own workspace" — the registry, run-group hand-offs, the
+// titlebar — keeps meaning exactly that. Only the two "is this folder already
+// open somewhere?" answers below consult it, which is the whole point: a
+// second window must not open a folder this one is already running.
+const adoptedWorkspaces = new Map<BrowserWindow, string[]>()
 
 // Send an event to every non-detached main window bound to a workspace (used to
 // hand a run group off to / back from a detached child window).
@@ -160,8 +167,14 @@ function normalizeWorkspacePath(p: string): string {
 function findMainWindowForWorkspace(workspacePath: string): BrowserWindow | null {
   const target = normalizeWorkspacePath(workspacePath)
   if (!target) return null
+  // A window whose primary it is wins: that is where its tabs, git and
+  // explorer already point.
   for (const [win, wp] of mainWindowWorkspaces) {
     if (!win.isDestroyed() && normalizeWorkspacePath(wp) === target) return win
+  }
+  for (const [win, list] of adoptedWorkspaces) {
+    if (win.isDestroyed()) continue
+    if (list.some((wp) => normalizeWorkspacePath(wp) === target)) return win
   }
   return null
 }
@@ -325,6 +338,7 @@ async function createWindow(
   win.on('closed', () => {
     mainWindows.delete(win)
     mainWindowWorkspaces.delete(win)
+    adoptedWorkspaces.delete(win)
     windowRegistry.remove(winId)
     detachedWindowIds.delete(winId)
     if (mainWindow === win) {
@@ -1217,6 +1231,21 @@ ipcMain.on('window:reportWorkspace', (event, workspacePath: string) => {
   broadcastOpenWorkspacesChanged()
 })
 
+// The sidebar can take on workspaces beyond the one the window was opened
+// with. Main needs the list so a second window does not open the same folder —
+// two sets of PTY and git operations on one checkout is what this prevents.
+ipcMain.on('window:reportAdoptedWorkspaces', (event, paths: string[]) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || !mainWindows.has(win)) return
+  if (detachedWindowIds.has(win.id)) return // detached child — never registry-tracked
+  const list = (Array.isArray(paths) ? paths : [])
+    .map((p) => String(p ?? '').trim())
+    .filter(Boolean)
+  if (list.length) adoptedWorkspaces.set(win, list)
+  else adoptedWorkspaces.delete(win)
+  broadcastOpenWorkspacesChanged()
+})
+
 // Renderers push the latest recent-workspaces list so the native File > Open
 // Recent submenu stays in sync. Every window pushes on each change, so skip the
 // rebuild when the list is unchanged.
@@ -1236,6 +1265,9 @@ ipcMain.handle('workspace:listOpen', () => {
   const open: string[] = []
   for (const [win, wp] of mainWindowWorkspaces) {
     if (!win.isDestroyed()) open.push(wp)
+  }
+  for (const [win, list] of adoptedWorkspaces) {
+    if (!win.isDestroyed()) open.push(...list)
   }
   return open
 })
