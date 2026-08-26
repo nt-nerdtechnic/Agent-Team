@@ -4490,6 +4490,25 @@ async def terminal_memory_usage(session: "Session", msg_id: str, msg_type: str, 
     }))
 
 
+#: One sweep serves every window that asks within this window of time.
+#:
+#: The panel it feeds is machine-wide, so N open windows all ask for the same
+#: numbers on their own timers — and the sweep shells out twice, on the shared
+#: executor, at a cost that scales with the pane count. Without this, three
+#: windows plus the Resource Manager mean three redundant `footprint` runs
+#: contending for the same thread pool (a failure this backend has hit before,
+#: from a different caller). The lock serialises them; the TTL means the ones
+#: that queued behind it get the reading that just completed instead of
+#: starting another.
+#:
+#: It does not blur anyone's CPU differencing: each caller subtracts against
+#: its OWN previous sample, and `sampled_at` travels with the reading, so a
+#: shared sample is simply a sample both callers took at the same instant.
+_RESOURCE_SWEEP_TTL_S = 1.0
+_resource_sweep_lock = asyncio.Lock()
+_resource_sweep_cache: dict[str, object] = {"at": 0.0, "payload": None}
+
+
 @handler("terminal.resource_usage")
 async def terminal_resource_usage(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Per-pane CPU and memory in one sweep, for the resource panel.
@@ -4502,8 +4521,23 @@ async def terminal_resource_usage(session: "Session", msg_id: str, msg_type: str
     against its own previous sample.
 
     The two sweeps are independent subprocesses, so they run concurrently; the
-    whole call costs about as much as the slower one.
+    whole call costs about as much as the slower one. Concurrent callers share
+    one sweep — see _RESOURCE_SWEEP_TTL_S.
     """
+    async with _resource_sweep_lock:
+        now = time.monotonic()
+        cached = _resource_sweep_cache["payload"]
+        if cached is not None and now - float(_resource_sweep_cache["at"]) < _RESOURCE_SWEEP_TTL_S:
+            await session.send_json(make_response(msg_id, msg_type, cached))
+            return
+        result = await _collect_resource_usage(session)
+        _resource_sweep_cache["at"] = now
+        _resource_sweep_cache["payload"] = result
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
+async def _collect_resource_usage(session: "Session") -> dict:
+    """One CPU + memory sweep over every live PTY this backend owns."""
     from . import process_cpu, process_memory
 
     groups = session.terminals.memory_pid_groups()
@@ -4525,7 +4559,7 @@ async def terminal_resource_usage(session: "Session", msg_id: str, msg_type: str
         for sid, (pane_id, _) in groups.items()
     ]
     cpu_count, machine_memory = process_cpu.machine_capacity()
-    await session.send_json(make_response(msg_id, msg_type, {
+    return {
         # An empty sweep with live panes means it failed, which is not the same
         # as "no panes" — the panel has to tell those apart, per metric.
         "available": process_memory.available() and bool(measured or not groups),
@@ -4537,7 +4571,7 @@ async def terminal_resource_usage(session: "Session", msg_id: str, msg_type: str
         # summary answers; the per-pane column stays relative to one core.
         "cpu_count": cpu_count,
         "machine_memory_bytes": machine_memory,
-    }))
+    }
 
 
 @handler("terminal.log_sent")
