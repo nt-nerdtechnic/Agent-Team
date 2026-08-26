@@ -220,7 +220,7 @@ async function start(): Promise<void> {
       agentKey: agentKey.value,
       paneId: props.paneId,
       historyRoot: props.workspacePath,
-      yoloStored: settingsGet<string | null>('agentTeam.yolo', null),
+      yoloStored: settingsGet<string>('agentTeam.yolo', '1'),
     })
     await term.spawn({
       // zsh reads ~/.zshrc (where installers add PATH) only in interactive
@@ -231,7 +231,7 @@ async function start(): Promise<void> {
       metadata: {
         workspace_path: props.workspacePath,
         origin: props.origin,
-        yolo: settingsGet<string | null>('agentTeam.yolo', null) !== '0',
+        yolo: settingsGet<string>('agentTeam.yolo', '1') !== '0',
       },
       // Start always means a NEW PTY. Reattach belongs to the connect-time
       // tryReattach above — letting spawn's internal reattach run here could

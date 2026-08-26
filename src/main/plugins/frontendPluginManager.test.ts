@@ -3154,6 +3154,7 @@ describe('Manifest v2 capability runtime deferral', () => {
 
 describe('first-party Git private bridge', () => {
   const HOST_CALL = 'plugin:host:call'
+  const CAPABILITY_CALL = 'plugin:cap:call'
 
   function gitDescriptor(mgr: FrontendPluginManager, workspacePath = '/workspace'): PluginLaunchDescriptor {
     return {
@@ -3217,6 +3218,85 @@ describe('first-party Git private bridge', () => {
       args,
     })) as Record<string, unknown>
   }
+
+  it('denies Git storage writes outside the approved preference ownership', async () => {
+    const { mgr, view } = await openGitView()
+    const executions: unknown[] = []
+    mgr.setPublicStorageHandler((execution) => {
+      executions.push(execution)
+      return null
+    })
+    const handler = ipcHandlers.get(CAPABILITY_CALL)
+    expect(handler).toBeDefined()
+
+    const response = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'git-storage-host-key',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'plugin', key: 'agentTeam.yolo', value: '0' },
+    })
+
+    expect(response).toMatchObject({
+      reqId: 'git-storage-host-key',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+    expect(executions).toEqual([])
+  })
+
+  it('routes only Host-owned read-only settings to Git v2 views', async () => {
+    const { mgr, view } = await openGitView()
+
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agentTeam.yolo': '0',
+        'agentTeam.analyzerModel': 'qwen2:latest',
+        'agentTeam.git.autoCommit': '1',
+        'unknown.setting': 'ignored',
+      },
+    })
+
+    expect(view.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agentTeam.yolo': '0',
+            'agentTeam.analyzerModel': 'qwen2:latest',
+          },
+        },
+      }],
+    }])
+  })
+
+  it('labels plugin storage changes so the settings facade accepts only its owned scope', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setPublicStorageHandler(() => null)
+    const handler = ipcHandlers.get(CAPABILITY_CALL)
+    expect(handler).toBeDefined()
+
+    const response = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'git-storage-owned-key',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'plugin', key: 'agentTeam.git.logScope', value: 'all' },
+    })
+
+    expect(response).toEqual({ reqId: 'git-storage-owned-key', ok: true, result: null })
+    expect(view.webContents.sent).toContainEqual({
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'plugin-storage',
+          scope: 'plugin',
+          settings: { 'agentTeam.git.logScope': 'all' },
+        },
+      }],
+    })
+  })
 
   it('routes a validated contribution to its own Host window only', async () => {
     const first = await openGitView()
@@ -3804,7 +3884,17 @@ describe('Git left legacy rollback composition', () => {
       asHost(host),
       '/workspace',
       { x: 0, y: 0, width: 400, height: 300 },
+      '',
+      '',
+      {
+        git_yolo: '0',
+        git_analyzer_model: 'qwen2:latest',
+        git_theme_custom: '{}',
+      },
     )).resolves.toEqual({ ok: true })
+    expect((host.children[0] as FakeViewLike).webContents.loads).toEqual([
+      '/plugins/navide-git/left.html?workspace_path=%2Fworkspace&git_yolo=0&git_analyzer_model=qwen2%3Alatest&git_theme_custom=%7B%7D&v2=1&contribution=left',
+    ])
 
     frontendPluginManager.replaceBuiltinForRecovery(legacy)
     await expect(openGitLeftPluginView(

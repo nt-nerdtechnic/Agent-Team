@@ -66,6 +66,11 @@ import {
 } from '../../shared/wsClient'
 import { AI_CLI_PROFILES } from '../../shared/aiCliProfiles'
 import { resolveWsType } from './capabilityMap'
+import {
+  GIT_HOST_READ_ONLY_KEYS,
+  GIT_USER_PREFERENCE_KEYS,
+  GIT_WORKSPACE_REPOSITORY_KEY,
+} from '../../../packages/features/git/src/gitPreferences'
 
 /** Everything the manager needs to launch one plugin view. */
 export interface PluginLaunchDescriptor {
@@ -1146,6 +1151,25 @@ export class FrontendPluginManager {
 
       if (plan.kind === 'public') {
         if (plan.storage) {
+          const storageKey = typeof call.args === 'object' && call.args !== null
+            ? (call.args as Record<string, unknown>).key
+            : null
+          const storageScope = typeof call.args === 'object' && call.args !== null
+            ? (call.args as Record<string, unknown>).scope
+            : null
+          if (
+            plugin.hasV2DescriptorIdentity &&
+            plugin.id === GIT_PLUGIN_ID &&
+            (
+              typeof storageKey !== 'string' ||
+              !(
+                (storageScope === 'plugin' && GIT_USER_PREFERENCE_KEYS.includes(storageKey as typeof GIT_USER_PREFERENCE_KEYS[number])) ||
+                (storageScope === 'workspace' && storageKey === GIT_WORKSPACE_REPOSITORY_KEY && plugin.workspacePath)
+              )
+            )
+          ) {
+            return buildError(call.reqId, 'CAPABILITY_DENIED', 'Git storage key is not owned by the plugin')
+          }
           const handler = this.publicStorageHandler
           if (!handler || !isStorageExecutionAddress(plan.address)) {
             return buildError(
@@ -1161,19 +1185,24 @@ export class FrontendPluginManager {
               partition: plan.storage.partition,
               snapshot: plan.storage.snapshot,
             })
-            const storageKey = typeof call.args === 'object' && call.args !== null
-              ? (call.args as Record<string, unknown>).key
-              : null
-            const storageScope = typeof call.args === 'object' && call.args !== null
-              ? (call.args as Record<string, unknown>).scope
-              : null
             if (
+              plugin.hasV2DescriptorIdentity &&
               plugin.id === GIT_PLUGIN_ID &&
-              storageScope === 'plugin' &&
+              (storageScope === 'plugin' || storageScope === 'workspace') &&
               typeof storageKey === 'string'
             ) {
+              const settingsEvent = {
+                source: 'plugin-storage' as const,
+                scope: storageScope,
+                settings: {
+                  [storageKey]: plan.address === 'storage.delete'
+                    ? null
+                    : (call.args as Record<string, unknown>).value,
+                },
+                ...(storageScope === 'workspace' ? { workspace_path: plugin.workspacePath } : {}),
+              }
               this.dispatchEvent('ui.settings_changed', {
-                settings: { [storageKey]: plan.address === 'storage.delete' ? null : (call.args as Record<string, unknown>).value },
+                ...settingsEvent,
               })
             }
             return buildSuccess(
@@ -1643,6 +1672,21 @@ export class FrontendPluginManager {
     this.dispatchEvent(event, payload, sourceBinding, targetPluginId)
   }
 
+  /** Route only the fixed Host-owned Git settings contract to v2 Git views. */
+  dispatchHostSettingsChanged(payload: unknown): void {
+    const rawSettings =
+      typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).settings
+        : null
+    if (typeof rawSettings !== 'object' || rawSettings === null || Array.isArray(rawSettings)) return
+    const settings = Object.fromEntries(
+      Object.entries(rawSettings as Record<string, unknown>)
+        .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
+    )
+    if (Object.keys(settings).length === 0) return
+    this.dispatchEvent('ui.settings_changed', { source: 'host', settings })
+  }
+
   /** Main-registered handlers for the shell-level host capabilities
    *  (open_external / reveal_path / open_workspace / pick_folder). index.ts
    *  wires them to shell.openExternal / shell.showItemInFolder /
@@ -1785,7 +1829,11 @@ export class FrontendPluginManager {
           // The shared backend listener has no authenticated public-event
           // source binding. Manifest v2 events therefore fail closed here;
           // Host producers must use dispatchPublicCapabilityEvent().
-          this.dispatchEvent(event, payload)
+          if (event === 'ui.settings_changed') {
+            this.dispatchHostSettingsChanged(payload)
+          } else {
+            this.dispatchEvent(event, payload)
+          }
         })
       }
       client.connect(this.backendWsUrl)
@@ -1903,20 +1951,65 @@ export class FrontendPluginManager {
     sourceBinding?: AuthenticatedRuntimeBinding,
     targetPluginId?: string
   ): void {
-    // User-level settings are still a private Host event for the first-party
-    // Git package. The package settings port uses this to keep left/window
-    // theme and layout caches synchronized; workspace routing is unnecessary
-    // because these values are intentionally user-scoped.
+    // Settings are a private first-party contract for the Git package. The
+    // v2 surface receives only the typed Host read-only keys or the exact
+    // plugin-owned storage key; the legacy loop below remains unchanged for
+    // rollback compatibility.
     if (event === 'ui.settings_changed') {
-      for (const plugin of this.running.values()) {
-        if (
-          plugin.hasV2DescriptorIdentity &&
-          plugin.id === GIT_PLUGIN_ID &&
-          plugin.capabilityPolicy.kind === 'manifest-v2' &&
-          plugin.capabilityPolicy.system.includes('ui') &&
-          plugin.capabilityContext?.userGrant?.system.includes('ui')
-        ) {
-          this.emitToInstance(plugin.instanceId, event, payload)
+      const record = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+        ? payload as Record<string, unknown>
+        : null
+      const rawSettings = record?.settings
+      const source = record?.source
+      let settings: Record<string, unknown> = {}
+      let settingsWorkspace: string | null = null
+      let settingsPayload: Record<string, unknown> | null = null
+      if (typeof rawSettings === 'object' && rawSettings !== null && !Array.isArray(rawSettings)) {
+        if (source === 'host') {
+          settings = Object.fromEntries(
+            Object.entries(rawSettings as Record<string, unknown>)
+              .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
+          )
+          settingsPayload = { source, settings }
+        } else if (source === 'plugin-storage') {
+          const scope = record?.scope
+          const allowedKeys = scope === 'plugin'
+            ? GIT_USER_PREFERENCE_KEYS
+            : scope === 'workspace'
+              ? [GIT_WORKSPACE_REPOSITORY_KEY]
+              : []
+          settings = Object.fromEntries(
+            Object.entries(rawSettings as Record<string, unknown>)
+              .filter(([key]) => allowedKeys.includes(key as never))
+          )
+          const workspacePath = record?.workspace_path
+          if (scope === 'workspace' && typeof workspacePath === 'string' && workspacePath.length > 0) {
+            settingsWorkspace = resolve(workspacePath)
+          }
+          settingsPayload = {
+            source,
+            scope,
+            settings,
+            ...(settingsWorkspace ? { workspace_path: workspacePath } : {}),
+          }
+        }
+      }
+      if (settingsPayload && Object.keys(settings).length > 0 &&
+        (source !== 'plugin-storage' || record?.scope !== 'workspace' || settingsWorkspace !== null)) {
+        for (const plugin of this.running.values()) {
+          if (
+            plugin.hasV2DescriptorIdentity &&
+            plugin.id === GIT_PLUGIN_ID &&
+            plugin.capabilityPolicy.kind === 'manifest-v2' &&
+            plugin.capabilityPolicy.system.includes('ui') &&
+            plugin.capabilityContext?.userGrant?.system.includes('ui') &&
+            (settingsWorkspace === null || (
+              plugin.workspacePath !== null &&
+              resolve(plugin.workspacePath) === settingsWorkspace
+            ))
+          ) {
+            this.emitToInstance(plugin.instanceId, event, settingsPayload)
+          }
         }
       }
       // Keep the legacy loop below active while the rollback bundle is live.
@@ -3832,7 +3925,8 @@ export async function openGitLeftPluginView(
   workspacePath: string,
   bounds: PluginBounds,
   httpUrl = '',
-  theme = ''
+  theme = '',
+  extraParams: Record<string, string> = {}
 ): Promise<GitLeftViewResult> {
   const base = frontendPluginManager.getDescriptor(GIT_PLUGIN_ID)
   if (!base) return { ok: false }
@@ -3850,7 +3944,7 @@ export async function openGitLeftPluginView(
     const existingWorkspace = frontendPluginManager.workspacePathOfInstance(existing.instanceId)
     if (existingWorkspace && resolve(existingWorkspace) === resolve(workspacePath)) {
       frontendPluginManager.setBounds(existing.instanceId, bounds)
-      frontendPluginManager.updateViewQuery(existing.instanceId, gitQuery(workspacePath, httpUrl, theme, {}, true, 'left'))
+      frontendPluginManager.updateViewQuery(existing.instanceId, gitQuery(workspacePath, httpUrl, theme, extraParams, true, 'left'))
       frontendPluginManager.activate(existing.instanceId)
       return { ok: true }
     }
@@ -3859,7 +3953,7 @@ export async function openGitLeftPluginView(
   const handle = await frontendPluginManager.openView(base, view, {
     hostWindow,
     bounds,
-    query: gitQuery(workspacePath, httpUrl, theme, {}, true, 'left'),
+    query: gitQuery(workspacePath, httpUrl, theme, extraParams, true, 'left'),
     workspacePath,
     capabilityContext: frontendPluginManager.gitCapabilityContext(
       base.packageVersion,

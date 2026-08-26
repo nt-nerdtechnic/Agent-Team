@@ -2,6 +2,11 @@
 import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
 import { shallowMount, flushPromises } from '@vue/test-utils'
 import { ref } from 'vue'
+import {
+  __resetSettingsForTest,
+  seedSettings,
+  settingsGet,
+} from '@navide/git-shared/lib/settings'
 
 // Stub useRepoDiscovery so we can control the repositories list.
 const mockRepositories = ref<{ rel_path: string; abs_path: string; branch: string; badge: { branch: string; dirtyCount: number } }[]>([])
@@ -49,6 +54,7 @@ const stubSurfacePorts = {
 
 beforeEach(() => {
   mockRepositories.value = []
+  __resetSettingsForTest()
   try { localStorage.clear() } catch { /* ignore */ }
 })
 
@@ -156,24 +162,26 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
   })
 })
 
-describe('MultiRepoGit – persisted repo tab (project.json ui_git_tab_repo)', () => {
+describe('MultiRepoGit – workspace Plugin Storage selection', () => {
   const TWO_REPOS = [
     makeRepo('.', '/ws', 'main'),
     makeRepo('sub', '/ws/sub', 'dev'),
   ]
 
-  it('restores the backend-saved repo tab', async () => {
+  it('restores the workspace-scoped Plugin Storage selection', async () => {
     mockRepositories.value = TWO_REPOS
-    const { backend } = makeBackend({ ui_git_tab_repo: '/ws/sub' })
+    seedSettings({ 'agentTeam.gitTabRepo': '/ws/sub' })
+    const { backend, send } = makeBackend({ ui_git_tab_repo: '/ws' })
     const wrapper = mountMultiRepo({
       props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     const tabs = wrapper.findAll('.repo-tab')
     expect(tabs[1].classes()).toContain('active')
+    expect(send).not.toHaveBeenCalledWith('project.peek', expect.anything())
   })
 
-  it('clicking a tab persists the selection via project.set_ui_state', async () => {
+  it('clicking a tab persists only the workspace Plugin Storage key', async () => {
     mockRepositories.value = TWO_REPOS
     const { backend, send } = makeBackend()
     const wrapper = mountMultiRepo({
@@ -181,42 +189,51 @@ describe('MultiRepoGit – persisted repo tab (project.json ui_git_tab_repo)', (
     })
     await flushPromises()
     await wrapper.findAll('.repo-tab')[1].trigger('click')
-    expect(send).toHaveBeenCalledWith('project.set_ui_state', {
-      workspace_path: '/ws',
-      git_tab_repo: '/ws/sub',
-    })
+    expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
+    expect(send).not.toHaveBeenCalledWith('project.set_ui_state', expect.anything())
   })
 
-  it('migrates the legacy localStorage key once (ack-gated delete)', async () => {
-    localStorage.setItem('agentTeam.gitTabRepo./ws', '/ws/sub')
+  it('uses the legacy project field as a read-only seed', async () => {
     mockRepositories.value = TWO_REPOS
-    const { backend, send } = makeBackend()
+    const { backend, send } = makeBackend({ ui_git_tab_repo: '/ws/sub' })
     const wrapper = mountMultiRepo({
       props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
-    // Legacy value restored and pushed to the backend, local copy deleted after ack.
     expect(wrapper.findAll('.repo-tab')[1].classes()).toContain('active')
-    expect(send).toHaveBeenCalledWith('project.set_ui_state', {
-      workspace_path: '/ws',
-      git_tab_repo: '/ws/sub',
-    })
-    expect(localStorage.getItem('agentTeam.gitTabRepo./ws')).toBeNull()
+    expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
+    expect(send).toHaveBeenCalledWith('project.peek', { workspace_path: '/ws' })
+    expect(send).not.toHaveBeenCalledWith('project.set_ui_state', expect.anything())
   })
 
-  it('clears the stale legacy copy when the backend already owns a value', async () => {
-    localStorage.setItem('agentTeam.gitTabRepo./ws', '/ws/stale')
+  it('uses a legacy localStorage seed without deleting or rewriting it', async () => {
+    localStorage.setItem('agentTeam.gitTabRepo./ws', '/ws/sub')
     mockRepositories.value = TWO_REPOS
-    const { backend, send } = makeBackend({ ui_git_tab_repo: '/ws/sub' })
+    const { backend, send } = makeBackend()
     mountMultiRepo({
       props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
-    expect(localStorage.getItem('agentTeam.gitTabRepo./ws')).toBeNull()
+    expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
+    expect(localStorage.getItem('agentTeam.gitTabRepo./ws')).toBe('/ws/sub')
     expect(send).not.toHaveBeenCalledWith('project.set_ui_state', expect.anything())
   })
 
-  it('a late restore does not override a user click', async () => {
+  it('keeps the legacy seed frozen after a later Plugin Storage selection', async () => {
+    localStorage.setItem('agentTeam.gitTabRepo./ws', '/ws')
+    mockRepositories.value = TWO_REPOS
+    const { backend } = makeBackend()
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+    })
+    await flushPromises()
+    await wrapper.findAll('.repo-tab')[1].trigger('click')
+
+    expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
+    expect(localStorage.getItem('agentTeam.gitTabRepo./ws')).toBe('/ws')
+  })
+
+  it('does not let a late read-only legacy seed override a user click', async () => {
     mockRepositories.value = TWO_REPOS
     let resolvePeek: (v: unknown) => void = () => {}
     const send = vi.fn((type: string) => {
@@ -231,5 +248,25 @@ describe('MultiRepoGit – persisted repo tab (project.json ui_git_tab_repo)', (
     resolvePeek({ ok: true, payload: { project: { ui_git_tab_repo: '/ws/sub' } } })
     await flushPromises()
     expect(wrapper.findAll('.repo-tab')[0].classes()).toContain('active')
+    expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws')
+  })
+
+  it('does not let a legacy seed overwrite a Plugin Storage value arriving during the read', async () => {
+    mockRepositories.value = TWO_REPOS
+    let resolvePeek: (v: unknown) => void = () => {}
+    const send = vi.fn((type: string) => {
+      if (type === 'project.peek') return new Promise((resolve) => { resolvePeek = resolve })
+      return Promise.resolve({ ok: true, payload: { ok: true } })
+    })
+    const wrapper = mountMultiRepo({
+      props: { workspacePath: '/ws', backend: { send } as never, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+    })
+
+    seedSettings({ 'agentTeam.gitTabRepo': '/ws/sub' })
+    resolvePeek({ ok: true, payload: { project: { ui_git_tab_repo: '/ws' } } })
+    await flushPromises()
+
+    expect(wrapper.findAll('.repo-tab')[1].classes()).toContain('active')
+    expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
   })
 })

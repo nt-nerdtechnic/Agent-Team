@@ -861,16 +861,28 @@ function currentUiTheme(): string {
   return typeof theme === 'string' ? theme : ''
 }
 
-async function migrateGitStorageForWorkspace(workspacePath: string): Promise<void> {
+/** Read-only Host values bootstrapped into each Git v2 view's entry query.
+ *  They are deliberately encoded in the same shapes the settings facade uses:
+ *  yolo/analyzer are plain strings, while theme customizations remain JSON. */
+function currentGitReadOnlyQuery(): Record<string, string> {
+  const settings = readUiSettings()
+  const yolo = uiSetting<string>(settings, 'agentTeam.yolo')
+  const analyzerModel = uiSetting<string>(settings, 'agentTeam.analyzerModel')
+  const themeCustom = uiSetting<Record<string, string>>(settings, 'agent-team:theme-custom')
+  return {
+    git_yolo: yolo === '0' ? '0' : '1',
+    git_analyzer_model: typeof analyzerModel === 'string' ? analyzerModel : '',
+    git_theme_custom: JSON.stringify(themeCustom ?? {}),
+  }
+}
+
+async function migrateGitStorage(): Promise<void> {
   const descriptor = frontendPluginManager.getDescriptor('navide.git')
   const packageVersion = descriptor?.packageVersion
   if (!packageVersion) return
-  const context = frontendPluginManager.gitCapabilityContext(packageVersion, workspacePath, 'git-migration')
   const migration = await migrateBundledGitPreferences(pluginStorageStore, {
     packageVersion,
     sourceSnapshot: gitStorageLifecycle.sourceFor(packageVersion),
-    workspaceId: context.runtimeBinding?.workspaceId ?? null,
-    workspacePath,
     legacySettings: readUiSettings(),
   })
   if (migration.completed) gitStorageLifecycle.rememberActive(packageVersion)
@@ -1341,9 +1353,12 @@ ipcMain.handle('window:openDiff', (event, args: Record<string, string>) => {
 // parity), opened from the main window's "open standalone Git" entry. Resolves
 // the backend HTTP base + current theme like openMiniIdeEditor.
 async function openGitWindow(workspacePath: string, extraParams: Record<string, string> = {}): Promise<boolean> {
-  await migrateGitStorageForWorkspace(workspacePath)
+  await migrateGitStorage()
   const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
-  return openGitPluginView(workspacePath, httpUrl, currentUiTheme(), extraParams)
+  return openGitPluginView(workspacePath, httpUrl, currentUiTheme(), {
+    ...currentGitReadOnlyQuery(),
+    ...extraParams,
+  })
 }
 
 ipcMain.handle('window:openGit', async (_event, args: Record<string, string>) => {
@@ -1392,9 +1407,16 @@ ipcMain.handle('window:openGitLeft', async (event, args: Record<string, unknown>
   if (!hostWindow || !registeredWorkspace || !bounds) return { ok: false }
   const workspacePath = normalizeWorkspacePath(registeredWorkspace)
   if (!workspacePath) return { ok: false }
-  await migrateGitStorageForWorkspace(workspacePath)
+  await migrateGitStorage()
   const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
-  return openGitLeftPluginView(hostWindow, workspacePath, bounds, httpUrl, currentUiTheme())
+  return openGitLeftPluginView(
+    hostWindow,
+    workspacePath,
+    bounds,
+    httpUrl,
+    currentUiTheme(),
+    currentGitReadOnlyQuery(),
+  )
 })
 
 ipcMain.handle('window:updateGitLeft', (event, args: Record<string, unknown>) => {

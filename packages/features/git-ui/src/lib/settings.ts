@@ -4,6 +4,10 @@ import type { ReactiveValue } from '../ports/value'
 /** Private settings adapter seam shared by Host and isolated feature views. */
 export interface SettingsBackend {
   readonly status: ReactiveValue<'starting' | 'connecting' | 'connected' | 'disconnected' | 'error'>
+  /** When present, getAll() is a partial snapshot owned by these keys. */
+  readonly ownedKeys?: readonly string[]
+  /** Host-owned keys accepted only from source: "host" broadcasts. */
+  readonly readOnlyKeys?: readonly string[]
   getAll(): Promise<Record<string, unknown> | null>
   setMany(updates: Record<string, unknown>): Promise<void>
   onChanged(callback: (payload: unknown) => void): () => void
@@ -127,6 +131,38 @@ let backend: Backend | null = null
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 let stopStatusWatch: (() => void) | null = null
 let offSettingsChanged: (() => void) | null = null
+let backendReady: Promise<void> = Promise.resolve()
+let resolveBackendReady: (() => void) | null = null
+let readinessGeneration = 0
+const warnedUnsupportedKeys = new Set<string>()
+
+function resetBackendReady(): void {
+  readinessGeneration += 1
+  const previous = resolveBackendReady
+  backendReady = new Promise<void>((resolve) => {
+    resolveBackendReady = () => {
+      resolve()
+      previous?.()
+    }
+  })
+}
+
+function warnUnsupportedKeyOnce(key: string): void {
+  const dev = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true
+  if (!dev || warnedUnsupportedKeys.has(key)) return
+  warnedUnsupportedKeys.add(key)
+  console.warn(`[settings] ignored write to non-owned key '${key}'`)
+}
+
+function canWriteKey(key: string): boolean {
+  if (!backend?.ownedKeys || backend.ownedKeys.includes(key)) return true
+  warnUnsupportedKeyOnce(key)
+  return false
+}
+
+function isManifestV2Runtime(): boolean {
+  return typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('v2') === '1'
+}
 
 // Local listeners notified when OTHER sources change the cache (broadcasts
 // from other windows, connect-time reconcile) — NOT this window's own writes.
@@ -171,6 +207,7 @@ export function settingsGet<T>(key: string, fallback: T): T {
 /** Write a JSON-serializable value. `null`/`undefined` are remove semantics
  *  (null is the delete marker on the wire, undefined can't survive JSON). */
 export function settingsSet(key: string, value: unknown): void {
+  if (!canWriteKey(key)) return
   if (value === null || value === undefined) {
     settingsRemove(key)
     return
@@ -182,6 +219,7 @@ export function settingsSet(key: string, value: unknown): void {
 
 /** Delete a key locally and on the backend (null value in the batched set). */
 export function settingsRemove(key: string): void {
+  if (!canWriteKey(key)) return
   delete cache[key]
   pending.set(key, null)
   scheduleFlush()
@@ -193,11 +231,23 @@ export function settingsRemove(key: string): void {
 export function initSettingsBackend(b: Backend): void {
   if (backend) return
   backend = b
+  resetBackendReady()
   offSettingsChanged = b.onChanged((raw) => {
     const delta = (raw as { settings?: unknown } | null)?.settings
     if (delta === null || typeof delta !== 'object') return
+    const source = (raw as { source?: unknown } | null)?.source
+    const ownedKeys = b.ownedKeys ? new Set(b.ownedKeys) : null
+    const readOnlyKeys = b.readOnlyKeys ? new Set(b.readOnlyKeys) : null
     const changed: string[] = []
     for (const [key, value] of Object.entries(delta as Record<string, unknown>)) {
+      if (ownedKeys) {
+        const accepted = source === 'host'
+          ? readOnlyKeys?.has(key) === true
+          : source === 'plugin-storage'
+            ? ownedKeys.has(key)
+            : false
+        if (!accepted) continue
+      }
       // A locally pending write is newer than the broadcast (the backend
       // merges last-write-wins and our flush hasn't landed yet) — keep ours.
       if (pending.has(key)) continue
@@ -210,26 +260,43 @@ export function initSettingsBackend(b: Backend): void {
   stopStatusWatch = watch(
     () => b.status.value,
     (s) => {
-      if (s === 'connected') void reconcile(b)
+      if (s === 'connected') {
+        const generation = readinessGeneration
+        void reconcile(b, generation)
+      } else {
+        resetBackendReady()
+      }
     },
     { immediate: true },
   )
 }
 
-async function reconcile(b: Backend): Promise<void> {
+/** Wait for the first connected-store reconciliation before reading a value
+ * whose source is a workspace-scoped Plugin Storage partition. */
+export function settingsReady(): Promise<void> {
+  return backendReady
+}
+
+async function reconcile(b: Backend, generation: number): Promise<void> {
   try {
     const server = await b.getAll()
-    if (server && typeof server === 'object') {
+    if (backend !== b || generation !== readinessGeneration) return
+    if (server === null) {
+      if (b.ownedKeys) throw new Error('authoritative settings snapshot unavailable')
+    } else if (typeof server === 'object' && !Array.isArray(server)) {
       // The backend file is authoritative, except for local writes that
       // haven't been flushed yet — those take precedence and flush below.
+      const ownedKeys = b.ownedKeys ? new Set(b.ownedKeys) : null
       const changed: string[] = []
       for (const key of Object.keys(cache)) {
+        if (ownedKeys && !ownedKeys.has(key)) continue
         if (!(key in server) && !pending.has(key)) {
           delete cache[key]
           changed.push(key)
         }
       }
       for (const [key, value] of Object.entries(server)) {
+        if (ownedKeys && !ownedKeys.has(key)) continue
         if (!pending.has(key) && cache[key] !== value) {
           cache[key] = value
           changed.push(key)
@@ -237,10 +304,13 @@ async function reconcile(b: Backend): Promise<void> {
       }
       notifyChanged(changed)
     }
+    resolveBackendReady?.()
+    resolveBackendReady = null
   } catch (err) {
     console.warn('[settings] reconcile failed', err)
+  } finally {
+    void flushPending()
   }
-  void flushPending()
 }
 
 function scheduleFlush(): void {
@@ -335,7 +405,10 @@ export function migrateLegacyLocalStorage(): void {
   scheduleFlush()
 }
 
-migrateLegacyLocalStorage()
+// The isolated Manifest v2 package has an explicit storage allowlist. Its
+// origin-localStorage is a retained legacy seed, not a second migration input;
+// the package reads that seed only at its own workspace-selection seam.
+if (!isManifestV2Runtime()) migrateLegacyLocalStorage()
 
 /** Test-only: detach the backend, drop queued writes, re-seed the cache from
  *  the bootstrap snapshot. */
@@ -345,11 +418,15 @@ export function __resetSettingsForTest(): void {
   offSettingsChanged?.()
   offSettingsChanged = null
   backend = null
+  readinessGeneration += 1
+  backendReady = Promise.resolve()
+  resolveBackendReady = null
   if (flushTimer !== null) {
     clearTimeout(flushTimer)
     flushTimer = null
   }
   pending.clear()
+  warnedUnsupportedKeys.clear()
   changeListeners.clear()
   for (const key of Object.keys(cache)) delete cache[key]
   Object.assign(cache, initialSettings())

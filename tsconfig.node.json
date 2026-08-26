@@ -16,6 +16,7 @@
     "src/preload/**/*.ts",
     "src/shared/**/*.ts",
     "packages/plugin-contracts/src/**/*.ts",
+    "packages/features/git/src/gitPreferences.ts",
     "electron.vite.config.ts"
   ]
 }

@@ -1,4 +1,7 @@
 import type { JsonValue } from '../../../packages/plugin-contracts/src/index'
+import {
+  GIT_USER_PREFERENCE_KEYS,
+} from '../../../packages/features/git/src/gitPreferences'
 import type { StoragePartition, StorageSnapshotRef } from './pluginCapabilityBroker'
 import type {
   HostStorageSnapshotIdentity,
@@ -6,22 +9,33 @@ import type {
   StorageExecution,
 } from './pluginStorage'
 
-export const GIT_STORAGE_KEYS = [
-  'agent-team:theme',
-  'agent-team:theme-custom',
-  'agentTeam.git.autoCommit',
-  'agentTeam.gitTopRatio',
-  'agentTeam.git.logOrder',
-  'agentTeam.analyzerModel',
-  'agentTeam.git.logScope',
-  'agentTeam.yolo',
-  'agentTeam.terminal.optionSelectHintSeen',
-  'git-ai-panel-width',
-  'git-ai-panel-width.agent',
-] as const
+export const GIT_STORAGE_KEYS = GIT_USER_PREFERENCE_KEYS
 
 const MIGRATION_MARKER = '__navide_git_storage_migration_v2'
 const GIT_PLUGIN_ID = 'navide.git'
+
+type MigrationLockMap = Map<string, Promise<void>>
+const migrationLocks = new WeakMap<object, MigrationLockMap>()
+
+async function withMigrationLock<T>(
+  store: PluginStorageStore,
+  key: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const locks = migrationLocks.get(store) ?? new Map<string, Promise<void>>()
+  migrationLocks.set(store, locks)
+  const previous = locks.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolve) => { release = resolve })
+  locks.set(key, current)
+  await previous
+  try {
+    return await operation()
+  } finally {
+    if (locks.get(key) === current) locks.delete(key)
+    release()
+  }
+}
 
 /** Prepare the current candidate from the Host-selected previous active
  * snapshot. Legacy settings are only needed for a first install with no
@@ -109,13 +123,26 @@ export async function migrateBundledGitPreferences(
   options: {
     packageVersion: string
     sourceSnapshot: HostStorageSnapshotIdentity | null
-    workspaceId: string | null
-    workspacePath: string
     legacySettings: Record<string, unknown>
   },
 ): Promise<{ migrated: boolean; completed: boolean }> {
-  const { packageVersion, sourceSnapshot, workspaceId, workspacePath, legacySettings } = options
-  if (!packageVersion) return { migrated: false, completed: false }
+  if (!options.packageVersion) return { migrated: false, completed: false }
+  return withMigrationLock(
+    store,
+    `${GIT_PLUGIN_ID}:${options.packageVersion}`,
+    () => migrateBundledGitPreferencesUnlocked(store, options),
+  )
+}
+
+async function migrateBundledGitPreferencesUnlocked(
+  store: PluginStorageStore,
+  options: {
+    packageVersion: string
+    sourceSnapshot: HostStorageSnapshotIdentity | null
+    legacySettings: Record<string, unknown>
+  },
+): Promise<{ migrated: boolean; completed: boolean }> {
+  const { packageVersion, sourceSnapshot, legacySettings } = options
 
   try {
     await prepareGitStorageSnapshot(store, packageVersion, sourceSnapshot)
@@ -128,18 +155,6 @@ export async function migrateBundledGitPreferences(
         if (!candidate.found && Object.prototype.hasOwnProperty.call(legacySettings, key)) {
           const value = legacySettings[key]
           if (value !== undefined) await write(store, 'plugin', key, value as JsonValue, packageVersion, 'candidate', null)
-        }
-      }
-
-      // The old renderer used a workspace-suffixed key for the selected Git tab.
-      // It is copied only when the caller has a matching legacy value; the Host
-      // still derives the destination workspace partition from its opaque id.
-      if (workspaceId && workspacePath) {
-        const legacyKey = `agentTeam.gitTabRepo.${workspacePath}`
-        const candidate = await read(store, 'workspace', 'agentTeam.gitTabRepo', packageVersion, 'candidate', workspaceId)
-        const legacyValue = legacySettings[legacyKey]
-        if (!candidate.found && legacyValue !== undefined) {
-          await write(store, 'workspace', 'agentTeam.gitTabRepo', legacyValue as JsonValue, packageVersion, 'candidate', workspaceId)
         }
       }
 
@@ -160,24 +175,7 @@ export async function migrateBundledGitPreferences(
       }
     }
 
-    // The active snapshot is shared by all live workspaces. A workspace opened
-    // after the initial promotion cannot replace that snapshot, so add only a
-    // missing workspace key directly to active. This remains create-only and
-    // never overwrites a user's existing selection.
-    let workspaceMigrated = false
-    if (workspaceId && workspacePath) {
-      const legacyKey = `agentTeam.gitTabRepo.${workspacePath}`
-      const legacyValue = legacySettings[legacyKey]
-      if (legacyValue !== undefined) {
-        const activeWorkspace = await read(store, 'workspace', 'agentTeam.gitTabRepo', packageVersion, 'active', workspaceId)
-        if (!activeWorkspace.found) {
-          await write(store, 'workspace', 'agentTeam.gitTabRepo', legacyValue as JsonValue, packageVersion, 'active', workspaceId)
-          workspaceMigrated = true
-        }
-      }
-    }
-
-    return { migrated: !pluginMigrationComplete || workspaceMigrated, completed: true }
+    return { migrated: !pluginMigrationComplete, completed: true }
   } catch (error) {
     console.warn('[git] v2 storage migration skipped:', error instanceof Error ? error.message : String(error))
     return { migrated: false, completed: false }

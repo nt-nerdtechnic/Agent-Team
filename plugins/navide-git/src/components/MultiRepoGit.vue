@@ -6,6 +6,15 @@ import { useRepoDiscovery, type DiscoveredRepoWithBadge } from '../composables/u
 import type { GitSurfacePorts } from '../ports/gitSurface'
 import type { GitUiBackend } from '../ports/gitBackend'
 import { useI18n } from 'vue-i18n'
+import {
+  GIT_LEGACY_WORKSPACE_REPOSITORY_PREFIX,
+  GIT_WORKSPACE_REPOSITORY_KEY,
+} from '@navide/git-feature'
+import {
+  settingsGet,
+  settingsReady,
+  settingsSet,
+} from '@navide/git-shared/lib/settings'
 
 const GitPane = defineAsyncComponent(() => import('./GitPane.vue'))
 
@@ -63,25 +72,30 @@ watch(singleChangesCount, (n) => {
 })
 
 // --- Multi-repo mode ---
-// The selected repo tab persists per workspace on the backend project
-// (project.json ui_git_tab_repo, via project.set_ui_state). The legacy
-// per-workspace localStorage key is migrated once (legacy copy deleted only
-// after the backend ack, so a failed push retries on the next load).
-const LEGACY_STORAGE_PREFIX = 'agentTeam.gitTabRepo.'
+// The selected repo tab is owned by the workspace-scoped Plugin Storage
+// partition. Legacy project.json/localStorage values are read-only seeds kept
+// for rollback compatibility; this surface never writes or deletes them.
 
 // Active tab: abs_path of the selected repo.
 const activeRepo = ref<string>('')
 
-// Saved selection restored from the backend (or the legacy localStorage copy).
+// Saved selection restored from Plugin Storage (or a read-only legacy seed).
 const savedRepo = ref<string>('')
 // Once the user picks a tab, a late-arriving restore must not override it.
 let userSelected = false
 
 async function restoreSavedRepo(ws: string): Promise<void> {
   if (!ws) return
-  const legacyKey = LEGACY_STORAGE_PREFIX + ws
-  let legacy: string | null = null
-  try { legacy = localStorage.getItem(legacyKey) } catch { legacy = null }
+  await settingsReady()
+  if (ws !== props.workspacePath || userSelected) return
+  const stored = settingsGet<string | null>(GIT_WORKSPACE_REPOSITORY_KEY, null)
+  if (stored) {
+    savedRepo.value = stored
+    return
+  }
+
+  let legacyLocal: string | null = null
+  try { legacyLocal = localStorage.getItem(`${GIT_LEGACY_WORKSPACE_REPOSITORY_PREFIX}${ws}`) } catch { legacyLocal = null }
   let backendSaved = ''
   try {
     const resp = await props.backend.send<{ project?: { ui_git_tab_repo?: string } | null }>(
@@ -89,23 +103,17 @@ async function restoreSavedRepo(ws: string): Promise<void> {
     )
     const v = resp.payload?.project?.ui_git_tab_repo
     if (typeof v === 'string') backendSaved = v
-  } catch { /* backend unavailable — fall back to the legacy copy below */ }
-  if (ws !== props.workspacePath) return // workspace switched mid-flight
-  if (backendSaved) {
-    // Backend already owns the value — clear any leftover legacy copy.
-    if (legacy !== null) { try { localStorage.removeItem(legacyKey) } catch { /* ignore */ } }
-    savedRepo.value = backendSaved
-  } else if (legacy) {
-    savedRepo.value = legacy
-    void props.backend.send<{ ok: boolean }>('project.set_ui_state', {
-      workspace_path: ws,
-      git_tab_repo: legacy,
-    }).then((resp) => {
-      if (resp.ok && resp.payload?.ok) {
-        try { localStorage.removeItem(legacyKey) } catch { /* ignore */ }
-      }
-    }).catch(() => { /* keep the legacy copy — retried next load */ })
+  } catch { /* backend unavailable — fall back to the read-only local seed */ }
+  if (ws !== props.workspacePath || userSelected) return // workspace/user changed mid-flight
+  const storedAfterLegacyRead = settingsGet<string | null>(GIT_WORKSPACE_REPOSITORY_KEY, null)
+  if (storedAfterLegacyRead) {
+    savedRepo.value = storedAfterLegacyRead
+    return
   }
+  const legacy = backendSaved || legacyLocal || ''
+  if (!legacy) return
+  savedRepo.value = legacy
+  settingsSet(GIT_WORKSPACE_REPOSITORY_KEY, legacy)
 }
 
 watch(
@@ -178,10 +186,7 @@ function selectTab(absPath: string): void {
   activeRepo.value = absPath
   mounted.value.add(absPath)
   if (!props.workspacePath) return
-  void props.backend.send('project.set_ui_state', {
-    workspace_path: props.workspacePath,
-    git_tab_repo: absPath,
-  }).catch(() => { /* best-effort persistence */ })
+  settingsSet(GIT_WORKSPACE_REPOSITORY_KEY, absPath)
 }
 
 function repoLabel(relPath: string): string {

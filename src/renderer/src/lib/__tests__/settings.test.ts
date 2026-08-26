@@ -1,12 +1,13 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { nextTick, ref } from 'vue'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import {
   settingsGet,
   settingsSet,
   settingsRemove,
   initSettingsBackend,
+  settingsReady,
   onSettingsChanged,
   migrateLegacyLocalStorage,
   __resetSettingsForTest,
@@ -188,6 +189,72 @@ describe('lib/settings', () => {
   })
 
   describe('connect-time reconcile', () => {
+    it('keeps the Host cache when the settings snapshot payload is missing', async () => {
+      stubBootstrap('{"agent-team:theme":"dark","agentTeam.analyzerModel":"model"}')
+      __resetSettingsForTest()
+      const seen: string[][] = []
+      const off = onSettingsChanged((keys) => seen.push(keys))
+      const { backend } = createMockBackend('connected')
+      initSettingsBackend(backend)
+      await settle()
+
+      expect(settingsGet('agent-team:theme', '')).toBe('dark')
+      expect(settingsGet('agentTeam.analyzerModel', '')).toBe('model')
+      expect(seen).toEqual([])
+      off()
+    })
+
+    it('resolves an early settingsReady waiter after a connection flap', async () => {
+      const status = ref<'connected' | 'disconnected'>('disconnected')
+      let resolveSnapshot!: (value: Record<string, unknown>) => void
+      const backend = {
+        status,
+        ownedKeys: ['agentTeam.gitTabRepo'],
+        getAll: vi.fn(() => new Promise<Record<string, unknown>>((resolve) => {
+          resolveSnapshot = resolve
+        })),
+        setMany: vi.fn(async () => undefined),
+        onChanged: () => () => undefined,
+      }
+
+      initSettingsBackend(backend)
+      let earlyReady = false
+      void settingsReady().then(() => { earlyReady = true })
+
+      status.value = 'connected'
+      await nextTick()
+      status.value = 'disconnected'
+      await nextTick()
+      status.value = 'connected'
+      await nextTick()
+      resolveSnapshot({ 'agentTeam.gitTabRepo': '/workspace/sub' })
+      await settingsReady()
+      await Promise.resolve()
+
+      expect(earlyReady).toBe(true)
+    })
+
+    it('flushes queued writes when reconciliation fails', async () => {
+      const status = ref<'connected' | 'disconnected'>('disconnected')
+      const setMany = vi.fn(async () => undefined)
+      const backend = {
+        status,
+        ownedKeys: ['agentTeam.git.logScope'],
+        getAll: vi.fn(async () => { throw new Error('snapshot unavailable') }),
+        setMany,
+        onChanged: () => () => undefined,
+      }
+
+      initSettingsBackend(backend)
+      settingsSet('agentTeam.git.logScope', 'queued')
+      status.value = 'connected'
+      await nextTick()
+      await Promise.resolve()
+
+      expect(setMany).toHaveBeenCalledWith({ 'agentTeam.git.logScope': 'queued' })
+      vi.clearAllTimers()
+    })
+
     it('adopts the backend dict but keeps pending local writes', async () => {
       stubBootstrap('{"stale":"local","shared":"old"}')
       __resetSettingsForTest()

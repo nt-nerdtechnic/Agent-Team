@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import GitLegacyLeftFallback from './GitLegacyLeftFallback.vue'
 import type { Issue, IssueDetail, IssueHandlerMode, IssueProvider } from '../composables/useIssues'
 import type { useBackend } from '../composables/useBackend'
+
+const GitLegacyLeftFallback = defineAsyncComponent(() => import('./GitLegacyLeftFallback.vue'))
 
 const props = defineProps<{
   workspacePath: string

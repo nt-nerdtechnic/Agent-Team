@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
+import { resolve } from 'node:path'
 
 // Renderer-only unit/component tests. Pure functions (lib/, data/) run in the
 // default `node` environment; composable tests opt into happy-dom per-file via
@@ -7,6 +8,12 @@ import vue from '@vitejs/plugin-vue'
 // (`__APP_BUILD__`) so importing modules that reference it doesn't throw.
 export default defineConfig({
   plugins: [vue()],
+  resolve: {
+    alias: {
+      '@navide/git-shared': resolve(__dirname, 'packages/features/git-ui/src'),
+      '@navide/git-feature': resolve(__dirname, 'packages/features/git/src'),
+    },
+  },
   define: {
     __APP_BUILD__: JSON.stringify('test')
   },

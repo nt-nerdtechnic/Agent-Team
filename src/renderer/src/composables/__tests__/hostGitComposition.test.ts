@@ -70,9 +70,10 @@ describe('Host Git composition', () => {
     }
   })
 
-  it('limits direct legacy Git imports in the v2 Host composition to the named recovery adapter', () => {
+  it('keeps the legacy Git implementation behind a dynamic recovery adapter', () => {
     const directGitImplementationImport = /from ['"][^'"]*(?:GitPane|MultiRepoGit|GitHistoryModal|GitCredentialModal)\.vue['"]/
     const recoveryAdapter = 'components/GitLegacyLeftFallback.vue'
+    const slot = readFileSync(join(rendererRoot, 'components', 'GitPluginHostSlot.vue'), 'utf8')
     const directImporters = collectProductionSources(rendererRoot)
       .filter((sourcePath) => v2GitHostCompositionSources.has(relative(rendererRoot, sourcePath)))
       .filter((sourcePath) => relative(rendererRoot, sourcePath) !== recoveryAdapter)
@@ -80,6 +81,8 @@ describe('Host Git composition', () => {
       .map((sourcePath) => relative(rendererRoot, sourcePath))
 
     expect(directImporters).toEqual([])
+    expect(slot).not.toContain("import GitLegacyLeftFallback from './GitLegacyLeftFallback.vue'")
+    expect(slot).toContain("import('./GitLegacyLeftFallback.vue')")
     expect(readFileSync(join(rendererRoot, recoveryAdapter), 'utf8'))
       .toContain("import MultiRepoGit from './MultiRepoGit.vue'")
   })

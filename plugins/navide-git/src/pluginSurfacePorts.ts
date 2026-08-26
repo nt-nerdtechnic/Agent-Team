@@ -1,5 +1,10 @@
 import { ref } from 'vue'
 import type { GitTransport } from '@navide/git-feature'
+import {
+  GIT_HOST_READ_ONLY_KEYS,
+  GIT_USER_PREFERENCE_KEYS,
+  GIT_WORKSPACE_REPOSITORY_KEY,
+} from '@navide/git-feature'
 import type {
   GitAccountPort,
   GitAccountPublic,
@@ -316,38 +321,42 @@ export function createPluginIssuePort(sdk: PluginCapabilitySdk): IssuePort {
 
 export function createPluginGitSettingsPort(sdk: PluginCapabilitySdk): SettingsBackend {
   if (isManifestV2Runtime()) {
-    const keys = [
-      'agent-team:theme',
-      'agent-team:theme-custom',
-      'agentTeam.git.autoCommit',
-      'agentTeam.gitTopRatio',
-      'agentTeam.git.logOrder',
-      'agentTeam.analyzerModel',
-      'agentTeam.git.logScope',
-      'agentTeam.yolo',
-      'agentTeam.terminal.optionSelectHintSeen',
-      'git-ai-panel-width',
-      'git-ai-panel-width.agent',
-    ] as const
+    const keys = [...GIT_USER_PREFERENCE_KEYS, GIT_WORKSPACE_REPOSITORY_KEY] as const
+    const warnedKeys = new Set<string>()
+    const scopeFor = (key: string): 'plugin' | 'workspace' =>
+      key === GIT_WORKSPACE_REPOSITORY_KEY ? 'workspace' : 'plugin'
+    const warnUnsupportedKey = (key: string): void => {
+      const dev = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true
+      if (!dev || warnedKeys.has(key)) return
+      warnedKeys.add(key)
+      console.warn(`[git-settings] ignored non-owned key '${key}'`)
+    }
     return {
       status: sdk.status,
+      ownedKeys: keys,
+      readOnlyKeys: GIT_HOST_READ_ONLY_KEYS,
       async getAll(): Promise<Record<string, unknown> | null> {
         const entries: Array<[string, unknown]> = []
         await Promise.all(keys.map(async (key) => {
           const response = await sdk.request<{ found: boolean; value: unknown }>('storage.get', {
-            scope: 'plugin',
+            scope: scopeFor(key),
             key,
           })
-          if (response.ok && response.payload?.found) entries.push([key, response.payload.value])
+          if (!response.ok) throw capabilityError(response)
+          if (response.payload?.found) entries.push([key, response.payload.value])
         }))
         return Object.fromEntries(entries)
       },
       async setMany(updates: Record<string, unknown>): Promise<void> {
+        for (const key of Object.keys(updates)) {
+          if (!keys.includes(key as typeof keys[number])) warnUnsupportedKey(key)
+        }
         for (const key of keys) {
           if (!(key in updates)) continue
+          const scope = scopeFor(key)
           const response = updates[key] === null
-            ? await sdk.request('storage.delete', { scope: 'plugin', key })
-            : await sdk.request('storage.set', { scope: 'plugin', key, value: updates[key] })
+            ? await sdk.request('storage.delete', { scope, key })
+            : await sdk.request('storage.set', { scope, key, value: updates[key] })
           if (!response.ok) throw capabilityError(response)
         }
       },

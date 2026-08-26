@@ -46,11 +46,21 @@ import GitLeftApp from './GitLeftApp.vue'
 // the cache with the store's JSON-string encoding so useTheme.loadTheme()
 // keeps it; the connect-time `ui.settings.get` reconcile then takes over.
 // Mirrors plugins/plans/mount.ts.
-const initialTheme = new URLSearchParams(window.location.search).get('theme')
+const query = new URLSearchParams(window.location.search)
+const initialTheme = query.get('theme')
+const initialThemeCustom = query.get('git_theme_custom')
+const initialYolo = query.get('git_yolo') ?? '1'
+const initialAnalyzerModel = query.get('git_analyzer_model') ?? ''
+const initialSettings: Record<string, unknown> = {
+  'agentTeam.yolo': initialYolo === '0' ? '0' : '1',
+  'agentTeam.analyzerModel': initialAnalyzerModel,
+}
 if (initialTheme) {
   document.documentElement.setAttribute('data-theme', initialTheme)
-  seedSettings({ 'agent-team:theme': JSON.stringify(initialTheme) })
+  initialSettings['agent-team:theme'] = JSON.stringify(initialTheme)
 }
+if (initialThemeCustom) initialSettings['agent-team:theme-custom'] = initialThemeCustom
+seedSettings(initialSettings)
 
 const backend = useBackend()
 const capabilitySdk = createPluginCapabilitySdk(backend)
@@ -70,7 +80,7 @@ const terminalPort = createPluginTerminalDockPort(capabilitySdk)
 initSettingsBackend(settingsPort)
 initKeybindingsPort(createPluginKeybindingsPort())
 
-const isLeftContribution = new URLSearchParams(window.location.search).get('contribution') === 'left'
+const isLeftContribution = query.get('contribution') === 'left'
 const app = isLeftContribution
   ? createApp(GitLeftApp, { surfacePorts, hostPort: contributionHostPort })
   : createApp(GitWindowApp)

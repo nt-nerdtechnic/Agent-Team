@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useBackend } from './capabilityBackend'
 import MultiRepoGit from './components/MultiRepoGit.vue'
+import { onSettingsChanged, settingsGet } from '@navide/git-shared/lib/settings'
 import type { GitSurfacePorts } from './ports/gitSurface'
 import type { GitContributionState } from './ports/gitContribution'
 import type { PluginGitContributionHostPort } from './pluginSurfacePorts'
@@ -20,7 +21,9 @@ const state = ref<GitContributionState>({
   availableAgents: [],
   issueHandoffs: {},
 })
+const analyzerModel = ref(settingsGet('agentTeam.analyzerModel', ''))
 let stopState: (() => void) | null = null
+let stopSettings: (() => void) | null = null
 
 function applyState(next: GitContributionState): void {
   if (next.workspacePath === workspacePath) state.value = next
@@ -30,11 +33,18 @@ onMounted(async () => {
   const initial = await props.hostPort.getState().catch(() => null)
   if (initial) applyState(initial)
   stopState = props.hostPort.onStateChanged(applyState)
+  stopSettings = onSettingsChanged((keys) => {
+    if (keys.includes('agentTeam.analyzerModel')) {
+      analyzerModel.value = settingsGet('agentTeam.analyzerModel', '')
+    }
+  })
 })
 
 onUnmounted(() => {
   stopState?.()
   stopState = null
+  stopSettings?.()
+  stopSettings = null
 })
 
 async function dispatch(action: Parameters<PluginGitContributionHostPort['dispatch']>[0]): Promise<void> {
@@ -47,7 +57,7 @@ async function dispatch(action: Parameters<PluginGitContributionHostPort['dispat
     :workspace-path="workspacePath"
     :backend="backend"
     :surface-ports="surfacePorts"
-    :analyzer-model="state.analyzerModel"
+    :analyzer-model="analyzerModel"
     :dispatch-targets="state.dispatchTargets"
     :available-agents="state.availableAgents"
     :issue-handoffs="state.issueHandoffs"
