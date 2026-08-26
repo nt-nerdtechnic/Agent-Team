@@ -5870,6 +5870,16 @@ watch(workspaceSelected, (v) => {
   }
 }, { immediate: true })
 
+// Switching between two workspaces this window holds never flips
+// workspaceSelected, so the watch above does not fire and the bar kept showing
+// the branch of the workspace being left until the 5s poll caught up. Wrong is
+// worse than absent here: a branch name next to a project you just switched to
+// reads as that project's branch. Cleared first, then refetched.
+watch(currentWorkspace, () => {
+  statusBarGit.value = { branch: '', ahead: 0, behind: 0, dirty: false }
+  void refreshStatusBarGit()
+})
+
 // ── Keybinding system ─────────────────────────────────────────────────────────
 useKeybindings()
 registerCommand('workbench.action.newWindow', async () => {
