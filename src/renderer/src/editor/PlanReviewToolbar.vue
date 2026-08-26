@@ -1230,7 +1230,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
             class="prt-anchor-clear"
             :title="t('pane.plans.note-anchor-clear')"
             @click="pendingAnchor = ''"
-          >×</button>
+          >✕</button>
         </span>
         <input
           ref="noteInput"

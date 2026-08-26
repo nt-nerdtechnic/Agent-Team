@@ -308,7 +308,7 @@ const verdictMeta = computed(() =>
               class="dismiss-btn"
               :title="dismissed.has(f.id) ? 'Restore' : 'Dismiss'"
               @click="toggleDismiss(f.id)"
-            >{{ dismissed.has(f.id) ? '↩' : '×' }}</button>
+            >{{ dismissed.has(f.id) ? '↩' : '✕' }}</button>
           </div>
           <div class="finding-title">{{ f.title }}</div>
           <div class="finding-body">{{ f.body }}</div>

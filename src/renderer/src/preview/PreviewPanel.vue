@@ -127,7 +127,7 @@ function openInEditor(relPath?: string, name?: string): void {
           >
             {{ $t('preview.open') }}
           </button>
-          <button class="pv-btn pv-x" :title="$t('preview.close')" @click="clear">×</button>
+          <button class="pv-btn pv-x" :title="$t('preview.close')" @click="clear">✕</button>
         </span>
       </header>
 
