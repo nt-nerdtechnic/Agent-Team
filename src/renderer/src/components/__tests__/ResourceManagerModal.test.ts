@@ -127,6 +127,24 @@ async function mountModal(
   return { w, refresh: usage.refresh }
 }
 
+// `.nv-modal-overlay` only skins the scrim — its own comment says it sets no
+// display/position/overflow on purpose, so every modal must position its own.
+// Without that the card renders into the document flow with no size and no
+// stacking context: the modal opens and nothing appears, which is exactly what
+// shipped here once. Mounted tests cannot catch it (they stub the teleport and
+// never lay anything out), so this reads the stylesheet.
+describe('ResourceManagerModal layout', () => {
+  it('positions its own overlay rather than relying on the shared skin', async () => {
+    const fs = await import('node:fs')
+    const source = fs.readFileSync('src/renderer/src/components/ResourceManagerModal.vue', 'utf8')
+    const overlay = source.slice(source.indexOf('.rm-overlay {'), source.indexOf('.rm-modal {'))
+    expect(overlay).toContain('position: fixed')
+    expect(overlay).toContain('inset: 0')
+    expect(overlay).toMatch(/z-index:\s*\d/)
+    expect(overlay).toContain('display: flex')
+  })
+})
+
 describe('ResourceManagerModal', () => {
   it('lists every pane in the roster, whichever window owns it', async () => {
     const { w } = await mountModal()

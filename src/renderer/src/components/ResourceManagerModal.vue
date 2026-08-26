@@ -400,6 +400,19 @@ async function scanDisk(): Promise<void> {
 </template>
 
 <style scoped>
+/* `.nv-modal-overlay` only skins the scrim — it deliberately sets no
+ * display/position/overflow, so every modal positions its own overlay. Without
+ * this block the card renders into the document flow with no size and no
+ * stacking context: the modal opens and nothing appears. */
+.rm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 8000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
 .rm-modal {
   display: flex;
   flex-direction: column;
