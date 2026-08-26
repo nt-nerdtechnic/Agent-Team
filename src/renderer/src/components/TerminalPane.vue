@@ -1,17 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { useTerminal, type ClipboardFailureReason } from '../composables/useTerminal'
-import { useTheme } from '../composables/useTheme'
-import { useNotify } from '../composables/useNotify'
-import type { TerminalDockPort } from '../ports/terminalDock'
+import { useTerminal, type ClipboardFailureReason } from '@navide/terminal'
+import { agentProfileFor } from '@navide/plugin-shell'
+import { useNotify, useTheme } from '@navide/ui-foundation'
+import type { TerminalDockPort } from '@navide/terminal'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import { extractDropPaths, escapeDraggedPath, stabilizeDroppedPaths } from '../lib/drop'
-import { CLI_CONTEXT_MIME, PANE_BATCH_MIME, PANE_ID_MIME, resolveCliDropSources, writeCliPaneDragPayload } from '../lib/cliContext'
+import { CLI_CONTEXT_MIME, PANE_BATCH_MIME, PANE_ID_MIME, resolveCliDropSources, writeCliPaneDragPayload } from '@navide/terminal'
 import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
 import { setBatchDragImage } from '../lib/batchDragImage'
-import { i18n } from '../i18n'
-import { isMacPlatform } from '../keybindings/parseKey'
+import { i18n } from '@navide/ui-foundation'
+import { isMacPlatform } from '@navide/shared'
 import RebuildIcon from './RebuildIcon.vue'
 import UsageBadge from './UsageBadge.vue'
 import RestoredPanePlaceholder from './RestoredPanePlaceholder.vue'
@@ -188,6 +188,7 @@ const terminal = useTerminal(props.paneId, props.terminalPort, {
   onFirstOutput: () => emit('first-output'),
   onClipboardFailure,
   onPtyLostWhileDisconnected: () => emit('pty-lost'),
+  agentProfileFor,
 })
 const { theme } = useTheme()
 watch(theme, () => terminal.updateXtermTheme())

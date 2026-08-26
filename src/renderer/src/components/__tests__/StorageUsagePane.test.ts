@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import StorageUsagePane from '../StorageUsagePane.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 
 function report() {

@@ -1,5 +1,5 @@
 import { ref, computed, watch, onScopeDispose } from 'vue'
-import { settingsGet, settingsSet } from '../lib/settings'
+import { settingsGet, settingsSet } from '@navide/shared'
 import type { GitRequestType, GitTransport } from '../../../../packages/features/git/src'
 import type { GitCredentialPort } from '../ports/gitSurface'
 

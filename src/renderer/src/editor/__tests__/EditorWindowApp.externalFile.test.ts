@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref } from 'vue'
 import EditorWindowApp from '../../EditorWindowApp.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 
 i18n.global.locale.value = 'en-US'
 
@@ -38,7 +38,6 @@ vi.mock('../../components/ExplorerPane.vue', () => stub('ExplorerPane'))
 vi.mock('../../components/SearchPane.vue', () => stub('SearchPane'))
 vi.mock('../../components/GitPane.vue', () => stub('GitPane'))
 vi.mock('../../components/ProblemsPane.vue', () => stub('ProblemsPane'))
-vi.mock('../../components/AiCliTerminal.vue', () => stub('AiCliTerminal'))
 vi.mock('../../components/NotificationHost.vue', () => stub('NotificationHost'))
 vi.mock('../PlanFileView.vue', () => stub('PlanFileView', ['workspacePath', 'relPath']))
 vi.mock('../DiffPane.vue', () => stub('DiffPane'))
@@ -86,18 +85,21 @@ vi.mock('../../composables/useBackend', () => ({
   }),
 }))
 
-vi.mock('../../lib/settings', () => ({
+vi.mock('@navide/shared', () => ({
   initSettingsBackend: vi.fn(),
   settingsGet: vi.fn((_key: string, def: unknown) => def),
   settingsSet: vi.fn(),
   onSettingsChanged: vi.fn(() => () => {}),
 }))
 
-vi.mock('../../composables/useNotify', () => ({
-  useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn() }),
+vi.mock('@navide/plugin-shell', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-shell')>()),
+  AiCliDock: stub('AiCliDock').default,
 }))
 
-vi.mock('../../composables/useTheme', () => ({
+vi.mock('@navide/ui-foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+  useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn() }),
   useTheme: () => ({ theme: ref('dark'), setTheme: vi.fn(), loadTheme: vi.fn() }),
   BUILTIN_THEMES: [],
 }))
@@ -107,7 +109,8 @@ vi.mock('../../composables/useTheme', () => ({
 // command bodies without a keybinding runtime.
 const commands = vi.hoisted(() => new Map<string, () => unknown>())
 
-vi.mock('../../keybindings/useKeybindings', () => ({
+vi.mock('@navide/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/shared')>()),
   initKeybindingsPort: vi.fn(),
   useKeybindings: vi.fn(),
   registerCommand: vi.fn((id: string, fn: () => unknown) => { commands.set(id, fn) }),

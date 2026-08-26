@@ -44,22 +44,6 @@ function sourceFiles(root: string): string[] {
   return files
 }
 
-const sharedMirrorPaths = [
-  'components/AiCliDock.vue',
-  'components/AiCliTerminal.vue',
-  'composables/useTerminal.ts',
-  'composables/useTerminalFontSize.ts',
-  'composables/useTerminalResize.ts',
-  'lib/aiCliContext.ts',
-  'lib/settings.ts',
-  ...readdirSync(resolve(repositoryRoot, 'packages/features/git-ui/src/agents'))
-    .filter((entry) => entry.endsWith('.ts'))
-    .map((entry) => `agents/${entry}`),
-  ...readdirSync(resolve(repositoryRoot, 'packages/features/git-ui/src/keybindings'))
-    .filter((entry) => entry.endsWith('.ts'))
-    .map((entry) => `keybindings/${entry}`),
-]
-
 describe('navide.git production package boundary', () => {
   it('declares both canonical custom contributions in one manifest', () => {
     const manifest = JSON.parse(readFileSync(resolve(packageRoot, 'manifest.json'), 'utf8')) as {
@@ -124,11 +108,26 @@ describe('navide.git production package boundary', () => {
     expect(source).not.toContain('git.credential_cancel')
   })
 
-  it('keeps the transitional shared-shell mirrors synchronized', () => {
-    for (const relativePath of sharedMirrorPaths) {
-      const hostPath = resolve(repositoryRoot, 'src/renderer/src', relativePath)
-      const packagePath = resolve(repositoryRoot, 'packages/features/git-ui/src', relativePath)
-      expect(readFileSync(hostPath, 'utf8'), relativePath).toBe(readFileSync(packagePath, 'utf8'))
+  it('uses private feature roots through their explicit export surfaces', () => {
+    const source = sourceFiles(resolve(packageRoot, 'src'))
+      .map((path) => readFileSync(path, 'utf8'))
+      .join('\n')
+    expect(source).toContain("from '@navide/shared'")
+    expect(source).toContain("from '@navide/ui-foundation'")
+    expect(source).toContain("from '@navide/terminal'")
+    expect(source).toContain("from '@navide/plugin-shell'")
+    expect(source).not.toMatch(/from ['"]@navide\/(?:shared|terminal|plugin-shell)\/(?!testing(?:['"]|$))|from ['"]@navide\/ui-foundation\/(?!styles\.css(?:['"]|$))/)
+    expect(source).not.toContain("@navide/plugin-shell/styles.css")
+  })
+
+  it('keeps Git-specific code out of generic private feature owners', () => {
+    for (const owner of ['shared', 'ui-foundation', 'terminal', 'plugin-shell']) {
+      const source = sourceFiles(resolve(repositoryRoot, 'packages/features', owner, 'src'))
+        .map((path) => readFileSync(path, 'utf8'))
+        .join('\n')
+      expect(source, owner).not.toContain('packages/features/git')
+      expect(source, owner).not.toContain('plugins/navide-git')
+      expect(source, owner).not.toContain('@navide/git-feature')
     }
   })
 })

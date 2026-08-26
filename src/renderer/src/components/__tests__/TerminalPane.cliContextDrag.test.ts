@@ -12,9 +12,11 @@ import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 const mockSessionId = { value: '' }
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   return {
+    ...actual,
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: vi.fn(),

@@ -10,9 +10,11 @@ const mockTerminal = vi.hoisted(() => ({
   onFirstOutput: undefined as (() => void) | undefined,
 }))
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   return {
+    ...actual,
     useTerminal: (
       _paneId: string,
       _backend: unknown,

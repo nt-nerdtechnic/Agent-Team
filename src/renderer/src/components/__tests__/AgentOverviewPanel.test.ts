@@ -9,7 +9,7 @@
 // rendering it as a no-op row, is the failure mode this pins.
 import { afterEach, describe, expect, it } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import AgentOverviewPanel, { type AgentOverviewRow } from '../AgentOverviewPanel.vue'
 import { useStatusBarPopover } from '../../composables/useStatusBarPopover'
 

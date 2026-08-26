@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi } from 'vitest'
 import { useGit } from '../useGit'
-import { __resetSettingsForTest } from '../../lib/settings'
+import { __resetSettingsForTest } from '@navide/shared/testing'
 import { createMockBackend, withScope, flush } from './mockBackend'
 
 const WS = '/tmp/test-workspace'

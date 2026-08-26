@@ -14,7 +14,7 @@ import {
   settingsGet,
   settingsReady,
   settingsSet,
-} from '@navide/git-shared/lib/settings'
+} from '@navide/shared'
 
 const GitPane = defineAsyncComponent(() => import('./GitPane.vue'))
 

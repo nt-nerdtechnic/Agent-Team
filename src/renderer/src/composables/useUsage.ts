@@ -1,6 +1,6 @@
 import { reactive, ref, watch } from 'vue'
 import type { useBackend } from './useBackend'
-import { settingsGet, settingsSet } from '../lib/settings'
+import { settingsGet, settingsSet } from '@navide/shared'
 
 // Module-singleton store for per-CLI quota snapshots (CodexBar-style badges).
 // The backend owns the poller (`usage_service.py`) and broadcasts

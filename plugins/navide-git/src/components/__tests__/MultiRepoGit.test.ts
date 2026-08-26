@@ -3,10 +3,10 @@ import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
 import { shallowMount, flushPromises } from '@vue/test-utils'
 import { ref } from 'vue'
 import {
-  __resetSettingsForTest,
   seedSettings,
   settingsGet,
-} from '@navide/git-shared/lib/settings'
+} from '@navide/shared'
+import { __resetSettingsForTest } from '@navide/shared/testing'
 
 // Stub useRepoDiscovery so we can control the repositories list.
 const mockRepositories = ref<{ rel_path: string; abs_path: string; branch: string; badge: { branch: string; dirtyCount: number } }[]>([])

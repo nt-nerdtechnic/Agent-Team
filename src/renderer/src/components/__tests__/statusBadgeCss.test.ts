@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import type { DisplayStatus } from '../../composables/useTerminal'
+import type { DisplayStatus } from '@navide/terminal'
 
 // Every surface that paints a pane status does it with a `[data-status='x']` /
 // `[data-state='x']` CSS rule, and a status with no rule silently falls back to
@@ -114,6 +114,6 @@ describe('every pane status is styled on every surface that paints one', () => {
         surface.selector('question')
       )
     }
-    expect(read('src/renderer/src/styles/tokens/semantic.css')).not.toContain('--question-fg')
+    expect(read('packages/features/ui-foundation/src/styles/tokens/semantic.css')).not.toContain('--question-fg')
   })
 })

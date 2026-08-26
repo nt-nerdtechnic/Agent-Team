@@ -6,7 +6,7 @@
 // capability backend, IPC/WebSocket details, or Host routes.
 
 import { createApp } from 'vue'
-import { i18n } from '@navide/git-shared/i18n'
+import { i18n } from '@navide/ui-foundation'
 import { useBackend } from './capabilityBackend'
 import { createPluginGitTransport, type PluginGitSdk } from './sdkGitTransport'
 import {
@@ -25,17 +25,11 @@ import {
   GIT_TRANSPORT_KEY,
   GIT_UI_KEY,
 } from './ports/gitSurface'
-import { TERMINAL_DOCK_KEY } from '@navide/git-shared/ports/terminalDock'
-import { initSettingsBackend, seedSettings } from '@navide/git-shared/lib/settings'
-import { initKeybindingsPort } from '@navide/git-shared/keybindings/useKeybindings'
+import { TERMINAL_DOCK_KEY } from '@navide/terminal'
+import { initKeybindingsPort, initSettingsBackend, seedSettings } from '@navide/shared'
 
 // Theme token layers — order matters: primitives → semantic roles → themes.
-import '@navide/git-shared/styles/tokens/base.css'
-import '@navide/git-shared/styles/tokens/semantic.css'
-import '@navide/git-shared/styles/tokens/themes/dark-midnight.css'
-import '@navide/git-shared/styles/tokens/themes/dark-forest.css'
-import '@navide/git-shared/styles/tokens/themes/light.css'
-import '@navide/git-shared/styles/tokens/themes/high-contrast.css'
+import '@navide/ui-foundation/styles.css'
 
 import GitWindowApp from './GitWindowApp.vue'
 import GitLeftApp from './GitLeftApp.vue'

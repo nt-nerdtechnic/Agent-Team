@@ -44,7 +44,7 @@
 //   pi        —      Documented as deliberately having no permission prompts.
 //                    It never stops to ask, so the state does not exist.
 
-import { AGENT_SPECS } from '../agents'
+import { AGENT_SPECS } from '@navide/plugin-shell'
 
 /** Notification types that block the turn until the user answers. Claude's
  *  other types are informational: `idle_prompt` fires every time a turn ends

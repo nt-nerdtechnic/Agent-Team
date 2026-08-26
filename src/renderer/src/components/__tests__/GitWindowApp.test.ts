@@ -9,8 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref } from 'vue'
 import { extractDropPaths, shellEscape } from '../../lib/drop'
-import { aiTerminalPaneId } from '../../lib/aiCliContext'
-import { i18n } from '../../i18n'
+import { aiTerminalPaneId } from '@navide/plugin-shell'
+import { i18n } from '@navide/ui-foundation'
 
 // Control surface for the stubbed CLI terminal: tests seed the PTY state the
 // dock sees at mount and read back what "Resolve with agent" pasted into it.
@@ -28,15 +28,15 @@ const term = vi.hoisted(() => ({
 
 // The CLI dock's terminal host pulls in useTerminal/xterm — stub it with the
 // imperative surface the dock drives (reattach/fit are called on first open).
-vi.mock('../AiCliTerminal.vue', () => ({
-  __esModule: true,
-  default: defineComponent({
-    name: 'AiCliTerminal',
-    props: ['paneId', 'terminalPort', 'workspacePath'],
-    inheritAttrs: false,
-    setup(_, { expose }) {
+vi.mock('@navide/terminal', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
+  return {
+    ...actual,
+    useTerminal: () => {
       const status = ref(term.status)
-      expose({
+      return {
+        mount: vi.fn(),
+        updateXtermTheme: vi.fn(),
         spawn: vi.fn(async () => {
           term.spawnCalls++
           if (term.spawnRuns) status.value = 'running'
@@ -57,11 +57,10 @@ vi.mock('../AiCliTerminal.vue', () => ({
         lastRawActivityAt: ref(term.lastRawActivityAt),
         sessionId: ref(''),
         error: ref('')
-      })
-      return () => h('div', { class: 'stub-AiCliTerminal' })
+      }
     }
-  })
-}))
+  }
+})
 
 interface SentCall {
   type: string
@@ -222,7 +221,7 @@ vi.mock('../../composables/useBackend', () => {
 })
 
 import GitWindowApp from '../../GitWindowApp.vue'
-import { useNotify } from '../../composables/useNotify'
+import { useNotify } from '@navide/ui-foundation'
 import { useBackend } from '../../composables/useBackend'
 import { createHostGitTransport } from '../../composables/hostGitTransport'
 import { createHostGitSurfacePorts, createHostTerminalDockPort } from '../../composables/hostSurfacePorts'
@@ -235,7 +234,7 @@ import {
   GIT_TRANSPORT_KEY,
   GIT_UI_KEY,
 } from '../../ports/gitSurface'
-import { TERMINAL_DOCK_KEY } from '../../ports/terminalDock'
+import { TERMINAL_DOCK_KEY } from '@navide/terminal'
 
 // notify.confirm resolves through the (stubbed-out) NotificationHost, so tests
 // answer the dialog directly on the shared useNotify singleton.

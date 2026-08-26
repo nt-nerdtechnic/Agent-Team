@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useBackend } from './capabilityBackend'
 import MultiRepoGit from './components/MultiRepoGit.vue'
-import { onSettingsChanged, settingsGet } from '@navide/git-shared/lib/settings'
+import { onSettingsChanged, settingsGet } from '@navide/shared'
 import type { GitSurfacePorts } from './ports/gitSurface'
 import type { GitContributionState } from './ports/gitContribution'
 import type { PluginGitContributionHostPort } from './pluginSurfacePorts'

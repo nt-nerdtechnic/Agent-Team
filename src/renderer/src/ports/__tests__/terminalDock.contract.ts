@@ -4,7 +4,7 @@ import type {
   TerminalDockPort,
   TerminalExitEvent,
   TerminalOutputEvent,
-} from '../terminalDock'
+} from '@navide/terminal'
 
 export interface TerminalDockRequestRecord {
   type: string

@@ -7,8 +7,9 @@
 // and that every channel is on until someone says otherwise.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { CLI_AGENT_SPECS } from '../../agents'
-import { __resetSettingsForTest, seedSettings, settingsGet, settingsSet } from '../../lib/settings'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
+import { seedSettings, settingsGet, settingsSet } from '@navide/shared'
+import { __resetSettingsForTest } from '@navide/shared/testing'
 
 /** The key both sides agree on — see push_delivery.DISABLED_SETTING_KEY. */
 const PUSH_DISABLED_KEY = 'pushChannelsDisabled'
@@ -73,7 +74,7 @@ describe('Settings — push channels', () => {
   })
 
   it('has a cost line for every vendor it offers', async () => {
-    const { i18n } = await import('../../i18n')
+    const { i18n } = await import('@navide/ui-foundation')
     for (const locale of ['en-US', 'zh-TW'] as const) {
       const messages = i18n.global.getLocaleMessage(locale) as Record<string, any>
       const block = messages.settings?.pushChannels

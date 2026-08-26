@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import type { useBackend } from '../composables/useBackend'
-import { useNotify } from '../composables/useNotify'
-import { setContext } from '../keybindings/useKeybindings'
+import { useNotify } from '@navide/ui-foundation'
+import { setContext } from '@navide/shared'
 import EditorViewMonaco from './view/EditorViewMonaco.vue'
 import { languageForFile, normalizeLanguage } from './languageDetect'
 import type { Range, Position } from './types'

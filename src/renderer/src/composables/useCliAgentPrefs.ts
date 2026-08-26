@@ -15,7 +15,7 @@
 
 import { ref, watch } from 'vue'
 
-import { settingsGet, settingsSet } from '../lib/settings'
+import { settingsGet, settingsSet } from '@navide/shared'
 
 const ORDER_KEY = 'agentTeam.cliAgents.order' // legacy global fallback default
 const DISABLED_KEY = 'agentTeam.cliAgents.disabled' // legacy global fallback default

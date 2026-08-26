@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { AGENT_SPECS } from '../agents'
+import { AGENT_SPECS } from '@navide/plugin-shell'
 import {
   highlightSegments,
   parseAnsiSegments,

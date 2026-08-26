@@ -26,7 +26,7 @@ import {
   type PlanStage,
 } from '../composables/usePlanHtml'
 import { sharePlanToGit } from '../composables/planShare'
-import { useNotify } from '../composables/useNotify'
+import { useNotify } from '@navide/ui-foundation'
 import { writePlanDragPayload } from '../lib/planDrag'
 
 const props = defineProps<{

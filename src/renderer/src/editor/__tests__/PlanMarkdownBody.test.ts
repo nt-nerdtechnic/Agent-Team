@@ -6,17 +6,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises, config, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
 import PlanMarkdownBody from '../PlanMarkdownBody.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import { resolvePlanStore } from '../../composables/planStore'
 
 i18n.global.locale.value = 'en-US'
 config.global.plugins = [i18n]
 
 const confirmMock = vi.fn(async () => true)
-vi.mock('../composables/useNotify', () => ({
-  useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: confirmMock }),
-}))
-vi.mock('../../composables/useNotify', () => ({
+vi.mock('@navide/ui-foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
   useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: confirmMock }),
 }))
 

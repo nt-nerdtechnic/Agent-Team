@@ -7,7 +7,7 @@ import {
   createHostTerminalDockPort,
 } from '../hostSurfacePorts'
 import type { GitFileAccessPort, GitSettingsPort, IssuePort } from '../../ports/gitSurface'
-import type { TerminalDockPort } from '../../ports/terminalDock'
+import type { TerminalDockPort } from '@navide/terminal'
 
 // Lightweight stand-in for useBackend() used by composable tests. It records
 // outgoing send() calls, lets a test preset per-type responses, and exposes

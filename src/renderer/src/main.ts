@@ -1,5 +1,5 @@
 import { createApp, type Component } from 'vue'
-import { i18n } from './i18n'
+import { i18n } from '@navide/ui-foundation'
 import { readHostBootstrapSettings } from './lib/settingsBootstrap'
 
 // Publish the Host snapshot before a lazy renderer root imports lib/settings.
@@ -9,12 +9,7 @@ import { readHostBootstrapSettings } from './lib/settingsBootstrap'
   readHostBootstrapSettings()
 
 // Theme token layers — order matters: primitives → semantic roles → theme overrides.
-import './styles/tokens/base.css'
-import './styles/tokens/semantic.css'
-import './styles/tokens/themes/dark-midnight.css'
-import './styles/tokens/themes/dark-forest.css'
-import './styles/tokens/themes/light.css'
-import './styles/tokens/themes/high-contrast.css'
+import '@navide/ui-foundation/styles.css'
 
 // Window-type dispatcher: Electron main appends `?window=editor`,
 // `?window=plans`, etc. for secondary windows. Default is the main shell.

@@ -4,21 +4,23 @@ import {
   entryBelongsToWorkspace,
   filterHistoryEntries,
   filterWorkspaceEntries,
-  formatTerminalExit,
   groupHistoryByDay,
   historyCleanupCutoffIso,
   historyCleanupMatches,
   historyEntryLabel,
-  isTerminalCrashLoopOpen,
   legacyHistoryLogPath,
   manualLogFileName,
   matchesHistorySearch,
-  recordTerminalExit,
-  resetTerminalCrashLoop,
-  terminalCrashKey,
   updateHistoryCustomName,
   type HistoryTitleEntry,
 } from '../spawnHistory'
+import {
+  formatTerminalExit,
+  isTerminalCrashLoopOpen,
+  recordTerminalExit,
+  resetTerminalCrashLoop,
+  terminalCrashKey,
+} from '@navide/terminal'
 
 function entry(overrides: Partial<HistoryTitleEntry> = {}): HistoryTitleEntry {
   return {

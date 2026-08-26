@@ -16,8 +16,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { shallowMount, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import ControlPane from '../ControlPane.vue'
-import { useKeybindings, setContext, _resetKeybindingsState } from '../../keybindings/useKeybindings'
-import { _resetRegistry } from '../../keybindings/commandRegistry'
+import { useKeybindings, setContext } from '@navide/shared'
+import { _resetKeybindingsState, _resetRegistry } from '@navide/shared/testing'
 
 const minimalProps = {
   backendStatus: 'connected',

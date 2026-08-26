@@ -6,8 +6,8 @@ import { MSG_START, MSG_END, MSG_ENVELOPE_PREFIX, MSG_NOTICE_PREFIX, MSG_SPAWN_F
 export type StageId = string
 // Derived from the per-vendor specs (agents/index.ts) — no hand-written
 // union to drift when a vendor is added.
-export type { AgentKey } from '../agents'
-import type { AgentKey } from '../agents'
+export type { AgentKey } from '@navide/plugin-shell'
+import type { AgentKey } from '@navide/plugin-shell'
 
 /**
  * One participant in a multi-agent parallel stage.

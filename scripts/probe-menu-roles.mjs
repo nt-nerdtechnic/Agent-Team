@@ -1,5 +1,5 @@
 // Print the accelerator Electron installs behind each menu role, so the
-// transcription in src/renderer/src/keybindings/externalKeys.ts can be checked
+// transcription in packages/features/shared/src/keybindings/externalKeys.ts can be checked
 // against the shipped Electron instead of against memory.
 //
 //   npx electron scripts/probe-menu-roles.mjs

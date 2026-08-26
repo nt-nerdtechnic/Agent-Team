@@ -3,9 +3,9 @@ import {
   PANE_ID_MIME,
   writeCliPaneDragPayload,
   type CliContextPayload,
-} from '../lib/cliContext'
+} from '@navide/terminal'
 import { setBatchDragImage } from '../lib/batchDragImage'
-import { i18n } from '../i18n'
+import { i18n } from '@navide/ui-foundation'
 
 interface PaneReorderDragOptions {
   payloadFor: (paneId: string) => CliContextPayload | null

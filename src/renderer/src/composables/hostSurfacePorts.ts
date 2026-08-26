@@ -19,7 +19,7 @@ import type {
   GitWindowUiPort,
   IssuePort,
 } from '../ports/gitSurface'
-import type { KeybindingsPort } from '../ports/keybindings'
+import type { KeybindingsPort } from '@navide/shared'
 import { useGitAccounts } from './useGitAccounts'
 import type {
   TerminalCreateRequest,
@@ -27,7 +27,7 @@ import type {
   TerminalExitEvent,
   TerminalFileListResult,
   TerminalOutputEvent,
-} from '../ports/terminalDock'
+} from '@navide/terminal'
 
 type HostBackend = ReturnType<typeof useBackend>
 type BackendResponse<T = unknown> = Awaited<ReturnType<HostBackend['send']>> & { payload?: T | null }

@@ -97,13 +97,21 @@ describe('plugin Git production composition', () => {
       'src/renderer/src/editor/DiffPane.vue',
       'src/renderer/src/editor/ConflictPane.vue',
       'src/renderer/src/editor/BranchDiffPane.vue',
-      'src/renderer/src/components/AiCliDock.vue',
-      'src/renderer/src/components/AiCliTerminal.vue',
-      'src/renderer/src/composables/useTerminal.ts',
     ]) {
       const sourcePath = resolve(repositoryRoot, relativePath)
       expect(graph.has(sourcePath), relativePath).toBe(true)
       expect(graph.get(sourcePath), relativePath).not.toMatch(/useBackend|backend\.send|backend\.on|window\.agentTeam|:backend=/)
+    }
+    expect(graphText).toContain("from '@navide/shared'")
+    expect(graphText).toContain("from '@navide/ui-foundation'")
+    expect(graphText).toContain("from '@navide/terminal'")
+    expect(graphText).toContain("from '@navide/plugin-shell'")
+    for (const relativePath of [
+      'src/renderer/src/components/AiCliDock.vue',
+      'src/renderer/src/components/AiCliTerminal.vue',
+      'src/renderer/src/composables/useTerminal.ts',
+    ]) {
+      expect(graph.has(resolve(repositoryRoot, relativePath)), relativePath).toBe(false)
     }
   })
 

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
 import CliAccountsPane from '../CliAccountsPane.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import {
   cliAccountSwitchKey,
   createCliAccountSwitchHandler,
@@ -44,7 +44,10 @@ const notify = {
   confirm: vi.fn(async (..._args: unknown[]) => true),
   prompt: vi.fn(async () => null),
 }
-vi.mock('../../composables/useNotify', () => ({ useNotify: () => notify }))
+vi.mock('@navide/ui-foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+  useNotify: () => notify,
+}))
 
 // CLI_AGENT_SPECS order: claude(0), codex(1), antigravity(2), grok(3), kimi(4)
 const SUPPORTED = ['claude', 'codex', 'grok', 'kimi']

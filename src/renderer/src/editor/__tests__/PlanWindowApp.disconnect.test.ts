@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref } from 'vue'
 import PlanWindowApp from '../../PlanWindowApp.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import { lastOpenedStorageKey } from '../plansPaneModel'
 import type { useBackend as useBackendFn } from '../../composables/useBackend'
@@ -83,47 +83,43 @@ vi.mock('../FilePreviewPane.vue', () =>
 vi.mock('../../components/NotificationHost.vue', () => stub('NotificationHost'))
 // The CLI dock's terminal host pulls in useTerminal/xterm — stub it with the
 // imperative surface the dock drives on mount.
-vi.mock('../../components/AiCliTerminal.vue', () => ({
-  __esModule: true,
-  default: defineComponent({
-    name: 'AiCliTerminal',
-    props: ['paneId', 'backend', 'workspacePath'],
-    inheritAttrs: false,
-    setup(_, { expose }) {
-      expose({
-        spawn: vi.fn(async () => undefined),
-        tryReattach: vi.fn(async () => undefined),
-        pasteText: vi.fn(),
-        interrupt: vi.fn(async () => undefined),
-        kill: vi.fn(async () => undefined),
-        cancelPendingCreate: vi.fn(async () => undefined),
-        fitTerminal: vi.fn(),
-        focus: vi.fn(),
-        status: ref('idle'),
-        displayStatus: ref('idle'),
-        lastRawActivityAt: ref(0),
-        sessionId: ref(''),
-        error: ref(''),
-      })
-      return () => h('div', { class: 'stub-AiCliTerminal' })
-    },
-  }),
-}))
-
 const toastMock = vi.hoisted(() => vi.fn())
-vi.mock('../../composables/useNotify', () => ({
+vi.mock('@navide/ui-foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
   useNotify: () => ({ toast: toastMock, alert: vi.fn(), confirm: vi.fn(async () => true) }),
+  useTheme: () => ({ theme: ref('dark'), setTheme: vi.fn(), loadTheme: vi.fn() }),
 }))
 
-vi.mock('../../lib/settings', () => ({
+vi.mock('@navide/terminal', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
+  return {
+    ...actual,
+    useTerminal: () => ({
+      mount: vi.fn(),
+      updateXtermTheme: vi.fn(),
+      spawn: vi.fn(async () => undefined),
+      tryReattach: vi.fn(async () => undefined),
+      pasteText: vi.fn(),
+      interrupt: vi.fn(async () => undefined),
+      kill: vi.fn(async () => undefined),
+      cancelPendingCreate: vi.fn(async () => undefined),
+      fitTerminal: vi.fn(),
+      focus: vi.fn(),
+      status: ref('idle'),
+      displayStatus: ref('idle'),
+      lastRawActivityAt: ref(0),
+      sessionId: ref(''),
+      error: ref(''),
+    }),
+  }
+})
+
+vi.mock('@navide/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/shared')>()),
   initSettingsBackend: vi.fn(),
   settingsGet: vi.fn((_key: string, def: unknown) => def),
   settingsSet: vi.fn(),
   onSettingsChanged: vi.fn(() => () => {}),
-}))
-
-vi.mock('../../composables/useTheme', () => ({
-  useTheme: () => ({ theme: ref('dark'), setTheme: vi.fn(), loadTheme: vi.fn() }),
 }))
 
 let mock: ReturnType<typeof createMockBackend>

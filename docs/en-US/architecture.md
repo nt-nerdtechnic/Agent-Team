@@ -155,7 +155,7 @@ Supported coding CLIs, Git clients, model runtimes, and MCP servers retain their
 
 ## Agent integration boundary
 
-An agent integration is declared per vendor rather than threaded through the application. One spec file on each side — `backend/agent_team_backend/cli_vendors/<key>.py` and `src/renderer/src/agents/<key>.ts` — declares that CLI's credentials, usage interface, resume syntax, session paths, spawn environment, log reader and install entry, and one registration line on each side publishes it. Shared modules read the registry instead of branching on the agent key, and a vendor module may not import another vendor or any application module.
+An agent integration is declared per vendor rather than threaded through the application. One spec file on each side — `backend/agent_team_backend/cli_vendors/<key>.py` and `packages/features/plugin-shell/src/agents/<key>.ts` — declares that CLI's credentials, usage interface, resume syntax, session paths, spawn environment, log reader and install entry, and one registration line on each side publishes it. Shared modules read the registry instead of branching on the agent key, and a vendor module may not import another vendor or any application module.
 
 A capability the spec leaves undeclared is treated as unsupported for that vendor and degrades gracefully; it never falls back to another vendor's behavior. This keeps a partial integration honest — a CLI can ship with spawning and install detection while resume, log reading and credential switching stay visibly unavailable until they are verified against a real installation.
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsGet, settingsSet } from '@navide/git-shared/lib/settings'
+import { settingsGet, settingsSet } from '@navide/shared'
 import { useGit } from '../composables/useGit'
 import type { IgnoreTarget, GitWorktree } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
@@ -13,7 +13,7 @@ import type {
   GitPaneUiPort,
   IssuePort,
 } from '../ports/gitSurface'
-import { useNotify } from '@navide/git-shared/composables/useNotify'
+import { useNotify } from '@navide/ui-foundation'
 import { computeGraph, laneColor } from '../lib/git-graph'
 import { guardedDiscard } from '../lib/discardConfirm'
 import { closeGitPaneMenusOnEscape } from '../lib/gitMenuEscape'

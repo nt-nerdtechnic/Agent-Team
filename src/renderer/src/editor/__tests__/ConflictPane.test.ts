@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
 import ConflictPane from '../ConflictPane.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 
 i18n.global.locale.value = 'en-US'
 

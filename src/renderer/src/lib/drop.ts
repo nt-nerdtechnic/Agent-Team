@@ -53,7 +53,7 @@ export async function stabilizeDroppedPaths(paths: string[]): Promise<string[]> 
   }
 }
 
-export { shellEscape } from './shellEscape'
+export { shellEscape } from '@navide/plugin-shell'
 
 /**
  * Escapes a dropped path the way Terminal.app does — backslashes before shell

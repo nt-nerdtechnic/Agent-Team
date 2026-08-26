@@ -26,8 +26,8 @@ another vendor or any app module.
 |-------|------|
 | Backend spec — credentials, usage, resume, session paths, spawn env, log reader, install entry | `backend/agent_team_backend/cli_vendors/<key>.py` |
 | Backend registration | `backend/agent_team_backend/cli_vendors/registry.py` |
-| Frontend spec — label, command, resume syntax, capability flags | `src/renderer/src/agents/<key>.ts` |
-| Frontend registration + display order | `src/renderer/src/agents/index.ts` |
+| Frontend spec — label, command, resume syntax, capability flags | `packages/features/plugin-shell/src/agents/<key>.ts` |
+| Frontend registration + display order | `packages/features/plugin-shell/src/agents/index.ts` |
 
 Everything the old layer-by-layer checklist enumerated now derives from those
 four:

@@ -11,7 +11,7 @@
 // jump, this component only renders rows and re-emits the click.
 import { onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { DisplayStatus } from '../composables/useTerminal'
+import type { DisplayStatus } from '@navide/terminal'
 
 /** Status values a pane row can carry: useTerminal's `displayStatus`, plus
  *  'waiting' for a cold-restore placeholder that was never realized and

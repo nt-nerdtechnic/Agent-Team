@@ -12,9 +12,9 @@
 // fire while a terminal has focus (Esc is the CLI's own interrupt key).
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsGet, settingsSet } from '../lib/settings'
-import { CLI_AGENT_SPECS } from '../agents'
-import { aiTerminalPaneId, bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
+import { settingsGet, settingsSet } from '@navide/shared'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
+import { aiTerminalPaneId, bracketedPaste, resolveCliCommand } from '@navide/plugin-shell'
 import {
   LOG_LEVELS,
   capLines,
@@ -24,8 +24,8 @@ import {
   type LogLevel,
 } from '../lib/debugLog'
 import type { useBackend } from '../composables/useBackend'
-import type { TerminalDockPort } from '../ports/terminalDock'
-import AiCliTerminal from './AiCliTerminal.vue'
+import type { TerminalDockPort } from '@navide/terminal'
+import { AiCliTerminal } from '@navide/plugin-shell'
 
 const logLevelList = LOG_LEVELS
 const getLineLevel = logLineLevel

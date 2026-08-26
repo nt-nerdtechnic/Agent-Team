@@ -7,9 +7,9 @@ import type { useStages } from '../composables/useStages'
 import type { useAnalyzer } from '../composables/useAnalyzer'
 import type { usePipelines } from '../composables/usePipelines'
 import { MCP_CATALOG, isMcpInstalled, type McpCatalogEntry } from '../data/mcpCatalog'
-import { useTheme } from '../composables/useTheme'
+import { useTheme } from '@navide/ui-foundation'
 import { useSettings } from '../composables/useSettings'
-import { settingsGet, settingsSet } from '../lib/settings'
+import { settingsGet, settingsSet } from '@navide/shared'
 import {
   USAGE_ENABLED_KEY,
   USAGE_REFRESH_OPTIONS,
@@ -33,7 +33,7 @@ import {
   MIN_RESUME_CONCURRENCY,
   MAX_RESUME_CONCURRENCY,
   clampResumeConcurrency,
-} from '../lib/resumeConcurrency'
+} from '@navide/terminal'
 import {
   DEFAULT_EDITOR_SETTING_KEY,
   DEFAULT_EDITOR_COMMAND_KEY,
@@ -56,7 +56,7 @@ import {
   withOwnDevices,
   type PolicyDocument,
 } from '../lib/panePolicy'
-import { CLI_AGENT_SPECS } from '../agents'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 import {
   LOOP_PROMPT_SETTING_KEY,
   DEFAULT_LOOP_PROMPT,

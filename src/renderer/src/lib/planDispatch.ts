@@ -6,7 +6,7 @@
  * Kept free of App.vue state so it is unit-testable.
  */
 
-import { CLI_AGENT_SPECS } from '../agents'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 
 export interface PlanDispatchPayload {
   workspace_path?: unknown

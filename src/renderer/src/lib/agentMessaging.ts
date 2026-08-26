@@ -19,8 +19,8 @@
 // Parsing runs on structured turn text (ActivityEvent.text), never on the
 // terminal buffer.
 
-import { AGENT_SPECS } from '../agents'
-import enUS from '../i18n/locales/en-US.json'
+import { AGENT_SPECS } from '@navide/plugin-shell'
+import { enUSMessages } from '@navide/ui-foundation'
 
 export const MSG_START = '---MSG-START---'
 export const MSG_END = '---MSG-END---'
@@ -366,7 +366,7 @@ function enUsSentence(
   fallback: string,
   params?: Record<string, string | number>,
 ): string {
-  const template = (enUS.msg as Record<string, string>)[localeKey]
+  const template = (enUSMessages.msg as Record<string, string>)[localeKey]
   if (!template) return fallback
   return template.replace(/\{(\w+)\}/g, (whole, name: string) => {
     const value = params?.[name]

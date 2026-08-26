@@ -20,7 +20,7 @@
 
 import { ref, computed, nextTick, onMounted, onUnmounted, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useKeybindings, registerCommand, setContext } from '@navide/git-shared/keybindings/useKeybindings'
+import { useKeybindings, registerCommand, setContext } from '@navide/shared'
 import {
   useGit,
   type BlameEntry,
@@ -29,9 +29,9 @@ import {
   type GitFileEntry
 } from './composables/useGit'
 import { useIssues } from './composables/useIssues'
-import { useNotify } from '@navide/git-shared/composables/useNotify'
-import { useTheme } from '@navide/git-shared/composables/useTheme'
-import { settingsGet, onSettingsChanged } from '@navide/git-shared/lib/settings'
+import { useNotify } from '@navide/ui-foundation'
+import { useTheme } from '@navide/ui-foundation'
+import { settingsGet, onSettingsChanged } from '@navide/shared'
 import {
   GIT_BRANCH_DIFF_KEY,
   GIT_FILE_ACCESS_KEY,
@@ -39,7 +39,7 @@ import {
   GIT_TRANSPORT_KEY,
   GIT_UI_KEY,
 } from './ports/gitSurface'
-import { TERMINAL_DOCK_KEY } from '@navide/git-shared/ports/terminalDock'
+import { TERMINAL_DOCK_KEY } from '@navide/terminal'
 import GitHistoryModal from './components/GitHistoryModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
@@ -48,8 +48,8 @@ import BranchDiffPane from './editor/BranchDiffPane.vue'
 // git plugin bundle); the same component the mini-IDE opens conflicts in.
 import ConflictPane from './editor/ConflictPane.vue'
 // Shared right-side CLI agent dock (rail toggle + resize + embedded PTY).
-import AiCliDock from '@navide/git-shared/components/AiCliDock.vue'
-import { aiTerminalPaneId, bracketedPaste } from '@navide/git-shared/lib/aiCliContext'
+import { AiCliDock } from '@navide/plugin-shell'
+import { aiTerminalPaneId, bracketedPaste } from '@navide/plugin-shell'
 import { closeGitWindowMenuOnEscape } from './lib/gitMenuEscape'
 
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager

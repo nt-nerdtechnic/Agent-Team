@@ -1,22 +1,22 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch, defineAsyncComponent } from 'vue'
-import type { PaneArgContext } from '../agents'
+import type { PaneArgContext } from '@navide/plugin-shell'
 import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
-import { PANE_BATCH_MIME } from '../lib/cliContext'
+import { PANE_BATCH_MIME } from '@navide/terminal'
 import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import RebuildIcon from './RebuildIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
 import GitPluginHostSlot from './GitPluginHostSlot.vue'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
-import type { DisplayStatus } from '../composables/useTerminal'
+import type { DisplayStatus } from '@navide/terminal'
 import type { Role, RoleKey } from '../data/roles'
 import type { Stage, StageId } from '../data/stages'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
-import { registerCommand } from '../keybindings/useKeybindings'
+import { registerCommand } from '@navide/shared'
 import { useUpdater } from '../composables/useUpdater'
-import { i18n } from '../i18n'
-import { useNotify } from '../composables/useNotify'
+import { i18n } from '@navide/ui-foundation'
+import { useNotify } from '@navide/ui-foundation'
 
 // PlanPane: the plan review surface (drill-down list → preview) embedded in the
 // Plans sidebar tab. Async-loaded (off first-paint path, pulls in plan machinery).
@@ -24,9 +24,9 @@ const PlanPane = defineAsyncComponent(() => import('../editor/PlanPane.vue'))
 
 // Re-exported from the canonical per-vendor specs — this was a hand-kept
 // structural mirror before stage 2 of the one-file-per-vendor refactor.
-import type { AgentSpec } from '../agents'
-export type { AgentSpec } from '../agents'
-import { CLI_AGENT_SPECS } from '../agents'
+import type { AgentSpec } from '@navide/plugin-shell'
+export type { AgentSpec } from '@navide/plugin-shell'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 
 /** CLIs YOLO mode actually affects: the ones declaring a bypass flag. Derived,
  *  because the hand-written hint here listed three while eight qualified. */

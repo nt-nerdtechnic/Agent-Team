@@ -12,7 +12,7 @@ import {
   usageFor,
   type UsageSnapshot
 } from '../useUsage'
-import { __resetSettingsForTest } from '../../lib/settings'
+import { __resetSettingsForTest } from '@navide/shared/testing'
 
 // Local test fixture — the frontend no longer keeps a provider allowlist
 // (the backend payload is the single source of who has a usage provider).

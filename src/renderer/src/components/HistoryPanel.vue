@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch, type Ref } from 'vue'
-import { settingsGet, settingsSet } from '../lib/settings'
+import { settingsGet, settingsSet } from '@navide/shared'
 import { useHistory, type HistoryEvent } from '../composables/useHistory'
 import type { useBackend } from '../composables/useBackend'
 import type { PipelineStatusView } from './ControlPane.vue'

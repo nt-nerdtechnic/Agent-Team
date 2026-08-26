@@ -68,6 +68,11 @@ export default defineConfig({
     //   ../../composables/useBackend  ./useBackend  ../useBackend
     alias: [
       { find: /^(?:\.\.?\/)+(?:composables\/)?useBackend$/, replacement: capabilityBackend },
+      { find: '@navide/shared', replacement: resolve(__dirname, 'packages/features/shared/src') },
+      { find: '@navide/ui-foundation', replacement: resolve(__dirname, 'packages/features/ui-foundation/src') },
+      { find: '@navide/ui-foundation/styles.css', replacement: resolve(__dirname, 'packages/features/ui-foundation/src/styles.css') },
+      { find: '@navide/terminal', replacement: resolve(__dirname, 'packages/features/terminal/src') },
+      { find: '@navide/plugin-shell', replacement: resolve(__dirname, 'packages/features/plugin-shell/src') },
     ],
   },
   define: {

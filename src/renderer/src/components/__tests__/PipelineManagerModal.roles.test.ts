@@ -6,16 +6,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, effectScope, type EffectScope } from 'vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import { useRoles, type Role } from '../../composables/useRoles'
 import { usePipelines } from '../../composables/usePipelines'
 import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // The dock owns a real PTY terminal (xterm); the roles tab never touches it.
-vi.mock('../AiCliDock.vue', () => ({
-  __esModule: true,
-  default: defineComponent({ name: 'AiCliDock', render: () => null }),
+vi.mock('@navide/plugin-shell', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-shell')>()),
+  AiCliDock: defineComponent({ name: 'AiCliDock', render: () => null }),
 }))
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

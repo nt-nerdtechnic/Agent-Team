@@ -16,14 +16,14 @@ import type {
   GitPaneUiPort,
   IssuePort,
 } from './ports/gitSurface'
-import type { PortResponse } from '@navide/git-shared/ports/response'
-import type { KeybindingsPort } from '@navide/git-shared/ports/keybindings'
-import type { SettingsBackend } from '@navide/git-shared/lib/settings'
+import type { PortResponse } from '@navide/shared'
+import type { KeybindingsPort } from '@navide/shared'
+import type { SettingsBackend } from '@navide/shared'
 import type {
   TerminalCreateRequest,
   TerminalDockPort,
   TerminalFileListResult,
-} from '@navide/git-shared/ports/terminalDock'
+} from '@navide/terminal'
 import type { Issue, IssueDetail, IssueProviderInfo } from './composables/useIssues'
 import type { GitTransportStatusSource } from '@navide/git-feature'
 import type { GitContributionAction, GitContributionState } from './ports/gitContribution'

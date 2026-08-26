@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { ref, type Component, type Ref } from 'vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import type { useBackend } from '../../composables/useBackend'
 
 const wire = {

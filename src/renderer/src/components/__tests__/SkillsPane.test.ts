@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import SkillsPane from '../SkillsPane.vue'
 
 const skill = {

@@ -1,4 +1,4 @@
-import { invokeCommand, listCommands } from '../keybindings/commandRegistry'
+import { invokeCommand, listCommands } from '@navide/shared'
 import { currentDiagnosticSeq, takeDiagnosticsSince } from '../lib/uiDiagnostics'
 
 /**

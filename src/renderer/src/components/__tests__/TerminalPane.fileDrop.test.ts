@@ -15,9 +15,11 @@ const mockPasteText = vi.fn()
 const mockPasteFromClipboard = vi.fn()
 const mockDisplayStatus = { value: 'idle' }
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   return {
+    ...actual,
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: mockPasteText,

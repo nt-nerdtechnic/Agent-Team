@@ -7,7 +7,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { ref, nextTick } from 'vue'
 import PlanReviewToolbar from '../PlanReviewToolbar.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import { parseHtmlPlanMeta, replaceHtmlPlanMeta } from '../../composables/usePlanHtml'
 import type { HtmlPlanMeta } from '../../composables/usePlanHtml'
 import { parsePlanMeta } from '../../composables/usePlanFile'
@@ -17,7 +17,8 @@ i18n.global.locale.value = 'en-US'
 
 const toastMock = vi.hoisted(() => vi.fn())
 const confirmMock = vi.hoisted(() => vi.fn(async () => true))
-vi.mock('../../composables/useNotify', () => ({
+vi.mock('@navide/ui-foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
   useNotify: () => ({ toast: toastMock, alert: vi.fn(), confirm: confirmMock }),
 }))
 

@@ -12,15 +12,14 @@ import type {
   GitWindowUiPort,
   IssuePort,
 } from '../../src/ports/gitSurface'
-import type { PortResponse } from '../../src/ports/response'
-import type { KeybindingsPort } from '../../src/ports/keybindings'
+import type { PortResponse, KeybindingsPort } from '@navide/shared'
 import type {
   TerminalCreateRequest,
   TerminalDockPort,
   TerminalExitEvent,
   TerminalFileListResult,
   TerminalOutputEvent,
-} from '../../src/ports/terminalDock'
+} from '@navide/terminal'
 import type { Issue, IssueDetail, IssueProviderInfo } from '../../src/composables/useIssues'
 import type { GitTransportStatusSource } from '../../../../packages/features/git/src'
 

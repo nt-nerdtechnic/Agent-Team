@@ -19,13 +19,15 @@ const mockTerminal = vi.hoisted(() => ({
   optionSelectHint: null as unknown as Ref<boolean>
 }))
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   mockTerminal.displayStatus = ref('idle')
   mockTerminal.awaitingKind = ref(null)
   mockTerminal.lastUserKeyAt = ref(0)
   mockTerminal.optionSelectHint = ref(false)
   return {
+    ...actual,
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: vi.fn(),

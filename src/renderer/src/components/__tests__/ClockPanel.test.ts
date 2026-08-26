@@ -4,7 +4,7 @@
 // string, and the single-open-popover rule the status bar now follows.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import ClockPanel from '../ClockPanel.vue'
 import { useStatusBarPopover } from '../../composables/useStatusBarPopover'
 

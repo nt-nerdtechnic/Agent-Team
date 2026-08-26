@@ -10,11 +10,11 @@ import {
   settingsReady,
   onSettingsChanged,
   migrateLegacyLocalStorage,
-  __resetSettingsForTest,
   SETTINGS_FLUSH_DEBOUNCE_MS,
   MIGRATED_LOCALSTORAGE_KEYS,
   PURGED_LOCALSTORAGE_KEYS,
-} from '../settings'
+} from '@navide/shared'
+import { __resetSettingsForTest } from '@navide/shared/testing'
 import { readHostBootstrapSettings } from '../settingsBootstrap'
 
 function stubBootstrap(raw: string | undefined): void {

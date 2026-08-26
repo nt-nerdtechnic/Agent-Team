@@ -28,7 +28,11 @@ export default defineConfig({
   plugins: [vue(), emitManifest],
   resolve: {
     alias: {
-      '@navide/git-shared': resolve(repositoryRoot, 'packages/features/git-ui/src'),
+      '@navide/shared': resolve(repositoryRoot, 'packages/features/shared/src'),
+      '@navide/ui-foundation': resolve(repositoryRoot, 'packages/features/ui-foundation/src'),
+      '@navide/ui-foundation/styles.css': resolve(repositoryRoot, 'packages/features/ui-foundation/src/styles.css'),
+      '@navide/terminal': resolve(repositoryRoot, 'packages/features/terminal/src'),
+      '@navide/plugin-shell': resolve(repositoryRoot, 'packages/features/plugin-shell/src'),
       '@navide/git-feature': resolve(repositoryRoot, 'packages/features/git/src'),
     },
   },

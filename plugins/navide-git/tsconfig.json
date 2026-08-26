@@ -10,9 +10,13 @@
     "allowJs": false,
     "baseUrl": ".",
     "paths": {
-      "@navide/git-shared/*": ["../../packages/features/git-ui/src/*"],
+      "@navide/shared": ["../../packages/features/shared/src/index.ts"],
+      "@navide/shared/testing": ["../../packages/features/shared/src/testing.ts"],
+      "@navide/ui-foundation": ["../../packages/features/ui-foundation/src/index.ts"],
+      "@navide/terminal": ["../../packages/features/terminal/src/index.ts"],
+      "@navide/plugin-shell": ["../../packages/features/plugin-shell/src/index.ts"],
       "@navide/git-feature": ["../../packages/features/git/src/index.ts"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "tests/**/*.ts", "../../packages/features/git-ui/src/**/*.ts", "../../packages/features/git-ui/src/**/*.vue"]
+  "include": ["src/**/*.ts", "src/**/*.vue", "tests/**/*.ts", "../../packages/features/shared/src/**/*.ts", "../../packages/features/shared/src/**/*.vue", "../../packages/features/ui-foundation/src/**/*.ts", "../../packages/features/ui-foundation/src/**/*.vue", "../../packages/features/terminal/src/**/*.ts", "../../packages/features/terminal/src/**/*.vue", "../../packages/features/plugin-shell/src/**/*.ts", "../../packages/features/plugin-shell/src/**/*.vue"]
 }

@@ -10,7 +10,13 @@ export default defineConfig({
   plugins: [vue()],
   resolve: {
     alias: {
-      '@navide/git-shared': resolve(__dirname, 'packages/features/git-ui/src'),
+      '@navide/shared': resolve(__dirname, 'packages/features/shared/src'),
+      '@navide/ui-foundation': resolve(__dirname, 'packages/features/ui-foundation/src'),
+      '@navide/ui-foundation/styles.css': resolve(__dirname, 'packages/features/ui-foundation/src/styles.css'),
+      '@navide/terminal': resolve(__dirname, 'packages/features/terminal/src'),
+      '@navide/plugin-shell': resolve(__dirname, 'packages/features/plugin-shell/src'),
+      '@navide/shared/testing': resolve(__dirname, 'packages/features/shared/src/testing.ts'),
+      '@navide/terminal/testing': resolve(__dirname, 'packages/features/terminal/src/testing.ts'),
       '@navide/git-feature': resolve(__dirname, 'packages/features/git/src'),
     },
   },
@@ -25,8 +31,11 @@ export default defineConfig({
       'src/renderer/plugins/**/*.{test,spec}.ts',
       'src/main/**/*.{test,spec}.ts',
       'src/shared/**/*.{test,spec}.ts',
+      'packages/features/shared/src/**/*.{test,spec}.ts',
+      'packages/features/ui-foundation/src/**/*.{test,spec}.ts',
+      'packages/features/terminal/src/**/*.{test,spec}.ts',
+      'packages/features/plugin-shell/src/**/*.{test,spec}.ts',
       'packages/features/git/src/**/*.{test,spec}.ts',
-      'packages/features/git-ui/src/**/*.{test,spec}.ts',
       'plugins/navide-git/src/**/*.{test,spec}.ts',
       'plugins/navide-git/tests/**/*.{test,spec}.ts'
     ],

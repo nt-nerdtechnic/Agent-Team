@@ -5,16 +5,16 @@
 // host app, so this component only owns the pipeline/stage/role UI.
 import { computed, ref, watch } from 'vue'
 import type { useBackend } from '../composables/useBackend'
-import type { TerminalDockPort } from '../ports/terminalDock'
-import { useNotify } from '../composables/useNotify'
-import AiCliDock from './AiCliDock.vue'
+import type { TerminalDockPort } from '@navide/terminal'
+import { useNotify } from '@navide/ui-foundation'
+import { AiCliDock } from '@navide/plugin-shell'
 import type { useRoles, Role } from '../composables/useRoles'
 import type { usePipelines, PipelineSummary } from '../composables/usePipelines'
 import { useStages } from '../composables/useStages'
 import { stageToBackend, type AgentKey, type Stage, type StageSlot } from '../data/stages'
-import { CLI_AGENT_SPECS } from '../agents'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 import { buildPmAiContext } from '../lib/pmAiContext'
-import { aiTerminalPaneId } from '../lib/aiCliContext'
+import { aiTerminalPaneId } from '@navide/plugin-shell'
 
 const props = defineProps<{
   backend: ReturnType<typeof useBackend>

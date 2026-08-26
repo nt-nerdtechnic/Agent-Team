@@ -2,7 +2,7 @@
 // plus the login command to send into the CLI to recover. Each vendor declares
 // its own `loginExpired` spec (see agents/types.ts) — only `claude` for now.
 
-import { AGENT_SPECS } from '../agents'
+import { AGENT_SPECS } from '@navide/plugin-shell'
 
 function loginExpiredSpecFor(agentKey: string): { pattern: RegExp; loginCommand: string } | undefined {
   return AGENT_SPECS.find((s) => s.agentKey === agentKey)?.loginExpired

@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import SearchPane from '../SearchPane.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/ui-foundation'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import type { WsResponse } from '../../composables/useBackend'
 
@@ -11,7 +11,10 @@ const notify = vi.hoisted(() => ({
   alert: vi.fn(),
   confirm: vi.fn(),
 }))
-vi.mock('../../composables/useNotify', () => ({ useNotify: () => notify }))
+vi.mock('@navide/ui-foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+  useNotify: () => notify,
+}))
 
 beforeEach(() => {
   notify.toast.mockClear()

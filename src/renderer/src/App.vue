@@ -24,8 +24,9 @@ import QuestionAlert from './components/QuestionAlert.vue'
 import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
-import { useNotify } from './composables/useNotify'
-import { agentUsesBracketedPaste, migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
+import { agentUsesBracketedPaste } from '@navide/plugin-shell'
+import { useNotify, useTheme } from '@navide/ui-foundation'
+import { migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from '@navide/terminal'
 import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
 import type { PushOutcome, RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
@@ -41,7 +42,6 @@ import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
 import { useBackend } from './composables/useBackend'
 import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
-import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
 import { useRoles } from './composables/useRoles'
 import {
@@ -78,12 +78,12 @@ import {
   type StageId,
   type StageSlot
 } from './data/stages'
-import { i18n } from './i18n'
+import { i18n } from '@navide/ui-foundation'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
-import { diagLog } from './lib/diagLog'
+import { diagLog } from '@navide/terminal'
 import { reclaimBlockedBy, idleReclaimThresholdMs, type ReclaimCandidate } from './lib/idleReclaim'
-import { findConsecutiveQuestionBlocks, findSentinel } from './lib/buffer'
+import { findConsecutiveQuestionBlocks, findSentinel } from '@navide/terminal'
 import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
@@ -97,13 +97,13 @@ import {
   screenToClientPoint,
   CLI_CHIP_LINE_CAP,
   CLI_PASTE_LINE_CAP
-} from './lib/cliContext'
+} from '@navide/terminal'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
 import { allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
 import { resolveDragBatch, reorderBatchByIds } from './lib/paneBatchDrag'
-import { AGENT_SPECS, type PaneArgContext } from './agents'
+import { AGENT_SPECS, type PaneArgContext } from '@navide/plugin-shell'
 import {
   orderedAgentKeys,
   isAgentEnabled,
@@ -119,7 +119,7 @@ import {
 import { recordDiagnostic, readDiagnostics, currentDiagnosticSeq } from './lib/uiDiagnostics'
 import { injectStandaloneTask, type StandaloneTaskInjectionDeps } from './lib/standalonePaneTask'
 import { quickClassify } from './lib/quick-classify'
-import type { DirLister } from './agents/types'
+import type { DirLister } from '@navide/plugin-shell'
 import {
   buildResumeCommand,
   acquirePaneRebuildLock,
@@ -133,7 +133,7 @@ import {
   RESTORE_PIN_AGENTS,
   shouldPreserveMissingSessionOnRestore,
   shouldWarnMissingResume,
-} from './lib/resume-command'
+} from '@navide/plugin-shell'
 import {
   claimFreshSessionId,
   classifyAttributedSession,
@@ -171,7 +171,7 @@ import {
   type RestoreSessionTrigger,
   type WorkspaceRestoreSession,
 } from './lib/resumeBehavior'
-import { initSettingsBackend, settingsGet, settingsSet } from './lib/settings'
+import { initSettingsBackend, settingsGet, settingsSet } from '@navide/shared'
 import { pickWhatsNew, type WhatsNewEntry } from './lib/whatsNew'
 import { initUsage } from './composables/useUsage'
 import {
@@ -198,7 +198,7 @@ import {
 } from './lib/cliAwaitingInput'
 import { markerTurnActionFor } from './lib/sessionMarkerTurn'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
-import { initKeybindingsPort, useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
+import { initKeybindingsPort, useKeybindings, registerCommand, setContext } from '@navide/shared'
 import { useUiActionBus } from './composables/useUiActionBus'
 import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
 import { useStatusBarPopover } from './composables/useStatusBarPopover'

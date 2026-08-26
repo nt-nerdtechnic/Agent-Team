@@ -10,9 +10,11 @@ import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 // id payload, are ignored. The real terminal is irrelevant here, so useTerminal
 // is mocked out — no xterm instance, no backend traffic.
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   return {
+    ...actual,
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: vi.fn(),

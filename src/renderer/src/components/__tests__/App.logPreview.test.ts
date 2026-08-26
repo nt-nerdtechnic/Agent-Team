@@ -19,7 +19,7 @@ const modalSource = readFileSync(
   'utf8'
 )
 const semanticTokensSource = readFileSync(
-  resolve(process.cwd(), 'src/renderer/src/styles/tokens/semantic.css'),
+  resolve(process.cwd(), 'packages/features/ui-foundation/src/styles/tokens/semantic.css'),
   'utf8'
 )
 
