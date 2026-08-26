@@ -9,6 +9,9 @@ All notable released changes to Navide will be documented in this file. The form
 - Add the public Plugin Platform v2 contracts, SDK CLI, UI package boundary,
   and an external-workspace frontend package smoke workflow with fail-closed
   capability-denial coverage.
+- Use the same optional package lifecycle and public dependency graph for
+  official and third-party plugins. The base App build no longer embeds or
+  automatically installs official plugin artifacts.
 - Add the Issue 16 Host-managed durable plugin/workspace storage adapter and
   lifecycle seams with authenticated package/workspace identity,
   version-matched candidate/active/previous snapshot selection, atomic JSON

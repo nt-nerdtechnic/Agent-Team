@@ -30,7 +30,7 @@ export default defineConfig({
   main: {
     resolve: {
       alias: {
-        '@navide/git-feature': resolve(__dirname, 'packages/features/git/src'),
+        '@navide/git-feature': resolve(__dirname, 'plugins/navide-git/src/git-feature/index.ts'),
       },
     },
     build: {
@@ -46,11 +46,6 @@ export default defineConfig({
     }
   },
   preload: {
-    resolve: {
-      alias: {
-        '@navide/git-feature': resolve(__dirname, 'packages/features/git/src'),
-      },
-    },
     build: {
       rollupOptions: {
         input: {
@@ -68,12 +63,12 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     resolve: {
       alias: {
-        '@navide/shared': resolve(__dirname, 'packages/features/shared/src'),
-        '@navide/ui-foundation': resolve(__dirname, 'packages/features/ui-foundation/src'),
-        '@navide/ui-foundation/styles.css': resolve(__dirname, 'packages/features/ui-foundation/src/styles.css'),
-        '@navide/terminal': resolve(__dirname, 'packages/features/terminal/src'),
-        '@navide/plugin-shell': resolve(__dirname, 'packages/features/plugin-shell/src'),
-        '@navide/git-feature': resolve(__dirname, 'packages/features/git/src'),
+        '@navide/git-feature': resolve(__dirname, 'plugins/navide-git/src/git-feature/index.ts'),
+        '@navide/shared': resolve(__dirname, 'packages/plugin-ui-vue/src/shared/index.ts'),
+        '@navide/terminal': resolve(__dirname, 'src/renderer/src/platform/terminal/index.ts'),
+        '@navide/plugin-shell': resolve(__dirname, 'src/renderer/src/platform/plugin-shell/index.ts'),
+        '@navide/ui-foundation/styles.css': resolve(__dirname, 'packages/plugin-ui-vue/src/foundation/styles.css'),
+        '@navide/ui-foundation': resolve(__dirname, 'packages/plugin-ui-vue/src/foundation/index.ts'),
       },
     },
     server: {

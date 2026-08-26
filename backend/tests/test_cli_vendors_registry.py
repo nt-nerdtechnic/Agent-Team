@@ -24,7 +24,7 @@ from agent_team_backend.cli_vendors.base import VendorSpec
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VENDORS_DIR = REPO_ROOT / "backend" / "agent_team_backend" / "cli_vendors"
 FRONTEND_AGENTS_DIR = (
-    REPO_ROOT / "packages" / "features" / "plugin-shell" / "src" / "agents"
+    REPO_ROOT / "src" / "renderer" / "src" / "platform" / "plugin-shell" / "agents"
 )
 
 EXPECTED_KEYS = {
@@ -76,7 +76,7 @@ def test_registry_matches_frontend_agent_specs() -> None:
     # Read-only regex over the frontend source: the backend must not import
     # or execute TS, but the two sides must never disagree about who exists.
     # Canonical location since stage 2: one spec file per vendor under
-    # packages/features/plugin-shell/src/agents/ (underscore files are templates, not specs).
+    # src/renderer/src/platform/plugin-shell/agents/ (underscore files are templates, not specs).
     frontend_keys: set[str] = set()
     for path in FRONTEND_AGENTS_DIR.glob("*.ts"):
         if path.stem.startswith("_") or path.stem in {"index", "types"}:
@@ -183,14 +183,14 @@ def test_turn_end_inference_flag_matches_reader_implementation() -> None:
         problems.append(
             f"  {key}: backend cli_vendors/{sources[key]}.py infers the turn "
             f"end from a _TURN_IDLE_* quiet timer, but "
-            f"packages/features/plugin-shell/src/agents/{key}.ts does not set "
+            f"src/renderer/src/platform/plugin-shell/agents/{key}.ts does not set "
             f"`turnEndInferredFromSilence: true`. FIX THE FRONTEND: add the "
             f"flag — without it, messaging waits for a turn end that only a "
             f"timer will ever produce."
         )
     for key in sorted(frontend - backend):
         problems.append(
-            f"  {key}: packages/features/plugin-shell/src/agents/{key}.ts sets "
+            f"  {key}: src/renderer/src/platform/plugin-shell/agents/{key}.ts sets "
             f"`turnEndInferredFromSilence: true`, but the reader in "
             f"cli_vendors/{sources[key]}.py reports a real turn-end record "
             f"(no _TURN_IDLE_* timer in the parse_activity it resolves to). "
@@ -293,7 +293,7 @@ def test_push_channel_matches_the_frontend_agent_spec() -> None:
 
     assert backend == frontend, (
         "push channels drifted between cli_vendors/<key>.py and "
-        f"packages/features/plugin-shell/src/agents/<key>.ts: backend={backend} frontend={frontend}"
+        f"src/renderer/src/platform/plugin-shell/agents/<key>.ts: backend={backend} frontend={frontend}"
     )
     for key, spec in registry.VENDORS.items():
         if spec.push_channel is None:

@@ -210,7 +210,7 @@ function aiCliMethod(
   address: string,
   validateRequest: (value: unknown) => value is Record<string, unknown>
 ): PublicCapabilityCatalogEntry {
-  return systemMethod(address, 'aiCli', validateRequest, 'firstParty')
+  return systemMethod(address, 'aiCli', validateRequest)
 }
 
 function storageMethod(
@@ -268,14 +268,14 @@ export const PUBLIC_CAPABILITY_CATALOG: Readonly<Record<string, PublicCapability
     kind: 'event',
     namespace: 'aiCli',
     scope: 'workspace',
-    eligibility: 'firstParty',
+    eligibility: 'public',
   },
   'aiCli.exited': {
     address: 'aiCli.exited',
     kind: 'event',
     namespace: 'aiCli',
     scope: 'workspace',
-    eligibility: 'firstParty',
+    eligibility: 'public',
   },
 }
 

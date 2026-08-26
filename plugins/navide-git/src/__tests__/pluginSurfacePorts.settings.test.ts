@@ -4,8 +4,8 @@ import {
   GIT_HOST_READ_ONLY_KEYS,
   GIT_USER_PREFERENCE_KEYS,
   GIT_WORKSPACE_REPOSITORY_KEY,
-} from '@navide/git-feature'
-import type { PortResponse } from '@navide/shared'
+} from '#git-feature'
+import type { PortResponse } from '@navide/plugin-ui-vue/shared'
 import {
   createPluginGitSettingsPort,
   createPluginGitWorkspaceGrantPort,

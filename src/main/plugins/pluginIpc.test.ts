@@ -367,6 +367,60 @@ describe('plugin management sender authorization', () => {
     ).toBe(false)
   })
 
+  it('projects manifest view contributions without first-party special cases', () => {
+    const manager = {
+      listContributionCatalog: () => [
+        {
+          pluginId: 'acme.tools',
+          packageVersion: '1.2.3',
+          contributionKey: 'acme.tools.secondary',
+          title: 'Secondary',
+          icon: null,
+          kind: 'custom',
+          location: 'right',
+          manifestOrder: 0,
+        },
+        {
+          pluginId: 'acme.tools',
+          packageVersion: '1.2.3',
+          contributionKey: 'acme.tools.primary',
+          title: 'Primary',
+          icon: 'icons/primary.svg',
+          kind: 'custom',
+          location: 'left',
+          manifestOrder: 1,
+        },
+      ],
+      listInstalledPackages: () => [],
+    } as unknown as FrontendPluginManager
+    registerPluginIpc(manager, '/plugins', () => true)
+
+    const handler = handlers.get('plugins:listContributions')
+    if (!handler) throw new Error('contribution catalog handler not registered')
+    expect(handler(null)).toEqual([
+      {
+        pluginId: 'acme.tools',
+        packageVersion: '1.2.3',
+        contributionKey: 'acme.tools.secondary',
+        title: 'Secondary',
+        icon: null,
+        kind: 'custom',
+        location: 'right',
+        manifestOrder: 0,
+      },
+      {
+        pluginId: 'acme.tools',
+        packageVersion: '1.2.3',
+        contributionKey: 'acme.tools.primary',
+        title: 'Primary',
+        icon: 'icons/primary.svg',
+        kind: 'custom',
+        location: 'left',
+        manifestOrder: 1,
+      },
+    ])
+  })
+
   it('rejects unauthorized senders on every plugins channel before side effects', async () => {
     const manager = {
       listDescriptors: vi.fn(),
@@ -382,6 +436,7 @@ describe('plugin management sender authorization', () => {
 
     const calls: Array<[string, unknown]> = [
       ['plugins:listInstalled', undefined],
+      ['plugins:listContributions', undefined],
       ['plugins:marketplaceSearch', 'demo'],
       ['plugins:prepareInstall', { namespace: 'acme', name: 'demo' }],
       ['plugins:commitInstall', { id: 'acme.demo', confirmed: true }],

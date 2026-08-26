@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui-vue/foundation'
 import {
   parseConflicts, buildResolved, countConflicts, hasConflicts,
   type FileSection, type ConflictChoice,
 } from '../lib/conflict-parser'
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '#git-feature'
 import type { GitFileAccessPort } from '../ports/gitSurface'
 // Type-only — erased at build time, so this never pulls useGit into a bundle.
 import type { ConflictStages } from '../composables/useGit'

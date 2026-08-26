@@ -6,7 +6,11 @@
 // capability backend, IPC/WebSocket details, or Host routes.
 
 import { createApp } from 'vue'
-import { i18n } from '@navide/ui-foundation'
+import {
+  createAiCliSessionController,
+  type AiCliPluginContext,
+} from '@navide/plugin-ui-vue'
+import { i18n } from '@navide/plugin-ui-vue/foundation'
 import { useBackend } from './capabilityBackend'
 import { createPluginGitTransport, type PluginGitSdk } from './sdkGitTransport'
 import {
@@ -16,7 +20,6 @@ import {
   createPluginGitContributionHostPort,
   createPluginGitWorkspaceGrantPort,
   createPluginGitSettingsPort,
-  createPluginTerminalDockPort,
 } from './pluginSurfacePorts'
 import {
   GIT_ACCOUNTS_KEY,
@@ -26,11 +29,10 @@ import {
   GIT_TRANSPORT_KEY,
   GIT_UI_KEY,
 } from './ports/gitSurface'
-import { TERMINAL_DOCK_KEY } from '@navide/terminal'
-import { initKeybindingsPort, initSettingsBackend, seedSettings } from '@navide/shared'
+import { initKeybindingsPort, initSettingsBackend, seedSettings } from '@navide/plugin-ui-vue/shared'
 
 // Theme token layers — order matters: primitives → semantic roles → themes.
-import '@navide/ui-foundation/styles.css'
+import '@navide/plugin-ui-vue/styles.css'
 
 import GitWindowApp from './GitWindowApp.vue'
 import GitLeftApp from './GitLeftApp.vue'
@@ -82,17 +84,43 @@ const legacyRepoSelection = {
   },
 }
 const settingsPort = createPluginGitSettingsPort(capabilitySdk)
-const terminalPort = createPluginTerminalDockPort(capabilitySdk)
+const isLeftContribution = query.get('contribution') === 'left'
+
+// The Git window owns the AI CLI panel, but not its transport.  Adapt the
+// already-authenticated capability/event closure to the public controller
+// shape so the panel never receives the generic backend or a raw terminal port.
+const aiCliController = isLeftContribution ? null : createAiCliSessionController({
+  capabilities: {
+    invoke: (async (method: string, params: unknown) => {
+      const response = await capabilitySdk.request(
+        method,
+        params as Record<string, unknown>,
+      )
+      if (!response.ok) {
+        throw new Error(response.error?.message || `AI CLI capability '${method}' failed`)
+      }
+      return response.payload
+    }) as AiCliPluginContext['capabilities']['invoke'],
+  },
+  events: {
+    subscribe: ((event: string, listener: (payload: unknown) => void) => {
+      const unsubscribe = capabilitySdk.subscribe(
+        event,
+        listener as (payload: unknown) => void,
+      )
+      return { dispose: unsubscribe }
+    }) as AiCliPluginContext['events']['subscribe'],
+  },
+})
 
 // Hook shared settings to the same authenticated ui capability closure before
 // the app reads any cached setting.
 initSettingsBackend(settingsPort)
 initKeybindingsPort(createPluginKeybindingsPort())
 
-const isLeftContribution = query.get('contribution') === 'left'
 const app = isLeftContribution
   ? createApp(GitLeftApp, { surfacePorts, hostPort: contributionHostPort, legacyRepoSelection })
-  : createApp(GitWindowApp, { workspaceGrantPort })
+  : createApp(GitWindowApp, { workspaceGrantPort, aiCliController: aiCliController! })
 app.use(i18n)
 app.provide(GIT_TRANSPORT_KEY, surfacePorts.gitTransport)
 app.provide(GIT_FILE_ACCESS_KEY, surfacePorts.fileAccess)
@@ -100,7 +128,6 @@ app.provide(GIT_UI_KEY, surfacePorts.ui)
 app.provide(GIT_BRANCH_DIFF_KEY, surfacePorts.branchDiff)
 app.provide(GIT_ACCOUNTS_KEY, surfacePorts.accounts)
 app.provide(GIT_ISSUES_KEY, surfacePorts.issues)
-app.provide(TERMINAL_DOCK_KEY, terminalPort)
 app.mount('#app')
 
 // Announce readiness only after the app has mounted and installed every port.

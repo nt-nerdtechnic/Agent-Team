@@ -6,19 +6,19 @@ let nextMenuOwnerId = 0
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsGet, settingsSet } from '@navide/shared'
+import { settingsGet, settingsSet } from '@navide/plugin-ui-vue/shared'
 import { useGit } from '../composables/useGit'
 import type { IgnoreTarget, GitWorktree } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
 import type { IssueDetail } from '../composables/useIssues'
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '#git-feature'
 import type {
   GitAccountPort,
   GitFileAccessPort,
   GitPaneUiPort,
   IssuePort,
 } from '../ports/gitSurface'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui-vue/foundation'
 import { computeGraph, laneColor } from '../lib/git-graph'
 import { guardedDiscard } from '../lib/discardConfirm'
 import { closeGitPaneMenusOnEscape } from '../lib/gitMenuEscape'

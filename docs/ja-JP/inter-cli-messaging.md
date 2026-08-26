@@ -721,8 +721,8 @@ MCP の `cli_send` から、あるいは別の Machine から中継されたも�
 | Stop hook 配信：hook の Timeout 内で所有 Window に問い合わせる | `backend/agent_team_backend/hook_drain.py` |
 | Push Channel：Spawn の配線と Transport 本体 | `backend/agent_team_backend/push_delivery.py` |
 | CLI がどの Channel を提供するか | `backend/agent_team_backend/cli_vendors/<key>.py`（`push_channel`） |
-| その Channel がどの配信 Hold に従うか | `packages/features/plugin-shell/src/agents/<key>.ts`（`pushChannel`） |
-| CLI が Turn の途中で入力を Queue するか | `packages/features/plugin-shell/src/agents/<key>.ts`（`acceptsMidTurnInput`） |
+| その Channel がどの配信 Hold に従うか | `src/renderer/src/platform/plugin-shell/agents/<key>.ts`（`pushChannel`） |
+| CLI が Turn の途中で入力を Queue するか | `src/renderer/src/platform/plugin-shell/agents/<key>.ts`（`acceptsMidTurnInput`） |
 | 受信者から見た Queue | `backend/agent_team_backend/agent_message_log.py`（`pending_incoming`） |
 | Install される hook コマンドと、どのイベントが応答を保持するか | `backend/agent_team_backend/claude_hooks.py` |
 | 配信結果と Hold を、MCP の呼び出し元が読む形で | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |

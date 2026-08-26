@@ -4,7 +4,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { ref } from 'vue'
 
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
-vi.mock('@navide/ui-foundation', () => ({
+vi.mock('@navide/plugin-ui-vue/foundation', () => ({
   useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn(async () => false) }),
 }))
 

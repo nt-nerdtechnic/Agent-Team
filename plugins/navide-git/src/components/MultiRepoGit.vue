@@ -9,12 +9,12 @@ import { useI18n } from 'vue-i18n'
 import {
   GIT_LEGACY_WORKSPACE_REPOSITORY_PREFIX,
   GIT_WORKSPACE_REPOSITORY_KEY,
-} from '@navide/git-feature'
+} from '#git-feature'
 import {
   settingsGet,
   settingsReady,
   settingsSet,
-} from '@navide/shared'
+} from '@navide/plugin-ui-vue/shared'
 
 const GitPane = defineAsyncComponent(() => import('./GitPane.vue'))
 

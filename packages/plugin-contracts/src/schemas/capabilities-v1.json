@@ -116,7 +116,6 @@
     {
       "address": "aiCli.startSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["profileId", "cols", "rows"], "properties": { "profileId": { "type": "string", "minLength": 1 }, "requestId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
@@ -125,7 +124,6 @@
     {
       "address": "aiCli.cancelStart",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["requestId"], "properties": { "requestId": { "type": "string", "minLength": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -134,7 +132,6 @@
     {
       "address": "aiCli.reattachSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
@@ -143,7 +140,6 @@
     {
       "address": "aiCli.sendInput",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "data"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "data": { "type": "string" } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -152,7 +148,6 @@
     {
       "address": "aiCli.resizeSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "cols", "rows"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -161,7 +156,6 @@
     {
       "address": "aiCli.redrawSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -170,7 +164,6 @@
     {
       "address": "aiCli.interruptSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -179,7 +172,6 @@
     {
       "address": "aiCli.stopSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -231,19 +223,17 @@
     {
       "address": "aiCli.output",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "payload": { "type": "object", "additionalProperties": false, "required": ["sessionId", "data"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "data": { "type": "string" } } }
     },
     {
       "address": "aiCli.exited",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "payload": { "type": "object", "additionalProperties": false, "required": ["sessionId", "exitCode"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "exitCode": { "type": ["integer", "null"] } } }
     }
   ],
-  "firstPartyNamespaces": ["aiCli"],
+  "firstPartyNamespaces": [],
   "legacyExceptions": [
     { "event": "git.changed", "authorizedBy": "legacy fs", "replacement": "workspace.filesChanged" }
   ]

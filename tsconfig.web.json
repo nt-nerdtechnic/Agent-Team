@@ -13,30 +13,29 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "@navide/shared": ["packages/features/shared/src/index.ts"],
-      "@navide/shared/testing": ["packages/features/shared/src/testing.ts"],
-      "@navide/ui-foundation": ["packages/features/ui-foundation/src/index.ts"],
-      "@navide/terminal": ["packages/features/terminal/src/index.ts"],
-      "@navide/terminal/testing": ["packages/features/terminal/src/testing.ts"],
-      "@navide/plugin-shell": ["packages/features/plugin-shell/src/index.ts"],
-      "@navide/git-feature": ["packages/features/git/src/index.ts"],
-      "@navide/git-feature/testing": ["packages/features/git/src/testing.ts"]
+      "@navide/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
+      "@navide/plugin-contracts": ["packages/plugin-contracts/src/index.ts"],
+      "@navide/git-feature": ["plugins/navide-git/src/git-feature/index.ts"],
+      "@navide/git-feature/testing": ["plugins/navide-git/src/git-feature/testing.ts"],
+      "@navide/shared": ["packages/plugin-ui-vue/src/shared/index.ts"],
+      "@navide/shared/testing": ["packages/plugin-ui-vue/src/shared/testing.ts"],
+      "@navide/terminal": ["src/renderer/src/platform/terminal/index.ts"],
+      "@navide/terminal/testing": ["src/renderer/src/platform/terminal/testing.ts"],
+      "@navide/plugin-shell": ["src/renderer/src/platform/plugin-shell/index.ts"],
+      "@navide/ui-foundation": ["packages/plugin-ui-vue/src/foundation/index.ts"],
+      "@navide/ui-foundation/*": ["packages/plugin-ui-vue/src/foundation/*"]
     }
   },
   "include": [
-    "packages/features/git/src/**/*.ts",
-    "packages/features/shared/src/**/*.ts",
-    "packages/features/shared/src/**/*.vue",
-    "packages/features/ui-foundation/src/**/*.ts",
-    "packages/features/ui-foundation/src/**/*.vue",
-    "packages/features/terminal/src/**/*.ts",
-    "packages/features/terminal/src/**/*.vue",
-    "packages/features/plugin-shell/src/**/*.ts",
-    "packages/features/plugin-shell/src/**/*.vue",
     "src/renderer/src/**/*.ts",
     "src/renderer/src/**/*.vue",
     "src/renderer/src/**/*.d.ts",
     "src/renderer/plugins/**/*.ts",
-    "src/shared/**/*.ts"
+    "src/shared/**/*.ts",
+    "packages/plugin-contracts/src/**/*.ts",
+    "packages/plugin-sdk/src/**/*.ts",
+    "plugins/navide-git/src/git-feature/**/*.ts",
+    "packages/plugin-ui-vue/src/**/*.ts",
+    "packages/plugin-ui-vue/src/**/*.vue"
   ]
 }

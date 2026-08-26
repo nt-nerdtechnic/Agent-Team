@@ -20,11 +20,11 @@ const agentListSource = readFileSync(
   'utf8'
 )
 const enLocale = readFileSync(
-  resolve(process.cwd(), 'packages/features/ui-foundation/src/i18n/locales/en-US.json'),
+  resolve(process.cwd(), 'packages/plugin-ui-vue/src/foundation/i18n/locales/en-US.json'),
   'utf8'
 )
 const zhLocale = readFileSync(
-  resolve(process.cwd(), 'packages/features/ui-foundation/src/i18n/locales/zh-TW.json'),
+  resolve(process.cwd(), 'packages/plugin-ui-vue/src/foundation/i18n/locales/zh-TW.json'),
   'utf8'
 )
 

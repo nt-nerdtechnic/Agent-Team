@@ -557,6 +557,41 @@ contextBridge.exposeInMainWorld('agentTeam', {
   plugins: {
     listInstalled: (): Promise<InstalledPluginSummary[]> =>
       ipcRenderer.invoke('plugins:listInstalled'),
+    listContributions: (): Promise<Array<{
+      pluginId: string
+      packageVersion: string | null
+      contributionKey: string
+      title: string
+      icon: string | null
+      kind: 'custom'
+      location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
+      manifestOrder: number
+    }>> => ipcRenderer.invoke('plugins:listContributions'),
+    openContribution: (args: {
+      contributionKey: string
+      workspace_path: string
+      bounds: { x: number; y: number; width: number; height: number }
+      query?: string
+    }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('plugins:openContribution', args),
+    openContributionWindow: (args: {
+      contributionKey: string
+      workspace_path: string
+      query?: string
+    }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('plugins:openContributionWindow', args),
+    updateContribution: (args: {
+      contributionKey: string
+      bounds: { x: number; y: number; width: number; height: number }
+      visible: boolean
+    }): Promise<{ ok: boolean }> => ipcRenderer.invoke('plugins:updateContribution', args),
+    closeContribution: (args: { contributionKey: string }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('plugins:closeContribution', args),
+    onContributionsChanged: (handler: () => void): (() => void) => {
+      const listener = (): void => handler()
+      ipcRenderer.on('plugins:contributionsChanged', listener)
+      return () => ipcRenderer.removeListener('plugins:contributionsChanged', listener)
+    },
     marketplaceSearch: (query?: string): Promise<MarketplaceListResponse> =>
       ipcRenderer.invoke('plugins:marketplaceSearch', query),
     prepareInstall: (args: {

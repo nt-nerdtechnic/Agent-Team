@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.web.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "noEmit": true,
+    "baseUrl": "../..",
+    "paths": {
+      "@navide/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
+      "@navide/plugin-contracts": ["packages/plugin-contracts/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue"]
+}

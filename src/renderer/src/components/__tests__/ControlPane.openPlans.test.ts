@@ -1,8 +1,6 @@
 // @vitest-environment happy-dom
-// The Plans surface is now a first-class sidebar tab (📋 in the icon rail) that
-// renders the embedded PlanPane inside the narrow sidebar — there is no longer a
-// pop-out button in the Pipelines header. These tests cover the tab button and
-// the sidebar branch that mounts PlanPane.
+// Plans is an ordinary installed contribution. These tests keep the empty
+// catalog behavior separate from the generic left-region placement path.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
@@ -19,7 +17,17 @@ const minimalProps = {
   analyzerModel: '',
   analyzerStatus: { available: false, version: '', defaultModel: '', models: [], benchmarkResults: [] },
   autoAnswerEnabled: false,
-  existingProject: null
+  existingProject: null,
+  pluginContributions: [{
+    pluginId: 'navide.plans',
+    packageVersion: '1.0.0',
+    contributionKey: 'navide.plans.left',
+    title: 'Plans',
+    icon: null,
+    kind: 'custom',
+    location: 'left',
+    manifestOrder: 0,
+  }],
 } as unknown as Record<string, unknown>
 
 // Minimal backend so the Explorer/Git/Plans child panes (all `v-if="backend"`)
@@ -51,20 +59,17 @@ describe('ControlPane – Plans sidebar tab', () => {
     expect(wrapper.find('.plans-btn').exists()).toBe(false)
   })
 
-  it('renders a Plans tab button in the sidebar icon rail', () => {
+  it('renders an installed Plans contribution in the sidebar icon rail', () => {
     const btns = wrapper.findAll('.sidebar-tabs .tab-btn')
-    // agents, pipeline, explorer, git, plans
-    expect(btns).toHaveLength(5)
-    expect(btns[4].attributes('title')).toContain('Plans')
+    // agents, pipeline, explorer, installed Plans contribution
+    expect(btns).toHaveLength(4)
+    expect(btns[3].attributes('title')).toContain('Plans')
   })
 
-  it('mounts PlanPane in the sidebar when the Plans tab is picked', async () => {
-    // Pipeline tab: no PlanPane yet.
-    expect(wrapper.find('.plans-split').exists()).toBe(false)
-    await wrapper.findAll('.sidebar-tabs .tab-btn')[4].trigger('click')
+  it('mounts the generic contribution host when the Plans tab is picked', async () => {
+    expect(wrapper.findComponent({ name: 'PluginRegionHost' }).exists()).toBe(false)
+    await wrapper.findAll('.sidebar-tabs .tab-btn')[3].trigger('click')
     await wrapper.vm.$nextTick()
-    // Plans now live in-sidebar; the mounted PlanPane is the observable effect
-    // (the tab no longer emits update:sidebar-tab — App.vue does not consume it).
-    expect(wrapper.find('.plans-split').exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'PluginRegionHost' }).exists()).toBe(true)
   })
 })

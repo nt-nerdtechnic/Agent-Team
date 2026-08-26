@@ -488,6 +488,28 @@ describe('registerDescriptor reserved-id guard', () => {
         location: 'window',
       }),
     ])
+    expect(mgr.listContributionCatalog()).toEqual([
+      {
+        pluginId: 'acme.files',
+        packageVersion: null,
+        contributionKey: 'acme.files.left',
+        title: 'Files',
+        icon: null,
+        kind: 'custom',
+        location: 'left',
+        manifestOrder: 0,
+      },
+      {
+        pluginId: 'acme.files',
+        packageVersion: null,
+        contributionKey: 'acme.files.window',
+        title: 'Files window',
+        icon: null,
+        kind: 'custom',
+        location: 'window',
+        manifestOrder: 1,
+      },
+    ])
   })
 })
 

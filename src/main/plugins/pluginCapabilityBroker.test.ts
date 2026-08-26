@@ -251,7 +251,7 @@ describe('Issue 03/04 public Host planner', () => {
     ...overrides,
   })
 
-  it('returns a Host-owned plan only after grant, eligibility, binding, and schema checks', () => {
+  it('returns a Host-owned plan only after grant, binding, and schema checks', () => {
     expect(planPublicCapabilityCall(call(), policy, context())).toMatchObject({
       kind: 'allow',
       plan: { kind: 'public', address: 'aiCli.startSession', scope: 'workspace', runtime: binding },
@@ -269,10 +269,10 @@ describe('Issue 03/04 public Host planner', () => {
     })
   })
 
-  it('does not treat first-party eligibility as an automatic grant', () => {
+  it('does not require first-party publisher eligibility', () => {
     expect(planPublicCapabilityCall(call(), policy, context({ publisherEligible: false }))).toMatchObject({
-      kind: 'deny',
-      response: { error: { code: 'CAPABILITY_DENIED' } },
+      kind: 'allow',
+      plan: { kind: 'public', address: 'aiCli.startSession' },
     })
   })
 

@@ -1,10 +1,10 @@
 import { ref } from 'vue'
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '#git-feature'
 import {
   GIT_HOST_READ_ONLY_KEYS,
   GIT_USER_PREFERENCE_KEYS,
   GIT_WORKSPACE_REPOSITORY_KEY,
-} from '@navide/git-feature'
+} from '#git-feature'
 import type {
   GitAccountPort,
   GitAccountPublic,
@@ -16,16 +16,11 @@ import type {
   GitPaneUiPort,
   IssuePort,
 } from './ports/gitSurface'
-import type { PortResponse } from '@navide/shared'
-import type { KeybindingsPort } from '@navide/shared'
-import type { SettingsBackend } from '@navide/shared'
-import type {
-  TerminalCreateRequest,
-  TerminalDockPort,
-  TerminalFileListResult,
-} from '@navide/terminal'
+import type { PortResponse } from '@navide/plugin-ui-vue/shared'
+import type { KeybindingsPort } from '@navide/plugin-ui-vue/shared'
+import type { SettingsBackend } from '@navide/plugin-ui-vue/shared'
 import type { Issue, IssueDetail, IssueProviderInfo } from './composables/useIssues'
-import type { GitTransportStatusSource } from '@navide/git-feature'
+import type { GitTransportStatusSource } from '#git-feature'
 import type { GitContributionAction, GitContributionState } from './ports/gitContribution'
 import type { GitWorkspaceGrantPort } from './ports/gitSurface'
 import { navBridge } from './capabilityBackend'
@@ -393,78 +388,6 @@ export function createPluginGitSettingsPort(sdk: PluginCapabilitySdk): SettingsB
       await requireOk(sdk.request('ui.settings.set', { updates }))
     },
     onChanged: (callback) => sdk.subscribe('ui.settings_changed', callback),
-  }
-}
-
-export function createPluginTerminalDockPort(sdk: PluginCapabilitySdk): TerminalDockPort {
-  const request = <T = unknown>(type: string, payload: Record<string, unknown> = {}, timeoutMs?: number) =>
-    timeoutMs === undefined ? sdk.request<T>(type, payload) : sdk.request<T>(type, payload, timeoutMs)
-  if (!isManifestV2Runtime()) throw new Error('navide.git requires a Manifest v2 view query')
-  return {
-      status: sdk.status,
-      shell: sdk.shell,
-      autoRestart: sdk.autoRestart,
-      input: (sessionId, data, timeoutMs) => request('aiCli.sendInput', { sessionId, data }, timeoutMs),
-      create: async (requestBody, timeoutMs) => {
-        const metadata = requestBody.metadata ?? {}
-        const yolo = metadata.yolo
-        const response = await request<{ sessionId: string }>('aiCli.startSession', {
-          profileId: requestBody.agentKey || 'claude',
-          requestId: requestBody.createGeneration,
-          cols: requestBody.cols,
-          rows: requestBody.rows,
-          paneId: requestBody.paneId,
-          yolo: yolo === true,
-        }, timeoutMs)
-        return {
-          ...response,
-          payload: response.ok && response.payload
-            ? { terminal_session_id: response.payload.sessionId, pid: 0 }
-            : null,
-        }
-      },
-      cancelCreate: (_paneId, createGeneration) => request('aiCli.cancelStart', { requestId: createGeneration }),
-      reattach: async (sessionIds, cols, rows) => {
-        const results = await Promise.all(sessionIds.map((sessionId) =>
-          request<{ sessionId: string }>('aiCli.reattachSession', { sessionId, cols, rows })))
-        const alive = results.flatMap((result, index) => result.ok ? [sessionIds[index]!] : [])
-        const dead = results.flatMap((result, index) => result.ok ? [] : [sessionIds[index]!])
-        return { ok: true, payload: { alive, dead }, error: null }
-      },
-      resize: (sessionId, cols, rows) => request('aiCli.resizeSession', { sessionId, cols, rows }),
-      interrupt: (sessionId) => request('aiCli.interruptSession', { sessionId }),
-      kill: (sessionId, force) => request('aiCli.stopSession', { sessionId, force }),
-      redraw: (sessionId, cols, rows) => request('aiCli.redrawSession', { sessionId, cols, rows }),
-      onOutput: (callback) => sdk.subscribe('aiCli.output', (payload) => {
-        const event = payload as { sessionId?: string; data?: string }
-        if (event.sessionId && typeof event.data === 'string') {
-          callback({ terminal_session_id: event.sessionId, data: event.data })
-        }
-      }),
-      onExit: (callback) => sdk.subscribe('aiCli.exited', (payload) => {
-        const event = payload as { sessionId?: string; exitCode?: number | null }
-        if (event.sessionId) {
-          callback({
-            terminal_session_id: event.sessionId,
-            reason: 'exited',
-            exit_code: event.exitCode ?? null,
-            signal: null,
-          })
-        }
-      }),
-      listFiles: (_workspacePath, query, maxResults) => request<TerminalFileListResult>('fs.listFilesFlat', {
-        query,
-        maxResults,
-      }),
-      listAgentPanes: () => request('agent_msg.list', {}),
-      statPath: (path, timeoutMs) => request('fs.statPath', { path }, timeoutMs),
-      openFile: async ({ filepath, line }) => {
-        await requireOk(sdk.request('ui.open_in_editor', {
-          path: filepath,
-          ...(line === undefined ? {} : { line }),
-        }))
-      },
-      openExternal: async (url) => { await requireOk(sdk.request('ui.open_external', { url })) },
   }
 }
 

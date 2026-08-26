@@ -1,11 +1,11 @@
 // @vitest-environment happy-dom
-// Cmd+1..5 sidebar-tab switching.
+// Cmd+1..4 core sidebar-tab switching.
 //
 // These used to be a bare `document.addEventListener('keydown')` inside
 // ControlPane, outside the keybinding system — which meant Settings could
 // neither list nor rebind them, and unbinding Cmd+1 there still left the
 // listener switching tabs. They are ordinary commands now
-// (`controlPane.selectSidebarTab1..5`, bound in defaults.ts under
+// (`controlPane.selectSidebarTab1..3`, bound in defaults.ts under
 // `paneStage && !editorOpen`), so this drives them through the real
 // capture-phase dispatcher instead of dispatching on `document`.
 //
@@ -46,9 +46,9 @@ function keydown(init: KeyboardEventInit): void {
   window.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
 }
 
-/** Active tab off the nav: 0=agents, 1=pipeline, 2=explorer, 3=git, 4=plans. */
-function activeTab(wrapper: VueWrapper): 'agents' | 'pipeline' | 'explorer' | 'git' | 'plans' | null {
-  const order = ['agents', 'pipeline', 'explorer', 'git', 'plans'] as const
+/** Active tab off the nav: 0=agents, 1=pipeline, 2=explorer. */
+function activeTab(wrapper: VueWrapper): 'agents' | 'pipeline' | 'explorer' | null {
+  const order = ['agents', 'pipeline', 'explorer'] as const
   const btns = wrapper.findAll('.sidebar-tabs .tab-btn')
   const idx = btns.findIndex((b) => b.classes().includes('active'))
   return idx >= 0 ? order[idx] : null
@@ -89,29 +89,25 @@ describe('ControlPane – Cmd+number sidebar shortcut', () => {
     expect(activeTab(wrapper)).toBe('explorer')
   })
 
-  it('Cmd+4 switches to the git tab', async () => {
+  it('Cmd+4 is ignored when no plugin contribution owns that slot', async () => {
     keydown({ key: '4', metaKey: true, code: 'Digit4' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('git')
+    expect(activeTab(wrapper)).toBe('explorer')
   })
 
-  it('Cmd+5 switches to the plans tab', async () => {
+  it('Cmd+5 is ignored because plugin tabs are manifest-driven', async () => {
     keydown({ key: '5', metaKey: true, code: 'Digit5' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('plans')
+    expect(activeTab(wrapper)).toBe('explorer')
   })
 
   it('Cmd+1 switches to the agents tab', async () => {
-    keydown({ key: '4', metaKey: true, code: 'Digit4' })
-    await wrapper.vm.$nextTick()
     keydown({ key: '1', metaKey: true, code: 'Digit1' })
     await wrapper.vm.$nextTick()
     expect(activeTab(wrapper)).toBe('agents')
   })
 
   it('Cmd+3 switches back to the explorer tab', async () => {
-    keydown({ key: '4', metaKey: true, code: 'Digit4' })
-    await wrapper.vm.$nextTick()
     keydown({ key: '3', metaKey: true, code: 'Digit3' })
     await wrapper.vm.$nextTick()
     expect(activeTab(wrapper)).toBe('explorer')
@@ -151,7 +147,7 @@ describe('ControlPane – Cmd+number sidebar shortcut', () => {
 
     keydown({ key: '4', metaKey: true, code: 'Digit4' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('git')
+    expect(activeTab(wrapper)).toBe('explorer')
 
     ta.remove()
   })

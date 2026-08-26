@@ -168,7 +168,7 @@ describe('third-party plugin external workspace', () => {
             'utf8'
           )
           expect(packageJson).not.toContain('workspace:')
-          expect(packageJson).not.toContain('packages/features')
+          expect(packageJson).not.toContain('packages/internal')
         }
         runPnpmOrThrow(['run', 'build:public-packages'], repository)
 

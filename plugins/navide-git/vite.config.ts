@@ -27,15 +27,13 @@ export default defineConfig({
   base: './',
   plugins: [vue(), emitManifest],
   resolve: {
-    alias: {
-      '@navide/shared': resolve(repositoryRoot, 'packages/features/shared/src'),
-      '@navide/ui-foundation': resolve(repositoryRoot, 'packages/features/ui-foundation/src'),
-      '@navide/ui-foundation/styles.css': resolve(repositoryRoot, 'packages/features/ui-foundation/src/styles.css'),
-      '@navide/terminal': resolve(repositoryRoot, 'packages/features/terminal/src'),
-      '@navide/plugin-shell': resolve(repositoryRoot, 'packages/features/plugin-shell/src'),
-      '@navide/git-feature': resolve(repositoryRoot, 'packages/features/git/src'),
-      '@navide/git-feature/testing': resolve(repositoryRoot, 'packages/features/git/src/testing.ts'),
-    },
+    alias: [
+      { find: '#git-feature', replacement: resolve(packageRoot, 'src/git-feature/index.ts') },
+      { find: '@navide/plugin-ui-vue/styles.css', replacement: resolve(repositoryRoot, 'packages/plugin-ui-vue/src/foundation/styles.css') },
+      { find: '@navide/plugin-ui-vue/shared', replacement: resolve(repositoryRoot, 'packages/plugin-ui-vue/src/shared/index.ts') },
+      { find: '@navide/plugin-ui-vue/foundation', replacement: resolve(repositoryRoot, 'packages/plugin-ui-vue/src/foundation/index.ts') },
+      { find: '@navide/plugin-ui-vue', replacement: resolve(repositoryRoot, 'packages/plugin-ui-vue/src/index.ts') },
+    ],
   },
   build: {
     outDir,

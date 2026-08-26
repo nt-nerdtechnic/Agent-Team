@@ -8,16 +8,19 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowJs": false,
-    "baseUrl": ".",
+    "baseUrl": "../..",
     "paths": {
-      "@navide/shared": ["../../packages/features/shared/src/index.ts"],
-      "@navide/shared/testing": ["../../packages/features/shared/src/testing.ts"],
-      "@navide/ui-foundation": ["../../packages/features/ui-foundation/src/index.ts"],
-      "@navide/terminal": ["../../packages/features/terminal/src/index.ts"],
-      "@navide/plugin-shell": ["../../packages/features/plugin-shell/src/index.ts"],
-      "@navide/git-feature": ["../../packages/features/git/src/index.ts"],
-      "@navide/git-feature/testing": ["../../packages/features/git/src/testing.ts"]
+      "#git-feature": ["plugins/navide-git/src/git-feature/index.ts"],
+      "#git-feature/testing": ["plugins/navide-git/src/git-feature/testing.ts"],
+      "@navide/git-feature": ["plugins/navide-git/src/git-feature/index.ts"],
+      "@navide/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
+      "@navide/plugin-contracts": ["packages/plugin-contracts/src/index.ts"],
+      "@navide/plugin-ui-vue": ["packages/plugin-ui-vue/src/index.ts"],
+      "@navide/plugin-ui-vue/shared": ["packages/plugin-ui-vue/src/shared/index.ts"],
+      "@navide/plugin-ui-vue/shared/testing": ["packages/plugin-ui-vue/src/shared/testing.ts"],
+      "@navide/plugin-ui-vue/foundation": ["packages/plugin-ui-vue/src/foundation/index.ts"],
+      "@navide/plugin-ui-vue/styles.css": ["packages/plugin-ui-vue/src/foundation/styles.css"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "tests/**/*.ts", "../../packages/features/shared/src/**/*.ts", "../../packages/features/shared/src/**/*.vue", "../../packages/features/ui-foundation/src/**/*.ts", "../../packages/features/ui-foundation/src/**/*.vue", "../../packages/features/terminal/src/**/*.ts", "../../packages/features/terminal/src/**/*.vue", "../../packages/features/plugin-shell/src/**/*.ts", "../../packages/features/plugin-shell/src/**/*.vue"]
+  "include": ["src/**/*.ts", "src/**/*.vue", "tests/**/*.ts"]
 }

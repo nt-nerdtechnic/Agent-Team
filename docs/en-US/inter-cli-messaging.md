@@ -720,8 +720,8 @@ still never persisted.
 | Stop-hook delivery: asking the owning window inside the hook's timeout | `backend/agent_team_backend/hook_drain.py` |
 | Push channels: spawn wiring and the transports themselves | `backend/agent_team_backend/push_delivery.py` |
 | Which channel a CLI offers | `backend/agent_team_backend/cli_vendors/<key>.py` (`push_channel`) |
-| Which delivery holds that channel still answers to | `packages/features/plugin-shell/src/agents/<key>.ts` (`pushChannel`) |
-| Whether a CLI queues input mid-turn | `packages/features/plugin-shell/src/agents/<key>.ts` (`acceptsMidTurnInput`) |
+| Which delivery holds that channel still answers to | `src/renderer/src/platform/plugin-shell/agents/<key>.ts` (`pushChannel`) |
+| Whether a CLI queues input mid-turn | `src/renderer/src/platform/plugin-shell/agents/<key>.ts` (`acceptsMidTurnInput`) |
 | The recipient's view of the queue | `backend/agent_team_backend/agent_message_log.py` (`pending_incoming`) |
 | The installed hook command, and which event keeps its response | `backend/agent_team_backend/claude_hooks.py` |
 | Delivery outcome and hold, as an MCP caller reads them | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |

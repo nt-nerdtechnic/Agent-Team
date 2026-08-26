@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "paths": {
+      "@navide/plugin-sdk": ["packages/plugin-sdk/dist/index.d.ts"],
+      "@navide/plugin-contracts": ["packages/plugin-contracts/dist/index.d.ts"]
+    }
+  },
+  "exclude": ["src/**/*.test.ts"]
+}

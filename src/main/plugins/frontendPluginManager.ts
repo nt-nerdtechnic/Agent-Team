@@ -72,6 +72,10 @@ import {
   GIT_USER_PREFERENCE_KEYS,
   GIT_WORKSPACE_REPOSITORY_KEY,
 } from '@navide/git-feature'
+import {
+  buildPluginContributionCatalog,
+  type PluginContributionCatalogEntry,
+} from './pluginContributionCatalog'
 
 /** Everything the manager needs to launch one plugin view. */
 export interface PluginLaunchDescriptor {
@@ -604,6 +608,10 @@ export class FrontendPluginManager {
   private readonly pendingTerminalOwners = new Map<string, string>()
   /** Host-side subscription disposers grouped by exact view instance. */
   private readonly instanceSubscriptions = new Map<string, Set<() => void>>()
+  /** Region composition owns these handles by Host window and contribution
+   *  key. The renderer only sees catalog metadata and never receives the
+   *  opaque instance id. */
+  private readonly contributionInstances = new Map<string, PluginViewHandle>()
   /** Awaiting terminal create/reattach responses. Teardown invalidates these
    *  records before a late backend response can register a route. */
   private readonly pendingTerminalOperations = new Map<string, PendingTerminalOperation>()
@@ -2638,6 +2646,9 @@ export class FrontendPluginManager {
     this.discardGitPathGrants(instanceId)
     this.running.delete(instanceId)
     this.bySender.delete(plugin.senderId)
+    for (const [key, handle] of this.contributionInstances) {
+      if (handle.instanceId === instanceId) this.contributionInstances.delete(key)
+    }
     if (![...this.running.values()].some((candidate) => candidate.hostWindow.id === plugin.hostWindow.id)) {
       this.gitContributionStates.delete(plugin.hostWindow.id)
     }
@@ -3276,6 +3287,140 @@ export class FrontendPluginManager {
    */
   listViewContributions(): PluginViewLaunchDescriptor[] {
     return [...this.descriptors.values()].flatMap((descriptor) => descriptor.views ?? [])
+  }
+
+  /** Deterministic registry projection used by Host navigation and region
+   *  composition. This projection contains no live view identity. */
+  listContributionCatalog(): PluginContributionCatalogEntry[] {
+    return buildPluginContributionCatalog(this.listDescriptors())
+  }
+
+  private contributionInstanceKey(hostWindow: BrowserWindow, contributionKey: string): string {
+    return `${hostWindow.id}:${contributionKey}`
+  }
+
+  /** Open or update one catalog contribution without exposing the runtime
+   *  instance handle to renderer code. The Host resolves the canonical view
+   *  by contribution key and retains the handle in the main process. */
+  async openContribution(
+    hostWindow: BrowserWindow,
+    contributionKey: string,
+    options: Omit<PluginViewOpenOptions, 'hostWindow'>,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const descriptor = this.listDescriptors().find((candidate) =>
+      candidate.views?.some((view) => view.contributionKey === contributionKey)
+    )
+    const view = descriptor?.views?.find((candidate) => candidate.contributionKey === contributionKey)
+    if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
+    if (view.location === 'window') {
+      return { ok: false, error: 'window contributions require a dedicated Host window' }
+    }
+
+    const key = this.contributionInstanceKey(hostWindow, contributionKey)
+    const existing = this.contributionInstances.get(key)
+    if (existing && this.running.has(existing.instanceId)) {
+      const workspace = options.workspacePath ?? null
+      const currentWorkspace = this.workspacePathOfInstance(existing.instanceId)
+      if (!workspace || !currentWorkspace || resolve(workspace) === resolve(currentWorkspace)) {
+        this.setBounds(existing.instanceId, options.bounds as PluginBounds)
+        this.updateViewQuery(existing.instanceId, options.query ?? '')
+        this.activate(existing.instanceId)
+        return { ok: true }
+      }
+      this.destroyInstance(existing.instanceId)
+      this.contributionInstances.delete(key)
+    } else if (existing) {
+      this.contributionInstances.delete(key)
+    }
+
+    try {
+      const handle = await this.openView(descriptor, view, {
+        ...options,
+        hostWindow,
+      })
+      this.contributionInstances.set(key, handle)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** Open a catalog contribution whose placement is a dedicated BrowserWindow.
+   * The window host is supplied by Electron main; renderer callers only send
+   * the stable contribution key and workspace/query metadata. */
+  async openContributionWindow(
+    hostWindow: BrowserWindow,
+    contributionKey: string,
+    options: Omit<PluginViewOpenOptions, 'hostWindow' | 'bounds'>,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const descriptor = this.listDescriptors().find((candidate) =>
+      candidate.views?.some((view) => view.contributionKey === contributionKey)
+    )
+    const view = descriptor?.views?.find((candidate) => candidate.contributionKey === contributionKey)
+    if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
+    if (view.location !== 'window') {
+      return { ok: false, error: 'contribution is not a window view' }
+    }
+
+    const key = this.contributionInstanceKey(hostWindow, contributionKey)
+    const existing = this.contributionInstances.get(key)
+    if (existing && this.running.has(existing.instanceId)) {
+      const workspace = options.workspacePath ?? null
+      const currentWorkspace = this.workspacePathOfInstance(existing.instanceId)
+      if (!workspace || !currentWorkspace || resolve(workspace) === resolve(currentWorkspace)) {
+        this.updateViewQuery(existing.instanceId, options.query ?? '')
+        this.activate(existing.instanceId)
+        this.focusInstance(existing.instanceId)
+        return { ok: true }
+      }
+      this.destroyInstance(existing.instanceId)
+      this.contributionInstances.delete(key)
+    } else if (existing) {
+      this.contributionInstances.delete(key)
+    }
+
+    try {
+      const handle = await this.openView(descriptor, view, {
+        ...options,
+        hostWindow,
+        bounds: 'fill',
+        closeHostOnHide: true,
+        mirrorTitle: true,
+      })
+      this.contributionInstances.set(key, handle)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** Update visibility/bounds for a Host region without accepting an opaque
+   *  instance id from renderer input. */
+  updateContribution(
+    hostWindow: BrowserWindow,
+    contributionKey: string,
+    bounds: PluginBounds,
+    visible: boolean,
+  ): { ok: boolean } {
+    const key = this.contributionInstanceKey(hostWindow, contributionKey)
+    const handle = this.contributionInstances.get(key)
+    if (!handle || !this.running.has(handle.instanceId)) {
+      this.contributionInstances.delete(key)
+      return { ok: false }
+    }
+    this.setBounds(handle.instanceId, bounds)
+    if (visible) this.activate(handle.instanceId)
+    else this.deactivate(handle.instanceId)
+    return { ok: true }
+  }
+
+  /** Destroy one contribution in one Host region. */
+  closeContribution(hostWindow: BrowserWindow, contributionKey: string): { ok: boolean } {
+    const key = this.contributionInstanceKey(hostWindow, contributionKey)
+    const handle = this.contributionInstances.get(key)
+    this.contributionInstances.delete(key)
+    if (handle) this.destroyInstance(handle.instanceId)
+    return { ok: true }
   }
 
   /**

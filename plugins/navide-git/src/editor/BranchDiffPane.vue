@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { parseHunks, toSideBySide, type Hunk, type SideRow } from '../lib/git-diff'
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '#git-feature'
 import type { GitBranchDiffPort } from '../ports/gitSurface'
 import { useGit } from '../composables/useGit'
 

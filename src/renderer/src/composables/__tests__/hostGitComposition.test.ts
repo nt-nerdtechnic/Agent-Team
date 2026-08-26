@@ -6,10 +6,7 @@ const rendererRoot = resolve(process.cwd(), 'src/renderer/src')
 // GitWindowApp is bundled as the navide.git plugin, so Issue 12 owns that
 // composition rather than the Host entry router.
 const issue12OwnedSources = new Set(['GitWindowApp.vue'])
-const v2GitHostCompositionSources = new Set([
-  'components/ControlPane.vue',
-  'components/GitPluginHostSlot.vue',
-])
+const v2GitHostCompositionSources = new Set(['components/GitPluginHostSlot.vue'])
 // EditorWindowApp remains a separate legacy editor composition; Issue 19's
 // ownership boundary covers only the v2 Git left/window contribution path.
 
@@ -34,10 +31,12 @@ function gitPaneMounts(source: string): string[] {
 }
 
 describe('Host Git composition', () => {
-  it('routes the main ControlPane Git tab through the package contribution slot', () => {
+  it('routes ControlPane left contributions through the generic region host', () => {
     const controlPane = readFileSync(join(rendererRoot, 'components', 'ControlPane.vue'), 'utf8')
+    expect(controlPane).toContain("import PluginRegionHost")
+    expect(controlPane).toContain('<PluginRegionHost')
     expect(controlPane).toContain("import GitPluginHostSlot from './GitPluginHostSlot.vue'")
-    expect(controlPane).toContain('<GitPluginHostSlot')
+    expect(controlPane).toContain('v-if="legacyGitRecovery && backend && sidebarTab === \'git\'"')
     expect(controlPane).not.toContain('MultiRepoGit')
     expect(controlPane).not.toContain('<GitPane')
   })

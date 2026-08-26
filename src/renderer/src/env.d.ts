@@ -282,6 +282,34 @@ declare global {
       }
       plugins?: {
         listInstalled: () => Promise<InstalledPluginSummary[]>
+        listContributions: () => Promise<Array<{
+          pluginId: string
+          packageVersion: string | null
+          contributionKey: string
+          title: string
+          icon: string | null
+          kind: 'custom'
+          location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
+          manifestOrder: number
+        }>>
+        openContribution: (args: {
+          contributionKey: string
+          workspace_path: string
+          bounds: { x: number; y: number; width: number; height: number }
+          query?: string
+        }) => Promise<{ ok: boolean; error?: string }>
+        openContributionWindow: (args: {
+          contributionKey: string
+          workspace_path: string
+          query?: string
+        }) => Promise<{ ok: boolean; error?: string }>
+        updateContribution: (args: {
+          contributionKey: string
+          bounds: { x: number; y: number; width: number; height: number }
+          visible: boolean
+        }) => Promise<{ ok: boolean }>
+        closeContribution: (args: { contributionKey: string }) => Promise<{ ok: boolean }>
+        onContributionsChanged: (handler: () => void) => () => void
         marketplaceSearch: (query?: string) => Promise<MarketplaceListResponse>
         prepareInstall: (args: {
           namespace: string

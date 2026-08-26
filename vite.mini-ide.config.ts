@@ -68,12 +68,12 @@ export default defineConfig({
     //   ../../composables/useBackend  ./useBackend  ../useBackend
     alias: [
       { find: /^(?:\.\.?\/)+(?:composables\/)?useBackend$/, replacement: capabilityBackend },
-      { find: '@navide/shared', replacement: resolve(__dirname, 'packages/features/shared/src') },
-      { find: '@navide/ui-foundation', replacement: resolve(__dirname, 'packages/features/ui-foundation/src') },
-      { find: '@navide/ui-foundation/styles.css', replacement: resolve(__dirname, 'packages/features/ui-foundation/src/styles.css') },
-      { find: '@navide/terminal', replacement: resolve(__dirname, 'packages/features/terminal/src') },
-      { find: '@navide/plugin-shell', replacement: resolve(__dirname, 'packages/features/plugin-shell/src') },
-      { find: '@navide/git-feature', replacement: resolve(__dirname, 'packages/features/git/src') },
+      { find: '@navide/shared', replacement: resolve(__dirname, 'packages/plugin-ui-vue/src/shared/index.ts') },
+      { find: '@navide/ui-foundation/styles.css', replacement: resolve(__dirname, 'packages/plugin-ui-vue/src/foundation/styles.css') },
+      { find: '@navide/ui-foundation', replacement: resolve(__dirname, 'packages/plugin-ui-vue/src/foundation/index.ts') },
+      { find: '@navide/terminal', replacement: resolve(__dirname, 'src/renderer/src/platform/terminal/index.ts') },
+      { find: '@navide/plugin-shell', replacement: resolve(__dirname, 'src/renderer/src/platform/plugin-shell/index.ts') },
+      { find: '@navide/git-feature', replacement: resolve(__dirname, 'plugins/navide-git/src/git-feature/index.ts') },
     ],
   },
   define: {

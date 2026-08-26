@@ -31,7 +31,7 @@ const props = {
 /** True when the 1st tab button (Agents) carries the active class. */
 function onAgentsTab(wrapper: VueWrapper): boolean {
   const btns = wrapper.findAll('.sidebar-tabs .tab-btn')
-  return btns.length === 5 && btns[0].classes().includes('active')
+  return btns.length === 3 && btns[0].classes().includes('active')
 }
 
 describe('ControlPane – Agents tab is surfaced by programmatic entry points', () => {

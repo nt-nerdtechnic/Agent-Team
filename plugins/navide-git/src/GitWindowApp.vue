@@ -18,9 +18,10 @@
 // UI port, so this surface stays independent of the concrete host transport.
 // All colors map to semantic tokens so the five app themes translate the design.
 
-import { ref, computed, nextTick, onMounted, onUnmounted, inject } from 'vue'
+import { ref, computed, onMounted, onUnmounted, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useKeybindings, registerCommand, setContext } from '@navide/shared'
+import { SafeAiCliPanel, type AiCliSessionController } from '@navide/plugin-ui-vue'
+import { useKeybindings, registerCommand, setContext } from '@navide/plugin-ui-vue/shared'
 import {
   useGit,
   type BlameEntry,
@@ -29,9 +30,8 @@ import {
   type GitFileEntry
 } from './composables/useGit'
 import { useIssues } from './composables/useIssues'
-import { useNotify } from '@navide/ui-foundation'
-import { useTheme } from '@navide/ui-foundation'
-import { settingsGet, onSettingsChanged } from '@navide/shared'
+import { useNotify, useTheme } from '@navide/plugin-ui-vue/foundation'
+import { settingsGet, onSettingsChanged } from '@navide/plugin-ui-vue/shared'
 import {
   GIT_BRANCH_DIFF_KEY,
   GIT_FILE_ACCESS_KEY,
@@ -40,7 +40,6 @@ import {
   GIT_UI_KEY,
 } from './ports/gitSurface'
 import type { GitWorkspaceGrantPort } from './ports/gitSurface'
-import { TERMINAL_DOCK_KEY } from '@navide/terminal'
 import GitHistoryModal from './components/GitHistoryModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
@@ -48,15 +47,15 @@ import BranchDiffPane from './editor/BranchDiffPane.vue'
 // Hand-rolled three-way merge view (plain Vue, no Monaco — keeps it out of the
 // git plugin bundle); the same component the mini-IDE opens conflicts in.
 import ConflictPane from './editor/ConflictPane.vue'
-// Shared right-side CLI agent dock (rail toggle + resize + embedded PTY).
-import { AiCliDock } from '@navide/plugin-shell'
-import { aiTerminalPaneId, bracketedPaste } from '@navide/plugin-shell'
 import { closeGitWindowMenuOnEscape } from './lib/gitMenuEscape'
 
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager
 // gitQuery). A getter is what useGit expects.
 const workspacePath = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
-const props = defineProps<{ workspaceGrantPort: GitWorkspaceGrantPort }>()
+const props = defineProps<{
+  workspaceGrantPort: GitWorkspaceGrantPort
+  aiCliController: AiCliSessionController
+}>()
 
 const { t } = useI18n()
 const gitTransport = inject(GIT_TRANSPORT_KEY)!
@@ -64,8 +63,7 @@ const fileAccess = inject(GIT_FILE_ACCESS_KEY)!
 const uiPort = inject(GIT_UI_KEY)!
 const branchDiff = inject(GIT_BRANCH_DIFF_KEY)!
 const issuePort = inject(GIT_ISSUES_KEY)!
-const terminalPort = inject(TERMINAL_DOCK_KEY)!
-if (!gitTransport || !fileAccess || !uiPort || !branchDiff || !issuePort || !terminalPort) {
+if (!gitTransport || !fileAccess || !uiPort || !branchDiff || !issuePort) {
   throw new Error('Git plugin ports were not provided by the composition root')
 }
 const { loadTheme } = useTheme()
@@ -356,202 +354,6 @@ async function onOpenWorktree(path: string): Promise<void> {
   }
 }
 
-// ── AI CLI dock (embedded PTY agent panel) ───────────────────────────────────
-// Pane id for the CLI dock, derived per (surface, workspace): Git windows for
-// different workspaces coexist, and a shared fixed id would let one window's
-// reattach steal — and its Start reap — another's running CLI (see
-// aiTerminalPaneId). workspacePath is fixed at window creation, so this is
-// stable for the window's life.
-const AI_PANE_ID = aiTerminalPaneId('git', workspacePath)
-
-// Context payload the CLI dock injects after a fresh spawn: workspace, current
-// branch, and the staged/unstaged/untracked file lists this window is showing.
-// Lists are capped so the CLI is not buried under a huge startup paste.
-const GIT_CONTEXT_MAX_FILES = 50
-function gitContextFileLines(label: string, files: GitFileEntry[]): string[] {
-  if (!files.length) return []
-  const shown = files.slice(0, GIT_CONTEXT_MAX_FILES).map((f) => `  ${f.status} ${f.path}`)
-  const more = files.length - GIT_CONTEXT_MAX_FILES
-  return [`${label} (${files.length}):`, ...shown, ...(more > 0 ? [`  …and ${more} more`] : [])]
-}
-function buildGitContext(): string {
-  const s = gitStatus.value
-  const lines = [
-    "You are running in a terminal embedded in Navide's Git window, assisting " +
-      'the user who is reviewing and committing changes in this repository.',
-    `Workspace: ${workspacePath}`,
-  ]
-  if (s.branch) lines.push(`Current branch: ${s.branch}`)
-  lines.push('')
-  const files = [
-    ...gitContextFileLines('Staged files', s.staged),
-    ...gitContextFileLines('Unstaged files', s.unstaged),
-    ...gitContextFileLines('Untracked files', s.untracked),
-  ]
-  lines.push(...(files.length ? files : ['Working tree clean.']))
-  return lines.join('\n')
-}
-
-// ── Resolve with agent (hand a conflicted file to the CLI dock) ──────────────
-// The dock's `buildContext` pipeline runs on a FRESH spawn only, and its
-// injectNow() re-injects that same buildContext — neither can carry a
-// per-file prompt. So the prompt goes in through the dock's exposed
-// pasteText() wrapped in the very envelope the dock uses internally: one
-// bracketed paste, then a submitting CR after the CLI has ingested it.
-const aiDockRef = ref<InstanceType<typeof AiCliDock> | null>(null)
-const aiDockOpen = ref(false)
-
-/** Caps on quoting the whole conflicted file: past either one the CLI would be
- *  buried in a paste it has to scroll past before reading anything useful, so
- *  only the conflict regions are quoted and the agent is told to open the file
- *  itself. */
-const CONFLICT_PROMPT_MAX_LINES = 400
-const CONFLICT_PROMPT_MAX_CHARS = 16000
-/** Lines quoted around each conflict block in that excerpt mode. */
-const CONFLICT_EXCERPT_CONTEXT = 6
-
-/** 1-based inclusive line ranges of the `<<<<<<<` … `>>>>>>>` blocks.
- *  Deliberately a line scan, not a parser: excerpting needs line numbers only,
- *  and the sides themselves are quoted verbatim for the agent to read. */
-function conflictBlockRanges(lines: string[]): { start: number; end: number }[] {
-  const ranges: { start: number; end: number }[] = []
-  let open = -1
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? ''
-    if (line.startsWith('<<<<<<<')) open = i
-    else if (line.startsWith('>>>>>>>') && open >= 0) {
-      ranges.push({ start: open + 1, end: i + 1 })
-      open = -1
-    }
-  }
-  return ranges
-}
-
-/** Pad each block with context lines and merge the ones that then touch, so
- *  neighbouring conflicts are quoted once instead of twice. */
-function excerptRanges(
-  blocks: { start: number; end: number }[],
-  totalLines: number
-): { start: number; end: number }[] {
-  const merged: { start: number; end: number }[] = []
-  for (const b of blocks) {
-    const start = Math.max(1, b.start - CONFLICT_EXCERPT_CONTEXT)
-    const end = Math.min(totalLines, b.end + CONFLICT_EXCERPT_CONTEXT)
-    const last = merged[merged.length - 1]
-    if (last && start <= last.end + 1) last.end = Math.max(last.end, end)
-    else merged.push({ start, end })
-  }
-  return merged
-}
-
-/** The instruction handed to the CLI agent. English on purpose: it is a prompt
- *  for the CLI, not UI copy (same rule as buildGitContext). */
-function buildConflictPrompt(relPath: string, content: string): string {
-  const lines = content.split('\n')
-  const blocks = conflictBlockRanges(lines)
-  const op = opInProgress.value
-  const out = [
-    'Resolve a git merge conflict for me.',
-    '',
-    `Repository: ${workspacePath}`,
-    `File: ${relPath} (absolute path: ${absPath(relPath)})`,
-    ...(op ? [`Operation in progress: ${op}`] : []),
-    `Conflict blocks in this file: ${blocks.length}`,
-    '',
-    'What to do:',
-    '1. Read both sides of every conflict block: "ours" is between <<<<<<< and' +
-      ' =======, "theirs" is between ======= and >>>>>>>.',
-    '2. Work out what each side is trying to do, then edit the file in place so' +
-      ' the result keeps both intents wherever they are compatible.',
-    '3. Remove every conflict marker line (<<<<<<<, |||||||, =======, >>>>>>>).',
-    '4. Do not stage and do not commit — I review the result and commit from' +
-      " Navide's Git window.",
-    '5. If a block is genuinely ambiguous, stop and explain the options instead' +
-      ' of guessing.',
-    ''
-  ]
-  if (lines.length <= CONFLICT_PROMPT_MAX_LINES && content.length <= CONFLICT_PROMPT_MAX_CHARS) {
-    out.push(`Full content of ${relPath}:`, '', content)
-    return out.join('\n')
-  }
-  out.push(
-    `The file is large (${lines.length} lines, ${content.length} characters), so` +
-      ` only the conflict regions are quoted below, with ${CONFLICT_EXCERPT_CONTEXT}` +
-      ' lines of context around each one. This is an excerpt — read the complete' +
-      ` file at ${absPath(relPath)} before editing it.`,
-    ''
-  )
-  if (!blocks.length) {
-    out.push('(No conflict markers found — check whether the file is already resolved.)')
-    return out.join('\n')
-  }
-  for (const r of excerptRanges(blocks, lines.length)) {
-    out.push(`--- ${relPath} lines ${r.start}-${r.end} ---`, ...lines.slice(r.start - 1, r.end), '')
-  }
-  return out.join('\n')
-}
-
-// A fresh spawn injects the dock's own git context first, after 2000 ms of CLI
-// silence (AiCliDock injectQuietMs). Requiring a strictly longer quiet window
-// here keeps this prompt behind that injection instead of interleaving with
-// it: the context paste is itself PTY activity, so it restarts this wait.
-const AGENT_PROMPT_QUIET_MS = 3500
-const AGENT_PROMPT_TIMEOUT_MS = 25000
-
-type DockTerminal = { status: string; lastRawActivityAt: number } | null
-
-async function waitForCliQuiet(term: () => DockTerminal): Promise<void> {
-  const deadline = Date.now() + AGENT_PROMPT_TIMEOUT_MS
-  for (;;) {
-    const t = term()
-    if (!t || t.status !== 'running') return
-    const last = t.lastRawActivityAt
-    if ((last > 0 && Date.now() - last >= AGENT_PROMPT_QUIET_MS) || Date.now() >= deadline) return
-    await new Promise((r) => setTimeout(r, 250))
-  }
-}
-
-async function sendPromptToAgent(prompt: string): Promise<{ ok: boolean; error?: string }> {
-  const dock = aiDockRef.value
-  if (!dock) return { ok: false, error: t('label.resolve-agent-unavailable') }
-  const term = (): DockTerminal => (dock.terminal as unknown as DockTerminal) ?? null
-  if (term()?.status !== 'running') {
-    await dock.start()
-    if (term()?.status !== 'running') return { ok: false, error: t('label.resolve-agent-start-failed') }
-    await waitForCliQuiet(term)
-    if (term()?.status !== 'running') return { ok: false, error: t('label.resolve-agent-start-failed') }
-  }
-  // Report a refused paste rather than following it with a bare CR: the two
-  // sends are 300 ms apart and the transport can drop in between.
-  if (!dock.pasteText(bracketedPaste(prompt))) {
-    return { ok: false, error: t('label.resolve-agent-start-failed') }
-  }
-  // Let the CLI ingest the paste before the submitting CR (the dock's own
-  // context injection uses the same 300 ms gap).
-  await new Promise((r) => setTimeout(r, 300))
-  dock.pasteText('\r')
-  return { ok: true }
-}
-
-/** Read the conflicted file, build the prompt, and hand it to the CLI dock —
- *  opening the panel so the user sees the agent working. The agent's edits
- *  arrive back through the existing git.changed refresh; nothing to wire here. */
-async function onResolveWithAgent(path: string): Promise<void> {
-  const resp = await fileAccess.readFile(workspacePath, path)
-  if (!resp.ok || typeof resp.content !== 'string') {
-    const detail = resp.error
-    notify.toast(detail || t('label.resolve-agent-read-failed', { path }), { type: 'error' })
-    return
-  }
-  aiDockOpen.value = true
-  const sent = await sendPromptToAgent(buildConflictPrompt(path, resp.content))
-  if (!sent.ok) {
-    notify.toast(sent.error || t('label.operation-failed'), { type: 'error' })
-    return
-  }
-  notify.toast(t('label.resolve-agent-sent', { path }), { type: 'success' })
-}
-
 // ── The file card: checkbox IS the stage state ───────────────────────────────
 function isConflictEntry(f: GitFileEntry): boolean {
   return f.status === 'U'
@@ -616,6 +418,9 @@ async function onResolveOurs(path: string): Promise<void> {
 }
 async function onResolveTheirs(path: string): Promise<void> {
   toastResult(await resolveConflictTheirs(path))
+}
+function onResolveWithAgent(_path?: string): void {
+  notify.toast('Use the AI CLI panel to start a session before resolving this file.', { type: 'info' })
 }
 async function onAbortOperation(): Promise<void> {
   const op = opInProgress.value
@@ -1487,8 +1292,7 @@ registerCommand('git.sync', () => {
   if (gitActionsReady()) void onSync()
 })
 registerCommand('git.focusAgent', () => {
-  aiDockOpen.value = true
-  void nextTick(() => aiDockRef.value?.terminal?.focus())
+  onResolveWithAgent()
 })
 </script>
 
@@ -2210,17 +2014,7 @@ registerCommand('git.focusAgent', () => {
         </div>
       </section>
 
-      <!-- Right AI CLI dock (rail toggle + resize + embedded PTY terminal) -->
-      <AiCliDock
-        ref="aiDockRef"
-        v-model:open="aiDockOpen"
-        width-key="git-ai-panel-width"
-        :pane-id="AI_PANE_ID"
-        origin="git-window"
-        :workspace-path="workspacePath"
-        :terminal-port="terminalPort"
-        :build-context="buildGitContext"
-      />
+      <SafeAiCliPanel :controller="props.aiCliController" />
     </div>
 
     <!-- ⋯ popover menu -->
@@ -2258,7 +2052,6 @@ registerCommand('git.focusAgent', () => {
 }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .spacer { flex: 1; }
-
 /* ── Toolbar ── */
 .toolbar {
   display: flex;

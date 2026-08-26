@@ -19,6 +19,7 @@ import ControlPane, {
   type AnalyzerStatusView,
   type WorkspaceMode
 } from './components/ControlPane.vue'
+import PluginRegionHost, { type PluginRegionContribution } from './components/PluginRegionHost.vue'
 import type { AgentOverviewRow } from './components/AgentOverviewPanel.vue'
 import QuestionAlert from './components/QuestionAlert.vue'
 import TokenStatsPanel from './components/TokenStatsPanel.vue'
@@ -488,6 +489,7 @@ const WS_PATH_KEY = 'agentTeam.currentWorkspace'
 // restore — see onWorkspaceCheck.
 const _bootWorkspace = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
 const _bootIsDuplicate = new URLSearchParams(window.location.search).get('duplicate') === '1'
+const legacyGitRecovery = new URLSearchParams(window.location.search).get('legacy_git_recovery') === '1'
 let suppressPaneRestoreOnce = _bootWorkspace !== '' && _bootIsDuplicate
 // Detached child window: shows only one run group of its workspace. When set,
 // this window renders just that group's tab/panes and never persists the shared
@@ -515,7 +517,52 @@ const currentWorkspace = ref<string>(
     }
   })()
 )
+const pluginContributions = ref<PluginRegionContribution[]>([])
 const gitChangesCount = ref(0)
+
+type PluginRegionLocation = PluginRegionContribution['location']
+
+const pluginContributionsByLocation = computed(() => {
+  const grouped: Record<PluginRegionLocation, PluginRegionContribution[]> = {
+    top: [],
+    bottom: [],
+    right: [],
+    left: [],
+    main: [],
+    window: [],
+  }
+  for (const contribution of pluginContributions.value) {
+    grouped[contribution.location].push(contribution)
+  }
+  return grouped
+})
+
+function pluginContributionsAt(location: Exclude<PluginRegionLocation, 'left' | 'window'>): PluginRegionContribution[] {
+  return pluginContributionsByLocation.value[location]
+}
+
+const windowPluginContributions = computed(() => pluginContributionsByLocation.value.window)
+
+async function openPluginContributionWindow(contribution: PluginRegionContribution): Promise<void> {
+  const workspacePath = currentWorkspace.value.trim()
+  if (!workspacePath) return
+  const result = await window.agentTeam?.plugins?.openContributionWindow?.({
+    contributionKey: contribution.contributionKey,
+    workspace_path: workspacePath,
+  })
+  if (!result?.ok) {
+    console.warn(`[renderer] plugin window '${contribution.contributionKey}' could not be opened: ${result?.error ?? 'unknown error'}`)
+  }
+}
+
+async function refreshPluginContributions(): Promise<void> {
+  try {
+    const list = await window.agentTeam?.plugins?.listContributions?.()
+    pluginContributions.value = Array.isArray(list) ? list : []
+  } catch {
+    pluginContributions.value = []
+  }
+}
 const workspaceSelected = ref<boolean>(
   _bootWorkspace !== '' ||
   (() => {
@@ -3418,9 +3465,6 @@ function onGitContributionAction(envelope: {
     case 'open_git_history_window':
       void window.agentTeam?.openGitHistoryWindow?.({ workspace_path: typedAction.workspace_path })
       return
-    case 'changes_count':
-      gitChangesCount.value = typedAction.count
-      return
     case 'open_workspace':
       void window.agentTeam?.openMainWindow?.({ workspace_path: typedAction.path })
       return
@@ -3463,16 +3507,26 @@ function onGitContributionAction(envelope: {
     case 'open_git_accounts':
       openSettingsAccounts()
       return
+    case 'changes_count':
+      gitChangesCount.value = typedAction.count
+      return
   }
 }
 
 let stopGitContributionActions: (() => void) | null = null
+let stopPluginContributionChanges: (() => void) | null = null
 onMounted(() => {
   stopGitContributionActions = window.agentTeam?.onGitContributionAction?.(onGitContributionAction) ?? null
+  void refreshPluginContributions()
+  stopPluginContributionChanges = window.agentTeam?.plugins?.onContributionsChanged?.(() => {
+    void refreshPluginContributions()
+  }) ?? null
 })
 onUnmounted(() => {
   stopGitContributionActions?.()
   stopGitContributionActions = null
+  stopPluginContributionChanges?.()
+  stopPluginContributionChanges = null
 })
 
 // Default delay if no startup trust dialog is observed.
@@ -5662,55 +5716,6 @@ watch(
   },
   { immediate: true },
 )
-
-interface StatusBarGit {
-  branch: string
-  ahead: number
-  behind: number
-  dirty: boolean
-}
-const statusBarGit = ref<StatusBarGit>({ branch: '', ahead: 0, behind: 0, dirty: false })
-
-async function refreshStatusBarGit(): Promise<void> {
-  if (!currentWorkspace.value || !workspaceSelected.value) return
-  if (backend.status.value !== 'connected') return
-  const resp = await sendQuiet<{
-    branch: string; ahead: number; behind: number
-    staged: unknown[]; unstaged: unknown[]
-  }>('git.status', { workspace_path: currentWorkspace.value })
-  if (resp) {
-    statusBarGit.value = {
-      branch: resp.branch || '',
-      ahead: resp.ahead ?? 0,
-      behind: resp.behind ?? 0,
-      dirty: (resp.staged?.length ?? 0) + (resp.unstaged?.length ?? 0) > 0
-    }
-  }
-}
-
-let _gitPollTimer: number | null = null
-// Skip the poll while the window is hidden (minimized / other desktop) — each
-// tick spawns git subprocesses in the backend, and hidden windows kept polling
-// forever. Catch up once when the window becomes visible again.
-// Main reports this over IPC rather than the Page Visibility API: terminal panes
-// need backgroundThrottling disabled, which pins document.hidden to false.
-let _windowVisible = true
-const _offWindowVisibility = window.agentTeam?.onWindowVisibility?.((visible: boolean) => {
-  _windowVisible = visible
-  if (visible && _gitPollTimer !== null) void refreshStatusBarGit()
-})
-onUnmounted(() => _offWindowVisibility?.())
-watch(workspaceSelected, (v) => {
-  if (v) {
-    void refreshStatusBarGit()
-    _gitPollTimer = window.setInterval(() => {
-      if (_windowVisible) void refreshStatusBarGit()
-    }, 5000)
-  } else {
-    if (_gitPollTimer !== null) { clearInterval(_gitPollTimer); _gitPollTimer = null }
-    statusBarGit.value = { branch: '', ahead: 0, behind: 0, dirty: false }
-  }
-}, { immediate: true })
 
 // ── Keybinding system ─────────────────────────────────────────────────────────
 useKeybindings()
@@ -8228,14 +8233,12 @@ async function titlebarRevealWorkspace(): Promise<void> {
   await window.agentTeam.openPath(currentWorkspace.value)
 }
 
-// Titlebar 📋 button: reveal the current workspace's plans. Plans now live in
-// the main-window left sidebar as their own tab (embedded PlanPane), not a
-// detached window — so this just switches ControlPane's sidebar tab to 'plans'
-// (ControlPane owns sidebarTab). The legacy openPlansWindow IPC bridge stays in
-// preload/main but is no longer wired here.
+// Open the installed Plans contribution when it is available. There is no
+// built-in Host fallback: an empty catalog must leave this action inert.
 function openPlansWindow(): void {
   if (!currentWorkspace.value) return
-  controlPaneRef.value?.selectSidebarTab('plans')
+  const plans = windowPluginContributions.value.find((entry) => entry.pluginId === 'navide.plans')
+  if (plans) void openPluginContributionWindow(plans)
 }
 
 async function onWorkspaceBrowse(path: string): Promise<void> {
@@ -12204,6 +12207,34 @@ function paneIsCommander(p: ActivePane): boolean {
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </button>
+      <div v-if="workspaceSelected && windowPluginContributions.length" class="titlebar-plugin-actions">
+        <button
+          v-for="contribution in windowPluginContributions"
+          :key="contribution.contributionKey"
+          class="titlebar-plugin-action"
+          type="button"
+          :title="contribution.title"
+          @mousedown.stop
+          @click="openPluginContributionWindow(contribution)"
+        >
+          {{ contribution.title }}
+        </button>
+      </div>
+    </div>
+    <!-- Manifest-driven top workbench contributions. The Host keeps opaque
+         instance handles in main; this renderer only supplies layout bounds. -->
+    <div
+      v-if="pluginContributionsAt('top').length"
+      class="plugin-region-layer plugin-region-layer--top"
+      data-plugin-region="top"
+    >
+      <PluginRegionHost
+        v-for="contribution in pluginContributionsAt('top')"
+        :key="contribution.contributionKey"
+        :contribution="contribution"
+        :workspace-path="currentWorkspace"
+        :visible="true"
+      />
     </div>
     <ControlPane
       ref="controlPaneRef"
@@ -12221,6 +12252,8 @@ function paneIsCommander(p: ActivePane): boolean {
       :pipelines="pipelinesApi.pipelines.value"
       :active-pipeline-id="pipelinesApi.activePipelineId.value"
       :backend="backend"
+      :plugin-contributions="pluginContributions"
+      :legacy-git-recovery="legacyGitRecovery"
       :git-changes-count="gitChangesCount"
       v-model:yolo-enabled="yoloEnabled"
       v-model:analyzer-model="analyzerModel"
@@ -12392,6 +12425,19 @@ function paneIsCommander(p: ActivePane): boolean {
       :class="{ 'stage--tabbed': stageTabs.length > 0 }"
       :data-layout="effectiveLayoutMode"
     >
+      <div
+        v-if="pluginContributionsAt('main').length"
+        class="plugin-region-layer plugin-region-layer--main"
+        data-plugin-region="main"
+      >
+        <PluginRegionHost
+          v-for="contribution in pluginContributionsAt('main')"
+          :key="contribution.contributionKey"
+          :contribution="contribution"
+          :workspace-path="currentWorkspace"
+          :visible="true"
+        />
+      </div>
       <StageTabBar
         v-if="stageTabs.length > 0"
         :tabs="stageTabs"
@@ -12878,24 +12924,37 @@ function paneIsCommander(p: ActivePane): boolean {
     </Teleport>
     <div class="resize-handle resize-handle-left" @mousedown="onResizeStart($event, 'left')" />
     <div v-if="tokenPanelExpanded" class="resize-handle resize-handle-right" @mousedown="onResizeStart($event, 'right')" />
+    <div
+      v-if="pluginContributionsAt('right').length"
+      class="plugin-region-layer plugin-region-layer--right"
+      data-plugin-region="right"
+    >
+      <PluginRegionHost
+        v-for="contribution in pluginContributionsAt('right')"
+        :key="contribution.contributionKey"
+        :contribution="contribution"
+        :workspace-path="currentWorkspace"
+        :visible="true"
+      />
+    </div>
     <NotificationHost />
     <WhatsNewModal v-if="whatsNewEntry" :entry="whatsNewEntry" @close="dismissWhatsNew" />
     <!-- Status bar -->
     <div class="statusbar">
+      <div
+        v-if="pluginContributionsAt('bottom').length"
+        class="plugin-region-layer plugin-region-layer--bottom"
+        data-plugin-region="bottom"
+      >
+        <PluginRegionHost
+          v-for="contribution in pluginContributionsAt('bottom')"
+          :key="contribution.contributionKey"
+          :contribution="contribution"
+          :workspace-path="currentWorkspace"
+          :visible="true"
+        />
+      </div>
       <div class="statusbar-left">
-        <span v-if="statusBarGit.branch" class="sb-item sb-git">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="6" y1="3" x2="6" y2="15"/>
-            <circle cx="18" cy="6" r="3"/>
-            <circle cx="6" cy="18" r="3"/>
-            <path d="M18 9a9 9 0 0 1-9 9"/>
-          </svg>
-          {{ statusBarGit.branch }}{{ statusBarGit.dirty ? '*' : '' }}
-        </span>
-        <span v-if="statusBarGit.behind > 0 || statusBarGit.ahead > 0" class="sb-item sb-sync">
-          <span v-if="statusBarGit.behind > 0">{{ statusBarGit.behind }}↓</span>
-          <span v-if="statusBarGit.ahead > 0"> {{ statusBarGit.ahead }}↑</span>
-        </span>
         <span
           class="sb-item sb-backend sb-clickable"
           :class="'sb-' + backend.status.value"
@@ -13142,6 +13201,42 @@ function paneIsCommander(p: ActivePane): boolean {
   padding-bottom: 24px;
 }
 
+/* Native plugin views are positioned from these DOM anchors. Empty locations
+   render no anchor, so an app with no installed contribution has no plugin
+   slot, button, or prompt. */
+.plugin-region-layer {
+  position: absolute;
+  min-width: 0;
+  min-height: 0;
+  pointer-events: none;
+  z-index: 120;
+}
+.plugin-region-layer :deep(.plugin-region-host) {
+  pointer-events: none;
+}
+.plugin-region-layer--top {
+  top: 38px;
+  left: var(--left-width, 360px);
+  right: var(--token-panel-width, 36px);
+  height: 32px;
+}
+.plugin-region-layer--main {
+  inset: 0;
+  z-index: 110;
+}
+.plugin-region-layer--right {
+  top: 38px;
+  right: var(--token-panel-width, 36px);
+  bottom: 24px;
+  width: min(320px, 28vw);
+}
+.plugin-region-layer--bottom {
+  top: 0;
+  left: var(--left-width, 360px);
+  right: var(--token-panel-width, 36px);
+  height: 24px;
+}
+
 /* ── Custom Titlebar ─────────────────────────────────────────────────────────── */
 .titlebar {
   position: absolute;
@@ -13233,6 +13328,27 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-hover);
   color: var(--text-bright);
 }
+.titlebar-plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+  flex-shrink: 0;
+}
+.titlebar-plugin-action {
+  -webkit-app-region: no-drag;
+  border: 1px solid var(--border-muted);
+  border-radius: 5px;
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+.titlebar-plugin-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
 
 /* ── Status Bar ──────────────────────────────────────────────────────────────── */
 .statusbar {
@@ -13273,7 +13389,6 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-hover);
   color: var(--text-bright);
 }
-.sb-git { gap: 5px; }
 .sb-dot {
   width: 6px;
   height: 6px;

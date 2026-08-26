@@ -629,8 +629,8 @@ Agent 不必有 Messages 面板可看，也能讀到同一個原因 ——
 | Stop-hook 投遞：在 hook 的逾時內詢問擁有該 Pane 的視窗 | `backend/agent_team_backend/hook_drain.py` |
 | Push 通道：spawn 接線與傳輸機制本身 | `backend/agent_team_backend/push_delivery.py` |
 | 某個 CLI 提供哪一種通道 | `backend/agent_team_backend/cli_vendors/<key>.py`（`push_channel`） |
-| 該通道仍然要遵守哪些投遞保留 | `packages/features/plugin-shell/src/agents/<key>.ts`（`pushChannel`） |
-| 某個 CLI 是否會在回合中途把輸入排隊 | `packages/features/plugin-shell/src/agents/<key>.ts`（`acceptsMidTurnInput`） |
+| 該通道仍然要遵守哪些投遞保留 | `src/renderer/src/platform/plugin-shell/agents/<key>.ts`（`pushChannel`） |
+| 某個 CLI 是否會在回合中途把輸入排隊 | `src/renderer/src/platform/plugin-shell/agents/<key>.ts`（`acceptsMidTurnInput`） |
 | 收件者眼中的佇列 | `backend/agent_team_backend/agent_message_log.py`（`pending_incoming`） |
 | 已安裝的 hook 指令，以及哪個事件會保留它的回應 | `backend/agent_team_backend/claude_hooks.py` |
 | 投遞結果與保留原因，以 MCP 呼叫端讀到的形式 | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |

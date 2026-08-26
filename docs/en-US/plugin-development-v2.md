@@ -39,17 +39,20 @@ Third-party plugins may depend only on these public package names:
 - `@navide/plugin-sdk`: activation, capability calls, events, lifecycle, view,
   and target APIs.
 - `@navide/plugin-ui`: stable design tokens and UI primitives.
+- `@navide/plugin-ui-vue`: Vue bindings, shared presentation services, and
+  safe capability-backed UI controllers that do not expose Host transports.
 
-The repository's `packages/features/*` packages are private, unpublished
-first-party implementation. A bundled plugin such as `navide.git` can use them;
-a third-party plugin cannot. They are not compatibility promises or examples of
-the public dependency graph.
+Official and third-party packages use the same public dependency graph and the
+same install, activation, update, rollback, and uninstall lifecycle. Official
+status changes only Registry trust and marketplace classification; it does not
+grant access to private Host modules or force an official package to be
+installed. The base App must remain usable with an empty plugin catalog.
 
 The package manifests declare public npm publication metadata and use normal
 SemVer 2.0.0 versions, but registry publication is future work outside Issue
 06. The package implementations live under
-`packages/plugin-{contracts,sdk,ui}/` and have no dependency on
-`packages/features/*`. Third-party projects must use registry versions in a
+`packages/plugin-{contracts,sdk,ui,ui-vue}/` and have no dependency on Host
+renderer sources. Third-party projects must use registry versions in a
 published workflow, never `workspace:` dependencies. The Issue 06 release
 gate packs those public packages and installs the tarballs in a directory
 outside the Navide workspace; it does not publish to npm.

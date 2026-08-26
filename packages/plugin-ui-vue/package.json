@@ -1,0 +1,40 @@
+{
+  "name": "@navide/plugin-ui-vue",
+  "version": "1.0.0",
+  "description": "Vue adapters and safe UI controllers for Navide plugins.",
+  "license": "MIT",
+  "publishConfig": { "access": "public" },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./shared": {
+      "types": "./dist/shared/index.d.ts",
+      "import": "./dist/shared/index.js"
+    },
+    "./shared/testing": {
+      "types": "./dist/shared/testing.d.ts",
+      "import": "./dist/shared/testing.js"
+    },
+    "./foundation": {
+      "types": "./dist/foundation/index.d.ts",
+      "import": "./dist/foundation/index.js"
+    },
+    "./styles.css": "./src/foundation/styles.css"
+  },
+  "files": ["dist", "src/foundation/styles.css", "src/foundation/styles"],
+  "peerDependencies": {
+    "@navide/plugin-sdk": "^1.0.0",
+    "vue": "^3.5.13",
+    "vue-i18n": "^10.0.5"
+  },
+  "devDependencies": {
+    "@navide/plugin-sdk": "^1.0.0",
+    "vue": "^3.5.13",
+    "vue-i18n": "^10.0.5"
+  }
+}

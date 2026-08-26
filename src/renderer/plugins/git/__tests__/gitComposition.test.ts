@@ -116,7 +116,7 @@ describe('plugin Git production composition', () => {
   })
 
   it('keeps the Issue 10 Git inventory free of unconsumed capabilities', () => {
-    const featureSource = readFileSync(resolve(repositoryRoot, 'packages/features/git/src/gitTransport.ts'), 'utf8')
+    const featureSource = readFileSync(resolve(repositoryRoot, 'plugins/navide-git/src/git-feature/gitTransport.ts'), 'utf8')
     const pluginSource = readFileSync(resolve(pluginRoot, 'pluginSurfacePorts.ts'), 'utf8')
     expect(featureSource).not.toContain('git.diff_all')
     expect(pluginSource).not.toContain('git.diff_all')

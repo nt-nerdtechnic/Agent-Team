@@ -210,6 +210,11 @@ export function registerPluginIpc(
     }))
   })
 
+  ipcMain.handle('plugins:listContributions', (event) => {
+    assertAuthorized(event)
+    return manager.listContributionCatalog()
+  })
+
   ipcMain.handle('plugins:marketplaceSearch', async (event, query?: string) => {
     assertAuthorized(event)
     const { registryUrl } = resolveConfiguredMarketplace(trust)

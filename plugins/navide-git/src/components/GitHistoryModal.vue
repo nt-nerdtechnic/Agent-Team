@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { computeGraph, laneColor } from '../lib/git-graph'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui-vue/foundation'
 import type { GitCommit, GitCommitDetail, DiffBlameHunk } from '../composables/useGit'
 
 // The full-history dialog reuses the parent GitPane's single useGit instance

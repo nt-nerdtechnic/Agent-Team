@@ -9,11 +9,10 @@
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["electron-vite/node"]
-    ,"baseUrl": "."
-    ,"paths": {
-      "@navide/git-feature": ["packages/features/git/src/index.ts"],
-      "@navide/git-feature/testing": ["packages/features/git/src/testing.ts"]
+    "types": ["electron-vite/node"],
+    "baseUrl": ".",
+    "paths": {
+      "@navide/git-feature": ["plugins/navide-git/src/git-feature/index.ts"]
     }
   },
   "include": [
@@ -21,7 +20,7 @@
     "src/preload/**/*.ts",
     "src/shared/**/*.ts",
     "packages/plugin-contracts/src/**/*.ts",
-    "packages/features/git/src/**/*.ts",
+    "plugins/navide-git/src/git-feature/**/*.ts",
     "electron.vite.config.ts"
   ]
 }
