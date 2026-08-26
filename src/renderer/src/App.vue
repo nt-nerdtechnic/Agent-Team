@@ -11538,6 +11538,13 @@ async function ensurePaneWorkspaceOnScreen(paneId: string): Promise<boolean> {
   return normWs(currentWorkspace.value) === normWs(target)
 }
 
+/** True while a switch is in flight, with the name being entered.
+ *
+ *  Drives the stage's cover: see switchToWorkspace for why the area would
+ *  otherwise sit blank rather than empty. */
+const switchingWorkspace = ref(false)
+const switchingWorkspaceName = ref('')
+
 async function switchToWorkspace(path: string): Promise<void> {
   if (isDetachedWindow) return // see adoptWorkspace
   if (!path || normWs(path) === normWs(currentWorkspace.value)) return
@@ -11559,38 +11566,52 @@ async function switchToWorkspace(path: string): Promise<void> {
   // changes — so the list is untouched and the sidebar does not reshuffle.
   // Both are already in it: the one being left through the watch above, the
   // one being entered through adoptWorkspace.
-  await onWorkspaceBrowse(path, { keepPanes: true })
-  // onWorkspaceBrowse has its own reasons to decline — chiefly finding the
-  // workspace open in some other window — and it declines by returning, which
-  // from here is indistinguishable from having worked. A switch that quietly
-  // does nothing is the worst outcome: the sidebar still says one thing and
-  // the screen another. Undo the list swap and say so.
-  if (normWs(currentWorkspace.value) !== normWs(path)) {
-    notifyRestore.toast(
-      i18n.global.t('switchWorkspace.failed', {
-        name: path.split('/').filter(Boolean).pop() ?? path,
-      }),
-      { type: 'error' },
-    )
-    return
-  }
-  // Load the entered workspace NOW. ControlPane reaches onWorkspaceCheck
-  // through a 400ms debounce on its workspace field — right for someone typing
-  // a path, wrong for a click: for those 400ms the window pairs the new
-  // workspace with the old run groups, so every tab filter misses and the list
-  // and grid blink empty on the way through. The debounced call still arrives
-  // and is a no-op by then.
-  await onWorkspaceCheck(path)
-  // The focused pane is very likely one this window just stopped showing. In
-  // grid mode that is harmless, but sidebar and spotlight render the focused
-  // pane and nothing else, so they would come up blank. Same landing as
-  // onUserSelectTab: keep the focus if it survived the filter, else take the
-  // first pane that did.
-  await nextTick()
-  const visible = tabVisiblePanes.value
-  if (!visible.some((p) => p.id === focusPaneId.value)) {
-    const first = visible[0]?.id
-    if (first) selectPane(first, { userInitiated: false })
+  // Cover the stage for the rest of this. Everything below is awaited, and the
+  // panes on screen belong to the workspace being left — a switch filters them
+  // out rather than tearing them down — so without this the area goes blank
+  // and stays blank while the entered workspace's panes are restored, one CLI
+  // probe each. Blank reads as "the click did nothing".
+  switchingWorkspaceName.value = path.split('/').filter(Boolean).pop() ?? path
+  switchingWorkspace.value = true
+  try {
+    await onWorkspaceBrowse(path, { keepPanes: true })
+    // onWorkspaceBrowse has its own reasons to decline — chiefly finding the
+    // workspace open in some other window — and it declines by returning, which
+    // from here is indistinguishable from having worked. A switch that quietly
+    // does nothing is the worst outcome: the sidebar still says one thing and
+    // the screen another. Undo the list swap and say so.
+    if (normWs(currentWorkspace.value) !== normWs(path)) {
+      notifyRestore.toast(
+        i18n.global.t('switchWorkspace.failed', {
+          name: path.split('/').filter(Boolean).pop() ?? path,
+        }),
+        { type: 'error' },
+      )
+      return
+    }
+    // Load the entered workspace NOW. ControlPane reaches onWorkspaceCheck
+    // through a 400ms debounce on its workspace field — right for someone typing
+    // a path, wrong for a click: for those 400ms the window pairs the new
+    // workspace with the old run groups, so every tab filter misses and the list
+    // and grid blink empty on the way through. The debounced call still arrives
+    // and is a no-op by then.
+    await onWorkspaceCheck(path)
+    // The focused pane is very likely one this window just stopped showing. In
+    // grid mode that is harmless, but sidebar and spotlight render the focused
+    // pane and nothing else, so they would come up blank. Same landing as
+    // onUserSelectTab: keep the focus if it survived the filter, else take the
+    // first pane that did.
+    await nextTick()
+    const visible = tabVisiblePanes.value
+    if (!visible.some((p) => p.id === focusPaneId.value)) {
+      const first = visible[0]?.id
+      if (first) selectPane(first, { userInitiated: false })
+    }
+  } finally {
+    // finally, not after the last await: every path out of here — the decline
+    // above, a throw from restore — must uncover the stage, or the window is
+    // left showing a spinner over panes that are already there.
+    switchingWorkspace.value = false
   }
 }
 
@@ -13636,6 +13657,18 @@ function paneIsCommander(p: ActivePane): boolean {
         </div>
         <div v-if="floatPipExpanded" class="float-pip-resize" @mousedown="onPipResizeStart" />
       </div>
+      <!-- Covers the stage while a workspace switch runs. Last child of the
+           stage, so it paints over the grid without the grid having to know
+           about it, and absolute rather than replacing the grid: tearing the
+           panes out of the DOM would dispose their terminals. -->
+      <Transition name="ws-switch">
+        <div v-if="switchingWorkspace" class="stage-switching" role="status" aria-live="polite">
+          <div class="empty-card loading-card">
+            <div class="spinner"></div>
+            <h2>{{ $t('switchWorkspace.loading', { name: switchingWorkspaceName }) }}</h2>
+          </div>
+        </div>
+      </Transition>
     </main>
     <SlotContainer
       slot-id="down"
@@ -15007,6 +15040,23 @@ function paneIsCommander(p: ActivePane): boolean {
   font-size: var(--font-2xs);
   line-height: 1.7;
 }
+/* The stage keeps its panes through a switch, so this covers them rather than
+   replacing them. Opaque: a translucent wash over another project's terminals
+   reads as a glitch, not as loading. */
+.stage-switching {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-base);
+}
+/* Fades out only. A switch should feel immediate on the way in — a fade-in
+   would just add delay to the thing that is already making them wait. */
+.ws-switch-leave-active { transition: opacity 160ms ease-out; }
+.ws-switch-leave-to { opacity: 0; }
+
 .spinner {
   width: 38px;
   height: 38px;

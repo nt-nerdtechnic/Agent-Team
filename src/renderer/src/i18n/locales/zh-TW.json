@@ -2304,7 +2304,8 @@
     "failed": "無法切換到 {name}。它可能剛剛被其他視窗開啟了，側欄會標示出來。",
     "confirmTitle": "要停掉正在跑的 pipeline 嗎？",
     "confirm": "這個專案正在跑的 pipeline 會被停止 — pipeline 屬於它啟動時的專案，沒辦法留在背景繼續跑。它的 agent 會留著，其他專案的東西也都不受影響。",
-    "confirmBtn": "切換並停止"
+    "confirmBtn": "切換並停止",
+    "loading": "正在切換到 {name}…"
   },
   "closeAll": {
     "label": "全部關閉",
