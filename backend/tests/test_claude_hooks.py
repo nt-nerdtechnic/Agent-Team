@@ -101,3 +101,37 @@ def test_dev_instance_does_not_overwrite_production_hook(tmp_path) -> None:
     # Settings file remains pointing to production port file
     assert settings_file.read_text(encoding="utf-8") == initial_content
 
+
+
+def test_subagent_stop_hook_is_installed(tmp_path) -> None:
+    """The event that closes the loop's blind spot must actually get written.
+
+    PreToolUse alone can only count subagents going in. Without SubagentStop
+    nothing ever counts one coming back out, so the pending count would climb
+    and never fall — worse than not counting at all.
+    """
+    from agent_team_backend.claude_hooks import install_hooks
+
+    settings_file = tmp_path / "settings.json"
+    port_file = tmp_path / "port"
+    port_file.write_text("1234")
+    install_hooks(str(port_file), settings_file=settings_file)
+
+    import json
+
+    hooks = json.loads(settings_file.read_text())["hooks"]
+    assert "SubagentStop" in hooks, "SubagentStop hook was not installed"
+    commands = [
+        h["command"]
+        for entry in hooks["SubagentStop"]
+        for h in entry.get("hooks", [])
+    ]
+    assert any("kind=subagent_stop" in c for c in commands)
+    # It is a plain signal hook: its response is discarded, unlike Stop's.
+    assert all("-o /dev/null" in c for c in commands)
+
+
+def test_subagent_stop_hook_reaches_the_endpoint(tmp_path) -> None:
+    payloads, stdout = _run_hook(tmp_path, "subagent_stop", b'{"ok":true}')
+    assert payloads, "the hook sent nothing"
+    assert stdout == "", "a signal hook's response must not reach the CLI"

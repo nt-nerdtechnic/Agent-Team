@@ -4,11 +4,18 @@ Claude Code (CLI) supports hooks: `~/.claude/settings.json` may declare shell
 commands to run at specific lifecycle events (PreToolUse / Stop / Notification
 / SubagentStop / etc.). Each hook receives a JSON payload on stdin.
 
-We install three hooks pointing at our local FastAPI endpoint so the
+We install four hooks pointing at our local FastAPI endpoint so the
 orchestrator gets reliable signals (better than buffer-scanning):
   - PreToolUse    → 100% signal: agent is actively working
   - Stop          → 100% signal: turn ended
   - Notification  → user attention requested (e.g. waiting for approval)
+  - SubagentStop  → a subagent (Task tool) finished
+
+PreToolUse and SubagentStop together are what let the backend count the
+background subagents a pane is waiting on: Task going in, its stop coming
+back out. The unattended loop reads that count to tell "the turn ended
+because the work is done" apart from "the turn ended to wait", which no
+amount of buffer-scanning could distinguish.
 
 The installer is MERGE-safe: it reads the existing settings.json, only adds
 our hook entries (tagged with a sentinel comment), and never overwrites the
@@ -38,6 +45,7 @@ _HOOK_EVENTS: dict[str, str] = {
     "PreToolUse": "pre_tool_use",
     "Stop": "stop",
     "Notification": "notification",
+    "SubagentStop": "subagent_stop",
 }
 
 #: Events that also arm the background rewake waiter — the hook that lets an

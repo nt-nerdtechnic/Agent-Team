@@ -31,6 +31,7 @@ from . import hook_drain
 from . import loop_watchdog
 from . import mem_probe
 from . import push_delivery
+from . import subagent_tracker
 from .analyzer import DEFAULT_MODEL as ANALYZER_DEFAULT_MODEL
 from .analyzer import (
     classify as _llama_classify,
@@ -626,6 +627,10 @@ async def _active_emit(event: dict[str, Any] | bytes) -> None:
         exit_pane_id = payload.get("pane_id")
         if exit_pane_id:
             _schedule_pane_unregister(exit_pane_id)
+            # A CLI that exits with subagents still running never reports their
+            # stops, so the count would stay above zero for a pane id that no
+            # longer has a CLI behind it.
+            subagent_tracker.reset(str(exit_pane_id))
     session_id = payload.get("terminal_session_id") if isinstance(payload, dict) else None
     if session_id and event.get("type") == "terminal.exit":
         sess = _PTY_OWNERS.pop(session_id, None)
@@ -1457,6 +1462,14 @@ _HOOK_VENDORS = frozenset(
     key for key, spec in _CLI_VENDORS.items() if spec.install_hooks is not None
 )
 
+# Vendors whose hooks report BOTH halves of a subagent's life — the Task going
+# in (PreToolUse) and its stop coming back out (SubagentStop). Counting on a
+# vendor that reports only the first would climb forever, and a count stuck
+# above zero holds the unattended loop back for its whole staleness window.
+# Listed rather than derived: what an installer writes is a fact about that
+# vendor's hook file, not something the vendor spec exposes.
+_SUBAGENT_COUNTING_VENDORS = frozenset({"claude"})
+
 
 @app.post("/hooks/{vendor}")
 async def cli_hook(vendor: str, request: Request) -> Any:
@@ -1464,7 +1477,8 @@ async def cli_hook(vendor: str, request: Request) -> Any:
 
     Hook commands installed by `claude_hooks` / `qwen_hooks` / `copilot_hooks`
     POST here with:
-      - Header X-Agent-Team-Event: pre_tool_use | stop | notification
+      - Header X-Agent-Team-Event: pre_tool_use | stop | notification |
+        subagent_stop
       - Body: the JSON payload the CLI pipes to the hook on stdin
 
     The three vendors disagree on where hooks are configured but agree on what
@@ -1488,10 +1502,15 @@ async def cli_hook(vendor: str, request: Request) -> Any:
     if not isinstance(payload, dict):
         payload = {}
 
-    # Map the CLI's lifecycle to our two event_type buckets.
+    # Map the CLI's lifecycle to our two event_type buckets. subagent_stop
+    # joins agent_active rather than earning a third bucket: a subagent
+    # finishing means the main agent is about to pick its work back up, which
+    # is what agent_active already says. Its own contribution — the pending
+    # count below — rides on the broadcast instead, so no consumer has to learn
+    # a new event_type to keep working.
     if event_kind == "stop":
         event_type = "turn_complete"
-    elif event_kind in ("pre_tool_use", "notification"):
+    elif event_kind in ("pre_tool_use", "notification", "subagent_stop"):
         event_type = "agent_active"
     else:
         return {"ok": False, "reason": f"unknown event kind: {event_kind!r}"}
@@ -1511,6 +1530,20 @@ async def cli_hook(vendor: str, request: Request) -> Any:
     # lookup bypasses it. Race (stop before JSONL claimed the session) → empty
     # pane_id, and the JSONL path's matching event supplies it shortly.
     pane_id, ws_path, stage_id = attribution.pane_for_session(session_id)
+    # Background-subagent bookkeeping: Task in on PreToolUse, out on
+    # SubagentStop. The frontend loop reads the resulting count to tell a turn
+    # that ended DONE from one that ended to WAIT — see subagent_tracker.
+    #
+    # Gated on the vendor because the two halves must come as a pair: a vendor
+    # that reports tool use but never reports a subagent finishing would count
+    # only upwards, and a count stuck above zero holds the loop back. Today
+    # claude is the only vendor installing both (qwen registers Notification
+    # alone), so this gate is also the reminder for whoever adds the next one.
+    if vendor in _SUBAGENT_COUNTING_VENDORS:
+        if event_kind == "pre_tool_use":
+            subagent_tracker.note_tool_use(pane_id, str(payload.get("tool_name") or ""))
+        elif event_kind == "subagent_stop":
+            subagent_tracker.note_subagent_stop(pane_id)
     # Stop-hook delivery: a claude pane with a message waiting is told to keep
     # going and act on it, instead of stopping and being typed at afterwards.
     # Only claude, because only its Stop hook can block — and only its hook
@@ -1547,6 +1580,11 @@ async def cli_hook(vendor: str, request: Request) -> Any:
         "timestamp": "",
         "detail": "hook:stop-blocked" if blocked_envelope else f"hook:{event_kind}",
         "notification_type": notification_type,
+        # Background subagents this pane is still waiting on. Always present so
+        # the frontend can trust a 0 as "none running" rather than "not
+        # reported"; vendors without these hooks never send the field at all
+        # and their panes simply never gate on it.
+        "pending_subagents": subagent_tracker.pending(pane_id),
     }))
     if vendor == "claude" and event_kind == "stop":
         # This body is read by Claude Code as the Stop hook's own output, so it
