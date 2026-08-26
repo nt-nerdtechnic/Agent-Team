@@ -127,9 +127,10 @@ export function detailMeansToolUse(detail: string): boolean {
 /** True when an `agent_active` event means THIS PANE'S agent is working, and
  *  so should advance the loop's activity clock.
  *
- *  Every hook signal arrives as one of two event types, so `subagent_stop`
- *  rides in as `agent_active` — a subagent finishing usually does mean the main
- *  agent is about to pick its work back up. But it is the SUBAGENT that acted,
+ *  A subagent finishing arrives as an `agent_active` — through claude's hook as
+ *  `hook:subagent_stop`, and through opencode's / kilo's reader as
+ *  `subagent:done`. It usually does mean the main agent is about to pick its
+ *  work back up. But it is the SUBAGENT that acted,
  *  and if the main agent stays idle that borrowed timestamp is permanent:
  *  loopContinueReady requires the turn end to be the LATEST signal, so an
  *  activity stamp landing after it can never be overtaken by anything except a
@@ -143,7 +144,21 @@ export function detailMeansToolUse(detail: string): boolean {
  *  other direction too: a main agent that really did resume work announces it
  *  with its own PreToolUse moments later. */
 export function activityMeansWorking(detail: string): boolean {
-  return detail !== 'hook:subagent_stop'
+  return !detailMeansSubagentDone(detail)
+}
+
+/** `detail` values that report a SUBAGENT finishing. Like tool use, the two
+ *  sources name it differently:
+ *
+ *    hook:subagent_stop   claude, via its SubagentStop hook
+ *    subagent:done        opencode / kilo, parsed out of the session log
+ *
+ *  Both must be kept off the loop's activity clock for the same reason, and
+ *  both are useless for counting: neither has a matching "subagent started"
+ *  event the loop can pair it with. Listing them together is what stops the
+ *  next vendor from re-introducing the jam under a third spelling. */
+function detailMeansSubagentDone(detail: string): boolean {
+  return detail === 'hook:subagent_stop' || detail === 'subagent:done'
 }
 
 /** How long the loop holds off after each consecutive LOOP_WAIT, clamped to

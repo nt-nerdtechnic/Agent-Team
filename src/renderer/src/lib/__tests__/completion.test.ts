@@ -524,7 +524,27 @@ describe('activityMeansWorking', () => {
   })
 
   it('does not count a subagent finishing as the pane working', () => {
+    // Both spellings, because both jam the loop the same way. claude reports it
+    // through its hook; opencode and kilo through their reader. Missing the
+    // second one is how the fix for claude failed to reach the vendors the
+    // tool-signal work had just brought into range.
     expect(activityMeansWorking('hook:subagent_stop')).toBe(false)
+    expect(activityMeansWorking('subagent:done')).toBe(false)
+  })
+
+  it('still counts a subagent STARTING, and ordinary tool use', () => {
+    // Only the finishing event is a borrowed timestamp. A tool call — including
+    // the one that dispatches a subagent — really is this pane working.
+    expect(activityMeansWorking('tool:task')).toBe(true)
+    expect(activityMeansWorking('tool:read')).toBe(true)
+    expect(activityMeansWorking('hook:pre_tool_use')).toBe(true)
+  })
+
+  it('the two subagent spellings are also kept out of the tool count', () => {
+    // Same events, second judgement: neither may be counted as tool use either,
+    // since neither has a pairable "started" event.
+    expect(detailMeansToolUse('hook:subagent_stop')).toBe(false)
+    expect(detailMeansToolUse('subagent:done')).toBe(false)
   })
 })
 
@@ -657,5 +677,57 @@ describe('the two loop markers stay distinct', () => {
   it('mentioning a marker mid-text never counts', () => {
     const mention = `完成時我會輸出 <<LOOP_WAIT>>。\n目前還在跑第 2 階段。`
     expect(turnEndsWithSentinel(mention, '<<LOOP_WAIT>>')).toBe(false)
+  })
+})
+
+describe('the opencode / kilo wait-then-resume sequence', () => {
+  // The same sequence that jammed for claude, in the spelling opencode and kilo
+  // use. Their reader names a subagent finishing `subagent:done` rather than
+  // `hook:subagent_stop`, so the fix for claude did not reach them until both
+  // spellings were listed — and the tool-signal work had just brought these two
+  // vendors into range of exactly this judgement.
+  const SETTLE = 1500
+  const ARMED = 1000
+  const TOOL_CALL = 1100 // tool:task → agent_active
+  const TURN_ENDED = 1200 // "still waiting" → turn_complete
+  const SUBAGENT_DONE = 5000 // subagent:done
+
+  it('a tool call advances the loop clock', () => {
+    expect(activityMeansWorking('tool:task')).toBe(true)
+  })
+
+  it('the subagent finishing does NOT advance it', () => {
+    expect(activityMeansWorking('subagent:done')).toBe(false)
+  })
+
+  it('so the loop can still continue once the subagent is done', () => {
+    expect(
+      loopContinueReady({
+        turnCompleteAt: TURN_ENDED,
+        lastActiveAt: TOOL_CALL, // subagent:done was not allowed to stamp this
+        armedAt: ARMED,
+        now: 9000,
+        settleMs: SETTLE,
+      })
+    ).toBe(true)
+  })
+
+  it('and would jam forever if subagent:done were treated as work', () => {
+    expect(
+      loopContinueReady({
+        turnCompleteAt: TURN_ENDED,
+        lastActiveAt: SUBAGENT_DONE,
+        armedAt: ARMED,
+        now: 9000,
+        settleMs: SETTLE,
+      })
+    ).toBe(false)
+  })
+
+  it('counts the tool call as work, so the turn is not judged a stall', () => {
+    const worked = { toolUsesThisTurn: 1, toolSignalsSeen: true }
+    expect(turnUsedNoTools(worked)).toBe(false)
+    // …while a turn that only talked, on the same vendor, still is.
+    expect(turnUsedNoTools({ toolUsesThisTurn: 0, toolSignalsSeen: true })).toBe(true)
   })
 })
