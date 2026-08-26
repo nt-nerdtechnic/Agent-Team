@@ -74,6 +74,39 @@ export function loopContinueReady(s: TurnCompleteState): boolean {
   return turnCompleteDone(s) && s.lastActiveAt > s.armedAt
 }
 
+/** How long a non-zero pending-subagent count may hold the loop back before it
+ *  is ignored. The count is maintained by hook events (Task PreToolUse up,
+ *  SubagentStop down) and can drift: a subagent killed with its CLI never
+ *  reports its stop, leaving the count stuck above zero forever. Failing OPEN
+ *  after this window means the worst a drifted count can do is delay the loop,
+ *  never silently park it for the rest of the run. */
+export const LOOP_SUBAGENT_WAIT_MAX_MS = 20 * 60_000
+
+/** The pane's latest hook-reported background-subagent count, and when it was
+ *  reported. `observedAt` is wall-clock ms of the event that carried `pending`
+ *  (0 = the pane has never reported one). */
+export interface SubagentWaitState {
+  pending: number
+  observedAt: number
+  now: number
+}
+
+/** True when the loop must hold its continue: the CLI has background subagents
+ *  still running, so its turn ended to WAIT, not because the work is done.
+ *
+ *  This is the structural half of the spin fix. Such a turn satisfies every
+ *  condition loopContinueReady tests — post-arm, latest, settled, and woken —
+ *  because the CLI really did end a turn after really being woken. Only the
+ *  subagent count reveals that continuing is pointless: the pane is parked on
+ *  work the loop cannot see, and injecting "continue" just makes it say "still
+ *  waiting" again.
+ *
+ *  Bounded by LOOP_SUBAGENT_WAIT_MAX_MS so a stale count fails open. */
+export function loopWaitingOnSubagents(s: SubagentWaitState): boolean {
+  if (s.pending <= 0 || s.observedAt <= 0) return false
+  return s.now - s.observedAt < LOOP_SUBAGENT_WAIT_MAX_MS
+}
+
 /** A turn shorter than this (whitespace-collapsed) is too small to be real
  *  work — "等待中。", "好的，我繼續" — and counts as a stalled run. */
 export const LOOP_MIN_PROGRESS_CHARS = 40
@@ -93,21 +126,72 @@ export const LOOP_STALL_LIMIT = 4
  *  yet going nowhere). Sized so a genuinely long unattended run never trips it. */
 export const LOOP_MAX_CONTINUES = 200
 
+/** How many previous turns a new turn is compared against. Verbatim comparison
+ *  only ever looked at the immediately previous turn, so a CLI alternating
+ *  between two phrasings (A→B→A→B) read as progress on every single turn. */
+export const LOOP_RECENT_TURNS = 4
+
+/** Characters that never take a space beside them in running text: CJK
+ *  punctuation, Han, and fullwidth forms. */
+const CJK_CLASS = '\u3000-\u303F\u4E00-\u9FFF\uFF00-\uFFEF'
+const CJK_WRAP_SPACE = new RegExp(`([${CJK_CLASS}])\\s+(?=[${CJK_CLASS}])`, 'g')
+
 /** Whitespace-collapsed turn text, so a TUI re-wrap of the same sentence
- *  compares equal to its previous rendering. */
+ *  compares equal to its previous rendering.
+ *
+ *  Collapsing runs to a single space is enough for English, where the wrap
+ *  replaced a space that was already there. Chinese has no such space, so a
+ *  wrap INSERTS one — "還在等。瀏覽器" wrapped becomes "還在等。 瀏覽器" — and
+ *  every repeat judgement built on this text would read the same sentence as a
+ *  new one. Whitespace between two CJK characters is therefore dropped
+ *  entirely. English spacing is untouched: the rule needs CJK on both sides. */
 export function normalizeTurnText(text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
+  return text.replace(/\s+/g, ' ').replace(CJK_WRAP_SPACE, '$1').trim()
+}
+
+/** The pane's tool-use signals for the turn just ended.
+ *
+ *  `toolSignalsSeen` is the self-calibration that makes this judgement safe
+ *  across vendors: only claude/qwen/copilot install hooks, so for every other
+ *  CLI `toolUsesThisTurn` is permanently 0 and treating that as a stall would
+ *  stop healthy loops. A pane only opts in once it has actually produced a
+ *  tool signal at least once. */
+export interface ToolActivityState {
+  /** PreToolUse signals attributed to this pane since the watcher armed. */
+  toolUsesThisTurn: number
+  /** This pane has produced a tool signal at least once in its lifetime. */
+  toolSignalsSeen: boolean
+}
+
+/** True when a turn ended without the agent touching a single tool — no file
+ *  read, no command run, no edit. On a CLI that reports tool use this is the
+ *  sharpest available "the agent only talked" signal, and talking is exactly
+ *  what a CLI parked on a background agent does: it restates that it is still
+ *  waiting, in fresh words each time, which is why comparing the TEXT could
+ *  never catch this spin. */
+export function turnUsedNoTools(s: ToolActivityState): boolean {
+  return s.toolSignalsSeen && s.toolUsesThisTurn === 0
 }
 
 /** True when a completed turn shows real forward motion. False — a "stalled
- *  run" — when the CLI repeated its previous answer verbatim, or answered with
- *  something too short to be work. Both are what a CLI does when it is stuck
- *  waiting on something the loop cannot observe (a background agent, a poll of
- *  its own), and both re-satisfy loopContinueReady on every poll. */
-export function turnMadeProgress(text: string, prevText: string): boolean {
+ *  run" — when the turn was too short to be work, or repeated one of the last
+ *  LOOP_RECENT_TURNS answers verbatim.
+ *
+ *  Comparison stays EXACT on purpose. A fuzzy judgement was tried and dropped:
+ *  restating "still waiting" in fresh words and reporting "step 1 done" after
+ *  "step 0 done" are indistinguishable by text similarity — the second differs
+ *  by one character — so any threshold that caught the spin also stopped
+ *  healthy loops. What the spin actually reveals is caught by turnUsedNoTools
+ *  and loopWaitingOnSubagents instead, which read facts rather than phrasing.
+ *
+ *  `prev` accepts a single previous turn (the original signature) or the recent
+ *  history; comparing against several is what catches a CLI alternating
+ *  between two ways of saying "still waiting". */
+export function turnMadeProgress(text: string, prev: string | string[]): boolean {
   const now = normalizeTurnText(text)
   if (now.length < LOOP_MIN_PROGRESS_CHARS) return false
-  return now !== normalizeTurnText(prevText)
+  const history = (Array.isArray(prev) ? prev : [prev]).filter((t) => t !== '')
+  return !history.some((old) => now === normalizeTurnText(old))
 }
 
 /** How long to hold off the next continue after `stalledRuns` consecutive
@@ -124,20 +208,39 @@ export interface LoopStallState {
   stalledRuns: number
   /** Normalized text of the last completed turn (see normalizeTurnText). */
   lastTurnText: string
+  /** Normalized text of the last LOOP_RECENT_TURNS turns, newest first.
+   *  Optional so a caller holding only the original two fields still works. */
+  recentTurns?: string[]
 }
 
-/** Fold a completed turn's text into the stall state.
+/** Fold a completed turn into the stall state, judging it on its text and —
+ *  when the vendor reports tool use — on whether it touched a tool at all.
  *
- *  Empty text is UNKNOWN, never a stall: only claude/codex/copilot readers
- *  attach the turn's text, so for every other vendor each turn would otherwise
- *  look stalled and stop a perfectly healthy loop. Those vendors keep their
- *  previous behaviour and rely on the continue cap alone. */
-export function applyTurnProgress(state: LoopStallState, text: string): LoopStallState {
+ *  Empty text is UNKNOWN to the text judgement, never a stall on its own: only
+ *  claude/codex/copilot readers attach the turn's text, so for every other
+ *  vendor each turn would otherwise look stalled and stop a perfectly healthy
+ *  loop. `tools` is optional for the same reason — a caller that has no tool
+ *  signals for this pane simply omits it and nothing changes. */
+export function applyTurnProgress(
+  state: LoopStallState,
+  text: string,
+  tools?: ToolActivityState
+): LoopStallState {
   const normalized = normalizeTurnText(text)
-  if (!normalized) return state
+  // A turn with no text is UNKNOWN to the text judgement, but the tool
+  // judgement can still speak: an empty-text turn_complete from a hook vendor
+  // that touched no tool is the same do-nothing turn, just unreported.
+  const noTools = tools !== undefined && turnUsedNoTools(tools)
+  if (!normalized) {
+    if (!noTools) return state
+    return { ...state, stalledRuns: state.stalledRuns + 1 }
+  }
+  const history = state.recentTurns ?? (state.lastTurnText ? [state.lastTurnText] : [])
+  const progressed = turnMadeProgress(text, history) && !noTools
   return {
-    stalledRuns: turnMadeProgress(text, state.lastTurnText) ? 0 : state.stalledRuns + 1,
+    stalledRuns: progressed ? 0 : state.stalledRuns + 1,
     lastTurnText: normalized,
+    recentTurns: [normalized, ...history].slice(0, LOOP_RECENT_TURNS),
   }
 }
 
