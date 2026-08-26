@@ -18,13 +18,6 @@ const row = (id: string, depth = 0): LineageRow => ({
   hasChildren: false,
   collapsed: false,
 })
-const remote = (id: string, ws: string, label?: string): {
-  pane_id: string
-  workspace_path: string
-  workspace_label?: string
-  busy: boolean
-} => ({ pane_id: id, workspace_path: ws, ...(label ? { workspace_label: label } : {}), busy: false })
-
 const A = '/Users/me/Desktop/alpha'
 const B = '/Users/me/Desktop/beta'
 const C = '/Users/me/Git/gamma'
@@ -35,8 +28,6 @@ function build(over: Partial<Parameters<typeof buildWorkspaceGroups>[0]> = {}) {
     order: [A],
     panes: [],
     lineage: [],
-    roster: [],
-    openPaths: [],
     collapsed: new Set<string>(),
     homeDir: HOME,
     ...over,
@@ -103,65 +94,6 @@ describe('buildWorkspaceGroups', () => {
     const rows = build({ here: `${A}/`, order: [A], panes: [pane('a1', A)], lineage: [row('a1')] })
     expect(rows).toHaveLength(1)
     expect(rows[0].count).toBe(1)
-  })
-
-  it('adds another window\'s workspace as a read-only row', () => {
-    const rows = build({ roster: [remote('r1', C, 'gamma'), remote('r2', C)] })
-    const other = rows.find((r) => r.path === C)
-    expect(other?.isCurrent).toBe(false)
-    expect(other?.count).toBe(2)
-    expect(other?.lineage).toEqual([])
-    expect(other?.label).toBe('gamma')
-  })
-
-  it('names another workspace from the first entry that carries a label', () => {
-    // They all name the same workspace, but a registration made before the
-    // label was known omits it — taking entries[0] blindly showed the folder
-    // basename or the real name depending on arrival order.
-    const rows = build({ roster: [remote('r1', C), remote('r2', C, 'gamma')] })
-    expect(rows.find((r) => r.path === C)?.label).toBe('gamma')
-  })
-
-  it('falls back to the folder name when no entry has a label', () => {
-    const rows = build({ roster: [remote('r1', C)] })
-    expect(rows.find((r) => r.path === C)?.label).toBe('gamma')
-  })
-
-  it('never lists a workspace this window holds as another window\'s', () => {
-    // The roster does not distinguish this window from any other.
-    const rows = build({
-      here: A,
-      order: [A],
-      panes: [pane('a1', A)],
-      lineage: [row('a1')],
-      roster: [remote('a1', A), remote('other', A)],
-    })
-    expect(rows).toHaveLength(1)
-    expect(rows[0].isCurrent).toBe(true)
-  })
-
-  it('drops a roster entry for a pane this window already renders', () => {
-    const rows = build({
-      here: A,
-      order: [A],
-      panes: [pane('shared', A)],
-      lineage: [row('shared')],
-      roster: [remote('shared', C)],
-    })
-    // 'shared' is ours, so C contributes nothing and gets no row.
-    expect(rows.map((r) => r.path)).toEqual([A])
-  })
-
-  it('lists a workspace that is open with no CLI started', () => {
-    const rows = build({ openPaths: [C] })
-    const idle = rows.find((r) => r.path === C)
-    expect(idle?.count).toBe(0)
-    expect(idle?.isCurrent).toBe(false)
-  })
-
-  it('does not list an open workspace twice', () => {
-    const rows = build({ here: A, order: [A], openPaths: [A, `${A}/`, C], roster: [remote('r', C)] })
-    expect(rows.map((r) => r.path)).toEqual([A, C])
   })
 
   it('carries the collapsed flag through', () => {

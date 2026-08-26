@@ -73,17 +73,6 @@ export interface PaneLineageRow {
   collapsed: boolean
 }
 
-/** A pane living in another window's workspace, as the backend registry sees
- *  it. There is no terminal for it here, so there is no status beyond busy. */
-export interface RemotePaneRow {
-  pane_id: string
-  name: string
-  workspace_path: string
-  agent_key: string
-  busy: boolean
-  offline: boolean
-}
-
 /** One workspace section of the sidebar.
  *
  *  `isCurrent` marks the one this window owns: only that section has real
@@ -101,7 +90,6 @@ export interface WorkspaceGroupRow {
   collapsed: boolean
   count: number
   lineage: PaneLineageRow[]
-  remote: RemotePaneRow[]
 }
 
 export interface ActivePaneView {
@@ -299,8 +287,6 @@ interface Props {
   /** Workspace sections, this window's first. Omitted renders the flat list —
    *  which is what every other mount of this component gets. */
   workspaces?: WorkspaceGroupRow[]
-  /** Bumped when another window's sidebar asks this one to open an agent. */
-  spawnCardNonce?: number
   /** True in a detached window: it is one run group's view of ONE workspace,
    *  so it neither opens others nor switches between them — the controls are
    *  hidden rather than left to do nothing.
@@ -363,13 +349,6 @@ function panesOf(
   return out
 }
 
-/** Every other workspace with something running in it. These rows come from
- *  the messaging registry, so they carry a name and a busy flag and nothing
- *  else — this window has no terminal for them. */
-const otherWorkspaceRows = computed<WorkspaceGroupRow[]>(
-  () => props.workspaces?.filter((w) => !w.isCurrent) ?? []
-)
-
 // Build tag injected at build time (electron.vite.config.ts) so the header
 // shows exactly which build is running — avoids confusion over which version
 // is live when juggling worktrees / uncommitted changes.
@@ -427,9 +406,7 @@ const emit = defineEmits<{
   (e: 'toggle-workspace', path: string): void
   /** Bring a workspace to the front — focus its window if one has it open,
    *  otherwise open it. */
-  (e: 'reveal-workspace', path: string): void
   /** Open a new agent in a workspace that is not this window's. */
-  (e: 'add-in-workspace', path: string): void
   (e: 'open-workspace-picker'): void
   (e: 'switch-to-workspace', path: string): void
   (e: 'close-workspace', path: string): void
@@ -924,17 +901,6 @@ function resumeAgent(): void {
   })
 }
 
-// Another window's ＋ on our workspace heading. Same landing as showResumeError:
-// the card only mounts on the Agents tab, so switch there before opening it.
-watch(
-  () => props.spawnCardNonce,
-  (next, prev) => {
-    if (next === undefined || prev === undefined || next === prev) return
-    selectSidebarTab('agents')
-    manualSpawnOpen.value = true
-  }
-)
-
 function showResumeError(message: string): void {
   resumeNotice.value = message
   // The notice renders inside the spawn card body, which only mounts on the
@@ -1010,6 +976,21 @@ const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | n
 const canDetachWorkspace = computed(
   () => !props.detachedWindow && localWorkspaceRows.value.length > 1
 )
+/** What the row does, for its tooltip.
+ *
+ *  Dragging a heading out is invisible otherwise — nothing about the row says
+ *  it can be dragged, and when the window holds only one workspace it silently
+ *  cannot be, which reads as broken rather than as deliberate.
+ */
+function wsHeadTitle(path: string): string {
+  const parts: string[] = []
+  if (!props.detachedWindow && path !== workspacePath.value) {
+    parts.push(i18n.global.t('label.workspace-switch-hint'))
+  }
+  if (canDetachWorkspace.value) parts.push(i18n.global.t('label.workspace-detach-hint'))
+  return parts.join(' · ')
+}
+
 function onWsDragStart(e: DragEvent, path: string): void {
   if (!canDetachWorkspace.value) {
     e.preventDefault()
@@ -1098,6 +1079,25 @@ function spawnAs(agentKey: string): void {
   spawnWorkspaceOverride.value = addMenuWorkspace.value
   addMenuOpen.value = false
   spawn()
+}
+
+/** The plain-shell spec, kept out of manualAgentSpecs because the agent
+ *  dropdown and "Handle Issue As…" are both about CLIs. */
+const terminalSpec = computed(() => props.agentSpecs.find((s) => s.agentKey === 'terminal'))
+
+/** The ＋ menu's plain shell.
+ *
+ *  Mirrors openTerminal, but into the workspace whose heading opened the menu.
+ *  Never with a role: role text is injected into a CLI's prompt, and a shell
+ *  would simply print it — which is why openTerminal sends an empty roleKey too,
+ *  and why this sits with the actions rather than among the agents, where the
+ *  role select above would look like it applied.
+ */
+function openTerminalFromMenu(): void {
+  if (!canSpawn.value) return
+  const ws = addMenuWorkspace.value || workspacePath.value
+  addMenuOpen.value = false
+  emit('spawn', { agentKey: 'terminal', roleKey: '', stageId: '', workspacePath: ws })
 }
 
 function openSpawnCardFromMenu(): void {
@@ -1610,7 +1610,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             'ws-head--viewing': ws.path === workspacePath,
             'ws-head--switchable': !detachedWindow && ws.path !== workspacePath,
           }"
-          :title="!detachedWindow && ws.path !== workspacePath ? $t('label.workspace-switch-hint') : ''"
+          :title="wsHeadTitle(ws.path)"
           :draggable="canDetachWorkspace"
           @dragstart="onWsDragStart($event, ws.path)"
           @dragend="onWsDragEnd($event, ws.path)"
@@ -1750,49 +1750,6 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <!-- Workspaces open in another window. The registry knows their name,
              agent and busy flag; everything else needs the window that owns
              them, which is what clicking a row goes to. -->
-        <template v-for="ws in otherWorkspaceRows" :key="ws.path">
-          <!-- canClose: false — that window's to close. Whole row again, but
-               this one goes to the window that owns the panes. -->
-          <li
-            class="ws-head ws-head--switchable"
-            :title="$t('label.workspace-elsewhere-hint')"
-            @click="emit('reveal-workspace', ws.path)"
-            @contextmenu="openWsMenu($event, ws.path, false)"
-          >
-            <button
-              class="ws-caret"
-              :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
-              @click.stop="emit('toggle-workspace', ws.path)"
-            >{{ ws.collapsed ? '›' : '⌄' }}</button>
-            <span class="ws-icon"><FolderIcon /></span>
-            <span class="ws-text" :title="ws.path">
-              <span class="ws-line">
-                <span class="ws-name">{{ ws.label }}</span>
-                <!-- Its agents live in the window that owns it, so clicking
-                     goes there rather than switching this window. Without this
-                     mark the row is indistinguishable from a switchable one. -->
-                <span class="ws-elsewhere" :title="$t('label.workspace-elsewhere-hint')">⧉</span>
-                <span class="ws-count">{{ ws.count }}</span>
-              </span>
-              <span class="ws-path">{{ ws.displayPath }}</span>
-            </span>
-            <button class="ws-add" :title="$t('action.add-to-grid')" @click.stop="emit('add-in-workspace', ws.path)">＋</button>
-          </li>
-          <li
-            v-for="r in ws.remote"
-            v-show="!ws.collapsed"
-            :key="r.pane_id"
-            class="agent-item remote-item"
-            :title="$t('label.open-in-its-window')"
-            @click="emit('reveal-workspace', ws.path)"
-          >
-            <div class="agent-line">
-              <span class="status-dot" :data-state="r.offline ? 'error' : (r.busy ? 'running' : 'idle')"></span>
-              <span class="agent-name">{{ r.name }}</span>
-              <span class="agent-sub">{{ r.agent_key }}</span>
-            </div>
-          </li>
-        </template>
       </ul>
 
       <div
@@ -1832,6 +1789,19 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             <span class="ws-add-lb">
               {{ missingClis.has(spec.agentKey) ? $t('label.agent-not-installed', { label: spec.label }) : spec.label }}
             </span>
+          </button>
+          <!-- A plain shell, last, which is where App.vue already orders it in
+               agentSpecs. The sidebar filtered it out of every list it built, so
+               the only way to one was the Open Terminal button inside the Manual
+               spawn dialog. Its own handler rather than spawnAs: the role picked
+               above is injected into a CLI's prompt, and a shell would print it. -->
+          <button
+            v-if="terminalSpec"
+            class="ws-add-opt"
+            @click="openTerminalFromMenu"
+          >
+            <span class="ws-add-ck"></span>
+            <span class="ws-add-lb">{{ terminalSpec.label }}</span>
           </button>
         </div>
         <div class="ws-add-div"></div>
@@ -3090,18 +3060,14 @@ button.icon-btn.muted:hover {
 /* The workspace on screen. The others in this window keep running; their
    headings read as links to switch to. */
 .ws-head--viewing .ws-name { color: var(--accent-bright, var(--text-bright)); }
+/* The row being viewed has no click action, so the cursor is free to say the
+   one thing it can do. A switchable row keeps `pointer`: clicking to switch is
+   its primary action, and the tooltip carries the drag. */
+.ws-head--viewing[draggable='true'] { cursor: grab; }
+.ws-head--viewing[draggable='true']:active { cursor: grabbing; }
 .ws-head--switchable { cursor: pointer; border-radius: var(--radius-xs); }
 .ws-head--switchable:hover { background: var(--bg-hover); }
 .ws-head--switchable:hover .ws-name { text-decoration: underline; }
-/* This window has no terminal for that project's panes — the row goes to the
-   window that does. */
-.ws-elsewhere {
-  flex: none;
-  font-size: 9px;
-  line-height: 1;
-  color: var(--text-muted);
-  opacity: 0.8;
-}
 .ws-text--switchable:hover .ws-name { text-decoration: underline; }
 /* Only another window's name is a link — this window's own is where you are. */
 .ws-head:not(.ws-head--current) .ws-text { cursor: pointer; }
@@ -3236,15 +3202,6 @@ button.icon-btn.muted:hover {
   color: var(--danger-bright, #e05252);
 }
 .ws-ctx-opt.danger:hover { background: var(--danger-subtle, rgb(224 82 82 / 12%)); }
-/* A pane in another window: shown so you know work is running there, dimmed
-   because none of this window's per-pane controls apply to it. */
-.remote-item {
-  opacity: 0.62;
-  cursor: pointer;
-}
-.remote-item:hover { opacity: 1; }
-.remote-item .agent-sub { color: var(--text-muted); font-size: 11px; }
-
 .agent-item {
   background: transparent;
   border: 1px solid transparent;

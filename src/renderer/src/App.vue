@@ -1504,10 +1504,6 @@ function mirrorMessagingHandle(pane: ActivePane): void {
       former_pane_ids: pane.formerPaneIds ?? [],
     })
     .catch(() => { /* local messaging is unaffected */ })
-  // The sidebar's other-workspace rows come from this registry, so refresh
-  // once our own entry has landed. Other windows pick the change up when they
-  // next regain focus.
-  void refreshWorkspaceRoster()
 }
 
 /** keepPersisted: pane handed off to another window (detach) — it re-registers
@@ -1518,7 +1514,6 @@ function unregisterPaneMessaging(paneId: string, opts: { keepPersisted?: boolean
   pushReadyPanes.delete(paneId)
   pushCooldownUntil.delete(paneId)
   backend.send('agent_msg.unregister', { pane_id: paneId }).catch(() => { /* best effort */ })
-  void refreshWorkspaceRoster()
   if (!opts.keepPersisted) dropPersistedMessagingName(paneId)
 }
 
@@ -2442,21 +2437,6 @@ onMounted(() => { _syncViewsTimer = window.setInterval(syncViews, 400) })
 // Cross-workspace roster: refresh on the events that can change it rather than
 // on a timer. Regaining focus is when another window's spawns become worth
 // showing; this window's own spawns and kills are handled where they happen.
-onMounted(() => {
-  if (isDetachedWindow) return
-  void refreshWorkspaceRoster()
-  window.addEventListener('focus', refreshWorkspaceRoster)
-})
-onUnmounted(() => window.removeEventListener('focus', refreshWorkspaceRoster))
-
-// The receiving half of addAgentInWorkspace: another window's sidebar ＋ on our
-// workspace. Main has already brought us forward by the time this arrives.
-let _disposeSpawnRequested: (() => void) | null = null
-onMounted(() => {
-  if (isDetachedWindow) return
-  _disposeSpawnRequested = window.agentTeam?.onSpawnRequested?.(() => { spawnCardNonce.value++ }) ?? null
-})
-onUnmounted(() => { _disposeSpawnRequested?.(); _disposeSpawnRequested = null })
 onUnmounted(() => {
   if (_syncViewsTimer !== null) clearInterval(_syncViewsTimer)
   window.removeEventListener('resize', onWindowResize)
@@ -11305,31 +11285,6 @@ const {
  *  tree at that rate; status and badges stay in paneViews and are looked up
  *  per row by the consumer. Same split as StageTabBar's structure/status
  *  computeds, and for the same reason. */
-/** One live pane anywhere on this machine, as the backend messaging registry
- *  sees it. Panes outside this window's workspace are only ever known through
- *  this — the window has no terminal for them and no status of its own. */
-interface RosterPane {
-  pane_id: string
-  name: string
-  workspace_path: string
-  workspace_label: string
-  agent_key: string
-  busy: boolean
-  offline: boolean
-}
-
-/** Live panes across every workspace, not just this window's.
- *
- *  The registry is already there and already global: agent_msg.list with no
- *  workspace_path returns every registered pane, which is what makes a sidebar
- *  that lists more than one project possible without a new backend surface.
- *
- *  Deliberately NOT polled. It refreshes on the events that can change it —
- *  this window spawning or closing a pane, and the window regaining focus
- *  (which is when another window's changes become worth showing). A timer here
- *  would run against a list the user is usually not looking at. */
-const crossWorkspaceRoster = ref<RosterPane[]>([])
-
 /** Home directory, for shortening the paths shown under each workspace name.
  *  Fetched once; an empty value just means paths render in full. */
 const homeDir = ref('')
@@ -11339,12 +11294,6 @@ onMounted(async () => {
   } catch { /* paths stay absolute */ }
 })
 
-async function refreshWorkspaceRoster(): Promise<void> {
-  if (isDetachedWindow) return
-  const resp = await sendQuiet<{ panes: RosterPane[] }>('agent_msg.list', {})
-  if (resp) crossWorkspaceRoster.value = Array.isArray(resp.panes) ? resp.panes : []
-}
-
 const paneLineage = computed<PaneLineageRow[]>(() =>
   buildPaneLineage(panes.value, collapsedPanes.value)
 )
@@ -11353,22 +11302,6 @@ const paneLineage = computed<PaneLineageRow[]>(() =>
  *  persisted: which projects you want out of the way is a property of the view
  *  you are looking at, not of the project. */
 const collapsedWorkspaces = ref<Set<string>>(new Set())
-
-/** Bring another workspace's window to the front.
- *
- *  Every pane in these rows lives in a window that already has it open — the
- *  roster only lists registered panes — so focusing that window is the whole
- *  operation. Deliberately NOT switching this window to that workspace: two
- *  windows on one folder would run two sets of PTY and git operations on it,
- *  which is what focusWorkspaceWindow exists to prevent. */
-async function revealWorkspace(path: string): Promise<void> {
-  if (!path || path === currentWorkspace.value) return
-  const focused = await window.agentTeam?.focusWorkspaceWindow?.(path)
-  if (!focused) {
-    // The window went away between the roster snapshot and this click.
-    void refreshWorkspaceRoster()
-  }
-}
 
 const EXTRA_WS_KEY = 'agentTeam.extraWorkspaces'
 
@@ -11455,19 +11388,6 @@ function persistExtraWorkspaces(): void {
   if (!isDetachedWindow) window.agentTeam?.reportAdoptedWorkspaces?.([...workspaceOrder.value])
 }
 
-/** Workspaces open in other windows.
- *
- *  The roster below only knows workspaces that have a REGISTERED PANE, so a
- *  window opened a moment ago — no CLI started yet — would be missing from the
- *  sidebar entirely. Main's window registry knows about it immediately. */
-const openWorkspacePaths = ref<string[]>([])
-let disposeOpenWorkspacesChanged: (() => void) | null = null
-
-async function refreshOpenWorkspaces(): Promise<void> {
-  if (isDetachedWindow) return
-  openWorkspacePaths.value = (await window.agentTeam?.listOpenWorkspaces?.()) ?? []
-}
-
 onMounted(() => {
   if (isDetachedWindow) return
   // Two ways this window can already hold workspaces before anyone clicks:
@@ -11488,13 +11408,6 @@ onMounted(() => {
       }
     })()
   }
-  void refreshOpenWorkspaces()
-  disposeOpenWorkspacesChanged =
-    window.agentTeam?.onOpenWorkspacesChanged?.(() => void refreshOpenWorkspaces()) ?? null
-})
-onUnmounted(() => {
-  disposeOpenWorkspacesChanged?.()
-  disposeOpenWorkspacesChanged = null
 })
 
 /** The ＋ on the sidebar's Workspace heading: the Welcome picker, reopened
@@ -11661,25 +11574,6 @@ function revealWorkspaceFolder(path: string): void {
   if (path) void window.agentTeam?.openPath?.(path)
 }
 
-/** Bumped when another window asks this one to open an agent. ControlPane
- *  watches it and opens its spawn card; a counter rather than a boolean so a
- *  second request while the card is already open still registers. */
-const spawnCardNonce = ref(0)
-
-/** The ＋ on another workspace's heading.
- *
- *  Spawning it from here would use THIS window's agent and role selection for a
- *  project it knows nothing about, so the owning window is asked to do it
- *  instead: it comes forward with its spawn card open and the user picks there. */
-async function addAgentInWorkspace(path: string): Promise<void> {
-  if (!path || path === currentWorkspace.value) return
-  const handed = await window.agentTeam?.requestSpawnInWorkspace?.(path)
-  if (!handed) {
-    // Its window closed between the roster snapshot and this click.
-    void refreshWorkspaceRoster()
-  }
-}
-
 function toggleWorkspaceCollapsed(path: string): void {
   const next = new Set(collapsedWorkspaces.value)
   if (next.has(path)) next.delete(path)
@@ -11693,10 +11587,9 @@ function toggleWorkspaceCollapsed(path: string): void {
  *  paneViews, so the 400ms status sync does not rebuild it. The list renders
  *  these rows and looks each pane's status up separately.
  *
- *  This window's own workspace carries lineage rows (it owns those terminals
- *  and knows everything about them). Every other workspace carries roster
- *  entries instead: a name, an agent and a busy flag, which is all the registry
- *  can say about a pane living in another window. */
+ *  Every row is a workspace this window holds, carrying lineage rows: it owns
+ *  those terminals and knows everything about them. What other windows are
+ *  running is theirs to show — a window is its own space. */
 interface WorkspaceGroupRow {
   path: string
   label: string
@@ -11705,10 +11598,7 @@ interface WorkspaceGroupRow {
   collapsed: boolean
   count: number
   lineage: PaneLineageRow[]
-  remote: RosterPane[]
 }
-
-
 
 const workspaceGroups = computed<WorkspaceGroupRow[]>(() =>
   buildWorkspaceGroups({
@@ -11716,8 +11606,6 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() =>
     order: workspaceOrder.value,
     panes: panes.value,
     lineage: paneLineage.value,
-    roster: crossWorkspaceRoster.value,
-    openPaths: openWorkspacePaths.value,
     collapsed: collapsedWorkspaces.value,
     homeDir: homeDir.value,
   })
@@ -13048,15 +12936,15 @@ function paneIsCommander(p: ActivePane): boolean {
              carries it for Mission Control, but the bar itself said nothing —
              and with several workspaces in one window, switching between them
              changed everything below and nothing up here. -->
-        <span class="titlebar-name titlebar-name--ws" :title="currentWorkspace">{{ workspaceBaseName }}</span>
         <!-- Two projects can share a folder name, so the name alone does not
-             say which one this is. Home is collapsed to ~, the same shortening
-             the sidebar's paths use. -->
-        <span
-          v-if="workspaceDisplayPath"
-          class="titlebar-path"
-          :title="currentWorkspace"
-        >{{ workspaceDisplayPath }}</span>
+             say which one this is — but the path is long and only wanted when
+             asked for, so hovering swaps one for the other rather than showing
+             both at once. Home is collapsed to ~, the same shortening the
+             sidebar's paths use. -->
+        <span class="titlebar-id">
+          <span class="titlebar-name titlebar-name--ws">{{ workspaceBaseName }}</span>
+          <span v-if="workspaceDisplayPath" class="titlebar-path">{{ workspaceDisplayPath }}</span>
+        </span>
         <span class="titlebar-spacer"></span>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
@@ -13102,7 +12990,6 @@ function paneIsCommander(p: ActivePane): boolean {
       :selected-pane-ids="selectedPaneIds"
       :can-rebuild-all="rebuildableAllPaneCount > 0"
       :rebuilding-all="rebuildingTabPanes"
-      :spawn-card-nonce="spawnCardNonce"
       :detached-window="isDetachedWindow"
       @spawn="onManualSpawn"
       @spawn-resume="onManualResume"
@@ -13110,8 +12997,6 @@ function paneIsCommander(p: ActivePane): boolean {
       @minimize="minimizePane"
       @toggle-collapsed="togglePaneCollapsed"
       @toggle-workspace="toggleWorkspaceCollapsed"
-      @reveal-workspace="revealWorkspace"
-      @add-in-workspace="addAgentInWorkspace"
       @open-workspace-picker="workspacePickerOpen = true"
       @switch-to-workspace="switchToWorkspace"
       @close-workspace="closeWorkspace"
@@ -14183,23 +14068,34 @@ function paneIsCommander(p: ActivePane): boolean {
    `flex: 1` would let it take a third of the bar and drift as they change. */
 .titlebar-name--ws {
   flex: 0 1 auto;
-  max-width: 40%;
+  min-width: 0;
+  max-width: 100%;
   padding: 0 8px;
   color: var(--text-primary);
 }
-/* Sits after the name and gives way first: the name is what the user reads,
-   the path only disambiguates it. Both are sized to their text so the pair
-   stays centred between the spacers. */
-.titlebar-path {
+/* Name normally, path while the pointer is on it. The bar is a drag region,
+   and a drag region swallows hover — so this one patch of it opts out. The
+   spacers either side stay draggable, which is most of the bar. */
+.titlebar-id {
+  display: flex;
+  align-items: center;
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 40%;
+  max-width: 70%;
+  -webkit-app-region: no-drag;
+}
+.titlebar-path {
+  display: none;
+  min-width: 0;
+  padding: 0 8px;
   font-size: 11px;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.titlebar-id:hover .titlebar-name--ws { display: none; }
+.titlebar-id:hover .titlebar-path { display: block; }
 /* Fills the bar between the traffic lights and the gear, and stays draggable
    so the empty stretch still moves the window. */
 .titlebar-spacer {

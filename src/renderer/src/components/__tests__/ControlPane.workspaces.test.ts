@@ -15,15 +15,6 @@ const localPanes = [
   { id: 'p2', agentLabel: 'Codex', status: 'idle', command: 'codex', origin: 'manual', isMinimized: false, isCommander: false }
 ]
 
-const remote = (name: string, opts: Partial<{ busy: boolean; offline: boolean }> = {}) => ({
-  pane_id: `r-${name}`,
-  name,
-  workspace_path: '/other',
-  agent_key: 'claude',
-  busy: opts.busy ?? false,
-  offline: opts.offline ?? false
-})
-
 function mountWith(extra: Record<string, unknown>): VueWrapper {
   sessionStorage.setItem('agentTeam.sidebarTab', 'agents')
   return shallowMount(ControlPane as never, {
@@ -49,12 +40,7 @@ function mountWith(extra: Record<string, unknown>): VueWrapper {
 const current = (over: Record<string, unknown> = {}) => ({
   path: '/Users/me/Desktop/Agent-Team', label: 'Agent-Team',
   displayPath: '~/Desktop/Agent-Team', isCurrent: true, collapsed: false,
-  count: 2, lineage: [], remote: [], ...over
-})
-const other = (over: Record<string, unknown> = {}) => ({
-  path: '/other', label: 'DealPilot',
-  displayPath: '/other', isCurrent: false, collapsed: false,
-  count: 1, lineage: [], remote: [remote('分析後台')], ...over
+  count: 2, lineage: [], ...over
 })
 
 describe('ControlPane – workspace sections', () => {
@@ -76,29 +62,6 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.find('.ws-count').text()).toBe('2')
   })
 
-  it('puts this window workspace first, others after', () => {
-    wrapper = mountWith({ workspaces: [current(), other()] })
-    const names = wrapper.findAll('.ws-name').map((n) => n.text())
-    expect(names).toEqual(['Agent-Team', 'DealPilot'])
-  })
-
-  it('renders another workspace panes as read-only rows', () => {
-    wrapper = mountWith({ workspaces: [current(), other()] })
-    const remotes = wrapper.findAll('.remote-item')
-    expect(remotes).toHaveLength(1)
-    expect(remotes[0].text()).toContain('分析後台')
-    // No per-pane controls: this window has no terminal for it.
-    expect(remotes[0].find('.agent-line-actions').exists()).toBe(false)
-  })
-
-  it('maps busy and offline onto the status dot', () => {
-    wrapper = mountWith({
-      workspaces: [current(), other({ remote: [remote('busy-one', { busy: true }), remote('gone', { offline: true })] })]
-    })
-    const states = wrapper.findAll('.remote-item .status-dot').map((d) => d.attributes('data-state'))
-    expect(states).toEqual(['running', 'error'])
-  })
-
   it('shows the path under the name, with home collapsed', () => {
     // Two projects can share a folder name; the path is what tells them apart.
     wrapper = mountWith({ workspaces: [current()] })
@@ -113,42 +76,11 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.emitted('toggle-workspace')?.[0]).toEqual(['/Users/me/Desktop/Agent-Team'])
   })
 
-  it('hides a collapsed workspace rows but keeps its heading', () => {
-    wrapper = mountWith({ workspaces: [current(), other({ collapsed: true })] })
-    expect(wrapper.findAll('.ws-head')).toHaveLength(2)
-    // v-show, so the element is present but not displayed.
-    const hidden = wrapper.findAll('.remote-item').filter((r) => r.attributes('style')?.includes('display: none'))
-    expect(hidden).toHaveLength(1)
-  })
-
-  it('emits reveal-workspace when another workspace name is clicked', async () => {
-    wrapper = mountWith({ workspaces: [current(), other()] })
-    const names = wrapper.findAll('.ws-name')
-    await names[1].trigger('click')
-    expect(wrapper.emitted('reveal-workspace')?.[0]).toEqual(['/other'])
-  })
-
-  it('emits reveal-workspace when one of its panes is clicked', async () => {
-    wrapper = mountWith({ workspaces: [current(), other()] })
-    await wrapper.find('.remote-item').trigger('click')
-    expect(wrapper.emitted('reveal-workspace')?.[0]).toEqual(['/other'])
-  })
-
   it('every workspace heading offers a way to add an agent', () => {
-    wrapper = mountWith({ workspaces: [current(), other()] })
+    wrapper = mountWith({
+      workspaces: [current(), current({ path: '/Users/me/Desktop/Other', label: 'Other' })],
+    })
     expect(wrapper.findAll('.ws-add')).toHaveLength(2)
-  })
-
-  it('only another workspace add hands over — this one spawns locally', async () => {
-    // This window owns its workspace's agent and role selection, so its ＋ runs
-    // the same spawn the card's button does. No other window knows that
-    // selection, so theirs is a request, not a spawn.
-    wrapper = mountWith({ workspaces: [current(), other()] })
-    const adds = wrapper.findAll('.ws-add')
-    await adds[0].trigger('click')          // this window's own heading
-    expect(wrapper.emitted('add-in-workspace')).toBeUndefined()
-    await adds[1].trigger('click')          // the other workspace
-    expect(wrapper.emitted('add-in-workspace')?.[0]).toEqual(['/other'])
   })
 
   it('this window own add is the spawn action, not just a card toggle', () => {
@@ -174,13 +106,6 @@ describe('ControlPane – workspace sections', () => {
     wrapper = mountWith({})
     expect(wrapper.find('.agent-header-actions').exists()).toBe(true)
     expect(wrapper.findAll('.ws-act')).toHaveLength(0)
-  })
-
-  it('another workspace row gets no rebuild or history', () => {
-    // This window cannot rebuild panes it does not own.
-    wrapper = mountWith({ workspaces: [current(), other()] })
-    const rows = wrapper.findAll('.ws-head')
-    expect(rows[1].findAll('.ws-act')).toHaveLength(0)
   })
 
   it('offers neither opening nor switching in a detached window', async () => {
@@ -214,15 +139,6 @@ describe('ControlPane – workspace sections', () => {
     wrapper = mountWith({})
     await wrapper.find('.hdr-add-ws').trigger('click')
     expect(wrapper.emitted('open-workspace-picker')).toBeTruthy()
-  })
-
-  it('lists a workspace with no agents at all', () => {
-    // A window opened a moment ago. Its heading has to be there even with an
-    // empty count, or opening it looks like it failed.
-    wrapper = mountWith({ workspaces: [current(), other({ count: 0, remote: [] })] })
-    const names = wrapper.findAll('.ws-name').map((n) => n.text())
-    expect(names).toEqual(['Agent-Team', 'DealPilot'])
-    expect(wrapper.findAll('.ws-count')[1].text()).toBe('0')
   })
 
   it('renders a section per local workspace, each with its own panes', () => {
@@ -272,18 +188,6 @@ describe('ControlPane – workspace sections', () => {
     wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current()] })
     await wrapper.find('.ws-head--current').trigger('contextmenu')
     expect(wrapper.find('.ws-ctx-opt.danger').exists()).toBe(false)
-  })
-
-  it("never offers to close a workspace another window owns", async () => {
-    // closeWorkspace only acts on workspaces THIS window adopted, so offering
-    // it on someone else's row produced a menu item that silently did nothing.
-    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), other()] })
-    const rows = wrapper.findAll('.ws-head')
-    await rows[1].trigger('contextmenu')   // the remote row
-    expect(wrapper.find('.ws-ctx-menu').exists()).toBe(true)
-    expect(wrapper.find('.ws-ctx-opt.danger').exists()).toBe(false)
-    // The other two entries still work on it.
-    expect(wrapper.findAll('.ws-ctx-opt').length).toBe(2)
   })
 
   it('closes an adopted workspace from that menu', async () => {
@@ -340,14 +244,6 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.emitted('switch-to-workspace')).toBeUndefined()
   })
 
-  it('another window\'s row goes to that window from anywhere on it', async () => {
-    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), other()] })
-    const remote = wrapper.findAll('.ws-head')[1]
-    expect(remote.classes()).toContain('ws-head--switchable')
-    await remote.trigger('click')
-    expect(wrapper.emitted('reveal-workspace')?.[0]).toEqual(['/other'])
-  })
-
   it('marks which workspace is on screen', () => {
     const other = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
     wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), other] })
@@ -364,11 +260,4 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.active-agents')
   })
 
-  it('opens the spawn card when another window asks it to', async () => {
-    // The receiving half of another window's ＋: a counter, so a second request
-    // while the card is already open still lands.
-    wrapper = mountWith({ workspaces: [current()], spawnCardNonce: 0 })
-    await wrapper.setProps({ spawnCardNonce: 1 } as never)
-    expect(wrapper.find('.spawn-card-body').exists()).toBe(true)
-  })
 })

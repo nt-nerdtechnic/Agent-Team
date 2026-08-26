@@ -64,10 +64,8 @@ declare global {
       getHomeDir: () => Promise<string>
       listOpenWorkspaces: () => Promise<string[]>
       focusWorkspaceWindow: (workspacePath: string) => Promise<boolean>
-      requestSpawnInWorkspace: (workspacePath: string) => Promise<boolean>
       reportAdoptedWorkspaces: (paths: string[]) => void
       takeRestoredAdoptedWorkspaces: () => Promise<string[]>
-      onSpawnRequested: (cb: () => void) => () => void
       onOpenWorkspacesChanged: (cb: () => void) => () => void
       openPath: (target: string) => Promise<{ ok: boolean; revealed?: boolean; error?: string }>
       revealPath: (target: string) => Promise<{ ok: boolean; error?: string }>

@@ -1598,6 +1598,7 @@
     "no-active-run": "沒有執行中的任務。",
     "workspace-elsewhere-hint": "在其他視窗開啟中，點擊前往那個視窗",
     "workspace-switch-hint": "點擊將這個視窗切換過去",
+    "workspace-detach-hint": "拖到視窗外可讓它獨立成一個視窗",
     "workspace-cumulative": "工作區累計",
     "all-time-global": "全部時間（全域）",
     "by-vendor": "依供應商",

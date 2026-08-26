@@ -18,44 +18,7 @@ const appSource = readFileSync(
   'utf8'
 )
 
-describe('cross-workspace roster', () => {
-  it('asks for every workspace, not just this one', () => {
-    const at = appSource.indexOf("'agent_msg.list'")
-    expect(at).toBeGreaterThan(-1)
-    // The payload is the argument right after the message type.
-    const call = appSource.slice(at, at + 120)
-    expect(call).not.toContain('workspace_path')
-  })
-
-  it('refreshes when a pane registers or unregisters', () => {
-    for (const fn of ['function mirrorMessagingHandle', 'function unregisterPaneMessaging']) {
-      const start = appSource.indexOf(fn)
-      expect(start, fn).toBeGreaterThan(-1)
-      const body = appSource.slice(start, appSource.indexOf('\n}', start))
-      expect(body, fn).toContain('refreshWorkspaceRoster')
-    }
-  })
-
-  it('refreshes on window focus and cleans the listener up', () => {
-    expect(appSource).toContain("window.addEventListener('focus', refreshWorkspaceRoster)")
-    expect(appSource).toContain("window.removeEventListener('focus', refreshWorkspaceRoster)")
-  })
-
-  it('does not poll', () => {
-    // A timer here would run against a list nobody is looking at most of the
-    // time; every refresh is event-driven instead.
-    const start = appSource.indexOf('async function refreshWorkspaceRoster')
-    const body = appSource.slice(start, appSource.indexOf('\n}', start))
-    expect(body).not.toContain('setInterval')
-    expect(appSource).not.toContain('setInterval(refreshWorkspaceRoster')
-  })
-
-  it('a detached window does not build a roster of its own', () => {
-    const start = appSource.indexOf('async function refreshWorkspaceRoster')
-    const body = appSource.slice(start, appSource.indexOf('\n}', start))
-    expect(body).toContain('isDetachedWindow')
-  })
-
+describe('several workspaces in one window', () => {
   it('feeds the grouping builder every input it needs', () => {
     // The grouping itself moved to lib/workspaceGroups and is tested by
     // running it — App.vue cannot be mounted, so it could only ever be
@@ -65,35 +28,21 @@ describe('cross-workspace roster', () => {
     expect(start).toBeGreaterThan(-1)
     const body = appSource.slice(start, appSource.indexOf('\n)', start))
     expect(body).toContain('buildWorkspaceGroups({')
+    // And nothing about other windows: the sidebar lists what THIS window
+    // holds. Feeding it the machine-wide registry put the same project in
+    // every window at once, one copy live and the rest read-only.
+    expect(body).not.toContain('roster')
+    expect(body).not.toContain('openPaths')
     for (const input of [
       'here: currentWorkspace.value',
       'order: workspaceOrder.value',
       'panes: panes.value',
       'lineage: paneLineage.value',
-      'roster: crossWorkspaceRoster.value',
-      'openPaths: openWorkspacePaths.value',
       'collapsed: collapsedWorkspaces.value',
       'homeDir: homeDir.value',
     ]) {
       expect(body, input).toContain(input)
     }
-  })
-
-  it('hands a cross-workspace add to the window that owns it', () => {
-    // Spawning from here would apply THIS window's agent and role selection to
-    // a project it has never opened. The owning window is asked instead.
-    const start = appSource.indexOf('async function addAgentInWorkspace')
-    expect(start).toBeGreaterThan(-1)
-    const body = appSource.slice(start, appSource.indexOf('\n}', start))
-    expect(body).toContain('requestSpawnInWorkspace')
-    expect(body).not.toContain('onManualSpawn')
-  })
-
-  it('opens its own spawn card when another window asks', () => {
-    expect(appSource).toContain('onSpawnRequested')
-    expect(appSource).toContain('spawnCardNonce.value++')
-    // Registered once and disposed — the listener outlives a reload otherwise.
-    expect(appSource).toContain('_disposeSpawnRequested')
   })
 
   it('adds a picked workspace to THIS sidebar, not a new window', () => {
@@ -131,11 +80,6 @@ describe('cross-workspace roster', () => {
     expect(appSource).toContain('@select="openWorkspaceFromPicker"')
     // Startup keeps its own non-dismissible instance.
     expect(appSource).toContain('v-if="!workspaceSelected"')
-  })
-
-  it('refreshes that list when a window opens or closes', () => {
-    expect(appSource).toContain('onOpenWorkspacesChanged')
-    expect(appSource).toContain('disposeOpenWorkspacesChanged')
   })
 
   it('the titlebar no longer duplicates what the sidebar carries', () => {
@@ -260,15 +204,16 @@ describe('cross-workspace roster', () => {
     expect(appSource).toContain('class="titlebar-path"')
     expect(appSource).toContain('{{ workspaceDisplayPath }}')
     expect(appSource).toContain('collapseHomePath(currentWorkspace.value, homeDir.value)')
-    // After the name in the markup, so it reads as the name's qualifier.
-    expect(appSource.indexOf('class="titlebar-name titlebar-name--ws"')).toBeLessThan(
-      appSource.indexOf('class="titlebar-path"')
-    )
-    // Gives way before the name does: the name is what is read, the path only
-    // disambiguates it.
+    // Hidden until asked for: the path is long, and the name is what the bar
+    // is for. Hovering swaps one for the other rather than showing both.
     const at = appSource.indexOf('.titlebar-path {')
     expect(at).toBeGreaterThan(-1)
-    expect(appSource.slice(at, at + 200)).toContain('text-overflow: ellipsis')
+    expect(appSource.slice(at, at + 200)).toContain('display: none')
+    expect(appSource).toContain('.titlebar-id:hover .titlebar-name--ws { display: none; }')
+    expect(appSource).toContain('.titlebar-id:hover .titlebar-path { display: block; }')
+    // The bar is a drag region, and a drag region swallows hover.
+    const box = appSource.indexOf('.titlebar-id {')
+    expect(appSource.slice(box, box + 220)).toContain('-webkit-app-region: no-drag')
   })
 
   it('asks before a switch stops a running pipeline', () => {
@@ -538,12 +483,4 @@ describe('cross-workspace roster', () => {
     expect(body).toContain('normWs(currentWorkspace.value)')
   })
 
-  it('focuses the owning window rather than switching this one', () => {
-    const start = appSource.indexOf('async function revealWorkspace')
-    expect(start).toBeGreaterThan(-1)
-    const body = appSource.slice(start, appSource.indexOf('\n}', start))
-    expect(body).toContain('focusWorkspaceWindow')
-    // Switching would put two windows' PTY and git operations on one checkout.
-    expect(body).not.toContain('currentWorkspace.value =')
-  })
 })

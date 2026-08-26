@@ -8,16 +8,7 @@ export interface LineageRow {
   collapsed: boolean
 }
 
-/** The only fields of a roster entry this file reads. The caller's own type
- *  flows through unchanged — grouping has no business knowing what else a
- *  registry entry carries. */
-export interface RosterEntry {
-  pane_id: string
-  workspace_path: string
-  workspace_label?: string
-}
-
-export interface WorkspaceGroupInput<R extends RosterEntry> {
+export interface WorkspaceGroupInput {
   /** The workspace on screen. */
   here: string
   /** Every workspace this window holds, in the order it took them on. */
@@ -26,15 +17,11 @@ export interface WorkspaceGroupInput<R extends RosterEntry> {
   panes: readonly { id: string; workspacePath: string }[]
   /** The whole window's lineage, in render order. */
   lineage: readonly LineageRow[]
-  /** Panes registered by every window, this one included. */
-  roster: readonly R[]
-  /** Workspaces open in some window, per main's registry. */
-  openPaths: readonly string[]
   collapsed: ReadonlySet<string>
   homeDir: string
 }
 
-export interface WorkspaceGroupRow<R extends RosterEntry = RosterEntry> {
+export interface WorkspaceGroupRow {
   path: string
   label: string
   displayPath: string
@@ -42,7 +29,6 @@ export interface WorkspaceGroupRow<R extends RosterEntry = RosterEntry> {
   collapsed: boolean
   count: number
   lineage: LineageRow[]
-  remote: R[]
 }
 
 const norm = (p: string): string => p.replace(/\/+$/, '')
@@ -68,22 +54,18 @@ export function workspaceParentPath(path: string, homeDir: string): string {
  *  so the 400ms status sync does not rebuild it; the list renders these rows
  *  and looks each pane's status up separately.
  *
- *  The bands, in order:
- *   1. Workspaces this window holds. Live panes, full controls. Ordered by
- *      when the window took them on, NOT viewed-first — deriving order from
- *      what is on screen makes the list reshuffle on every switch.
- *   2. Workspaces some other window holds, from the messaging registry. It
- *      knows a pane's name, agent and busy flag and nothing else, so these
- *      rows are read-only and click through to the window that owns them.
- *   3. Workspaces open with no CLI started yet. Without these, a workspace
- *      just opened is absent until its first pane registers, which reads as
- *      "it did not open".
+ *  Only workspaces THIS window holds. It used to list two more bands — what
+ *  other windows were running, and what was open with no CLI yet — which made
+ *  the same project appear in every window at once, one copy live and the rest
+ *  read-only. A window is its own space; what another one is doing belongs to
+ *  that window.
+ *
+ *  Ordered by when the window took each on, NOT viewed-first: deriving the
+ *  order from what is on screen makes the list reshuffle on every switch.
  */
-export function buildWorkspaceGroups<R extends RosterEntry>(
-  input: WorkspaceGroupInput<R>,
-): WorkspaceGroupRow<R>[] {
-  const { here, order, panes, lineage, roster, openPaths, collapsed, homeDir } = input
-  const rows: WorkspaceGroupRow<R>[] = []
+export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroupRow[] {
+  const { here, order, panes, lineage, collapsed, homeDir } = input
+  const rows: WorkspaceGroupRow[] = []
 
   // A pane records the workspace it was started in, and an MCP child inherits
   // its parent's, so each workspace's panes form whole subtrees of the lineage
@@ -107,52 +89,6 @@ export function buildWorkspaceGroups<R extends RosterEntry>(
       collapsed: collapsed.has(path),
       count: own.length,
       lineage: own,
-      remote: [],
-    })
-  }
-
-  // Panes this window already renders must not appear twice, and neither must
-  // one whose workspace this window holds — the roster does not distinguish
-  // this window from any other.
-  const localIds = new Set(panes.map((p) => p.id))
-  const byWorkspace = new Map<string, R[]>()
-  for (const entry of roster) {
-    const path = entry.workspace_path
-    if (!path || seenLocal.has(norm(path)) || localIds.has(entry.pane_id)) continue
-    const bucket = byWorkspace.get(path)
-    if (bucket) bucket.push(entry)
-    else byWorkspace.set(path, [entry])
-  }
-  for (const [path, entries] of byWorkspace) {
-    rows.push({
-      path,
-      // The first entry that carries one, not the first entry: they all name
-      // the same workspace, but a registration made before the label was
-      // known omits it, and falling back to the basename there would show a
-      // different name for the same project depending on arrival order.
-      label: entries.find((e) => e.workspace_label)?.workspace_label || basename(path),
-      displayPath: workspaceParentPath(path, homeDir),
-      isCurrent: false,
-      collapsed: collapsed.has(path),
-      count: entries.length,
-      lineage: [],
-      remote: entries,
-    })
-  }
-
-  const listed = new Set(rows.map((r) => norm(r.path)))
-  for (const path of openPaths) {
-    if (!path || listed.has(norm(path))) continue
-    listed.add(norm(path))
-    rows.push({
-      path,
-      label: basename(path),
-      displayPath: workspaceParentPath(path, homeDir),
-      isCurrent: false,
-      collapsed: collapsed.has(path),
-      count: 0,
-      lineage: [],
-      remote: [],
     })
   }
 

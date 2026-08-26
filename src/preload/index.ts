@@ -127,18 +127,11 @@ contextBridge.exposeInMainWorld('agentTeam', {
   listOpenWorkspaces: (): Promise<string[]> => ipcRenderer.invoke('workspace:listOpen'),
   focusWorkspaceWindow: (workspacePath: string): Promise<boolean> =>
     ipcRenderer.invoke('workspace:focusExisting', workspacePath),
-  requestSpawnInWorkspace: (workspacePath: string): Promise<boolean> =>
-    ipcRenderer.invoke('workspace:requestSpawn', workspacePath),
   reportAdoptedWorkspaces: (paths: string[]): void =>
     ipcRenderer.send('window:reportAdoptedWorkspaces', paths),
   takeRestoredAdoptedWorkspaces: (): Promise<string[]> =>
     ipcRenderer.invoke('window:takeRestoredAdopted'),
   // Returns a disposer, like the workspace listener below.
-  onSpawnRequested: (cb: () => void): (() => void) => {
-    const listener = (): void => cb()
-    ipcRenderer.on('workspace:spawnRequested', listener)
-    return () => ipcRenderer.removeListener('workspace:spawnRequested', listener)
-  },
   // Returns a disposer — Welcome mounts/unmounts with the workspace gate.
   onOpenWorkspacesChanged: (cb: () => void): (() => void) => {
     const listener = (): void => cb()

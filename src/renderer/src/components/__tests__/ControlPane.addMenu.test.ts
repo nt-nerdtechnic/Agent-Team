@@ -10,7 +10,7 @@ import ControlPane from '../ControlPane.vue'
 const specs = [
   { agentKey: 'claude', label: 'Claude Code' },
   { agentKey: 'codex', label: 'Codex' },
-  { agentKey: 'terminal', label: 'Terminal' } // filtered out of manual spawn
+  { agentKey: 'terminal', label: 'Terminal' } // last, as App.vue orders it
 ]
 
 // The list only renders once there is at least one pane — with none, the
@@ -89,9 +89,75 @@ describe('ControlPane – the ＋ menu', () => {
     wrapper = mountWith()
     await openMenu(wrapper)
     const opts = wrapper.findAll('.ws-add-scroll .ws-add-opt')
-    // "terminal" is not a manual-spawn agent; it must not appear.
-    expect(opts.map((o) => o.text())).toEqual(['✓Claude Code', 'Codex'])
+    // A plain shell comes last, which is where App.vue already orders it in
+    // agentSpecs — it is something you can start, and the menu is the list of
+    // things you can start. It carries no tick: it is not the picked agent, and
+    // choosing it does not become one.
+    expect(opts.map((o) => o.text())).toEqual(['✓Claude Code', 'Codex', 'Terminal'])
     expect(opts[0].classes()).toContain('on')
+    expect(opts[2].classes()).not.toContain('on')
+  })
+
+  it('says a heading can be dragged out, only when it can be', async () => {
+    // Nothing about the row shows it is draggable, and with one workspace it
+    // silently is not — which reads as broken rather than deliberate.
+    wrapper = mountWith()
+    const lone = wrapper.find('.ws-head--current')
+    expect(lone.attributes('draggable')).toBe('false')
+    expect(lone.attributes('title')).toBe('')
+
+    wrapper.unmount()
+    const second = { ...workspaceRow, path: '/Users/me/Desktop/other', label: 'other' }
+    wrapper = mountWith({ workspaces: [workspaceRow, second] })
+    const rows = wrapper.findAll('.ws-head--current')
+    expect(rows[0].attributes('draggable')).toBe('true')
+    // Row 0 is the workspace on screen, so it has no switch hint to offer —
+    // a title there can only be the drag one. Asserted as "not empty" rather
+    // than by its text, which is translated.
+    expect(rows[0].attributes('title')).not.toBe('')
+  })
+
+  it('starts a plain shell without the picked role', async () => {
+    // The role is injected into a CLI's prompt. A shell would print it, so this
+    // cannot go through spawnAs, which sends whatever the role select holds.
+    wrapper = mountWith()
+    await openMenu(wrapper)
+    await wrapper.find('.ws-add-role').setValue('reviewer')
+    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[2].trigger('click')
+    expect(wrapper.emitted('spawn')?.[0]?.[0]).toMatchObject({
+      agentKey: 'terminal',
+      roleKey: '',
+    })
+  })
+
+  it('leaves the picked agent alone when a shell is started', async () => {
+    // Unlike a CLI pick, which writes back to the card. A shell is not an agent
+    // the card can be set to, and overwriting the pick would lose it.
+    wrapper = mountWith()
+    await openMenu(wrapper)
+    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[2].trigger('click')
+    await openMenu(wrapper)
+    const opts = wrapper.findAll('.ws-add-scroll .ws-add-opt')
+    expect(opts[0].classes()).toContain('on')
+  })
+
+  it('starts the shell in the workspace whose heading was clicked', async () => {
+    // The ＋ belongs to one row, and a window can hold several workspaces.
+    const second = { ...workspaceRow, path: '/Users/me/Desktop/other', label: 'other' }
+    wrapper = mountWith({ workspaces: [workspaceRow, second] })
+    await wrapper.findAll('.ws-add')[1].trigger('click')
+    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[2].trigger('click')
+    expect(wrapper.emitted('spawn')?.[0]?.[0]).toMatchObject({
+      agentKey: 'terminal',
+      workspacePath: '/Users/me/Desktop/other',
+    })
+  })
+
+  it('closes the menu after starting a shell', async () => {
+    wrapper = mountWith()
+    await openMenu(wrapper)
+    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[2].trigger('click')
+    expect(wrapper.find('.ws-add-menu').exists()).toBe(false)
   })
 
   it('opens the CLI that was clicked, not the one the card had', async () => {
