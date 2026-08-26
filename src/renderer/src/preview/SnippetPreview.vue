@@ -32,7 +32,7 @@ const gutterWidth = computed(() => String(lines.value.length).length)
   padding: 8px 10px;
   font-family: var(--font-mono, ui-monospace, 'SF Mono', Menlo, monospace);
   font-size: 11.5px;
-  line-height: 1.65;
+  line-height: var(--lh-loose);
   white-space: pre;
 }
 .sp-line {

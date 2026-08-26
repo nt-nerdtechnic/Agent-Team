@@ -142,7 +142,7 @@ function confirmSelection(): void {
   justify-content: space-between;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-muted);
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--text-bright);
 }
@@ -150,7 +150,7 @@ function confirmSelection(): void {
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--font-md);
   cursor: pointer;
   padding: 2px 6px;
   border-radius: var(--radius-sm);
@@ -167,13 +167,13 @@ function confirmSelection(): void {
 }
 .reconnect-empty {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-align: center;
   padding: 32px 12px;
 }
 .reconnect-hint {
   margin: 0 0 10px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
 }
 .reconnect-list {
@@ -214,7 +214,7 @@ function confirmSelection(): void {
   gap: 8px;
 }
 .reconnect-name {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   color: var(--text-bright);
   overflow: hidden;
@@ -223,7 +223,7 @@ function confirmSelection(): void {
 }
 .reconnect-badge {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   padding: 1px 8px;
   border-radius: 10px;
@@ -242,7 +242,7 @@ function confirmSelection(): void {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-primary);
 }
 .reconnect-preview-line {
@@ -253,7 +253,7 @@ function confirmSelection(): void {
 .reconnect-meta {
   display: flex;
   gap: 6px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
 }
 .reconnect-footer {
@@ -264,7 +264,7 @@ function confirmSelection(): void {
   border-top: 1px solid var(--border-muted);
 }
 .reconnect-btn {
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 4px 14px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-default);

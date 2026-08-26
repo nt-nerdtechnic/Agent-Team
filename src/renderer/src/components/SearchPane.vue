@@ -442,7 +442,7 @@ defineExpose({ openReplace, focusInput, setQuery })
 .sp-tg {
   width: 24px;
   height: 26px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
@@ -471,7 +471,7 @@ defineExpose({ openReplace, focusInput, setQuery })
 .sp-glob-label { font-size: 10.5px; color: var(--text-muted); margin-top: 2px; }
 .sp-glob-input {
   padding: 5px 8px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
   border-radius: 4px;
@@ -507,7 +507,7 @@ defineExpose({ openReplace, focusInput, setQuery })
 .sp-chev { display: inline-flex; color: var(--text-muted); transition: transform 0.1s; }
 .sp-chev.open { transform: rotate(90deg); }
 .sp-file-name { font-weight: 600; color: var(--text-primary); flex-shrink: 0; }
-.sp-file-path { color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.sp-file-path { color: var(--text-muted); font-size: var(--font-2xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .sp-file-count {
   flex-shrink: 0;
   min-width: 16px;
@@ -538,7 +538,7 @@ defineExpose({ openReplace, focusInput, setQuery })
   white-space: nowrap;
 }
 .sp-match:hover { background: var(--bg-hover); }
-.sp-ln { color: var(--text-muted); font-size: 11px; min-width: 30px; text-align: right; flex-shrink: 0; }
+.sp-ln { color: var(--text-muted); font-size: var(--font-2xs); min-width: 30px; text-align: right; flex-shrink: 0; }
 .sp-text {
   font: 12px/1.6 ui-monospace, Menlo, monospace;
   color: var(--text-secondary);

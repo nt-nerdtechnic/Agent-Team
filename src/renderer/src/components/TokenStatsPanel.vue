@@ -432,7 +432,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   flex-direction: column;
   color: var(--text-bright);
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 12px;
+  font-size: var(--font-xs);
   min-height: 0;
   overflow: hidden;
 }
@@ -469,18 +469,18 @@ async function confirmReset(scope: ResetScope): Promise<void> {
 .rail-btn.active {
   color: var(--accent-fg);
 }
-.rail-icon { font-size: 16px; }
+.rail-icon { font-size: var(--font-lg); }
 .rail-label {
   /* No rotate(180deg) here: that bottom-up "book spine" trick flips CJK
      glyphs upside down. Plain vertical-rl keeps CJK upright (top-to-bottom)
      and rotates Latin text 90° clockwise — both readable. */
   writing-mode: vertical-rl;
   letter-spacing: 1px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   text-transform: uppercase;
 }
 .rail-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   background: var(--accent-emphasis);
   color: var(--text-on-emphasis);
   padding: 2px 6px;
@@ -579,7 +579,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   margin-bottom: 6px;
 }
 .block-title {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-secondary);
@@ -590,7 +590,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   background: transparent;
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
   border-radius: 3px;
   padding: 0 6px;
@@ -598,7 +598,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
 }
 .reset-btn:hover { color: var(--danger-fg); border-color: var(--danger-fg); }
 .run-meta {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   margin-bottom: 6px;
   overflow: hidden;
@@ -608,7 +608,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
 .run-id {
   font-family: Menlo, Monaco, monospace;
 }
-.muted { color: var(--text-secondary); font-size: 11px; margin: 4px 0; }
+.muted { color: var(--text-secondary); font-size: var(--font-2xs); margin: 4px 0; }
 
 .totals {
   display: grid;
@@ -623,7 +623,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   overflow: hidden;
 }
 .big {
-  font-size: 14px;
+  font-size: var(--font-md);
   font-weight: 600;
   color: var(--text-bright);
   overflow: hidden;
@@ -640,7 +640,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
 .grid {
   width: 100%;
   border-collapse: collapse;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   table-layout: fixed;
 }
 .grid tr.head td, .grid tr.head th {

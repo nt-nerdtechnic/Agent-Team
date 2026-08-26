@@ -301,9 +301,9 @@ const comparison: CompareRow[] = [
 
 .mh-intro {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-secondary);
-  line-height: 1.65;
+  line-height: var(--lh-loose);
 }
 
 .mh-dirs {
@@ -322,7 +322,7 @@ const comparison: CompareRow[] = [
 }
 .mh-dir-arrow {
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--accent-fg);
   background: var(--accent-subtle);
   border-radius: 99px;
@@ -330,7 +330,7 @@ const comparison: CompareRow[] = [
   align-self: flex-start;
 }
 .mh-dir-title {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 700;
   color: var(--text-bright);
 }
@@ -348,7 +348,7 @@ const comparison: CompareRow[] = [
 }
 .mh-h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--font-md);
   font-weight: 700;
   color: var(--text-bright);
 }
@@ -360,8 +360,8 @@ const comparison: CompareRow[] = [
 }
 .mh-p {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: var(--font-sm);
+  line-height: var(--lh-loose);
 }
 .mh-note {
   margin: 0;
@@ -372,8 +372,8 @@ const comparison: CompareRow[] = [
 .mh-list {
   margin: 0;
   padding-left: 1.3em;
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: var(--font-sm);
+  line-height: var(--lh-loose);
   display: flex;
   flex-direction: column;
   gap: 4px;

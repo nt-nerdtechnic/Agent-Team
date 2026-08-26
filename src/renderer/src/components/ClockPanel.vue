@@ -130,7 +130,7 @@ const projectCreatedText = computed(() => {
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
   box-shadow: var(--shadow-popover);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
 }
 .ck-head {
@@ -153,7 +153,7 @@ const projectCreatedText = computed(() => {
   border: 1px solid var(--border-muted);
   border-radius: var(--radius-sm);
   padding: 2px 7px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   cursor: pointer;
 }
 .ck-btn:hover { color: var(--text-bright); }

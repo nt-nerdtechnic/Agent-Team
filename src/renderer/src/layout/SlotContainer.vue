@@ -91,7 +91,7 @@ function pick(id: string): void {
   overflow: hidden;
   background: var(--bg-base);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .slot--up { border-bottom: 1px solid var(--border-muted); }
 .slot--down { border-top: 1px solid var(--border-muted); }
@@ -123,8 +123,8 @@ function pick(id: string): void {
 }
 .slot-tab:hover { color: var(--text-primary); background: var(--bg-elevated); }
 .slot-tab.active { color: var(--text-bright); background: var(--bg-muted); }
-.slot-tab-icon { font-size: 13px; }
-.slot-tab-label { font-size: 11px; }
+.slot-tab-icon { font-size: var(--font-sm); }
+.slot-tab-label { font-size: var(--font-2xs); }
 
 .slot-spacer { flex: 1; }
 .slot-collapse {
@@ -137,7 +137,7 @@ function pick(id: string): void {
   border: none;
   border-radius: 6px;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--font-md);
   line-height: 1;
   cursor: pointer;
   transition: color 0.15s, background 0.15s;

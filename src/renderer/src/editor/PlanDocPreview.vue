@@ -208,7 +208,7 @@ defineExpose({ scrollToAnchor, isEditing, cancelEdit })
   display: flex;
   flex: 1;
   flex-direction: column;
-  font-size: 13px;
+  font-size: var(--font-sm);
   gap: 6px;
   justify-content: center;
   padding: 0 16px;
@@ -219,7 +219,7 @@ defineExpose({ scrollToAnchor, isEditing, cancelEdit })
    diagnostic detail, deliberately quieter than the message above. */
 .pdp-error-reason,
 .pdp-error-path {
-  font-size: 12px;
+  font-size: var(--font-xs);
   opacity: 0.75;
   overflow-wrap: anywhere;
 }

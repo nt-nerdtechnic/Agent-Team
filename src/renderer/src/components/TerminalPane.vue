@@ -700,7 +700,7 @@ onMounted(() => {
   background: none;
   border: none;
   color: var(--text-disabled);
-  font-size: 14px;
+  font-size: var(--font-md);
   cursor: pointer;
   padding: 0 3px;
   line-height: 1;
@@ -735,7 +735,7 @@ onMounted(() => {
   padding: 5px 52px 5px 12px;
   background: var(--bg-subtle);
   border-bottom: 1px solid var(--border-muted);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
 }
 /* Reorder drop target feedback, matching .tab-btn.drag-over in StageTabBar.vue. */
@@ -749,7 +749,7 @@ onMounted(() => {
   gap: 8px;
 }
 .header-sub {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -853,7 +853,7 @@ onMounted(() => {
 }
 .status {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   text-transform: uppercase;
   padding: 2px 8px;
   border-radius: 999px;
@@ -912,7 +912,7 @@ onMounted(() => {
   justify-content: center;
   background: var(--accent-subtle);
   color: var(--accent-bright);
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-family: inherit;
   pointer-events: none;
 }
@@ -930,7 +930,7 @@ onMounted(() => {
   border-radius: 6px;
   background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   pointer-events: none;
 }
 /* Both live in the bottom-right corner; the hint steps up when the button is out. */
@@ -953,7 +953,7 @@ onMounted(() => {
   background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
   color: var(--accent-bright);
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
   transition: background-color 0.15s, border-color 0.15s;
 }
@@ -1042,7 +1042,7 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   color: var(--text-secondary);
 }

@@ -189,7 +189,7 @@ function onSize(id: SlotId, raw: string): void {
 
 <style scoped>
 .ls { display: flex; flex-direction: column; gap: 18px; max-width: 720px; }
-.ls-intro { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.ls-intro { margin: 0; color: var(--text-secondary); font-size: var(--font-xs); line-height: 1.6; }
 
 .ls-slot {
   border: 1px solid var(--border-muted);
@@ -205,10 +205,10 @@ function onSize(id: SlotId, raw: string): void {
   flex-wrap: wrap;
   margin-bottom: 10px;
 }
-.ls-slot-name { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-bright); }
-.ls-fixed-note { font-size: 11px; color: var(--text-secondary); }
+.ls-slot-name { margin: 0; font-size: var(--font-sm); font-weight: 600; color: var(--text-bright); }
+.ls-fixed-note { font-size: var(--font-2xs); color: var(--text-secondary); }
 
-.ls-size { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); }
+.ls-size { display: flex; align-items: center; gap: 6px; font-size: var(--font-2xs); color: var(--text-secondary); }
 .ls-size-input {
   width: 68px;
   height: 24px;
@@ -217,7 +217,7 @@ function onSize(id: SlotId, raw: string): void {
   border: 1px solid var(--border-default);
   border-radius: 5px;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .ls-size-input:disabled { opacity: 0.5; }
 
@@ -226,12 +226,12 @@ function onSize(id: SlotId, raw: string): void {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   cursor: pointer;
 }
 
-.ls-empty { margin: 0; font-size: 11px; color: var(--text-secondary); font-style: italic; }
+.ls-empty { margin: 0; font-size: var(--font-2xs); color: var(--text-secondary); font-style: italic; }
 
 .ls-views { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .ls-view { display: flex; align-items: center; gap: 8px; }
@@ -248,13 +248,13 @@ function onSize(id: SlotId, raw: string): void {
   border: 1px solid var(--border-muted);
   border-radius: 6px;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-align: left;
   cursor: pointer;
 }
 .ls-view-name.active { border-color: var(--accent-fg); color: var(--text-bright); }
 .ls-view-name.is-static { cursor: default; }
-.ls-view-icon { font-size: 13px; }
+.ls-view-icon { font-size: var(--font-sm); }
 
 .ls-move,
 .ls-hide,
@@ -266,7 +266,7 @@ function onSize(id: SlotId, raw: string): void {
   border: 1px solid var(--border-default);
   border-radius: 6px;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
 }
 .ls-move:disabled,
@@ -280,11 +280,11 @@ function onSize(id: SlotId, raw: string): void {
   border: 1px solid var(--border-default);
   border-radius: 6px;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
 }
 .ls-preset:hover { border-color: var(--accent-fg); color: var(--text-bright); }
 
 .ls-actions { display: flex; align-items: center; gap: 10px; }
-.ls-reset-note { font-size: 11px; color: var(--text-secondary); }
+.ls-reset-note { font-size: var(--font-2xs); color: var(--text-secondary); }
 </style>

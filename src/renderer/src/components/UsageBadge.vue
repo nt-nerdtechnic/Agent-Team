@@ -506,7 +506,7 @@ function acctTitle(profileId: string | null): string {
   border-radius: 8px;
   padding: 10px 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 .usage-pop-head {
@@ -521,7 +521,7 @@ function acctTitle(profileId: string | null): string {
   color: var(--text-bright);
 }
 .usage-pop-plan {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   text-transform: capitalize;
   color: var(--text-secondary);
 }
@@ -582,7 +582,7 @@ function acctTitle(profileId: string | null): string {
 }
 .usage-row-reset {
   margin-top: 2px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   opacity: 0.8;
 }
 .usage-pop-switch {
@@ -591,7 +591,7 @@ function acctTitle(profileId: string | null): string {
   border-top: 1px solid var(--border-default);
 }
 .usage-pop-switch-title {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   margin-bottom: 4px;
   color: var(--text-secondary);
@@ -615,7 +615,7 @@ function acctTitle(profileId: string | null): string {
   border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
   transition:
     background 0.12s ease,
@@ -666,7 +666,7 @@ function acctTitle(profileId: string | null): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 700;
   color: #fff;
 }
@@ -686,19 +686,19 @@ function acctTitle(profileId: string | null): string {
 }
 .usage-acct-tick {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--accent-fg);
 }
 .usage-acct-pct {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   color: var(--text-secondary);
 }
 /* Signed-out rows take the quota slot but read as a state, not a number. */
 .usage-acct-out {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-style: italic;
   color: var(--text-tertiary, var(--text-secondary));
 }
@@ -726,7 +726,7 @@ function acctTitle(profileId: string | null): string {
   border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
   transition:
     background 0.12s ease,
@@ -740,7 +740,7 @@ function acctTitle(profileId: string | null): string {
   flex-shrink: 0;
   width: 20px;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
 }
 .usage-pop-updated {

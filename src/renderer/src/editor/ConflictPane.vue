@@ -424,10 +424,10 @@ function choiceOf(idx: number): ConflictChoice | undefined {
   border-bottom: 1px solid var(--border-muted);
   background: var(--bg-subtle);
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .cp-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 999px;
@@ -442,10 +442,10 @@ function choiceOf(idx: number): ConflictChoice | undefined {
   white-space: nowrap;
   font-family: ui-monospace, Menlo, monospace;
 }
-.cp-progress { color: var(--text-muted); font-size: 11px; flex-shrink: 0; white-space: nowrap; }
+.cp-progress { color: var(--text-muted); font-size: var(--font-2xs); flex-shrink: 0; white-space: nowrap; }
 .cp-apply {
   padding: 3px 10px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   border-radius: 4px;
   border: 1px solid var(--accent-emphasis);
   background: color-mix(in srgb, var(--accent-emphasis) 18%, transparent);
@@ -465,7 +465,7 @@ function choiceOf(idx: number): ConflictChoice | undefined {
 
 /* ── Body ─────────────────────────────────────────────────────────────── */
 .cp-body { flex: 1; overflow-y: auto; }
-.cp-msg { padding: 24px; text-align: center; color: var(--text-muted); font-size: 12px; }
+.cp-msg { padding: 24px; text-align: center; color: var(--text-muted); font-size: var(--font-xs); }
 .cp-msg.err { color: var(--danger-fg); }
 .cp-msg.warn { color: var(--warning-fg); }
 
@@ -478,8 +478,8 @@ function choiceOf(idx: number): ConflictChoice | undefined {
   margin: 0;
   padding: 4px 12px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-all;
@@ -509,20 +509,20 @@ function choiceOf(idx: number): ConflictChoice | undefined {
   background: color-mix(in srgb, var(--success-fg) 7%, transparent);
 }
 .cp-ci-num {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 700;
   color: var(--danger-fg);
   flex-shrink: 0;
 }
 .cp-conflict.resolved .cp-ci-num { color: var(--success-fg); }
-.cp-head-label { font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
+.cp-head-label { font-size: var(--font-2xs); font-family: ui-monospace, Menlo, monospace; }
 .cp-head-label.ours { color: var(--attention-fg); }
 .cp-head-label.theirs { color: var(--accent-fg); }
-.cp-head-sep { font-size: 10px; color: var(--text-muted); }
+.cp-head-sep { font-size: var(--font-3xs); color: var(--text-muted); }
 .cp-conflict-actions { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; flex-wrap: wrap; }
 
 .cp-btn {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 8px;
   border-radius: 4px;
   border: 1px solid var(--border-muted);
@@ -546,7 +546,7 @@ function choiceOf(idx: number): ConflictChoice | undefined {
 }
 .cp-base-head {
   padding: 3px 8px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
   background: var(--bg-subtle);
   border-bottom: 1px solid var(--border-muted);
@@ -557,8 +557,8 @@ function choiceOf(idx: number): ConflictChoice | undefined {
   max-height: 220px;
   overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-all;
@@ -570,8 +570,8 @@ function choiceOf(idx: number): ConflictChoice | undefined {
 .cp-side {
   padding: 4px 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   transition: opacity 0.15s;
 }
 .cp-side.ours-side { background: color-mix(in srgb, var(--warning-fg) 6%, transparent); border-right: 1px solid var(--border-muted); }
@@ -580,9 +580,9 @@ function choiceOf(idx: number): ConflictChoice | undefined {
 .cp-side.side-chosen { opacity: 1; }
 .cp-side.side-rejected { opacity: 0.3; }
 .cp-line { display: flex; align-items: flex-start; }
-.cp-lno { width: 36px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--text-muted); user-select: none; font-size: 11px; }
+.cp-lno { width: 36px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--text-muted); user-select: none; font-size: var(--font-2xs); }
 .cp-ltext { white-space: pre-wrap; word-break: break-all; color: var(--text-primary); }
-.cp-empty-side { padding: 4px 8px; color: var(--text-muted); font-size: 11px; font-style: italic; }
+.cp-empty-side { padding: 4px 8px; color: var(--text-muted); font-size: var(--font-2xs); font-style: italic; }
 
 /* Manual edit */
 .cp-manual-edit { padding: 8px; background: var(--bg-subtle); }
@@ -595,8 +595,8 @@ function choiceOf(idx: number): ConflictChoice | undefined {
   border-radius: 4px;
   padding: 6px 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   resize: vertical;
   outline: none;
 }
@@ -611,11 +611,11 @@ function choiceOf(idx: number): ConflictChoice | undefined {
   padding: 3px 8px;
   background: color-mix(in srgb, var(--success-fg) 7%, transparent);
   border-top: 1px solid var(--border-muted);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .cp-preview-label { color: var(--success-fg); flex: 1; }
 .cp-undo-btn {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 1px 6px;
   border-radius: 3px;
   border: 1px solid var(--border-muted);

@@ -2279,7 +2279,7 @@ registerCommand('git.focusAgent', () => {
 }
 .crumb b { color: var(--text-bright); font-weight: 650; }
 .crumb-sep { margin: 0 4px; color: var(--text-muted); }
-.crumb-cnt { margin-left: 6px; color: var(--accent-fg); font-size: 12px; }
+.crumb-cnt { margin-left: 6px; color: var(--accent-fg); font-size: var(--font-xs); }
 .busy-dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--attention-fg);
@@ -2323,7 +2323,7 @@ registerCommand('git.focusAgent', () => {
   padding: 6px 18px;
   background: var(--danger-subtle);
   color: var(--danger-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .empty {
   flex: 1;
@@ -2341,8 +2341,8 @@ registerCommand('git.focusAgent', () => {
   border-radius: 12px;
   background: var(--bg-subtle);
 }
-.init-title { margin: 0 0 6px; font-size: 16px; font-weight: 800; color: var(--text-bright); }
-.init-sub { margin: 0 0 16px; font-size: 12.5px; line-height: 1.5; color: var(--text-muted); }
+.init-title { margin: 0 0 6px; font-size: var(--font-lg); font-weight: 800; color: var(--text-bright); }
+.init-sub { margin: 0 0 16px; font-size: 12.5px; line-height: var(--lh-base); color: var(--text-muted); }
 .init-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .init-clone {
   display: flex;
@@ -2376,7 +2376,7 @@ registerCommand('git.focusAgent', () => {
   padding: 7px 12px;
   border-radius: 9px;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-sm);
   cursor: pointer;
 }
 .navi button:hover { background: var(--bg-hover-faint); }
@@ -2385,9 +2385,9 @@ registerCommand('git.focusAgent', () => {
 .divider { height: 1px; background: var(--border-muted); margin: 4px 12px 12px; }
 
 /* ── GitPane-copied card vocabulary (keep in sync with GitPane.vue) ────────── */
-.empty-msg { color: var(--text-muted); font-size: 11px; font-style: italic; padding: 3px 8px 6px; }
-.err-text { color: var(--danger-fg); font-size: 11px; margin: 0; padding: 2px 4px; }
-.chash { font-size: 10px; color: var(--text-muted); font-family: monospace; background: transparent; }
+.empty-msg { color: var(--text-muted); font-size: var(--font-2xs); font-style: italic; padding: 3px 8px 6px; }
+.err-text { color: var(--danger-fg); font-size: var(--font-2xs); margin: 0; padding: 2px 4px; }
+.chash { font-size: var(--font-3xs); color: var(--text-muted); font-family: monospace; background: transparent; }
 
 .git-card {
   margin: 6px 10px;
@@ -2411,36 +2411,36 @@ registerCommand('git.focusAgent', () => {
 }
 .sec-caret { font-size: 9px; color: var(--text-muted); width: 10px; flex-shrink: 0; }
 .sec-label {
-  font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  font-size: var(--font-2xs); font-weight: 600; color: var(--text-secondary);
   letter-spacing: 0.3px;
 }
 .sec-badge {
-  font-size: 10px; color: var(--text-secondary); background: var(--bg-active);
+  font-size: var(--font-3xs); color: var(--text-secondary); background: var(--bg-active);
   border-radius: 10px; padding: 0 6px; flex-shrink: 0;
 }
 
 .branch-row {
   display: flex; align-items: center; gap: 4px;
-  padding: 2px 0; font-size: 11px; border-radius: 3px;
+  padding: 2px 0; font-size: var(--font-2xs); border-radius: 3px;
 }
 .branch-row:hover { background: var(--bg-hover-faint); }
 .branch-row.current .b-name { color: var(--accent-bright); font-weight: 600; }
-.b-check { width: 14px; color: var(--success-bright); font-size: 10px; text-align: center; flex-shrink: 0; }
+.b-check { width: 14px; color: var(--success-bright); font-size: var(--font-3xs); text-align: center; flex-shrink: 0; }
 .b-name { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .b-name.remote { color: var(--text-muted); font-style: italic; }
-.b-track { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
-.branch-section-label { font-size: 10px; color: var(--text-muted); padding: 4px 0 2px; letter-spacing: 0.04em; text-transform: uppercase; }
+.b-track { color: var(--text-muted); font-size: var(--font-3xs); flex-shrink: 0; }
+.branch-section-label { font-size: var(--font-3xs); color: var(--text-muted); padding: 4px 0 2px; letter-spacing: 0.04em; text-transform: uppercase; }
 .compare-panel {
   margin: 4px 0; background: var(--bg-inset, var(--bg-subtle)); border: 1px solid var(--border-muted);
-  border-radius: 4px; padding: 6px 8px; font-size: 11px;
+  border-radius: 4px; padding: 6px 8px; font-size: var(--font-2xs);
 }
 .compare-title { color: var(--accent-bright); font-weight: 600; margin-bottom: 3px; }
 .compare-stat  { color: var(--success-bright); margin-bottom: 2px; }
-.compare-file  { color: var(--text-secondary); font-family: monospace; font-size: 10px; }
+.compare-file  { color: var(--text-secondary); font-family: monospace; font-size: var(--font-3xs); }
 
 .generic-row {
   display: flex; align-items: center; gap: 6px;
-  padding: 3px 0; font-size: 11px;
+  padding: 3px 0; font-size: var(--font-2xs);
 }
 .generic-row:hover { background: var(--bg-hover-faint); }
 .generic-row.clickable { cursor: pointer; }
@@ -2449,16 +2449,16 @@ registerCommand('git.focusAgent', () => {
 .row-btn {
   display: flex; align-items: center; justify-content: center;
   min-width: 20px; height: 20px; background: transparent; border: none;
-  border-radius: 3px; color: var(--text-secondary); font-size: 11px; cursor: pointer; padding: 0 2px;
+  border-radius: 3px; color: var(--text-secondary); font-size: var(--font-2xs); cursor: pointer; padding: 0 2px;
 }
 .row-btn:hover { color: var(--text-primary); background: var(--bg-active); }
 .row-btn.danger:hover { color: var(--danger-fg); }
 .row-btn.always { opacity: 1; }
-.stash-ref { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+.stash-ref { color: var(--text-muted); font-size: var(--font-3xs); flex-shrink: 0; }
 .stash-msg { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.remote-name { color: var(--text-muted); font-size: 10px; flex-shrink: 0; min-width: 44px; }
-.remote-url  { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-.wt-icon { color: var(--success-bright); font-size: 11px; flex-shrink: 0; width: 14px; text-align: center; }
+.remote-name { color: var(--text-muted); font-size: var(--font-3xs); flex-shrink: 0; min-width: 44px; }
+.remote-url  { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-2xs); }
+.wt-icon { color: var(--success-bright); font-size: var(--font-2xs); flex-shrink: 0; width: 14px; text-align: center; }
 .wt-name-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .wt-name-row .b-name { flex: 0 1 auto; }
 .wt-badge {
@@ -2469,23 +2469,23 @@ registerCommand('git.focusAgent', () => {
 
 .git-input {
   flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-primary); font-size: 11px; padding: 3px 7px;
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 3px 7px;
 }
 .git-input:focus { outline: none; border-color: var(--accent-focus); }
 .input-row { display: flex; gap: 4px; }
 .btn-ghost {
   background: transparent; border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-secondary); font-size: 12px; padding: 4px 8px; cursor: pointer;
+  color: var(--text-secondary); font-size: var(--font-xs); padding: 4px 8px; cursor: pointer;
 }
 .btn-ghost:hover { border-color: var(--border-strong); color: var(--text-primary); }
 .btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-ghost.sm { font-size: 11px; padding: 3px 7px; }
+.btn-ghost.sm { font-size: var(--font-2xs); padding: 3px 7px; }
 .btn-ghost.active { color: var(--accent-bright); }
-.check-label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); cursor: pointer; }
+.check-label { display: flex; align-items: center; gap: 4px; font-size: var(--font-2xs); color: var(--text-secondary); cursor: pointer; }
 .check-label input { accent-color: var(--accent-focus); cursor: pointer; }
 
-.config-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 11px; }
-.config-key { color: var(--text-muted); min-width: 108px; flex-shrink: 0; font-family: monospace; font-size: 10px; }
+.config-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: var(--font-2xs); }
+.config-key { color: var(--text-muted); min-width: 108px; flex-shrink: 0; font-family: monospace; font-size: var(--font-3xs); }
 .config-val { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .config-val.clickable { cursor: pointer; border-radius: 3px; padding: 1px 4px; margin: -1px -4px; }
 .config-val.clickable:hover { background: var(--bg-muted); color: var(--text-on-emphasis); }
@@ -2498,9 +2498,9 @@ registerCommand('git.focusAgent', () => {
   display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 8px;
   background: var(--bg-muted); color: var(--text-muted); font-size: 9px; line-height: 14px;
 }
-.issue-detail-title { font-size: 12px; color: var(--text-primary); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.issue-detail-title { font-size: var(--font-xs); color: var(--text-primary); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
 .issue-body {
-  white-space: pre-wrap; word-break: break-word; font-size: 11px; color: var(--text-primary);
+  white-space: pre-wrap; word-break: break-word; font-size: var(--font-2xs); color: var(--text-primary);
   background: var(--bg-muted); border-radius: 4px; padding: 6px; margin: 0 0 4px; font-family: inherit;
 }
 .issue-comment { border-top: 1px solid var(--border-muted); padding-top: 4px; margin-top: 4px; }
@@ -2509,7 +2509,7 @@ registerCommand('git.focusAgent', () => {
   border: none;
   background: none;
   color: var(--accent-fg);
-  font-size: 12px;
+  font-size: var(--font-xs);
   cursor: pointer;
   padding: 2px 4px;
   border-radius: 5px;
@@ -2539,9 +2539,9 @@ registerCommand('git.focusAgent', () => {
 
 .list-hdr { display: flex; align-items: flex-end; gap: 12px; margin-bottom: 12px; }
 .gtitle { font-size: 15px; font-weight: 800; color: var(--text-bright); }
-.gsub { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
+.gsub { font-size: var(--font-xs); color: var(--text-muted); margin-top: 1px; }
 .hdr-actions { margin-left: auto; display: flex; gap: 10px; }
-.clean-hint, .empty-hint { color: var(--text-muted); font-size: 13px; padding: 26px 4px; }
+.clean-hint, .empty-hint { color: var(--text-muted); font-size: var(--font-sm); padding: 26px 4px; }
 
 .fcard {
   background: var(--bg-subtle);
@@ -2555,7 +2555,7 @@ registerCommand('git.focusAgent', () => {
   gap: 11px;
   padding: 8.5px 16px;
   border-bottom: 1px solid var(--border-muted);
-  font-size: 13px;
+  font-size: var(--font-sm);
   cursor: pointer;
 }
 .frow:last-child { border-bottom: none; }
@@ -2583,7 +2583,7 @@ registerCommand('git.focusAgent', () => {
   align-items: center;
   justify-content: center;
   color: var(--text-on-emphasis);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 800;
 }
 .stag {
@@ -2636,7 +2636,7 @@ registerCommand('git.focusAgent', () => {
   background: var(--bg-muted);
   border-radius: 8px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 6px 12px;
   cursor: pointer;
 }
@@ -2751,7 +2751,7 @@ registerCommand('git.focusAgent', () => {
   overflow: auto;
   padding: 4px 0 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .blame-row, .db-line {
   display: flex;
@@ -2772,11 +2772,11 @@ registerCommand('git.focusAgent', () => {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.bl-date { color: var(--text-muted); font-size: 10px; min-width: 74px; flex-shrink: 0; }
+.bl-date { color: var(--text-muted); font-size: var(--font-3xs); min-width: 74px; flex-shrink: 0; }
 .db-no { color: var(--text-muted); min-width: 36px; text-align: right; flex-shrink: 0; user-select: none; }
 .db-sign { width: 10px; flex-shrink: 0; text-align: center; user-select: none; }
 .db-code { white-space: pre; flex-shrink: 0; color: var(--text-primary); }
-.db-hunk-head { color: var(--accent-bright); font-size: 10px; opacity: 0.8; padding: 4px 14px 2px; white-space: pre; }
+.db-hunk-head { color: var(--accent-bright); font-size: var(--font-3xs); opacity: 0.8; padding: 4px 14px 2px; white-space: pre; }
 .db-line.db-add { background: var(--diff-add-bg); }
 .db-line.db-add .db-code, .db-line.db-add .db-sign { color: var(--success-bright); }
 .db-line.db-del { background: var(--diff-del-bg); }

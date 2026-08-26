@@ -329,7 +329,7 @@ const verdictMeta = computed(() =>
 .review-pane {
   display: flex; flex-direction: column; height: 100%;
   background: var(--bg-base); color: var(--text-primary);
-  font-size: 12px; overflow: hidden;
+  font-size: var(--font-xs); overflow: hidden;
 }
 
 /* Header */
@@ -357,53 +357,53 @@ const verdictMeta = computed(() =>
 }
 .model-row { display: flex; align-items: center; gap: 4px; }
 .model-select {
-  padding: 2px 4px; font-size: 11px;
+  padding: 2px 4px; font-size: var(--font-2xs);
   background: var(--bg-subtle); border: 1px solid var(--border-default);
   border-radius: 4px; color: var(--text-primary); cursor: pointer; min-width: 0;
 }
 .model-select--flex { flex: 1; }
 .model-input { font-family: inherit; }
 .mode-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.mode-label { display: flex; align-items: center; font-size: 11px; font-weight: 600; color: var(--text-primary); }
+.mode-label { display: flex; align-items: center; font-size: var(--font-2xs); font-weight: 600; color: var(--text-primary); }
 .branch-toggle {
-  padding: 2px 7px; font-size: 10px; border-radius: 4px;
+  padding: 2px 7px; font-size: var(--font-3xs); border-radius: 4px;
   border: 1px solid var(--border-default); background: transparent;
   color: var(--text-muted); cursor: pointer; white-space: nowrap;
 }
 .branch-toggle:hover { color: var(--accent-fg); border-color: var(--accent-emphasis); }
 .branch-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.branch-label { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
-.branch-arrow { color: var(--text-muted); font-size: 11px; }
+.branch-label { font-size: var(--font-3xs); color: var(--text-muted); white-space: nowrap; }
+.branch-arrow { color: var(--text-muted); font-size: var(--font-2xs); }
 .branch-select {
-  flex: 1; min-width: 80px; padding: 2px 4px; font-size: 11px;
+  flex: 1; min-width: 80px; padding: 2px 4px; font-size: var(--font-2xs);
   background: var(--bg-subtle); border: 1px solid var(--border-default);
   border-radius: 4px; color: var(--text-primary); cursor: pointer;
 }
 .action-row { display: flex; align-items: center; gap: 8px; }
 .btn-primary {
-  display: flex; align-items: center; padding: 4px 10px; font-size: 11px; font-weight: 600;
+  display: flex; align-items: center; padding: 4px 10px; font-size: var(--font-2xs); font-weight: 600;
   background: var(--success-emphasis); color: var(--text-on-emphasis); border: none; border-radius: 5px; cursor: pointer;
 }
 .btn-primary:hover { background: var(--success-strong); }
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-stop {
-  padding: 4px 10px; font-size: 11px; font-weight: 600;
+  padding: 4px 10px; font-size: var(--font-2xs); font-weight: 600;
   background: var(--danger-subtle); color: var(--danger-fg);
   border: 1px solid var(--danger-muted); border-radius: 5px; cursor: pointer;
 }
 .btn-stop:hover { background: var(--danger-emphasis); color: var(--text-on-emphasis); }
-.reviewing-indicator { font-size: 11px; color: var(--text-muted); font-style: italic; }
+.reviewing-indicator { font-size: var(--font-2xs); color: var(--text-muted); font-style: italic; }
 
 /* Error */
 .review-error {
-  padding: 6px 10px; font-size: 11px; color: var(--danger-fg);
+  padding: 6px 10px; font-size: var(--font-2xs); color: var(--danger-fg);
   background: var(--danger-subtle); border-bottom: 1px solid var(--danger-muted); flex-shrink: 0;
 }
 
 /* Analyzing state */
 .analyzing-state {
   flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 10px; color: var(--text-muted); font-size: 11px;
+  gap: 10px; color: var(--text-muted); font-size: var(--font-2xs);
 }
 .spinner {
   width: 18px; height: 18px; border: 2px solid var(--border-default);
@@ -411,12 +411,12 @@ const verdictMeta = computed(() =>
   animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.elapsed-time { color: var(--text-muted); font-size: 10px; }
+.elapsed-time { color: var(--text-muted); font-size: var(--font-3xs); }
 
 /* Empty hint */
 .empty-hint {
   flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  color: var(--text-muted); font-size: 12px; text-align: center; gap: 4px;
+  color: var(--text-muted); font-size: var(--font-xs); text-align: center; gap: 4px;
 }
 .empty-hint p { max-width: 220px; line-height: 1.6; }
 
@@ -428,17 +428,17 @@ const verdictMeta = computed(() =>
 /* Verdict bar */
 .verdict-bar {
   display: flex; align-items: center; gap: 8px;
-  padding: 7px 12px; font-size: 11px; font-weight: 600; flex-shrink: 0;
+  padding: 7px 12px; font-size: var(--font-2xs); font-weight: 600; flex-shrink: 0;
 }
 .verdict-approve  { background: var(--diff-add-bg); color: var(--success-fg); border-bottom: 1px solid color-mix(in srgb, var(--success-fg) 25%, transparent); }
 .verdict-warn     { background: color-mix(in srgb, var(--attention-fg) 12%, transparent); color: var(--warning-fg); border-bottom: 1px solid color-mix(in srgb, var(--attention-fg) 25%, transparent); }
 .verdict-reject   { background: var(--diff-del-bg);  color: var(--danger-fg);  border-bottom: 1px solid color-mix(in srgb, var(--danger-fg) 25%, transparent); }
-.verdict-icon { font-size: 13px; }
+.verdict-icon { font-size: var(--font-sm); }
 
 /* Summary */
 .summary-text {
   margin: 0; padding: 8px 12px 6px;
-  font-size: 11px; line-height: 1.6; color: var(--text-secondary);
+  font-size: var(--font-2xs); line-height: 1.6; color: var(--text-secondary);
   border-bottom: 1px solid var(--border-muted); flex-shrink: 0;
 }
 
@@ -449,7 +449,7 @@ const verdictMeta = computed(() =>
 }
 .filter-pill {
   display: flex; align-items: center; gap: 4px;
-  padding: 2px 8px; font-size: 10px; border-radius: 20px;
+  padding: 2px 8px; font-size: var(--font-3xs); border-radius: 20px;
   border: 1px solid var(--border-default); background: transparent;
   color: var(--text-muted); cursor: pointer; white-space: nowrap;
 }
@@ -480,9 +480,9 @@ const verdictMeta = computed(() =>
   padding: 5px 8px; border-bottom: 1px solid var(--border-muted);
   background: var(--bg-base);
 }
-.sev-badge { font-size: 11px; flex-shrink: 0; }
+.sev-badge { font-size: var(--font-2xs); flex-shrink: 0; }
 .finding-file {
-  flex: 1; font-size: 10px; font-family: monospace;
+  flex: 1; font-size: var(--font-3xs); font-family: monospace;
   color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .finding-file--link { cursor: pointer; }
@@ -496,20 +496,20 @@ const verdictMeta = computed(() =>
 .finding-ai-btn:hover { background: color-mix(in srgb, var(--accent-fg) 12%, transparent); }
 .dismiss-btn {
   background: transparent; border: none; cursor: pointer;
-  color: var(--text-muted); font-size: 12px; line-height: 1;
+  color: var(--text-muted); font-size: var(--font-xs); line-height: 1;
   padding: 0 2px; border-radius: 3px; flex-shrink: 0;
 }
 .dismiss-btn:hover { color: var(--text-primary); background: var(--bg-hover-strong); }
 
 .finding-title {
-  padding: 5px 10px 2px; font-size: 11px; font-weight: 600; color: var(--text-primary);
+  padding: 5px 10px 2px; font-size: var(--font-2xs); font-weight: 600; color: var(--text-primary);
 }
 .finding-body {
-  padding: 2px 10px 8px; font-size: 11px; line-height: 1.55; color: var(--text-secondary);
+  padding: 2px 10px 8px; font-size: var(--font-2xs); line-height: 1.55; color: var(--text-secondary);
 }
 
 .no-findings {
   display: flex; align-items: center; justify-content: center;
-  padding: 24px; color: var(--text-muted); font-size: 11px; font-style: italic;
+  padding: 24px; color: var(--text-muted); font-size: var(--font-2xs); font-style: italic;
 }
 </style>

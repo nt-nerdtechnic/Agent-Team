@@ -81,7 +81,7 @@ const MermaidBlock = defineComponent({
   overflow: auto;
   padding: 10px 12px;
   font-size: 12.5px;
-  line-height: 1.65;
+  line-height: var(--lh-loose);
 }
 .mp-h {
   font-size: 13.5px;
@@ -115,7 +115,7 @@ const MermaidBlock = defineComponent({
   border-radius: 6px;
   background: var(--bg-elevated, rgba(127, 127, 127, 0.12));
   font-family: var(--font-mono, ui-monospace, 'SF Mono', Menlo, monospace);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.6;
   overflow-x: auto;
 }
@@ -132,7 +132,7 @@ const MermaidBlock = defineComponent({
 }
 .mp :deep(.mp-mermaid--loading) {
   opacity: 0.5;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .mp :deep(code) {
   padding: 1px 5px;

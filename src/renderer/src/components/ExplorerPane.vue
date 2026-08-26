@@ -820,7 +820,7 @@ defineExpose({ revealFile, focusTree })
   flex-shrink: 0;
 }
 .exp-ws {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -881,7 +881,7 @@ defineExpose({ revealFile, focusTree })
   color: var(--text-primary);
 }
 .exp-status {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 700;
   flex-shrink: 0;
   width: 14px;
@@ -902,7 +902,7 @@ defineExpose({ revealFile, focusTree })
 /* Inline dir notes (load error / truncated listing) */
 .exp-note {
   padding-right: 8px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-style: italic;
   color: var(--text-muted);
   white-space: nowrap;
@@ -933,7 +933,7 @@ defineExpose({ revealFile, focusTree })
   max-width: 280px;
   box-shadow: 0 8px 28px var(--shadow-overlay);
 }
-.exp-prompt-title { font-size: 12px; font-weight: 600; color: var(--text-bright); margin-bottom: 8px; }
+.exp-prompt-title { font-size: var(--font-xs); font-weight: 600; color: var(--text-bright); margin-bottom: 8px; }
 .exp-prompt-input {
   width: 100%;
   box-sizing: border-box;
@@ -975,7 +975,7 @@ defineExpose({ revealFile, focusTree })
   width: 100%;
   text-align: left;
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   border: none;
   border-radius: 4px;
   background: transparent;
@@ -993,7 +993,7 @@ defineExpose({ revealFile, focusTree })
   justify-content: space-between;
   gap: 12px;
 }
-.exp-ctx-caret { color: var(--text-muted); font-size: 10px; }
+.exp-ctx-caret { color: var(--text-muted); font-size: var(--font-3xs); }
 .exp-ctx-submenu {
   position: absolute;
   top: -5px;
@@ -1036,13 +1036,13 @@ defineExpose({ revealFile, focusTree })
   flex-wrap: wrap;
 }
 .sel-count {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   margin-right: 4px;
   white-space: nowrap;
 }
 .sel-btn {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 8px;
   border-radius: 4px;
   border: 1px solid var(--border-default);

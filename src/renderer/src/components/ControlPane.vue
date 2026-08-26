@@ -2078,7 +2078,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   background: var(--bg-base);
   border-right: 1px solid var(--border-muted);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   overflow: hidden;
 }
 
@@ -2164,7 +2164,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 }
 .rail-btn:hover { background: var(--bg-subtle); color: var(--text-bright); }
 .rail-btn.active { color: var(--accent-fg); }
-.rail-icon { font-size: 16px; }
+.rail-icon { font-size: var(--font-lg); }
 /* No emoji reads as a branch, so git uses its own glyph — kept in Git's
    brand orange so the rail stays as colourful as the emoji beside it. */
 .rail-icon-git { color: #f05033; }
@@ -2173,7 +2173,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
      upside down. Plain vertical-rl keeps CJK upright and rotates Latin 90°. */
   writing-mode: vertical-rl;
   letter-spacing: 1px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   text-transform: uppercase;
 }
 .rail-badge {
@@ -2246,7 +2246,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 
 /* Section header label (matches GitPane sec-label) */
 .lbl {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   letter-spacing: 0.2px;
   text-transform: none;
@@ -2255,7 +2255,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   display: block;
 }
 .lbl.tiny {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   padding: 0;
 }
@@ -2289,7 +2289,7 @@ textarea {
   padding: 6px 8px;
   border-radius: var(--radius-xs);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--font-xs);
   box-sizing: border-box;
   width: 100%;
 }
@@ -2333,12 +2333,12 @@ textarea.drag-over {
 .row.workspace-row .browse {
   flex-shrink: 0;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 6px 10px;
 }
 .row.workspace-row .switch-ws {
   flex-shrink: 0;
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 6px 9px;
   line-height: 1;
 }
@@ -2347,7 +2347,7 @@ textarea.drag-over {
   align-items: flex-start;
   gap: 8px;
   margin-top: 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-primary);
   cursor: pointer;
   user-select: none;
@@ -2374,21 +2374,21 @@ textarea.drag-over {
 }
 .analyzer-row select {
   flex: 1;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 6px;
 }
 .analyzer-row .refresh {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 8px;
   flex-shrink: 0;
 }
 .muted-inline {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .muted-inline {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .pipeline-row {
   margin-top: 4px;
@@ -2413,7 +2413,7 @@ textarea.drag-over {
 .resume-input {
   flex: 1;
   min-width: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 6px;
   background: var(--bg-muted);
   color: var(--text-bright);
@@ -2428,7 +2428,7 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 6px 10px;
   border-radius: var(--radius-xs);
   cursor: pointer;
@@ -2467,7 +2467,7 @@ button.link {
   background: transparent;
   border: none;
   color: var(--accent-fg);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 4px;
   text-align: left;
 }
@@ -2496,7 +2496,7 @@ button.link {
   background: none;
   padding: 0 2px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--font-sm);
   line-height: 1;
   color: var(--text-muted);
 }
@@ -2505,7 +2505,7 @@ button.history-btn {
   background: transparent;
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--font-md);
   padding: 0;
   width: 32px;
   height: 32px;
@@ -2555,7 +2555,7 @@ button.icon-btn {
   background: transparent;
   border: none;
   padding: 2px 4px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   line-height: 1;
   cursor: pointer;
   border-radius: var(--radius-xs);
@@ -2573,9 +2573,9 @@ button.icon-btn.muted:hover {
 }
 .hint {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   margin: 0;
-  line-height: 1.5;
+  line-height: var(--lh-base);
 }
 .hint.warn {
   color: var(--attention-fg);
@@ -2593,7 +2593,7 @@ button.icon-btn.muted:hover {
 }
 .pg-btn {
   padding: 2px 8px;
-  font-size: 14px;
+  font-size: var(--font-md);
   line-height: 1;
   min-width: 28px;
 }
@@ -2602,7 +2602,7 @@ button.icon-btn.muted:hover {
   cursor: default;
 }
 .pg-info {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   min-width: 36px;
   text-align: center;
@@ -2636,7 +2636,7 @@ button.icon-btn.muted:hover {
 }
 .pipeline-item-name {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-bright);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2646,12 +2646,12 @@ button.icon-btn.muted:hover {
   color: var(--accent-bright);
 }
 .pipeline-item-meta {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   white-space: nowrap;
 }
 .pipeline-item-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   white-space: nowrap;
 }
 .pipeline-item-badge.running {
@@ -2673,7 +2673,7 @@ button.icon-btn.muted:hover {
   border: 1px solid var(--accent-emphasis);
   border-radius: var(--radius-xs);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 4px 6px;
 }
 /* ── Pipeline detail header ────────────────────────────────────────────────── */
@@ -2688,7 +2688,7 @@ button.icon-btn.muted:hover {
   flex-wrap: wrap;
 }
 .back-btn {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 6px;
   color: var(--text-secondary);
 }
@@ -2696,7 +2696,7 @@ button.icon-btn.muted:hover {
   color: var(--text-bright);
 }
 .manage-btn {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 6px;
   color: var(--text-secondary);
 }
@@ -2704,7 +2704,7 @@ button.icon-btn.muted:hover {
   color: var(--text-bright);
 }
 .pipeline-detail-name {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--accent-bright);
   flex: 1;
@@ -2719,7 +2719,7 @@ button.icon-btn.muted:hover {
   margin-top: 2px;
 }
 .active-tag {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--success-fg);
   background: var(--success-subtle);
   border: 1px solid color-mix(in srgb, var(--success-strong) 33%, transparent);
@@ -2733,7 +2733,7 @@ button.icon-btn.muted:hover {
   border: 1px solid var(--accent-emphasis);
   border-radius: var(--radius-xs);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 3px 6px;
 }
 .hint code,
@@ -2741,7 +2741,7 @@ button.icon-btn.muted:hover {
   background: var(--bg-subtle);
   padding: 1px 5px;
   border-radius: var(--radius-xs);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .pipeline {
   background: var(--bg-inset);
@@ -2786,7 +2786,7 @@ button.icon-btn.muted:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
 }
 .resume-state {
@@ -2810,14 +2810,14 @@ button.icon-btn.muted:hover {
   color: var(--accent-bright);
 }
 .resume-meta {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
 }
 .resume-meta .dot {
   margin: 0 4px;
 }
 .resume-task {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-primary);
   background: var(--bg-inset);
   padding: 6px 8px;
@@ -2844,7 +2844,7 @@ button.icon-btn.muted:hover {
   width: min(480px, 90vw);
   color: var(--text-bright);
   font-family: var(--font-ui);
-  font-size: 13px;
+  font-size: var(--font-sm);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 .restart-card h3 {
@@ -2858,7 +2858,7 @@ button.icon-btn.muted:hover {
 }
 .restart-card .restart-warn {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .restart-task {
   background: var(--bg-subtle);
@@ -2866,7 +2866,7 @@ button.icon-btn.muted:hover {
   border-radius: var(--radius-xs);
   padding: 8px 10px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin: 8px 0;
   max-height: 120px;
   overflow-y: auto;
@@ -2889,13 +2889,13 @@ button.icon-btn.muted:hover {
   margin-bottom: 8px;
 }
 .prn-title {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--success-fg);
   letter-spacing: 0.02em;
 }
 .prn-task {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-bright);
   line-height: 1.4;
   display: -webkit-box;
@@ -2904,7 +2904,7 @@ button.icon-btn.muted:hover {
   overflow: hidden;
 }
 .prn-meta {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
 }
 .prn-auto {
@@ -2957,7 +2957,7 @@ button.icon-btn.muted:hover {
   50%       { opacity: 0.82; }
 }
 .pipeline-line {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
 }
 .pipeline-line .muted {
@@ -3009,7 +3009,7 @@ button.icon-btn.muted:hover {
   background: none;
   padding: 0;
   cursor: pointer;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   line-height: 1;
   color: var(--text-secondary);
 }
@@ -3086,7 +3086,7 @@ button.icon-btn.muted:hover {
   background: var(--bg-muted);
   color: var(--text-muted);
   font-weight: 400;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-variant-numeric: tabular-nums;
 }
 .ws-add {
@@ -3095,7 +3095,7 @@ button.icon-btn.muted:hover {
   background: none;
   padding: 0 2px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   line-height: 1;
   color: var(--text-muted);
   opacity: 0.65;
@@ -3116,7 +3116,7 @@ button.icon-btn.muted:hover {
   border: none;
   background: none;
   cursor: pointer;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   line-height: 1;
   color: var(--text-muted);
   opacity: 0.65;
@@ -3141,7 +3141,7 @@ button.icon-btn.muted:hover {
   border-radius: var(--radius-md);
   background: var(--bg-elevated, var(--bg-secondary));
   box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .ws-add-role {
   width: calc(100% - 12px);
@@ -3159,13 +3159,13 @@ button.icon-btn.muted:hover {
   border: none;
   background: none;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-align: left;
   cursor: pointer;
 }
 .ws-add-opt:hover { background: var(--bg-hover, rgb(255 255 255 / 7%)); }
 .ws-add-opt.on { color: var(--text-bright); font-weight: 600; }
-.ws-add-ck { flex: none; width: 10px; font-size: 10px; }
+.ws-add-ck { flex: none; width: 10px; font-size: var(--font-3xs); }
 .ws-add-lb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-add-more { color: var(--text-secondary); padding-left: 26px; }
 
@@ -3180,7 +3180,7 @@ button.icon-btn.muted:hover {
   border-radius: var(--radius-md);
   background: var(--bg-elevated, var(--bg-secondary));
   box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .ws-ctx-opt {
   display: block;
@@ -3189,7 +3189,7 @@ button.icon-btn.muted:hover {
   border: none;
   background: none;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-align: left;
   cursor: pointer;
 }
@@ -3334,7 +3334,7 @@ button.icon-btn.muted:hover {
   .progress .bar::after { animation: none; }
 }
 .agent-line-sub {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -3369,7 +3369,7 @@ button.icon-btn.muted:hover {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   margin: 4px 0 5px;
 }
@@ -3389,7 +3389,7 @@ button.icon-btn.muted:hover {
   margin-top: 8px;
 }
 .agent-item.expanded > .row.tight button {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 10px;
   border-radius: 4px;
 }
@@ -3416,7 +3416,7 @@ button.icon-btn.muted:hover {
 .agent-close-btn {
   margin-left: 4px;
   padding: 0 4px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3455,7 +3455,7 @@ button.icon-btn.muted:hover {
 }
 .stage-line {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   margin-bottom: 6px;
 }
 .pipe-tag {
@@ -3497,7 +3497,7 @@ button.icon-btn.muted:hover {
 }
 .badge {
   font-weight: 600;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   background: var(--bg-muted);
   padding: 2px 6px;
   border-radius: var(--radius-xs);
@@ -3510,7 +3510,7 @@ button.icon-btn.muted:hover {
 /* Auto-name marker — same treatment as the pane header's. */
 .auto-name-mark {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   line-height: 1;
   opacity: 0.45;
   margin-left: -4px; /* pulls back .agent-line's 6px gap */
@@ -3518,7 +3518,7 @@ button.icon-btn.muted:hover {
 }
 .minimized-tag {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   white-space: nowrap;
   flex-shrink: 0;
@@ -3596,7 +3596,7 @@ button.icon-btn.muted:hover {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   margin-bottom: 4px;
 }
@@ -3617,7 +3617,7 @@ button.icon-btn.muted:hover {
   background: var(--bg-muted);
   border-radius: 4px;
   padding: 3px 6px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -3625,7 +3625,7 @@ button.icon-btn.muted:hover {
 }
 .err {
   color: var(--danger-fg);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   margin: 4px 0;
 }
 .prompt-block {
@@ -3638,15 +3638,15 @@ button.icon-btn.muted:hover {
 .role-line {
   margin: 4px 0 0;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .prompt-preview {
   margin: 6px 0 0;
   padding: 6px 8px;
   background: var(--bg-inset);
   border-radius: var(--radius-xs);
-  font-size: 10px;
-  line-height: 1.5;
+  font-size: var(--font-3xs);
+  line-height: var(--lh-base);
   max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
@@ -3659,7 +3659,7 @@ button.icon-btn.muted:hover {
 }
 .prompt-head .tiny {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .warn-block {
   display: flex;
@@ -3687,7 +3687,7 @@ button.icon-btn.muted:hover {
   background: var(--bg-subtle);
   cursor: pointer;
   user-select: none;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -3727,7 +3727,7 @@ button.icon-btn.muted:hover {
   background: none;
   padding: 0 2px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   line-height: 1;
   color: var(--text-muted);
 }

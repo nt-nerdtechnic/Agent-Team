@@ -676,7 +676,7 @@ onUnmounted(() => {
 .tk-stamp {
   flex: 1;
   min-width: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -690,7 +690,7 @@ onUnmounted(() => {
   cursor: pointer;
   border-radius: 3px;
   padding: 0 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.7;
 }
 .tk-rescan:hover:not(:disabled) {
@@ -735,7 +735,7 @@ onUnmounted(() => {
 .tk-sec-title {
   flex: 1;
   min-width: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-secondary);
@@ -745,7 +745,7 @@ onUnmounted(() => {
 }
 .tk-count {
   flex: none;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
 }
 .tk-chips {
@@ -760,7 +760,7 @@ onUnmounted(() => {
   border-radius: var(--radius-pill);
   background: transparent;
   padding: 1px 7px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   cursor: pointer;
 }
@@ -817,7 +817,7 @@ onUnmounted(() => {
 .tk-name {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   color: var(--text-bright);
   overflow: hidden;
@@ -859,7 +859,7 @@ onUnmounted(() => {
 .tk-desc {
   flex: 1;
   min-width: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -916,7 +916,7 @@ onUnmounted(() => {
 .tk-v {
   display: block;
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-primary);
   word-break: break-all;
   white-space: pre-wrap;
@@ -931,21 +931,21 @@ onUnmounted(() => {
 }
 .tk-confirm-lead {
   margin: 0 0 4px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-primary);
 }
 .tk-confirm-detail {
   display: block;
   margin-bottom: 4px;
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-primary);
   word-break: break-all;
   white-space: pre-wrap;
 }
 .tk-confirm-warning {
   margin: 0 0 6px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--danger-bright);
 }
 .tk-confirm-acts {
@@ -959,7 +959,7 @@ onUnmounted(() => {
   appearance: none;
   border-radius: 3px;
   padding: 2px 10px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
 }
 .tk-confirm-cancel {
@@ -982,7 +982,7 @@ onUnmounted(() => {
 .tk-sec-error {
   margin: 0;
   padding: 6px 10px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 .tk-sec-error {
@@ -998,7 +998,7 @@ onUnmounted(() => {
   border-radius: var(--radius-control);
   background: var(--danger-subtle);
   color: var(--danger-bright);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   word-break: break-word;
 }
 </style>

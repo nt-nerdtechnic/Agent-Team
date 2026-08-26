@@ -557,7 +557,7 @@ function finish(): void {
   border-radius: 6px;
   padding: 3px 8px;
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
 }
 .ob-lang-btn span.active {
@@ -628,7 +628,7 @@ function finish(): void {
 
 /* ── Card actions ───────────────────────────────────────────────────────────── */
 .ob-btn {
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 9px 18px;
   border: 1px solid var(--border-default);
   border-radius: 999px;
@@ -636,7 +636,7 @@ function finish(): void {
   color: var(--text-secondary);
   cursor: pointer;
   text-decoration: none;
-  line-height: 1.3;
+  line-height: var(--lh-tight);
 }
 .ob-btn:hover:not(:disabled) {
   background: var(--bg-muted);
@@ -672,7 +672,7 @@ function finish(): void {
 .ob-note {
   flex-basis: 100%;
   margin: 4px 0 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   line-height: 1.55;
   color: var(--text-muted);
 }
@@ -778,7 +778,7 @@ function finish(): void {
   color: var(--text-bright);
 }
 .ob-model-desc {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
 }
 .ob-model-size {
@@ -795,7 +795,7 @@ function finish(): void {
   letter-spacing: 0.02em;
   padding: 1px 6px;
   border-radius: 999px;
-  line-height: 1.5;
+  line-height: var(--lh-base);
 }
 .ob-tag.rec {
   color: var(--accent-fg);
@@ -813,7 +813,7 @@ function finish(): void {
 }
 .ob-model-custom-label {
   flex: none;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 .ob-input {
@@ -845,7 +845,7 @@ function finish(): void {
   align-items: center;
   gap: 10px;
   padding: 12px 4px;
-  font-size: 14px;
+  font-size: var(--font-md);
   color: var(--text-muted);
   border-bottom: 1px solid var(--border-muted);
 }

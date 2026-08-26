@@ -261,10 +261,10 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
   border-bottom: 1px solid var(--border-muted);
   background: var(--bg-subtle);
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .dp-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 999px;
@@ -304,7 +304,7 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
 .dp-tbtn:disabled { opacity: 0.35; cursor: default; }
 
 .dp-body { flex: 1; overflow: auto; }
-.dp-msg { padding: 24px; text-align: center; color: var(--text-muted); font-size: 12px; }
+.dp-msg { padding: 24px; text-align: center; color: var(--text-muted); font-size: var(--font-xs); }
 .dp-msg.err { color: var(--danger-fg); }
 
 .dp-img-wrap { display: flex; justify-content: center; padding: 24px; }
@@ -322,14 +322,14 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
   top: 0;
   z-index: 1;
 }
-.dp-range { color: var(--accent-fg); font-family: ui-monospace, Menlo, monospace; font-size: 11px; opacity: 0.85; }
+.dp-range { color: var(--accent-fg); font-family: ui-monospace, Menlo, monospace; font-size: var(--font-2xs); opacity: 0.85; }
 .dp-actions { display: flex; gap: 5px; }
 .hk-btn {
   background: var(--bg-muted);
   color: var(--text-primary);
   border: 1px solid var(--border-muted);
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 8px;
   cursor: pointer;
 }
@@ -342,15 +342,15 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
   display: flex;
   align-items: flex-start;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   white-space: pre;
   padding-right: 8px;
   min-height: 18px;
 }
 .dp-side.left { border-right: 1px solid var(--border-muted); }
 .dp-side.empty { background: var(--bg-subtle); }
-.dp-no { width: 42px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--text-muted); user-select: none; font-size: 11px; }
+.dp-no { width: 42px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--text-muted); user-select: none; font-size: var(--font-2xs); }
 .dp-check { margin: 2px 3px 0 0; flex-shrink: 0; cursor: pointer; }
 .dp-check-sp { width: 16px; flex-shrink: 0; }
 .dp-sign { width: 10px; flex-shrink: 0; text-align: center; user-select: none; }

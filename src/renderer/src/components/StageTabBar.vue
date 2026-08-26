@@ -245,7 +245,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   border-bottom: 2px solid transparent;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-family: inherit;
   cursor: pointer;
   white-space: nowrap;
@@ -288,7 +288,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   margin-left: 2px;
   border-radius: var(--radius-xs);
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   opacity: 0;
   transition: opacity var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
@@ -309,7 +309,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   border-radius: 8px;
   background: var(--bg-muted);
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-variant-numeric: tabular-nums;
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
@@ -324,7 +324,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   border: 1px solid var(--accent-focus);
   border-radius: var(--radius-xs);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-family: inherit;
   padding: 0 4px;
   height: 18px;
@@ -343,7 +343,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
-  font-size: 16px;
+  font-size: var(--font-lg);
   line-height: 1;
   cursor: pointer;
   flex-shrink: 0;
@@ -400,7 +400,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   border: none;
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-family: inherit;
   cursor: pointer;
 }

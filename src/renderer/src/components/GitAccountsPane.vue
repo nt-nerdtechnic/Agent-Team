@@ -201,7 +201,7 @@ async function remove(id: string): Promise<void> {
   gap: 12px;
   margin-bottom: 14px;
 }
-.ga-title { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text-bright); }
+.ga-title { margin: 0 0 4px; font-size: var(--font-sm); font-weight: 600; color: var(--text-bright); }
 .ga-hint { margin: 0; font-size: 11.5px; color: var(--text-secondary); max-width: 46ch; line-height: 1.4; }
 
 .ga-banner {
@@ -235,9 +235,9 @@ async function remove(id: string): Promise<void> {
 }
 .ga-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ga-row-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
-.ga-row-meta { font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ga-row-meta { font-size: var(--font-2xs); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ga-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.ga-confirm-text { font-size: 11px; color: var(--text-secondary); }
+.ga-confirm-text { font-size: var(--font-2xs); color: var(--text-secondary); }
 
 .ga-empty { font-size: 11.5px; color: var(--text-muted); margin: 0; }
 
@@ -251,16 +251,16 @@ async function remove(id: string): Promise<void> {
   flex-direction: column;
   gap: 10px;
 }
-.ga-form-title { font-size: 12px; font-weight: 600; color: var(--text-bright); }
+.ga-form-title { font-size: var(--font-xs); font-weight: 600; color: var(--text-bright); }
 .ga-field { display: flex; flex-direction: column; gap: 4px; }
-.ga-label { font-size: 11px; color: var(--text-secondary); }
+.ga-label { font-size: var(--font-2xs); color: var(--text-secondary); }
 .ga-field-hint { margin: 2px 0 0; font-size: 10.5px; color: var(--text-muted); line-height: 1.4; }
 .ga-input {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
   border-radius: 4px;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 5px 8px;
 }
 .ga-input:focus { outline: none; border-color: var(--accent-focus); }
@@ -268,14 +268,14 @@ async function remove(id: string): Promise<void> {
 
 .ga-btn {
   border-radius: 5px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 5px 10px;
   cursor: pointer;
   border: 1px solid var(--border-default);
   background: transparent;
   color: var(--text-primary);
 }
-.ga-btn.sm { font-size: 11px; padding: 3px 8px; }
+.ga-btn.sm { font-size: var(--font-2xs); padding: 3px 8px; }
 .ga-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .ga-btn.primary {
   background: var(--accent-emphasis);

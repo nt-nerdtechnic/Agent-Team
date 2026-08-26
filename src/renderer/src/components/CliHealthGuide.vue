@@ -334,9 +334,9 @@ async function dismiss(): Promise<void> {
   padding: 24px 30px 20px;
   border-bottom: 1px solid var(--border-muted);
 }
-.ch-kicker { color: var(--accent-bright); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.ch-kicker { color: var(--accent-bright); font-size: var(--font-xs); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 h1 { margin: 5px 0 0; color: var(--text-bright); font-size: 25px; }
-.ch-steps { display: flex; gap: 22px; margin: 0; padding: 0; list-style: none; color: var(--text-muted); font-size: 12px; }
+.ch-steps { display: flex; gap: 22px; margin: 0; padding: 0; list-style: none; color: var(--text-muted); font-size: var(--font-xs); }
 .ch-steps li { display: flex; align-items: center; gap: 7px; }
 .ch-steps li span { display: grid; place-items: center; width: 23px; height: 23px; border: 1px solid var(--border-default); border-radius: 50%; }
 .ch-steps li.active { color: var(--text-bright); }
@@ -348,19 +348,19 @@ h2 { margin: 0 0 8px; color: var(--text-bright); font-size: 22px; }
 .ch-card { padding: 20px; margin-bottom: 14px; border: 1px solid var(--border-default); border-radius: 14px; background: var(--bg-subtle); }
 .ch-card-head, .ch-candidate-top { display: flex; align-items: center; gap: 10px; }
 .ch-card-head { justify-content: space-between; margin-bottom: 14px; }
-.ch-warning { color: var(--attention-fg); font-size: 12px; }
+.ch-warning { color: var(--attention-fg); font-size: var(--font-xs); }
 .ch-candidate { padding: 12px 14px; margin-top: 8px; border-left: 3px solid var(--border-default); background: var(--bg-base); border-radius: 6px; }
 .ch-candidate.primary { border-left-color: var(--accent-bright); }
-.ch-candidate-top { color: var(--text-secondary); font-size: 12px; }
+.ch-candidate-top { color: var(--text-secondary); font-size: var(--font-xs); }
 .ch-candidate-top code { margin-left: auto; color: var(--text-bright); }
 .ch-signal { color: var(--danger-fg); font-weight: 700; }
-.ch-path { display: block; margin-top: 8px; color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
+.ch-path { display: block; margin-top: 8px; color: var(--text-muted); font-size: var(--font-2xs); overflow-wrap: anywhere; }
 .ch-candidate-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
-.ch-confirm { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--danger-fg); border-radius: 8px; background: var(--bg-subtle); font-size: 13px; }
-.ch-confirm p { margin: 6px 0 0; color: var(--text-secondary); line-height: 1.5; overflow-wrap: anywhere; }
+.ch-confirm { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--danger-fg); border-radius: 8px; background: var(--bg-subtle); font-size: var(--font-sm); }
+.ch-confirm p { margin: 6px 0 0; color: var(--text-secondary); line-height: var(--lh-base); overflow-wrap: anywhere; }
 .ch-confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
-.ch-blocked { margin: 10px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-.ch-actions-note { margin-top: 14px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.ch-blocked { margin: 10px 0 0; color: var(--text-muted); font-size: var(--font-xs); line-height: var(--lh-base); }
+.ch-actions-note { margin-top: 14px; color: var(--text-secondary); font-size: var(--font-xs); line-height: var(--lh-base); }
 .ch-version-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
 .repair ol { color: var(--text-secondary); line-height: 1.8; }
 .ch-verify { text-align: center; padding-top: 50px; }
@@ -379,7 +379,7 @@ h2 { margin: 0 0 8px; color: var(--text-bright); font-size: 22px; }
 .ch-btn.danger:hover:not(:disabled) { background: var(--bg-hover-strong); border-color: var(--danger-fg); color: var(--danger-fg); }
 .ch-btn.ghost:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); color: var(--text-bright); }
 .ch-btn:disabled { opacity: .55; cursor: default; }
-.ch-btn code { font-size: 11px; }
+.ch-btn code { font-size: var(--font-2xs); }
 @media (max-width: 760px) {
   .ch-page { padding: 14px; }
   .ch-dialog { width: calc(100vw - 28px); max-height: calc(100vh - 28px); }

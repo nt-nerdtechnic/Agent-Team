@@ -1465,7 +1465,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   color: var(--text-primary);
   display: flex;
   flex-direction: column;
-  font-size: 12px;
+  font-size: var(--font-xs);
   height: 100%;
   overflow-y: auto;
 }
@@ -1480,7 +1480,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 }
 
 .plans-title {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1503,7 +1503,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   border-radius: 6px;
   box-sizing: border-box;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 4px 24px 4px 8px;
   width: 100%;
 }
@@ -1521,7 +1521,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   height: 18px;
   justify-content: center;
   padding: 0;
@@ -1547,7 +1547,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   border-radius: 6px;
   color: var(--text-secondary);
   flex: 1;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   min-width: 0;
   padding: 3px 4px;
 }
@@ -1561,7 +1561,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   color: var(--text-secondary);
   cursor: pointer;
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1;
   padding: 3px 7px;
 }
@@ -1582,7 +1582,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   border-radius: 4px;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 3px 7px;
 }
 
@@ -1621,7 +1621,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 700;
   justify-content: space-between;
   letter-spacing: 0.05em;
@@ -1680,7 +1680,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
-  font-size: 12px;
+  font-size: var(--font-xs);
   height: 20px;
   justify-content: center;
   opacity: 0;
@@ -1731,7 +1731,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   border-radius: 4px;
   cursor: pointer;
   display: flex;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   height: 20px;
   justify-content: center;
   /* Hidden until the row is touched — except when pinned, where it is the
@@ -1777,7 +1777,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .plan-row-overview {
   color: var(--text-muted);
   display: -webkit-box;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.35;
   overflow: hidden;
   -webkit-box-orient: vertical;
@@ -1787,7 +1787,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .plan-row-path {
   color: var(--text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   opacity: 0.65;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1798,7 +1798,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   align-items: center;
   color: var(--text-muted);
   display: flex;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   gap: 8px;
   justify-content: space-between;
 }
@@ -1807,7 +1807,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   background: var(--attention-subtle);
   border-radius: 999px;
   color: var(--attention-bright);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 700;
   padding: 1px 6px;
   text-transform: uppercase;
@@ -1935,7 +1935,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   color: var(--text-primary);
   cursor: pointer;
   display: block;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 6px 10px;
   text-align: left;
   width: 100%;
@@ -2005,12 +2005,12 @@ async function ctxUpgradeToPlan(): Promise<void> {
 
 .quick-open-empty {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 8px;
 }
 
 .rename-title {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 700;
   margin-bottom: 8px;
 }
@@ -2020,7 +2020,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: 6px;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 5px 8px;
   width: 100%;
 }
@@ -2032,7 +2032,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 
 .rename-hint {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin-top: 6px;
 }
 
@@ -2049,7 +2049,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   border-radius: 6px;
   color: var(--text-primary);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 12px;
 }
 

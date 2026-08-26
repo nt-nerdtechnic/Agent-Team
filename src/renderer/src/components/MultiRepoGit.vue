@@ -322,7 +322,7 @@ function repoLabel(relPath: string): string {
 }
 
 .repo-tab-name {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   letter-spacing: 0.01em;
   line-height: 1.2;
@@ -340,7 +340,7 @@ function repoLabel(relPath: string): string {
   display: flex;
   align-items: center;
   gap: 3px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   opacity: 0.85;
   line-height: 1;

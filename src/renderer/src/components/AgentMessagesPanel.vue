@@ -225,7 +225,7 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
 
 .msg-title {
   min-width: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 700;
   color: var(--text-primary);
   overflow: hidden;
@@ -246,7 +246,7 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
   border: 1px solid rgba(128, 128, 128, 0.25);
   border-radius: 4px;
   padding: 2px 6px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   cursor: pointer;
 }
 
@@ -256,7 +256,7 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
 .msg-paused {
   flex: none;
   padding: 4px 10px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   background: rgba(230, 160, 60, 0.15);
   color: #e8a54b;
   border-bottom: 1px solid rgba(230, 160, 60, 0.25);
@@ -272,7 +272,7 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
 .msg-empty {
   padding: 20px 10px;
   text-align: center;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 
@@ -293,7 +293,7 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
   flex-wrap: wrap;
   gap: 0 4px;
   min-width: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -329,7 +329,7 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
 
 .msg-time {
   flex: none;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
 }
 
@@ -412,7 +412,7 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 
 .msg-preview { color: var(--text-secondary); }
@@ -424,7 +424,7 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
   padding: 6px 8px;
   background: rgba(128, 128, 128, 0.1);
   border-radius: 4px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 220px;

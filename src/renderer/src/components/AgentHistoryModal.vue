@@ -985,7 +985,7 @@ async function copyLogText(): Promise<void> {
   justify-content: space-between;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-muted);
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--text-bright);
 }
@@ -998,7 +998,7 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: 1px solid var(--danger-muted);
   color: var(--danger-fg);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -1041,7 +1041,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: 4px;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 4px;
   outline: none;
 }
@@ -1058,7 +1058,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: 4px;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 400;
   padding: 3px 20px 3px 8px;
   width: 100%;
@@ -1073,7 +1073,7 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   cursor: pointer;
   padding: 1px 4px;
   transition: color var(--motion-fast) var(--ease-out);
@@ -1082,7 +1082,7 @@ async function copyLogText(): Promise<void> {
   color: var(--text-bright);
 }
 .agent-history-search-status {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   padding: 0 2px;
 }
@@ -1090,7 +1090,7 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--font-md);
   cursor: pointer;
   padding: 2px 6px;
   border-radius: var(--radius-sm);
@@ -1108,7 +1108,7 @@ async function copyLogText(): Promise<void> {
 }
 .agent-history-empty {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-align: center;
   padding: 24px;
 }
@@ -1117,7 +1117,7 @@ async function copyLogText(): Promise<void> {
   top: 0;
   background: var(--bg-base);
   padding: 6px 12px 4px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.4px;
@@ -1133,7 +1133,7 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   cursor: pointer;
   text-align: left;
-  font-size: 12px;
+  font-size: var(--font-xs);
   transition: background-color 0.12s ease;
 }
 .agent-history-row:hover {
@@ -1159,7 +1159,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: 4px;
   padding: 1px 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-bright);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1171,12 +1171,12 @@ async function copyLogText(): Promise<void> {
 }
 .ah-time {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
 }
 .ah-row-star {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   opacity: 0;
   padding: 0 2px;
@@ -1202,7 +1202,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 6px;
   cursor: pointer;
   transition: color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
@@ -1221,7 +1221,7 @@ async function copyLogText(): Promise<void> {
   display: block;
   margin: 8px auto 4px;
   padding: 3px 14px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   border-radius: 20px;
   border: 1px solid var(--border-default);
   background: var(--bg-subtle);
@@ -1258,7 +1258,7 @@ async function copyLogText(): Promise<void> {
   gap: 8px;
 }
 .detail-name {
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 2px 8px;
 }
 /* Status pill mirrors the list's ah-dot colors so both columns read the
@@ -1267,7 +1267,7 @@ async function copyLogText(): Promise<void> {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   padding: 1px 8px;
   border-radius: 10px;
@@ -1296,12 +1296,12 @@ async function copyLogText(): Promise<void> {
   display: grid;
   grid-template-columns: max-content 1fr;
   gap: 6px 14px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   align-items: baseline;
 }
 .detail-label {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   white-space: nowrap;
 }
 .detail-value {
@@ -1310,7 +1310,7 @@ async function copyLogText(): Promise<void> {
 }
 .detail-session {
   font-family: monospace;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   word-break: break-all;
 }
 .detail-path {
@@ -1319,7 +1319,7 @@ async function copyLogText(): Promise<void> {
 .ah-restore-badge {
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 10px;
@@ -1345,13 +1345,13 @@ async function copyLogText(): Promise<void> {
 .ah-session-unavailable {
   width: 100%;
   color: var(--warning-fg);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .ah-revive {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 500;
   padding: 3px 10px;
   border-radius: 20px;
@@ -1386,14 +1386,14 @@ async function copyLogText(): Promise<void> {
 }
 .ah-delete-logs {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--danger-fg);
 }
 .ah-icon-btn {
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   cursor: pointer;
   padding: 1px 4px;
   border-radius: var(--radius-sm);
@@ -1409,7 +1409,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--accent-muted);
   border-radius: 4px;
   color: var(--text-bright);
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 2px 8px;
   min-width: 0;
   flex: 1;
@@ -1417,7 +1417,7 @@ async function copyLogText(): Promise<void> {
 }
 .ah-copied {
   color: var(--success-fg);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
 }
 .ah-cleanup-wrap {
@@ -1427,7 +1427,7 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -1461,7 +1461,7 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: none;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 400;
   text-align: left;
   padding: 5px 8px;
@@ -1506,7 +1506,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: 4px;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 8px;
   width: 160px;
   min-width: 0;
@@ -1516,12 +1516,12 @@ async function copyLogText(): Promise<void> {
   border-color: var(--accent-focus);
 }
 .ah-log-search-count {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   white-space: nowrap;
 }
 .ah-log-copy {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   padding: 2px 8px;
@@ -1536,7 +1536,7 @@ async function copyLogText(): Promise<void> {
   background: transparent;
 }
 .ah-log-truncated {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--warning-fg);
 }
 .ah-log-body {
@@ -1550,7 +1550,7 @@ async function copyLogText(): Promise<void> {
 }
 .ah-log-empty {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 12px;
   text-align: center;
 }
@@ -1561,8 +1561,8 @@ async function copyLogText(): Promise<void> {
 .ah-log-pre {
   margin: 0;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: var(--font-2xs);
+  line-height: var(--lh-base);
   color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1643,7 +1643,7 @@ async function copyLogText(): Promise<void> {
 }
 .log-preview-header h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--font-md);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -1652,7 +1652,7 @@ async function copyLogText(): Promise<void> {
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 16px;
+  font-size: var(--font-lg);
   padding: 4px;
 }
 .log-preview-close:hover {
@@ -1667,7 +1667,7 @@ async function copyLogText(): Promise<void> {
 .log-preview-body pre {
   margin: 0;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
   white-space: pre-wrap;
   word-wrap: break-word;

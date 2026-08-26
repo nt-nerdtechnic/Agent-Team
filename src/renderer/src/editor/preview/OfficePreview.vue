@@ -114,7 +114,7 @@ onMounted(async () => {
 .offp-status {
   padding: 8px 12px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   flex: none;
 }
 .offp-card {
@@ -135,7 +135,7 @@ onMounted(async () => {
 }
 .offp-card-error {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--danger-fg, #e5534b);
 }
 .offp-frame {
@@ -159,7 +159,7 @@ onMounted(async () => {
   border: 1px solid var(--border-color, rgba(128, 128, 128, 0.35));
   border-radius: 4px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 10px;
   cursor: pointer;
   white-space: nowrap;
@@ -175,7 +175,7 @@ onMounted(async () => {
 }
 .offp-table {
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-variant-numeric: tabular-nums;
 }
 .offp-td {

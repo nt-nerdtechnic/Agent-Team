@@ -429,13 +429,13 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
 }
 
 .ai-cli-title {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
 }
 
 .ai-cli-ws {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin-left: auto;
   min-width: 0;
   overflow: hidden;
@@ -454,7 +454,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
 
 .ai-cli-agent-select {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-xs);
   min-width: 0;
   padding: 5px 8px;
 }
@@ -468,7 +468,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
   color: var(--text-bright);
   cursor: pointer;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 5px 10px;
 }
 
@@ -508,7 +508,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
 
 .ai-cli-running-label {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   min-width: 0;
   overflow: hidden;
@@ -519,7 +519,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
 .ai-cli-empty {
   color: var(--text-muted);
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   margin: 0;
   padding: 12px;
 }

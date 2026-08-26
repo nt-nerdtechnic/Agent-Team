@@ -88,7 +88,7 @@ function openItem(d: Diagnostic): void {
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
 }
 .problems-header {
@@ -101,13 +101,13 @@ function openItem(d: Diagnostic): void {
 }
 .problems-title {
   font-weight: 600;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-secondary);
 }
 .badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 1px 6px;
   border-radius: 10px;
   font-weight: 600;
@@ -118,7 +118,7 @@ function openItem(d: Diagnostic): void {
 .problems-empty {
   padding: 24px 16px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-align: center;
 }
 .problems-list {
@@ -128,7 +128,7 @@ function openItem(d: Diagnostic): void {
 .prob-group { margin-bottom: 2px; }
 .prob-file {
   padding: 6px 12px 2px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-secondary);
   white-space: nowrap;
@@ -164,13 +164,13 @@ function openItem(d: Diagnostic): void {
 .prob-src {
   flex-shrink: 0;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-style: italic;
 }
 .prob-fix-btn {
   flex-shrink: 0;
   display: none;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 1px 6px;
   border: 1px solid var(--border-muted);
   border-radius: 3px;

@@ -1371,12 +1371,12 @@ defineExpose({
   gap: 6px;
   padding: 4px 10px;
   border-radius: 5px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   background: var(--bg-base);
   border: 1px solid var(--border-muted);
 }
 .ep-tab.active { border-color: var(--accent-emphasis); }
-.ep-dirty { color: var(--attention-fg); font-size: 10px; }
+.ep-dirty { color: var(--attention-fg); font-size: var(--font-3xs); }
 .ep-spacer { flex: 1; }
 .ep-act {
   font-size: 11.5px;
@@ -1392,7 +1392,7 @@ defineExpose({
 .ep-act.primary { background: var(--accent-emphasis); border-color: var(--accent-emphasis); color: var(--text-on-emphasis); }
 .ep-act.success { background: var(--success-emphasis); border-color: var(--success-strong); color: var(--text-on-emphasis); }
 .ep-body { flex: 1; position: relative; min-height: 0; }
-.ep-error, .ep-loading { padding: 24px; color: var(--text-muted); font-size: 12px; }
+.ep-error, .ep-loading { padding: 24px; color: var(--text-muted); font-size: var(--font-xs); }
 .ep-error { color: var(--danger-fg); }
 .ep-backend-error { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
 .ep-retry {
@@ -1413,8 +1413,8 @@ defineExpose({
 .ep-binary-placeholder { text-align: center; padding: 48px 24px; color: var(--text-muted); }
 .ep-binary-icon { font-size: 40px; display: block; opacity: 0.3; margin-bottom: 12px; }
 .ep-binary-name { font-size: 15px; font-weight: 600; color: var(--text-secondary); margin: 0 0 6px; }
-.ep-binary-meta { font-size: 12px; margin: 0 0 10px; opacity: 0.7; }
-.ep-binary-hint { font-size: 11px; opacity: 0.5; margin: 0; }
+.ep-binary-meta { font-size: var(--font-xs); margin: 0 0 10px; opacity: 0.7; }
+.ep-binary-hint { font-size: var(--font-2xs); opacity: 0.5; margin: 0; }
 
 /* Encoding picker */
 .ep-enc-picker { max-height: 280px; overflow-y: auto; }
@@ -1428,7 +1428,7 @@ defineExpose({
   background: var(--bg-subtle);
   flex-shrink: 0;
 }
-.ep-cmdk-badge { font-size: 11px; font-weight: 700; color: var(--accent-fg); }
+.ep-cmdk-badge { font-size: var(--font-2xs); font-weight: 700; color: var(--accent-fg); }
 .ep-cmdk-input {
   flex: 1;
   padding: 6px 10px;
@@ -1460,7 +1460,7 @@ defineExpose({
   background: var(--bg-subtle);
 }
 .ep-prop-actions { display: flex; gap: 6px; }
-.ep-prop-hint { font-size: 10px; color: var(--text-muted); margin-left: 8px; font-weight: 400; }
+.ep-prop-hint { font-size: var(--font-3xs); color: var(--text-muted); margin-left: 8px; font-weight: 400; }
 .ep-prop-diff {
   display: flex;
   flex-direction: column;
@@ -1489,7 +1489,7 @@ defineExpose({
   border-top: 1px solid var(--border-default);
   background: var(--bg-subtle);
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .ep-conflict-msg { color: var(--attention-fg); flex: 1; }
 
@@ -1521,7 +1521,7 @@ defineExpose({
 .ep-find-input:focus { border-color: var(--accent-emphasis); }
 .ep-find-btn {
   padding: 3px 7px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-family: inherit;
   border: 1px solid var(--border-default);
   border-radius: 4px;
@@ -1530,10 +1530,10 @@ defineExpose({
   cursor: pointer;
 }
 .ep-find-btn.active { background: var(--accent-muted); color: var(--accent-fg); border-color: var(--accent-emphasis); }
-.ep-find-count { font-size: 11px; color: var(--text-muted); min-width: 52px; text-align: center; }
+.ep-find-count { font-size: var(--font-2xs); color: var(--text-muted); min-width: 52px; text-align: center; }
 .ep-find-nav {
   padding: 3px 8px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   border: 1px solid var(--border-default);
   border-radius: 4px;
   background: transparent;
@@ -1544,7 +1544,7 @@ defineExpose({
 .ep-find-nav:disabled { opacity: 0.4; cursor: default; }
 .ep-find-close {
   padding: 3px 7px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   border: none;
   background: transparent;
   color: var(--text-muted);
@@ -1574,11 +1574,11 @@ defineExpose({
   pointer-events: all;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
 }
-.ep-goto-label { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.ep-goto-label { font-size: var(--font-xs); color: var(--text-secondary); white-space: nowrap; }
 .ep-goto-input {
   width: 72px;
   padding: 4px 8px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   background: var(--bg-base);
   border: 1px solid var(--border-default);
   border-radius: 4px;
@@ -1605,7 +1605,7 @@ defineExpose({
 }
 .ep-ctx-item {
   display: block; width: 100%; text-align: left;
-  padding: 5px 14px; font-size: 12px;
+  padding: 5px 14px; font-size: var(--font-xs);
   background: none; border: none; cursor: pointer;
   color: var(--text-primary);
 }
@@ -1622,7 +1622,7 @@ defineExpose({
   height: 22px;
   background: var(--bg-inset);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   flex-shrink: 0;
   user-select: none;
   border-top: 1px solid var(--border-muted);
@@ -1646,8 +1646,8 @@ defineExpose({
   border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.28);
   padding: 4px 0; min-width: 140px; z-index: 300;
 }
-.ep-indent-header { padding: 4px 12px 2px; font-size: 10px; opacity: 0.5; text-transform: uppercase; letter-spacing: .04em; }
-.ep-indent-opt { display: block; width: 100%; text-align: left; padding: 4px 12px; background: none; border: none; cursor: pointer; font-size: 12px; color: var(--text-primary); }
+.ep-indent-header { padding: 4px 12px 2px; font-size: var(--font-3xs); opacity: 0.5; text-transform: uppercase; letter-spacing: .04em; }
+.ep-indent-opt { display: block; width: 100%; text-align: left; padding: 4px 12px; background: none; border: none; cursor: pointer; font-size: var(--font-xs); color: var(--text-primary); }
 .ep-indent-opt:hover, .ep-indent-opt.active { background: var(--accent-muted); color: var(--accent-fg); }
 .ep-indent-sep { height: 1px; background: var(--border-default); margin: 3px 0; }
 
@@ -1655,7 +1655,7 @@ defineExpose({
   position: absolute;
   z-index: 150;
   display: flex; align-items: center; gap: 5px;
-  padding: 4px 10px; font-size: 11px; font-weight: 600;
+  padding: 4px 10px; font-size: var(--font-2xs); font-weight: 600;
   background: var(--accent-emphasis); color: var(--text-on-emphasis);
   border: none; border-radius: 5px; cursor: pointer;
   box-shadow: 0 2px 8px rgba(0,0,0,0.35);

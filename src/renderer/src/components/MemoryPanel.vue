@@ -129,7 +129,7 @@ function sizeText(bytes: number): string {
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
 }
 .mem-head {
@@ -152,7 +152,7 @@ function sizeText(bytes: number): string {
   border: 1px solid var(--border-muted);
   border-radius: 4px;
   padding: 2px 7px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   cursor: pointer;
 }
 .mem-btn:hover { color: var(--text-bright); }
@@ -187,7 +187,7 @@ function sizeText(bytes: number): string {
   border-radius: 4px;
   background: transparent;
   color: inherit;
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-align: left;
   cursor: pointer;
 }
@@ -231,7 +231,7 @@ function sizeText(bytes: number): string {
   color: var(--text-bright);
   border-radius: 4px;
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   cursor: pointer;
 }
 .mem-reclaim:hover:not(:disabled) { background: var(--bg-hover); }
@@ -239,7 +239,7 @@ function sizeText(bytes: number): string {
 .mem-note {
   margin: 8px 0 0;
   color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: var(--font-2xs);
+  line-height: var(--lh-base);
 }
 </style>

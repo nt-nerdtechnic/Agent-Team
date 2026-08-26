@@ -281,7 +281,7 @@ function onLogDividerEnd(): void {
   color: var(--text-primary);
   border: 1px solid var(--border-default);
   border-radius: 5px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 4px 4px;
   cursor: pointer;
   white-space: nowrap;
@@ -312,7 +312,7 @@ function onLogDividerEnd(): void {
 }
 .log-title {
   font-family: Menlo, Monaco, 'Courier New', monospace;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   letter-spacing: 0.4px;
   color: var(--text-secondary);
@@ -333,7 +333,7 @@ function onLogDividerEnd(): void {
   overflow-y: auto;
   overscroll-behavior: contain;
   font-family: Menlo, Monaco, 'Courier New', monospace;
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .pipeline-log-empty {
   height: 100%;
@@ -343,11 +343,11 @@ function onLogDividerEnd(): void {
   justify-content: center;
   gap: 6px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .empty-glyph {
   font-family: Menlo, Monaco, 'Courier New', monospace;
-  font-size: 16px;
+  font-size: var(--font-lg);
   color: var(--border-default);
   letter-spacing: 1px;
 }
@@ -371,7 +371,7 @@ function onLogDividerEnd(): void {
 }
 .pipeline-log-line {
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: var(--lh-base);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -394,7 +394,7 @@ function onLogDividerEnd(): void {
   color: var(--text-bright);
   border: 1px solid var(--border-default);
   border-radius: 5px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 5px;
 }
 .flt {
@@ -418,7 +418,7 @@ function onLogDividerEnd(): void {
   gap: 6px;
   align-items: baseline;
   padding: 3px 8px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.45;
   cursor: pointer;
   border-left: 2px solid transparent;
@@ -451,7 +451,7 @@ function onLogDividerEnd(): void {
   border: 1px solid var(--border-muted);
   border-radius: 5px;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 240px;
@@ -460,7 +460,7 @@ function onLogDividerEnd(): void {
 .msg {
   padding: 12px 8px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .actions {
   display: flex;
@@ -474,7 +474,7 @@ function onLogDividerEnd(): void {
   color: var(--text-primary);
   border: 1px solid var(--border-default);
   border-radius: 5px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 5px 6px;
   cursor: pointer;
 }

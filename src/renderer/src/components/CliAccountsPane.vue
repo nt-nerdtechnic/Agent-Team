@@ -555,7 +555,7 @@ onMounted(() => refreshUsage())
 }
 .cli-head-text { min-width: 0; }
 .cli-refresh { flex: none; }
-.cli-title { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text-bright); }
+.cli-title { margin: 0 0 4px; font-size: var(--font-sm); font-weight: 600; color: var(--text-bright); }
 .cli-hint { margin: 0; font-size: 11.5px; color: var(--text-secondary); max-width: 52ch; line-height: 1.4; }
 
 .cli-banner {
@@ -579,8 +579,8 @@ onMounted(() => refreshUsage())
   gap: 12px;
   margin-bottom: 8px;
 }
-.cli-agent-name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
-.cli-unsupported { margin: 0; font-size: 11px; color: var(--text-muted); font-style: italic; }
+.cli-agent-name { font-size: var(--font-xs); font-weight: 600; color: var(--text-primary); }
+.cli-unsupported { margin: 0; font-size: var(--font-2xs); color: var(--text-muted); font-style: italic; }
 
 .cli-card-grid {
   display: grid;
@@ -609,7 +609,7 @@ onMounted(() => refreshUsage())
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 700;
   color: #fff;
 }
@@ -617,7 +617,7 @@ onMounted(() => refreshUsage())
 .cli-card-id {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   color: var(--text-primary);
   overflow: hidden;
@@ -647,7 +647,7 @@ onMounted(() => refreshUsage())
 }
 
 .cli-card-big {
-  font-size: 20px;
+  font-size: var(--font-xl);
   font-weight: 700;
   line-height: 1.1;
   color: var(--text-primary);
@@ -670,16 +670,16 @@ onMounted(() => refreshUsage())
 .cli-mini-fill { height: 100%; border-radius: 999px; background: var(--success-fg); }
 .cli-mini-fill.warn { background: var(--attention-fg); }
 .cli-mini-fill.crit { background: var(--danger-fg); }
-.cli-card-foot { font-size: 10px; color: var(--text-muted); }
-.cli-card-cache { font-size: 10px; font-weight: 600; color: var(--attention-fg); }
-.cli-card-refresh { font-size: 10px; color: var(--text-muted); }
+.cli-card-foot { font-size: var(--font-3xs); color: var(--text-muted); }
+.cli-card-cache { font-size: var(--font-3xs); font-weight: 600; color: var(--attention-fg); }
+.cli-card-refresh { font-size: var(--font-3xs); color: var(--text-muted); }
 /* A read is in flight — the only line on the card that is about right now,
    so it must not read as quietly as the historical ones around it. */
 .cli-card-refresh.pending { color: var(--accent-fg); font-weight: 600; }
-.cli-card-expired { font-size: 11px; font-weight: 600; color: var(--danger-fg); }
+.cli-card-expired { font-size: var(--font-2xs); font-weight: 600; color: var(--danger-fg); }
 .cli-card-none { display: flex; flex-direction: column; gap: 2px; }
 .cli-card-dash {
-  font-size: 20px;
+  font-size: var(--font-xl);
   font-weight: 700;
   line-height: 1.1;
   color: var(--text-muted);
@@ -692,10 +692,10 @@ onMounted(() => refreshUsage())
   gap: 6px;
   margin-top: auto;
 }
-.cli-confirm-text { font-size: 11px; color: var(--text-secondary); }
+.cli-confirm-text { font-size: var(--font-2xs); color: var(--text-secondary); }
 .cli-badge {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   color: var(--accent-fg);
   background: var(--accent-subtle, var(--bg-muted));
@@ -706,14 +706,14 @@ onMounted(() => refreshUsage())
 
 .cli-btn {
   border-radius: 5px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 5px 10px;
   cursor: pointer;
   border: 1px solid var(--border-default);
   background: transparent;
   color: var(--text-primary);
 }
-.cli-btn.sm { font-size: 11px; padding: 3px 8px; }
+.cli-btn.sm { font-size: var(--font-2xs); padding: 3px 8px; }
 .cli-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .cli-btn.primary {
   background: var(--accent-emphasis);

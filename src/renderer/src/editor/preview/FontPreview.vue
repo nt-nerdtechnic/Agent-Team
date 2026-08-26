@@ -74,7 +74,7 @@ onUnmounted(() => {
 .fontp-status {
   padding: 8px 12px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .fontp-card {
   display: flex;
@@ -94,7 +94,7 @@ onUnmounted(() => {
 }
 .fontp-card-error {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--danger-fg, #e5534b);
 }
 .fontp-specimen {
@@ -105,7 +105,7 @@ onUnmounted(() => {
   overflow-wrap: break-word;
 }
 .fontp-line--digits {
-  font-size: 20px;
+  font-size: var(--font-xl);
 }
 .fontp-line--cjk {
   font-size: 24px;

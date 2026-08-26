@@ -308,7 +308,7 @@ function cellClass(cell: SideRow['left']): string {
 .bdp {
   display: flex; flex-direction: column; height: 100%;
   background: var(--bg-base); color: var(--text-primary);
-  font-size: 12px; overflow: hidden;
+  font-size: var(--font-xs); overflow: hidden;
 }
 
 /* Top bar */
@@ -318,13 +318,13 @@ function cellClass(cell: SideRow['left']): string {
   flex-shrink: 0; min-height: 28px; background: var(--bg-elevated);
 }
 .bdp-badge {
-  font-size: 10px; font-weight: 700; color: var(--accent-fg);
+  font-size: var(--font-3xs); font-weight: 700; color: var(--accent-fg);
   background: var(--accent-subtle); border-radius: 3px; padding: 1px 5px; flex-shrink: 0;
 }
-.bdp-title { font-size: 11px; font-weight: 600; color: var(--text-primary); }
-.bdp-meta { font-size: 11px; color: var(--text-muted); margin-left: 4px; }
-.bdp-add { font-size: 11px; color: var(--success-fg); font-variant-numeric: tabular-nums; }
-.bdp-del { font-size: 11px; color: var(--danger-fg); font-variant-numeric: tabular-nums; }
+.bdp-title { font-size: var(--font-2xs); font-weight: 600; color: var(--text-primary); }
+.bdp-meta { font-size: var(--font-2xs); color: var(--text-muted); margin-left: 4px; }
+.bdp-add { font-size: var(--font-2xs); color: var(--success-fg); font-variant-numeric: tabular-nums; }
+.bdp-del { font-size: var(--font-2xs); color: var(--danger-fg); font-variant-numeric: tabular-nums; }
 .bdp-sp { flex: 1; }
 .bdp-btn {
   display: flex; align-items: center; justify-content: center;
@@ -344,7 +344,7 @@ function cellClass(cell: SideRow['left']): string {
 .bdp-review-hdr:hover { background: var(--bg-hover); }
 .bdp-review-ic { color: var(--accent-fg); flex-shrink: 0; }
 .bdp-review-label {
-  flex: 1; font-size: 11px; font-weight: 600; color: var(--text-primary);
+  flex: 1; font-size: var(--font-2xs); font-weight: 600; color: var(--text-primary);
 }
 .bdp-review-body {
   flex-shrink: 0; overflow: hidden;
@@ -360,7 +360,7 @@ function cellClass(cell: SideRow['left']): string {
 /* States */
 .bdp-msg {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  font-size: 12px; color: var(--text-muted); padding: 24px; text-align: center;
+  font-size: var(--font-xs); color: var(--text-muted); padding: 24px; text-align: center;
 }
 .bdp-err { color: var(--danger-fg); }
 
@@ -394,7 +394,7 @@ function cellClass(cell: SideRow['left']): string {
 .bdp-file-hdr:hover .bdp-open-btn { opacity: 1; }
 .bdp-open-btn:hover { color: var(--accent-fg); background: var(--bg-hover-strong); }
 .bdp-fname {
-  flex: 1; font-size: 12px; font-weight: 600; color: var(--text-primary);
+  flex: 1; font-size: var(--font-xs); font-weight: 600; color: var(--text-primary);
   font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
@@ -404,7 +404,7 @@ function cellClass(cell: SideRow['left']): string {
   border-bottom: 1px solid var(--border-muted);
 }
 .bdp-hidden-side {
-  padding: 3px 10px; font-size: 11px; color: var(--text-muted);
+  padding: 3px 10px; font-size: var(--font-2xs); color: var(--text-muted);
   background: var(--bg-base); border-right: 1px solid var(--border-muted);
   font-style: italic;
 }
@@ -417,7 +417,7 @@ function cellClass(cell: SideRow['left']): string {
   font-family: ui-monospace, Menlo, monospace;
 }
 .bdp-range {
-  font-size: 11px; color: var(--accent-fg); opacity: 0.85;
+  font-size: var(--font-2xs); color: var(--accent-fg); opacity: 0.85;
 }
 
 /* Side-by-side grid: each hunk is a 2-column grid */
@@ -428,15 +428,15 @@ function cellClass(cell: SideRow['left']): string {
 
 .bdp-side {
   display: flex; align-items: baseline; gap: 0;
-  font-family: ui-monospace, Menlo, monospace; font-size: 12px;
-  line-height: 1.5; min-width: 0; border-right: 1px solid var(--border-muted);
+  font-family: ui-monospace, Menlo, monospace; font-size: var(--font-xs);
+  line-height: var(--lh-base); min-width: 0; border-right: 1px solid var(--border-muted);
 }
 .bdp-right { border-right: none; }
 
 .bdp-no {
   min-width: 36px; text-align: right; padding: 0 6px;
   color: var(--text-muted); user-select: none; flex-shrink: 0;
-  font-variant-numeric: tabular-nums; font-size: 11px;
+  font-variant-numeric: tabular-nums; font-size: var(--font-2xs);
 }
 .bdp-sign {
   width: 14px; text-align: center; flex-shrink: 0;

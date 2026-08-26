@@ -13947,7 +13947,7 @@ function paneIsCommander(p: ActivePane): boolean {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
   letter-spacing: 0.02em;
 }
@@ -13961,7 +13961,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .boot-retry {
   margin-top: 16px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 6px 16px;
   border-radius: 6px;
   border: 1px solid var(--border-default);
@@ -14057,7 +14057,7 @@ function paneIsCommander(p: ActivePane): boolean {
   flex: 1;
   text-align: center;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 500;
   color: var(--text-secondary);
   overflow: hidden;
@@ -14088,7 +14088,7 @@ function paneIsCommander(p: ActivePane): boolean {
   display: none;
   min-width: 0;
   padding: 0 8px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -14108,7 +14108,7 @@ function paneIsCommander(p: ActivePane): boolean {
   min-width: 0;
   height: 24px;
   padding: 0 8px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   background: var(--bg-inset);
   border: 1px solid var(--border-muted);
   border-radius: 5px;
@@ -14129,7 +14129,7 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-inset);
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 0;
 }
 .titlebar-ws-btn:hover {
@@ -14171,7 +14171,7 @@ function paneIsCommander(p: ActivePane): boolean {
   z-index: 200;
   user-select: none;
   padding: 0 8px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .statusbar-left,
 .statusbar-right {
@@ -14239,7 +14239,7 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
   box-shadow: var(--shadow-popover);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
   user-select: none;
 }
@@ -14299,7 +14299,7 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-hover);
   color: var(--text-bright);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   transition: background 0.12s, opacity 0.12s;
 }
 .bp-btn:hover:not(:disabled) { background: var(--bg-active, var(--bg-hover)); }
@@ -14464,7 +14464,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
 }
@@ -14495,7 +14495,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   text-align: center;
   -moz-appearance: textfield;
   appearance: textfield;
@@ -14516,11 +14516,11 @@ function paneIsCommander(p: ActivePane): boolean {
   background: color-mix(in srgb, var(--accent-emphasis) 20%, transparent);
 }
 .grid-custom-x {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
 }
 .grid-page-label {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   padding: 0 2px;
 }
@@ -14617,7 +14617,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border: 1px solid var(--accent-emphasis);
   border-radius: 4px;
   color: var(--text-bright);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 1px 3px;
   min-width: 0;
 }
@@ -14626,7 +14626,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border-color: var(--accent-focus);
 }
 .spotlight-thumb-name {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-bright);
   white-space: nowrap;
@@ -14672,7 +14672,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .spotlight-strip-empty {
   color: var(--text-disabled);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 0 8px;
 }
 /* Sidebar (Auto): focus pane fills left column; meeting list in right column */
@@ -14757,7 +14757,7 @@ function paneIsCommander(p: ActivePane): boolean {
   flex-shrink: 0;
 }
 .meeting-name {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-bright);
   white-space: nowrap;
   overflow: hidden;
@@ -14775,14 +14775,14 @@ function paneIsCommander(p: ActivePane): boolean {
   user-select: none;
 }
 .meeting-sub {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .meeting-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 2px 6px;
   border-radius: 3px;
   flex-shrink: 0;
@@ -14796,7 +14796,7 @@ function paneIsCommander(p: ActivePane): boolean {
 .meeting-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
 .meeting-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .meeting-loop {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 2px 6px;
   border-radius: 3px;
   flex-shrink: 0;
@@ -14810,7 +14810,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .meeting-empty {
   color: var(--text-disabled);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   text-align: center;
   padding: 16px 8px;
 }
@@ -14854,7 +14854,7 @@ function paneIsCommander(p: ActivePane): boolean {
   user-select: none;
 }
 .float-pip-title {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-secondary);
 }
@@ -14863,7 +14863,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 0 2px;
   line-height: 1;
 }
@@ -14896,13 +14896,13 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .empty-card p {
   margin: 8px 0;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-primary);
   text-align: left;
 }
 .empty-card .muted {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .empty-card.loading-card {
   border-style: solid;
@@ -14916,7 +14916,7 @@ function paneIsCommander(p: ActivePane): boolean {
 .empty-card .status {
   text-align: center;
   font-family: Menlo, Monaco, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--accent-bright);
   background: var(--accent-subtle);
   border: 1px solid var(--accent-muted);
@@ -14928,7 +14928,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .empty-card .small {
   text-align: center;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.7;
 }
 .spinner {
@@ -14962,7 +14962,7 @@ function paneIsCommander(p: ActivePane): boolean {
   width: min(520px, 92vw);
   color: var(--text-bright);
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
+  font-size: var(--font-sm);
   box-shadow: 0 12px 48px var(--shadow-overlay);
   overflow: hidden;
 }
@@ -14983,7 +14983,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .stall-slot {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .stall-body {
   padding: 16px 18px;
@@ -14992,13 +14992,13 @@ function paneIsCommander(p: ActivePane): boolean {
   gap: 8px;
 }
 .stall-title {
-  font-size: 14px;
+  font-size: var(--font-md);
   font-weight: 600;
   color: var(--text-primary);
 }
 .stall-reason {
   font-family: Menlo, Monaco, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--warning-fg);
   background: var(--attention-subtle);
   border: 1px solid var(--attention-muted);
@@ -15007,18 +15007,18 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .stall-hint {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
   line-height: 1.6;
 }
 .stall-hint strong {
   color: var(--text-bright);
 }
-.check-row { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; user-select: none; }
+.check-row { display: flex; align-items: center; gap: 6px; font-size: var(--font-xs); cursor: pointer; user-select: none; }
 .check-row input[type='checkbox'] { width: 14px; height: 14px; accent-color: var(--accent-fg); }
 .confirm-dont-show { margin-top: 10px; }
 .stall-auto {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--accent-bright);
   font-weight: 500;
 }
@@ -15034,7 +15034,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 8px 16px;
   border-radius: 4px;
   cursor: pointer;
@@ -15056,7 +15056,7 @@ function paneIsCommander(p: ActivePane): boolean {
 .stall-btn.danger:hover {
   background: var(--danger-bright);
 }
-.sb-url { color: var(--text-muted); font-size: 10px; }
+.sb-url { color: var(--text-muted); font-size: var(--font-3xs); }
 .sb-clock { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .sb-version { color: var(--text-muted); margin-left: 4px; }
 .sb-announce-unread .sb-version { color: inherit; }
@@ -15085,7 +15085,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .pane-ctx-header {
   padding: 5px 14px 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-muted);
   white-space: nowrap;
@@ -15094,7 +15094,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .pane-ctx-item {
   padding: 6px 14px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
   cursor: pointer;
   white-space: nowrap;
@@ -15108,7 +15108,7 @@ function paneIsCommander(p: ActivePane): boolean {
   width: 100%;
   box-sizing: border-box;
   padding: 8px 10px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   background: var(--bg-muted);
   border: 1px solid var(--border-default);
   border-radius: 4px;

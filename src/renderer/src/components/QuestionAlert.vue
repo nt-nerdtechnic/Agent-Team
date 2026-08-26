@@ -243,12 +243,12 @@ header {
   margin-left: 4px;
 }
 .stage {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   margin-left: 4px;
 }
 .queue-badge {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--warning-fg);
   background: color-mix(in srgb, var(--warning-fg) 15%, transparent);
   border: 1px solid color-mix(in srgb, var(--warning-fg) 35%, transparent);
@@ -262,7 +262,7 @@ header {
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--font-md);
   padding: 4px 8px;
   border-radius: var(--radius-sm);
 }
@@ -294,7 +294,7 @@ header {
 }
 .qnum {
   font-family: Menlo, Monaco, monospace;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--accent-bright);
   background: var(--accent-muted);
   padding: 2px 6px;
@@ -302,9 +302,9 @@ header {
   flex-shrink: 0;
 }
 .qprompt {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 500;
-  line-height: 1.5;
+  line-height: var(--lh-base);
   color: var(--text-bright);
 }
 .choices {
@@ -323,8 +323,8 @@ header {
   border-radius: var(--radius-sm);
   cursor: pointer;
   text-align: left;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: var(--font-sm);
+  line-height: var(--lh-base);
   font-family: inherit;
 }
 .choice:hover:not(:disabled) {
@@ -337,7 +337,7 @@ header {
 }
 .choice .check {
   color: var(--accent-fg);
-  font-size: 12px;
+  font-size: var(--font-xs);
   margin-top: 1px;
 }
 .choice.picked .check {
@@ -354,7 +354,7 @@ textarea {
   padding: 8px 10px;
   border-radius: 6px;
   font-family: Menlo, Monaco, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   resize: vertical;
   min-height: 60px;
 }
@@ -366,7 +366,7 @@ textarea:focus {
   padding: 10px 18px;
   background: var(--bg-inset);
   border-top: 1px solid var(--accent-muted);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .auto-spinner {
   color: var(--accent-bright);
@@ -390,7 +390,7 @@ footer {
 }
 .hint {
   flex: 1;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 .hint.ok {
@@ -404,7 +404,7 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 7px 14px;
   border-radius: var(--radius-sm);
   cursor: pointer;

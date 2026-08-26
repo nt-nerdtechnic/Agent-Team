@@ -222,7 +222,7 @@ function openInEditor(relPath?: string, name?: string): void {
   flex: none;
 }
 .pv-btn {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 2px 7px;
   border-radius: 5px;
   border: 1px solid var(--border-default);
@@ -255,7 +255,7 @@ function openInEditor(relPath?: string, name?: string): void {
   align-items: center;
   padding: 4px 8px;
   border-top: 1px solid var(--border-default);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   opacity: 0.7;
 }
 .pv-sub {
@@ -291,7 +291,7 @@ function openInEditor(relPath?: string, name?: string): void {
   border: 1.5px dashed var(--border-default);
 }
 .pv-empty-title {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
 }
 .pv-empty-hint {

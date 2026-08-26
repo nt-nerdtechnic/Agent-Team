@@ -954,7 +954,7 @@ function buildAiContext(): string {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 16px;
+  font-size: var(--font-lg);
   cursor: pointer;
   padding: 4px 8px;
   border-radius: var(--radius-control);
@@ -971,7 +971,7 @@ function buildAiContext(): string {
   background: var(--bg-inset);
   color: var(--text-bright);
   font-family: var(--font-ui);
-  font-size: 13px;
+  font-size: var(--font-sm);
   overflow: hidden;
 }
 .top {
@@ -984,7 +984,7 @@ function buildAiContext(): string {
   flex-shrink: 0;
 }
 .title {
-  font-size: 14px;
+  font-size: var(--font-md);
   font-weight: 600;
 }
 .tabs {
@@ -995,7 +995,7 @@ function buildAiContext(): string {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 5px 12px;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -1014,7 +1014,7 @@ function buildAiContext(): string {
   align-items: center;
   gap: 6px;
   margin-left: auto;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 .dot {
@@ -1056,11 +1056,11 @@ function buildAiContext(): string {
   flex-shrink: 0;
 }
 .toolbar button {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 5px 10px;
 }
 .summary-ok {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--success-fg);
 }
 
@@ -1107,12 +1107,12 @@ function buildAiContext(): string {
   white-space: nowrap;
 }
 .pl-meta {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   flex-shrink: 0;
 }
 .pl-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--success-fg);
   background: var(--success-subtle);
   border: 1px solid color-mix(in srgb, var(--success-strong) 33%, transparent);
@@ -1122,7 +1122,7 @@ function buildAiContext(): string {
 }
 .pl-enter {
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--font-md);
 }
 
 /* ── Pipeline detail header ───────────────────────────────────────────────── */
@@ -1134,7 +1134,7 @@ function buildAiContext(): string {
   flex-shrink: 0;
 }
 .back-btn {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 8px;
   color: var(--text-secondary);
 }
@@ -1166,7 +1166,7 @@ function buildAiContext(): string {
   flex-shrink: 0;
 }
 .tiny {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 7px;
 }
 .pad {
@@ -1247,7 +1247,7 @@ function buildAiContext(): string {
 }
 .mono-key {
   font-family: Menlo, Monaco, monospace;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--accent-bright);
   background: var(--bg-muted);
   padding: 1px 6px;
@@ -1266,7 +1266,7 @@ function buildAiContext(): string {
 }
 .item-sub {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1274,7 +1274,7 @@ function buildAiContext(): string {
 }
 .manager-badge {
   margin-left: 4px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 
 /* ── Fields ───────────────────────────────────────────────────────────────── */
@@ -1284,7 +1284,7 @@ function buildAiContext(): string {
   gap: 4px;
 }
 .lbl {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1304,17 +1304,17 @@ textarea {
   padding: 8px 10px;
   border-radius: 4px;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--font-sm);
   box-sizing: border-box;
   width: 100%;
 }
 textarea {
   resize: vertical;
-  line-height: 1.5;
+  line-height: var(--lh-base);
 }
 textarea.mono {
   font-family: Menlo, Monaco, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   min-height: 100px;
 }
 input:focus,
@@ -1331,7 +1331,7 @@ input:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   cursor: pointer;
 }
 .check-row input[type='checkbox'] {
@@ -1341,7 +1341,7 @@ input:disabled {
 }
 .manager-toggle {
   align-items: flex-start;
-  line-height: 1.5;
+  line-height: var(--lh-base);
 }
 .manager-toggle input[type='checkbox'] {
   margin-top: 2px;
@@ -1353,7 +1353,7 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 7px 14px;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -1386,14 +1386,14 @@ button.ghost:hover:not(:disabled) {
   background: var(--bg-muted);
 }
 button.small {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 10px;
 }
 .icon-btn {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 4px;
   cursor: pointer;
   border-radius: 3px;
@@ -1452,17 +1452,17 @@ button.small {
 /* ── Messages ─────────────────────────────────────────────────────────────── */
 .hint {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin: 0;
 }
 .warn-msg {
   color: var(--attention-fg);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin: 4px 0 0;
 }
 .err-msg {
   color: var(--danger-fg);
-  font-size: 12px;
+  font-size: var(--font-xs);
   margin: 0;
 }
 
@@ -1490,7 +1490,7 @@ button.small {
   font-size: 15px;
 }
 .modal-card p {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
   margin: 0 0 14px;
   line-height: 1.6;

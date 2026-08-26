@@ -213,7 +213,7 @@ onMounted(refreshInstalled)
      the <h1> the settings modal renders above it; the modal already reserves the
      gap below that title, so no top padding here. */
   padding: 0 22px 12px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -240,15 +240,15 @@ onMounted(refreshInstalled)
 .ext-ns,
 .ext-requires {
   color: var(--text-muted, #888);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .ext-badge.ext-sensitive {
   color: #c77400;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .ext-badge.ext-dev-warning {
   color: #c77400;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .ext-remove,
 .ext-install {
@@ -280,7 +280,7 @@ onMounted(refreshInstalled)
 }
 .ext-trust-badge {
   display: inline-block;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   padding: 2px 6px;
   border-radius: 4px;

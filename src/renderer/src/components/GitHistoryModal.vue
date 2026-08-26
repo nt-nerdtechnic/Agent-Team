@@ -490,11 +490,11 @@ watch(() => props.show, (visible) => {
   display: flex; align-items: center; gap: 8px; padding: 8px 14px;
   border-bottom: 1px solid var(--border-muted); flex-shrink: 0;
 }
-.hm-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.hm-title { font-size: var(--font-sm); font-weight: 600; color: var(--text-primary); }
 .spacer { flex: 1; }
 .hm-close {
   background: transparent; border: none; color: var(--text-muted);
-  font-size: 13px; cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm);
+  font-size: var(--font-sm); cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm);
   transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .hm-close:hover { background: var(--bg-active); color: var(--text-primary); }
@@ -506,17 +506,17 @@ watch(() => props.show, (visible) => {
 }
 .hm-select {
   background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
-  color: var(--text-primary); font-size: 11px; padding: 3px 6px; cursor: pointer;
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 3px 6px; cursor: pointer;
   transition: border-color var(--motion-fast) var(--ease-out);
 }
 .hm-select:focus { outline: none; border-color: var(--accent-focus); }
 .hm-select:disabled { opacity: 0.5; cursor: default; }
-.hm-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); cursor: pointer; user-select: none; }
+.hm-toggle { display: flex; align-items: center; gap: 4px; font-size: var(--font-2xs); color: var(--text-secondary); cursor: pointer; user-select: none; }
 .hm-toggle input { margin: 0; cursor: pointer; }
 .hm-search { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 120px; margin-left: auto; }
 .search-input {
   flex: 1; background: transparent; border: none;
-  border-bottom: 1px solid var(--border-default); color: var(--text-primary); font-size: 11px; padding: 2px 0;
+  border-bottom: 1px solid var(--border-default); color: var(--text-primary); font-size: var(--font-2xs); padding: 2px 0;
 }
 .search-input:focus { outline: none; border-bottom-color: var(--accent-focus); }
 .search-input::placeholder { color: var(--text-muted); }
@@ -525,12 +525,12 @@ watch(() => props.show, (visible) => {
 .hm-table { flex: 1 1 55%; display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--border-default); }
 .tbl-head, .tbl-row {
   display: flex; align-items: center; gap: 0;
-  font-size: 12px; line-height: 1;
+  font-size: var(--font-xs); line-height: 1;
 }
 .tbl-head {
   flex-shrink: 0; height: 24px; padding: 0 14px;
   border-bottom: 1px solid var(--border-muted); background: var(--bg-subtle);
-  color: var(--text-muted); font-size: 11px; font-weight: 600; user-select: none;
+  color: var(--text-muted); font-size: var(--font-2xs); font-weight: 600; user-select: none;
 }
 .tbl-body { flex: 1; overflow-y: auto; }
 .tbl-row { height: 24px; padding: 0 14px; cursor: pointer; color: var(--text-primary); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
@@ -562,7 +562,7 @@ watch(() => props.show, (visible) => {
 .graph-dot.head { box-shadow: 0 0 0 1px var(--success-fg), 0 0 4px var(--success-fg); }
 
 .desc-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
-.ref-pill { font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: 999px; line-height: 1.5; flex-shrink: 0; }
+.ref-pill { font-size: var(--font-3xs); font-weight: 600; padding: 0 5px; border-radius: 999px; line-height: var(--lh-base); flex-shrink: 0; }
 .ref-pill.local  { background: var(--accent-muted); color: var(--accent-bright); }
 .ref-pill.remote { background: var(--success-subtle); color: var(--success-bright); }
 .ref-pill.tag    { background: var(--attention-subtle); color: var(--attention-fg); }
@@ -570,12 +570,12 @@ watch(() => props.show, (visible) => {
 /* On the solid-accent selected row, tint pills with a translucent overlay so
    they stay legible instead of clashing with (or vanishing into) the fill. */
 .tbl-row.selected .ref-pill { background: var(--overlay-soft); color: var(--text-on-emphasis); }
-.chash { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); background: transparent; }
+.chash { font-size: var(--font-2xs); color: var(--text-muted); font-family: var(--font-mono); background: transparent; }
 
 .hm-loadmore { display: flex; justify-content: center; padding: 5px 0; flex-shrink: 0; }
 .load-more-btn {
   background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
-  color: var(--text-primary); font-size: 11px; padding: 3px 14px; cursor: pointer;
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 3px 14px; cursor: pointer;
   transition: border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .load-more-btn:hover:not(:disabled) { border-color: var(--accent-focus); color: var(--text-bright); }
@@ -585,23 +585,23 @@ watch(() => props.show, (visible) => {
 .hm-detail { flex: 1 1 45%; display: flex; min-height: 0; }
 .detail-empty {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  color: var(--text-muted); font-size: 11px; font-style: italic; padding: 12px;
+  color: var(--text-muted); font-size: var(--font-2xs); font-style: italic; padding: 12px;
 }
 .detail-left {
   width: 42%; flex-shrink: 0; overflow-y: auto; padding: 8px 14px;
-  border-right: 1px solid var(--border-default); font-size: 11px;
+  border-right: 1px solid var(--border-default); font-size: var(--font-2xs);
 }
-.dl-msg { font-size: 12px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; white-space: pre-wrap; }
-.dl-body { color: var(--text-secondary); font-size: 11px; margin-bottom: 8px; white-space: pre-wrap; }
+.dl-msg { font-size: var(--font-xs); font-weight: 600; color: var(--text-primary); margin-bottom: 4px; white-space: pre-wrap; }
+.dl-body { color: var(--text-secondary); font-size: var(--font-2xs); margin-bottom: 8px; white-space: pre-wrap; }
 .dl-meta { margin-bottom: 8px; }
 .dl-row { display: flex; gap: 8px; margin-bottom: 3px; color: var(--text-primary); }
 .dl-key { color: var(--text-muted); min-width: 56px; flex-shrink: 0; }
-.dl-mono { font-family: var(--font-mono); font-size: 10px; color: var(--text-secondary); background: transparent; word-break: break-all; }
+.dl-mono { font-family: var(--font-mono); font-size: var(--font-3xs); color: var(--text-secondary); background: transparent; word-break: break-all; }
 .dl-parent { margin-right: 6px; }
 .dl-files-hdr { color: var(--text-muted); font-weight: 600; margin-bottom: 3px; }
 .dl-files { display: flex; flex-direction: column; }
 .dl-file {
-  font-family: var(--font-mono); font-size: 10px; color: var(--text-primary);
+  font-family: var(--font-mono); font-size: var(--font-3xs); color: var(--text-primary);
   padding: 2px 4px; border-radius: 3px; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
@@ -610,9 +610,9 @@ watch(() => props.show, (visible) => {
 .dl-file.active { background: var(--accent-muted); color: var(--accent-bright); }
 
 .detail-right { flex: 1; min-width: 0; overflow: auto; padding: 4px 0; }
-.diff-view { font-family: var(--font-mono); font-size: 11px; }
-.db-hunk-head { color: var(--accent-bright); font-size: 10px; opacity: 0.8; padding: 2px 8px; white-space: pre; }
-.db-line { display: flex; align-items: baseline; line-height: 1.5; width: max-content; min-width: 100%; padding: 0 8px; }
+.diff-view { font-family: var(--font-mono); font-size: var(--font-2xs); }
+.db-hunk-head { color: var(--accent-bright); font-size: var(--font-3xs); opacity: 0.8; padding: 2px 8px; white-space: pre; }
+.db-line { display: flex; align-items: baseline; line-height: var(--lh-base); width: max-content; min-width: 100%; padding: 0 8px; }
 .db-no { color: var(--text-muted); min-width: 34px; text-align: right; padding-right: 8px; flex-shrink: 0; user-select: none; }
 .db-sign { width: 10px; flex-shrink: 0; text-align: center; user-select: none; }
 .db-code { white-space: pre; flex-shrink: 0; }
@@ -622,9 +622,9 @@ watch(() => props.show, (visible) => {
 .db-line.db-del .db-code, .db-line.db-del .db-sign { color: var(--danger-fg); }
 .db-line.db-ctx .db-code { color: var(--text-primary); }
 
-.empty-msg { color: var(--text-muted); font-size: 11px; font-style: italic; padding: 8px 14px; }
-.loading-text { color: var(--text-muted); font-size: 10px; padding: 6px 10px; }
-.err-text { color: var(--danger-fg); font-size: 11px; margin: 0; }
+.empty-msg { color: var(--text-muted); font-size: var(--font-2xs); font-style: italic; padding: 8px 14px; }
+.loading-text { color: var(--text-muted); font-size: var(--font-3xs); padding: 6px 10px; }
+.err-text { color: var(--danger-fg); font-size: var(--font-2xs); margin: 0; }
 
 /* ── commit context menu ────────────────────────────────────────────────── */
 .ctx-menu {
@@ -636,7 +636,7 @@ watch(() => props.show, (visible) => {
 .ctx-menu .menu-item {
   display: flex; align-items: center; width: 100%;
   background: transparent; border: none; color: var(--text-primary);
-  font-size: 12px; padding: 5px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  font-size: var(--font-xs); padding: 5px 10px; border-radius: var(--radius-sm); cursor: pointer;
   text-align: left; font-family: var(--font-ui); gap: 6px;
   transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
@@ -653,13 +653,13 @@ watch(() => props.show, (visible) => {
   display: flex; flex-direction: column; gap: 10px;
 }
 .mini-modal-path {
-  font-family: var(--font-mono); font-size: 11px; color: var(--accent-fg);
+  font-family: var(--font-mono); font-size: var(--font-2xs); color: var(--accent-fg);
   word-break: break-all;
 }
 .mini-modal-btns { display: flex; gap: 6px; justify-content: flex-end; }
 .git-input {
   flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
-  color: var(--text-primary); font-size: 11px; padding: 3px 7px;
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 3px 7px;
 }
 .git-input:focus { outline: none; border-color: var(--accent-focus); }
 
@@ -671,10 +671,10 @@ watch(() => props.show, (visible) => {
 }
 .reset-mode-btn:hover { border-color: var(--accent-focus); }
 .reset-mode-btn.danger:hover { border-color: var(--danger-fg); }
-.rm-name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.rm-name { font-size: var(--font-xs); font-weight: 600; color: var(--text-primary); }
 .reset-mode-btn.danger .rm-name { color: var(--danger-fg); }
-.rm-desc { font-size: 10px; color: var(--text-muted); }
-.reset-confirm-text { font-size: 12px; color: var(--text-secondary); margin: 0; }
+.rm-desc { font-size: var(--font-3xs); color: var(--text-muted); }
+.reset-confirm-text { font-size: var(--font-xs); color: var(--text-secondary); margin: 0; }
 .reset-confirm-text.danger { color: var(--danger-fg); font-weight: 600; }
 
 /* Canonical button spec — byte-identical in GitPane.vue,

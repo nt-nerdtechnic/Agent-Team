@@ -483,15 +483,15 @@ function relaunch(): void {
   display: flex; align-items: center; justify-content: space-between; gap: 24px;
   padding: 22px 28px 18px; border-bottom: 1px solid var(--border-muted); flex-wrap: wrap;
 }
-.ci-kicker { color: var(--accent-bright); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-.ci-steps { display: flex; gap: 16px; margin: 0; padding: 0; list-style: none; color: var(--text-muted); font-size: 12px; }
+.ci-kicker { color: var(--accent-bright); font-size: var(--font-xs); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.ci-steps { display: flex; gap: 16px; margin: 0; padding: 0; list-style: none; color: var(--text-muted); font-size: var(--font-xs); }
 .ci-steps li { display: flex; align-items: center; gap: 6px; }
 .ci-steps li span { display: grid; place-items: center; width: 21px; height: 21px; border: 1px solid var(--border-default); border-radius: 50%; }
 .ci-steps li.active { color: var(--text-bright); }
 .ci-steps li.active span { border-color: var(--accent-bright); color: var(--accent-bright); }
 .ci-steps li.done span { border-color: var(--success-emphasis); background: var(--success-emphasis); color: var(--text-on-emphasis); }
 .ci-card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.ci-badge { font-size: 11px; border-radius: 99px; padding: 1px 9px; background: var(--bg-base); color: var(--text-muted); }
+.ci-badge { font-size: var(--font-2xs); border-radius: 99px; padding: 1px 9px; background: var(--bg-base); color: var(--text-muted); }
 .ci-badge.ok { color: var(--success-fg, #2b8a3e); }
 .ci-badge.outdated { color: var(--attention-fg); }
 .ci-reqs { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -499,7 +499,7 @@ function relaunch(): void {
 .ci-reqs .ci-note { margin: 0; }
 .ci-req-mark {
   display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
-  background: var(--success-emphasis); color: var(--text-on-emphasis); font-size: 11px; flex: none;
+  background: var(--success-emphasis); color: var(--text-on-emphasis); font-size: var(--font-2xs); flex: none;
 }
 .ci-reqs li.missing .ci-req-mark { background: var(--attention-fg); }
 .ci-chain { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -511,7 +511,7 @@ function relaunch(): void {
   border: 1px solid var(--border-default); border-radius: 50%; font-size: 10.5px;
 }
 .ci-chain li.next .ci-chain-index { border-color: var(--accent-bright); color: var(--accent-bright); }
-.ci-btn.small { padding: 3px 9px; font-size: 12px; margin-left: auto; }
+.ci-btn.small { padding: 3px 9px; font-size: var(--font-xs); margin-left: auto; }
 .ci-row.center { justify-content: center; }
 h1 { margin: 6px 0 0; color: var(--text-bright); font-size: 22px; }
 .ci-desc { margin: 6px 0 0; color: var(--text-muted); font-size: 12.5px; }
@@ -520,14 +520,14 @@ h1 { margin: 6px 0 0; color: var(--text-bright); font-size: 22px; }
 .ci-card { padding: 14px 16px; margin-bottom: 12px; border: 1px solid var(--border-default); border-radius: 12px; background: var(--bg-subtle); }
 .ci-card.blocked { border-color: var(--attention-fg); }
 .ci-card.failed { border-color: var(--danger-fg); }
-.ci-card-label { color: var(--text-muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
-.ci-command { display: block; margin-top: 8px; color: var(--text-bright); font-size: 12px; overflow-wrap: anywhere; }
+.ci-card-label { color: var(--text-muted); font-size: var(--font-2xs); letter-spacing: .06em; text-transform: uppercase; }
+.ci-command { display: block; margin-top: 8px; color: var(--text-bright); font-size: var(--font-xs); overflow-wrap: anywhere; }
 .ci-note { margin: 8px 0 0; color: var(--text-secondary); font-size: 12.5px; line-height: 1.6; }
 .ci-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
 .ci-error {
   margin: 10px 0 12px; padding: 10px 12px; max-height: 180px; overflow: auto;
   border-radius: 8px; background: var(--bg-base); color: var(--text-secondary);
-  font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 11.5px; line-height: var(--lh-base); white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .ci-warn { margin: 10px 0 0; color: var(--attention-fg); font-size: 12.5px; line-height: 1.6; }
 .ci-verdict { text-align: center; padding: 20px 0 8px; }
@@ -535,8 +535,8 @@ h1 { margin: 6px 0 0; color: var(--text-bright); font-size: 22px; }
 h2 { margin: 0 0 8px; color: var(--text-bright); font-size: 19px; }
 .ci-footer { display: flex; align-items: center; gap: 10px; margin-top: auto; padding: 14px 28px; border-top: 1px solid var(--border-muted); flex-wrap: wrap; }
 .ci-footer span { flex: 1; }
-.ci-dont-ask { display: flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
-.ci-btn { border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 13px; cursor: pointer; color: var(--text-primary); background: var(--bg-subtle); text-decoration: none; font-size: 13px; transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out); }
+.ci-dont-ask { display: flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: var(--font-xs); cursor: pointer; }
+.ci-btn { border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 13px; cursor: pointer; color: var(--text-primary); background: var(--bg-subtle); text-decoration: none; font-size: var(--font-sm); transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out); }
 .ci-btn.primary { border-color: var(--accent-emphasis); background: var(--accent-emphasis); color: var(--text-on-emphasis); }
 .ci-btn.ghost { background: transparent; }
 .ci-btn:hover:not(:disabled) { background: var(--bg-hover-strong); border-color: var(--border-strong); }

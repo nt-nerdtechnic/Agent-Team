@@ -2498,7 +2498,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
 .ide-titlebar-name {
   flex: 1;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 500;
   color: var(--text-secondary);
   overflow: hidden;
@@ -2631,7 +2631,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
   background: transparent;
   border-right: 1px solid var(--border-muted);
@@ -2645,7 +2645,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   color: var(--text-bright);
   border-top-color: var(--accent-emphasis);
 }
-.ide-tab-dirty { color: var(--attention-fg); font-size: 10px; }
+.ide-tab-dirty { color: var(--attention-fg); font-size: var(--font-3xs); }
 .ide-tab-diff-badge {
   font-size: 9px;
   font-weight: 700;
@@ -2663,7 +2663,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1;
   padding: 2px;
   border-radius: 3px;
@@ -2682,7 +2682,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   gap: 4px;
   overflow: hidden;
 }
-.ide-bc-sep { color: var(--text-muted); opacity: 0.6; font-size: 10px; }
+.ide-bc-sep { color: var(--text-muted); opacity: 0.6; font-size: var(--font-3xs); }
 .ide-bc-seg {
   color: var(--text-secondary);
   white-space: nowrap;
@@ -2712,7 +2712,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
 }
 .ide-tab-ctx-item {
   padding: 5px 14px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
   cursor: pointer;
   white-space: nowrap;
@@ -2736,7 +2736,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   overflow-y: auto;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   padding: 4px 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .ide-bc-dd-item {
   display: flex;
@@ -2767,7 +2767,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
 .ide-bc-dd-sym-badge[data-kind="interface"] { background: #56b6c2; }
 .ide-bc-dd-sym-badge[data-kind="type"] { background: #c678dd; }
 .ide-bc-dd-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-.ide-bc-dd-line { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
+.ide-bc-dd-line { font-size: var(--font-3xs); color: var(--text-muted); flex-shrink: 0; }
 .ide-bc-dd-empty { padding: 8px 10px; color: var(--text-muted); font-size: 11.5px; }
 
 .ide-editors { flex: 1; position: relative; min-height: 0; }
@@ -2781,7 +2781,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 
 /* ── Command Palette ─────────────────────────────────────────────────────── */
@@ -2812,7 +2812,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
 }
 .ide-palette-input {
   padding: 11px 14px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   background: transparent;
   border: none;
   border-bottom: 1px solid var(--border-muted);
@@ -2840,7 +2840,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
 .ide-palette-item.active { background: var(--bg-muted); }
 .ide-palette-label { color: var(--text-primary); }
 .ide-palette-key {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
   background: var(--bg-base);
   border: 1px solid var(--border-muted);
@@ -2849,12 +2849,12 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   font-family: ui-monospace, Menlo, monospace;
   flex-shrink: 0;
 }
-.ide-palette-empty { padding: 12px 14px; color: var(--text-muted); font-size: 12px; }
-.ide-new-file-label { padding: 10px 14px 4px; font-size: 11px; color: var(--text-muted); user-select: none; }
+.ide-palette-empty { padding: 12px 14px; color: var(--text-muted); font-size: var(--font-xs); }
+.ide-new-file-label { padding: 10px 14px 4px; font-size: var(--font-2xs); color: var(--text-muted); user-select: none; }
 .ide-new-file-hint { padding: 6px 14px 8px; font-size: 10.5px; color: var(--text-muted); opacity: .7; }
 .ide-palette-section-header {
   padding: 4px 14px 2px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .06em;

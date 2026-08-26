@@ -31,7 +31,9 @@
   --font-ui: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang TC', sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* ── Type scale (6 steps) ───────────────────────────────────── */
+  /* ── Type scale (7 steps) ───────────────────────────────────── */
+  --font-3xs: 10px;  /* dense UI floor: sidebar rows, status bar, tab
+                        strips. Nothing in the app should be smaller. */
   --font-2xs: 11px;  /* badges / tags */
   --font-xs: 12px;   /* secondary captions */
   --font-sm: 13px;   /* list body (= --font-row-desc) */

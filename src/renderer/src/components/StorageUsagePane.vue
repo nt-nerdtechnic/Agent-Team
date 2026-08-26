@@ -629,7 +629,7 @@ onMounted(async () => {
 }
 .su-risk,
 .su-locked {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   padding: 1px 6px;
   border-radius: var(--radius-pill);
@@ -655,7 +655,7 @@ onMounted(async () => {
   padding: 0;
   list-style: none;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
   word-break: break-all;
 }

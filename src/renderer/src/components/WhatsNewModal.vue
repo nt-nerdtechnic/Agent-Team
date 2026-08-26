@@ -103,7 +103,7 @@ header strong {
 }
 .title {
   margin: 0 0 12px;
-  font-size: 16px;
+  font-size: var(--font-lg);
   font-weight: 600;
   color: var(--text-bright);
 }
@@ -124,7 +124,7 @@ header strong {
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
   border-radius: 6px;
-  line-height: 1.5;
+  line-height: var(--lh-base);
   color: var(--text-secondary);
 }
 footer {
@@ -139,7 +139,7 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 7px 14px;
   border-radius: var(--radius-sm);
   cursor: pointer;

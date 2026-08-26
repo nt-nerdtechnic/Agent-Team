@@ -213,7 +213,7 @@ onUnmounted(() => {
 }
 
 .comp-sub2 {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: rgba(255,255,255,0.45);
   margin: 0 0 28px;
 }

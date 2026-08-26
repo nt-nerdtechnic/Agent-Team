@@ -175,16 +175,16 @@ async function onSubmit(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 7px 9px;
 }
-.qi-input.sm { font-size: 12px; padding: 5px 8px; }
+.qi-input.sm { font-size: var(--font-xs); padding: 5px 8px; }
 .qi-input:focus {
   outline: none;
   border-color: var(--accent-focus);
 }
 .qi-hint {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
   margin: 0;
   line-height: 1.4;
@@ -193,7 +193,7 @@ async function onSubmit(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   cursor: pointer;
 }

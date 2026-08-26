@@ -662,7 +662,7 @@ onUnmounted(() => stopTail())
   flex: none;
 }
 .dbg-title {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
 }
 .dbg-tabs {
@@ -673,7 +673,7 @@ onUnmounted(() => stopTail())
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 5px 12px;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -692,7 +692,7 @@ onUnmounted(() => stopTail())
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 .dbg-dot {
@@ -712,7 +712,7 @@ onUnmounted(() => stopTail())
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 2px 6px;
 }
 .dbg-close:hover {
@@ -742,7 +742,7 @@ onUnmounted(() => stopTail())
   color: var(--text-bright);
   border: 1px solid var(--border-muted);
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 6px;
 }
 .dbg-input {
@@ -752,16 +752,16 @@ onUnmounted(() => stopTail())
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   cursor: pointer;
 }
 .dbg-count {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 .dbg-cwd {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
   overflow: hidden;
@@ -774,7 +774,7 @@ onUnmounted(() => stopTail())
   color: var(--text-bright);
   border: 1px solid var(--border-muted);
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 9px;
   cursor: pointer;
 }
@@ -793,8 +793,8 @@ onUnmounted(() => stopTail())
   overflow: auto;
   padding: 6px 12px;
   font-family: var(--font-mono, monospace);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: var(--font-2xs);
+  line-height: var(--lh-base);
   user-select: text;
 }
 .dbg-log-line {
@@ -815,7 +815,7 @@ onUnmounted(() => stopTail())
 .dbg-empty {
   padding: 24px 0;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
 }
 
@@ -830,11 +830,11 @@ onUnmounted(() => stopTail())
   min-height: 0;
   overflow: auto;
   padding: 12px 16px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   user-select: text;
 }
 .dbg-info h3 {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-secondary);
@@ -872,7 +872,7 @@ onUnmounted(() => stopTail())
   flex: 1;
   min-width: 0;
   font-family: var(--font-mono, monospace);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

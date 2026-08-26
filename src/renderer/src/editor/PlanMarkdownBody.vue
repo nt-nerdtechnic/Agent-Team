@@ -362,7 +362,7 @@ defineExpose({ isEditing, cancelEdit, scrollToAnchor })
   height: 100%;
   overflow-y: auto;
   padding: 20px 24px 32px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-primary);
   background: var(--bg-base);
   font-family: var(--font-ui, system-ui, sans-serif);
@@ -472,7 +472,7 @@ defineExpose({ isEditing, cancelEdit, scrollToAnchor })
   color: var(--text-primary);
   cursor: pointer;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 9px;
 }
 
@@ -505,8 +505,8 @@ defineExpose({ isEditing, cancelEdit, scrollToAnchor })
   border-radius: 6px;
   color: var(--text-primary);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   min-height: 120px;
   padding: 8px;
   resize: vertical;
@@ -546,17 +546,17 @@ defineExpose({ isEditing, cancelEdit, scrollToAnchor })
 }
 
 .pmb-line--h2 {
-  font-size: 16px;
+  font-size: var(--font-lg);
   margin-top: 16px;
 }
 
 .pmb-line--h3 {
-  font-size: 14px;
+  font-size: var(--font-md);
   margin-top: 12px;
 }
 
 .pmb-line--h4 {
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 
 .pmb-line--quote {
@@ -571,7 +571,7 @@ defineExpose({ isEditing, cancelEdit, scrollToAnchor })
   border-radius: 4px;
   padding: 1px 5px;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 
 .pmb-line--bullet {
@@ -636,7 +636,7 @@ defineExpose({ isEditing, cancelEdit, scrollToAnchor })
 
 .pmb-mermaid--loading {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-style: italic;
 }
 </style>
