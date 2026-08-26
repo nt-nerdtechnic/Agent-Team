@@ -96,3 +96,55 @@ describe('per-turn bookkeeping', () => {
     expect(body).toContain('panePendingSubagents.delete(paneId)')
   })
 })
+
+describe('LOOP_WAIT wiring — the vendor-agnostic half', () => {
+  function noteLoopWaitBody(): string {
+    const start = appSource.indexOf('function noteLoopWait(')
+    expect(start).toBeGreaterThan(-1)
+    return appSource.slice(start, appSource.indexOf('\n}\n', start))
+  }
+
+  it('holds the next continue rather than stopping the loop', () => {
+    // Waiting is a legitimate state. Stopping the run here would turn an honest
+    // "still waiting" into a dead loop — the fail-CLOSED shape this whole area
+    // is bounded against.
+    const body = noteLoopWaitBody()
+    expect(body).toContain('watcher.nextContinueAt = Date.now() + holdMs')
+    expect(body).not.toContain('stopLoopSpinning')
+  })
+
+  it('stops honouring the marker once the budget is spent', () => {
+    // Without this bound, a marker-every-turn agent parks the loop for good.
+    const body = noteLoopWaitBody()
+    expect(body).toContain('if (!loopWaitHonoured(watcher))')
+    expect(body).toContain('return false')
+  })
+
+  it('guards against replayed turns the same way the done marker does', () => {
+    // A re-parsed historical turn must not schedule a wait for a loop that has
+    // since moved on.
+    expect(noteLoopWaitBody()).toContain('TURN_TEXT_REPLAY_TOLERANCE_MS')
+  })
+
+  it('skips the stall judgement only for a HONOURED wait', () => {
+    // The two mechanisms must not double-count: a wait has its own budget, and
+    // a turn that is not an honoured wait has to fall through unchanged.
+    expect(appSource).toContain(
+      "if (!noteLoopWait(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')) {"
+    )
+  })
+
+  it('resets the streak on any other turn but keeps the spent budget', () => {
+    const body = noteLoopWaitBody()
+    expect(body).toContain('applyLoopWait(watcher, false)')
+  })
+})
+
+describe('tool signals are read from every vendor that reports them', () => {
+  it('does not hardcode the claude hook detail', () => {
+    // opencode's reader already names tools as `tool:<name>`; hardcoding the
+    // hook detail was what kept that signal unused.
+    expect(appSource).toContain("if (detailMeansToolUse(ev.detail ?? '')) {")
+    expect(appSource).not.toContain("if (ev.detail === 'hook:pre_tool_use') {")
+  })
+})

@@ -110,7 +110,7 @@ import {
   CLI_PASTE_LINE_CAP
 } from './lib/cliContext'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
-import { activityMeansWorking, allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
+import { activityMeansWorking, allSlotsFinished, applyLoopWait, applyTurnProgress, detailMeansToolUse, loopWaitBackoffMs, loopWaitHonoured, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal, type LoopWaitState } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
 import { resolveDragBatch, reorderBatchByIds } from './lib/paneBatchDrag'
@@ -205,6 +205,7 @@ import {
   DEFAULT_LOOP_RESUME,
   LOOP_ESTIMATE_WINDOW_MS,
   LOOP_DONE_MARKER,
+  LOOP_WAIT_MARKER,
   withLoopDoneInstruction,
   parseLimitReset,
   matchSessionLimit,
@@ -3115,6 +3116,43 @@ function noteLoopTurnProgress(paneId: string, text: string, timestamp: string): 
   watcher.recentTurns = next.recentTurns ?? []
 }
 
+/** A completed turn ended with LOOP_WAIT_MARKER: the CLI says it did nothing
+ *  but wait on something the loop cannot see. Hold the next continue instead of
+ *  poking it again, and report whether the turn was handled as a wait.
+ *
+ *  Returns false — meaning "judge this turn normally" — when the turn carried no
+ *  marker, OR when the run has spent its whole waiting budget. That second case
+ *  is the fail-OPEN bound: an agent emitting the marker every turn would
+ *  otherwise park the loop for good, silently. Once the budget is gone the
+ *  marker stops being honoured, ordinary continues resume, and the stall
+ *  detector finally gets to see those turns and end the run. */
+function noteLoopWait(paneId: string, text: string, timestamp: string): boolean {
+  const watcher = loopLimitWatchers.get(paneId)
+  if (!watcher) return false
+  if (!text || !turnEndsWithSentinel(text, LOOP_WAIT_MARKER)) {
+    // Any other turn ends the streak; the spent budget deliberately stays.
+    const cleared = applyLoopWait(watcher, false)
+    watcher.consecutive = cleared.consecutive
+    watcher.totalWaitedMs = cleared.totalWaitedMs
+    return false
+  }
+  // Same replay guard as the done-marker path: a re-parsed historical turn
+  // must not schedule a wait for a loop that has since moved on.
+  const eventMs = timestamp ? Date.parse(timestamp) : NaN
+  if (!Number.isNaN(eventMs) && eventMs < watcher.armedAt - TURN_TEXT_REPLAY_TOLERANCE_MS) return false
+  if (!loopWaitHonoured(watcher)) {
+    console.warn(`[loop] pane ${paneId}: LOOP_WAIT budget spent — ignoring the marker from here on`)
+    return false
+  }
+  const next = applyLoopWait(watcher, true)
+  watcher.consecutive = next.consecutive
+  watcher.totalWaitedMs = next.totalWaitedMs
+  const holdMs = loopWaitBackoffMs(next.consecutive)
+  watcher.nextContinueAt = Date.now() + holdMs
+  console.info(`[loop] pane ${paneId}: agent reported it is waiting — holding ${holdMs / 1000}s (${next.consecutive} in a row)`)
+  return true
+}
+
 /** The loop is spinning without finishing — it repeated itself past the stall
  *  limit, or burned through the continue cap. Stop it (same teardown as the
  *  done path) and ask for attention instead of injecting another continue. */
@@ -3229,8 +3267,13 @@ interface LoopLimitWatcher {
   toolUsesThisTurn: number
   /** This pane has reported tool use at least once, so a zero above means
    *  "used none" rather than "this vendor never says". Self-calibrating: only
-   *  hook vendors (claude/qwen/copilot) ever set it. */
+   *  vendors whose reader or hook names tools ever set it. */
   toolSignalsSeen: boolean
+  /** Consecutive turns that ended with LOOP_WAIT_MARKER (0 after any other). */
+  consecutive: number
+  /** Time this run has already granted to LOOP_WAIT holds, bounded by
+   *  LOOP_WAIT_TOTAL_MAX_MS so the marker can never park a loop for good. */
+  totalWaitedMs: number
 }
 const loopLimitWatchers = new Map<string, LoopLimitWatcher>()
 const LOOP_LIMIT_POLL_MS = 5000
@@ -3266,6 +3309,8 @@ function startLoopLimitWatcher(paneId: string): void {
     recentTurns: [],
     toolUsesThisTurn: 0,
     toolSignalsSeen: false,
+    consecutive: 0,
+    totalWaitedMs: 0,
   }
   watcher.timer = window.setInterval(() => {
     const pane = panes.value.find((p) => p.id === paneId)
@@ -8788,7 +8833,13 @@ backend.on('agent.activity', (raw) => {
     // Unattended loop: judge whether this turn actually moved the task forward.
     // A CLI parked on something the loop can't observe (a background agent)
     // ends its turn for real every time, so only the TEXT reveals the spin.
-    noteLoopTurnProgress(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
+    // LOOP_WAIT: the CLI says this turn only waited. Hold the next continue and
+    // skip the stall judgement — an honest "still waiting" is not a spin, and
+    // the wait has its own budget (see noteLoopWait). A turn that is NOT a
+    // honoured wait falls through to the ordinary judgement unchanged.
+    if (!noteLoopWait(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')) {
+      noteLoopTurnProgress(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
+    }
     // Inter-CLI messaging: scan this turn's text for MSG blocks, then pump.
     // A marker reply is scanned as empty text — nothing in it was addressed to
     // anyone — but the pump still runs, since the pane is now idle.
@@ -8817,7 +8868,7 @@ backend.on('agent.activity', (raw) => {
     // Tool use is the sharpest "this turn did work" signal there is, and its
     // absence is what a CLI parked on a background agent looks like: it talks,
     // it never touches a tool. Counted per armed turn by the loop watcher.
-    if (ev.detail === 'hook:pre_tool_use') {
+    if (detailMeansToolUse(ev.detail ?? '')) {
       const toolWatcher = loopLimitWatchers.get(ev.pane_id)
       if (toolWatcher) {
         toolWatcher.toolUsesThisTurn += 1
