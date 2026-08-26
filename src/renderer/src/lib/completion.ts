@@ -107,6 +107,23 @@ export function loopWaitingOnSubagents(s: SubagentWaitState): boolean {
   return s.now - s.observedAt < LOOP_SUBAGENT_WAIT_MAX_MS
 }
 
+/** `detail` values that mean the agent called a TOOL, rather than just
+ *  producing text. Two sources report this today and they name it differently:
+ *
+ *    hook:pre_tool_use   claude, via its PreToolUse hook
+ *    tool:<name>         opencode, parsed straight out of its session log
+ *
+ *  Both are equally factual — one arrives through a hook, the other through a
+ *  reader — so the loop treats them the same. Every other vendor reports only
+ *  coarse `assistant` / `user` details, which is exactly why turnUsedNoTools
+ *  self-calibrates on `toolSignalsSeen` rather than assuming silence means
+ *  "no tools were used".
+ *
+ *  Adding a vendor here is one line, the moment its reader starts naming tools. */
+export function detailMeansToolUse(detail: string): boolean {
+  return detail === 'hook:pre_tool_use' || detail.startsWith('tool:')
+}
+
 /** True when an `agent_active` event means THIS PANE'S agent is working, and
  *  so should advance the loop's activity clock.
  *
@@ -127,6 +144,58 @@ export function loopWaitingOnSubagents(s: SubagentWaitState): boolean {
  *  with its own PreToolUse moments later. */
 export function activityMeansWorking(detail: string): boolean {
   return detail !== 'hook:subagent_stop'
+}
+
+/** How long the loop holds off after each consecutive LOOP_WAIT, clamped to
+ *  the last tier. Rising, because a second and third "still waiting" says the
+ *  agent is parked on something slower than the first one suggested. */
+export const LOOP_WAIT_BACKOFF_MS = [60_000, 180_000, 600_000]
+
+/** Total time one run may spend honouring LOOP_WAIT before the marker starts
+ *  being IGNORED.
+ *
+ *  This bound is the whole reason the marker is safe to add. Without it, an
+ *  agent that emits LOOP_WAIT every turn — misreading the protocol, or genuinely
+ *  parked on something that will never finish — silently stops the loop
+ *  forever, which is the exact fail-CLOSED shape the subagent gate was already
+ *  bounded against. Past this budget the loop resumes normal continues and the
+ *  ordinary stall detector gets to see those turns and end the run. */
+export const LOOP_WAIT_TOTAL_MAX_MS = 30 * 60_000
+
+/** The run's LOOP_WAIT bookkeeping. */
+export interface LoopWaitState {
+  /** Consecutive turns that ended with the marker (0 after any other turn). */
+  consecutive: number
+  /** Total time already granted to this run's waits. */
+  totalWaitedMs: number
+}
+
+/** How long to hold off after `consecutive` LOOP_WAIT turns in a row. */
+export function loopWaitBackoffMs(consecutive: number): number {
+  if (consecutive <= 0) return 0
+  return LOOP_WAIT_BACKOFF_MS[Math.min(consecutive, LOOP_WAIT_BACKOFF_MS.length) - 1]
+}
+
+/** Whether another LOOP_WAIT may still be honoured, or the run has spent its
+ *  whole waiting budget and the marker should now be ignored (fail-OPEN). */
+export function loopWaitHonoured(s: LoopWaitState): boolean {
+  return s.totalWaitedMs < LOOP_WAIT_TOTAL_MAX_MS
+}
+
+/** Fold a completed turn into the wait state.
+ *
+ *  `waited` says whether this turn ended with the marker. Any other turn
+ *  resets the streak — the agent got somewhere, so the next wait starts its
+ *  backoff from the bottom again. The spent budget is NOT reset: it bounds the
+ *  whole run, which is what stops a marker-every-turn loop from waiting out
+ *  the night in one-minute steps. */
+export function applyLoopWait(s: LoopWaitState, waited: boolean): LoopWaitState {
+  if (!waited) return { consecutive: 0, totalWaitedMs: s.totalWaitedMs }
+  const next = s.consecutive + 1
+  return {
+    consecutive: next,
+    totalWaitedMs: s.totalWaitedMs + loopWaitBackoffMs(next),
+  }
 }
 
 /** A turn shorter than this (whitespace-collapsed) is too small to be real

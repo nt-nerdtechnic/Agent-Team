@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { activityMeansWorking, slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, normalizeTurnText, turnMadeProgress, loopBackoffMs, applyTurnProgress, loopStallVerdict, loopWaitingOnSubagents, turnUsedNoTools, LOOP_STALL_BACKOFF_MS, LOOP_MIN_PROGRESS_CHARS, LOOP_STALL_LIMIT, LOOP_MAX_CONTINUES, LOOP_SUBAGENT_WAIT_MAX_MS, LOOP_RECENT_TURNS, type SlotSignal, type LoopStallState } from '../completion'
+import { activityMeansWorking, applyLoopWait, detailMeansToolUse, loopWaitBackoffMs, loopWaitHonoured, LOOP_WAIT_BACKOFF_MS, LOOP_WAIT_TOTAL_MAX_MS, slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, normalizeTurnText, turnMadeProgress, loopBackoffMs, applyTurnProgress, loopStallVerdict, loopWaitingOnSubagents, turnUsedNoTools, LOOP_STALL_BACKOFF_MS, LOOP_MIN_PROGRESS_CHARS, LOOP_STALL_LIMIT, LOOP_MAX_CONTINUES, LOOP_SUBAGENT_WAIT_MAX_MS, LOOP_RECENT_TURNS, type SlotSignal, type LoopStallState } from '../completion'
 
 // Fixed reference time for the watcher arming. turn_complete only counts when
 // its timestamp is strictly AFTER this.
@@ -570,5 +570,92 @@ describe('the full wait-then-resume sequence', () => {
         settleMs: SETTLE,
       })
     ).toBe(false)
+  })
+})
+
+describe('detailMeansToolUse', () => {
+  it('accepts both sources that report tool use today', () => {
+    expect(detailMeansToolUse('hook:pre_tool_use')).toBe(true) // claude, via hook
+    expect(detailMeansToolUse('tool:read')).toBe(true) // opencode, via its reader
+    expect(detailMeansToolUse('tool:unknown')).toBe(true)
+  })
+
+  it('rejects the coarse details every other vendor reports', () => {
+    // These are all a vendor says today. Counting them as tool use would make
+    // turnUsedNoTools fire on ordinary talking turns.
+    for (const d of ['assistant', 'assistant:thinking', 'user', 'prompt', 'usage', 'token_count', '']) {
+      expect(detailMeansToolUse(d)).toBe(false)
+    }
+  })
+
+  it('does not mistake a subagent event for tool use', () => {
+    // opencode reports subagent:done with no matching "started", so it can
+    // never be paired into a count — and it is not the pane using a tool.
+    expect(detailMeansToolUse('subagent:done')).toBe(false)
+    expect(detailMeansToolUse('hook:subagent_stop')).toBe(false)
+  })
+})
+
+describe('LOOP_WAIT backoff and budget', () => {
+  const FRESH = { consecutive: 0, totalWaitedMs: 0 }
+
+  it('holds longer each consecutive wait, then clamps', () => {
+    expect(loopWaitBackoffMs(0)).toBe(0)
+    expect(loopWaitBackoffMs(1)).toBe(LOOP_WAIT_BACKOFF_MS[0])
+    expect(loopWaitBackoffMs(2)).toBe(LOOP_WAIT_BACKOFF_MS[1])
+    expect(loopWaitBackoffMs(3)).toBe(LOOP_WAIT_BACKOFF_MS[2])
+    expect(loopWaitBackoffMs(99)).toBe(LOOP_WAIT_BACKOFF_MS[LOOP_WAIT_BACKOFF_MS.length - 1])
+  })
+
+  it('counts a wait and charges its hold against the budget', () => {
+    const after = applyLoopWait(FRESH, true)
+    expect(after.consecutive).toBe(1)
+    expect(after.totalWaitedMs).toBe(LOOP_WAIT_BACKOFF_MS[0])
+  })
+
+  it('any other turn ends the streak but keeps the spent budget', () => {
+    // The streak resets so the next wait starts its backoff from the bottom;
+    // the budget does not, because it bounds the whole RUN.
+    const waited = applyLoopWait(applyLoopWait(FRESH, true), true)
+    const worked = applyLoopWait(waited, false)
+    expect(worked.consecutive).toBe(0)
+    expect(worked.totalWaitedMs).toBe(waited.totalWaitedMs)
+  })
+
+  it('stops honouring the marker once the budget is spent — the fail-OPEN bound', () => {
+    // Without this an agent emitting LOOP_WAIT every turn parks the loop for
+    // good, silently: the same fail-CLOSED shape the subagent gate is bounded
+    // against. Past the budget, ordinary continues resume and the stall
+    // detector gets to see those turns.
+    expect(loopWaitHonoured(FRESH)).toBe(true)
+    expect(loopWaitHonoured({ consecutive: 9, totalWaitedMs: LOOP_WAIT_TOTAL_MAX_MS - 1 })).toBe(true)
+    expect(loopWaitHonoured({ consecutive: 9, totalWaitedMs: LOOP_WAIT_TOTAL_MAX_MS })).toBe(false)
+  })
+
+  it('a marker-every-turn run exhausts its budget in bounded time', () => {
+    let st = FRESH
+    let turns = 0
+    while (loopWaitHonoured(st) && turns < 1000) {
+      st = applyLoopWait(st, true)
+      turns++
+    }
+    expect(turns).toBeLessThan(1000) // it terminates at all
+    expect(st.totalWaitedMs).toBeGreaterThanOrEqual(LOOP_WAIT_TOTAL_MAX_MS)
+  })
+})
+
+describe('the two loop markers stay distinct', () => {
+  it('a waiting turn is not read as a finished one, and vice versa', () => {
+    const waiting = '仍在等背景測試回報。\n\n<<LOOP_WAIT>>'
+    const finished = '全部完成。\n\n<<LOOP_DONE>>'
+    expect(turnEndsWithSentinel(waiting, '<<LOOP_WAIT>>')).toBe(true)
+    expect(turnEndsWithSentinel(waiting, '<<LOOP_DONE>>')).toBe(false)
+    expect(turnEndsWithSentinel(finished, '<<LOOP_DONE>>')).toBe(true)
+    expect(turnEndsWithSentinel(finished, '<<LOOP_WAIT>>')).toBe(false)
+  })
+
+  it('mentioning a marker mid-text never counts', () => {
+    const mention = `完成時我會輸出 <<LOOP_WAIT>>。\n目前還在跑第 2 階段。`
+    expect(turnEndsWithSentinel(mention, '<<LOOP_WAIT>>')).toBe(false)
   })
 })
