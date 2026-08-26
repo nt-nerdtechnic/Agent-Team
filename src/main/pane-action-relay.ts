@@ -64,16 +64,19 @@ export class PaneActionRelay {
   }
 
   /** Feed a renderer reply back in (wired to PANE_ACTION_REPLY_CHANNEL). */
-  handleReply(requestId: string, result: PaneActionResult): void {
+  handleReply(requestId: string, result: PaneActionResult | undefined): void {
     const entry = this.pending.get(requestId)
     if (!entry) return // already resolved or timed out
+    // A renderer whose handler returned nothing has not claimed the pane, and
+    // must not take the whole main process down for it.
+    const answer: PaneActionResult = result ?? { error: 'not-found' }
     // Only `not-found` is a disowning. Any other answer came from the window
     // that owns the pane, and it is the answer — waiting for the rest would
     // turn a legitimate "blocked" into a timeout.
-    if (result.error !== 'not-found') {
+    if (answer.error !== 'not-found') {
       clearTimeout(entry.timer)
       this.pending.delete(requestId)
-      entry.resolve(result)
+      entry.resolve(answer)
       return
     }
     entry.remaining -= 1

@@ -95,6 +95,16 @@ describe('PaneActionRelay', () => {
     relay.handleReply(requestIdOf(a), { ok: true })
   })
 
+  // A renderer handler that returns nothing must count as a disowning rather
+  // than throwing in the main process.
+  it('treats a reply with no result object as a disowning', async () => {
+    const relay = new PaneActionRelay()
+    const a = target()
+    const promise = relay.request([a], 'pane-1', 'focus')
+    relay.handleReply(requestIdOf(a), undefined)
+    await expect(promise).resolves.toEqual({ error: 'not-found' })
+  })
+
   it('ignores replies with an unknown correlation id', () => {
     const relay = new PaneActionRelay()
     relay.handleReply('never-issued', { ok: true })

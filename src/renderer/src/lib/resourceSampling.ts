@@ -26,7 +26,13 @@ export interface CpuSample {
  * Above 100 is real and kept — a CLI running four workers on four cores is at
  * 400%, exactly as Activity Monitor reports it.
  */
-export function cpuPercent(prev: CpuSample | undefined, curr: CpuSample): number | null {
+export function cpuPercent(
+  prev: CpuSample | undefined,
+  curr: CpuSample,
+  /** Logical cores. A group cannot exceed 100% per core, so anything above it
+   *  is the pid set having changed rather than work having happened. */
+  cpuCount = 0
+): number | null {
   if (!prev) return null
   const elapsedMs = curr.sampledAt - prev.sampledAt
   // A clock that did not move (or went backwards, across a sleep/wake) gives
@@ -34,10 +40,18 @@ export function cpuPercent(prev: CpuSample | undefined, curr: CpuSample): number
   if (!(elapsedMs > 0)) return null
   const delta = curr.cpuSeconds - prev.cpuSeconds
   // The counter only falls when the tree changed under us — a child exited
-  // between sweeps, so its accumulated time left the total. That is not
-  // negative CPU use; it is no measurement.
-  if (delta < 0) return 0
-  return (delta / (elapsedMs / 1000)) * 100
+  // between sweeps, taking its accumulated time out of the total. That is not
+  // zero CPU (which reads as "idle" next to a pane that is pinning a core);
+  // it is no measurement, same as the first sample.
+  if (delta < 0) return null
+  const percent = (delta / (elapsedMs / 1000)) * 100
+  // The mirror image: the backend re-walks each pane's descendants on its own
+  // slower timer, so a long-running child can join the group carrying CPU time
+  // it accrued before we were watching it. Divided by one 2 s interval that
+  // reads as hundreds of percent per core — impossible, and worth showing as
+  // unknown rather than as a spike the user cannot explain.
+  if (cpuCount > 0 && percent > cpuCount * 100) return null
+  return percent
 }
 
 /**

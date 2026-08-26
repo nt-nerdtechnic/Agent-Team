@@ -37,8 +37,31 @@ describe('cpuPercent', () => {
   })
 
   // The tree lost a child between sweeps, taking its accumulated time with it.
-  it('reports zero rather than negative when the counter falls', () => {
-    expect(cpuPercent({ cpuSeconds: 90, sampledAt: 0 }, { cpuSeconds: 10, sampledAt: 1_000 })).toBe(0)
+  // A zero here would read as "idle" next to a pane that is pinning a core, so
+  // it is unknown — the same answer as the first sample.
+  it('is null rather than zero when the counter falls', () => {
+    expect(
+      cpuPercent({ cpuSeconds: 90, sampledAt: 0 }, { cpuSeconds: 10, sampledAt: 1_000 })
+    ).toBeNull()
+  })
+
+  // The backend re-walks each pane's descendants on a slower timer than the
+  // panel samples, so a child can join the group carrying CPU time it accrued
+  // before we were watching. Over one interval that reads as an impossible
+  // spike; the machine cannot exceed 100% per core.
+  it('is null when the figure exceeds what the machine has', () => {
+    const prev = { cpuSeconds: 0, sampledAt: 0 }
+    const curr = { cpuSeconds: 20, sampledAt: 2_000 } // 1000% of one core
+    expect(cpuPercent(prev, curr, 4)).toBeNull()
+    // Same reading on a machine that really has twelve cores is possible.
+    expect(cpuPercent(prev, curr, 12)).toBeCloseTo(1000)
+  })
+
+  // Without a core count there is nothing to compare against, so the cap is off.
+  it('does not cap when the core count is unknown', () => {
+    expect(
+      cpuPercent({ cpuSeconds: 0, sampledAt: 0 }, { cpuSeconds: 20, sampledAt: 2_000 })
+    ).toBeCloseTo(1000)
   })
 })
 

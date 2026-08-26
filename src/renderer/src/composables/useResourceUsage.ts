@@ -105,7 +105,7 @@ export function useResourceUsage(opts: UseResourceUsageOptions) {
         seen.add(key)
         bytes.set(key, pane.bytes ?? 0)
         const sample: CpuSample = { cpuSeconds: pane.cpu_seconds ?? 0, sampledAt: sampledAtMs }
-        const percent = cpuPercent(previous.get(key), sample)
+        const percent = cpuPercent(previous.get(key), sample, cpuCount.value)
         percents.set(key, percent)
         previous.set(key, sample)
         if (pane.pane_id) {
