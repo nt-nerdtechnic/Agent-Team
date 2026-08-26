@@ -36,6 +36,45 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.91',
+    title: {
+      'zh-TW': '全新資源管理器、背景子代理追蹤、Loop 迴圈等待退避與日誌防護',
+      'en-US': 'Resource Manager, Background Subagent Tracking, Loop Wait Backoff & Log Stability',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '全新資源管理器 (Resource Manager)：整合 CPU 佔用、記憶體與 Token 消耗即時監控，支援全局面板跳轉與閒置回收。',
+        'en-US':
+          'Unified Resource Manager: real-time CPU, memory, and token monitoring with cross-window pane jumping and idle reclaim.',
+      },
+      {
+        'zh-TW':
+          '背景子代理追蹤與 Loop 等待退避：支援 <<LOOP_WAIT>> 標記與階梯式退避，精準識別子代理執行狀態，防止迴圈空轉。',
+        'en-US':
+          'Subagent Tracking & Loop Wait Backoff: supports <<LOOP_WAIT>> markers and tiered backoff to prevent loops from spinning on background tasks.',
+      },
+      {
+        'zh-TW':
+          '工作區多視窗拖曳交接：側邊欄工作區標題支援拖曳至獨立新視窗，無縫移交運作中的 Agent 會話。',
+        'en-US':
+          'Workspace Detach Gesture: drag workspace headers out to their own windows without interrupting active agent processes.',
+      },
+      {
+        'zh-TW':
+          '日誌讀取與回合結束訊號防護：修復未完成行導致 High-Water Mark 提前推進的問題，確保回合結束訊號不遺失。',
+        'en-US':
+          'Log Ingestion & Turn-End Protection: prevents half-written log lines from prematurely advancing watermarks and dropping turn ends.',
+      },
+      {
+        'zh-TW':
+          'Claude 配額直接查詢：改採 Print 模式直接非同步執行獲取額度與原因，消除終端模擬輸入的延遲與誤報。',
+        'en-US':
+          'Claude Quota Direct Probing: fetches Claude quotas directly via print mode, eliminating PTY input lag and false errors.',
+      },
+    ],
+  },
+  {
     version: '0.1.90',
     title: {
       'zh-TW': '終端 PTY 二進位幀串流傳輸與後端日誌探索效能優化',
