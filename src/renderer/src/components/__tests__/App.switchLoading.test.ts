@@ -74,6 +74,20 @@ describe('the stage says a switch is happening', () => {
     expect(appSource).not.toContain('.ws-switch-enter-active')
   })
 
+  it('is the only way a switch can happen', () => {
+    // Every entry point — a sidebar heading, the picker, clicking a pane in
+    // another workspace, detaching the one on screen — goes through
+    // switchToWorkspace. Nothing enforced that, so a new path added later
+    // would switch with no cover and the animation would silently not appear.
+    //
+    // A keepPanes browse IS a switch: keeping the panes of the workspace being
+    // left is what distinguishes it from an ordinary browse, which kills them.
+    // So exactly one of those may exist, and it must be inside this function.
+    const all = appSource.split('keepPanes: true')
+    expect(all).toHaveLength(2)
+    expect(fn).toContain('await onWorkspaceBrowse(path, { keepPanes: true })')
+  })
+
   it('leaves the empty-stage branch alone', () => {
     // The cover is the stage's last child, not a sibling wedged between the
     // "no panes at all" card and the grid — inserting one there breaks the
