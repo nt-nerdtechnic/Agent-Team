@@ -107,6 +107,28 @@ export function loopWaitingOnSubagents(s: SubagentWaitState): boolean {
   return s.now - s.observedAt < LOOP_SUBAGENT_WAIT_MAX_MS
 }
 
+/** True when an `agent_active` event means THIS PANE'S agent is working, and
+ *  so should advance the loop's activity clock.
+ *
+ *  Every hook signal arrives as one of two event types, so `subagent_stop`
+ *  rides in as `agent_active` — a subagent finishing usually does mean the main
+ *  agent is about to pick its work back up. But it is the SUBAGENT that acted,
+ *  and if the main agent stays idle that borrowed timestamp is permanent:
+ *  loopContinueReady requires the turn end to be the LATEST signal, so an
+ *  activity stamp landing after it can never be overtaken by anything except a
+ *  NEW turn — which an idle agent never produces. The loop then stops
+ *  continuing forever, silently, and fails CLOSED. loopWaitingOnSubagents
+ *  cannot rescue it: what jams is the continue verdict, not the gate.
+ *
+ *  Only the loop's clock is narrowed by this. The shared activity clock keeps
+ *  stamping every event, so delivery gating, the done notification and the
+ *  pipeline's stage verdict are untouched. Skipping the stamp is safe in the
+ *  other direction too: a main agent that really did resume work announces it
+ *  with its own PreToolUse moments later. */
+export function activityMeansWorking(detail: string): boolean {
+  return detail !== 'hook:subagent_stop'
+}
+
 /** A turn shorter than this (whitespace-collapsed) is too small to be real
  *  work — "等待中。", "好的，我繼續" — and counts as a stalled run. */
 export const LOOP_MIN_PROGRESS_CHARS = 40

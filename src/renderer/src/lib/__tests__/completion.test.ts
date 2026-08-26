@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, normalizeTurnText, turnMadeProgress, loopBackoffMs, applyTurnProgress, loopStallVerdict, loopWaitingOnSubagents, turnUsedNoTools, LOOP_STALL_BACKOFF_MS, LOOP_MIN_PROGRESS_CHARS, LOOP_STALL_LIMIT, LOOP_MAX_CONTINUES, LOOP_SUBAGENT_WAIT_MAX_MS, LOOP_RECENT_TURNS, type SlotSignal, type LoopStallState } from '../completion'
+import { activityMeansWorking, slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, normalizeTurnText, turnMadeProgress, loopBackoffMs, applyTurnProgress, loopStallVerdict, loopWaitingOnSubagents, turnUsedNoTools, LOOP_STALL_BACKOFF_MS, LOOP_MIN_PROGRESS_CHARS, LOOP_STALL_LIMIT, LOOP_MAX_CONTINUES, LOOP_SUBAGENT_WAIT_MAX_MS, LOOP_RECENT_TURNS, type SlotSignal, type LoopStallState } from '../completion'
 
 // Fixed reference time for the watcher arming. turn_complete only counts when
 // its timestamp is strictly AFTER this.
@@ -512,5 +512,63 @@ describe('applyTurnProgress recent-turn history', () => {
       state = applyTurnProgress(state, `Completed step ${i} of the migration and verified its output.`)
     }
     expect(state.stalledRuns).toBe(0)
+  })
+})
+
+describe('activityMeansWorking', () => {
+  it('treats ordinary activity as the pane working', () => {
+    expect(activityMeansWorking('hook:pre_tool_use')).toBe(true)
+    expect(activityMeansWorking('hook:notification')).toBe(true)
+    expect(activityMeansWorking('user')).toBe(true)
+    expect(activityMeansWorking('')).toBe(true)
+  })
+
+  it('does not count a subagent finishing as the pane working', () => {
+    expect(activityMeansWorking('hook:subagent_stop')).toBe(false)
+  })
+})
+
+describe('the full wait-then-resume sequence', () => {
+  // Walks one real exchange through the actual predicates, which is where the
+  // pieces meet: the unit tests above each pass while the SEQUENCE still jams.
+  const SETTLE = 1500
+  const ARMED = 1000
+  const TASK_STARTED = 1100 // PreToolUse(Task) → agent_active
+  const TURN_ENDED = 1200 // "still waiting" → Stop hook → turn_complete
+  const SUBAGENT_DONE = 5000 // SubagentStop
+
+  it('holds the loop while the subagent runs', () => {
+    expect(loopWaitingOnSubagents({ pending: 1, observedAt: TURN_ENDED, now: 1300 })).toBe(true)
+  })
+
+  it('lets the loop continue once the subagent is done', () => {
+    // The gate opens (count back to zero) AND the continue verdict must agree.
+    expect(loopWaitingOnSubagents({ pending: 0, observedAt: SUBAGENT_DONE, now: 9000 })).toBe(false)
+    expect(
+      loopContinueReady({
+        turnCompleteAt: TURN_ENDED,
+        // SubagentStop did NOT advance the clock — activityMeansWorking said no.
+        lastActiveAt: TASK_STARTED,
+        armedAt: ARMED,
+        now: 9000,
+        settleMs: SETTLE,
+      })
+    ).toBe(true)
+  })
+
+  it('would jam forever if SubagentStop advanced the activity clock', () => {
+    // The regression this pins: turnCompleteDone requires the turn end to be
+    // the LATEST signal, so an activity stamp landing after it can never be
+    // overtaken by anything except a NEW turn — and a main agent that stays
+    // idle never produces one. Silent, and fails CLOSED.
+    expect(
+      loopContinueReady({
+        turnCompleteAt: TURN_ENDED,
+        lastActiveAt: SUBAGENT_DONE,
+        armedAt: ARMED,
+        now: 9000,
+        settleMs: SETTLE,
+      })
+    ).toBe(false)
   })
 })

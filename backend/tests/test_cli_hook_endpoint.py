@@ -391,3 +391,42 @@ def test_a_vendor_that_cannot_report_subagent_stops_never_counts(
     )
     assert resp.status_code == 200
     assert _payload(events)["pending_subagents"] == 0
+
+
+def test_the_full_wait_then_resume_hook_sequence(
+    client: TestClient, events: list[dict], attributed: str
+) -> None:
+    """One real exchange, end to end, as the hooks actually fire it.
+
+    Each step below has its own test above; this pins the SEQUENCE, which is
+    where the count is either right or useless. The frontend gate reads only
+    the last number it was told, so what matters is that every broadcast in the
+    run carries the truth at that instant — not just the first and last.
+    """
+    seen: list[tuple[str, int]] = []
+
+    def step(kind: str, **body) -> None:
+        events.clear()
+        _post(client, kind, **body)
+        p = _payload(events)
+        seen.append((p["event_type"], p["pending_subagents"]))
+
+    step("pre_tool_use", tool_name="Task")  # agent dispatches two background agents
+    step("pre_tool_use", tool_name="Task")
+    step("pre_tool_use", tool_name="Read")  # ordinary work in between
+    step("stop")                            # "still waiting" — the turn really ends
+    step("subagent_stop")                   # one comes back
+    step("stop")                            # "still waiting for the other one"
+    step("subagent_stop")                   # the last one comes back
+    step("stop")                            # now genuinely idle
+
+    assert seen == [
+        ("agent_active", 1),
+        ("agent_active", 2),
+        ("agent_active", 2),   # Read must not inflate the count
+        ("turn_complete", 2),  # ← the loop must HOLD here
+        ("agent_active", 1),
+        ("turn_complete", 1),  # ← and here
+        ("agent_active", 0),
+        ("turn_complete", 0),  # ← only here may it continue
+    ]
