@@ -4490,6 +4490,56 @@ async def terminal_memory_usage(session: "Session", msg_id: str, msg_type: str, 
     }))
 
 
+@handler("terminal.resource_usage")
+async def terminal_resource_usage(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Per-pane CPU and memory in one sweep, for the resource panel.
+
+    Memory is the footprint number `terminal.memory_usage` already returns.
+    CPU is the *accumulated* CPU seconds of the pane's process tree, not a
+    percentage: a percentage only exists between two readings, and two windows
+    sampling at different rates would each need their own interval. Returning
+    the raw counter with the clock it was read at lets every caller difference
+    against its own previous sample.
+
+    The two sweeps are independent subprocesses, so they run concurrently; the
+    whole call costs about as much as the slower one.
+    """
+    from . import process_cpu, process_memory
+
+    groups = session.terminals.memory_pid_groups()
+    pids = [pid for _, pids in groups.values() for pid in pids]
+    by_session = {sid: pids for sid, (_, pids) in groups.items()}
+    measured, (cpu_measured, sampled_at) = await asyncio.gather(
+        asyncio.to_thread(process_memory.footprints, pids),
+        asyncio.to_thread(process_cpu.cpu_times, pids),
+    )
+    totals = process_memory.sum_by_group(by_session, measured)
+    cpu_totals = process_cpu.sum_by_group(by_session, cpu_measured)
+    panes = [
+        {
+            "terminal_session_id": sid,
+            "pane_id": pane_id,
+            "bytes": totals.get(sid, 0),
+            "cpu_seconds": cpu_totals.get(sid, 0.0),
+        }
+        for sid, (pane_id, _) in groups.items()
+    ]
+    cpu_count, machine_memory = process_cpu.machine_capacity()
+    await session.send_json(make_response(msg_id, msg_type, {
+        # An empty sweep with live panes means it failed, which is not the same
+        # as "no panes" — the panel has to tell those apart, per metric.
+        "available": process_memory.available() and bool(measured or not groups),
+        "cpu_available": process_cpu.available() and bool(cpu_measured or not groups),
+        "sampled_at": sampled_at,
+        "panes": panes,
+        "total_bytes": sum(totals.values()),
+        # Denominators for "how much of this machine", which is the question the
+        # summary answers; the per-pane column stays relative to one core.
+        "cpu_count": cpu_count,
+        "machine_memory_bytes": machine_memory,
+    }))
+
+
 @handler("terminal.log_sent")
 async def terminal_log_sent(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     # Fire-and-forget: log injected text to the session's output log file.
