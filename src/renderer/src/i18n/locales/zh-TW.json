@@ -2141,12 +2141,6 @@
     "duration-hours": "{count} 小時",
     "duration-minutes": "{count} 分"
   },
-  "agentOverview": {
-    "title": "代理總覽",
-    "close": "關閉",
-    "jump": "切換到這個代理",
-    "empty": "此視窗沒有代理"
-  },
   "paneStatus": {
     "running": "執行中",
     "idle": "閒置",
@@ -2688,6 +2682,8 @@
     "pane-gone": "這個 pane 已經不在了。",
     "disk-free": "剩餘 {free}，共 {total}",
     "disk-scanning": "掃描中…",
-    "disk-failed": "掃描沒有成功。"
+    "disk-failed": "掃描沒有成功。",
+    "reclaimable-hint": "{count} 個可回收",
+    "unnamed-pane": "終端機"
   }
 }

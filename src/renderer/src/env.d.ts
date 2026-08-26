@@ -88,7 +88,7 @@ declare global {
       onGroupReattached: (cb: (groupId: string) => void) => void
       onOpenPipelineManager: (handler: (payload: { pipelineId?: string }) => void) => () => void
       openPlansWindow: (args: { workspace_path: string; rel_path?: string }) => Promise<{ ok: boolean }>
-      openResourcesWindow: (args: { workspace_path?: string }) => Promise<{ ok: boolean }>
+      onOpenResourceManager: (handler: () => void) => () => void
       requestPaneAction: (args: {
         paneId: string
         action: 'focus' | 'reclaim'

@@ -2141,12 +2141,6 @@
     "duration-hours": "{count}h",
     "duration-minutes": "{count}m"
   },
-  "agentOverview": {
-    "title": "Agents",
-    "close": "Close",
-    "jump": "Go to this agent",
-    "empty": "No agents in this window"
-  },
   "paneStatus": {
     "running": "running",
     "idle": "idle",
@@ -2688,6 +2682,8 @@
     "pane-gone": "That pane is no longer open.",
     "disk-free": "{free} free of {total}",
     "disk-scanning": "Scanning…",
-    "disk-failed": "The scan could not run."
+    "disk-failed": "The scan could not run.",
+    "reclaimable-hint": "{count} reclaimable",
+    "unnamed-pane": "Terminal"
   }
 }

@@ -12,6 +12,7 @@ import { formatBytes } from './lib/formatBytes'
 import { formatCpuPercent, machineCpuShare, machineMemoryShare } from './lib/resourceSampling'
 import { useResourceUsage, type ResourceUsageWire } from './composables/useResourceUsage'
 import ResourceSummaryPanel, { type ResourceSummaryRow } from './components/ResourceSummaryPanel.vue'
+import ResourceManagerModal from './components/ResourceManagerModal.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
 import ControlPane, {
@@ -278,6 +279,8 @@ onMounted(() => {
   window.agentTeam?.onFocusPane?.((paneId) => {
     void focusPaneFromNotification(paneId)
   })
+  // Native application menu entry (menu:open-resource-manager).
+  window.agentTeam?.onOpenResourceManager?.(() => openResourceManager())
   // Plan window "execute" dispatch routed to this workspace's window.
   window.agentTeam?.onPlanExecutionDispatch?.((payload) => { void onPlanExecutionDispatch(payload) })
   // Resource Manager row actions (jump / reclaim). That window is machine-wide
@@ -11894,7 +11897,13 @@ async function onSidebarFocusPane(paneId: string, ev?: MouseEvent): Promise<void
 // pane's live displayStatus — the only app-wide readable copy of that per-pane
 // state (displayStatus itself lives inside TerminalPane). A lost backend
 // session is not visible there, so disconnectedPaneIds wins over it.
-const resourcePanelOpen = computed(() => openPopover.value === 'resource')
+const showResourceManager = ref(false)
+// Mount the modal only once it has been asked for, like the other heavy modals.
+const resourceManagerEverOpened = ref(false)
+/** Either surface being visible is what picks the fast sampling cadence. */
+const resourcePanelOpen = computed(
+  () => openPopover.value === 'resource' || showResourceManager.value
+)
 
 /** Panes with a live CLI. The pill counts these, not placeholders: a
  *  placeholder holds no process, so no CPU and no memory. */
@@ -11911,15 +11920,18 @@ const resourceRows = computed<ResourceSummaryRow[]>(() => {
   const reclaimable = new Set(reclaimableNowIds.value)
   const bytesByKey = resourceUsage.bytesByKey.value
   const cpuByKey = resourceUsage.cpuPercentByKey.value
+  const bytesByPane = resourceUsage.bytesByPaneId.value
+  const cpuByPane = resourceUsage.cpuPercentByPaneId.value
   return panes.value.map((p) => {
     const name = p.customName || p.autoName || p.agentLabel
     const vendor = agentSpecs.find((s) => s.agentKey === p.agentKey)?.label ?? p.agentKey
     // Keyed by terminal session first: that id is the one this window holds for
     // its own PTY, so it cannot drift the way a pane id can when a pane is
-    // rebuilt around a new one. The pane id is the fallback for a pane whose
-    // ref is not mounted at this moment.
+    // rebuilt around a new one. The pane-id index is the fallback for a pane
+    // whose ref is not mounted at this moment — the session-keyed map never
+    // holds a bare pane id, so looking one up there would always miss.
     const sessionKey = (paneRefs[p.id]?.sessionId as unknown as string) ?? ''
-    const key = bytesByKey.has(sessionKey) || cpuByKey.has(sessionKey) ? sessionKey : p.id
+    const known = bytesByKey.has(sessionKey) || cpuByKey.has(sessionKey)
     return {
       paneId: p.id,
       name,
@@ -11936,8 +11948,8 @@ const resourceRows = computed<ResourceSummaryRow[]>(() => {
         p.workspacePath && p.workspacePath !== currentWorkspace.value
           ? (p.workspacePath.split('/').filter(Boolean).pop() ?? p.workspacePath)
           : '',
-      bytes: bytesByKey.get(key) ?? 0,
-      cpuPercent: cpuByKey.get(key) ?? null,
+      bytes: (known ? bytesByKey.get(sessionKey) : bytesByPane.get(p.id)) ?? 0,
+      cpuPercent: (known ? cpuByKey.get(sessionKey) : cpuByPane.get(p.id)) ?? null,
       reclaimable: reclaimable.has(p.id),
     }
   })
@@ -11970,13 +11982,27 @@ const resourceMemoryShare = computed(() =>
  *  Each figure appears only once it is knowable — CPU needs two samples, and a
  *  sweep that failed shows nothing rather than a zero that reads as "idle". */
 const resourcePillText = computed(() => {
-  const parts = [`▤ ${realizedPaneCount.value}`]
+  // The pane count, not the realized subset: idle reclaim downgrades panes to
+  // placeholders rather than closing them, and a pill reading "▤ 0" beside a
+  // panel listing thirteen panes is a contradiction. The resource figures below
+  // still come only from the panes that actually hold a process.
+  const parts = [`▤ ${panes.value.length}`]
   const share = resourceCpuShare.value
   if (share !== null && resourceUsage.cpuAvailable.value) parts.push(formatCpuPercent(share))
   if (resourceUsage.measured.value && resourceUsage.available.value && resourceTotals.value.bytes > 0) {
     parts.push(formatBytes(resourceTotals.value.bytes))
   }
   return parts.join(' · ')
+})
+
+/** The hover text keeps what the merged pill has no room for — how many panes
+ *  "reclaim now" would take, which the old memory pill showed inline. */
+const resourcePillTitle = computed(() => {
+  const base = i18n.global.t('resource.statusbar-title')
+  const count = reclaimableNowIds.value.length
+  return count > 0
+    ? `${base} · ${i18n.global.t('resource.reclaimable-hint', { count })}`
+    : base
 })
 
 // The pill is hidden once the last pane exits, but the popover is not — without
@@ -12008,9 +12034,10 @@ async function onResourceReclaim(): Promise<void> {
   if (reclaimed > 0) void resourceUsage.refresh()
 }
 
-function onOpenResourceWindow(): void {
+function openResourceManager(): void {
   closePopover()
-  void window.agentTeam?.openResourcesWindow?.({ workspace_path: currentWorkspace.value })
+  resourceManagerEverOpened.value = true
+  showResourceManager.value = true
 }
 
 // Pane right-click context menu, shared by the agent list, spotlight thumbnails,
@@ -13242,6 +13269,15 @@ function paneIsCommander(p: ActivePane): boolean {
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"
     />
+    <ResourceManagerModal
+      v-if="resourceManagerEverOpened"
+      :open="showResourceManager"
+      :backend="backend"
+      :usage="resourceUsage"
+      :auto-reclaim-on="idleReclaimEnabled"
+      :auto-reclaim-minutes="idleReclaimMinutes"
+      @close="showResourceManager = false"
+    />
     <PipelineManagerModal
       v-if="pmEverOpened"
       ref="pmRef"
@@ -13923,7 +13959,7 @@ function paneIsCommander(p: ActivePane): boolean {
           class="sb-item sb-resource sb-clickable"
           role="button"
           tabindex="0"
-          :title="$t('resource.statusbar-title')"
+          :title="resourcePillTitle"
           @click="togglePopover('resource')"
           @keydown.enter="togglePopover('resource')"
         >
@@ -14039,7 +14075,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="closePopover()"
       @reclaim="() => void onResourceReclaim()"
       @jump="onResourceJump"
-      @open-window="onOpenResourceWindow"
+      @open-window="openResourceManager"
     />
   </div>
 </template>

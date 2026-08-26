@@ -384,13 +384,14 @@ function focusOrCreateMainWindow(): void {
   })
 }
 
-// The Pipeline Manager is a modal inside a workspace window: reveal one and let
-// its renderer open the modal. Target selection mirrors sendMenuAction (detached
-// run-group children never host it), and a window is created when none is left —
-// on macOS the app outlives its last window, where a silent no-op would make the
-// menu item look broken. The send waits for the first paint so it can never race
-// the renderer's listener registration.
-function requestPipelineManager(): void {
+// The Pipeline Manager and the Resource Manager are modals inside a workspace
+// window: reveal one and let its renderer open the modal. Target selection
+// mirrors sendMenuAction (detached run-group children never host them), and a
+// window is created when none is left — on macOS the app outlives its last
+// window, where a silent no-op would make the menu item look broken. The send
+// waits for the first paint so it can never race the renderer's listener
+// registration.
+function requestMainWindowModal(channel: string): void {
   const focused = BrowserWindow.getFocusedWindow()
   const target =
     focused && !focused.isDestroyed() && mainWindows.has(focused) && !detachedWindowIds.has(focused.id)
@@ -398,7 +399,7 @@ function requestPipelineManager(): void {
       : [...mainWindows].reverse().find((w) => !w.isDestroyed() && !detachedWindowIds.has(w.id))
 
   const send = (win: BrowserWindow): void => {
-    if (!win.isDestroyed()) win.webContents.send('menu:open-pipeline-manager', {})
+    if (!win.isDestroyed()) win.webContents.send(channel, {})
   }
   const revealAndSend = (win: BrowserWindow): void => {
     if (win.isVisible()) {
@@ -414,6 +415,14 @@ function requestPipelineManager(): void {
 
   if (target) revealAndSend(target)
   else void createWindow().then(revealAndSend)
+}
+
+function requestPipelineManager(): void {
+  requestMainWindowModal('menu:open-pipeline-manager')
+}
+
+function requestResourceManager(): void {
+  requestMainWindowModal('menu:open-resource-manager')
 }
 
 function backendInfoPayload() {
@@ -1697,48 +1706,6 @@ function openPlanWindow(workspacePath: string, relPath?: string): void {
   })
 }
 
-// Resource Manager: one window for the whole app, not one per workspace. It
-// reports on the machine — every CLI this app is running, wherever it was
-// started from — so a second copy would show the same rows twice.
-let resourceWindow: BrowserWindow | null = null
-
-function openResourceWindow(workspacePath: string): void {
-  if (resourceWindow && !resourceWindow.isDestroyed()) {
-    if (resourceWindow.isMinimized()) resourceWindow.restore()
-    resourceWindow.show()
-    resourceWindow.focus()
-    return
-  }
-  const win = new BrowserWindow({
-    width: 760,
-    height: 620,
-    minWidth: 520,
-    minHeight: 360,
-    title: 'Resource Manager',
-    backgroundColor: '#0d1117',
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      // The window samples on a two-second interval while it is open; throttling
-      // a background window would silently stretch that into a wrong figure,
-      // because the percentage is a delta over the interval.
-      backgroundThrottling: false
-    }
-  })
-  resourceWindow = win
-  win.on('closed', () => {
-    if (resourceWindow === win) resourceWindow = null
-  })
-  loadWindow(win, { window: 'resources', workspace_path: workspacePath })
-}
-
-ipcMain.handle('window:openResources', (_event, args: { workspace_path?: string }) => {
-  openResourceWindow((args?.workspace_path ?? '').trim())
-  return { ok: true }
-})
-
 ipcMain.handle('window:openPlans', (_event, args: { workspace_path?: string; rel_path?: string }) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }
@@ -2645,9 +2612,7 @@ app.whenReady().then(async () => {
     onOpenRecent: (path: string) => sendMenuAction('open-recent:' + path),
     onNewWindow: () => void createWindow(),
     onOpenPipelineManager: () => requestPipelineManager(),
-    // Machine-wide, so the menu opens it without a workspace: the window lists
-    // every CLI this app is running, whichever folder each was started from.
-    onOpenResourceManager: () => openResourceWindow(''),
+    onOpenResourceManager: () => requestResourceManager(),
     onOpenRepo: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide'),
     onReportIssue: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide/issues'),
     onShowShortcuts: () => sendMenuAction('show-shortcuts'),

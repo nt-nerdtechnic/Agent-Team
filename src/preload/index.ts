@@ -168,13 +168,16 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.on('menu:open-pipeline-manager', listener)
     return () => ipcRenderer.removeListener('menu:open-pipeline-manager', listener)
   },
+  onOpenResourceManager: (handler: () => void): (() => void) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('menu:open-resource-manager', listener)
+    return () => ipcRenderer.removeListener('menu:open-resource-manager', listener)
+  },
   openPlansWindow: (args: { workspace_path: string; rel_path?: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:openPlans', {
       workspace_path: args.workspace_path,
       ...(args.rel_path ? { rel_path: args.rel_path } : {}),
     }),
-  openResourcesWindow: (args: { workspace_path?: string }): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('window:openResources', { workspace_path: args?.workspace_path ?? '' }),
   openGitHistoryWindow: (args: { workspace_path: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:openGitHistory', { workspace_path: args.workspace_path }),
   openGitWindow: (args: {

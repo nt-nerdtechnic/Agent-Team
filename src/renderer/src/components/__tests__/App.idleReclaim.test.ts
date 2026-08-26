@@ -110,13 +110,17 @@ describe('idle reclaim wiring', () => {
   it('keys measurements by terminal session id, with pane id as the fallback', () => {
     const fn = block('const resourceRows = computed<ResourceSummaryRow[]>', 'const resourcePillText = computed(')
     expect(fn).toContain('const sessionKey = (paneRefs[p.id]?.sessionId as unknown as string) ?? \'\'')
-    expect(fn).toContain('bytesByKey.has(sessionKey) || cpuByKey.has(sessionKey) ? sessionKey : p.id')
+    // The session-keyed maps never hold a bare pane id, so the fallback has to
+    // read the pane-id index the composable keeps for exactly this — looking a
+    // pane id up in the session map would always miss and report zero.
+    expect(fn).toContain('known ? bytesByKey.get(sessionKey) : bytesByPane.get(p.id)')
+    expect(fn).toContain('known ? cpuByKey.get(sessionKey) : cpuByPane.get(p.id)')
   })
 
   // Reclaiming from the panel re-measures rather than closing it: the point is
   // to watch the machine get its resources back.
   it('re-measures after an explicit reclaim from the panel', () => {
-    const fn = block('async function onResourceReclaim(', 'function onOpenResourceWindow(')
+    const fn = block('async function onResourceReclaim(', 'function openResourceManager(')
     expect(fn).toContain('await reclaimPanesNow()')
     expect(fn).toContain('void resourceUsage.refresh()')
   })
