@@ -209,6 +209,20 @@ describe('ResourceSummaryPanel', () => {
   })
 })
 
+// The pill lives on the left of the status bar; a card that opens on the far
+// side of the screen from what was clicked reads as a different control
+// answering.
+describe('ResourceSummaryPanel anchoring', () => {
+  it('opens against the left edge, where its trigger is', async () => {
+    const source = await import('node:fs').then((fs) =>
+      fs.readFileSync('src/renderer/src/components/ResourceSummaryPanel.vue', 'utf8')
+    )
+    const card = source.slice(source.indexOf('.rs-pop {'), source.indexOf('.rs-head {'))
+    expect(card).toContain('left: 8px')
+    expect(card).not.toContain('right: 8px')
+  })
+})
+
 describe('useStatusBarPopover — the resource popover joins the exclusive set', () => {
   it('closes whichever popover was open when the resource one opens', () => {
     const { openPopover, toggle, close } = useStatusBarPopover()

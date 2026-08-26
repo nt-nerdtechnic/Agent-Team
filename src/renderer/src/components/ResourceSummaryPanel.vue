@@ -181,7 +181,10 @@ function rowTitle(row: ResourceSummaryRow): string {
 }
 .rs-pop {
   position: fixed;
-  right: 8px;
+  /* Anchored to the pill, which lives on the LEFT of the status bar — a card
+     that opens on the far side of the screen from what was clicked reads as a
+     different control answering. */
+  left: 8px;
   bottom: 30px;
   z-index: 1000;
   width: 288px;

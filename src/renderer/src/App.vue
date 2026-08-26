@@ -13947,13 +13947,6 @@ function paneIsCommander(p: ActivePane): boolean {
           <span class="sb-dot" />
           {{ $t('updater.badge-check-failed') }}
         </span>
-      </div>
-      <div class="statusbar-right">
-        <span v-if="pipeline.state !== 'idle'" class="sb-item sb-pipeline" :class="'sb-' + pipeline.state">
-          {{ pipeline.state === 'running'
-            ? `Stage ${pipeline.stageIndex + 1} / ${stagesApi.stages.value.length || '?'}`
-            : pipeline.state }}
-        </span>
         <span
           v-if="panes.length > 0"
           class="sb-item sb-resource sb-clickable"
@@ -13964,6 +13957,13 @@ function paneIsCommander(p: ActivePane): boolean {
           @keydown.enter="togglePopover('resource')"
         >
           {{ resourcePillText }}
+        </span>
+      </div>
+      <div class="statusbar-right">
+        <span v-if="pipeline.state !== 'idle'" class="sb-item sb-pipeline" :class="'sb-' + pipeline.state">
+          {{ pipeline.state === 'running'
+            ? `Stage ${pipeline.stageIndex + 1} / ${stagesApi.stages.value.length || '?'}`
+            : pipeline.state }}
         </span>
         <span
           v-if="backfill.active"

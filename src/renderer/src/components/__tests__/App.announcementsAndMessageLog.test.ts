@@ -70,6 +70,17 @@ describe('resource summary rows and popover lifetime', () => {
     expect(block).toContain("vendor: vendor === name ? '' : vendor")
   })
 
+  // It reports on this machine, which is what the rest of the left side is
+  // about (branch, backend, update state) — and the card that opens from it is
+  // anchored to the same edge.
+  it('keeps the pill on the left side of the status bar', () => {
+    const left = appSource.slice(
+      appSource.indexOf('<div class="statusbar-left">'),
+      appSource.indexOf('<div class="statusbar-right">')
+    )
+    expect(left).toContain('class="sb-item sb-resource sb-clickable"')
+  })
+
   it('closes the overview when the last pane leaves', () => {
     // The trigger is v-if="panes.length > 0"; without this the popover and its
     // full-viewport backdrop outlive it and swallow every status-bar click.
