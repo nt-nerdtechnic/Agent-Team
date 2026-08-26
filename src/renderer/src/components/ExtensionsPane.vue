@@ -143,7 +143,7 @@ onMounted(refreshInstalled)
           <span v-if="p.warning" class="ext-badge ext-dev-warning">{{ p.warning }}</span>
           <button class="ext-remove" @click="remove(p.id)">Remove</button>
         </li>
-        <li v-if="!installed.length" class="ext-empty">No plugins installed.</li>
+        <li v-if="!installed.length" class="ext-empty nv-empty">No plugins installed.</li>
       </ul>
     </section>
 
@@ -297,5 +297,27 @@ onMounted(refreshInstalled)
   display: flex;
   gap: 8px;
   margin-top: 12px;
+}
+/* These six buttons declare nothing of their own — they are native browser
+ * buttons. Hover therefore darkens what the platform already painted instead
+ * of replacing the fill: an overlay colour here would flip a light native
+ * button to a dark one on hover, which is a bigger change than the missing
+ * feedback it fixes. The search button is reached structurally because it has
+ * no class of its own. */
+.ext-remove,
+.ext-install,
+.ext-search button,
+.ext-confirm-publisher,
+.ext-confirm-risk,
+.ext-cancel {
+  transition: filter var(--motion-fast) var(--ease-out);
+}
+.ext-remove:hover:not(:disabled),
+.ext-install:hover:not(:disabled),
+.ext-search button:hover:not(:disabled),
+.ext-confirm-publisher:hover:not(:disabled),
+.ext-confirm-risk:hover:not(:disabled),
+.ext-cancel:hover:not(:disabled) {
+  filter: brightness(0.93);
 }
 </style>

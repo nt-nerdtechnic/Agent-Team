@@ -2819,6 +2819,10 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   color: var(--text-primary);
   outline: none;
 }
+.ide-palette-input:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
 .ide-palette-list {
   list-style: none;
   margin: 0;

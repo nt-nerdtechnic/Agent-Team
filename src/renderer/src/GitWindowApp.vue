@@ -2622,6 +2622,7 @@ registerCommand('git.focusAgent', () => {
   padding: 2px 2px 8px;
 }
 .cmp-input:focus { outline: none; }
+.cmp-input:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: -2px; }
 .cmp-input::placeholder { color: var(--text-muted); }
 .cmp-actions {
   display: flex;

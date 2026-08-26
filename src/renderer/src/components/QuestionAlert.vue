@@ -428,4 +428,10 @@ button.ghost {
 button.ghost:hover:not(:disabled) {
   background: var(--bg-muted);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .auto-spinner {
+    animation: none;
+  }
+}
 </style>

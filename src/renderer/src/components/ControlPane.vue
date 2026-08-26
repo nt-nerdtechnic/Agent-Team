@@ -3373,6 +3373,8 @@ button.icon-btn.muted:hover {
 @media (prefers-reduced-motion: reduce) {
   .status-dot { animation: none !important; }
   .expand-caret { transition: none; }
+  .progress .bar,
+  .progress .bar::after { animation: none; }
 }
 .agent-line-sub {
   font-size: 10px;

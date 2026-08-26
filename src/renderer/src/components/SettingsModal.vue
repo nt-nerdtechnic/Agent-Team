@@ -3870,6 +3870,12 @@ watch(activeTab, (tab) => {
   background: var(--bg-muted);
   outline: none;
 }
+/* The background above is the same one hover paints, so keyboard focus was
+   indistinguishable from a mouse-over. Inset so the list's overflow cannot
+   clip it. */
+.s-search-result:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
 .s-search-result-main {
   display: flex;
   align-items: center;
@@ -4221,6 +4227,11 @@ button {
   padding: 6px 12px;
   border-radius: var(--radius-xs);
   cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
 }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.primary { background: var(--success-emphasis); border-color: var(--success-strong); color: var(--text-on-emphasis); font-weight: 600; }
@@ -4231,6 +4242,16 @@ button.ghost { background: transparent; }
 button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 /* The label carries a count, which must not wrap inside the row's control slot. */
 .reclaim-now-btn { white-space: nowrap; }
+/* The only button in this panel with no feedback of its own: the base rule
+   above supplies its box, this supplies hover and press. */
+.reclaim-now-btn:hover:not(:disabled) {
+  background: var(--bg-hover-strong);
+  border-color: var(--border-strong);
+}
+.reclaim-now-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
 
 /* ── Messages ─────────────────────────────────────────────────────────────── */
 .err-msg { color: var(--danger-fg); font-size: 11px; margin: 0; }

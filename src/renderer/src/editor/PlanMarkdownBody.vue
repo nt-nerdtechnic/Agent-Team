@@ -333,7 +333,7 @@ defineExpose({ isEditing, cancelEdit, scrollToAnchor })
         </ul>
       </div>
 
-      <div v-if="sections.length === 0 && todos.length === 0" class="pmb-state">No content yet.</div>
+      <div v-if="sections.length === 0 && todos.length === 0" class="pmb-state nv-empty">No content yet.</div>
     </div>
 
     <!-- Fallback: no frontmatter — render the whole file as read-only markdown. -->

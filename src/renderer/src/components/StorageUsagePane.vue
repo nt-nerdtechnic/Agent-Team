@@ -734,4 +734,10 @@ onMounted(async () => {
   background: var(--danger-deep);
   color: var(--text-on-emphasis);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .su-skeleton-row {
+    animation: none;
+  }
+}
 </style>

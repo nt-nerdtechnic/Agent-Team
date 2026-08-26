@@ -635,7 +635,7 @@ function buildAiContext(): string {
             <span class="pl-enter">›</span>
           </li>
         </ul>
-        <p v-else class="hint">No pipelines loaded yet…</p>
+        <p v-else class="hint nv-empty nv-empty--inline">No pipelines loaded yet…</p>
       </template>
 
       <!-- Detail view: pipeline header + stage editor -->

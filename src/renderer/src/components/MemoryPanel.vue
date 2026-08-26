@@ -94,7 +94,7 @@ function sizeText(bytes: number): string {
         </button>
       </li>
     </ul>
-    <p v-else class="mem-empty">{{ t('memory.no-panes') }}</p>
+    <p v-else class="mem-empty nv-empty nv-empty--inline">{{ t('memory.no-panes') }}</p>
 
     <div class="mem-foot">
       <button

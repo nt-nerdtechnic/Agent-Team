@@ -245,6 +245,9 @@ function formatTime(value: string): string {
   border: 1px solid var(--border-default); background: var(--bg-muted);
   color: inherit; text-decoration: none;
 }
+/* Hover feedback only — colour is left alone so `.cm-btn.danger` keeps its red
+ * label. Transition and focus ring come from semantic.css. */
+.cm-btn:hover:not(:disabled) { background: var(--bg-hover-strong); border-color: var(--border-strong); }
 .cm-btn:disabled { opacity: 0.5; cursor: default; }
 .cm-btn.small { padding: 2px 8px; }
 .cm-btn.danger { color: #c0392b; }

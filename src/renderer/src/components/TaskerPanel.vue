@@ -439,7 +439,7 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
-          <p v-if="!visibleCronEntries.length" class="tk-empty">{{ t('executions.empty') }}</p>
+          <p v-if="!visibleCronEntries.length" class="tk-empty nv-empty nv-empty--inline">{{ t('executions.empty') }}</p>
         </template>
 
         <p v-if="opError.crontab" class="tk-op-error" data-error-section="crontab">
@@ -569,7 +569,7 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
-          <p v-if="!visibleAgents.length" class="tk-empty">{{ t('executions.empty') }}</p>
+          <p v-if="!visibleAgents.length" class="tk-empty nv-empty nv-empty--inline">{{ t('executions.empty') }}</p>
         </template>
 
         <p v-if="opError.launchagent" class="tk-op-error" data-error-section="launchagent">
@@ -649,7 +649,7 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
-          <p v-if="!daemonEntries.length" class="tk-empty">{{ t('executions.empty') }}</p>
+          <p v-if="!daemonEntries.length" class="tk-empty nv-empty nv-empty--inline">{{ t('executions.empty') }}</p>
         </template>
       </section>
     </div>

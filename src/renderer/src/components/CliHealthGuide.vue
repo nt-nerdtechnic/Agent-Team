@@ -372,6 +372,12 @@ h2 { margin: 0 0 8px; color: var(--text-bright); font-size: 22px; }
 .ch-btn.primary { border-color: var(--accent-emphasis); background: var(--accent-emphasis); color: var(--text-on-emphasis); }
 .ch-btn.danger { border-color: var(--danger-fg); color: var(--danger-fg); background: transparent; }
 .ch-btn.ghost { background: transparent; }
+/* Hover feedback: the variants restate their own resting colour so the base
+ * rule cannot recolour them. Transition and focus ring come from semantic.css. */
+.ch-btn:hover:not(:disabled) { background: var(--bg-hover-strong); border-color: var(--border-strong); color: var(--text-bright); }
+.ch-btn.primary:hover:not(:disabled) { background: var(--accent-focus); border-color: var(--accent-focus); color: var(--text-on-emphasis); }
+.ch-btn.danger:hover:not(:disabled) { background: var(--bg-hover-strong); border-color: var(--danger-fg); color: var(--danger-fg); }
+.ch-btn.ghost:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); color: var(--text-bright); }
 .ch-btn:disabled { opacity: .55; cursor: default; }
 .ch-btn code { font-size: 11px; }
 @media (max-width: 760px) {

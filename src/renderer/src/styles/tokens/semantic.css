@@ -535,3 +535,86 @@ input[type='range'] {
   font-size: var(--font-xs);
   line-height: var(--lh-base);
 }
+
+/*
+ * ═══════════════════════════════════════════════════════════════
+ * Interaction feedback (Phase 3)
+ *
+ * Three gaps this layer fills, all of them appearance-only:
+ * pressed state, keyboard focus ring, and the shared look of the
+ * empty / loading copy panels already render. Nothing here gates or
+ * creates state — a panel with no empty-state markup stays as it is.
+ * ═══════════════════════════════════════════════════════════════
+ */
+
+/*
+ * House pressed state. `opacity` and not `transform`, because a
+ * transform here would clobber the translate() several buttons use to
+ * position themselves. Instant on purpose: press feedback that eases
+ * in reads as lag.
+ */
+button:not(:disabled):not([disabled]):active,
+[role='button']:not([aria-disabled='true']):active {
+  opacity: 0.85;
+}
+
+/*
+ * House focus ring. `outline-offset` is negative so the ring is drawn
+ * inside the button and cannot be clipped by a parent's overflow —
+ * the failure mode that made several of the existing rings invisible.
+ * Component-scoped rules carry a [data-v-*] attribute and still win,
+ * so a component that already styles focus is untouched.
+ */
+button:focus-visible,
+summary:focus-visible,
+[role='button']:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: -2px;
+}
+
+/* Pressed state for the historical button prefixes (see the Phase 2
+ * list above): they inherit the global rule, this only adds the
+ * matching :not() guards their disabled styling relies on. */
+.ah-icon-btn:active:not(:disabled),
+.ai-cli-btn:active:not(:disabled),
+.an-btn:active:not(:disabled),
+.bp-btn:active:not(:disabled),
+.ch-btn:active:not(:disabled),
+.ci-btn:active:not(:disabled),
+.cli-btn:active:not(:disabled),
+.cm-btn:active:not(:disabled),
+.cp-btn:active:not(:disabled),
+.exp-btn:active:not(:disabled),
+.ga-btn:active:not(:disabled),
+.ob-btn:active:not(:disabled),
+.pv-btn:active:not(:disabled),
+.row-btn:active:not(:disabled),
+.sel-btn:active:not(:disabled),
+.stall-btn:active:not(:disabled) {
+  opacity: 0.85;
+}
+
+/* ── Empty / loading copy ───────────────────────────────────────
+ * Appearance only. These classes go on text that already renders;
+ * they set centring, greyscale, size and breathing room so an empty
+ * list stops looking like a rendering failure. No display change —
+ * attaching one cannot restack an element's children.
+ */
+.nv-empty,
+.nv-loading {
+  padding: 28px 16px;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: var(--lh-base);
+  text-align: center;
+}
+.nv-loading {
+  color: var(--text-secondary);
+}
+/* Dense rows and inline slots, where 28px of padding would push the
+ * surrounding layout around. */
+.nv-empty--inline,
+.nv-loading--inline {
+  padding: 10px 12px;
+}

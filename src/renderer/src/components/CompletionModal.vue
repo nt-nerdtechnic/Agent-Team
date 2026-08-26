@@ -249,4 +249,11 @@ onUnmounted(() => {
 .comp-btn:active {
   transform: translateY(0);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .comp-card,
+  .comp-emoji {
+    animation: none;
+  }
+}
 </style>

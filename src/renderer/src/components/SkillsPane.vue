@@ -861,8 +861,8 @@ onMounted(() => void loadSkills())
     <div class="skills-body" :class="{ 'drawer-open': selectedRow !== null }">
       <!-- ── Main region: browse (cards) or route (matrix) ──────────── -->
       <div class="skills-main">
-        <div v-if="loading" class="skills-state">{{ t('label.loading') }}</div>
-        <div v-else-if="matrixRows.length === 0" class="skills-state">
+        <div v-if="loading" class="skills-state nv-loading">{{ t('label.loading') }}</div>
+        <div v-else-if="matrixRows.length === 0" class="skills-state nv-empty">
           <strong>{{ t('settings.skills.empty-title') }}</strong>
           <span>{{ t('settings.skills.empty-body') }}</span>
         </div>
@@ -1169,7 +1169,7 @@ onMounted(() => void loadSkills())
           </footer>
         </template>
 
-        <div v-else class="skills-state">{{ t('label.loading') }}</div>
+        <div v-else class="skills-state nv-loading">{{ t('label.loading') }}</div>
       </aside>
     </div>
   </div>

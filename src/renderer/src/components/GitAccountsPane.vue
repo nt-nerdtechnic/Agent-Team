@@ -142,7 +142,7 @@ async function remove(id: string): Promise<void> {
           </div>
         </div>
       </div>
-      <p v-else class="ga-empty">{{ $t('settings.accounts.empty') }}</p>
+      <p v-else class="ga-empty nv-empty nv-empty--inline">{{ $t('settings.accounts.empty') }}</p>
 
       <!-- Add / edit form -->
       <div v-if="formOpen" class="ga-form">

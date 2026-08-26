@@ -2512,7 +2512,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
               <div class="spacer" />
               <div class="dispatch-wrap">
                 <button
-                  class="btn-ghost sm"
+                  class="btn-ghost sm nv-btn nv-btn--sm"
                   :disabled="!dispatchTargets.length"
                   :title="dispatchTargets.length ? 'Send this issue to a running agent' : 'No running agent'"
                   @click="onDispatchClick"
@@ -2524,8 +2524,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
                   >{{ t.label }}</button>
                 </div>
               </div>
-              <a class="btn-ghost sm" :href="selectedIssue.url" target="_blank" rel="noopener">Open ↗</a>
-              <button class="btn-ghost sm" :disabled="isIssueSubmitting" @click="toggleIssueState">
+              <a class="btn-ghost sm nv-btn nv-btn--sm" :href="selectedIssue.url" target="_blank" rel="noopener">Open ↗</a>
+              <button class="btn-ghost sm nv-btn nv-btn--sm" :disabled="isIssueSubmitting" @click="toggleIssueState">
                 {{ selectedIssue.state === 'open' ? 'Close' : 'Reopen' }}
               </button>
             </div>
@@ -2541,7 +2541,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
             </div>
             <div class="input-row" style="margin-top:6px; flex-direction:column; gap:4px">
               <textarea v-model="newComment" class="git-input" rows="2" placeholder="Add a comment…" />
-              <button class="btn-ghost sm" :disabled="!newComment.trim() || isIssueSubmitting" @click="submitComment">Comment</button>
+              <button class="btn-ghost sm nv-btn nv-btn--sm" :disabled="!newComment.trim() || isIssueSubmitting" @click="submitComment">Comment</button>
             </div>
           </template>
 
@@ -2551,8 +2551,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
               <input v-model="newIssueTitle" class="git-input" placeholder="Issue title" />
               <textarea v-model="newIssueBody" class="git-input" rows="3" placeholder="Description (optional)" />
               <div class="input-row">
-                <button class="btn-ghost sm" :disabled="!newIssueTitle.trim() || isIssueSubmitting" @click="submitNewIssue">Create</button>
-                <button class="btn-ghost sm" @click="showNewIssue = false">Cancel</button>
+                <button class="btn-ghost sm nv-btn nv-btn--sm" :disabled="!newIssueTitle.trim() || isIssueSubmitting" @click="submitNewIssue">Create</button>
+                <button class="btn-ghost sm nv-btn nv-btn--sm" @click="showNewIssue = false">Cancel</button>
               </div>
             </div>
             <div v-if="isLoadingIssues" class="empty-msg" style="padding:2px 0">Loading…</div>
@@ -2688,7 +2688,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       <div v-if="ignoreResult" class="ignore-modal" @click.stop>
         <div class="ignore-modal-path" :title="ignoreResult.path">{{ ignoreResult.path }}</div>
         <div class="ignore-modal-text">{{ ignoreResult.text }}</div>
-        <button class="btn-ghost sm" @click="ignoreResult = null">{{ $t('action.close') }}</button>
+        <button class="btn-ghost sm nv-btn nv-btn--sm" @click="ignoreResult = null">{{ $t('action.close') }}</button>
       </div>
     </Teleport>
 
@@ -2908,6 +2908,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .hdr-btn:hover { color: var(--text-primary); background: var(--bg-active); }
 .hdr-btn.active { color: var(--accent-fg); }
 .hdr-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.hdr-btn:active:not(:disabled) { opacity: 0.8; }
+.hdr-btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-focus); }
 
 /* ── Dropdown menu ──────────────────────────────────────────────────────────── */
 .menu-anchor { position: relative; }
@@ -3046,6 +3048,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .sec-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
 .sec-btn.danger:hover { color: var(--danger-fg); }
 .sec-btn.always { opacity: 1; }
+.sec-btn:active:not(:disabled) { opacity: 0.8; }
+.sec-btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-focus); }
 
 /* ── Section cards (History / Stashes / Remotes / Tags / Worktrees / Config) ─── */
 .git-card {
@@ -3449,6 +3453,17 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .input-row { display: flex; gap: 4px; }
 .check-label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); cursor: pointer; }
 .check-label input { accent-color: var(--accent-focus); cursor: pointer; }
+
+/* Decorative pulses use literal durations, so the global --motion-* reset
+   does not reach them. Spinners keep spinning on purpose: a frozen spinner
+   reads as a hung operation. */
+@media (prefers-reduced-motion: reduce) {
+  .ai-btn.auto-active:not(.generating) span,
+  .auto-pending-dot,
+  .ac-status-dot {
+    animation: none;
+  }
+}
 </style>
 
 <!-- Teleported dropdowns render at body level; must be non-scoped -->
