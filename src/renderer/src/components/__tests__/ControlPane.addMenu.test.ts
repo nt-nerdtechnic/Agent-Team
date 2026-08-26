@@ -89,13 +89,20 @@ describe('ControlPane – the ＋ menu', () => {
     wrapper = mountWith()
     await openMenu(wrapper)
     const opts = wrapper.findAll('.ws-add-scroll .ws-add-opt')
-    // A plain shell comes last, which is where App.vue already orders it in
-    // agentSpecs — it is something you can start, and the menu is the list of
-    // things you can start. It carries no tick: it is not the picked agent, and
-    // choosing it does not become one.
-    expect(opts.map((o) => o.text())).toEqual(['✓Claude Code', 'Codex', 'Terminal'])
+    expect(opts.map((o) => o.text())).toEqual(['✓Claude Code', 'Codex'])
     expect(opts[0].classes()).toContain('on')
-    expect(opts[2].classes()).not.toContain('on')
+  })
+
+  it('keeps the plain shell out of the scrolling list', async () => {
+    // The list caps at 200px and scrolls. An eleventh entry — which is what a
+    // shell would be with every CLI enabled — sits below the fold, where it
+    // reads as missing rather than as needing a scroll. Rendered is not the
+    // same as visible, and a test that only asked "is it in the DOM" passed
+    // while the thing was unreachable.
+    wrapper = mountWith()
+    await openMenu(wrapper)
+    expect(wrapper.find('.ws-add-scroll .ws-add-term').exists()).toBe(false)
+    expect(wrapper.find('.ws-add-term').exists()).toBe(true)
   })
 
   it('says a heading can be dragged out, only when it can be', async () => {
@@ -123,7 +130,7 @@ describe('ControlPane – the ＋ menu', () => {
     wrapper = mountWith()
     await openMenu(wrapper)
     await wrapper.find('.ws-add-role').setValue('reviewer')
-    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[2].trigger('click')
+    await wrapper.find('.ws-add-term').trigger('click')
     expect(wrapper.emitted('spawn')?.[0]?.[0]).toMatchObject({
       agentKey: 'terminal',
       roleKey: '',
@@ -135,7 +142,7 @@ describe('ControlPane – the ＋ menu', () => {
     // the card can be set to, and overwriting the pick would lose it.
     wrapper = mountWith()
     await openMenu(wrapper)
-    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[2].trigger('click')
+    await wrapper.find('.ws-add-term').trigger('click')
     await openMenu(wrapper)
     const opts = wrapper.findAll('.ws-add-scroll .ws-add-opt')
     expect(opts[0].classes()).toContain('on')
@@ -146,7 +153,7 @@ describe('ControlPane – the ＋ menu', () => {
     const second = { ...workspaceRow, path: '/Users/me/Desktop/other', label: 'other' }
     wrapper = mountWith({ workspaces: [workspaceRow, second] })
     await wrapper.findAll('.ws-add')[1].trigger('click')
-    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[2].trigger('click')
+    await wrapper.find('.ws-add-term').trigger('click')
     expect(wrapper.emitted('spawn')?.[0]?.[0]).toMatchObject({
       agentKey: 'terminal',
       workspacePath: '/Users/me/Desktop/other',
@@ -156,7 +163,7 @@ describe('ControlPane – the ＋ menu', () => {
   it('closes the menu after starting a shell', async () => {
     wrapper = mountWith()
     await openMenu(wrapper)
-    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[2].trigger('click')
+    await wrapper.find('.ws-add-term').trigger('click')
     expect(wrapper.find('.ws-add-menu').exists()).toBe(false)
   })
 
@@ -173,7 +180,7 @@ describe('ControlPane – the ＋ menu', () => {
     await wrapper.findAll('.ws-add-scroll .ws-add-opt')[1].trigger('click')
     // Reopen the menu, go into the full dialog, and read its dropdown.
     await openMenu(wrapper)
-    await wrapper.find('.ws-add-more').trigger('click')
+    await wrapper.find('.ws-add-card').trigger('click')
     expect((wrapper.find('.spawn-card-body select').element as HTMLSelectElement).value).toBe('codex')
   })
 
@@ -233,7 +240,7 @@ describe('ControlPane – the ＋ menu', () => {
     await wrapper.findAll('.ws-add-scroll .ws-add-opt')[0].trigger('click')
     // Now spawn from the dialog instead.
     await adds[0].trigger('click')
-    await wrapper.find('.ws-add-more').trigger('click')
+    await wrapper.find('.ws-add-card').trigger('click')
     await wrapper.find('.spawn-card-body .primary').trigger('click')
     expect(wrapper.emitted('spawn')?.[1]?.[0]).toMatchObject({
       workspacePath: '/Users/me/Desktop/Agent-Team'
@@ -279,7 +286,7 @@ describe('ControlPane – the ＋ menu', () => {
   it('the last row opens the full card instead of spawning', async () => {
     wrapper = mountWith()
     await openMenu(wrapper)
-    await wrapper.find('.ws-add-more').trigger('click')
+    await wrapper.find('.ws-add-card').trigger('click')
     expect(wrapper.emitted('spawn')).toBeUndefined()
     expect(wrapper.find('.spawn-card-body').exists()).toBe(true)
   })
@@ -294,7 +301,7 @@ describe('ControlPane – the ＋ menu', () => {
     // Manual spawn became a dialog; it must not have lost a control on the way.
     wrapper = mountWith()
     await openMenu(wrapper)
-    await wrapper.find('.ws-add-more').trigger('click')
+    await wrapper.find('.ws-add-card').trigger('click')
     const body = wrapper.find('.spawn-card-body')
     expect(body.findAll('select')).toHaveLength(2)      // CLI + role
     expect(body.find('.terminal-btn').exists()).toBe(true)
@@ -326,7 +333,7 @@ describe('ControlPane – the ＋ menu', () => {
 
     const open = async (): Promise<void> => {
       await openMenu(wrapper)
-      await wrapper.find('.ws-add-more').trigger('click')
+      await wrapper.find('.ws-add-card').trigger('click')
       expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(true)
     }
 

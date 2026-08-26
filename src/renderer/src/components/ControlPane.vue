@@ -1790,22 +1790,21 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               {{ missingClis.has(spec.agentKey) ? $t('label.agent-not-installed', { label: spec.label }) : spec.label }}
             </span>
           </button>
-          <!-- A plain shell, last, which is where App.vue already orders it in
-               agentSpecs. The sidebar filtered it out of every list it built, so
-               the only way to one was the Open Terminal button inside the Manual
-               spawn dialog. Its own handler rather than spawnAs: the role picked
-               above is injected into a CLI's prompt, and a shell would print it. -->
-          <button
-            v-if="terminalSpec"
-            class="ws-add-opt"
-            @click="openTerminalFromMenu"
-          >
-            <span class="ws-add-ck"></span>
-            <span class="ws-add-lb">{{ terminalSpec.label }}</span>
-          </button>
         </div>
         <div class="ws-add-div"></div>
-        <button class="ws-add-opt ws-add-more" @click="openSpawnCardFromMenu">
+        <!-- A plain shell. Not in the list above: that list scrolls once there
+             are more CLIs than fit, and an eleventh entry sat below the fold
+             where it read as missing. Down here it is always in view, which is
+             also how the Manual spawn dialog treats it — a button beside the
+             agent dropdown rather than an entry in it.
+             Its own handler rather than spawnAs: the role picked above is
+             injected into a CLI's prompt, and a shell would print it. -->
+        <button
+          v-if="terminalSpec"
+          class="ws-add-opt ws-add-more ws-add-term"
+          @click="openTerminalFromMenu"
+        >{{ terminalSpec.label }}</button>
+        <button class="ws-add-opt ws-add-more ws-add-card" @click="openSpawnCardFromMenu">
           {{ $t('label.manual-spawn') }}…
         </button>
       </div>
