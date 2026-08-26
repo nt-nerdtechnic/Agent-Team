@@ -84,7 +84,7 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 
 | Tool | 參數 | 功能 |
 |---|---|---|
-| `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
+| `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`pane_id`（每個 `ui.pane.*` action 都吃這個鍵）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
 | `cli_send` | `to`、`text`、`wait_for_delivery_s=0`（上限 120） | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
 | `cli_check_message` | `msg_key` | 某次 `cli_send` 的結果：`{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 你自己送出、目前卡住或失敗的訊息：`{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |

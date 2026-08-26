@@ -90,7 +90,7 @@ documents the addresses, the idle gate and the guard rails they share.
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
+| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `pane_id` (the key every `ui.pane.*` action takes), `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
 | `cli_send` | `to`, `text`, `wait_for_delivery_s=0` (capped at 120) | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
 | `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | Your own sends that are stuck or failed: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |

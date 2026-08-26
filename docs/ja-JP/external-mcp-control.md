@@ -91,7 +91,7 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 
 | Tool | パラメータ | 動作 |
 |---|---|---|
-| `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
+| `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`pane_id`（すべての `ui.pane.*` アクションが取るキー）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
 | `cli_send` | `to`, `text`, `wait_for_delivery_s=0`（上限 120） | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返し、待機を指定した場合はその結末も返す |
 | `cli_check_message` | `msg_key` | 一つの `cli_send` の結末: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 自分の送信のうち滞留中または失敗しているもの: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
