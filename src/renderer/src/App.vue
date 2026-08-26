@@ -11578,6 +11578,13 @@ const switchingWorkspaceName = ref('')
  *  picked mid-switch. Without this the first run to finish uncovers a stage
  *  the second is still rebuilding, and the blank it was added to fill is back. */
 let switchCoverSeq = 0
+/** How long a switch may run before the cover appears.
+ *
+ *  A switch with nothing to restore is a project.peek round trip and a tick.
+ *  Showing a spinner for that — and then fading it out — is a flash, which
+ *  reads as a glitch rather than as loading. Past this the stage would
+ *  otherwise sit blank, which is what the cover is for. */
+const SWITCH_COVER_DELAY_MS = 180
 
 async function switchToWorkspace(path: string): Promise<void> {
   if (isDetachedWindow) return // see adoptWorkspace
@@ -11607,7 +11614,9 @@ async function switchToWorkspace(path: string): Promise<void> {
   // probe each. Blank reads as "the click did nothing".
   const coverSeq = ++switchCoverSeq
   switchingWorkspaceName.value = path.split('/').filter(Boolean).pop() ?? path
-  switchingWorkspace.value = true
+  const coverTimer = setTimeout(() => {
+    if (coverSeq === switchCoverSeq) switchingWorkspace.value = true
+  }, SWITCH_COVER_DELAY_MS)
   try {
     await onWorkspaceBrowse(path, { keepPanes: true })
     // onWorkspaceBrowse has its own reasons to decline — chiefly finding the
@@ -11648,7 +11657,10 @@ async function switchToWorkspace(path: string): Promise<void> {
     // left showing a spinner over panes that are already there.
     //
     // Only if this is still the newest switch: an older one finishing must not
-    // uncover a stage a newer one is still rebuilding.
+    // uncover a stage a newer one is still rebuilding. Clearing the timer is
+    // unconditional though — an older switch's pending timer must never raise
+    // the cover after that switch is over.
+    clearTimeout(coverTimer)
     if (coverSeq === switchCoverSeq) switchingWorkspace.value = false
   }
 }

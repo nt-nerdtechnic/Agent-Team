@@ -28,11 +28,35 @@ function body(name: string): string {
 const fn = body('switchToWorkspace')
 
 describe('the stage says a switch is happening', () => {
-  it('covers the stage for the whole switch', () => {
-    // Raised before the first await of the switch itself, not after: the work
-    // that leaves the stage blank starts there.
-    expect(fn.indexOf('switchingWorkspace.value = true')).toBeLessThan(
+  it('arms the cover before the work that would blank the stage', () => {
+    // The timer is set before the first await, not after: the work that leaves
+    // the stage blank starts there.
+    expect(fn.indexOf('const coverTimer = setTimeout')).toBeLessThan(
       fn.indexOf('await onWorkspaceBrowse(path, { keepPanes: true })')
+    )
+    expect(fn).toContain('switchingWorkspace.value = true')
+  })
+
+  it('does not flash on a switch that finishes quickly', () => {
+    // A switch with nothing to restore is a peek round trip and a tick.
+    // Showing a spinner for that and fading it out again reads as a glitch,
+    // not as loading — so the cover waits to see whether it is needed.
+    expect(appSource).toContain('const SWITCH_COVER_DELAY_MS = 180')
+    expect(fn).toContain('}, SWITCH_COVER_DELAY_MS)')
+    // Raised inside the timer, so a fast switch never raises it at all.
+    const at = fn.indexOf('const coverTimer = setTimeout')
+    const armed = fn.slice(at, fn.indexOf('SWITCH_COVER_DELAY_MS)', at))
+    expect(armed).toContain('switchingWorkspace.value = true')
+  })
+
+  it('never lets a finished switch raise the cover later', () => {
+    // The timer outlives a fast switch. Left pending, it would cover a stage
+    // whose switch is already over — a spinner with nothing behind it.
+    // Cleared unconditionally, unlike the flag, which only the newest owns.
+    const at = fn.indexOf('} finally {')
+    expect(fn.slice(at)).toContain('clearTimeout(coverTimer)')
+    expect(fn.slice(at).indexOf('clearTimeout(coverTimer)')).toBeLessThan(
+      fn.slice(at).indexOf('if (coverSeq === switchCoverSeq)')
     )
   })
 
@@ -89,6 +113,9 @@ describe('the stage says a switch is happening', () => {
     expect(fn.indexOf('const coverSeq = ++switchCoverSeq')).toBeLessThan(
       fn.indexOf('await onWorkspaceBrowse(path, { keepPanes: true })')
     )
+    // The pending timer checks ownership too: a slow first switch must not
+    // raise a cover naming the workspace a second switch has moved on from.
+    expect(fn).toContain('if (coverSeq === switchCoverSeq) switchingWorkspace.value = true')
   })
 
   it('is the only way a switch can happen', () => {
