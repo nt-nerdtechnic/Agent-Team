@@ -246,7 +246,7 @@ Probe が届いた場合にのみ存在します。Timeout 時、`reason` は似
 
 **Capability の境界 — Idle/完了の検出。** ほとんどの CLI の Log Reader は、完了した
 Turn のテキストを載せた `turn_complete` Event を発行します。**aider、antigravity、
-claude、codex、copilot、cursor、grok、kilo、kimi、muse、opencode、pi、qwen** です。
+claude、codex、copilot、cursor、droid、grok、kilo、kimi、muse、opencode、pi、qwen** です。
 これらでは `cli_wait_idle` と `cli_get_status` の `last_activity.type` が正確な
 Turn 完了 Signal で解決します — ただし一点だけ但し書きがあります。**grok、kimi、
 pi、qwen** は自前の Turn 終了記録を持たず、Log の 8 秒の沈黙から `turn_complete`
@@ -261,7 +261,7 @@ pi、qwen** は自前の Turn 終了記録を持たず、Log の 8 秒の沈黙�
 
 これは、`cli_send_and_wait` の結果で読むべきフィールドが `source` である理由でも
 あります。どの CLI が生み出したものでも形は同じですが、確度は同じではありません。
-aider/antigravity/claude/codex/copilot/cursor/kilo/muse/opencode からの
+aider/antigravity/claude/codex/copilot/cursor/droid/kilo/muse/opencode からの
 `turn_complete` は Turn が終わったという CLI 自身の言明であり、grok/kimi/pi/qwen
 からの同じ値は上記の 8 秒沈黙による推測です。そして `quiet_period` — 素の
 Terminal Pane で唯一得られる結果 — は、Turn の終了を何も報告しなかったという

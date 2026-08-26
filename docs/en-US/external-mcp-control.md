@@ -252,7 +252,7 @@ current).
 
 **Capability boundary — idle/completion detection.** Most CLIs' log readers
 emit a `turn_complete` event carrying the finished turn's text: **aider,
-antigravity, claude, codex, copilot, cursor, grok, kilo, kimi, muse,
+antigravity, claude, codex, copilot, cursor, droid, grok, kilo, kimi, muse,
 opencode, pi, qwen**. For those, `cli_wait_idle` and `cli_get_status`'s
 `last_activity.type` resolve on the precise turn-complete signal — with one
 qualification: **grok, kimi, pi, qwen** have no end-of-turn record of their
@@ -268,7 +268,7 @@ CLI has actually finished.
 
 This is also why `source` is the field to read on a `cli_send_and_wait`
 result: the shape is identical whichever CLI produced it, but the confidence
-is not. `turn_complete` from aider/antigravity/claude/codex/copilot/cursor/
+is not. `turn_complete` from aider/antigravity/claude/codex/copilot/cursor/droid/
 kilo/muse/opencode is the CLI's own word that the turn ended; the same value
 from grok/kimi/pi/qwen is the 8-second-silence inference above; and
 `quiet_period` — the only outcome available for a plain terminal pane —

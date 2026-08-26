@@ -9,9 +9,9 @@ checks CI enforces; the records in Part 2 here predate it and name files that
 have since moved.
 
 Current built-in agent keys are `claude`, `codex`, `antigravity`, `grok`,
-`kimi`, `opencode`, `qwen`, `kilo`, `pi`, `copilot`, `cursor`, `aider`, and
-`muse`. One key identifies a vendor on both sides — `agentKey` in the
-frontend, `agent_key` in the backend.
+`kimi`, `opencode`, `qwen`, `kilo`, `pi`, `copilot`, `cursor`, `aider`,
+`muse`, and `droid`. One key identifies a vendor on both sides — `agentKey`
+in the frontend, `agent_key` in the backend.
 
 ---
 
