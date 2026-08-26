@@ -167,6 +167,23 @@ describe('useResourceUsage', () => {
     expect(m.api.cpuPercentByKey.value.get('sess-a')).toBeNull()
   })
 
+  // A pane rebuilt around a new PTY keeps its session while the renderer's pane
+  // id moves on, so the sweep keeps reporting the id the PTY was created with.
+  // A surface that lists panes by pane id needs that mapping to tell "already
+  // accounted for" from "a pane nobody claimed".
+  it('remembers which backend pane id each key was reported under', async () => {
+    const m = mount(async () =>
+      wire({ panes: [{ terminal_session_id: 'sess-a', pane_id: 'old-a', bytes: 10, cpu_seconds: 1 }] })
+    )
+    disposers.push(m.dispose)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(m.api.paneIdByKey.value.get('sess-a')).toBe('old-a')
+
+    m.panes.value = 0
+    await nextTick()
+    expect(m.api.paneIdByKey.value.size).toBe(0)
+  })
+
   it('stops its timer when the scope is disposed', async () => {
     let calls = 0
     const m = mount(async () => {

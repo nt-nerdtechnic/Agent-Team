@@ -16,6 +16,7 @@ const MB = 1024 * 1024
 function rows(...over: Array<Partial<ResourceSummaryRow>>): ResourceSummaryRow[] {
   return over.map((o, i) => ({
     paneId: `pane-${i}`,
+    measuredKey: `sess-${i}`,
     name: `Pane ${i}`,
     vendor: '',
     foreignWorkspace: '',

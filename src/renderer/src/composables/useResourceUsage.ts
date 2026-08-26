@@ -59,6 +59,13 @@ export function useResourceUsage(opts: UseResourceUsageOptions) {
   // from carries no session id.
   const bytesByPaneId = ref(new Map<string, number>())
   const cpuPercentByPaneId = ref(new Map<string, number | null>())
+  // Session key → the pane id the BACKEND reported it under. A pane rebuilt
+  // around a new PTY keeps its session while the renderer's pane id moves on,
+  // so these two differ exactly when it matters: a surface that lists panes by
+  // pane id needs this to tell "already accounted for" from "a pane nobody
+  // claimed", or the same CLI appears twice — once named at 0 B, once anonymous
+  // holding the real figures.
+  const paneIdByKey = ref(new Map<string, string>())
   const available = ref(true)
   const cpuAvailable = ref(true)
   const measured = ref(false)
@@ -98,6 +105,7 @@ export function useResourceUsage(opts: UseResourceUsageOptions) {
       const percents = new Map<string, number | null>()
       const bytesPerPane = new Map<string, number>()
       const percentsPerPane = new Map<string, number | null>()
+      const paneIds = new Map<string, string>()
       const seen = new Set<string>()
       for (const pane of wire.panes ?? []) {
         const key = pane.terminal_session_id || pane.pane_id
@@ -111,6 +119,7 @@ export function useResourceUsage(opts: UseResourceUsageOptions) {
         if (pane.pane_id) {
           bytesPerPane.set(pane.pane_id, pane.bytes ?? 0)
           percentsPerPane.set(pane.pane_id, percent)
+          paneIds.set(key, pane.pane_id)
         }
       }
       // Drop panes that are gone, so a pane id reused later does not inherit a
@@ -120,6 +129,7 @@ export function useResourceUsage(opts: UseResourceUsageOptions) {
       cpuPercentByKey.value = percents
       bytesByPaneId.value = bytesPerPane
       cpuPercentByPaneId.value = percentsPerPane
+      paneIdByKey.value = paneIds
       measured.value = true
     } finally {
       inFlight = false
@@ -150,6 +160,7 @@ export function useResourceUsage(opts: UseResourceUsageOptions) {
         cpuPercentByKey.value = new Map()
         bytesByPaneId.value = new Map()
         cpuPercentByPaneId.value = new Map()
+        paneIdByKey.value = new Map()
         return
       }
       void refresh()
@@ -184,6 +195,7 @@ export function useResourceUsage(opts: UseResourceUsageOptions) {
     cpuPercentByKey,
     bytesByPaneId,
     cpuPercentByPaneId,
+    paneIdByKey,
     totalBytes,
     totalCpuPercent,
     cpuShare: computed(() => machineCpuShare(totalCpuPercent.value, cpuCount.value)),

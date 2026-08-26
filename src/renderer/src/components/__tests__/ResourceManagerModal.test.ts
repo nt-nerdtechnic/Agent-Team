@@ -57,6 +57,7 @@ function fakeUsage(
 ) {
   const bytesByPaneId = ref(new Map(Object.entries(bytes)))
   const cpuPercentByPaneId = ref(new Map(Object.entries(cpu)))
+  const paneIdByKey = ref(new Map<string, string>())
   const refresh = vi.fn(async () => undefined)
   return {
     api: {
@@ -64,6 +65,7 @@ function fakeUsage(
       cpuPercentByKey: ref(new Map<string, number | null>()),
       bytesByPaneId,
       cpuPercentByPaneId,
+      paneIdByKey,
       totalBytes: computed(() => 0),
       totalCpuPercent: computed(() => null),
       cpuShare: computed(() => null),
@@ -77,6 +79,22 @@ function fakeUsage(
       stop: vi.fn(),
     } as unknown as never,
     refresh,
+  }
+}
+
+/** A row as the host resolves it — pane id plus the key its figures sat under. */
+function localRow(over: Record<string, unknown> = {}) {
+  return {
+    paneId: 'p1',
+    measuredKey: 'p1',
+    name: 'Scan the code',
+    vendor: 'claude',
+    foreignWorkspace: 'Agent-Team',
+    status: 'idle' as const,
+    bytes: 300 * MB,
+    cpuPercent: 1,
+    reclaimable: false,
+    ...over,
   }
 }
 
@@ -108,6 +126,7 @@ async function mountModal(
     bytes?: Record<string, number>
     cpu?: Record<string, number | null>
     usageOver?: Parameters<typeof fakeUsage>[2]
+    localRows?: ReturnType<typeof localRow>[]
   } = {}
 ): Promise<{ w: VueWrapper; refresh: ReturnType<typeof vi.fn> }> {
   const usage = fakeUsage(opts.bytes ?? DEFAULT_BYTES, opts.cpu ?? DEFAULT_CPU, opts.usageOver)
@@ -116,6 +135,7 @@ async function mountModal(
       open: opts.open ?? true,
       backend: fakeBackend(),
       usage: usage.api,
+      localRows: opts.localRows ?? [],
       autoReclaimOn: true,
       autoReclaimMinutes: '45',
     },
@@ -142,6 +162,17 @@ describe('ResourceManagerModal layout', () => {
     expect(overlay).toContain('inset: 0')
     expect(overlay).toMatch(/z-index:\s*\d/)
     expect(overlay).toContain('display: flex')
+  })
+
+  // Same trap one level in: .nv-modal-shell--wide is a skin, and the repo's
+  // other modals (.pm-modal) set their own box. Without a width the table's
+  // content decides it, and a ten-row table decides "as wide as the screen".
+  it('sets its own width and height rather than letting the table decide', async () => {
+    const fs = await import('node:fs')
+    const source = fs.readFileSync('src/renderer/src/components/ResourceManagerModal.vue', 'utf8')
+    const modal = source.slice(source.indexOf('.rm-modal {'), source.indexOf('.rm-spacer'))
+    expect(modal).toContain('width: min(var(--modal-w-wide)')
+    expect(modal).toMatch(/height:\s*min\(/)
   })
 })
 
@@ -307,6 +338,42 @@ describe('ResourceManagerModal', () => {
     wire.status = 'starting'
     const { w } = await mountModal()
     expect(wire.calls.some((c) => c.type === 'agent_msg.list')).toBe(false)
+    w.unmount()
+  })
+
+  // This is the bug the modal shipped with: a pane rebuilt around a new PTY
+  // keeps its terminal session while its pane id moves on, so the sweep still
+  // reports it under the id the PTY was created with. Keyed by pane id alone,
+  // the same CLI appeared twice — once named at 0 B (the roster's current id),
+  // once anonymous holding the real figures (the sweep's stale id).
+  it('lists a rebuilt pane once, with its figures', async () => {
+    wire.panes = [
+      { pane_id: 'new-1', name: 'Scan the code', workspace_label: 'Agent-Team', agent_key: 'claude', busy: false, offline: false },
+    ]
+    const { w } = await mountModal({
+      // The sweep only knows the pane id the PTY was created under.
+      bytes: { 'old-1': 300 * MB },
+      cpu: { 'old-1': 4 },
+      localRows: [localRow({ paneId: 'new-1', measuredKey: 'old-1', bytes: 300 * MB, cpuPercent: 4 })],
+    })
+    const rows = w.findAll('[data-row="pane"]')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].get('.rm-name').text()).toBe('Scan the code')
+    expect(rows[0].get('[data-part="memory"]').text()).toBe('300 MB')
+    expect(w.text()).not.toContain(i18n.global.t('resource.unnamed-pane'))
+    w.unmount()
+  })
+
+  // The host knows this window's panes better than the roster does, so its row
+  // wins — including the figures it resolved by session id.
+  it('prefers the host row over the roster entry for the same pane', async () => {
+    const { w } = await mountModal({
+      bytes: { p1: 0 },
+      localRows: [localRow({ paneId: 'p1', measuredKey: 'p1', name: 'Renamed here', bytes: 512 * MB })],
+    })
+    const row = w.get('[data-pane="p1"]')
+    expect(row.get('.rm-name').text()).toBe('Renamed here')
+    expect(row.get('[data-part="memory"]').text()).toBe('512 MB')
     w.unmount()
   })
 

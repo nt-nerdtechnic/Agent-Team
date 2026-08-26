@@ -16,6 +16,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
 import type { useResourceUsage } from '../composables/useResourceUsage'
+import type { ResourceSummaryRow } from './ResourceSummaryPanel.vue'
 import { formatBytes } from '../lib/formatBytes'
 import { formatCpuPercent, machineCpuShare, machineMemoryShare } from '../lib/resourceSampling'
 
@@ -24,6 +25,10 @@ const props = defineProps<{
   backend: ReturnType<typeof useBackend>
   /** The host's sampling loop — shared, not duplicated. */
   usage: ReturnType<typeof useResourceUsage>
+  /** This window's own panes, as the host resolved them. Authoritative: the
+   *  host knows each pane's terminal session id, so its figures survive a
+   *  rebuild that moves the pane id. The roster below only has pane ids. */
+  localRows: ResourceSummaryRow[]
   /** Read-only mirror of the Settings › General rows. */
   autoReclaimOn: boolean
   autoReclaimMinutes: string
@@ -109,29 +114,78 @@ interface ResourceRow {
   trend: number[]
 }
 
-// Rows are the union of what the backend measured and what the roster knows.
-// The measurement covers every live PTY, including the plain terminal panes the
-// roster never sees; the roster supplies the names, and a pane it does not know
-// is shown as a terminal rather than dropped from the machine's total.
+// Rows come from three places, in order of how much each one knows.
+//
+// 1. The host's own rows. It resolved every pane in THIS window against the
+//    terminal session id, which survives a rebuild that moves the pane id —
+//    keyed by pane id alone these would read 0 B while their measurement sat
+//    under the id the PTY was created with.
+// 2. The roster, for panes belonging to other windows. Pane ids only, so the
+//    same rebuild drift applies; a name with no figures is still worth showing.
+// 3. Whatever the sweep measured that neither of the above claimed — plain
+//    terminal panes, which never register in the roster, and are exactly what
+//    you open this to find when a shell is running a build.
 const rows = computed<ResourceRow[]>(() => {
-  const byId = new Map(roster.value.map((p) => [p.pane_id as string, p]))
-  const ids = new Set<string>([...props.usage.bytesByPaneId.value.keys(), ...byId.keys()])
-  return [...ids].map((paneId) => {
-    const pane = byId.get(paneId)
-    return {
+  const bytes = props.usage.bytesByPaneId.value
+  const cpu = props.usage.cpuPercentByPaneId.value
+  const out: ResourceRow[] = []
+  const seenPanes = new Set<string>()
+  const claimedMeasurements = new Set<string>()
+
+  for (const row of props.localRows) {
+    seenPanes.add(row.paneId)
+    claimedMeasurements.add(row.measuredKey)
+    // The host's status vocabulary is richer than the roster's; collapse it to
+    // the three states this table draws.
+    const status: RowStatus =
+      row.status === 'disconnected'
+        ? 'disconnected'
+        : row.status === 'running' || row.status === 'awaiting'
+          ? 'running'
+          : 'idle'
+    out.push({
+      paneId: row.paneId,
+      name: row.name,
+      vendor: row.vendor,
+      workspace: row.foreignWorkspace,
+      status,
+      bytes: row.bytes,
+      cpuPercent: row.cpuPercent,
+      trend: trends.value.get(row.measuredKey) ?? [],
+    })
+  }
+
+  for (const pane of roster.value) {
+    const paneId = pane.pane_id as string
+    if (seenPanes.has(paneId)) continue
+    seenPanes.add(paneId)
+    claimedMeasurements.add(paneId)
+    out.push({
       paneId,
-      name: pane?.name || t('resource.unnamed-pane'),
-      vendor: pane?.agent_key ?? '',
-      workspace: pane?.workspace_label ?? '',
-      // The roster knows three things about liveness, and no more: the window
-      // that owns the pane is gone, the pane is mid-turn, or neither. A pane it
-      // does not know about gets the neutral one.
-      status: pane?.offline ? 'disconnected' : pane?.busy ? 'running' : 'idle',
-      bytes: props.usage.bytesByPaneId.value.get(paneId) ?? 0,
-      cpuPercent: props.usage.cpuPercentByPaneId.value.get(paneId) ?? null,
+      name: pane.name || t('resource.unnamed-pane'),
+      vendor: pane.agent_key ?? '',
+      workspace: pane.workspace_label ?? '',
+      status: pane.offline ? 'disconnected' : pane.busy ? 'running' : 'idle',
+      bytes: bytes.get(paneId) ?? 0,
+      cpuPercent: cpu.get(paneId) ?? null,
       trend: trends.value.get(paneId) ?? [],
-    }
-  })
+    })
+  }
+
+  for (const paneId of bytes.keys()) {
+    if (claimedMeasurements.has(paneId) || seenPanes.has(paneId)) continue
+    out.push({
+      paneId,
+      name: t('resource.unnamed-pane'),
+      vendor: '',
+      workspace: '',
+      status: 'idle',
+      bytes: bytes.get(paneId) ?? 0,
+      cpuPercent: cpu.get(paneId) ?? null,
+      trend: trends.value.get(paneId) ?? [],
+    })
+  }
+  return out
 })
 
 const filter = ref<'all' | 'running' | 'idle'>('all')
@@ -414,9 +468,13 @@ async function scanDisk(): Promise<void> {
   -webkit-app-region: no-drag;
 }
 .rm-modal {
+  /* The shell class only skins the card — every modal here sets its own box,
+   * the same way .pm-modal does. Without a width the table's own content is
+   * what decides it, and a ten-row table decides "as wide as the screen". */
+  width: min(var(--modal-w-wide), 92vw);
+  height: min(760px, 86vh);
   display: flex;
   flex-direction: column;
-  max-height: min(760px, 88vh);
   color: var(--text-secondary);
   font-size: var(--font-xs);
   overflow: hidden;

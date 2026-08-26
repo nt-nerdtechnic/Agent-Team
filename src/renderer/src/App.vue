@@ -11934,6 +11934,7 @@ const resourceRows = computed<ResourceSummaryRow[]>(() => {
   const cpuByKey = resourceUsage.cpuPercentByKey.value
   const bytesByPane = resourceUsage.bytesByPaneId.value
   const cpuByPane = resourceUsage.cpuPercentByPaneId.value
+  const paneIdByKey = resourceUsage.paneIdByKey.value
   return panes.value.map((p) => {
     const name = p.customName || p.autoName || p.agentLabel
     const vendor = agentSpecs.find((s) => s.agentKey === p.agentKey)?.label ?? p.agentKey
@@ -11946,6 +11947,10 @@ const resourceRows = computed<ResourceSummaryRow[]>(() => {
     const known = bytesByKey.has(sessionKey) || cpuByKey.has(sessionKey)
     return {
       paneId: p.id,
+      // The id the measurement row itself carries, which after a rebuild is the
+      // pane id the PTY was created under — not this pane's current one. The
+      // Resource Manager needs it to know that row is already accounted for.
+      measuredKey: (known ? paneIdByKey.get(sessionKey) : undefined) ?? p.id,
       name,
       // An unnamed pane's display name already IS the vendor label (agentLabel is
       // assigned spec.label at creation), so emitting both would print it twice
@@ -13286,6 +13291,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :open="showResourceManager"
       :backend="backend"
       :usage="resourceUsage"
+      :local-rows="resourceRows"
       :auto-reclaim-on="idleReclaimEnabled"
       :auto-reclaim-minutes="idleReclaimMinutes"
       @close="showResourceManager = false"

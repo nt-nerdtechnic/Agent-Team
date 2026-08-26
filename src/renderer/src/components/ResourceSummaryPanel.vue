@@ -17,6 +17,11 @@ import { paneStatusLabelKey, type PaneStatusValue } from '../lib/paneStatusLabel
 
 export interface ResourceSummaryRow {
   paneId: string
+  /** The key this row's figures were found under — the terminal session id
+   *  when the host knows it, else the pane id. A pane rebuilt around a new PTY
+   *  keeps the session id while its pane id moves on, so this is what tells
+   *  another surface "that measurement is already spoken for". */
+  measuredKey: string
   /** Display name — the rename/auto name when set, else the agent label. */
   name: string
   /** CLI vendor label; empty when it would merely repeat `name`. */
