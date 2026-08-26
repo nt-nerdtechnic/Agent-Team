@@ -107,7 +107,7 @@ import {
   CLI_PASTE_LINE_CAP
 } from './lib/cliContext'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
-import { allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
+import { allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
 import { resolveDragBatch, reorderBatchByIds } from './lib/paneBatchDrag'
@@ -1403,6 +1403,15 @@ const paneTurnCompleteAt = new Map<string, number>()
 // MOST RECENT signal was "working" vs "turn ended" — the core of the CLI-state
 // model that replaces buffer-guessing.
 const paneLastActiveAt = new Map<string, number>()
+
+// Per-pane count of background subagents the CLI is still waiting on, as last
+// reported by a hook event, with the wall-clock time of that report. The
+// unattended loop reads it to tell a turn that ended DONE from one that ended
+// to WAIT — the one distinction none of its other signals can make, because a
+// CLI parked on a background agent really does end its turn (see the backend's
+// subagent_tracker and loopWaitingOnSubagents). Vendors without hooks never
+// send the field, so their panes never gate on it.
+const panePendingSubagents = new Map<string, { pending: number; observedAt: number }>()
 
 // ── Inter-CLI messaging (name registry + delivery queue wiring) ─────────────
 const messaging = useAgentMessaging()
@@ -3066,14 +3075,18 @@ function noteLoopTurnProgress(paneId: string, text: string, timestamp: string): 
   if (!watcher) return
   const eventMs = timestamp ? Date.parse(timestamp) : NaN
   if (!Number.isNaN(eventMs) && eventMs < watcher.armedAt - TURN_TEXT_REPLAY_TOLERANCE_MS) return
-  const next = applyTurnProgress(watcher, text)
+  const next = applyTurnProgress(watcher, text, {
+    toolUsesThisTurn: watcher.toolUsesThisTurn,
+    toolSignalsSeen: watcher.toolSignalsSeen,
+  })
   if (next.stalledRuns > watcher.stalledRuns) {
     console.warn(
-      `[loop] pane ${paneId}: turn showed no progress (${next.stalledRuns}/${LOOP_STALL_LIMIT}) — next continue backs off ${loopBackoffMs(next.stalledRuns) / 1000}s`
+      `[loop] pane ${paneId}: turn showed no progress (${next.stalledRuns}/${LOOP_STALL_LIMIT}, ${watcher.toolUsesThisTurn} tool uses) — next continue backs off ${loopBackoffMs(next.stalledRuns) / 1000}s`
     )
   }
   watcher.stalledRuns = next.stalledRuns
   watcher.lastTurnText = next.lastTurnText
+  watcher.recentTurns = next.recentTurns ?? []
 }
 
 /** The loop is spinning without finishing — it repeated itself past the stall
@@ -3120,7 +3133,11 @@ function stopLoopComplete(paneId: string): void {
  *  watcher is gone). Only a turn_complete after this instant is judged. */
 function armLoopTurn(paneId: string): void {
   const watcher = loopLimitWatchers.get(paneId)
-  if (watcher) watcher.armedAt = Date.now()
+  if (!watcher) return
+  watcher.armedAt = Date.now()
+  // Per-TURN counter: what the next turn does with tools says nothing about
+  // what the last one did. toolSignalsSeen is per-PANE and deliberately kept.
+  watcher.toolUsesThisTurn = 0
 }
 
 /** turn_complete carried LOOP_DONE_MARKER as its final line: stop the loop if
@@ -3177,6 +3194,17 @@ interface LoopLimitWatcher {
   nextContinueAt: number
   /** Normalized text of the last completed turn, for the repeat comparison. */
   lastTurnText: string
+  /** Normalized text of the last LOOP_RECENT_TURNS turns, newest first, so a
+   *  CLI alternating between two phrasings of "still waiting" is not read as
+   *  progress on every turn. */
+  recentTurns: string[]
+  /** Tool-use signals attributed to this pane since the turn was armed. A turn
+   *  that ends having touched no tool did no work — see turnUsedNoTools. */
+  toolUsesThisTurn: number
+  /** This pane has reported tool use at least once, so a zero above means
+   *  "used none" rather than "this vendor never says". Self-calibrating: only
+   *  hook vendors (claude/qwen/copilot) ever set it. */
+  toolSignalsSeen: boolean
 }
 const loopLimitWatchers = new Map<string, LoopLimitWatcher>()
 const LOOP_LIMIT_POLL_MS = 5000
@@ -3190,6 +3218,11 @@ function stopLoopLimitWatcher(paneId: string): void {
     clearInterval(watcher.timer)
     loopLimitWatchers.delete(paneId)
   }
+  // Drop the subagent count with the watcher that reads it. A count left above
+  // zero — the pane's CLI exited while a subagent was running, so its
+  // SubagentStop never arrived — would otherwise gate the NEXT loop started on
+  // this pane for the whole staleness window.
+  panePendingSubagents.delete(paneId)
 }
 
 function startLoopLimitWatcher(paneId: string): void {
@@ -3204,6 +3237,9 @@ function startLoopLimitWatcher(paneId: string): void {
     stalledRuns: 0,
     nextContinueAt: 0,
     lastTurnText: '',
+    recentTurns: [],
+    toolUsesThisTurn: 0,
+    toolSignalsSeen: false,
   }
   watcher.timer = window.setInterval(() => {
     const pane = panes.value.find((p) => p.id === paneId)
@@ -3291,6 +3327,22 @@ function startLoopLimitWatcher(paneId: string): void {
     }
     if (verdict === 'stop-stalled') {
       stopLoopSpinning(paneId, 'stalled')
+      return
+    }
+    // Parked on background subagents: the turn ended to WAIT, not because the
+    // work is done. loopContinueReady cannot see this — every one of its
+    // conditions holds — so the hook-reported count is checked separately, and
+    // ahead of it. Holding here costs nothing: the count drops to zero the
+    // moment the last SubagentStop lands and the next poll continues normally.
+    const subagents = panePendingSubagents.get(paneId)
+    if (
+      subagents !== undefined &&
+      loopWaitingOnSubagents({
+        pending: subagents.pending,
+        observedAt: subagents.observedAt,
+        now: Date.now(),
+      })
+    ) {
       return
     }
     if (
@@ -5947,19 +5999,23 @@ registerCommand('ui.pane.create', async (args) => {
   if (!injected) throw new Error(`ui.pane.create failed to inject task into pane "${paneId}"`)
   return paneId
 })
+// These actions key on the pane id and reject a pane name, which is the only
+// handle a caller reading the messaging roster starts with — so saying what is
+// missing is not enough, the message has to say where the id comes from.
+const PANE_ID_HINT = 'a pane id, not a pane name: cli_list_targets reports it as pane_id, and ui_snapshot lists panes[].id'
 registerCommand('ui.pane.close', async (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
-  if (!paneId) throw new Error('ui.pane.close requires paneId')
+  if (!paneId) throw new Error(`ui.pane.close requires ${PANE_ID_HINT}`)
   await onKill(paneId)
 })
 registerCommand('ui.pane.focus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
-  if (!paneId) throw new Error('ui.pane.focus requires paneId')
+  if (!paneId) throw new Error(`ui.pane.focus requires ${PANE_ID_HINT}`)
   onFocusPane(paneId)
 })
 registerCommand('ui.pane.getStatus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
-  if (!paneId) throw new Error('ui.pane.getStatus requires paneId')
+  if (!paneId) throw new Error(`ui.pane.getStatus requires ${PANE_ID_HINT}`)
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) throw new Error(`ui.pane.getStatus: pane "${paneId}" not found`)
   const ref = paneRefs[paneId]
@@ -8637,7 +8693,7 @@ const sessionGhostHealGate = createGhostHealGate(async (paneId, pinnedSessionId)
 // is working; turn_complete = its turn ended. We timestamp both per pane; the
 // completion logic reads these instead of guessing from the TUI buffer.
 backend.on('agent.activity', (raw) => {
-  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string; superseded?: boolean }
+  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string; superseded?: boolean; pending_subagents?: number }
   if (!ev?.pane_id) return
   // QUESTION badge: "the agent asked you something and is waiting". Decided in
   // one place for both event types because both carry a half of it — the turn
@@ -8645,6 +8701,16 @@ backend.on('agent.activity', (raw) => {
   // mid-flight and so produces no turn_complete at all) on agent_active. The
   // rules live in questionActionFor so they can be executed by the suite;
   // App.vue is an SFC the tests cannot mount.
+  // Background-subagent count, carried by every hook event that has one. Read
+  // before the event-type branches because both kinds carry it: the count goes
+  // UP on an agent_active (Task PreToolUse) and is read on the turn_complete
+  // that follows.
+  if (typeof ev.pending_subagents === 'number') {
+    panePendingSubagents.set(ev.pane_id, {
+      pending: ev.pending_subagents,
+      observedAt: Date.now(),
+    })
+  }
   const questionAction = questionActionFor(ev)
   if (questionAction === 'raise') paneRefs[ev.pane_id]?.markQuestion?.()
   else if (questionAction === 'clear') paneRefs[ev.pane_id]?.clearQuestion?.()
@@ -8710,6 +8776,16 @@ backend.on('agent.activity', (raw) => {
     // it — retire the continue affordance even if the user never clicked it.
     const activePane = panes.value.find((p) => p.id === ev.pane_id)
     if (activePane?.resumeContinueAvailable) activePane.resumeContinueAvailable = false
+    // Tool use is the sharpest "this turn did work" signal there is, and its
+    // absence is what a CLI parked on a background agent looks like: it talks,
+    // it never touches a tool. Counted per armed turn by the loop watcher.
+    if (ev.detail === 'hook:pre_tool_use') {
+      const toolWatcher = loopLimitWatchers.get(ev.pane_id)
+      if (toolWatcher) {
+        toolWatcher.toolUsesThisTurn += 1
+        toolWatcher.toolSignalsSeen = true
+      }
+    }
     // Auto-name from the user's own prompt (readers attach it as text on
     // user-record events; detail is 'user' for most vendors, 'prompt' for
     // kimi/aider, 'user_message' for codex). Arrives before the assistant's
