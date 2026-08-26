@@ -7337,7 +7337,20 @@ async function advanceRestoreSession(trigger: RestoreSessionTrigger, coldBatch?:
       : [])
     : restoreSessionScopeTargets(session, trigger)
   const reconnectStart = reconnectedCount.value
-  if (decision === 'resume' && session.scope === 'all') {
+  // Starting a workspace fresh is the one batch nothing caps. Fresh spawns are
+  // deliberately exempt from the resume semaphore — throttling them would stall
+  // a pipeline stage spawned into a background tab — but that reasoning is about
+  // ONE spawn. Starting a whole workspace fresh still costs the backend a
+  // login-shell PATH refresh, a CLI probe and a PTY fork per pane, serially on
+  // one event-loop thread, and isResume is false there, so the semaphore never
+  // sees it: a twenty-pane workspace sent twenty terminal.create at once and the
+  // later acks landed past the request deadline.
+  //
+  // Only this batch. A resume under 'single'/'page'/'tab' is already capped by
+  // the semaphore at whatever the user set (default 3), so adding a second
+  // ceiling of 2 would just make their own setting slower.
+  const unthrottledBatch = decision === 'fresh' && trigger === 'cold'
+  if (unthrottledBatch || (decision === 'resume' && session.scope === 'all')) {
     await runWithConcurrency(ids, ALL_SCOPE_RESTORE_CONCURRENCY, (paneId) => realizeRestoredPane(paneId, true))
   } else {
     await Promise.all(ids.map((paneId) => realizeRestoredPane(paneId, true)))
