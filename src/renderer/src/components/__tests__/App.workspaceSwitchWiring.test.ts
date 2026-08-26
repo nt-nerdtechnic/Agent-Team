@@ -68,7 +68,8 @@ describe('workspace switch — how the parts fit together', () => {
   })
 
   it('takes every jump-to-a-pane path through the same switch', () => {
-    // Four ways to land on a pane: the sidebar list, the status-bar overview,
+    // Four ways to land on a pane: the sidebar list, the status-bar resource
+    // panel,
     // the history modal, and a message notification. Each can name one in a
     // workspace that is not on screen, and each would otherwise focus
     // something the grid filters out — the blank main area, four times over.
@@ -78,7 +79,7 @@ describe('workspace switch — how the parts fit together', () => {
     expect(helper).toContain('await switchToWorkspace(target)')
     expect(helper).toContain('return normWs(currentWorkspace.value) === normWs(target)')
 
-    expect(body('onAgentOverviewJump')).toContain('onSidebarFocusPane(paneId)')
+    expect(body('onResourceJump')).toContain('onSidebarFocusPane(paneId)')
     for (const fn of ['onSidebarFocusPane', 'onFocusHistoryPane', 'focusPaneFromNotification']) {
       const b = body(fn)
       // Called, and its answer respected — an ignored false focuses a pane the

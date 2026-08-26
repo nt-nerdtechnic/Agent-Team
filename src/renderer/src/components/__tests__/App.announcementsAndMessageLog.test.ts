@@ -59,12 +59,12 @@ describe('message-log persistence wiring (FINDINGS 4/5/6/8)', () => {
   })
 })
 
-describe('agent overview rows and popover lifetime', () => {
+describe('resource summary rows and popover lifetime', () => {
   it('blanks the vendor when it would only repeat the pane name', () => {
     // agentLabel is assigned spec.label at pane creation, so an unnamed pane's
     // name IS the vendor label — emitting both printed it twice on the default
     // path (a freshly spawned, unrenamed pane).
-    const start = appSource.indexOf('const agentOverviewRows = computed')
+    const start = appSource.indexOf('const resourceRows = computed')
     expect(start).toBeGreaterThan(-1)
     const block = appSource.slice(start, appSource.indexOf('\n})', start))
     expect(block).toContain("vendor: vendor === name ? '' : vendor")
@@ -76,7 +76,7 @@ describe('agent overview rows and popover lifetime', () => {
     const start = appSource.indexOf('watch(\n  () => panes.value.length,')
     expect(start).toBeGreaterThan(-1)
     const block = appSource.slice(start, appSource.indexOf('\n)', start))
-    expect(block).toContain("openPopover.value === 'agents'")
+    expect(block).toContain("openPopover.value === 'resource'")
     expect(block).toContain('closePopover()')
   })
 })

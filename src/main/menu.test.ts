@@ -81,6 +81,7 @@ function makeHooks(): AppMenuHooks & { calls: string[] } {
     onOpenRecent: (p) => calls.push('open-recent:' + p),
     onNewWindow: () => calls.push('new-window'),
     onOpenPipelineManager: () => calls.push('pipeline-manager'),
+    onOpenResourceManager: () => calls.push('resource-manager'),
     onOpenRepo: () => calls.push('open-repo'),
     onReportIssue: () => calls.push('report-issue'),
     onShowShortcuts: () => calls.push('show-shortcuts')
@@ -175,6 +176,11 @@ describe('installApplicationMenu', () => {
     const item = itemIn(submenuOf('Window'), 'Pipeline Manager')
     fire(item)
     expect(hooks.calls).toEqual(['pipeline-manager'])
+  })
+
+  it('Window has Resource Manager wired to its hook', () => {
+    fire(itemIn(submenuOf('Window'), 'Resource Manager'))
+    expect(hooks.calls).toEqual(['resource-manager'])
   })
 
   // role: 'copy' copies the DOM selection, which a terminal pane never has, so
@@ -372,5 +378,6 @@ describe('installApplicationMenu', () => {
     const menu = isMac ? submenuOf('Agent-Team') : submenuOf('File')
     expect(() => fire(itemIn(menu, 'Settings…'))).not.toThrow()
     expect(() => fire(itemIn(submenuOf('Window'), 'Pipeline Manager'))).not.toThrow()
+    expect(() => fire(itemIn(submenuOf('Window'), 'Resource Manager'))).not.toThrow()
   })
 })

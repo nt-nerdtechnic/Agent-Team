@@ -173,6 +173,8 @@ contextBridge.exposeInMainWorld('agentTeam', {
       workspace_path: args.workspace_path,
       ...(args.rel_path ? { rel_path: args.rel_path } : {}),
     }),
+  openResourcesWindow: (args: { workspace_path?: string }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('window:openResources', { workspace_path: args?.workspace_path ?? '' }),
   openGitHistoryWindow: (args: { workspace_path: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:openGitHistory', { workspace_path: args.workspace_path }),
   openGitWindow: (args: {
@@ -410,6 +412,28 @@ contextBridge.exposeInMainWorld('agentTeam', {
     error?: string
   }> =>
     ipcRenderer.invoke('cli:get-pane-buffer', paneId),
+  // Resource Manager row actions: the window lists panes from every main
+  // window, so jumping to one or reclaiming it has to be relayed to whichever
+  // window owns it.
+  requestPaneAction: (args: {
+    paneId: string
+    action: 'focus' | 'reclaim'
+  }): Promise<{ ok?: boolean; error?: string }> => ipcRenderer.invoke('pane:action', args),
+  onPaneActionRequest: (
+    handler: (
+      paneId: string,
+      action: 'focus' | 'reclaim'
+    ) => Promise<{ ok?: boolean; error?: string }> | { ok?: boolean; error?: string }
+  ): void => {
+    ipcRenderer.on(
+      'pane:action:request',
+      (_event, requestId: string, paneId: string, action: 'focus' | 'reclaim') => {
+        void Promise.resolve(handler(paneId, action)).then((result) => {
+          ipcRenderer.send('pane:action:reply', requestId, result)
+        })
+      }
+    )
+  },
   onCliPaneBufferRequest: (
     handler: (
       paneId: string

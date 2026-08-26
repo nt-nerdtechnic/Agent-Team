@@ -8,7 +8,10 @@ import { buildPaneLineage } from './lib/paneLineage'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
 import { flattenSidebarOrder, resolveFocusedPane } from './lib/paneFocus'
-import MemoryPanel, { type MemoryPaneRow } from './components/MemoryPanel.vue'
+import { formatBytes } from './lib/formatBytes'
+import { formatCpuPercent, machineCpuShare, machineMemoryShare } from './lib/resourceSampling'
+import { useResourceUsage, type ResourceUsageWire } from './composables/useResourceUsage'
+import ResourceSummaryPanel, { type ResourceSummaryRow } from './components/ResourceSummaryPanel.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
 import ControlPane, {
@@ -26,7 +29,6 @@ import ControlPane, {
   type AnalyzerStatusView,
   type WorkspaceMode
 } from './components/ControlPane.vue'
-import type { AgentOverviewRow } from './components/AgentOverviewPanel.vue'
 import QuestionAlert from './components/QuestionAlert.vue'
 import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import { asAgentPush, normalizePreviewTarget } from './preview/previewTarget'
@@ -107,7 +109,7 @@ import {
   CLI_PASTE_LINE_CAP
 } from './lib/cliContext'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
-import { allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
+import { activityMeansWorking, allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
 import { resolveDragBatch, reorderBatchByIds } from './lib/paneBatchDrag'
@@ -238,7 +240,6 @@ const RestoreScopeModal = defineAsyncComponent(() => import('./components/Restor
 const PipelineManagerModal = defineAsyncComponent(() => import('./components/PipelineManagerModal.vue'))
 const AnnouncementsPanel = defineAsyncComponent(() => import('./components/AnnouncementsPanel.vue'))
 const ClockPanel = defineAsyncComponent(() => import('./components/ClockPanel.vue'))
-const AgentOverviewPanel = defineAsyncComponent(() => import('./components/AgentOverviewPanel.vue'))
 
 const backend = useBackend()
 // Hook the settings cache to the ws: reconciles + flushes queued writes once
@@ -279,6 +280,21 @@ onMounted(() => {
   })
   // Plan window "execute" dispatch routed to this workspace's window.
   window.agentTeam?.onPlanExecutionDispatch?.((payload) => { void onPlanExecutionDispatch(payload) })
+  // Resource Manager row actions (jump / reclaim). That window is machine-wide
+  // and main asks every window, so a pane this one does not own is disowned
+  // with not-found rather than answered.
+  window.agentTeam?.onPaneActionRequest?.(async (paneId, action) => {
+    if (!panes.value.some((p) => p.id === paneId)) return { error: 'not-found' }
+    if (action === 'focus') {
+      onResourceJump(paneId)
+      // `focused` asks main to bring this window forward — a renderer cannot.
+      return { ok: true, focused: true }
+    }
+    // Reclaim runs the same guards the status-bar reclaim does, so a pane that
+    // is busy, focused or holding a draft refuses instead of dying.
+    const reclaimed = await reclaimPanesNow([paneId])
+    return reclaimed > 0 ? { ok: true } : { error: 'blocked' }
+  })
   // Editor-window AI Chat fetches a CLI pane's scrollback through the main
   // process (cli:get-pane-buffer); answer from this window's paneRefs.
   window.agentTeam?.onCliPaneBufferRequest?.((paneId) => {
@@ -1411,6 +1427,13 @@ const paneLastActiveAt = new Map<string, number>()
 // CLI parked on a background agent really does end its turn (see the backend's
 // subagent_tracker and loopWaitingOnSubagents). Vendors without hooks never
 // send the field, so their panes never gate on it.
+// The unattended loop's own activity clock. Same stamps as paneLastActiveAt
+// except for `subagent_stop`, which is a SUBAGENT acting, not this pane's
+// agent. Kept separate rather than narrowing paneLastActiveAt so the three
+// other readers of that clock — delivery gating, the done notification and the
+// pipeline's stage verdict — keep behaving exactly as before.
+const paneLastWorkingAt = new Map<string, number>()
+
 const panePendingSubagents = new Map<string, { pending: number; observedAt: number }>()
 
 // ── Inter-CLI messaging (name registry + delivery queue wiring) ─────────────
@@ -3350,7 +3373,7 @@ function startLoopLimitWatcher(paneId: string): void {
       Date.now() >= watcher.nextContinueAt &&
       loopContinueReady({
         turnCompleteAt: paneTurnCompleteAt.get(paneId) ?? 0,
-        lastActiveAt: paneLastActiveAt.get(paneId) ?? 0,
+        lastActiveAt: paneLastWorkingAt.get(paneId) ?? 0,
         armedAt: watcher.armedAt,
         now: Date.now(),
         settleMs: TURN_COMPLETE_SETTLE_MS,
@@ -8772,6 +8795,8 @@ backend.on('agent.activity', (raw) => {
     }
   } else if (ev.event_type === 'agent_active') {
     paneLastActiveAt.set(ev.pane_id, Date.now())
+    // The loop reads a stricter clock; see activityMeansWorking for why.
+    if (activityMeansWorking(ev.detail ?? '')) paneLastWorkingAt.set(ev.pane_id, Date.now())
     // The pane is working again, so it is no longer parked where a restore left
     // it — retire the continue affordance even if the user never clicked it.
     const activePane = panes.value.find((p) => p.id === ev.pane_id)
@@ -9680,6 +9705,7 @@ function cancelAllWatchers(): void {
   paneArmedAt.clear()
   paneTurnCompleteAt.clear()
   paneLastActiveAt.clear()
+  paneLastWorkingAt.clear()
 }
 
 // ── Manager-mode router: parsers + scan + route ─────────────────────────────
@@ -11857,17 +11883,43 @@ async function onSidebarFocusPane(paneId: string, ev?: MouseEvent): Promise<void
   onFocusPane(paneId)
 }
 
-// ── Agent overview popover (status-bar "N agents") ──────────────────────────
-// Rows for the status-bar agent list. Status comes from paneViews, which
-// syncViews refreshes every 400 ms from each pane's live displayStatus — the
-// only app-wide readable copy of that per-pane state (displayStatus itself
-// lives inside TerminalPane). A lost backend session is not visible there, so
-// disconnectedPaneIds wins over it.
-const agentOverviewRows = computed<AgentOverviewRow[]>(() => {
+// ── Resource popover + Resource Manager (status-bar CPU + memory) ───────────
+// One list where there used to be two popovers: the agent overview answered
+// "which panes exist and what are they doing", the memory panel answered "who
+// is holding the machine". You ask both at the same moment — when the fan
+// spins up — so they are one row now, and the status-bar pill carries the
+// headline figures instead of a bare count.
+//
+// Status comes from paneViews, which syncViews refreshes every 400 ms from each
+// pane's live displayStatus — the only app-wide readable copy of that per-pane
+// state (displayStatus itself lives inside TerminalPane). A lost backend
+// session is not visible there, so disconnectedPaneIds wins over it.
+const resourcePanelOpen = computed(() => openPopover.value === 'resource')
+
+/** Panes with a live CLI. The pill counts these, not placeholders: a
+ *  placeholder holds no process, so no CPU and no memory. */
+const realizedPaneCount = computed(() => panes.value.filter((p) => p.realized).length)
+
+const resourceUsage = useResourceUsage({
+  request: () => sendQuiet<ResourceUsageWire>('terminal.resource_usage', {}),
+  paneCount: realizedPaneCount,
+  panelOpen: resourcePanelOpen,
+})
+
+const resourceRows = computed<ResourceSummaryRow[]>(() => {
   const statusById = new Map(paneViews.value.map((v) => [v.id, v.status]))
+  const reclaimable = new Set(reclaimableNowIds.value)
+  const bytesByKey = resourceUsage.bytesByKey.value
+  const cpuByKey = resourceUsage.cpuPercentByKey.value
   return panes.value.map((p) => {
     const name = p.customName || p.autoName || p.agentLabel
     const vendor = agentSpecs.find((s) => s.agentKey === p.agentKey)?.label ?? p.agentKey
+    // Keyed by terminal session first: that id is the one this window holds for
+    // its own PTY, so it cannot drift the way a pane id can when a pane is
+    // rebuilt around a new one. The pane id is the fallback for a pane whose
+    // ref is not mounted at this moment.
+    const sessionKey = (paneRefs[p.id]?.sessionId as unknown as string) ?? ''
+    const key = bytesByKey.has(sessionKey) || cpuByKey.has(sessionKey) ? sessionKey : p.id
     return {
       paneId: p.id,
       name,
@@ -11884,102 +11936,81 @@ const agentOverviewRows = computed<AgentOverviewRow[]>(() => {
         p.workspacePath && p.workspacePath !== currentWorkspace.value
           ? (p.workspacePath.split('/').filter(Boolean).pop() ?? p.workspacePath)
           : '',
+      bytes: bytesByKey.get(key) ?? 0,
+      cpuPercent: cpuByKey.get(key) ?? null,
+      reclaimable: reclaimable.has(p.id),
     }
   })
 })
 
-// The overview's status-bar trigger is hidden once the last pane exits, but the
-// popover is not — without this it would stay mounted with a full-viewport
-// backdrop swallowing every click on a status bar that no longer offers a way
-// to dismiss it.
+// The backend measures every PTY it owns, which is every window's — the right
+// scope for the Resource Manager, and the wrong one for a card that lists this
+// window's panes. Totalled from the rows so the headline and the list agree.
+const resourceTotals = computed(() => {
+  let bytes = 0
+  let cpu = 0
+  let cpuKnown = false
+  for (const row of resourceRows.value) {
+    bytes += row.bytes
+    if (row.cpuPercent !== null) {
+      cpu += row.cpuPercent
+      cpuKnown = true
+    }
+  }
+  return { bytes, cpu: cpuKnown ? cpu : null }
+})
+const resourceCpuShare = computed(() =>
+  machineCpuShare(resourceTotals.value.cpu, resourceUsage.cpuCount.value)
+)
+const resourceMemoryShare = computed(() =>
+  machineMemoryShare(resourceTotals.value.bytes, resourceUsage.machineMemoryBytes.value)
+)
+
+/** The pill's own text: pane count, this machine's share of CPU, total memory.
+ *  Each figure appears only once it is knowable — CPU needs two samples, and a
+ *  sweep that failed shows nothing rather than a zero that reads as "idle". */
+const resourcePillText = computed(() => {
+  const parts = [`▤ ${realizedPaneCount.value}`]
+  const share = resourceCpuShare.value
+  if (share !== null && resourceUsage.cpuAvailable.value) parts.push(formatCpuPercent(share))
+  if (resourceUsage.measured.value && resourceUsage.available.value && resourceTotals.value.bytes > 0) {
+    parts.push(formatBytes(resourceTotals.value.bytes))
+  }
+  return parts.join(' · ')
+})
+
+// The pill is hidden once the last pane exits, but the popover is not — without
+// this it would stay mounted with a full-viewport backdrop swallowing every
+// click on a status bar that no longer offers a way to dismiss it.
 watch(
   () => panes.value.length,
   (count) => {
-    if (count === 0 && openPopover.value === 'agents') closePopover()
+    if (count === 0 && openPopover.value === 'resource') closePopover()
   },
 )
 
-/** Jump from the overview to a pane. Mirrors the sidebar agent list's plain
+/** Jump from the panel to a pane. Mirrors the sidebar agent list's plain
  *  click: reveal the pane's tab, then select it as user-initiated so a
  *  cold-restore placeholder is realized instead of silently focusing nothing.
  *  A minimized pane is restored first — effectiveFocusPaneId skips minimized
  *  panes, so focusing one without restoring would show a different pane. */
-function onAgentOverviewJump(paneId: string): void {
+function onResourceJump(paneId: string): void {
   closePopover()
   if (minimizedPanes.value.has(paneId)) restorePane(paneId)
   onSidebarFocusPane(paneId)
 }
 
-// ── Memory popover (status-bar "CLI memory") ────────────────────────────────
-// The measurement shells out to `footprint`, so it is taken when the panel
-// opens and not on a timer. Sizes stay from that reading until it is reopened:
-// a number that silently drifts while you read it is worse than one you know
-// the age of, and this panel exists to be acted on immediately.
-const memoryBytesByPane = ref<Map<string, number>>(new Map())
-const memoryBytesBySession = ref<Map<string, number>>(new Map())
-const memoryMeasured = ref(false)
-const memoryAvailable = ref(true)
-
-/** Panes with a live CLI. The status-bar pill counts these, not placeholders:
- *  a placeholder holds no process and so no memory. */
-const realizedPaneCount = computed(() => panes.value.filter((p) => p.realized).length)
-
-const memoryRows = computed<MemoryPaneRow[]>(() => {
-  const reclaimable = new Set(reclaimableNowIds.value)
-  return panes.value
-    .filter((p) => p.realized)
-    .map((p) => ({
-      paneId: p.id,
-      title: p.customName || p.autoName || p.agentLabel,
-      // Keyed by terminal session first: that id is the one this window holds
-      // for its own PTY, so it cannot drift the way a pane id can when a pane
-      // is rebuilt around a new one. The pane id is the fallback for a pane
-      // whose ref is not mounted at this moment.
-      bytes: memoryBytesBySession.value.get(
-        (paneRefs[p.id]?.sessionId as unknown as string) ?? ''
-      ) ?? memoryBytesByPane.value.get(p.id) ?? 0,
-      reclaimable: reclaimable.has(p.id),
-    }))
-})
-
-async function refreshMemoryUsage(): Promise<void> {
-  memoryMeasured.value = false
-  const reply = await sendQuiet<{
-    available?: boolean
-    panes?: Array<{ pane_id?: string; terminal_session_id?: string; bytes?: number }>
-  }>('terminal.memory_usage', {})
-  if (!reply) {
-    // The backend could not answer at all. Sizes stay hidden rather than shown
-    // as zero, which would read as "these panes are free".
-    memoryAvailable.value = false
-    memoryMeasured.value = true
-    return
-  }
-  memoryAvailable.value = reply.available !== false
-  const byPane = new Map<string, number>()
-  const bySession = new Map<string, number>()
-  for (const row of reply.panes ?? []) {
-    const bytes = Number(row.bytes) || 0
-    if (row.pane_id) byPane.set(row.pane_id, bytes)
-    if (row.terminal_session_id) bySession.set(row.terminal_session_id, bytes)
-  }
-  memoryBytesByPane.value = byPane
-  memoryBytesBySession.value = bySession
-  memoryMeasured.value = true
-}
-
-function toggleMemoryPanel(): void {
-  const opening = openPopover.value !== 'memory'
-  togglePopover('memory')
-  if (opening) void refreshMemoryUsage()
-}
-
-async function onMemoryReclaim(): Promise<void> {
+async function onResourceReclaim(): Promise<void> {
   const reclaimed = await reclaimPanesNow()
   // Re-measured rather than closed: the point of the panel is to show the
-  // machine getting its memory back, and the rows that are left are the answer
-  // to "what is still holding it".
-  if (reclaimed > 0) void refreshMemoryUsage()
+  // machine getting its resources back, and the rows that are left are the
+  // answer to "what is still holding them".
+  if (reclaimed > 0) void resourceUsage.refresh()
+}
+
+function onOpenResourceWindow(): void {
+  closePopover()
+  void window.agentTeam?.openResourcesWindow?.({ workspace_path: currentWorkspace.value })
 }
 
 // Pane right-click context menu, shared by the agent list, spotlight thumbnails,
@@ -13889,25 +13920,14 @@ function paneIsCommander(p: ActivePane): boolean {
         </span>
         <span
           v-if="panes.length > 0"
-          class="sb-item sb-agents sb-clickable"
+          class="sb-item sb-resource sb-clickable"
           role="button"
           tabindex="0"
-          :title="$t('agentOverview.title')"
-          @click="togglePopover('agents')"
-          @keydown.enter="togglePopover('agents')"
+          :title="$t('resource.statusbar-title')"
+          @click="togglePopover('resource')"
+          @keydown.enter="togglePopover('resource')"
         >
-          {{ panes.length }} agent{{ panes.length !== 1 ? 's' : '' }}
-        </span>
-        <span
-          v-if="realizedPaneCount > 0"
-          class="sb-item sb-memory sb-clickable"
-          role="button"
-          tabindex="0"
-          :title="$t('memory.statusbar-title')"
-          @click="toggleMemoryPanel()"
-          @keydown.enter="toggleMemoryPanel()"
-        >
-          ▤ {{ realizedPaneCount }}<template v-if="reclaimableNowIds.length > 0"> · ♻ {{ reclaimableNowIds.length }}</template>
+          {{ resourcePillText }}
         </span>
         <span
           v-if="backfill.active"
@@ -14005,22 +14025,21 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="closePopover()"
     />
 
-    <!-- Agent overview popover -->
-    <AgentOverviewPanel
-      v-if="openPopover === 'agents'"
-      :rows="agentOverviewRows"
+    <!-- Resource summary popover (CPU + memory + reclaim) -->
+    <ResourceSummaryPanel
+      v-if="openPopover === 'resource'"
+      :rows="resourceRows"
+      :measured="resourceUsage.measured.value"
+      :available="resourceUsage.available.value"
+      :cpu-available="resourceUsage.cpuAvailable.value"
+      :cpu-share="resourceCpuShare"
+      :memory-share="resourceMemoryShare"
+      :total-bytes="resourceTotals.bytes"
+      :total-cpu-percent="resourceTotals.cpu"
       @close="closePopover()"
-      @jump="onAgentOverviewJump"
-    />
-    <!-- Memory popover -->
-    <MemoryPanel
-      v-if="openPopover === 'memory'"
-      :rows="memoryRows"
-      :measured="memoryMeasured"
-      :available="memoryAvailable"
-      @close="closePopover()"
-      @reclaim="() => void onMemoryReclaim()"
-      @jump="onAgentOverviewJump"
+      @reclaim="() => void onResourceReclaim()"
+      @jump="onResourceJump"
+      @open-window="onOpenResourceWindow"
     />
   </div>
 </template>
@@ -14326,10 +14345,10 @@ function paneIsCommander(p: ActivePane): boolean {
 .sb-pipeline.sb-running { color: var(--accent-fg); }
 .sb-pipeline.sb-completed { color: var(--success-fg); }
 .sb-pipeline.sb-aborted { color: var(--danger-fg); }
-.sb-agents { color: var(--text-secondary); }
+
 /* Same weight as the agent count beside it — this is an ambient reading, not
    an alert, even when it is offering something to reclaim. */
-.sb-memory { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.sb-resource { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .sb-backfill { color: var(--text-secondary); opacity: 0.85; }
 .sb-update-available .sb-dot { background: var(--accent-fg); }
 .sb-update-downloading .sb-dot { background: var(--attention-fg); }

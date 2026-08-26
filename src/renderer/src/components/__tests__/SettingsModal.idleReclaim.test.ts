@@ -63,10 +63,6 @@ describe('Settings › General reclaim rows', () => {
       'settings.general.idle-reclaim-now-action',
       'settings.general.idle-reclaim-now-action-empty',
       'pane.terminal.idle-reclaimed',
-      'memory.title',
-      'memory.statusbar-title',
-      'memory.reclaim-action',
-      'memory.unavailable',
     ]) {
       expect(t(key), `${key} missing in ${locale}`).not.toBe(key)
     }

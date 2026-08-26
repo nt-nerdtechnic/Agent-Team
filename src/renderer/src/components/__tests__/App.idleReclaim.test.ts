@@ -93,27 +93,32 @@ describe('idle reclaim wiring', () => {
   // The measurement shells out to footprint, whose cost scales with the pane
   // count — on a timer it would be a tax paid forever for a panel nobody has
   // open.
-  it('measures memory only when the panel is opened', () => {
-    const fn = block('function toggleMemoryPanel(', 'async function onMemoryReclaim(')
-    expect(fn).toContain("const opening = openPopover.value !== 'memory'")
-    expect(fn).toContain('if (opening) void refreshMemoryUsage()')
-    expect(appSource).not.toContain('setInterval(() => { void refreshMemoryUsage() }')
+  // The cadence itself is useResourceUsage's (and tested there); what has to be
+  // true here is that App.vue hands it the two inputs that pick the cadence —
+  // the realized pane count and whether the panel is open — rather than a
+  // constant that would leave the loop running over an empty machine.
+  it('drives the sampling loop from the pane count and the open panel', () => {
+    const fn = block('const resourceUsage = useResourceUsage({', 'const resourceRows = computed<')
+    expect(fn).toContain("sendQuiet<ResourceUsageWire>('terminal.resource_usage', {})")
+    expect(fn).toContain('paneCount: realizedPaneCount')
+    expect(fn).toContain('panelOpen: resourcePanelOpen')
   })
 
   // A pane rebuilt around a new PTY gets a new pane id, and the backend still
   // reports the session it created the PTY under. The session id is the key
   // this window holds itself, so it cannot drift the same way.
   it('keys measurements by terminal session id, with pane id as the fallback', () => {
-    const fn = block('const memoryRows = computed<MemoryPaneRow[]>', 'async function refreshMemoryUsage(')
-    expect(fn).toContain('memoryBytesBySession.value.get(')
-    expect(fn).toContain('?? memoryBytesByPane.value.get(p.id) ?? 0')
+    const fn = block('const resourceRows = computed<ResourceSummaryRow[]>', 'const resourcePillText = computed(')
+    expect(fn).toContain('const sessionKey = (paneRefs[p.id]?.sessionId as unknown as string) ?? \'\'')
+    expect(fn).toContain('bytesByKey.has(sessionKey) || cpuByKey.has(sessionKey) ? sessionKey : p.id')
   })
 
-  // Showing an unmeasured pane as 0 bytes reads as "this one is free", which is
-  // the opposite of what a failed sweep means.
-  it('marks memory unavailable rather than zero when the backend cannot answer', () => {
-    const fn = block('async function refreshMemoryUsage(', 'function toggleMemoryPanel(')
-    expect(fn).toContain('memoryAvailable.value = false')
+  // Reclaiming from the panel re-measures rather than closing it: the point is
+  // to watch the machine get its resources back.
+  it('re-measures after an explicit reclaim from the panel', () => {
+    const fn = block('async function onResourceReclaim(', 'function onOpenResourceWindow(')
+    expect(fn).toContain('await reclaimPanesNow()')
+    expect(fn).toContain('void resourceUsage.refresh()')
   })
 
   // The timed sweep is housekeeping the user did not ask for, so it logs rather

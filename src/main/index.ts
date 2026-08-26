@@ -37,6 +37,12 @@ import {
   type CliPaneBufferResult
 } from './cli-buffer-relay'
 import {
+  PaneActionRelay,
+  PANE_ACTION_REPLY_CHANNEL,
+  type PaneActionKind,
+  type PaneActionResult
+} from './pane-action-relay'
+import {
   hitTestWindows,
   selectDropCandidates,
   PANE_DRAG_END_CHANNEL,
@@ -1691,6 +1697,48 @@ function openPlanWindow(workspacePath: string, relPath?: string): void {
   })
 }
 
+// Resource Manager: one window for the whole app, not one per workspace. It
+// reports on the machine — every CLI this app is running, wherever it was
+// started from — so a second copy would show the same rows twice.
+let resourceWindow: BrowserWindow | null = null
+
+function openResourceWindow(workspacePath: string): void {
+  if (resourceWindow && !resourceWindow.isDestroyed()) {
+    if (resourceWindow.isMinimized()) resourceWindow.restore()
+    resourceWindow.show()
+    resourceWindow.focus()
+    return
+  }
+  const win = new BrowserWindow({
+    width: 760,
+    height: 620,
+    minWidth: 520,
+    minHeight: 360,
+    title: 'Resource Manager',
+    backgroundColor: '#0d1117',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      // The window samples on a two-second interval while it is open; throttling
+      // a background window would silently stretch that into a wrong figure,
+      // because the percentage is a delta over the interval.
+      backgroundThrottling: false
+    }
+  })
+  resourceWindow = win
+  win.on('closed', () => {
+    if (resourceWindow === win) resourceWindow = null
+  })
+  loadWindow(win, { window: 'resources', workspace_path: workspacePath })
+}
+
+ipcMain.handle('window:openResources', (_event, args: { workspace_path?: string }) => {
+  openResourceWindow((args?.workspace_path ?? '').trim())
+  return { ok: true }
+})
+
 ipcMain.handle('window:openPlans', (_event, args: { workspace_path?: string; rel_path?: string }) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }
@@ -1768,6 +1816,36 @@ ipcMain.handle('cli:get-pane-buffer', (_event, paneId: string): Promise<CliPaneB
   const targets = [...mainWindows].filter((w) => !w.isDestroyed()).map((w) => w.webContents)
   return cliBufferRelay.request(targets, String(paneId ?? ''))
 })
+
+// Resource Manager row actions. The window is machine-wide, so the pane it
+// names may belong to any main window; the relay asks them all and takes the
+// answer from whichever one owns it (see pane-action-relay.ts).
+const paneActionRelay = new PaneActionRelay()
+
+ipcMain.on(PANE_ACTION_REPLY_CHANNEL, (event, requestId: string, result: PaneActionResult) => {
+  // A jump only reveals the pane inside its window; bringing that window to the
+  // front is main's job, and the sender is the window that claimed the pane.
+  if (result?.focused) {
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    if (owner && !owner.isDestroyed()) {
+      if (owner.isMinimized()) owner.restore()
+      owner.show()
+      owner.focus()
+    }
+  }
+  paneActionRelay.handleReply(requestId, result)
+})
+
+ipcMain.handle(
+  'pane:action',
+  (_event, args: { paneId?: string; action?: PaneActionKind }): Promise<PaneActionResult> => {
+    const paneId = String(args?.paneId ?? '')
+    if (!paneId) return Promise.resolve({ error: 'not-found' })
+    const action: PaneActionKind = args?.action === 'reclaim' ? 'reclaim' : 'focus'
+    const targets = [...mainWindows].filter((w) => !w.isDestroyed()).map((w) => w.webContents)
+    return paneActionRelay.request(targets, paneId, action)
+  }
+)
 
 // Cross-window pane drop fallback. Same-app cross-window drops that land on
 // an accepting drop target are delivered directly by Chromium and handled
@@ -2567,6 +2645,9 @@ app.whenReady().then(async () => {
     onOpenRecent: (path: string) => sendMenuAction('open-recent:' + path),
     onNewWindow: () => void createWindow(),
     onOpenPipelineManager: () => requestPipelineManager(),
+    // Machine-wide, so the menu opens it without a workspace: the window lists
+    // every CLI this app is running, whichever folder each was started from.
+    onOpenResourceManager: () => openResourceWindow(''),
     onOpenRepo: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide'),
     onReportIssue: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide/issues'),
     onShowShortcuts: () => sendMenuAction('show-shortcuts'),

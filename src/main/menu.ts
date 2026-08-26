@@ -60,6 +60,8 @@ export interface AppMenuHooks {
   onNewWindow?: () => void
   /** Window menu: ask the main window to open the Pipeline Manager modal. */
   onOpenPipelineManager?: () => void
+  /** Window menu: open the Resource Manager window (CPU + memory per CLI). */
+  onOpenResourceManager?: () => void
   /** Help menu: open the Navide GitHub repo. */
   onOpenRepo?: () => void
   /** Help menu: open the GitHub issues page. */
@@ -301,6 +303,7 @@ export function installApplicationMenu(
       label: 'Window',
       submenu: [
         { label: 'Pipeline Manager', click: () => hooks.onOpenPipelineManager?.() },
+        { label: 'Resource Manager', click: () => hooks.onOpenResourceManager?.() },
         { type: 'separator' },
         { role: 'minimize' },
         // macOS "zoom" = maximize the window frame. Unrelated to content zoom,
