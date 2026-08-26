@@ -1141,7 +1141,7 @@ async function copyLogText(): Promise<void> {
 }
 .agent-history-row.selected {
   background: var(--bg-selected);
-  box-shadow: inset 2px 0 0 var(--accent-fg);
+  box-shadow: inset 2px 0 0 var(--accent-focus);
 }
 .ah-dot {
   flex-shrink: 0;

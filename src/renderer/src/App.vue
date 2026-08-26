@@ -14139,8 +14139,8 @@ function paneIsCommander(p: ActivePane): boolean {
 .titlebar-gear {
   -webkit-app-region: no-drag;
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   display: flex;
   align-items: center;
   justify-content: center;

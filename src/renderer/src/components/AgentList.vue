@@ -206,8 +206,8 @@ button.history-btn {
   color: var(--text-secondary);
   font-size: var(--font-md);
   padding: 0;
-  width: 32px;
-  height: 32px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   border-radius: 4px;
   cursor: pointer;
   display: inline-flex;
@@ -297,8 +297,8 @@ button.icon-btn:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 18px;
-  width: 18px;
+  height: var(--icon-btn-sm);
+  width: var(--icon-btn-sm);
 }
 .agent-close-btn:hover {
   color: var(--danger-fg);

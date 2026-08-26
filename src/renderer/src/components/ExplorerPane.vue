@@ -834,8 +834,8 @@ defineExpose({ revealFile, focusTree })
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   border: none;
   border-radius: 4px;
   background: transparent;

@@ -386,7 +386,7 @@ function cellClass(cell: SideRow['left']): string {
 .bdp-file-ic { color: var(--text-muted); flex-shrink: 0; }
 .bdp-open-btn {
   display: flex; align-items: center; justify-content: center;
-  width: 20px; height: 20px; flex-shrink: 0;
+  width: var(--icon-btn-sm); height: var(--icon-btn-sm); flex-shrink: 0;
   background: transparent; border: none; border-radius: 4px;
   color: var(--text-muted); cursor: pointer; padding: 0;
   opacity: 0; transition: opacity 0.1s;

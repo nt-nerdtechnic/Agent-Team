@@ -512,12 +512,12 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   flex-shrink: 0;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 15px;
   line-height: 1;
-  transition: color 0.15s, background 0.15s;
+  transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .collapse:hover { color: var(--text-primary); background: var(--bg-elevated); }
 .title {
@@ -549,10 +549,10 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   flex-shrink: 0;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .tab:hover { color: var(--text-primary); background: var(--bg-elevated); }
 .tab.active {

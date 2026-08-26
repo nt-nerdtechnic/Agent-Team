@@ -4265,7 +4265,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   padding: 6px 12px; font-size: var(--font-xs); color: var(--text-secondary); cursor: pointer;
 }
 .p2p-tab:hover:not(:disabled) { color: var(--text-bright); }
-.p2p-tab.on { color: var(--text-bright); border-bottom-color: var(--accent-emphasis); font-weight: 500; }
+.p2p-tab.on { color: var(--text-bright); border-bottom-color: var(--accent-focus); font-weight: 500; }
 .p2p-tab:disabled { opacity: 0.5; cursor: default; }
 .p2p-account { margin-top: 12px; }
 .p2p-account-row {

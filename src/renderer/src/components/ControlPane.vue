@@ -2507,8 +2507,8 @@ button.history-btn {
   color: var(--text-secondary);
   font-size: var(--font-md);
   padding: 0;
-  width: 32px;
-  height: 32px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   border-radius: var(--radius-xs);
   cursor: pointer;
   display: inline-flex;
@@ -2516,8 +2516,8 @@ button.history-btn {
   justify-content: center;
 }
 button.agent-rebuild-all-btn {
-  width: 32px;
-  height: 32px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -3110,8 +3110,8 @@ button.icon-btn.muted:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: var(--icon-btn-sm);
+  height: var(--icon-btn-sm);
   padding: 0;
   border: none;
   background: none;
@@ -3420,8 +3420,8 @@ button.icon-btn.muted:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 18px;
-  width: 18px;
+  height: var(--icon-btn-sm);
+  width: var(--icon-btn-sm);
 }
 .agent-minimize-btn:hover {
   color: var(--text-primary);
@@ -3429,8 +3429,8 @@ button.icon-btn.muted:hover {
 }
 .agent-rebuild-btn {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: var(--icon-btn-sm);
+  height: var(--icon-btn-sm);
   padding: 2px;
   color: var(--text-secondary);
   display: inline-flex;

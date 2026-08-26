@@ -2536,7 +2536,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   border-radius: 0;
 }
 .ide-act-btn:hover { color: var(--text-bright); }
-.ide-act-btn.active { color: var(--text-bright); border-left-color: var(--accent-emphasis); }
+.ide-act-btn.active { color: var(--text-bright); border-left-color: var(--accent-focus); }
 .ide-act-btn { position: relative; }
 .ide-act-badge {
   position: absolute;
@@ -2595,7 +2595,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   border-bottom: 1px solid var(--border-muted);
   flex-shrink: 0;
 }
-.group-active .ide-tab-bar { border-bottom: 2px solid var(--accent-emphasis); }
+.group-active .ide-tab-bar { border-bottom: 2px solid var(--accent-focus); }
 .ide-tabs {
   display: flex;
   align-items: stretch;
