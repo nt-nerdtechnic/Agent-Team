@@ -1310,7 +1310,6 @@ ipcMain.handle('workspace:focusExisting', (event, workspacePath: string) => {
   return true
 })
 
-// The sidebar's ＋ on another workspace's heading. That workspace's agents and
 // ── Crash-restore prompt (see window-registry.ts) ────────────────────────────
 // The first window to ask claims the banner; apply/dismiss both clear it.
 ipcMain.handle('restore:getPending', () => {

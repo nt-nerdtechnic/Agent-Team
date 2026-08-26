@@ -73,12 +73,14 @@ export interface PaneLineageRow {
   collapsed: boolean
 }
 
-/** One workspace section of the sidebar.
+/** One workspace section of the sidebar — one this window holds, with real
+ *  panes, live status, lineage and every per-pane control.
  *
- *  `isCurrent` marks the one this window owns: only that section has real
- *  panes with live status, lineage and every per-pane control. The others are
- *  registry rows — enough to see that work is running elsewhere and to jump to
- *  it, and nothing more. */
+ *  `isCurrent` is true for all of them now. It used to separate these from
+ *  read-only rows describing what OTHER windows were running; those are gone,
+ *  because a window is its own space. The field stays as the answer to "does
+ *  this window have terminals for these panes", which is what the consumers
+ *  actually ask. */
 export interface WorkspaceGroupRow {
   path: string
   label: string
@@ -960,11 +962,14 @@ const addMenuWorkspace = ref<string>('')
 // ── Right-click on a workspace heading ───────────────────────────────────
 const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | null>(null)
 
-/** `canClose` is the answer to "would closing this do anything?", not "is this
- *  the primary?". Only a workspace THIS window adopted can be closed here: the
- *  primary is what the window was opened with, and another window's is that
- *  window's to close. Offering it on those two produced a menu item that
- *  silently did nothing. */
+/** `canClose` is the answer to "would closing this do anything?".
+ *
+ *  Only a workspace that is NOT the one on screen: closing what you are looking
+ *  at would leave the window showing a project it no longer holds. Offering it
+ *  there produced a menu item that silently did nothing.
+ *
+ *  Note it is the one on screen, not the one the window was opened with — the
+ *  primary can be closed from here once you have switched away from it. */
 // Drag-out: dragging a workspace heading and releasing OUTSIDE this window
 // gives that workspace its own window. Deliberately the same gesture as a stage
 // tab in StageTabBar — both mean "pull this out of here", so both are a drag to
@@ -1094,9 +1099,11 @@ const terminalSpec = computed(() => props.agentSpecs.find((s) => s.agentKey === 
  *  role select above would look like it applied.
  */
 function openTerminalFromMenu(): void {
-  if (!canSpawn.value) return
+  // Menu first, like spawnAs: a click that turns out to be a no-op still
+  // dismisses the menu, rather than leaving it open with nothing happening.
   const ws = addMenuWorkspace.value || workspacePath.value
   addMenuOpen.value = false
+  if (!canSpawn.value) return
   emit('spawn', { agentKey: 'terminal', roleKey: '', stageId: '', workspacePath: ws })
 }
 

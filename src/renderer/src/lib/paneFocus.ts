@@ -43,8 +43,12 @@ export interface SidebarSection {
  *
  *  Shift-range selection walks this. It used to walk the flat spawn order,
  *  which stopped matching the moment the list gained indentation and stopped
- *  matching further once it gained workspace sections. Rows from other windows
- *  are skipped — this window has no terminal for those panes.
+ *  matching further once it gained workspace sections.
+ *
+ *  The isCurrent guard below is defensive: the sidebar now lists only
+ *  workspaces this window holds, so every section passes it. It stays because
+ *  a section this window has no terminal for must never be swept into a range,
+ *  and that is a property of the type, not of who builds it today.
  */
 export function flattenSidebarOrder(sections: readonly SidebarSection[]): string[] {
   const out: string[] = []

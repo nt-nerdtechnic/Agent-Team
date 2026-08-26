@@ -48,7 +48,7 @@ export function workspaceParentPath(path: string, homeDir: string): string {
   return collapseHomePath(trimmed.slice(0, cut), homeDir)
 }
 
-/** The sidebar's outer layer: one row per workspace, in three bands.
+/** The sidebar's outer layer: one row per workspace this window holds.
  *
  *  STRUCTURE ONLY — ids, paths and counts. Nothing here reads live pane status,
  *  so the 400ms status sync does not rebuild it; the list renders these rows
