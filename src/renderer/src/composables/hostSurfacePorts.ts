@@ -1,4 +1,4 @@
-import type { GitTransport } from '../../../../packages/features/git/src'
+import type { GitTransport } from '@navide/git-feature'
 import type { useBackend } from './useBackend'
 import type {
   ConflictStages,
@@ -10,6 +10,7 @@ import type { Issue, IssueDetail, IssueProviderInfo } from './useIssues'
 import type {
   GitBranchDiffPort,
   GitAccountPort,
+  GitCredential,
   GitCredentialPort,
   GitFileAccessPort,
   GitFileReadResult,
@@ -148,7 +149,7 @@ type HostAgentTeam = {
     diff: string
     error?: string
   }>
-  gitAccounts?: { getCredential?: (workspacePath: string) => Promise<{ ok?: boolean; credential?: { username: string; token: string } | null }> }
+  gitAccounts?: { getCredential?: (workspacePath: string) => Promise<{ ok?: boolean; credential?: GitCredential | null }> }
 }
 
 function hostAgentTeam(): HostAgentTeam | undefined {
@@ -180,7 +181,7 @@ export function createHostGitBranchDiffPort(backend: HostBackend): GitBranchDiff
 
 export function createHostGitCredentialPort(): GitCredentialPort {
   return {
-    async getCredential(workspacePath: string): Promise<{ username: string; token: string } | null> {
+    async getCredential(workspacePath: string): Promise<GitCredential | null> {
       try {
         const result = await hostAgentTeam()?.gitAccounts?.getCredential?.(workspacePath)
         return result?.ok && result.credential ? result.credential : null

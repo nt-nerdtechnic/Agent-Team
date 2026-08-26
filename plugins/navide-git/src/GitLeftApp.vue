@@ -1,19 +1,18 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { useBackend } from './capabilityBackend'
 import MultiRepoGit from './components/MultiRepoGit.vue'
 import { onSettingsChanged, settingsGet } from '@navide/shared'
-import type { GitSurfacePorts } from './ports/gitSurface'
+import type { GitSurfacePorts, LegacyRepoSelectionPort } from './ports/gitSurface'
 import type { GitContributionState } from './ports/gitContribution'
 import type { PluginGitContributionHostPort } from './pluginSurfacePorts'
 
 const props = defineProps<{
   surfacePorts: GitSurfacePorts
   hostPort: PluginGitContributionHostPort
+  legacyRepoSelection: LegacyRepoSelectionPort
 }>()
 
 const workspacePath = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
-const backend = useBackend()
 const state = ref<GitContributionState>({
   workspacePath,
   analyzerModel: '',
@@ -55,14 +54,14 @@ async function dispatch(action: Parameters<PluginGitContributionHostPort['dispat
 <template>
   <MultiRepoGit
     :workspace-path="workspacePath"
-    :backend="backend"
+    :legacy-repo-selection="legacyRepoSelection"
     :surface-ports="surfacePorts"
     :analyzer-model="analyzerModel"
     :dispatch-targets="state.dispatchTargets"
     :available-agents="state.availableAgents"
     :issue-handoffs="state.issueHandoffs"
     @changes-count="dispatch({ operation: 'changes_count', count: $event })"
-    @open-workspace="dispatch({ operation: 'open_workspace', path: $event })"
+    @open-workspace="dispatch({ operation: 'open_workspace', path: $event.path, grant: $event.grant })"
     @open-file="dispatch({ operation: 'open_file', payload: $event })"
     @open-conflict="dispatch({ operation: 'open_conflict', payload: $event })"
     @open-diff="dispatch({ operation: 'open_diff', payload: $event })"

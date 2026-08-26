@@ -19,7 +19,8 @@
       "@navide/terminal": ["packages/features/terminal/src/index.ts"],
       "@navide/terminal/testing": ["packages/features/terminal/src/testing.ts"],
       "@navide/plugin-shell": ["packages/features/plugin-shell/src/index.ts"],
-      "@navide/git-feature": ["packages/features/git/src/index.ts"]
+      "@navide/git-feature": ["packages/features/git/src/index.ts"],
+      "@navide/git-feature/testing": ["packages/features/git/src/testing.ts"]
     }
   },
   "include": [

@@ -5,14 +5,18 @@ import { describe, expect, it } from 'vitest'
 import { GIT_EVENT_TYPES, GIT_REQUEST_TYPES } from '../gitTransport'
 
 const repositoryRoot = fileURLToPath(new URL('../../../../../', import.meta.url))
-const legacyRendererRoot = join(repositoryRoot, 'src/renderer/src')
+const gitConsumerRoots = [
+  join(repositoryRoot, 'src/renderer/src'),
+  join(repositoryRoot, 'src/renderer/plugins/git'),
+  join(repositoryRoot, 'plugins/navide-git/src'),
+]
 
-function collectLegacyRendererSources(directory: string): string[] {
+function collectGitConsumerSources(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true })
     .flatMap((entry) => {
       if (entry.isDirectory() && entry.name === '__tests__') return []
       const entryPath = join(directory, entry.name)
-      if (entry.isDirectory()) return collectLegacyRendererSources(entryPath)
+      if (entry.isDirectory()) return collectGitConsumerSources(entryPath)
       if (
         !entry.isFile()
         || !/\.(ts|vue)$/.test(entry.name)
@@ -25,7 +29,7 @@ function collectLegacyRendererSources(directory: string): string[] {
 
 function collectGitTypes(pattern: RegExp): string[] {
   const matches = new Set<string>()
-  for (const sourcePath of collectLegacyRendererSources(legacyRendererRoot)) {
+  for (const sourcePath of gitConsumerRoots.flatMap(collectGitConsumerSources)) {
     const source = readFileSync(sourcePath, 'utf8')
     pattern.lastIndex = 0
     for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
@@ -38,12 +42,12 @@ function collectGitTypes(pattern: RegExp): string[] {
 const requestCallPattern = /\b(?:send|runWrite)\s*(?:<[\s\S]*?>\s*)?\(\s*['"](git\.[a-z_]+)['"]/g
 const eventSubscriptionPattern = /\bon\s*\(\s*['"](git\.[a-z_]+)['"]/g
 
-describe('legacy Git transport inventory', () => {
-  it('matches every Git request issued by legacy renderer consumers', () => {
+describe('Git transport inventory', () => {
+  it('matches every Git request issued by v2 and legacy consumers', () => {
     expect(collectGitTypes(requestCallPattern)).toEqual([...GIT_REQUEST_TYPES].sort())
   })
 
-  it('matches every Git event subscribed by legacy renderer consumers', () => {
+  it('matches every Git event subscribed by v2 and legacy consumers', () => {
     expect(collectGitTypes(eventSubscriptionPattern)).toEqual([...GIT_EVENT_TYPES].sort())
   })
 })

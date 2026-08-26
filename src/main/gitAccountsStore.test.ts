@@ -60,10 +60,34 @@ describe('GitAccountsStore', () => {
     expect(store.getBinding('/Users/me/repo-a')).toBe(account.id)
     expect(store.getCredentialForWorkspace('/Users/me/repo-a')).toEqual({
       username: 'nt-nerdtechnic',
-      token: 'ghp_secret1234' // gitleaks:allow — fixture token, not a real credential
+      token: 'ghp_secret1234', // gitleaks:allow — fixture token, not a real credential
+      expectedHost: 'github.com',
     })
     // Unbound workspace → no credential, no throw.
     expect(store.getCredentialForWorkspace('/Users/me/repo-b')).toBeNull()
+  })
+
+  it('canonicalizes a bound account host and rejects non-host destinations', () => {
+    const store = new GitAccountsStore(file, fakeCrypto())
+    const account = store.add({
+      label: 'work',
+      host: 'GITHUB.COM',
+      username: 'u',
+      token: 'tok-host',
+    })
+    expect(account.host).toBe('github.com')
+
+    for (const host of [
+      '',
+      'https://github.com',
+      'alice@github.com',
+      'github.com/org/repo',
+      'github.com:443',
+      'github.com?query=value',
+      'github.com#fragment',
+    ]) {
+      expect(() => store.add({ label: 'bad', host, username: 'u', token: 'tok-host' })).toThrow()
+    }
   })
 
   it('normalizes trailing-slash workspace paths to the same binding', () => {

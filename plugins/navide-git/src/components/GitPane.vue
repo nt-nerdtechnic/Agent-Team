@@ -1,3 +1,8 @@
+<script lang="ts">
+// Module scope is shared by every pane in this renderer document.
+let nextMenuOwnerId = 0
+</script>
+
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -40,14 +45,13 @@ const props = defineProps<{
 }>()
 
 const paneRoot = ref<HTMLElement | null>(null)
-let nextMenuOwnerId = 0
 const menuOwnerId = `git-pane-${++nextMenuOwnerId}`
 const openMenuOwners = new Set<string>()
 let activeMenuOwnerId: string | null = null
 
 const emit = defineEmits<{
   (e: 'changes-count', n: number): void
-  (e: 'open-workspace', path: string): void
+  (e: 'open-workspace', picked: { path: string; grant: string }): void
   (e: 'open-file', payload: { filepath: string; name: string }): void
   (e: 'open-conflict', payload: { filepath: string; name: string }): void
   (e: 'open-diff', payload: { filepath: string; staged: boolean; name: string; commit?: string }): void
@@ -436,31 +440,39 @@ async function doInitInFolder(): Promise<void> {
   initError.value = ''
   const picked = await props.ui.pickWorkspace(props.workspacePath || undefined)
   if (!picked) return
-  const r = await initRepo(true, picked)
+  const r = await initRepo(true, picked.path)
   if (!r.ok) { initError.value = r.error || 'git init failed'; return }
   emit('open-workspace', picked)
 }
 
+async function openPickedWorkspace(defaultPath: string): Promise<void> {
+  const picked = await props.ui.pickWorkspace(defaultPath)
+  if (picked) emit('open-workspace', picked)
+}
+
 // ── clone ───────────────────────────────────────────────────────────────────────
-const cloneUrl = ref(''), cloneParent = ref(''), cloning = ref(false), cloneError = ref('')
+const cloneUrl = ref(''), cloneParent = ref(''), cloneParentGrant = ref(''), cloning = ref(false), cloneError = ref('')
 function repoNameFromUrl(url: string): string {
   const seg = url.trim().replace(/\.git$/, '').replace(/\/+$/, '').split(/[/:]/).at(-1)
   return seg || 'repo'
 }
 async function pickCloneDir(): Promise<void> {
   const picked = await props.ui.pickWorkspace(cloneParent.value || undefined)
-  if (picked) cloneParent.value = picked
+  if (picked) {
+    cloneParent.value = picked.path
+    cloneParentGrant.value = picked.grant
+  }
 }
 async function doClone(): Promise<void> {
   cloneError.value = ''
   if (!cloneUrl.value.trim()) { cloneError.value = 'Enter repository URL'; return }
-  if (!cloneParent.value.trim()) { cloneError.value = 'Select a target folder'; return }
+  if (!cloneParent.value.trim() || !cloneParentGrant.value) { cloneError.value = 'Select a target folder'; return }
   const target = `${cloneParent.value.replace(/\/+$/, '')}/${repoNameFromUrl(cloneUrl.value)}`
   cloning.value = true
   try {
-    const r = await cloneRepo(cloneUrl.value.trim(), target)
+    const r = await cloneRepo(cloneUrl.value.trim(), target, cloneParentGrant.value)
     if (!r.ok) { cloneError.value = r.error || 'Clone failed'; return }
-    if (r.path) emit('open-workspace', r.path)
+    if (r.path && r.openWorkspaceGrant) emit('open-workspace', { path: r.path, grant: r.openWorkspaceGrant })
   } finally {
     cloning.value = false
   }
@@ -1178,7 +1190,7 @@ async function doMoveWorktree(wt: GitWorktree): Promise<void> {
   worktreeError.value = ''
   worktreeBusy.value = wt.path
   try {
-    const r = await moveWorktree(wt.path, dest)
+    const r = await moveWorktree(wt.path, dest.path)
     if (!r.ok) worktreeError.value = r.error || t('label.worktree-move-failed')
   } finally {
     worktreeBusy.value = ''
@@ -1208,7 +1220,7 @@ async function doRepairWorktrees(): Promise<void> {
 }
 async function pickWorktreeDir(): Promise<void> {
   const picked = await props.ui.pickWorkspace(newWtPath.value || undefined)
-  if (picked) newWtPath.value = picked
+  if (picked) newWtPath.value = picked.path
 }
 
 // ── config ────────────────────────────────────────────────────────────────────
@@ -1612,7 +1624,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           v-for="repo in discoveredRepos"
           :key="repo.abs_path"
           class="repo-row"
-          @click="emit('open-workspace', repo.abs_path)"
+          @click="openPickedWorkspace(repo.abs_path)"
         >
           <svg class="repo-icon" width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M14.5 3H7.71l-.85-.85A.5.5 0 0 0 6.5 2h-5a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h13a.5.5 0 0 0 .5-.5v-10a.5.5 0 0 0-.5-.5z"/></svg>
           <span class="repo-path">{{ repo.rel_path }}</span>

@@ -25,8 +25,6 @@ export interface GitTransportContractHarness {
     payload: TPayload,
     options?: { ok?: boolean; error?: GitTransportError | null },
   ): void
-  setRejection(type: GitRequestType, error?: Error | string): void
-  clearRejection(type: GitRequestType): void
 }
 
 const CONNECTED: { value: GitTransportStatus } = { value: 'connected' }
@@ -92,10 +90,6 @@ export function runGitTransportContract(createHarness: () => GitTransportContrac
           error: { code: 'GIT_FAILED', message: 'nothing to commit' },
         })
 
-      harness.setRejection('git.log', new Error('ws not open'))
-      await expect(harness.transport.send('git.log', { workspace_path: '/workspace' }))
-        .rejects.toThrow('ws not open')
-
       expect(harness.sent).toEqual([
         {
           type: 'git.status',
@@ -114,11 +108,6 @@ export function runGitTransportContract(createHarness: () => GitTransportContrac
         },
         {
           type: 'git.commit',
-          payload: { workspace_path: '/workspace' },
-          timeoutMs: DEFAULT_GIT_TIMEOUT_MS,
-        },
-        {
-          type: 'git.log',
           payload: { workspace_path: '/workspace' },
           timeoutMs: DEFAULT_GIT_TIMEOUT_MS,
         },

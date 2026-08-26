@@ -185,6 +185,30 @@ Sessions should publish structured progress back to the Project Intelligence Lay
 
 See [Privacy and Data Flows](privacy.md) and [SECURITY.md](../../SECURITY.md).
 
+## Git v2 process boundary and recovery
+
+The production Git v2 package runs in an isolated plugin renderer. Its Git and
+Issue requests cross a narrow Host-owned bridge to Electron main and then the
+local backend; the package never receives a generic backend route, a terminal
+surface, or a Git credential.
+
+Git account credentials are bound by the Host to one canonical HTTPS hostname.
+The Host sends a credential only for that destination, and the backend asks
+again which HTTPS host Git is prompting for before it answers. Picker-selected
+paths use short-lived, per-instance, one-time Host grants. A clone grant permits
+only one safe direct child of the chosen directory; a successful clone creates
+the separate grant required to open its exact result as a workspace.
+
+Git events are routed by Host-owned workspace and instance identity, so one
+view cannot refresh another workspace. Plugin Storage owns Git preferences and
+the selected repository value; older project/local values are read-only runtime
+seeds and never replace a newer storage value.
+
+The normal startup descriptor is v2. Electron main may select the retained
+legacy descriptor only with `NAVIDE_GIT_RECOVERY=legacy`; that switch clears
+live v2 Git instances but leaves Plugin Storage snapshots and legacy seeds
+unchanged. This is a production recovery path, not a generic version lifecycle.
+
 ## Architectural direction
 
 Long-term architecture work must turn the current control plane and engineering surfaces into a complete AI-native engineering environment. It should not copy traditional IDE interfaces uncritically, but it must eventually cover the full professional workflow. The primary seams are:

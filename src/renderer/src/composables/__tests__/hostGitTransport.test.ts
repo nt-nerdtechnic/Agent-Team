@@ -7,12 +7,12 @@ import type {
   GitRequestType,
   GitTransport,
   GitTransportError,
-} from '../../../../../packages/features/git/src'
+} from '@navide/git-feature'
 import type {
   GitTransportContractHarness,
   GitTransportRequestRecord,
-} from '../../../../../packages/features/git/src/__tests__/gitTransport.contract'
-import { runGitTransportContract } from '../../../../../packages/features/git/src/__tests__/gitTransport.contract'
+} from '@navide/git-feature/testing'
+import { runGitTransportContract } from '@navide/git-feature/testing'
 
 interface HostHarness {
   backend: HostGitBackend
@@ -23,15 +23,12 @@ interface HostHarness {
     payload: TPayload,
     options?: { ok?: boolean; error?: GitTransportError | null },
   ): void
-  setRejection(type: GitRequestType, error?: Error | string): void
-  clearRejection(type: GitRequestType): void
 }
 
 function createHostHarness(): HostHarness {
   const status = ref<BackendStatus>('connected')
   const listeners = new Map<GitEventType, Set<(payload: unknown) => void>>()
   const responses = new Map<GitRequestType, WsResponse>()
-  const rejections = new Map<GitRequestType, Error>()
   const sent: GitTransportRequestRecord[] = []
 
   async function send<TPayload = unknown>(
@@ -42,8 +39,6 @@ function createHostHarness(): HostHarness {
     // The adapter must bind the feature contract's default instead of leaving
     // the effective deadline to an adapter-specific fallback.
     sent.push({ type: type as GitRequestType, payload, timeoutMs: timeoutMs ?? Number.NaN })
-    const rejection = rejections.get(type as GitRequestType)
-    if (rejection) throw rejection
     const response = responses.get(type as GitRequestType)
     return (response ?? {
       id: 'test-request',
@@ -93,16 +88,8 @@ function createHostHarness(): HostHarness {
     })
   }
 
-  function setRejection(type: GitRequestType, error: Error | string = 'ws not open'): void {
-    rejections.set(type, typeof error === 'string' ? new Error(error) : error)
-  }
-
-  function clearRejection(type: GitRequestType): void {
-    rejections.delete(type)
-  }
-
   const backend = { status, send, on } satisfies HostGitBackend
-  return { backend, sent, emit, setResponse, setRejection, clearRejection }
+  return { backend, sent, emit, setResponse }
 }
 
 function createContractHarness(): GitTransportContractHarness {
@@ -112,8 +99,6 @@ function createContractHarness(): GitTransportContractHarness {
     sent: harness.sent,
     emit: harness.emit,
     setResponse: harness.setResponse,
-    setRejection: harness.setRejection,
-    clearRejection: harness.clearRejection,
   }
 }
 
@@ -136,5 +121,18 @@ describe('Host Git WebSocket adapter', () => {
       error: null,
     })
     expect(harness.sent[0]?.timeoutMs).toBe(10_000)
+  })
+
+  it('normalizes a concrete backend rejection into the shared error envelope', async () => {
+    const harness = createHostHarness()
+    const backend: HostGitBackend = {
+      ...harness.backend,
+      send: async () => { throw new Error('socket closed') },
+    }
+    await expect(createHostGitTransport(backend).send('git.status')).resolves.toEqual({
+      ok: false,
+      payload: null,
+      error: { code: 'BACKEND_ERROR', message: 'socket closed' },
+    })
   })
 })

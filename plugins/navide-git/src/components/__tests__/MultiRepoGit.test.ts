@@ -33,17 +33,13 @@ function makeRepo(relPath: string, absPath: string, branch = 'main', dirtyCount 
   return { rel_path: relPath, abs_path: absPath, branch, badge: { branch, dirtyCount } }
 }
 
-/** Backend stub: project.peek returns the given project snapshot (null = no
- *  project.json yet); everything else acks with { ok: true }. */
-function makeBackend(project: { ui_git_tab_repo?: string } | null = null) {
-  const send = vi.fn(async (type: string) => {
-    if (type === 'project.peek') return { ok: true, payload: { project } }
-    return { ok: true, payload: { ok: true } }
-  })
-  return { backend: { send } as never, send }
+/** Composition seam for the read-only project.json compatibility seed. */
+function makeLegacyRepoSelection(value: string | null = null) {
+  const read = vi.fn(async () => value)
+  return { legacyRepoSelection: { readLegacyRepoSelection: read }, read }
 }
 
-const stubBackend = makeBackend().backend
+const stubLegacyRepoSelection = makeLegacyRepoSelection().legacyRepoSelection
 const stubSurfacePorts = {
   gitTransport: {
     status: { value: 'connected' },
@@ -74,7 +70,7 @@ describe('MultiRepoGit – single-repo passthrough', () => {
   it('renders a single GitPane stub and no tab bar when 0 repos discovered', () => {
     mockRepositories.value = []
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection: stubLegacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     expect(wrapper.find('.repo-tab-bar').exists()).toBe(false)
     // Shallow stub renders as <git-pane-stub> (or similar).
@@ -86,7 +82,7 @@ describe('MultiRepoGit – single-repo passthrough', () => {
   it('renders no tab bar when only 1 repo discovered', () => {
     mockRepositories.value = [makeRepo('.', '/ws', 'main')]
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection: stubLegacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     expect(wrapper.find('.repo-tab-bar').exists()).toBe(false)
   })
@@ -99,7 +95,7 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('sub', '/ws/sub', 'dev', 0),
     ]
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection: stubLegacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     expect(wrapper.find('.repo-tab-bar').exists()).toBe(true)
     expect(wrapper.findAll('.repo-tab')).toHaveLength(2)
@@ -111,7 +107,7 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('sub', '/ws/sub', 'dev'),
     ]
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection: stubLegacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     const tabs = wrapper.findAll('.repo-tab')
     expect(tabs[0].classes()).toContain('active')
@@ -124,7 +120,7 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('sub', '/ws/sub', 'dev', 0),
     ]
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection: stubLegacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     const firstTab = wrapper.findAll('.repo-tab')[0]
     expect(firstTab.find('.repo-tab-badge').exists()).toBe(true)
@@ -140,7 +136,7 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('sub', '/ws/sub', 'dev'),
     ]
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection: stubLegacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     const tabs = wrapper.findAll('.repo-tab')
     await tabs[1].trigger('click')
@@ -154,7 +150,7 @@ describe('MultiRepoGit – multi-repo tab bar', () => {
       makeRepo('pkg', '/ws/pkg', 'dev'),
     ]
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend: stubBackend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection: stubLegacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     const firstTabName = wrapper.findAll('.repo-tab-name')[0].text()
     // Our stub t() returns the key itself.
@@ -171,60 +167,59 @@ describe('MultiRepoGit – workspace Plugin Storage selection', () => {
   it('restores the workspace-scoped Plugin Storage selection', async () => {
     mockRepositories.value = TWO_REPOS
     seedSettings({ 'agentTeam.gitTabRepo': '/ws/sub' })
-    const { backend, send } = makeBackend({ ui_git_tab_repo: '/ws' })
+    const { legacyRepoSelection, read } = makeLegacyRepoSelection('/ws')
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     const tabs = wrapper.findAll('.repo-tab')
     expect(tabs[1].classes()).toContain('active')
-    expect(send).not.toHaveBeenCalledWith('project.peek', expect.anything())
+    expect(read).not.toHaveBeenCalled()
   })
 
   it('clicking a tab persists only the workspace Plugin Storage key', async () => {
     mockRepositories.value = TWO_REPOS
-    const { backend, send } = makeBackend()
+    const { legacyRepoSelection, read } = makeLegacyRepoSelection()
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     await wrapper.findAll('.repo-tab')[1].trigger('click')
     expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
-    expect(send).not.toHaveBeenCalledWith('project.set_ui_state', expect.anything())
+    expect(read).toHaveBeenCalledWith('/ws')
   })
 
   it('uses the legacy project field as a read-only seed', async () => {
     mockRepositories.value = TWO_REPOS
-    const { backend, send } = makeBackend({ ui_git_tab_repo: '/ws/sub' })
+    const { legacyRepoSelection, read } = makeLegacyRepoSelection('/ws/sub')
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     expect(wrapper.findAll('.repo-tab')[1].classes()).toContain('active')
     expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
-    expect(send).toHaveBeenCalledWith('project.peek', { workspace_path: '/ws' })
-    expect(send).not.toHaveBeenCalledWith('project.set_ui_state', expect.anything())
+    expect(read).toHaveBeenCalledWith('/ws')
   })
 
   it('uses a legacy localStorage seed without deleting or rewriting it', async () => {
     localStorage.setItem('agentTeam.gitTabRepo./ws', '/ws/sub')
     mockRepositories.value = TWO_REPOS
-    const { backend, send } = makeBackend()
+    const { legacyRepoSelection, read } = makeLegacyRepoSelection()
     mountMultiRepo({
-      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
     expect(localStorage.getItem('agentTeam.gitTabRepo./ws')).toBe('/ws/sub')
-    expect(send).not.toHaveBeenCalledWith('project.set_ui_state', expect.anything())
+    expect(read).toHaveBeenCalledWith('/ws')
   })
 
   it('keeps the legacy seed frozen after a later Plugin Storage selection', async () => {
     localStorage.setItem('agentTeam.gitTabRepo./ws', '/ws')
     mockRepositories.value = TWO_REPOS
-    const { backend } = makeBackend()
+    const { legacyRepoSelection } = makeLegacyRepoSelection()
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     await flushPromises()
     await wrapper.findAll('.repo-tab')[1].trigger('click')
@@ -235,17 +230,14 @@ describe('MultiRepoGit – workspace Plugin Storage selection', () => {
 
   it('does not let a late read-only legacy seed override a user click', async () => {
     mockRepositories.value = TWO_REPOS
-    let resolvePeek: (v: unknown) => void = () => {}
-    const send = vi.fn((type: string) => {
-      if (type === 'project.peek') return new Promise((r) => { resolvePeek = r })
-      return Promise.resolve({ ok: true, payload: { ok: true } })
-    })
+    let resolveSeed: (v: string | null) => void = () => {}
+    const legacyRepoSelection = { readLegacyRepoSelection: vi.fn(() => new Promise<string | null>((r) => { resolveSeed = r })) }
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend: { send } as never, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
     // User picks the root tab while the restore is still in flight.
     await wrapper.findAll('.repo-tab')[0].trigger('click')
-    resolvePeek({ ok: true, payload: { project: { ui_git_tab_repo: '/ws/sub' } } })
+    resolveSeed('/ws/sub')
     await flushPromises()
     expect(wrapper.findAll('.repo-tab')[0].classes()).toContain('active')
     expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws')
@@ -253,17 +245,14 @@ describe('MultiRepoGit – workspace Plugin Storage selection', () => {
 
   it('does not let a legacy seed overwrite a Plugin Storage value arriving during the read', async () => {
     mockRepositories.value = TWO_REPOS
-    let resolvePeek: (v: unknown) => void = () => {}
-    const send = vi.fn((type: string) => {
-      if (type === 'project.peek') return new Promise((resolve) => { resolvePeek = resolve })
-      return Promise.resolve({ ok: true, payload: { ok: true } })
-    })
+    let resolveSeed: (v: string | null) => void = () => {}
+    const legacyRepoSelection = { readLegacyRepoSelection: vi.fn(() => new Promise<string | null>((resolve) => { resolveSeed = resolve })) }
     const wrapper = mountMultiRepo({
-      props: { workspacePath: '/ws', backend: { send } as never, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+      props: { workspacePath: '/ws', legacyRepoSelection, surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     })
 
     seedSettings({ 'agentTeam.gitTabRepo': '/ws/sub' })
-    resolvePeek({ ok: true, payload: { project: { ui_git_tab_repo: '/ws' } } })
+    resolveSeed('/ws')
     await flushPromises()
 
     expect(wrapper.findAll('.repo-tab')[1].classes()).toContain('active')

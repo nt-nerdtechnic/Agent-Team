@@ -63,6 +63,132 @@ class TestCreateAskpassContext:
         finally:
             await cleanup()
 
+
+@pytest.mark.asyncio
+async def test_clone_and_fetch_only_prepare_a_pat_for_its_bound_https_host(monkeypatch, tmp_path):
+    credential = {
+        "username": "alice",
+        "token": "never-print-this-token",
+        "expected_host": "github.com",
+    }
+    rejected_clone = await git_service.clone_repo(
+        "https://gitlab.com/acme/repo.git", str(tmp_path / "clone"), credential=credential
+    )
+    assert rejected_clone == {
+        "ok": False,
+        "path": "",
+        "error": "credential destination rejected",
+    }
+    assert credential["token"] not in str(rejected_clone)
+
+    calls: list[tuple[list[str], dict | None]] = []
+
+    async def fake_run(argv, cwd, **_kwargs):
+        assert cwd == str(tmp_path)
+        if argv[:3] == ["git", "symbolic-ref", "--quiet"]:
+            return 0, "main\n", ""
+        if argv[:3] == ["git", "config", "--get"]:
+            return 0, "origin\n", ""
+        assert argv == ["git", "remote", "get-url", "origin"]
+        return 0, "https://github.com/acme/repo.git\n", ""
+
+    async def fake_run_with_timeout(argv, cwd, **kwargs):
+        calls.append((argv, kwargs.get("env")))
+        return 0, "updated", ""
+
+    monkeypatch.setattr(git_service, "_run", fake_run)
+    monkeypatch.setattr(git_service, "_run_with_timeout", fake_run_with_timeout)
+    matched_fetch = await git_service.fetch(str(tmp_path), credential=credential)
+    assert matched_fetch == {"ok": True, "output": "updated", "error": ""}
+    assert calls[0][0] == ["git", "-c", "credential.helper=", "fetch", "--prune"]
+    assert credential["token"] not in str(calls)
+
+    async def alternate_host_run(argv, cwd, **_kwargs):
+        if argv[:3] == ["git", "symbolic-ref", "--quiet"]:
+            return 0, "main\n", ""
+        if argv[:3] == ["git", "config", "--get"]:
+            return 0, "origin\n", ""
+        return 0, "https://git.example.test/acme/repo.git\n", ""
+
+    monkeypatch.setattr(git_service, "_run", alternate_host_run)
+    rejected_fetch = await git_service.fetch(str(tmp_path), credential=credential)
+    assert rejected_fetch == {"ok": False, "output": "", "error": "credential destination rejected"}
+    assert credential["token"] not in str(rejected_fetch)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "expected_argv"),
+    [
+        (git_service.fetch, ["git", "fetch", "--prune"]),
+        (git_service.pull_only, ["git", "pull"]),
+        (git_service.push_only, ["git", "push"]),
+    ],
+)
+async def test_bound_account_leaves_ssh_remote_to_git_authentication(
+    monkeypatch, tmp_path, operation, expected_argv
+):
+    credential = {"username": "alice", "token": "fixture-token", "expected_host": "github.com"}
+    calls: list[tuple[list[str], dict | None]] = []
+
+    async def fake_run(argv, _cwd, **_kwargs):
+        if argv[:3] == ["git", "symbolic-ref", "--quiet"]:
+            return 0, "main\n", ""
+        if argv[:3] == ["git", "config", "--get"]:
+            return 0, "origin\n", ""
+        assert argv[:3] == ["git", "remote", "get-url"]
+        return 0, "git@github.com:acme/repo.git\n", ""
+
+    async def fake_run_with_timeout(argv, _cwd, **kwargs):
+        calls.append((argv, kwargs.get("env")))
+        return 0, "updated", ""
+
+    monkeypatch.setattr(git_service, "_run", fake_run)
+    monkeypatch.setattr(git_service, "_run_with_timeout", fake_run_with_timeout)
+
+    result = await operation(str(tmp_path), credential=credential)
+
+    assert result == {"ok": True, "output": "updated", "error": ""}
+    assert calls == [(expected_argv, None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "expected_argv"),
+    [
+        (git_service.fetch, ["git", "fetch", "--prune"]),
+        (git_service.pull_only, ["git", "pull"]),
+        (git_service.push_only, ["git", "push"]),
+    ],
+)
+async def test_bound_account_without_a_remote_preserves_git_no_remote_failure(
+    monkeypatch, tmp_path, operation, expected_argv
+):
+    credential = {"username": "alice", "token": "fixture-token", "expected_host": "github.com"}
+    calls: list[tuple[list[str], dict | None]] = []
+
+    async def fake_run(argv, _cwd, **_kwargs):
+        if argv[:3] == ["git", "symbolic-ref", "--quiet"]:
+            return 0, "main\n", ""
+        if argv[:3] == ["git", "config", "--get"]:
+            return 0, "origin\n", ""
+        assert argv[:3] == ["git", "remote", "get-url"]
+        return 2, "", "fatal: No such remote 'origin'\n"
+
+    async def fake_run_with_timeout(argv, _cwd, **kwargs):
+        calls.append((argv, kwargs.get("env")))
+        return 128, "", "fatal: No such remote 'origin'\n"
+
+    monkeypatch.setattr(git_service, "_run", fake_run)
+    monkeypatch.setattr(git_service, "_run_with_timeout", fake_run_with_timeout)
+
+    result = await operation(str(tmp_path), credential=credential)
+
+    assert result == {"ok": False, "output": "fatal: No such remote 'origin'", "error": "fatal: No such remote 'origin'"}
+    assert calls == [(expected_argv, None)]
+
+
+class TestAskpassFailures:
     @pytest.mark.asyncio
     async def test_timeout_returns_null_value(self):
         async def on_request(request_id: str, prompt: str) -> None:
@@ -102,5 +228,34 @@ class TestCreateAskpassContext:
                 )
             await asyncio.sleep(0.05)
             assert called is False
+        finally:
+            await cleanup()
+
+    @pytest.mark.asyncio
+    async def test_expected_host_rejects_unknown_or_mismatched_prompt_destinations(self):
+        received: list[tuple[str, str]] = []
+
+        async def on_request(request_id: str, prompt: str) -> None:
+            received.append((request_id, prompt))
+
+        env, cleanup = await git_service.create_askpass_context(
+            on_request,
+            expected_host="github.com",
+        )
+        try:
+            loop = asyncio.get_running_loop()
+            for prompt in [
+                "Password for 'https://gitlab.com/acme/repo':",
+                "Password:",
+            ]:
+                response = await loop.run_in_executor(
+                    None,
+                    _send_request,
+                    int(env["NAVIDE_ASKPASS_PORT"]),
+                    env["NAVIDE_ASKPASS_TOKEN"],
+                    prompt,
+                )
+                assert response == {"value": None}
+            assert received == []
         finally:
             await cleanup()

@@ -5,7 +5,12 @@ import {
   GIT_USER_PREFERENCE_KEYS,
   GIT_WORKSPACE_REPOSITORY_KEY,
 } from '@navide/git-feature'
-import { createPluginGitSettingsPort, type PluginCapabilitySdk } from '../pluginSurfacePorts'
+import type { PortResponse } from '@navide/shared'
+import {
+  createPluginGitSettingsPort,
+  createPluginGitWorkspaceGrantPort,
+  type PluginCapabilitySdk,
+} from '../pluginSurfacePorts'
 
 const originalUrl = window.location.href
 
@@ -98,6 +103,33 @@ describe('navide.git v2 settings port', () => {
         type: 'storage.set',
         payload: { scope: 'workspace', key: 'agentTeam.gitTabRepo', value: '/workspace/sub' },
       },
+    ])
+  })
+})
+
+describe('navide.git workspace grant port', () => {
+  it('uses the private Host contribution bridge for picker provenance and open', async () => {
+    const { sdk } = makeSdk()
+    const hostRequests: Array<{ action: string; payload: Record<string, unknown> }> = []
+    const hostRequest = async <TPayload = unknown>(
+      action: string,
+      payload: Record<string, unknown> = {},
+    ): Promise<PortResponse<TPayload>> => {
+      hostRequests.push({ action, payload })
+      const response = action === 'git.contribution' && payload.operation === 'pick_workspace'
+        ? { path: '/picked', grant: 'opaque-grant' }
+        : { accepted: true }
+      return { ok: true, payload: response as TPayload, error: null }
+    }
+    sdk.hostRequest = hostRequest
+    const port = createPluginGitWorkspaceGrantPort(sdk)
+
+    await expect(port.pickWorkspace('/default')).resolves.toEqual({ path: '/picked', grant: 'opaque-grant' })
+    await port.openWorkspace({ path: '/cloned/repo', grant: 'derived-grant' })
+
+    expect(hostRequests).toEqual([
+      { action: 'git.contribution', payload: { operation: 'pick_workspace', payload: { default_path: '/default' } } },
+      { action: 'git.contribution', payload: { operation: 'open_workspace', payload: { path: '/cloned/repo', grant: 'derived-grant' } } },
     ])
   })
 })

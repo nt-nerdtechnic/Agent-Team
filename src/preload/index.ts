@@ -47,6 +47,7 @@ export interface GitAccountInput {
 export interface GitCredential {
   username: string
   token: string
+  expectedHost: string
 }
 
 export interface GitContributionState {

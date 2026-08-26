@@ -1,13 +1,13 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, safeStorage, session, shell } from 'electron'
 import { join, dirname } from 'node:path'
-import { writeFile, readFile, mkdir } from 'node:fs/promises'
+import { writeFile, readFile } from 'node:fs/promises'
 import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { startBackend, getResolvedUserPath, type BackendHandle } from './backend'
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
-import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
+import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGitStartup, frontendPluginManager } from './plugins/frontendPluginManager'
 import {
   isTrustedPluginManagementSender,
   registerPluginIpc,
@@ -30,6 +30,7 @@ import { withDeadline } from './deadline'
 import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
 import { registeredGitLeftWorkspace, trustedGitLeftWindow } from './gitLeftIpc'
 import { setWindowDockTileBadge } from './dock-tile-badge'
+import { writeTempTextArtifact } from './temp-text-artifact'
 import { BackendBroadcastTracker } from './backend-broadcast'
 import { stabilizeDroppedPaths, pruneDroppedFiles, saveClipboardImage } from './dropped-file-store'
 import { watchBackendExit } from './backend-crash'
@@ -604,10 +605,13 @@ if (!bundledPlans.registered) {
 // dist-plugins in dev. Mirrors the mini-IDE / Plans registration above; see
 // registerBundledGit for precedence. The legacy resources/plugins/git bundle
 // remains available only through the explicit recovery path.
-const bundledGit = registerBundledGit(frontendPluginManager, {
+// This environment switch is read once by Electron main at startup. Renderer
+// and plugin code receive neither the mode nor an API that can change it.
+const gitRecoveryMode = process.env.NAVIDE_GIT_RECOVERY === 'legacy' ? 'legacy' : 'normal'
+const bundledGit = registerBundledGitStartup(frontendPluginManager, {
   isPackaged: app.isPackaged,
   resourcesPath: process.resourcesPath,
-})
+}, gitRecoveryMode)
 if (!bundledGit.registered) {
   console.warn(`[main] bundled Git unavailable: ${bundledGit.reason}`)
 }
@@ -2010,13 +2014,9 @@ ipcMain.handle('shell:openExternal', async (_event, url: string) => {
 ipcMain.handle('shell:openTempFile', async (_event, filename: string, content: string) => {
   if (!filename || typeof filename !== 'string') return { ok: false, error: 'invalid filename' }
   try {
-    const dir = join(tmpdir(), 'agent-team-head')
-    await mkdir(dir, { recursive: true })
-    const safe = filename.replace(/[/\\]/g, '_')
-    const file = join(dir, safe)
-    await writeFile(file, content ?? '', 'utf8')
-    const err = await shell.openPath(file)
-    return err ? { ok: false, error: err } : { ok: true, path: file }
+    const artifact = await writeTempTextArtifact(tmpdir(), filename, content ?? '')
+    const err = await shell.openPath(artifact.path)
+    return err ? { ok: false, error: err } : { ok: true, ...artifact }
   } catch (e) {
     return { ok: false, error: String(e) }
   }

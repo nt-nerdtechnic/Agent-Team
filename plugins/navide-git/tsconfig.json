@@ -15,7 +15,8 @@
       "@navide/ui-foundation": ["../../packages/features/ui-foundation/src/index.ts"],
       "@navide/terminal": ["../../packages/features/terminal/src/index.ts"],
       "@navide/plugin-shell": ["../../packages/features/plugin-shell/src/index.ts"],
-      "@navide/git-feature": ["../../packages/features/git/src/index.ts"]
+      "@navide/git-feature": ["../../packages/features/git/src/index.ts"],
+      "@navide/git-feature/testing": ["../../packages/features/git/src/testing.ts"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "tests/**/*.ts", "../../packages/features/shared/src/**/*.ts", "../../packages/features/shared/src/**/*.vue", "../../packages/features/ui-foundation/src/**/*.ts", "../../packages/features/ui-foundation/src/**/*.vue", "../../packages/features/terminal/src/**/*.ts", "../../packages/features/terminal/src/**/*.vue", "../../packages/features/plugin-shell/src/**/*.ts", "../../packages/features/plugin-shell/src/**/*.vue"]

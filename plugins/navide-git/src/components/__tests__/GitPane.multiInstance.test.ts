@@ -1,0 +1,74 @@
+// @vitest-environment happy-dom
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { ref } from 'vue'
+
+vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
+vi.mock('@navide/ui-foundation', () => ({
+  useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn(async () => false) }),
+}))
+
+import GitPane from '../GitPane.vue'
+
+const mounted: Array<{ unmount(): void }> = []
+
+afterEach(() => {
+  for (const wrapper of mounted.splice(0)) wrapper.unmount()
+})
+
+function responseFor(type: string): { ok: true; payload: unknown; error: null } {
+  if (type === 'git.status') {
+    return { ok: true, payload: {
+      is_git_repo: true, branch: 'main', remote_branch: 'origin/main', ahead: 0, behind: 0,
+      staged: [], unstaged: [], untracked: [], ignored: [], operation_in_progress: '',
+    }, error: null }
+  }
+  if (type === 'git.log') return { ok: true, payload: { commits: [] }, error: null }
+  if (type === 'git.branches') return { ok: true, payload: { branches: [] }, error: null }
+  if (type === 'git.stash_list') return { ok: true, payload: { stashes: [] }, error: null }
+  if (type === 'git.remotes') return { ok: true, payload: { remotes: [] }, error: null }
+  if (type === 'git.tags') return { ok: true, payload: { tags: [] }, error: null }
+  if (type === 'git.worktrees') return { ok: true, payload: { worktrees: [] }, error: null }
+  return { ok: true, payload: {}, error: null }
+}
+
+function mountPane(workspacePath: string) {
+  const wrapper = mount(GitPane, {
+    attachTo: document.body,
+    props: {
+      workspacePath,
+      gitTransport: {
+        status: { value: 'connected' },
+        send: vi.fn(async (type: string) => responseFor(type)) as never,
+        on: vi.fn(() => () => {}),
+      },
+      fileAccess: { readFile: vi.fn(), writeFile: vi.fn(), readImage: vi.fn() },
+      ui: {
+        openInEditor: vi.fn(), openExternal: vi.fn(), revealPath: vi.fn(), openPath: vi.fn(),
+        openTempFile: vi.fn(), pickWorkspace: vi.fn(), openMainWindow: vi.fn(),
+        openBranchDiffWindow: vi.fn(), openGitWindow: vi.fn(), openGitHistoryWindow: vi.fn(),
+      },
+      issuePort: { provider: vi.fn(), list: vi.fn(), get: vi.fn(), create: vi.fn(), comment: vi.fn(), setState: vi.fn() },
+      accounts: { accounts: ref([]), available: ref(true), refresh: vi.fn(), getBinding: vi.fn(async () => null) },
+    },
+    global: { mocks: { $t: (key: string) => key } },
+  })
+  mounted.push(wrapper)
+  return wrapper
+}
+
+describe('GitPane menu ownership', () => {
+  it('gives mounted panes distinct owners and keeps a sibling menu open on Escape', async () => {
+    const first = mountPane('/workspace/a')
+    const second = mountPane('/workspace/b')
+    await flushPromises()
+
+    expect(first.attributes('data-git-pane-owner')).not.toBe(second.attributes('data-git-pane-owner'))
+
+    await second.find('.remote-btn').trigger('click')
+    const secondMenu = `[data-git-pane-menu-owner="${second.attributes('data-git-pane-owner')}"]`
+    expect(document.querySelector(`${secondMenu}.tp-dropdown`)).not.toBeNull()
+    first.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(document.querySelector(`${secondMenu}.tp-dropdown`)).not.toBeNull()
+  })
+})

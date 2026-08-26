@@ -475,8 +475,12 @@ def _git_credential(payload: dict[str, Any]) -> dict[str, str] | None:
     Returns None when absent/malformed so git_service falls back to the normal
     interactive askpass flow."""
     cred = payload.get("credential")
-    if isinstance(cred, dict) and cred.get("token"):
-        return {"username": str(cred.get("username") or ""), "token": str(cred.get("token"))}
+    if isinstance(cred, dict) and cred.get("token") and isinstance(cred.get("expectedHost"), str):
+        return {
+            "username": str(cred.get("username") or ""),
+            "token": str(cred.get("token")),
+            "expected_host": cred["expectedHost"],
+        }
     return None
 
 

@@ -1,7 +1,7 @@
 import type { JsonValue } from '../../../packages/plugin-contracts/src/index'
 import {
   GIT_USER_PREFERENCE_KEYS,
-} from '../../../packages/features/git/src/gitPreferences'
+} from '@navide/git-feature'
 import type { StoragePartition, StorageSnapshotRef } from './pluginCapabilityBroker'
 import type {
   HostStorageSnapshotIdentity,

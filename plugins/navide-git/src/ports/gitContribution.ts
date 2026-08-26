@@ -16,7 +16,7 @@ export type GitContributionAction =
   | { operation: 'open_git_window'; workspace_path: string; filepath?: string; staged?: boolean; commit?: string; base?: string; compare?: string }
   | { operation: 'open_git_history_window'; workspace_path: string }
   | { operation: 'changes_count'; count: number }
-  | { operation: 'open_workspace'; path: string }
+| { operation: 'open_workspace'; path: string; grant: string }
   | { operation: 'open_file'; payload: { workspace_path: string; filepath: string; name: string } }
   | { operation: 'open_conflict'; payload: { workspace_path: string; filepath: string; name: string } }
   | { operation: 'open_diff'; payload: { workspace_path: string; filepath: string; staged: boolean; name: string; commit?: string } }

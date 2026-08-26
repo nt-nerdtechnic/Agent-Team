@@ -1349,11 +1349,13 @@ export function useGit(
   async function cloneRepo(
     url: string,
     target_dir: string,
-  ): Promise<{ ok: boolean; path?: string; error?: string }> {
+    target_grant?: string,
+  ): Promise<{ ok: boolean; path?: string; openWorkspaceGrant?: string; error?: string }> {
     try {
       const resp = await send<{ ok: boolean; path: string; error?: string }>('git.clone', {
         url,
         target_dir,
+        ...(target_grant ? { target_grant } : {}),
         workspace_path: workspacePath(),
       }, 65_000)
       return resp.payload ?? { ok: false, error: 'no response' }

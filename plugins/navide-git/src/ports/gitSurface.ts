@@ -41,7 +41,6 @@ export interface GitWindowUiPort {
   openExternal(url: string): Promise<void>
   revealPath(path: string): Promise<void>
   pickFolder(defaultPath?: string): Promise<string | null>
-  openWorkspace(path: string): Promise<void>
 }
 
 /** Legacy GitPane actions that open or manipulate Host-owned windows/files. */
@@ -55,7 +54,7 @@ export interface GitPaneUiPort {
   revealPath(path: string): Promise<void>
   openPath(path: string): Promise<void>
   openTempFile(name: string, content: string): Promise<void>
-  pickWorkspace(defaultPath?: string): Promise<string | null>
+  pickWorkspace(defaultPath?: string): Promise<PickedWorkspace | null>
   openMainWindow(workspacePath: string): Promise<void>
   openBranchDiffWindow(workspacePath: string, base: string): Promise<void>
   openGitWindow(args: {
@@ -67,6 +66,26 @@ export interface GitPaneUiPort {
     compare?: string
   }): Promise<void>
   openGitHistoryWindow(workspacePath: string): Promise<void>
+}
+
+/** An opaque Host picker grant accompanies the canonical picked path. */
+export interface PickedWorkspace {
+  path: string
+  grant: string
+}
+
+/** Host-owned provenance for a workspace selected by the first-party picker. */
+export interface GitWorkspaceGrantPort {
+  pickWorkspace(defaultPath?: string): Promise<PickedWorkspace | null>
+  openWorkspace(selection: PickedWorkspace): Promise<void>
+}
+
+/** Read-only compatibility seed owned by the plugin composition root.
+ *
+ * Domain components only know that a legacy repository selection may exist;
+ * request names and backend transport details stay in the adapter. */
+export interface LegacyRepoSelectionPort {
+  readLegacyRepoSelection(workspacePath: string): Promise<string | null>
 }
 
 export interface GitBranchDiffPort {

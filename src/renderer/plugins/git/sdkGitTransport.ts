@@ -4,7 +4,7 @@ import {
   type GitRequestType,
   type GitTransport,
   type GitTransportStatusSource,
-} from '../../../../packages/features/git/src'
+} from '@navide/git-feature'
 import type { PortResponse } from '@navide/shared'
 
 export type PluginGitSdkResponse<TPayload = unknown> = PortResponse<TPayload>
@@ -33,11 +33,19 @@ export function createPluginGitTransport(sdk: PluginGitSdk): GitTransport {
       payload: Record<string, unknown> = {},
       timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
     ) {
-      const response = await sdk.request<TPayload>(type, payload, timeoutMs)
-      return {
-        ok: response.ok,
-        payload: response.payload,
-        error: response.error,
+      try {
+        const response = await sdk.request<TPayload>(type, payload, timeoutMs)
+        return {
+          ok: response.ok,
+          payload: response.payload,
+          error: response.error,
+        }
+      } catch (error) {
+        return {
+          ok: false,
+          payload: null,
+          error: { code: 'BACKEND_ERROR', message: error instanceof Error ? error.message : 'backend request failed' },
+        }
       }
     },
     on(type, callback) {

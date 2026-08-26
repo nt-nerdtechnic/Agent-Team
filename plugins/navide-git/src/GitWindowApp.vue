@@ -39,6 +39,7 @@ import {
   GIT_TRANSPORT_KEY,
   GIT_UI_KEY,
 } from './ports/gitSurface'
+import type { GitWorkspaceGrantPort } from './ports/gitSurface'
 import { TERMINAL_DOCK_KEY } from '@navide/terminal'
 import GitHistoryModal from './components/GitHistoryModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
@@ -55,6 +56,7 @@ import { closeGitWindowMenuOnEscape } from './lib/gitMenuEscape'
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager
 // gitQuery). A getter is what useGit expects.
 const workspacePath = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
+const props = defineProps<{ workspaceGrantPort: GitWorkspaceGrantPort }>()
 
 const { t } = useI18n()
 const gitTransport = inject(GIT_TRANSPORT_KEY)!
@@ -348,9 +350,9 @@ async function pickFolder(defaultPath?: string): Promise<string | null> {
 }
 async function onOpenWorktree(path: string): Promise<void> {
   try {
-    await uiPort.openWorkspace(path)
+    await uiPort.revealPath(path)
   } catch (err) {
-    notify.toast(err instanceof Error ? err.message : t('label.could-not-open-workspace'), { type: 'error' })
+    notify.toast(err instanceof Error ? err.message : t('label.could-not-reveal-path'), { type: 'error' })
   }
 }
 
@@ -1372,9 +1374,10 @@ const initGitignore = ref(true)
 const showCloneForm = ref(false)
 const cloneUrl = ref('')
 const cloneDir = ref('')
+const cloneParentGrant = ref<string | null>(null)
 const isCloning = ref(false)
 const canClone = computed(
-  () => cloneUrl.value.trim().length > 0 && cloneDir.value.trim().length > 0 && !isCloning.value
+  () => cloneUrl.value.trim().length > 0 && cloneDir.value.trim().length > 0 && cloneParentGrant.value !== null && !isCloning.value
 )
 
 async function onInitRepo(): Promise<void> {
@@ -1391,22 +1394,26 @@ async function onInitRepo(): Promise<void> {
 }
 
 async function pickCloneDir(): Promise<void> {
-  const picked = await pickFolder(cloneDir.value.trim() || undefined)
-  if (picked) cloneDir.value = picked
+  const picked = await props.workspaceGrantPort.pickWorkspace(cloneDir.value.trim() || undefined)
+  if (picked) {
+    cloneDir.value = picked.path
+    cloneParentGrant.value = picked.grant
+  }
 }
 
-/** A clone lands outside this window's workspace, so the injected UI port opens
- *  the result in a workspace window. */
+/** A clone result can only be opened through the one-time Host-derived grant. */
 async function onCloneRepo(): Promise<void> {
   if (!canClone.value) return
   isCloning.value = true
   try {
-    const r = await cloneRepo(cloneUrl.value.trim(), cloneDir.value.trim())
+    const r = await cloneRepo(cloneUrl.value.trim(), cloneDir.value.trim(), cloneParentGrant.value ?? undefined)
     if (!toastResult(r)) return
     notify.toast(r.path ? t('label.cloned-into', { path: r.path }) : t('label.cloned'), {
       type: 'success'
     })
-    if (r.path) await onOpenWorktree(r.path)
+    if (r.path && r.openWorkspaceGrant) {
+      await props.workspaceGrantPort.openWorkspace({ path: r.path, grant: r.openWorkspaceGrant })
+    }
   } finally {
     isCloning.value = false
   }

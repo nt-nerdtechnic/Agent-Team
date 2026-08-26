@@ -28,6 +28,11 @@ writeFileSync(join(tmpdir(), 'agent-team-dev-token'), DEV_TOKEN)
 
 export default defineConfig({
   main: {
+    resolve: {
+      alias: {
+        '@navide/git-feature': resolve(__dirname, 'packages/features/git/src'),
+      },
+    },
     build: {
       rollupOptions: {
         input: resolve(__dirname, 'src/main/index.ts'),
@@ -41,6 +46,11 @@ export default defineConfig({
     }
   },
   preload: {
+    resolve: {
+      alias: {
+        '@navide/git-feature': resolve(__dirname, 'packages/features/git/src'),
+      },
+    },
     build: {
       rollupOptions: {
         input: {

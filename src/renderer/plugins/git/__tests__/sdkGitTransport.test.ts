@@ -5,7 +5,7 @@ import {
   type GitTransport,
   type GitTransportError,
   type GitTransportStatusSource,
-} from '../../../../../packages/features/git/src'
+} from '@navide/git-feature'
 import {
   createPluginGitTransport,
   type PluginGitSdk,
@@ -14,8 +14,8 @@ import {
 import type {
   GitTransportContractHarness,
   GitTransportRequestRecord,
-} from '../../../../../packages/features/git/src/__tests__/gitTransport.contract'
-import { runGitTransportContract } from '../../../../../packages/features/git/src/__tests__/gitTransport.contract'
+} from '@navide/git-feature/testing'
+import { runGitTransportContract } from '@navide/git-feature/testing'
 
 interface SdkHarness {
   readonly sdk: PluginGitSdk
@@ -26,15 +26,12 @@ interface SdkHarness {
     payload: TPayload,
     options?: { ok?: boolean; error?: GitTransportError | null },
   ): void
-  setRejection(type: GitRequestType, error?: Error | string): void
-  clearRejection(type: GitRequestType): void
 }
 
 function createSdkHarness(): SdkHarness {
   const status: GitTransportStatusSource = { value: 'connected' }
   const listeners = new Map<GitEventType, Set<(payload: unknown) => void>>()
   const responses = new Map<GitRequestType, PluginGitSdkResponse>()
-  const rejections = new Map<GitRequestType, Error>()
   const sent: GitTransportRequestRecord[] = []
   async function request<TPayload = unknown>(
     type: GitRequestType,
@@ -42,8 +39,6 @@ function createSdkHarness(): SdkHarness {
     timeoutMs: number,
   ): Promise<PluginGitSdkResponse<TPayload>> {
     sent.push({ type, payload, timeoutMs })
-    const rejection = rejections.get(type)
-    if (rejection) throw rejection
     return (responses.get(type) ?? {
       ok: true,
       payload: null,
@@ -78,22 +73,12 @@ function createSdkHarness(): SdkHarness {
     })
   }
 
-  function setRejection(type: GitRequestType, error: Error | string = 'sdk request failed'): void {
-    rejections.set(type, typeof error === 'string' ? new Error(error) : error)
-  }
-
-  function clearRejection(type: GitRequestType): void {
-    rejections.delete(type)
-  }
-
   const sdk = { status, request, subscribe } satisfies PluginGitSdk
   return {
     sdk,
     sent,
     emit,
     setResponse,
-    setRejection,
-    clearRejection,
   }
 }
 
@@ -104,8 +89,6 @@ function createContractHarness(): GitTransportContractHarness {
     sent: harness.sent,
     emit: harness.emit,
     setResponse: harness.setResponse,
-    setRejection: harness.setRejection,
-    clearRejection: harness.clearRejection,
   }
 }
 
@@ -170,5 +153,18 @@ describe('plugin Git SDK adapter', () => {
     expect(firstListener).toHaveBeenCalledOnce()
     expect(secondListener).toHaveBeenCalledTimes(2)
     expect(secondListener).toHaveBeenLastCalledWith({ workspace_path: '/second-again' })
+  })
+
+  it('normalizes an SDK rejection into the shared error envelope', async () => {
+    const harness = createSdkHarness()
+    const sdk: PluginGitSdk = {
+      ...harness.sdk,
+      request: async () => { throw new Error('broker unavailable') },
+    }
+    await expect(createPluginGitTransport(sdk).send('git.status')).resolves.toEqual({
+      ok: false,
+      payload: null,
+      error: { code: 'BACKEND_ERROR', message: 'broker unavailable' },
+    })
   })
 })

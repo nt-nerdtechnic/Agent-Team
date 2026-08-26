@@ -4,7 +4,7 @@ import { defineAsyncComponent } from 'vue'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
 import { useRepoDiscovery, type DiscoveredRepoWithBadge } from '../composables/useRepoDiscovery'
 import type { GitSurfacePorts } from '../ports/gitSurface'
-import type { GitUiBackend } from '../ports/gitBackend'
+import type { LegacyRepoSelectionPort } from '../ports/gitSurface'
 import { useI18n } from 'vue-i18n'
 import {
   GIT_LEGACY_WORKSPACE_REPOSITORY_PREFIX,
@@ -21,7 +21,7 @@ const GitPane = defineAsyncComponent(() => import('./GitPane.vue'))
 const props = defineProps<{
   workspacePath: string
   analyzerModel?: string
-  backend: GitUiBackend
+  legacyRepoSelection: LegacyRepoSelectionPort
   embedded?: boolean
   dispatchTargets?: { id: string; label: string }[]
   availableAgents?: { key: string; label: string }[]
@@ -34,7 +34,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'changes-count', n: number): void
-  (e: 'open-workspace', path: string): void
+  (e: 'open-workspace', picked: { path: string; grant: string }): void
   (e: 'open-file', payload: { workspace_path: string; filepath: string; name: string }): void
   (e: 'open-conflict', payload: { workspace_path: string; filepath: string; name: string }): void
   (e: 'open-diff', payload: { workspace_path: string; filepath: string; staged: boolean; name: string; commit?: string }): void
@@ -96,14 +96,7 @@ async function restoreSavedRepo(ws: string): Promise<void> {
 
   let legacyLocal: string | null = null
   try { legacyLocal = localStorage.getItem(`${GIT_LEGACY_WORKSPACE_REPOSITORY_PREFIX}${ws}`) } catch { legacyLocal = null }
-  let backendSaved = ''
-  try {
-    const resp = await props.backend.send<{ project?: { ui_git_tab_repo?: string } | null }>(
-      'project.peek', { workspace_path: ws },
-    )
-    const v = resp.payload?.project?.ui_git_tab_repo
-    if (typeof v === 'string') backendSaved = v
-  } catch { /* backend unavailable — fall back to the read-only local seed */ }
+  const backendSaved = await props.legacyRepoSelection.readLegacyRepoSelection(ws).catch(() => null)
   if (ws !== props.workspacePath || userSelected) return // workspace/user changed mid-flight
   const storedAfterLegacyRead = settingsGet<string | null>(GIT_WORKSPACE_REPOSITORY_KEY, null)
   if (storedAfterLegacyRead) {

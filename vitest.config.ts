@@ -18,6 +18,7 @@ export default defineConfig({
       '@navide/shared/testing': resolve(__dirname, 'packages/features/shared/src/testing.ts'),
       '@navide/terminal/testing': resolve(__dirname, 'packages/features/terminal/src/testing.ts'),
       '@navide/git-feature': resolve(__dirname, 'packages/features/git/src'),
+      '@navide/git-feature/testing': resolve(__dirname, 'packages/features/git/src/testing.ts'),
     },
   },
   define: {

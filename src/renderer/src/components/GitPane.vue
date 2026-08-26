@@ -1,3 +1,8 @@
+<script lang="ts">
+// Module scope is shared by every pane in this renderer document.
+let nextMenuOwnerId = 0
+</script>
+
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -6,7 +11,7 @@ import { useGit } from '../composables/useGit'
 import type { IgnoreTarget, GitWorktree } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
 import type { IssueDetail } from '../composables/useIssues'
-import type { GitTransport } from '../../../../packages/features/git/src'
+import type { GitTransport } from '@navide/git-feature'
 import type {
   GitAccountPort,
   GitCredentialPort,
@@ -43,7 +48,6 @@ const props = defineProps<{
 }>()
 
 const paneRoot = ref<HTMLElement | null>(null)
-let nextMenuOwnerId = 0
 const menuOwnerId = `git-pane-${++nextMenuOwnerId}`
 const openMenuOwners = new Set<string>()
 let activeMenuOwnerId: string | null = null

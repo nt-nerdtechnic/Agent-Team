@@ -11,6 +11,7 @@ import { BrowserWindow, WebContentsView, ipcMain, type WebContents } from 'elect
 import { randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { URL } from 'node:url'
 import { WebSocket as NodeWebSocket } from 'ws'
 import {
   parseCapabilityCall,
@@ -70,7 +71,7 @@ import {
   GIT_HOST_READ_ONLY_KEYS,
   GIT_USER_PREFERENCE_KEYS,
   GIT_WORKSPACE_REPOSITORY_KEY,
-} from '../../../packages/features/git/src/gitPreferences'
+} from '@navide/git-feature'
 
 /** Everything the manager needs to launch one plugin view. */
 export interface PluginLaunchDescriptor {
@@ -191,7 +192,18 @@ interface GitAccountHandlers {
   bind(workspacePath: string, accountId: string): void
   unbind(workspacePath: string): void
   getBinding(workspacePath: string): string | null
-  getCredential(workspacePath: string): { username: string; token: string } | null
+  getCredential(workspacePath: string): { username: string; token: string; expectedHost: string } | null
+}
+
+type GitPathGrantOperation = 'clone_target' | 'open_workspace'
+
+interface GitPathGrant {
+  instanceId: string
+  workspacePath: string
+  packageVersion: string
+  path: string
+  operations: ReadonlySet<GitPathGrantOperation>
+  expiresAt: number
 }
 
 interface TerminalRoute {
@@ -288,6 +300,8 @@ const GIT_HOST_UI_ACTIONS = new Set([
   'ui.open_workspace',
   'ui.pick_folder',
 ])
+const GIT_PATH_GRANT_TTL_MS = 5 * 60 * 1000
+const MAX_GIT_PATH_GRANTS_PER_INSTANCE = 16
 const GIT_HOST_FS_TYPES = new Set([
   'fs.read_file',
   'fs.write_file',
@@ -410,6 +424,16 @@ function isWorkspaceContainedPath(workspacePath: string, candidatePath: string):
   return relativePath !== '..' &&
     !relativePath.startsWith(`..${sep}`) &&
     !isAbsolute(relativePath)
+}
+
+function isExpectedHttpsRemote(url: unknown, expectedHost: string): boolean {
+  if (typeof url !== 'string' || !url) return false
+  try {
+    const remote = new URL(url)
+    return remote.protocol === 'https:' && remote.hostname === expectedHost
+  } catch {
+    return false
+  }
 }
 
 function isStorageExecutionAddress(value: string): value is StorageExecutionAddress {
@@ -568,6 +592,8 @@ export class FrontendPluginManager {
   private readonly gitContributionStates = new Map<number, GitContributionState>()
   /** Main-owned safeStorage adapter for the first-party Git account surface. */
   private gitAccountHandlers: GitAccountHandlers | null = null
+  /** Opaque picker provenance for the private first-party Git bridge. */
+  private readonly gitPathGrants = new Map<string, GitPathGrant>()
   /** `terminal_session_id` → authenticated route ownership. v2 teardown
    *  clears the live instance id but retains the stable tuple as a tombstone;
    *  legacy routes retain their plugin-id adapter semantics. */
@@ -744,6 +770,105 @@ export class FrontendPluginManager {
     return instanceId ? this.running.get(instanceId) : undefined
   }
 
+  private discardGitPathGrants(instanceId: string): void {
+    for (const [grant, record] of this.gitPathGrants) {
+      if (record.instanceId === instanceId) this.gitPathGrants.delete(grant)
+    }
+  }
+
+  private issueGitPathGrant(
+    plugin: RunningPlugin,
+    path: string,
+    operations: readonly GitPathGrantOperation[],
+  ): string | null {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    const resolvedPath = resolvePathForContainment(path)
+    if (!resolvedPath || !binding?.packageVersion || !plugin.workspacePath) return null
+    this.discardExpiredGitPathGrants()
+    const existing = [...this.gitPathGrants.entries()]
+      .filter(([, grant]) => grant.instanceId === plugin.instanceId)
+    while (existing.length >= MAX_GIT_PATH_GRANTS_PER_INSTANCE) {
+      const oldest = existing.shift()
+      if (oldest) this.gitPathGrants.delete(oldest[0])
+    }
+    const grant = randomUUID()
+    this.gitPathGrants.set(grant, {
+      instanceId: plugin.instanceId,
+      workspacePath: resolve(plugin.workspacePath),
+      packageVersion: binding.packageVersion,
+      path: resolvedPath,
+      operations: new Set(operations),
+      expiresAt: Date.now() + GIT_PATH_GRANT_TTL_MS,
+    })
+    return grant
+  }
+
+  private discardExpiredGitPathGrants(): void {
+    const now = Date.now()
+    for (const [grant, record] of this.gitPathGrants) {
+      if (record.expiresAt <= now) this.gitPathGrants.delete(grant)
+    }
+  }
+
+  private consumeGitPathGrant(
+    plugin: RunningPlugin,
+    grant: unknown,
+    path: string,
+    operation: GitPathGrantOperation,
+  ): boolean {
+    if (typeof grant !== 'string' || !grant) return false
+    this.discardExpiredGitPathGrants()
+    const record = this.gitPathGrants.get(grant)
+    const binding = plugin.capabilityContext?.runtimeBinding
+    const resolvedPath = resolvePathForContainment(path)
+    if (
+      !record ||
+      !binding ||
+      !resolvedPath ||
+      record.instanceId !== plugin.instanceId ||
+      record.workspacePath !== resolve(plugin.workspacePath ?? '') ||
+      record.packageVersion !== binding.packageVersion ||
+      record.path !== resolvedPath ||
+      !record.operations.has(operation)
+    ) return false
+    this.gitPathGrants.delete(grant)
+    return true
+  }
+
+  /** A clone grant authorizes exactly one new direct child of the Host-picked
+   *  directory.  The plugin cannot turn a picked directory into an arbitrary
+   *  containment root by supplying a nested or traversal target. */
+  private consumeGitCloneTargetGrant(
+    plugin: RunningPlugin,
+    grant: unknown,
+    targetDir: unknown,
+  ): string | null {
+    if (typeof grant !== 'string' || !grant || typeof targetDir !== 'string' || !targetDir) return null
+    const requestedLeaf = basename(targetDir)
+    if (
+      requestedLeaf === '.' ||
+      requestedLeaf === '..' ||
+      requestedLeaf !== targetDir.split(/[\\/]/).at(-1) ||
+      requestedLeaf.includes('\\')
+    ) return null
+    this.discardExpiredGitPathGrants()
+    const record = this.gitPathGrants.get(grant)
+    const binding = plugin.capabilityContext?.runtimeBinding
+    const resolvedTarget = resolvePathForContainment(targetDir)
+    if (
+      !record ||
+      !binding ||
+      !resolvedTarget ||
+      record.instanceId !== plugin.instanceId ||
+      record.workspacePath !== resolve(plugin.workspacePath ?? '') ||
+      record.packageVersion !== binding.packageVersion ||
+      !record.operations.has('clone_target') ||
+      dirname(resolvedTarget) !== record.path
+    ) return null
+    this.gitPathGrants.delete(grant)
+    return resolvedTarget
+  }
+
   private payloadClaimsInstance(payload: unknown): boolean {
     // `pluginId` remains a tolerated legacy envelope field and is ignored by
     // parseCapabilityCall. `instanceId` is new Host-owned identity and must
@@ -849,7 +974,7 @@ export class FrontendPluginManager {
         (record.base === undefined || typeof record.base === 'string') &&
         (record.compare === undefined || typeof record.compare === 'string')
     }
-    if (operation === 'open_workspace') return stringField('path')
+    if (operation === 'open_workspace') return stringField('path') && stringField('grant')
     if (operation === 'focus_pane') return stringField('paneId')
     if (operation === 'open_file' || operation === 'open_conflict') {
       return stringField('workspace_path') && stringField('filepath') && stringField('name')
@@ -889,7 +1014,10 @@ export class FrontendPluginManager {
     if (!this.validateContributionPayload(operation, args.payload)) {
       return buildError(reqId, 'BAD_REQUEST', 'Git contribution payload is invalid')
     }
-    if (plugin.capabilityContext?.runtimeBinding?.audience !== 'git-left') {
+    const audience = plugin.capabilityContext?.runtimeBinding?.audience
+    const isWindowPickerAction = audience === 'git-window' &&
+      (operation === 'pick_workspace' || operation === 'open_workspace')
+    if (audience !== 'git-left' && !isWindowPickerAction) {
       return buildError(reqId, 'CAPABILITY_DENIED', 'Git contribution is only available to the left view')
     }
     const payload = args.payload as Record<string, unknown>
@@ -925,7 +1053,30 @@ export class FrontendPluginManager {
       const picked = await this.hostShellHandlers.pickFolder(
         typeof payload.default_path === 'string' ? payload.default_path : undefined,
       )
-      return buildSuccess(reqId, { path: picked })
+      if (!picked) return buildSuccess(reqId, { path: null, grant: null })
+      const grant = this.issueGitPathGrant(plugin, picked, ['clone_target', 'open_workspace'])
+      if (!grant) return buildError(reqId, 'CAPABILITY_DENIED', 'Host picker path is unavailable')
+      return buildSuccess(reqId, { path: resolvePathForContainment(picked), grant })
+    }
+    if (operation === 'open_workspace') {
+      const path = String(payload.path)
+      if (!this.consumeGitPathGrant(plugin, payload.grant, path, 'open_workspace')) {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'workspace path lacks a valid Host picker grant')
+      }
+      const grantedPath = resolvePathForContainment(path)
+      if (!grantedPath) return buildError(reqId, 'CAPABILITY_DENIED', 'workspace path lacks a valid Host picker grant')
+      if (audience === 'git-window') {
+        if (!this.hostShellHandlers) return buildError(reqId, 'BACKEND_ERROR', 'host shell handlers not registered')
+        const opened = this.hostShellHandlers.openWorkspace(grantedPath)
+        return opened.ok
+          ? buildSuccess(reqId, { accepted: true })
+          : buildError(reqId, 'BACKEND_ERROR', 'workspace could not be opened')
+      }
+      plugin.hostWindow.webContents.send('git:contribution-action', {
+        operation,
+        payload: { path: grantedPath },
+      })
+      return buildSuccess(reqId, { accepted: true })
     }
     if (plugin.hostWindow.isDestroyed()) return buildError(reqId, 'CAPABILITY_DENIED', 'Git host window is closed')
     plugin.hostWindow.webContents.send('git:contribution-action', { operation, payload })
@@ -1031,12 +1182,20 @@ export class FrontendPluginManager {
         return { ...payload, reqId } as CapabilityResponse
       }
       const wsPayload = payload as Record<string, unknown>
+      let cloneTarget: string | null = null
+      if (action === 'fs.request' && type === 'fs.stat_path') {
+        const candidate = typeof wsPayload.path === 'string' ? wsPayload.path : ''
+        if (!plugin.workspacePath || !isWorkspaceContainedPath(plugin.workspacePath, candidate)) {
+          return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'path is outside the Host workspace binding')
+        }
+        wsPayload.path = resolvePathForContainment(resolve(plugin.workspacePath, candidate))
+      }
       if (action === 'git.request' && GIT_REMOTE_REQUEST_TYPES.has(type)) {
         const workspacePath = plugin.workspacePath
         if (!workspacePath || !this.gitAccountHandlers) {
           return buildError(reqId, 'BACKEND_ERROR', 'Git account service is unavailable')
         }
-        let credential: { username: string; token: string } | null
+        let credential: { username: string; token: string; expectedHost: string } | null
         try {
           credential = this.gitAccountHandlers.getCredential(resolve(workspacePath))
         } catch (error) {
@@ -1049,12 +1208,37 @@ export class FrontendPluginManager {
         if (!credential) {
           return buildError(reqId, 'CREDENTIAL_REQUIRED', 'No workspace-bound Git credential is available')
         }
+        if (type === 'git.clone' && !isExpectedHttpsRemote(wsPayload.url, credential.expectedHost)) {
+          return buildError(reqId, 'CREDENTIAL_REQUIRED', 'No workspace-bound Git credential is available for this HTTPS remote')
+        }
         wsPayload.credential = credential
+      }
+      if (action === 'git.request' && type === 'git.clone') {
+        cloneTarget = this.consumeGitCloneTargetGrant(plugin, wsPayload.target_grant, wsPayload.target_dir)
+        if (!cloneTarget) {
+          return buildError(reqId, 'CAPABILITY_DENIED', 'clone target lacks a valid Host picker grant')
+        }
+        wsPayload.target_dir = cloneTarget
+        delete wsPayload.target_grant
       }
       const client = this.ensureBackend()
       if (!client) return buildError(reqId, 'BACKEND_ERROR', 'backend not connected')
       try {
-        return backendResponseToCapability(reqId, await client.send(type, wsPayload))
+        const response = backendResponseToCapability(reqId, await client.send(type, wsPayload))
+        if (
+          type === 'git.clone' &&
+          cloneTarget &&
+          response.ok &&
+          typeof response.result === 'object' &&
+          response.result !== null &&
+          typeof (response.result as { path?: unknown }).path === 'string' &&
+          resolvePathForContainment((response.result as { path: string }).path) === cloneTarget
+        ) {
+          const grant = this.issueGitPathGrant(plugin, cloneTarget, ['open_workspace'])
+          if (!grant) return buildError(reqId, 'CAPABILITY_DENIED', 'cloned workspace is unavailable')
+          return buildSuccess(reqId, { ...response.result as Record<string, unknown>, openWorkspaceGrant: grant })
+        }
+        return response
       } catch (error) {
         return buildError(
           reqId,
@@ -1071,6 +1255,12 @@ export class FrontendPluginManager {
       const type = typeof args.type === 'string' ? args.type : ''
       if (!GIT_HOST_UI_ACTIONS.has(type)) {
         return buildError(reqId, 'METHOD_NOT_FOUND', 'Git UI Host action is not mapped')
+      }
+      // A Git plugin may open a workspace only by consuming the opaque grant
+      // on the private contribution bridge. Never turn an arbitrary renderer
+      // path into another workspace root through the generic UI adapter.
+      if (type === 'ui.open_workspace') {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'workspace paths require a Host picker grant')
       }
       const rawPayload = args.payload
       if (typeof rawPayload !== 'object' || rawPayload === null || Array.isArray(rawPayload)) {
@@ -1412,17 +1602,10 @@ export class FrontendPluginManager {
       else if (wsType === 'fs.stat_path') payload.path = path
       else payload.rel_path = path
       if (wsType === 'fs.stat_path') {
-        const root = resolve(workspacePath)
-        const statPath = resolve(isAbsolute(path) ? path : join(root, path))
-        const statRelative = relative(root, statPath)
-        if (
-          statRelative === '..' ||
-          statRelative.startsWith(`..${sep}`) ||
-          isAbsolute(statRelative)
-        ) {
+        if (!isWorkspaceContainedPath(workspacePath, path)) {
           throw new Error('filesystem path escapes the workspace')
         }
-        payload.path = statPath
+        payload.path = resolvePathForContainment(resolve(workspacePath, path))
       }
       if (wsType === 'fs.write_file') payload.content = args.content
       const response = await this.sendPublicBackend(wsType, payload)
@@ -2014,6 +2197,7 @@ export class FrontendPluginManager {
       }
       // Keep the legacy loop below active while the rollback bundle is live.
     }
+    const deliveredInstanceIds = new Set<string>()
     // Git's existing changed event is a private first-party transport seam,
     // not a public Manifest v2 capability. Route it by the Host-owned
     // workspace path so two Git view instances never receive one another's
@@ -2025,7 +2209,6 @@ export class FrontendPluginManager {
           ? resolve((payload as Record<string, unknown>).workspace_path as string)
           : null
       if (!eventWorkspace) return
-      let routedV2 = false
       for (const plugin of this.running.values()) {
         if (
           !plugin.hasV2DescriptorIdentity ||
@@ -2046,9 +2229,8 @@ export class FrontendPluginManager {
           continue
         }
         this.emitToInstance(plugin.instanceId, event, payload)
-        routedV2 = true
+        deliveredInstanceIds.add(plugin.instanceId)
       }
-      if (routedV2) return
     }
     if (event === 'terminal.output') {
       const sessionId = terminalSessionIdOf(payload)
@@ -2118,6 +2300,7 @@ export class FrontendPluginManager {
       return
     }
     for (const plugin of this.running.values()) {
+      if (deliveredInstanceIds.has(plugin.instanceId)) continue
       if (targetPluginId !== undefined && plugin.id !== targetPluginId) continue
       const allowed =
         plugin.capabilityPolicy.kind === 'manifest-v2'
@@ -2452,6 +2635,7 @@ export class FrontendPluginManager {
     plugin.detachHostClosed = null
     this.releaseTerminalOwnership(plugin)
     this.releaseInstanceSubscriptions(instanceId)
+    this.discardGitPathGrants(instanceId)
     this.running.delete(instanceId)
     this.bySender.delete(plugin.senderId)
     if (![...this.running.values()].some((candidate) => candidate.hostWindow.id === plugin.hostWindow.id)) {
@@ -3717,6 +3901,17 @@ export function registerBundledGit(
   // validates.
   const legacy = registerLegacyBundledGit(manager, source)
   return legacy.registered ? { registered: true } : v2
+}
+
+/** Select the startup descriptor from a main-process-owned recovery mode. */
+export function registerBundledGitStartup(
+  manager: FrontendPluginManager,
+  source: BundledMiniIdeSource,
+  recoveryMode: 'normal' | 'legacy' = 'normal',
+): { registered: boolean; reason?: string } {
+  return recoveryMode === 'legacy'
+    ? registerLegacyBundledGit(manager, source)
+    : registerBundledGit(manager, source)
 }
 
 /** Explicit rollback registration for diagnostics and recovery tooling. The

@@ -14,6 +14,7 @@ import {
   createPluginKeybindingsPort,
   createPluginGitSurfacePorts,
   createPluginGitContributionHostPort,
+  createPluginGitWorkspaceGrantPort,
   createPluginGitSettingsPort,
   createPluginTerminalDockPort,
 } from './pluginSurfacePorts'
@@ -66,6 +67,20 @@ const gitSdk: PluginGitSdk = {
 const gitTransport = createPluginGitTransport(gitSdk)
 const surfacePorts = createPluginGitSurfacePorts(capabilitySdk, gitTransport)
 const contributionHostPort = createPluginGitContributionHostPort(capabilitySdk)
+const workspaceGrantPort = createPluginGitWorkspaceGrantPort(capabilitySdk)
+const legacyRepoSelection = {
+  async readLegacyRepoSelection(workspacePath: string): Promise<string | null> {
+    try {
+      const response = await backend.send<{ project?: { ui_git_tab_repo?: string } | null }>(
+        'project.peek', { workspace_path: workspacePath },
+      )
+      const selection = response.payload?.project?.ui_git_tab_repo
+      return typeof selection === 'string' ? selection : null
+    } catch {
+      return null
+    }
+  },
+}
 const settingsPort = createPluginGitSettingsPort(capabilitySdk)
 const terminalPort = createPluginTerminalDockPort(capabilitySdk)
 
@@ -76,8 +91,8 @@ initKeybindingsPort(createPluginKeybindingsPort())
 
 const isLeftContribution = query.get('contribution') === 'left'
 const app = isLeftContribution
-  ? createApp(GitLeftApp, { surfacePorts, hostPort: contributionHostPort })
-  : createApp(GitWindowApp)
+  ? createApp(GitLeftApp, { surfacePorts, hostPort: contributionHostPort, legacyRepoSelection })
+  : createApp(GitWindowApp, { workspaceGrantPort })
 app.use(i18n)
 app.provide(GIT_TRANSPORT_KEY, surfacePorts.gitTransport)
 app.provide(GIT_FILE_ACCESS_KEY, surfacePorts.fileAccess)

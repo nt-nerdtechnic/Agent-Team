@@ -69,6 +69,16 @@ The classic form still works unchanged:
 ./release.sh 0.3.0
 ```
 
+## Git recovery switch
+
+If a release needs the retained Git recovery bundle, launch the application
+from its main-process environment with `NAVIDE_GIT_RECOVERY=legacy`. Normal
+startup must omit the variable and select Git v2. Verify the Git left and
+window surfaces open against an existing workspace and that the existing Git
+preferences and repository selection are still present. To restore v2, quit
+the application, remove the variable, and relaunch. The switch does not edit
+Plugin Storage or legacy seed data.
+
 ## Notes
 
 - **Bump keywords** (`patch`/`minor`/`major`) compute the next version from the

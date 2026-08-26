@@ -34,6 +34,7 @@ interface GitAccountInput {
 interface GitCredential {
   username: string
   token: string
+  expectedHost: string
 }
 
 declare global {

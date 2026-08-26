@@ -1,4 +1,4 @@
-import type { GitTransport } from '../../../../packages/features/git/src'
+import type { GitTransport } from '@navide/git-feature'
 import type { InjectionKey } from 'vue'
 import type { PortResponse, ReactiveValue } from '@navide/shared'
 import type {
@@ -77,7 +77,13 @@ export interface GitBranchDiffPort {
 }
 
 export interface GitCredentialPort {
-  getCredential?(workspacePath: string): Promise<{ username: string; token: string } | null>
+  getCredential?(workspacePath: string): Promise<GitCredential | null>
+}
+
+export interface GitCredential {
+  username: string
+  token: string
+  expectedHost: string
 }
 
 export interface GitAccountPublic {

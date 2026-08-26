@@ -27,6 +27,7 @@ import type {
 import type { Issue, IssueDetail, IssueProviderInfo } from './composables/useIssues'
 import type { GitTransportStatusSource } from '@navide/git-feature'
 import type { GitContributionAction, GitContributionState } from './ports/gitContribution'
+import type { GitWorkspaceGrantPort } from './ports/gitSurface'
 import { navBridge } from './capabilityBackend'
 
 export interface PluginCapabilitySdk {
@@ -153,9 +154,6 @@ export function createPluginGitUiPort(sdk: PluginCapabilitySdk): GitWindowUiPort
       }))
       return payload?.path ?? null
     },
-    async openWorkspace(path: string): Promise<void> {
-      await requireOk(sdk.request('ui.open_workspace', { workspace_path: path }))
-    },
   }
 }
 
@@ -229,10 +227,12 @@ export function createPluginGitPaneUiPort(sdk: PluginCapabilitySdk): GitPaneUiPo
     async openPath(path) { await request('open_path', { path }) },
     async openTempFile(name, content) { await request('open_temp_file', { name, content }) },
     async pickWorkspace(defaultPath) {
-      const payload = await request<{ path: string | null }>('pick_workspace', {
+      const payload = await request<{ path: string | null; grant: string | null }>('pick_workspace', {
         ...(defaultPath ? { default_path: defaultPath } : {}),
       })
-      return payload?.path ?? null
+      return typeof payload?.path === 'string' && typeof payload.grant === 'string'
+        ? { path: payload.path, grant: payload.grant }
+        : null
     },
     async openMainWindow(workspacePath) { await request('open_main_window', { workspace_path: workspacePath }) },
     async openBranchDiffWindow(workspacePath, base) {
@@ -254,6 +254,26 @@ export function createPluginGitPaneUiPort(sdk: PluginCapabilitySdk): GitPaneUiPo
   }
 }
 
+/** The standalone Git window needs picker provenance without gaining the
+ * generic workspace-opening UI port. */
+export function createPluginGitWorkspaceGrantPort(sdk: PluginCapabilitySdk): GitWorkspaceGrantPort {
+  const request = <TPayload = unknown>(operation: string, payload: Record<string, unknown> = {}) =>
+    requireOk<TPayload>(sdk.hostRequest('git.contribution', { operation, payload }))
+  return {
+    async pickWorkspace(defaultPath) {
+      const payload = await request<{ path: string | null; grant: string | null }>('pick_workspace', {
+        ...(defaultPath ? { default_path: defaultPath } : {}),
+      })
+      return typeof payload?.path === 'string' && typeof payload.grant === 'string'
+        ? { path: payload.path, grant: payload.grant }
+        : null
+    },
+    async openWorkspace(selection) {
+      await request('open_workspace', { path: selection.path, grant: selection.grant })
+    },
+  }
+}
+
 export function createPluginGitContributionHostPort(sdk: PluginCapabilitySdk): PluginGitContributionHostPort {
   return {
     async getState(): Promise<GitContributionState | null> {
@@ -263,7 +283,7 @@ export function createPluginGitContributionHostPort(sdk: PluginCapabilitySdk): P
       const payload = 'payload' in action ? action.payload : (() => {
         switch (action.operation) {
           case 'changes_count': return { count: action.count }
-          case 'open_workspace': return { path: action.path }
+          case 'open_workspace': return { path: action.path, grant: action.grant }
           case 'focus_pane': return { paneId: action.paneId }
           case 'open_path': return { path: action.path }
           case 'open_temp_file': return { name: action.name, content: action.content }

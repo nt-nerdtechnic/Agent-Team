@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { loadPluginDir } from '../../../src/main/plugins/installedPlugins'
 
@@ -44,7 +44,58 @@ function sourceFiles(root: string): string[] {
   return files
 }
 
+const privateFeatureRoots = ['shared', 'ui-foundation', 'terminal', 'plugin-shell', 'git']
+const productionRoots = [
+  'src/main',
+  'src/preload',
+  'src/renderer/src',
+  'src/renderer/plugins/git',
+  'plugins/navide-git/src',
+  ...privateFeatureRoots.map((owner) => `packages/features/${owner}/src`),
+]
+
+function isProductionSource(path: string): boolean {
+  return !/(?:^|\/)__(?:tests|mocks)__(?:\/|$)|(?:^|\/)tests(?:\/|$)|\.(?:test|spec)\.ts$/.test(path)
+}
+
+function privateFeatureBoundaryViolations(path: string, source: string): string[] {
+  const violations: string[] = []
+  const specifierPattern = /(?:import\s*(?:[^'"()]*?\s+from\s*)?|export\s+[^'"()]*?\s+from\s*|import\s*\()(['"])([^'"]+)\1/g
+  for (const match of source.matchAll(specifierPattern)) {
+    const specifier = match[2]
+    if (/^@navide\/(?:shared|ui-foundation|terminal|plugin-shell|git-feature)\/(?!testing$|styles\.css$)/.test(specifier)) {
+      violations.push(`deep private alias '${specifier}'`)
+      continue
+    }
+    if (specifier.startsWith('.')) {
+      const target = resolve(dirname(path), specifier)
+      if (privateFeatureRoots.some((owner) => target.startsWith(resolve(repositoryRoot, `packages/features/${owner}/src`)))) {
+        const ownerRoot = resolve(repositoryRoot, `packages/features/${privateFeatureRoots.find((owner) => target.startsWith(resolve(repositoryRoot, `packages/features/${owner}/src`)))}/src`)
+        if (!path.startsWith(ownerRoot)) violations.push(`relative private feature source '${specifier}'`)
+      }
+    }
+  }
+  return violations
+}
+
 describe('navide.git production package boundary', () => {
+  it('scans every production graph for static, side-effect, dynamic, export, and relative feature-source imports', () => {
+    for (const root of productionRoots) {
+      for (const path of sourceFiles(resolve(repositoryRoot, root)).filter(isProductionSource)) {
+        expect(privateFeatureBoundaryViolations(path, readFileSync(path, 'utf8')), relative(repositoryRoot, path)).toEqual([])
+      }
+    }
+  })
+
+  it('recognizes dynamic imports alongside the other ESM import forms', () => {
+    const source = [
+      "import '@navide/git-feature/internal'",
+      "import type { Thing } from '@navide/git-feature/internal'",
+      "export { Thing } from '@navide/git-feature/internal'",
+      "await import('@navide/git-feature/internal')",
+    ].join('\n')
+    expect(privateFeatureBoundaryViolations(resolve(repositoryRoot, 'src/main/example.ts'), source)).toHaveLength(4)
+  })
   it('declares both canonical custom contributions in one manifest', () => {
     const manifest = JSON.parse(readFileSync(resolve(packageRoot, 'manifest.json'), 'utf8')) as {
       schemaVersion: number

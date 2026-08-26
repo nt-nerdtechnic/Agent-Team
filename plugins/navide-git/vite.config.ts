@@ -34,6 +34,7 @@ export default defineConfig({
       '@navide/terminal': resolve(repositoryRoot, 'packages/features/terminal/src'),
       '@navide/plugin-shell': resolve(repositoryRoot, 'packages/features/plugin-shell/src'),
       '@navide/git-feature': resolve(repositoryRoot, 'packages/features/git/src'),
+      '@navide/git-feature/testing': resolve(repositoryRoot, 'packages/features/git/src/testing.ts'),
     },
   },
   build: {

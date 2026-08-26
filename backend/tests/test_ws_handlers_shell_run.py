@@ -1,0 +1,129 @@
+"""Production Host allowlist coverage for the shell.run handler seam."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from agent_team_backend import app, ws_handlers
+
+
+class FakeWebSocket:
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        self.sent.append(payload)
+
+
+def _session() -> app.Session:
+    return app.Session(FakeWebSocket())  # type: ignore[arg-type]
+
+
+async def _run(session: app.Session, payload: dict[str, Any]) -> dict[str, Any]:
+    await app.handle_message(session, {"id": "shell-1", "type": "shell.run", "payload": payload})
+    return session.websocket.sent[-1]["payload"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_allowlist_rejects_an_unregistered_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app.attribution, "known_workspaces", lambda: [])
+
+    payload = await _run(_session(), {
+        "host_mode": "allowlist", "workspace_path": str(tmp_path), "command": "git status",
+    })
+
+    assert payload == {"ok": False, "error": "workspace path not registered"}
+
+
+@pytest.mark.asyncio
+async def test_allowlist_keeps_cwd_within_registered_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    child = tmp_path / "child"
+    child.mkdir()
+    monkeypatch.setattr(app.attribution, "known_workspaces", lambda: [str(tmp_path)])
+    calls: list[tuple[list[str], str, float]] = []
+
+    async def fake_run(argv: list[str], cwd: str, *, timeout: float) -> tuple[int, str, str]:
+        calls.append((argv, cwd, timeout))
+        return 0, "clean", ""
+
+    monkeypatch.setattr(ws_handlers, "run_allowlisted_text", fake_run)
+
+    payload = await _run(_session(), {
+        "host_mode": "allowlist", "workspace_path": str(child), "command": "git status",
+    })
+    outside = await _run(_session(), {
+        "host_mode": "allowlist", "workspace_path": str(tmp_path.parent), "command": "git status",
+    })
+
+    assert payload == {"ok": True, "output": "clean", "stdout": "clean", "stderr": "", "exit_code": 0}
+    assert calls == [(["git", "status"], str(child.resolve()), 30.0)]
+    assert outside == {"ok": False, "error": "workspace path not registered"}
+
+
+@pytest.mark.asyncio
+async def test_allowlist_rejects_non_allowlisted_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app.attribution, "known_workspaces", lambda: [str(tmp_path)])
+
+    payload = await _run(_session(), {
+        "host_mode": "allowlist", "workspace_path": str(tmp_path), "command": "rm -rf .",
+    })
+
+    assert payload == {"ok": False, "error": "executable is not allowlisted"}
+
+
+@pytest.mark.asyncio
+async def test_allowlist_truncates_output_and_preserves_nonzero_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app.attribution, "known_workspaces", lambda: [str(tmp_path)])
+
+    async def fake_run(_argv: list[str], _cwd: str, *, timeout: float) -> tuple[int, str, str]:
+        assert timeout == 30.0
+        return 23, "o" * 9000, "e" * 9000
+
+    monkeypatch.setattr(ws_handlers, "run_allowlisted_text", fake_run)
+
+    payload = await _run(_session(), {
+        "host_mode": "allowlist", "workspace_path": str(tmp_path), "command": "git status",
+    })
+
+    assert payload == {
+        "ok": True,
+        "output": "o" * 8000,
+        "stdout": "o" * 8000,
+        "stderr": "e" * 8000,
+        "exit_code": 23,
+    }
+
+
+@pytest.mark.asyncio
+async def test_allowlist_timeout_and_executor_error_keep_the_response_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app.attribution, "known_workspaces", lambda: [str(tmp_path)])
+
+    async def timeout_run(_argv: list[str], _cwd: str, *, timeout: float) -> tuple[int, str, str]:
+        return 128, "", "git timed out"
+
+    monkeypatch.setattr(ws_handlers, "run_allowlisted_text", timeout_run)
+    timeout_payload = await _run(_session(), {
+        "host_mode": "allowlist", "workspace_path": str(tmp_path), "command": "git status",
+    })
+
+    assert timeout_payload == {
+        "ok": True, "output": "", "stdout": "", "stderr": "git timed out", "exit_code": 128,
+    }
+
+    async def missing_binary(_argv: list[str], _cwd: str, *, timeout: float) -> tuple[int, str, str]:
+        return 127, "", "git not found"
+
+    monkeypatch.setattr(ws_handlers, "run_allowlisted_text", missing_binary)
+    error_payload = await _run(_session(), {
+        "host_mode": "allowlist", "workspace_path": str(tmp_path), "command": "git status",
+    })
+    assert error_payload == {
+        "ok": True, "output": "", "stdout": "", "stderr": "git not found", "exit_code": 127,
+    }

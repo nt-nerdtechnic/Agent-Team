@@ -22,7 +22,6 @@ export interface InMemoryGitTransport extends GitTransportContractHarness {}
 export function createInMemoryGitTransport(status: GitTransportStatusSource): InMemoryGitTransport {
   const listeners = new Map<GitEventType, Set<(payload: unknown) => void>>()
   const responses = new Map<GitRequestType, GitTransportResponse>()
-  const rejections = new Map<GitRequestType, Error>()
   const sent: GitTransportRequestRecord[] = []
 
   function on(type: GitEventType, callback: (payload: unknown) => void): () => void {
@@ -41,8 +40,6 @@ export function createInMemoryGitTransport(status: GitTransportStatusSource): In
     timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
   ): Promise<GitTransportResponse<TPayload>> {
     sent.push({ type, payload, timeoutMs })
-    const rejection = rejections.get(type)
-    if (rejection) throw rejection
     const response = responses.get(type)
     if (response) return response as GitTransportResponse<TPayload>
     return { ok: true, payload: null, error: null }
@@ -73,14 +70,6 @@ export function createInMemoryGitTransport(status: GitTransportStatusSource): In
     })
   }
 
-  function setRejection(type: GitRequestType, error: Error | string = 'transport unavailable'): void {
-    rejections.set(type, typeof error === 'string' ? new Error(error) : error)
-  }
-
-  function clearRejection(type: GitRequestType): void {
-    rejections.delete(type)
-  }
-
   const transport: GitTransport = { status, send, on }
-  return { transport, sent, emit, setResponse, setRejection, clearRejection }
+  return { transport, sent, emit, setResponse }
 }

@@ -32,7 +32,7 @@ const gitPaneStub = {
 
 function mountRepo() {
   return mount(MultiRepoGit, {
-    props: { workspacePath: '/ws', backend: makeBackend(), surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
+    props: { workspacePath: '/ws', legacyRepoSelection: makeLegacyRepoSelection(), surfacePorts: stubSurfacePorts, repositorySource: mockRepositories },
     global: { stubs: { GitPane: gitPaneStub } },
   })
 }
@@ -41,12 +41,8 @@ function makeRepo(relPath: string, absPath: string, branch = 'main', dirtyCount 
   return { rel_path: relPath, abs_path: absPath, branch, badge: { branch, dirtyCount } }
 }
 
-function makeBackend() {
-  const send = vi.fn(async (type: string) => {
-    if (type === 'project.peek') return { ok: true, payload: { project: null } }
-    return { ok: true, payload: { ok: true } }
-  })
-  return { send } as never
+function makeLegacyRepoSelection() {
+  return { readLegacyRepoSelection: vi.fn(async () => null) }
 }
 
 function panes(wrapper: ReturnType<typeof mount>) {

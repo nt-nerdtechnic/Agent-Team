@@ -82,6 +82,12 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Fixed
 
+- Make Git account sign-in safer by limiting saved credentials to the selected
+  Git host, protecting clone destinations chosen in the folder picker, and
+  keeping Git preferences and selected repositories when moving to Plugin
+  Storage. A documented legacy Git recovery launch option remains available if
+  a release needs to return temporarily to the previous Git interface.
+
 - Restore Git contribution parity across the embedded and dedicated views,
   including AI CLI file/external opens, semantic resize/redraw/force controls,
   change badges, and Escape-to-close behavior without affecting sibling
