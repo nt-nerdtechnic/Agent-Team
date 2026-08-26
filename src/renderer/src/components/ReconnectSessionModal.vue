@@ -60,8 +60,8 @@ function confirmSelection(): void {
 
 <template>
   <Teleport v-if="show" to="body">
-    <div class="reconnect-overlay" @click.self="emit('close')">
-      <div class="reconnect-modal">
+    <div class="reconnect-overlay nv-modal-overlay" @click.self="emit('close')">
+      <div class="reconnect-modal nv-modal-shell nv-modal-shell--standard">
         <div class="reconnect-header">
           <span>{{ $t('reconnect.modal-title') }}</span>
           <button class="reconnect-close" @click="emit('close')">✕</button>
@@ -100,9 +100,9 @@ function confirmSelection(): void {
           </template>
         </div>
         <div v-if="!loading && orphans.length > 0" class="reconnect-footer">
-          <button class="reconnect-btn" @click="emit('close')">{{ $t('action.cancel') }}</button>
+          <button class="reconnect-btn nv-btn" @click="emit('close')">{{ $t('action.cancel') }}</button>
           <button
-            class="reconnect-btn primary"
+            class="reconnect-btn primary nv-btn nv-btn--primary"
             :disabled="!selected"
             @click="confirmSelection"
           >{{ $t('reconnect.confirm') }}</button>
@@ -116,7 +116,9 @@ function confirmSelection(): void {
 .reconnect-overlay {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -126,13 +128,13 @@ function confirmSelection(): void {
 .reconnect-modal {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
-  width: min(560px, 92vw);
+  border-radius: var(--radius-lg);
+  width: min(var(--modal-w-standard), 92vw);
   max-height: 78vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 12px 48px var(--shadow-overlay);
+  box-shadow: var(--shadow-modal);
 }
 .reconnect-header {
   display: flex;
@@ -151,7 +153,7 @@ function confirmSelection(): void {
   font-size: 14px;
   cursor: pointer;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 .reconnect-close:hover {
   color: var(--text-bright);
@@ -187,10 +189,12 @@ function confirmSelection(): void {
   text-align: left;
   padding: 10px 12px;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-subtle);
   cursor: pointer;
-  transition: border-color 0.12s ease, background-color 0.12s ease;
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out);
 }
 .reconnect-row:hover:not(:disabled) {
   border-color: var(--accent-muted);
@@ -262,7 +266,7 @@ function confirmSelection(): void {
 .reconnect-btn {
   font-size: 12px;
   padding: 4px 14px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-default);
   background: transparent;
   color: var(--text-primary);

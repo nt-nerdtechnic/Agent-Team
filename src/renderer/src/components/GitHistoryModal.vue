@@ -252,8 +252,8 @@ watch(() => props.show, (visible) => {
 <template>
   <Teleport to="body" :disabled="inline">
     <template v-if="show">
-      <div v-if="!inline" class="tp-backdrop" @click="emit('close')" />
-      <div class="history-modal" :class="{ inline }" @click="closeCtxMenu()">
+      <div v-if="!inline" class="tp-backdrop nv-modal-overlay" @click="emit('close')" />
+      <div class="history-modal nv-modal-shell nv-modal-shell--wide" :class="{ inline }" @click="closeCtxMenu()">
         <!-- Header -->
         <div v-if="!inline" class="hm-hdr">
           <span class="hm-title">{{ $t('label.history') }}</span>
@@ -407,7 +407,7 @@ watch(() => props.show, (visible) => {
 
   <!-- ── Create branch / tag from a commit ────────────────────────────── -->
   <Teleport to="body">
-    <div v-if="commitRefModal" class="tp-backdrop" @click="commitRefModal = null" />
+    <div v-if="commitRefModal" class="tp-backdrop nv-modal-overlay" @click="commitRefModal = null" />
     <div v-if="commitRefModal" class="mini-modal" @click.stop>
       <div class="mini-modal-path">
         {{ commitRefModal.kind === 'branch' ? $t('label.create-branch-from') : $t('label.create-tag-at') }} {{ commitRefModal.hash.slice(0, 7) }}
@@ -416,15 +416,15 @@ watch(() => props.show, (visible) => {
       <input v-if="commitRefModal.kind === 'tag'" v-model="commitRefModal.message" class="git-input" :placeholder="$t('label.message-optional')" @keydown.enter="submitCommitRef" />
       <p v-if="commitRefModal.error" class="err-text">{{ commitRefModal.error }}</p>
       <div class="mini-modal-btns">
-        <button class="btn-ghost sm" @click="commitRefModal = null">{{ $t('action.cancel') }}</button>
-        <button class="btn-ghost sm" @click="submitCommitRef">{{ $t('action.create') }}</button>
+        <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="commitRefModal = null">{{ $t('action.cancel') }}</button>
+        <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="submitCommitRef">{{ $t('action.create') }}</button>
       </div>
     </div>
   </Teleport>
 
   <!-- ── Reset current branch dialog (soft / mixed / hard) ───────────────── -->
   <Teleport to="body">
-    <div v-if="resetDialog" class="tp-backdrop" @click="resetDialog = null" />
+    <div v-if="resetDialog" class="tp-backdrop nv-modal-overlay" @click="resetDialog = null" />
     <div v-if="resetDialog" class="mini-modal" @click.stop>
       <div class="mini-modal-path">
         {{ $t('label.reset-title') }} → {{ resetDialog.hash.slice(0, 7) }}
@@ -440,7 +440,7 @@ watch(() => props.show, (visible) => {
           <span class="rm-name">Hard</span><span class="rm-desc">{{ $t('label.reset-hard-desc') }}</span>
         </button>
         <div class="mini-modal-btns">
-          <button class="btn-ghost sm" @click="resetDialog = null">{{ $t('action.cancel') }}</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="resetDialog = null">{{ $t('action.cancel') }}</button>
         </div>
       </template>
       <template v-else>
@@ -448,8 +448,8 @@ watch(() => props.show, (visible) => {
           {{ resetDialog.mode === 'hard' ? $t('label.reset-hard-warning') : $t('label.reset-confirm') }}
         </p>
         <div class="mini-modal-btns">
-          <button class="btn-ghost sm" @click="resetDialog.mode = null">{{ $t('action.cancel') }}</button>
-          <button class="btn-ghost sm" :class="{ 'btn-danger': resetDialog.mode === 'hard' }" @click="confirmReset">
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="resetDialog.mode = null">{{ $t('action.cancel') }}</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" :class="{ 'btn-danger': resetDialog.mode === 'hard' }" @click="confirmReset">
             {{ $t('action.reset') }} ({{ resetDialog.mode }})
           </button>
         </div>
@@ -459,19 +459,32 @@ watch(() => props.show, (visible) => {
 </template>
 
 <style scoped>
-.tp-backdrop { position: fixed; inset: 0; z-index: 9998; }
+.tp-backdrop {
+  position: fixed; inset: 0; z-index: 9998;
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
+}
 
 .history-modal {
   position: fixed; z-index: 9999; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  width: min(1100px, 94vw); height: 86vh;
-  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: 8px;
-  box-shadow: 0 12px 32px var(--shadow-scrim);
+  width: min(var(--modal-w-wide), 92vw); height: 86vh;
+  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
   display: flex; flex-direction: column; overflow: hidden;
+}
+/* Local entry animation: the shared .nv-modal-shell keyframes end on
+   `transform: none`, which would drop this dialog's translate centering while
+   they play. Same motion, centering preserved — and never in inline mode. */
+.history-modal:not(.inline) { animation: hm-modal-in var(--motion-base) var(--ease-out); }
+@keyframes hm-modal-in {
+  from { opacity: 0; transform: translate(-50%, -50%) translateY(6px) scale(0.985); }
+  to { opacity: 1; transform: translate(-50%, -50%); }
 }
 .history-modal.inline {
   position: relative; top: 0; left: 0; transform: none;
   width: 100%; height: 100%;
-  border: none; border-radius: 0; box-shadow: none;
+  border: none; border-radius: 0; box-shadow: none; animation: none;
 }
 .hm-hdr {
   display: flex; align-items: center; gap: 8px; padding: 8px 14px;
@@ -481,8 +494,8 @@ watch(() => props.show, (visible) => {
 .spacer { flex: 1; }
 .hm-close {
   background: transparent; border: none; color: var(--text-muted);
-  font-size: 13px; cursor: pointer; padding: 2px 6px; border-radius: 4px;
-  transition: background-color 0.1s ease, color 0.1s ease;
+  font-size: 13px; cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm);
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .hm-close:hover { background: var(--bg-active); color: var(--text-primary); }
 
@@ -492,9 +505,9 @@ watch(() => props.show, (visible) => {
   border-bottom: 1px solid var(--border-muted); flex-shrink: 0;
 }
 .hm-select {
-  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
+  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   color: var(--text-primary); font-size: 11px; padding: 3px 6px; cursor: pointer;
-  transition: border-color 0.1s ease;
+  transition: border-color var(--motion-fast) var(--ease-out);
 }
 .hm-select:focus { outline: none; border-color: var(--accent-focus); }
 .hm-select:disabled { opacity: 0.5; cursor: default; }
@@ -520,7 +533,7 @@ watch(() => props.show, (visible) => {
   color: var(--text-muted); font-size: 11px; font-weight: 600; user-select: none;
 }
 .tbl-body { flex: 1; overflow-y: auto; }
-.tbl-row { height: 24px; padding: 0 14px; cursor: pointer; color: var(--text-primary); transition: background-color 0.1s ease, color 0.1s ease; }
+.tbl-row { height: 24px; padding: 0 14px; cursor: pointer; color: var(--text-primary); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 .tbl-row:hover { background: var(--bg-hover-faint); }
 .tbl-row.selected { background: var(--accent-emphasis); color: var(--text-on-emphasis); }
 .tbl-row.selected .chash,
@@ -557,13 +570,13 @@ watch(() => props.show, (visible) => {
 /* On the solid-accent selected row, tint pills with a translucent overlay so
    they stay legible instead of clashing with (or vanishing into) the fill. */
 .tbl-row.selected .ref-pill { background: var(--overlay-soft); color: var(--text-on-emphasis); }
-.chash { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: transparent; }
+.chash { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); background: transparent; }
 
 .hm-loadmore { display: flex; justify-content: center; padding: 5px 0; flex-shrink: 0; }
 .load-more-btn {
-  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
+  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   color: var(--text-primary); font-size: 11px; padding: 3px 14px; cursor: pointer;
-  transition: border-color 0.1s ease, color 0.1s ease;
+  transition: border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .load-more-btn:hover:not(:disabled) { border-color: var(--accent-focus); color: var(--text-bright); }
 .load-more-btn:disabled { opacity: 0.5; cursor: default; }
@@ -583,21 +596,21 @@ watch(() => props.show, (visible) => {
 .dl-meta { margin-bottom: 8px; }
 .dl-row { display: flex; gap: 8px; margin-bottom: 3px; color: var(--text-primary); }
 .dl-key { color: var(--text-muted); min-width: 56px; flex-shrink: 0; }
-.dl-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: var(--text-secondary); background: transparent; word-break: break-all; }
+.dl-mono { font-family: var(--font-mono); font-size: 10px; color: var(--text-secondary); background: transparent; word-break: break-all; }
 .dl-parent { margin-right: 6px; }
 .dl-files-hdr { color: var(--text-muted); font-weight: 600; margin-bottom: 3px; }
 .dl-files { display: flex; flex-direction: column; }
 .dl-file {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: var(--text-primary);
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-primary);
   padding: 2px 4px; border-radius: 3px; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  transition: background-color 0.1s ease, color 0.1s ease;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .dl-file:hover { background: var(--bg-hover-faint); }
 .dl-file.active { background: var(--accent-muted); color: var(--accent-bright); }
 
 .detail-right { flex: 1; min-width: 0; overflow: auto; padding: 4px 0; }
-.diff-view { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.diff-view { font-family: var(--font-mono); font-size: 11px; }
 .db-hunk-head { color: var(--accent-bright); font-size: 10px; opacity: 0.8; padding: 2px 8px; white-space: pre; }
 .db-line { display: flex; align-items: baseline; line-height: 1.5; width: max-content; min-width: 100%; padding: 0 8px; }
 .db-no { color: var(--text-muted); min-width: 34px; text-align: right; padding-right: 8px; flex-shrink: 0; user-select: none; }
@@ -617,15 +630,15 @@ watch(() => props.show, (visible) => {
 .ctx-menu {
   position: fixed; z-index: 10001;
   background: var(--bg-subtle); border: 1px solid var(--border-default);
-  border-radius: 6px; padding: 4px; min-width: 220px;
+  border-radius: var(--radius-sm); padding: 4px; min-width: 220px;
   box-shadow: 0 8px 24px var(--shadow-scrim);
 }
 .ctx-menu .menu-item {
   display: flex; align-items: center; width: 100%;
   background: transparent; border: none; color: var(--text-primary);
-  font-size: 12px; padding: 5px 10px; border-radius: 4px; cursor: pointer;
-  text-align: left; font-family: inherit; gap: 6px;
-  transition: background-color 0.1s ease, color 0.1s ease;
+  font-size: 12px; padding: 5px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  text-align: left; font-family: var(--font-ui); gap: 6px;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .ctx-menu .menu-item:hover { background: var(--bg-active); }
 .ctx-menu .menu-item.danger { color: var(--danger-fg); }
@@ -636,25 +649,25 @@ watch(() => props.show, (visible) => {
 .mini-modal {
   position: fixed; z-index: 10000; top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(420px, 80vw); background: var(--bg-subtle); border: 1px solid var(--border-default);
-  border-radius: 8px; padding: 16px; box-shadow: 0 12px 32px var(--shadow-scrim);
+  border-radius: var(--radius-md); padding: 16px; box-shadow: var(--shadow-modal);
   display: flex; flex-direction: column; gap: 10px;
 }
 .mini-modal-path {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--accent-fg);
+  font-family: var(--font-mono); font-size: 11px; color: var(--accent-fg);
   word-break: break-all;
 }
 .mini-modal-btns { display: flex; gap: 6px; justify-content: flex-end; }
 .git-input {
-  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
+  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   color: var(--text-primary); font-size: 11px; padding: 3px 7px;
 }
 .git-input:focus { outline: none; border-color: var(--accent-focus); }
 
 .reset-mode-btn {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
-  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: 6px;
+  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   padding: 7px 10px; cursor: pointer; text-align: left;
-  transition: border-color 0.1s ease;
+  transition: border-color var(--motion-fast) var(--ease-out);
 }
 .reset-mode-btn:hover { border-color: var(--accent-focus); }
 .reset-mode-btn.danger:hover { border-color: var(--danger-fg); }
@@ -664,14 +677,92 @@ watch(() => props.show, (visible) => {
 .reset-confirm-text { font-size: 12px; color: var(--text-secondary); margin: 0; }
 .reset-confirm-text.danger { color: var(--danger-fg); font-weight: 600; }
 
-/* Mirrors GitPane.vue's .btn-ghost — scoped styles don't cross components. */
-.btn-ghost {
-  background: transparent; border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-secondary); font-size: 12px; padding: 4px 8px; cursor: pointer;
-  transition: background-color 0.1s ease, border-color 0.1s ease, color 0.1s ease;
+/* Canonical button spec — byte-identical in GitPane.vue,
+   GitCredentialModal.vue and GitHistoryModal.vue. Scoped styles don't cross
+   component boundaries, so the house spec is restated in each; keep the three
+   copies in sync. Colours preserve each variant's existing identity (Git's
+   primary action stays green); only the scale and the four states are new. */
+.btn-primary,
+.btn-ghost,
+.btn-danger {
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  line-height: var(--lh-tight);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
 }
-.btn-ghost:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.btn-ghost.sm { font-size: 11px; padding: 3px 7px; }
-.btn-ghost.btn-danger { border-color: var(--danger-fg); color: var(--danger-fg); }
-.btn-ghost.btn-danger:hover { background: var(--danger-subtle, var(--bg-active)); }
+.btn-primary {
+  background: var(--success-emphasis);
+  border-color: var(--success-strong);
+  color: var(--text-on-emphasis);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--success-strong);
+  border-color: var(--success-strong);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.btn-danger {
+  background: var(--danger-emphasis);
+  border-color: var(--danger-emphasis);
+  color: var(--text-on-emphasis);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-bright);
+  border-color: var(--danger-bright);
+}
+.btn-ghost.btn-danger {
+  background: transparent;
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
+}
+.btn-ghost.btn-danger:hover:not(:disabled) {
+  background: var(--danger-subtle);
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
+}
+.btn-primary.sm,
+.btn-ghost.sm,
+.btn-danger.sm {
+  padding: 3px 7px;
+  font-size: var(--font-2xs);
+}
+.btn-ghost.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+  flex: 0 0 auto;
+}
+.btn-primary:active:not(:disabled),
+.btn-ghost:active:not(:disabled),
+.btn-danger:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn-primary:focus-visible,
+.btn-ghost:focus-visible,
+.btn-danger:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.btn-primary:disabled,
+.btn-ghost:disabled,
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 </style>

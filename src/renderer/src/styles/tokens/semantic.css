@@ -210,3 +210,328 @@
   --ansi-bright-cyan: #56d4dd;
   --ansi-bright-white: #f0f6fc;
 }
+
+/*
+ * ═══════════════════════════════════════════════════════════════
+ * Shared component surface (Phase 2)
+ *
+ * A style-only layer: it defines the house spec for buttons, modal
+ * shells, form controls and popovers. Components opt in by adding an
+ * `nv-*` class next to their existing classes — nothing here removes
+ * or renames anything a component already declares.
+ *
+ * Specificity note: scoped component rules carry an extra
+ * [data-v-*] attribute, so they outrank the plain class selectors
+ * below. This layer therefore *fills gaps* (missing hover / active /
+ * focus-visible / disabled / transition) rather than overriding what
+ * a component already decided. Where a component must converge on the
+ * house spec, its own scoped block consumes the tokens defined here.
+ * ═══════════════════════════════════════════════════════════════
+ */
+:root {
+  /* ── Modal shell scale ──────────────────────────────────────── */
+  --modal-w-compact: 440px;   /* confirmations, single-field prompts */
+  --modal-w-standard: 620px;  /* forms, guided flows */
+  --modal-w-wide: 1100px;     /* data tables, multi-pane settings */
+  --modal-backdrop: var(--shadow-overlay);
+  --modal-backdrop-blur: 4px;
+
+  /* ── Control heights ────────────────────────────────────────── */
+  --control-h-sm: 24px;
+  --control-h-md: 28px;
+  --control-h-lg: 32px;
+
+  /* ── Popover geometry (promoted from the 4 status-bar popovers) ─ */
+  --radius-popover: var(--radius-md);
+}
+
+/* ── Button ─────────────────────────────────────────────────────
+ * `.nv-btn` is the house button. Variants are modifier classes so a
+ * component can add `nv-btn nv-btn--primary` alongside its own class.
+ */
+.nv-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: var(--lh-tight);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
+}
+.nv-btn:hover:not(:disabled):not([disabled]) {
+  background: var(--bg-hover-strong);
+  border-color: var(--border-strong);
+}
+.nv-btn:active:not(:disabled):not([disabled]) {
+  transform: translateY(1px);
+}
+.nv-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.nv-btn:disabled,
+.nv-btn[disabled],
+.nv-btn[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.nv-btn--primary {
+  background: var(--accent-emphasis);
+  border-color: var(--accent-emphasis);
+  color: var(--text-on-emphasis);
+}
+.nv-btn--primary:hover:not(:disabled):not([disabled]) {
+  background: var(--accent-focus);
+  border-color: var(--accent-focus);
+}
+
+.nv-btn--danger {
+  background: var(--danger-emphasis);
+  border-color: var(--danger-emphasis);
+  color: var(--text-on-emphasis);
+}
+.nv-btn--danger:hover:not(:disabled):not([disabled]) {
+  background: var(--danger-fg);
+  border-color: var(--danger-fg);
+}
+
+.nv-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.nv-btn--ghost:hover:not(:disabled):not([disabled]) {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--text-bright);
+}
+
+.nv-btn--sm {
+  padding: 3px 8px;
+  font-size: var(--font-xs);
+}
+
+/* Icon-only button container: three sizes from the Phase 1 scale. */
+.nv-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.nv-icon-btn:hover:not(:disabled):not([disabled]) {
+  background: var(--bg-hover-strong);
+  color: var(--text-bright);
+}
+.nv-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.nv-icon-btn--sm { width: var(--icon-btn-sm); height: var(--icon-btn-sm); }
+.nv-icon-btn--lg { width: var(--icon-btn-lg); height: var(--icon-btn-lg); }
+
+/*
+ * The 29 historical button prefixes. Names are NOT changed — this list
+ * only grants them the four interaction states and a shared corner
+ * radius. Every property here is one a scoped rule overrides if the
+ * component already made a decision, so the visible effect is limited
+ * to the buttons that were missing feedback entirely.
+ */
+.ah-icon-btn,
+.ai-cli-btn,
+.an-btn,
+.bp-btn,
+.ch-btn,
+.ci-btn,
+.cli-btn,
+.cm-btn,
+.cp-btn,
+.exp-btn,
+.ga-btn,
+.ob-btn,
+.pv-btn,
+.row-btn,
+.sel-btn,
+.stall-btn {
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
+}
+.ah-icon-btn:focus-visible,
+.ai-cli-btn:focus-visible,
+.an-btn:focus-visible,
+.bp-btn:focus-visible,
+.ch-btn:focus-visible,
+.ci-btn:focus-visible,
+.cli-btn:focus-visible,
+.cm-btn:focus-visible,
+.cp-btn:focus-visible,
+.exp-btn:focus-visible,
+.ga-btn:focus-visible,
+.ob-btn:focus-visible,
+.pv-btn:focus-visible,
+.row-btn:focus-visible,
+.sel-btn:focus-visible,
+.stall-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.ah-icon-btn:disabled,
+.ai-cli-btn:disabled,
+.an-btn:disabled,
+.bp-btn:disabled,
+.ch-btn:disabled,
+.ci-btn:disabled,
+.cli-btn:disabled,
+.cm-btn:disabled,
+.cp-btn:disabled,
+.exp-btn:disabled,
+.ga-btn:disabled,
+.ob-btn:disabled,
+.pv-btn:disabled,
+.row-btn:disabled,
+.sel-btn:disabled,
+.stall-btn:disabled {
+  cursor: not-allowed;
+}
+
+/* ── Modal shell ────────────────────────────────────────────────
+ * `.nv-modal-overlay` skins the scrim, `.nv-modal-shell` skins the
+ * card. Neither sets display/position/overflow, so adding the class
+ * to an existing overlay cannot rearrange its layout.
+ */
+.nv-modal-overlay {
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
+}
+.nv-modal-shell {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+}
+/* Opacity-only on purpose: several cards centre themselves with
+ * translate(-50%, …), and animating `transform` here would fight that. */
+@keyframes nv-modal-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes nv-modal-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.nv-modal-overlay { animation: nv-modal-scrim-in var(--motion-fast) var(--ease-out); }
+.nv-modal-shell { animation: nv-modal-in var(--motion-base) var(--ease-out); }
+
+.nv-modal-shell--compact { width: min(var(--modal-w-compact), 92vw); }
+.nv-modal-shell--standard { width: min(var(--modal-w-standard), 92vw); }
+.nv-modal-shell--wide { width: min(var(--modal-w-wide), 92vw); }
+
+/* ── Popover ────────────────────────────────────────────────────
+ * The formula the four status-bar popovers already agreed on.
+ */
+.nv-popover {
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-popover);
+  box-shadow: var(--shadow-popover);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+}
+
+/* ── Form controls ──────────────────────────────────────────────
+ * Native <input> / <select> / checkbox get the house skin. The
+ * element-level accent-color rule is deliberately unscoped: no
+ * component sets it today, so it is a pure gap fill.
+ */
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--accent-emphasis);
+}
+
+.nv-input,
+.nv-select {
+  padding: 5px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: var(--lh-base);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+.nv-input::placeholder {
+  color: var(--text-muted);
+}
+.nv-input:hover:not(:disabled),
+.nv-select:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+.nv-input:focus,
+.nv-select:focus {
+  outline: none;
+  border-color: var(--accent-focus);
+}
+.nv-input:disabled,
+.nv-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.nv-select {
+  cursor: pointer;
+}
+.nv-check {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent-emphasis);
+}
+.nv-check:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
+}
+
+/* Helper / hint text under a control — one spec, many legacy names. */
+.nv-hint {
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
+}

@@ -22,13 +22,13 @@ const note = computed(() =>
 <template>
   <Teleport to="body">
     <div
-      class="modal"
+      class="modal nv-modal-overlay"
       tabindex="-1"
       @click.self="emit('close')"
       @keydown.esc="emit('close')"
       @keydown.enter="emit('close')"
     >
-      <div class="card">
+      <div class="card nv-modal-shell nv-modal-shell--standard">
         <header>
           <span class="dot"></span>
           <strong>{{ header }} · v{{ entry.version }}</strong>
@@ -41,7 +41,7 @@ const note = computed(() =>
           <p v-if="note" class="note">{{ note }}</p>
         </div>
         <footer>
-          <button class="primary" @click="emit('close')">{{ dismiss }}</button>
+          <button class="primary nv-btn nv-btn--primary" @click="emit('close')">{{ dismiss }}</button>
         </footer>
       </div>
     </div>
@@ -52,7 +52,9 @@ const note = computed(() =>
 .modal {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -65,15 +67,15 @@ const note = computed(() =>
   background: var(--bg-base);
   border: 1px solid var(--border-default);
   border-left: 4px solid var(--accent-fg);
-  border-radius: 8px;
-  width: min(520px, 92vw);
+  border-radius: var(--radius-lg);
+  width: min(var(--modal-w-standard), 92vw);
   max-height: 80vh;
   display: flex;
   flex-direction: column;
   color: var(--text-bright);
-  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
-  box-shadow: 0 12px 48px var(--shadow-overlay);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 header {
@@ -139,7 +141,7 @@ button {
   color: var(--text-bright);
   font-size: 12px;
   padding: 7px 14px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-family: inherit;
 }

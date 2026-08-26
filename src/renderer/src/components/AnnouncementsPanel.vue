@@ -53,7 +53,7 @@ function fmtTime(ts: number): string {
 
 <template>
   <div class="an-backdrop" @click="emit('close')" />
-  <div class="an-pop" @click.stop>
+  <div class="an-pop nv-popover" @click.stop>
     <div class="an-head">
       <span class="an-head-title">{{ $t('announce.title') }}</span>
       <button class="an-btn" data-act="mark-all" @click="emit('mark-all-read')">
@@ -128,10 +128,10 @@ function fmtTime(ts: number): string {
   max-height: 60vh;
   display: flex;
   flex-direction: column;
-  border-radius: 8px;
+  border-radius: var(--radius-popover);
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-popover);
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -157,7 +157,7 @@ function fmtTime(ts: number): string {
   background: var(--bg-hover);
   color: var(--text-secondary);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 7px;
   font-size: 10px;
   cursor: pointer;

@@ -7,6 +7,7 @@ import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 import RebuildIcon from './RebuildIcon.vue'
+import HistoryIcon from './HistoryIcon.vue'
 import FolderIcon from './FolderIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
@@ -789,11 +790,11 @@ function selectSidebarTab(tab: SidebarTab): void {
 // `title` keeps its shortcut hint: Cmd+1..5 are bound to SIDEBAR_TABS by
 // position in that list, not by position in the strip, so reordering the strip
 // leaves the hints correct.
-const RAIL_TABS: { id: SidebarTab; icon: string; label: string; title: string; path: string }[] = [
+const RAIL_TABS: { id: SidebarTab; icon?: string; label: string; title: string; path: string }[] = [
   { id: 'agents', icon: '\u{1F916}', label: 'label.agents', title: 'Agents (\u23181)', path: 'M2 3.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm0 4.5a1.25 1.25 0 1 1 2.5 0A1.25 1.25 0 0 1 2 8Zm0 4.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0ZM6.5 2.75A.75.75 0 0 1 7.25 2h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5A.75.75 0 0 1 7.25 6.5h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Z' },
   { id: 'pipeline', icon: '\u{1F500}', label: 'label.pipeline', title: 'Pipeline (\u23182)', path: 'M0 1.75C0 .784.784 0 1.75 0h3.5C6.216 0 7 .784 7 1.75v3.5A1.75 1.75 0 0 1 5.25 7H4v4a1 1 0 0 0 1 1h4v-1.25C9 9.784 9.784 9 10.75 9h3.5c.966 0 1.75.784 1.75 1.75v3.5A1.75 1.75 0 0 1 14.25 16h-3.5A1.75 1.75 0 0 1 9 14.25v-.75H5A2.5 2.5 0 0 1 2.5 11V7h-.75A1.75 1.75 0 0 1 0 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Zm9 9a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Z' },
   { id: 'explorer', icon: '\u{1F4C1}', label: 'label.explorer', title: 'Explorer (\u23183)', path: 'M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5L6.2 1.7A1.75 1.75 0 0 0 4.96 1H1.75Z' },
-  { id: 'git', icon: '\u{1F33F}', label: 'label.git', title: 'Git (\u23184)', path: 'M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25z' },
+  { id: 'git', label: 'label.git', title: 'Git (\u23184)', path: 'M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25z' },
   { id: 'plans', icon: '\u{1F4CB}', label: 'label.plans', title: 'Plans (\u23185)', path: 'M5 2a1 1 0 0 0-1 1H2.75A1.75 1.75 0 0 0 1 4.75v9.5c0 .966.784 1.75 1.75 1.75h10.5A1.75 1.75 0 0 0 15 14.25v-9.5A1.75 1.75 0 0 0 13.25 3H12a1 1 0 0 0-1-1H5Zm0 2h6v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4Zm-2.25.5H4a2.5 2.5 0 0 0 2 1h4a2.5 2.5 0 0 0 2-1h1.25a.25.25 0 0 1 .25.25v9.5a.25.25 0 0 1-.25.25H2.75a.25.25 0 0 1-.25-.25v-9.5a.25.25 0 0 1 .25-.25Z' },
 ]
 
@@ -1387,7 +1388,9 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         :title="$t('layout.expand')"
         @click="selectSidebarTab(t.id)"
       >
-        <span class="rail-icon">{{ t.icon }}</span>
+        <svg v-if="!t.icon" class="rail-icon rail-icon-git" width="18" height="18"
+             viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path :d="t.path"/></svg>
+        <span v-else class="rail-icon">{{ t.icon }}</span>
         <span class="rail-label">{{ $t(t.label) }}</span>
         <span v-if="t.id === 'git' && gitChangesCount > 0" class="rail-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
       </button>
@@ -1591,7 +1594,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           >
             <RebuildIcon />
           </button>
-          <button class="history-btn" :title="$t('label.history')" @click="emit('open-history')">📋</button>
+          <button class="history-btn" :title="$t('label.history')" @click="emit('open-history')"><HistoryIcon /></button>
         </div>
       </div>
       <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
@@ -1637,7 +1640,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           >
             <RebuildIcon />
           </button>
-          <button class="ws-act" :title="$t('label.history')" @click.stop="emit('open-history')">📋</button>
+          <button class="ws-act" :title="$t('label.history')" @click.stop="emit('open-history')"><HistoryIcon /></button>
           <!-- Opens the same CLI and role the spawn card holds, in THIS
                workspace — the menu remembers which heading opened it. -->
           <button
@@ -1715,7 +1718,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           </div>
           <template v-if="expandedPaneId === p.id || props.focusPaneId === p.id">
             <div class="agent-role-line">
-              <span>{{ agentTypeLabel(p.agentKey) }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span></span>
+              <span class="agent-role-main">{{ agentTypeLabel(p.agentKey) }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span></span>
               <span class="state" :data-state="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
             </div>
             <div v-if="!p.isMinimized && p.origin === 'pipeline'" class="stage-line">
@@ -1726,7 +1729,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             </div>
             <div v-if="!p.isMinimized" class="agent-cmd"><code>{{ p.command }}</code></div>
             <div v-if="!p.isMinimized && p.sessionId" class="agent-session" title="CLI session id — used to resume this agent's memory on restart">
-              🔖 session: <code>{{ p.sessionId }}</code>
+              <span class="agent-session-k">session</span><code>{{ p.sessionId }}</code>
             </div>
             <div v-if="p.error" class="err">{{ p.error }}</div>
             <div class="row tight">
@@ -1840,8 +1843,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       <!-- A dialog rather than a permanent card: the sidebar is a list of what
            is running, and a form for starting something new sat in it all day
            whether or not it was wanted. Every control inside is unchanged. -->
-      <div v-if="manualSpawnOpen" class="spawn-modal-backdrop" @click.self="manualSpawnOpen = false">
-        <div class="spawn-card spawn-card--modal" role="dialog" aria-modal="true">
+      <div v-if="manualSpawnOpen" class="spawn-modal-backdrop nv-modal-overlay" @click.self="manualSpawnOpen = false">
+        <div class="spawn-card spawn-card--modal nv-modal-shell" role="dialog" aria-modal="true">
         <div class="spawn-card-hdr">
           <span>{{ $t('label.manual-spawn') }}</span>
           <button class="spawn-modal-close" :aria-label="$t('action.close')" @click="manualSpawnOpen = false">✕</button>
@@ -2126,10 +2129,10 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   height: 30px;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .tab-btn:hover { color: var(--text-primary); background: var(--bg-elevated); }
 .tab-btn.active {
@@ -2147,12 +2150,12 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   height: 30px;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .tab-collapse:hover { color: var(--text-primary); background: var(--bg-elevated); }
 
@@ -2192,6 +2195,9 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 .rail-btn:hover { background: var(--bg-subtle); color: var(--text-bright); }
 .rail-btn.active { color: var(--accent-fg); }
 .rail-icon { font-size: 16px; }
+/* No emoji reads as a branch, so git uses its own glyph — kept in Git's
+   brand orange so the rail stays as colourful as the emoji beside it. */
+.rail-icon-git { color: #f05033; }
 .rail-label {
   /* No rotate(180deg): the bottom-up "book spine" trick flips CJK glyphs
      upside down. Plain vertical-rl keeps CJK upright and rotates Latin 90°. */
@@ -2311,14 +2317,14 @@ textarea {
   border: 1px solid var(--border-default);
   color: var(--text-bright);
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-family: inherit;
   font-size: 12px;
   box-sizing: border-box;
   width: 100%;
 }
 textarea {
-  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-family: var(--font-mono);
   resize: vertical;
 }
 input[type='text']:focus,
@@ -2425,7 +2431,7 @@ textarea.drag-over {
 .terminal-btn {
   opacity: 0.6;
   border-style: dashed;
-  transition: opacity 0.2s, background 0.2s;
+  transition: opacity var(--motion-base) var(--ease-out), background var(--motion-base) var(--ease-out);
 }
 .terminal-btn:hover:not(:disabled) {
   opacity: 1;
@@ -2442,7 +2448,7 @@ textarea.drag-over {
   background: var(--bg-muted);
   color: var(--text-bright);
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .resume-btn {
   flex-shrink: 0;
@@ -2454,7 +2460,7 @@ button {
   color: var(--text-bright);
   font-size: 12px;
   padding: 6px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
 }
 button:disabled {
@@ -2533,7 +2539,7 @@ button.history-btn {
   padding: 0;
   width: 32px;
   height: 32px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -2569,6 +2575,7 @@ button.agent-rebuild-all-btn.busy svg {
 @keyframes agent-rebuild-spin {
   to { transform: rotate(360deg); }
 }
+button.history-btn :deep(svg) { width: 15px; height: 15px; }
 button.history-btn:hover {
   color: var(--text-bright);
   border-color: var(--accent-fg);
@@ -2581,7 +2588,7 @@ button.icon-btn {
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   opacity: 0.5;
 }
 button.icon-btn:hover {
@@ -2643,11 +2650,11 @@ button.icon-btn.muted:hover {
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--motion-fast) var(--ease-out);
 }
 .pipeline-item:hover {
   background: var(--bg-elevated);
@@ -2694,7 +2701,7 @@ button.icon-btn.muted:hover {
   flex: 1;
   background: var(--bg-inset);
   border: 1px solid var(--accent-emphasis);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-bright);
   font-size: 12px;
   padding: 4px 6px;
@@ -2746,7 +2753,7 @@ button.icon-btn.muted:hover {
   color: var(--success-fg);
   background: var(--success-subtle);
   border: 1px solid color-mix(in srgb, var(--success-strong) 33%, transparent);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   padding: 1px 5px;
   white-space: nowrap;
 }
@@ -2754,7 +2761,7 @@ button.icon-btn.muted:hover {
   flex: 1;
   background: var(--bg-inset);
   border: 1px solid var(--accent-emphasis);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-bright);
   font-size: 12px;
   padding: 3px 6px;
@@ -2763,14 +2770,14 @@ button.icon-btn.muted:hover {
 .agent-cmd code {
   background: var(--bg-subtle);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   font-size: 10px;
 }
 .pipeline {
   background: var(--bg-inset);
   border: 1px solid var(--accent-muted);
   padding: 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .pipeline-detail-scroll .pipeline {
   flex: 1;
@@ -2784,13 +2791,13 @@ button.icon-btn.muted:hover {
   background: var(--bg-inset);
   border: 1px solid var(--accent-muted);
   padding: 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .resume-card {
   background: var(--bg-elevated);
   border: 1px solid var(--accent-muted);
   border-left: 3px solid var(--accent-fg);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 8px 10px;
   margin-bottom: 8px;
   display: flex;
@@ -2844,7 +2851,7 @@ button.icon-btn.muted:hover {
   color: var(--text-primary);
   background: var(--bg-inset);
   padding: 6px 8px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   white-space: pre-wrap;
   max-height: 80px;
   overflow-y: auto;
@@ -2862,11 +2869,11 @@ button.icon-btn.muted:hover {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
   border-left: 4px solid var(--danger-fg);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 20px 22px;
   width: min(480px, 90vw);
   color: var(--text-bright);
-  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  font-family: var(--font-ui);
   font-size: 13px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
@@ -2886,9 +2893,9 @@ button.icon-btn.muted:hover {
 .restart-task {
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 8px 10px;
-  font-family: Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   margin: 8px 0;
   max-height: 120px;
@@ -2952,7 +2959,7 @@ button.icon-btn.muted:hover {
   height: 100%;
   background: linear-gradient(90deg, var(--accent-emphasis) 0%, var(--accent-focus) 40%, var(--success-fg) 100%);
   background-size: 200% 100%;
-  transition: width 300ms ease;
+  transition: width var(--motion-base) var(--ease-out);
   animation: bar-flow 2.5s linear infinite, bar-pulse 2s ease-in-out infinite;
 }
 .progress .bar::after {
@@ -3083,7 +3090,7 @@ button.icon-btn.muted:hover {
 /* The workspace on screen. The others in this window keep running; their
    headings read as links to switch to. */
 .ws-head--viewing .ws-name { color: var(--accent-bright, var(--text-bright)); }
-.ws-head--switchable { cursor: pointer; border-radius: 4px; }
+.ws-head--switchable { cursor: pointer; border-radius: var(--radius-xs); }
 .ws-head--switchable:hover { background: var(--bg-hover); }
 .ws-head--switchable:hover .ws-name { text-decoration: underline; }
 /* This window has no terminal for that project's panes — the row goes to the
@@ -3109,7 +3116,7 @@ button.icon-btn.muted:hover {
   min-width: 18px;
   height: 15px;
   padding: 0 4px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-muted);
   color: var(--text-muted);
   font-weight: 400;
@@ -3165,7 +3172,7 @@ button.icon-btn.muted:hover {
   max-width: calc(100vw - 24px);
   padding: 5px 0;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-elevated, var(--bg-secondary));
   box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
   font-size: 12px;
@@ -3204,7 +3211,7 @@ button.icon-btn.muted:hover {
   min-width: 150px;
   padding: 4px 0;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-elevated, var(--bg-secondary));
   box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
   font-size: 12px;
@@ -3241,7 +3248,7 @@ button.icon-btn.muted:hover {
 .agent-item {
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 0 4px;
 }
 /* Panes sit under the workspace that owns them. The sibling selector is what
@@ -3294,7 +3301,7 @@ button.icon-btn.muted:hover {
      reading as a paragraph. */
   min-height: 22px;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 1px 2px;
   overflow: hidden;
 }
@@ -3358,7 +3365,7 @@ button.icon-btn.muted:hover {
   flex-shrink: 0;
   font-size: 8px;
   color: var(--text-muted);
-  transition: transform 0.15s;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 .agent-item.expanded .expand-caret {
   transform: rotate(90deg);
@@ -3403,9 +3410,39 @@ button.icon-btn.muted:hover {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  font-size: 10px;
-  color: var(--accent-bright);
-  margin: 2px 0 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 4px 0 5px;
+}
+/* The agent's own name is the one thing worth reading at a glance; the rest of
+   the card is deliberately quieter so the eye lands here first. */
+.agent-role-main {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-bright);
+  font-weight: 500;
+}
+/* Actions read as one quiet pair: Remove only fills in on hover, so a card at
+   rest is not dominated by a red block. */
+.agent-item.expanded > .row.tight {
+  margin-top: 8px;
+}
+.agent-item.expanded > .row.tight button {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 4px;
+}
+.agent-item.expanded > .row.tight button.danger {
+  background: transparent;
+  color: var(--danger-fg);
+  border: 1px solid color-mix(in srgb, var(--danger-fg) 40%, transparent);
+}
+.agent-item.expanded > .row.tight button.danger:hover {
+  background: var(--danger-emphasis);
+  border-color: transparent;
+  color: var(--text-on-emphasis);
 }
 .agent-item.expanded > .agent-role-line,
 .agent-item.expanded > .stage-line,
@@ -3458,9 +3495,9 @@ button.icon-btn.muted:hover {
   background: var(--danger-deep);
 }
 .stage-line {
-  color: var(--text-secondary);
+  color: var(--text-muted);
   font-size: 10px;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 .pipe-tag {
   font-size: 9px;
@@ -3468,7 +3505,7 @@ button.icon-btn.muted:hover {
   background: var(--accent-muted);
   color: var(--accent-bright);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
 }
 /* Agent-spawned pane. Distinct hue from .pipe-tag so the two provenance marks
    are never confused; both sit in the same slot before the name. */
@@ -3478,7 +3515,7 @@ button.icon-btn.muted:hover {
   background: var(--done-muted, var(--bg-muted));
   color: var(--done-fg, var(--text-secondary));
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   flex: none;
 }
 /* Fold control for a pane that has children. Sized to match .lineage-spacer so
@@ -3504,7 +3541,7 @@ button.icon-btn.muted:hover {
   font-size: 10px;
   background: var(--bg-muted);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-primary);
 }
 .badge.role {
@@ -3596,13 +3633,36 @@ button.icon-btn.muted:hover {
   text-overflow: ellipsis;
 }
 .agent-session {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   font-size: 10px;
   color: var(--text-secondary);
   margin-bottom: 4px;
-  word-break: break-all;
 }
-.agent-session code {
-  color: var(--accent-fg);
+.agent-session-k {
+  flex: none;
+  font-size: 9px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+/* Command and session id are both machine strings: same chip, one line each,
+   truncated rather than wrapped. The full value is in the row's title. */
+.agent-item.expanded > .agent-cmd code,
+.agent-item.expanded > .agent-session code {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-muted);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .err {
   color: var(--danger-fg);
@@ -3614,7 +3674,7 @@ button.icon-btn.muted:hover {
   padding: 6px 8px;
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .role-line {
   margin: 4px 0 0;
@@ -3625,7 +3685,7 @@ button.icon-btn.muted:hover {
   margin: 6px 0 0;
   padding: 6px 8px;
   background: var(--bg-inset);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: 10px;
   line-height: 1.5;
   max-height: 220px;
@@ -3655,7 +3715,7 @@ button.icon-btn.muted:hover {
 /* ── Manual spawn card (matches GitPane git-card / History style) ─────────── */
 .spawn-card {
   border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   margin-top: 6px;
 }
@@ -3682,17 +3742,20 @@ button.icon-btn.muted:hover {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgb(0 0 0 / 45%);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
 }
 .spawn-card--modal {
-  width: 320px;
+  /* Keeps its own 320px: it is a compact spawn card, not a dialog tier. */
+  width: min(320px, 92vw);
   max-width: 100%;
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--bg-elevated, var(--bg-secondary));
-  box-shadow: 0 16px 48px rgb(0 0 0 / 50%);
+  box-shadow: var(--shadow-modal);
 }
 .spawn-card--modal .spawn-card-hdr {
   display: flex;
@@ -3769,7 +3832,7 @@ button.icon-btn.muted:hover {
   background: var(--bg-base);
   border-top: 1px solid var(--border-muted);
   border-bottom: 1px solid var(--border-muted);
-  transition: background 0.1s;
+  transition: background var(--motion-fast) var(--ease-out);
 }
 .pane-split .part-resize:hover {
   background: var(--bg-elevated);
@@ -3778,9 +3841,9 @@ button.icon-btn.muted:hover {
   margin: 0 auto;
   width: 44px;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   background: var(--text-muted);
-  transition: height 0.1s, width 0.1s, background 0.1s;
+  transition: height var(--motion-fast) var(--ease-out), width var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .pane-split .part-resize:hover .part-resize-grip,
 .pane-split .part-resize:active .part-resize-grip {

@@ -1831,8 +1831,8 @@ watch(activeTab, (tab) => {
 <template>
   <Teleport to="body">
     <!-- Overlay -->
-    <div class="s-overlay" @click.self="emit('close')">
-      <div class="s-modal">
+    <div class="s-overlay nv-modal-overlay" @click.self="emit('close')">
+      <div class="s-modal nv-modal-shell nv-modal-shell--wide">
 
         <!-- ── Sidebar (title + search + grouped nav) ────────────────────── -->
         <aside class="s-sidebar">
@@ -1998,7 +1998,7 @@ watch(activeTab, (tab) => {
                   <span class="mcp-server-name">{{ srv.name }}</span>
                   <span class="mcp-transport-badge">{{ srv.transport }}</span>
                   <span class="mcp-spacer"></span>
-                  <button class="mcp-delete-btn" @click="mRemoveServer(idx)" title="Remove">🗑</button>
+                  <button class="mcp-delete-btn nv-btn nv-btn--danger" @click="mRemoveServer(idx)" title="Remove">🗑</button>
                   <!-- Toggle switch -->
                   <ToggleSwitch
                     :model-value="srv.enabled"
@@ -2189,7 +2189,7 @@ watch(activeTab, (tab) => {
           <!-- ── CATALOG VIEW ────────────────────────────────────────────── -->
           <template v-else-if="mView === 'catalog'">
             <div class="mcp-topbar" data-settings-section="mcp-catalog">
-              <button class="mcp-back-btn" @click="mView = 'list'">← Back</button>
+              <button class="mcp-back-btn nv-btn" @click="mView = 'list'">← Back</button>
               <span class="mcp-page-title">Add MCP Servers</span>
             </div>
 
@@ -2212,7 +2212,7 @@ watch(activeTab, (tab) => {
                   </div>
                 </div>
                 <button v-if="mIsInstalled(item.name)" class="mcp-installed-badge" disabled>Installed</button>
-                <button v-else class="mcp-add-btn" @click="mAddFromCatalog(item)" :disabled="mSaving">+ Add</button>
+                <button v-else class="mcp-add-btn nv-btn nv-btn--primary" @click="mAddFromCatalog(item)" :disabled="mSaving">+ Add</button>
               </div>
               <div v-if="mFilteredCatalog.length === 0" class="mcp-empty">No matching MCP servers found</div>
             </div>
@@ -2220,7 +2220,7 @@ watch(activeTab, (tab) => {
 
           <template v-else>
             <div class="mcp-topbar" data-settings-section="mcp-custom">
-              <button class="mcp-back-btn" @click="mView = 'list'">← {{ $t('action.back') }}</button>
+              <button class="mcp-back-btn nv-btn" @click="mView = 'list'">← {{ $t('action.back') }}</button>
               <span class="mcp-page-title">{{ $t('settings.mcp.custom-title') }}</span>
             </div>
             <form class="mcp-custom-form" @submit.prevent="mCreateCustom">
@@ -2249,7 +2249,7 @@ watch(activeTab, (tab) => {
                 <button type="button" class="mcp-action-btn" @click="mView = 'list'">{{ $t('action.cancel') }}</button>
                 <button
                   type="submit"
-                  class="mcp-add-btn"
+                  class="mcp-add-btn nv-btn nv-btn--primary"
                   :disabled="mSaving || !mCustomName.trim() || (mCustomTransport === 'stdio' ? !mCustomCommand.trim() : !mCustomUrl.trim())"
                 >{{ $t('settings.mcp.create-server') }}</button>
               </div>
@@ -2339,7 +2339,7 @@ watch(activeTab, (tab) => {
                     @change="props.analyzerApi.saveSettings({ gguf_path: ($event.target as HTMLInputElement).value })"
                   />
                   <button
-                    class="az-recheck-btn"
+                    class="az-recheck-btn nv-btn"
                     :disabled="azRechecking"
                     @click="azRecheck"
                     :title="$t('action.recheck-file-exists')"
@@ -2375,7 +2375,7 @@ watch(activeTab, (tab) => {
                     @change="props.analyzerApi.saveSettings({ ollama_base_url: ($event.target as HTMLInputElement).value })"
                   />
                   <button
-                    class="az-recheck-btn"
+                    class="az-recheck-btn nv-btn"
                     :disabled="azRechecking"
                     @click="azRecheck"
                     :title="$t('settings.analyzer.recheck-title')"
@@ -2411,7 +2411,7 @@ watch(activeTab, (tab) => {
                 @keydown.enter="azDoPull"
               />
               <button
-                class="az-run-btn"
+                class="az-run-btn nv-btn nv-btn--primary"
                 :disabled="props.analyzerApi.pulling.value || !azPullName.trim()"
                 @click="azDoPull"
               >
@@ -2462,7 +2462,7 @@ watch(activeTab, (tab) => {
                     <template v-if="m.size > 0"> · {{ (m.size / 1e9).toFixed(1) }} GB</template>
                   </span>
                 </div>
-                <button class="az-del-btn" @click="azDoDelete(m.name)" :title="$t('settings.analyzer.delete-local-title')">✕</button>
+                <button class="az-del-btn nv-btn nv-btn--danger" @click="azDoDelete(m.name)" :title="$t('settings.analyzer.delete-local-title')">✕</button>
               </div>
             </div>
           </div>
@@ -2472,7 +2472,7 @@ watch(activeTab, (tab) => {
             <div class="az-section-header">
               <div class="az-section-title">{{ $t('settings.analyzer.model-benchmark') }}</div>
               <button
-                class="az-run-btn"
+                class="az-run-btn nv-btn nv-btn--primary"
                 :disabled="props.analyzerApi.benchmarking.value || !props.analyzerApi.health.value?.ok"
                 @click="props.analyzerApi.benchmark()"
               >
@@ -3699,7 +3699,9 @@ watch(activeTab, (tab) => {
 .s-overlay {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   z-index: 8000;
   display: flex;
   align-items: center;
@@ -3712,14 +3714,14 @@ watch(activeTab, (tab) => {
   background: var(--bg-base);
   color: var(--text-bright);
   border: 1px solid var(--border-muted);
-  border-radius: 12px;
-  width: 92vw;
+  border-radius: var(--radius-lg);
+  width: min(var(--modal-w-wide), 92vw);
   max-width: 1100px;
   height: 88vh;
   display: grid;
   grid-template-columns: 232px minmax(0, 1fr);
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0,0,0,0.7);
+  box-shadow: var(--shadow-modal);
 }
 
 /* ── Sidebar ─────────────────────────────────────────────────────────────────  */
@@ -3829,7 +3831,7 @@ watch(activeTab, (tab) => {
   height: 30px;
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: 12px;
   padding: 0 10px;
@@ -3849,7 +3851,7 @@ watch(activeTab, (tab) => {
   overflow-y: auto;
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: 0 16px 36px rgba(0,0,0,0.45);
   padding: 6px;
 }
@@ -3859,7 +3861,7 @@ watch(activeTab, (tab) => {
   background: transparent;
   color: var(--text-primary);
   text-align: left;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 8px 9px;
   cursor: pointer;
 }
@@ -3933,7 +3935,7 @@ watch(activeTab, (tab) => {
 .cli-agent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .cli-agent-row {
   display: flex; align-items: center; gap: 10px;
-  padding: 8px 12px; border: 1px solid var(--border-default); border-radius: 8px;
+  padding: 8px 12px; border: 1px solid var(--border-default); border-radius: var(--radius-md);
   background: var(--bg-elevated);
 }
 .cli-agent-row.drag-over { box-shadow: inset 0 0 0 2px var(--accent-focus); background: var(--accent-subtle); }
@@ -3954,16 +3956,16 @@ watch(activeTab, (tab) => {
   gap: 9px;
   padding: 12px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-subtle);
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
+  transition: border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
   text-align: left;
 }
 .ap-theme-card:hover { border-color: var(--border-strong); background: var(--bg-muted); }
 .ap-theme-card.active { border-color: var(--accent-emphasis); box-shadow: 0 0 0 1px var(--accent-emphasis); }
 .ap-swatches { display: flex; gap: 4px; }
-.ap-swatch { width: 24px; height: 24px; border-radius: 5px; border: 1px solid var(--border-muted); }
+.ap-swatch { width: 24px; height: 24px; border-radius: var(--radius-sm); border: 1px solid var(--border-muted); }
 .ap-theme-label { font-size: 12px; font-weight: 500; color: var(--text-primary); }
 .ap-check { position: absolute; top: 10px; right: 11px; font-size: 12px; color: var(--accent-fg); }
 .ap-lang-row { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -3973,12 +3975,12 @@ watch(activeTab, (tab) => {
   position: relative;
   padding: 8px 20px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-subtle);
   color: var(--text-primary);
   font-size: 13px;
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
+  transition: border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .ap-lang-btn:hover { border-color: var(--border-strong); background: var(--bg-muted); }
 .ap-lang-btn.active { border-color: var(--accent-emphasis); box-shadow: 0 0 0 1px var(--accent-emphasis); }
@@ -3987,7 +3989,7 @@ watch(activeTab, (tab) => {
   font-size: 11px;
   padding: 4px 10px;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -4000,7 +4002,7 @@ watch(activeTab, (tab) => {
   gap: 12px;
   padding: 7px 10px;
   border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-subtle);
 }
 .ap-color-input {
@@ -4008,18 +4010,18 @@ watch(activeTab, (tab) => {
   height: 26px;
   padding: 0;
   border: 1px solid var(--border-default);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   cursor: pointer;
   flex-shrink: 0;
 }
 .ap-color-name { font-size: 12px; color: var(--text-primary); min-width: 92px; }
-.ap-color-token { font-size: 10.5px; color: var(--text-muted); font-family: ui-monospace, monospace; flex: 1; }
+.ap-color-token { font-size: 10.5px; color: var(--text-muted); font-family: var(--font-mono); flex: 1; }
 .ap-color-clear {
   width: 20px;
   height: 20px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -4085,7 +4087,7 @@ watch(activeTab, (tab) => {
 .settings-meta-row.inline {
   padding: 7px 9px;
   border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   margin-top: 10px;
 }
 .scope-badge {
@@ -4102,7 +4104,7 @@ watch(activeTab, (tab) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 .settings-path-divider { color: var(--text-muted); }
 .settings-path-btn {
@@ -4110,7 +4112,7 @@ watch(activeTab, (tab) => {
   border: 1px solid var(--border-default);
   background: transparent;
   color: var(--text-secondary);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   padding: 3px 7px;
   font-size: 10.5px;
   cursor: pointer;
@@ -4184,7 +4186,7 @@ button.tiny {
   font-size: 11.5px;
   font-family: inherit;
   background: var(--bg-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 /* ── Fields ───────────────────────────────────────────────────────────────── */
@@ -4195,20 +4197,20 @@ input[type='text'], input[type='email'], input[type='number'], input[type='passw
   border: 1px solid var(--border-default);
   color: var(--text-bright);
   padding: 7px 9px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-family: inherit;
   font-size: 12px;
   box-sizing: border-box;
   width: 100%;
 }
-textarea { font-family: Menlo, Monaco, monospace; resize: vertical; line-height: 1.5; }
+textarea { font-family: var(--font-mono); resize: vertical; line-height: 1.5; }
 input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent-emphasis); }
 input:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ── List items ───────────────────────────────────────────────────────────── */
 .row-g { display: flex; align-items: center; gap: 6px; }
 .row-g.gap { gap: 8px; }
-.badge { background: var(--bg-muted); color: var(--text-secondary); font-size: 9px; padding: 1px 5px; border-radius: 3px; }
+.badge { background: var(--bg-muted); color: var(--text-secondary); font-size: 9px; padding: 1px 5px; border-radius: var(--radius-xs); }
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 button {
@@ -4217,7 +4219,7 @@ button {
   color: var(--text-bright);
   font-size: 12px;
   padding: 6px 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
 }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -4273,22 +4275,22 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .policy-section-label { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
 .policy-empty { margin: 0; font-size: 11.5px; color: var(--text-secondary); }
 .policy-rules { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.policy-rule { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: 5px; background: var(--bg-muted); }
+.policy-rule { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-muted); }
 .policy-rule-text { font-size: 11.5px; color: var(--text-bright); word-break: break-all; }
 .policy-add { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .member-row { flex-direction: column; align-items: stretch; gap: 6px; }
 .member-main { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .member-main .policy-rule-text { flex: 1; min-width: 0; }
-.member-tag { margin-left: 6px; padding: 1px 5px; border-radius: 3px; font-size: 10px; background: var(--bg-default); color: var(--text-secondary); }
+.member-tag { margin-left: 6px; padding: 1px 5px; border-radius: var(--radius-xs); font-size: 10px; background: var(--bg-default); color: var(--text-secondary); }
 .member-tag.off { color: var(--attention-fg); }
 .member-role-static { font-size: 11.5px; color: var(--text-secondary); flex-shrink: 0; }
 .member-role { flex-shrink: 0; }
 .member-confirm { border-top: 1px solid var(--border-default); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
 .member-confirm-text { margin: 0; font-size: 11.5px; color: var(--attention-fg); }
-.member-token { margin: 12px 0 0; padding: 10px; border: 1px solid var(--attention-fg); border-radius: 5px; background: var(--bg-muted); display: flex; flex-direction: column; gap: 8px; }
+.member-token { margin: 12px 0 0; padding: 10px; border: 1px solid var(--attention-fg); border-radius: var(--radius-sm); background: var(--bg-muted); display: flex; flex-direction: column; gap: 8px; }
 .member-token-title { margin: 0; font-size: 12.5px; color: var(--text-bright); }
 .member-token-warn { margin: 0; font-size: 11.5px; color: var(--attention-fg); }
-.member-token-value { display: block; padding: 8px; border-radius: 4px; background: var(--bg-default); font-size: 12px; color: var(--text-bright); word-break: break-all; user-select: all; }
+.member-token-value { display: block; padding: 8px; border-radius: var(--radius-xs); background: var(--bg-default); font-size: 12px; color: var(--text-bright); word-break: break-all; user-select: all; }
 .hint-msg { color: var(--text-secondary); font-size: 11px; margin: 0; }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */
@@ -4300,7 +4302,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   margin-bottom: 18px;
   padding: 3px;
   border: 1px solid var(--border-muted);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-inset);
   align-self: flex-start;
 }
@@ -4311,7 +4313,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   font-size: 12.5px;
   font-weight: 600;
   padding: 5px 14px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 .help-topic:hover { color: var(--text-primary); }
@@ -4333,13 +4335,13 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .mcp-page-title { font-size: 13px; font-weight: 700; color: var(--text-bright); flex: 1; min-width: 0; }
 .mcp-topbar-actions { display: flex; gap: 8px; }
 .mcp-action-btn {
-  font-size: 11px; padding: 5px 11px; border-radius: 6px;
+  font-size: 11px; padding: 5px 11px; border-radius: var(--radius-sm);
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-bright); cursor: pointer;
 }
 .mcp-action-btn:hover:not(:disabled) { background: var(--border-default); }
 .mcp-action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .mcp-back-btn {
-  font-size: 12px; padding: 4px 10px; border-radius: 5px;
+  font-size: 12px; padding: 4px 10px; border-radius: var(--radius-sm);
   background: transparent; border: 1px solid var(--border-default); color: var(--text-secondary); cursor: pointer;
 }
 .mcp-back-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
@@ -4358,7 +4360,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 
 /* Server card */
 .mcp-server-card {
-  background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: 10px;
+  background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: var(--radius-md);
   display: flex; flex-direction: column; overflow: hidden;
 }
 
@@ -4371,7 +4373,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .mcp-server-name { font-weight: 700; font-size: 13px; color: var(--text-bright); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mcp-transport-badge {
   padding: 2px 6px; border: 1px solid var(--border-default); border-radius: var(--radius-pill);
-  color: var(--text-secondary); background: var(--bg-muted); font-family: Menlo, Monaco, monospace;
+  color: var(--text-secondary); background: var(--bg-muted); font-family: var(--font-mono);
   font-size: 9px; text-transform: uppercase;
 }
 
@@ -4387,7 +4389,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 /* Delete button */
 .mcp-delete-btn {
   border: none; background: transparent; color: var(--text-disabled);
-  font-size: 14px; cursor: pointer; padding: 2px 4px; border-radius: 4px; line-height: 1;
+  font-size: 14px; cursor: pointer; padding: 2px 4px; border-radius: var(--radius-xs); line-height: 1;
 }
 .mcp-delete-btn:hover { color: var(--danger-fg); background: color-mix(in srgb, var(--danger-fg) 10%, transparent); }
 .mcp-delete-btn.small { font-size: 10px; color: var(--text-muted); }
@@ -4402,7 +4404,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .mcp-tools-row:hover { background: var(--bg-elevated); }
 .mcp-tools-error { color: var(--danger-fg); cursor: default; }
 .mcp-tools-disabled { color: var(--text-disabled); cursor: default; }
-.mcp-chevron { font-size: 12px; transition: transform 0.15s; display: inline-block; }
+.mcp-chevron { font-size: 12px; transition: transform var(--motion-fast) var(--ease-out); display: inline-block; }
 .mcp-chevron.open { transform: rotate(90deg); }
 .mcp-tool-count { font-size: 11px; }
 
@@ -4412,7 +4414,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   border-top: 1px solid var(--bg-subtle); display: flex; flex-direction: column; gap: 3px;
 }
 .mcp-tool-list li { font-size: 11px; color: var(--text-secondary); }
-.mcp-tool-name { color: var(--accent-bright); font-family: Menlo, Monaco, monospace; }
+.mcp-tool-name { color: var(--accent-bright); font-family: var(--font-mono); }
 .mcp-tool-desc { color: var(--text-muted); }
 
 /* Config form toggle */
@@ -4428,23 +4430,23 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 .mcp-config-form select,
 .mcp-custom-form select {
-  padding: 6px 8px; border: 1px solid var(--border-default); border-radius: 5px;
+  padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   background: var(--bg-base); color: var(--text-primary);
 }
 .mcp-transport-field { max-width: 220px; }
 
 /* Env vars editor */
 .mcp-env-row { display: flex; align-items: center; gap: 6px; }
-.mcp-env-key { width: 140px; flex-shrink: 0; font-family: Menlo, Monaco, monospace; font-size: 11px; }
-.mcp-env-val { flex: 1; min-width: 0; font-family: Menlo, Monaco, monospace; font-size: 11px; }
-.mcp-arg-index { width: 18px; color: var(--text-muted); font-family: Menlo, Monaco, monospace; font-size: 10px; text-align: right; }
+.mcp-env-key { width: 140px; flex-shrink: 0; font-family: var(--font-mono); font-size: 11px; }
+.mcp-env-val { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11px; }
+.mcp-arg-index { width: 18px; color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; text-align: right; }
 .mcp-add-env-btn {
-  font-size: 10px; padding: 2px 7px; border-radius: 4px;
+  font-size: 10px; padding: 2px 7px; border-radius: var(--radius-xs);
   background: transparent; border: 1px solid var(--border-default); color: var(--text-secondary); cursor: pointer; margin-left: 6px;
 }
 .mcp-add-env-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
 .mcp-reveal-btn {
-  border: 1px solid var(--border-default); border-radius: 4px; background: transparent;
+  border: 1px solid var(--border-default); border-radius: var(--radius-xs); background: transparent;
   color: var(--text-secondary); padding: 3px 6px; font-size: 9px; cursor: pointer;
 }
 .mcp-reveal-btn:hover { color: var(--text-bright); background: var(--bg-muted); }
@@ -4454,7 +4456,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   position: relative; padding: 12px 16px; border-bottom: 1px solid var(--border-muted); flex-shrink: 0;
 }
 .mcp-search {
-  width: 100%; padding: 8px 36px 8px 12px; border-radius: 8px;
+  width: 100%; padding: 8px 36px 8px 12px; border-radius: var(--radius-md);
   background: var(--bg-subtle); border: 1px solid var(--border-default); color: var(--text-bright);
   font-size: 12px; box-sizing: border-box;
 }
@@ -4482,13 +4484,13 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .mcp-catalog-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
 .mcp-catalog-note { font-size: 10px; color: var(--attention-fg); margin-top: 2px; }
 .mcp-add-btn {
-  font-size: 11px; padding: 6px 14px; border-radius: 6px; white-space: nowrap; flex-shrink: 0;
+  font-size: 11px; padding: 6px 14px; border-radius: var(--radius-sm); white-space: nowrap; flex-shrink: 0;
   background: var(--accent-emphasis); border: 1px solid var(--accent-focus); color: var(--text-on-emphasis); font-weight: 600; cursor: pointer;
 }
 .mcp-add-btn:hover:not(:disabled) { background: var(--accent-focus); }
 .mcp-add-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .mcp-installed-badge {
-  font-size: 11px; padding: 6px 14px; border-radius: 6px; white-space: nowrap; flex-shrink: 0;
+  font-size: 11px; padding: 6px 14px; border-radius: var(--radius-sm); white-space: nowrap; flex-shrink: 0;
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-muted); cursor: not-allowed;
 }
 .mcp-custom-form {
@@ -4525,37 +4527,37 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .az-pct { font-weight: 600; color: var(--text-bright); margin-left: 6px; }
 .az-size-info { color: var(--text-muted); font-size: 11px; margin-left: 4px; }
 .az-gguf-hint { font-size: 11px; color: var(--text-muted); margin-top: 6px; line-height: 1.5; }
-.az-gguf-hint code { background: var(--bg-subtle); padding: 1px 4px; border-radius: 3px; color: var(--text-bright); }
+.az-gguf-hint code { background: var(--bg-subtle); padding: 1px 4px; border-radius: var(--radius-xs); color: var(--text-bright); }
 .az-link { color: var(--accent-fg); text-decoration: none; }
 .az-link:hover { text-decoration: underline; }
-.az-code { background: var(--bg-subtle); padding: 1px 5px; border-radius: 3px; font-size: 11px; color: var(--text-bright); font-family: monospace; }
+.az-code { background: var(--bg-subtle); padding: 1px 5px; border-radius: var(--radius-xs); font-size: 11px; color: var(--text-bright); font-family: var(--font-mono); }
 .az-url-row { display: flex; gap: 6px; align-items: center; }
 .az-url-row .az-input { flex: 1; }
 .az-recheck-btn {
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-secondary);
-  font-size: 14px; padding: 6px 10px; border-radius: 6px; cursor: pointer;
-  flex-shrink: 0; transition: color 0.15s, background 0.15s;
+  font-size: 14px; padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  flex-shrink: 0; transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .az-recheck-btn:hover:not(:disabled) { background: var(--border-default); color: var(--text-bright); }
 .az-recheck-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .az-detect-btn {
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-secondary);
-  font-size: 11px; font-weight: 500; padding: 6px 10px; border-radius: 6px; cursor: pointer;
-  flex-shrink: 0; white-space: nowrap; transition: color 0.15s, background 0.15s;
+  font-size: 11px; font-weight: 500; padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  flex-shrink: 0; white-space: nowrap; transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .az-detect-btn:hover:not(:disabled) { background: var(--border-default); color: var(--text-bright); }
 .az-detect-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .az-browse-btn {
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-secondary);
-  font-size: 13px; padding: 6px 10px; border-radius: 6px; cursor: pointer;
-  flex-shrink: 0; transition: color 0.15s, background 0.15s;
+  font-size: 13px; padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  flex-shrink: 0; transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .az-browse-btn:hover { background: var(--border-default); color: var(--text-bright); }
 
-.az-backend-toggle { display: flex; gap: 0; border: 1px solid var(--border-default); border-radius: 6px; overflow: hidden; width: fit-content; }
+.az-backend-toggle { display: flex; gap: 0; border: 1px solid var(--border-default); border-radius: var(--radius-sm); overflow: hidden; width: fit-content; }
 .az-backend-btn {
   background: var(--bg-subtle); border: none; color: var(--text-secondary); font-size: 12px;
-  padding: 6px 16px; cursor: pointer; transition: background 0.15s, color 0.15s;
+  padding: 6px 16px; cursor: pointer; transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .az-backend-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
 .az-backend-btn.active { background: var(--accent-emphasis); color: var(--text-on-emphasis); font-weight: 600; }
@@ -4565,8 +4567,8 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .az-input {
   width: 100%; box-sizing: border-box;
   background: var(--bg-base); border: 1px solid var(--border-default); color: var(--text-bright);
-  font-size: 12px; padding: 7px 10px; border-radius: 6px;
-  outline: none; transition: border-color 0.15s;
+  font-size: 12px; padding: 7px 10px; border-radius: var(--radius-sm);
+  outline: none; transition: border-color var(--motion-fast) var(--ease-out);
 }
 .az-input:focus { border-color: var(--accent-focus); }
 .az-status-row { margin-top: 8px; }
@@ -4576,22 +4578,22 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .az-pull-error { font-size: 11px; color: var(--danger-fg); margin-top: 6px; }
 
 .az-progress-bar-wrap {
-  height: 4px; background: var(--bg-muted); border-radius: 2px; margin-top: 6px; overflow: hidden;
+  height: 4px; background: var(--bg-muted); border-radius: var(--radius-xs); margin-top: 6px; overflow: hidden;
 }
-.az-progress-bar { height: 100%; background: var(--accent-emphasis); border-radius: 2px; transition: width 0.3s; }
+.az-progress-bar { height: 100%; background: var(--accent-emphasis); border-radius: var(--radius-xs); transition: width var(--motion-base) var(--ease-out); }
 
 .az-model-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
 .az-no-models { font-size: 12px; color: var(--text-muted); padding: 8px 0; }
 .az-model-row {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 7px 10px; background: var(--bg-base); border: 1px solid var(--border-muted); border-radius: 6px;
+  padding: 7px 10px; background: var(--bg-base); border: 1px solid var(--border-muted); border-radius: var(--radius-sm);
 }
 .az-model-info { display: flex; flex-direction: column; gap: 2px; }
-.az-model-name { font-size: 12px; color: var(--text-bright); font-family: monospace; }
+.az-model-name { font-size: 12px; color: var(--text-bright); font-family: var(--font-mono); }
 .az-model-meta { font-size: 10px; color: var(--text-secondary); }
 .az-del-btn {
   background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 12px;
-  padding: 2px 6px; border-radius: 4px; transition: color 0.15s, background 0.15s;
+  padding: 2px 6px; border-radius: var(--radius-xs); transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .az-del-btn:hover { color: var(--danger-fg); background: var(--bg-muted); }
 
@@ -4606,9 +4608,9 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   font-size: 12px;
   font-weight: 600;
   padding: 7px 16px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--motion-fast) var(--ease-out);
 }
 .az-run-btn:hover:not(:disabled) { background: var(--accent-focus); }
 .az-run-btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -4632,7 +4634,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .az-hint p { margin: 0 0 10px; }
 .az-hint ul { margin: 0 0 10px; padding-left: 18px; }
 .az-hint li { margin-bottom: 4px; }
-.az-hint code { background: var(--bg-subtle); padding: 1px 5px; border-radius: 3px; font-size: 11px; color: var(--text-bright); }
+.az-hint code { background: var(--bg-subtle); padding: 1px 5px; border-radius: var(--radius-xs); font-size: 11px; color: var(--text-bright); }
 .az-pass-rule { color: var(--accent-fg); font-size: 11px; }
 
 .az-results { padding: 16px 20px; flex: 1; overflow-y: auto; min-height: 0; }
@@ -4654,7 +4656,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 .az-th-task, .az-th-score, .az-th-verdict { text-align: center; }
 .az-table td { padding: 8px 10px; border-bottom: 1px solid var(--bg-subtle); vertical-align: middle; }
-.az-td-model { font-family: monospace; font-size: 11px; color: var(--text-bright); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.az-td-model { font-family: var(--font-mono); font-size: 11px; color: var(--text-bright); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .az-td-task { text-align: center; white-space: nowrap; }
 .az-td-score { text-align: center; color: var(--text-secondary); }
 .az-td-verdict { text-align: center; }
@@ -4667,7 +4669,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   color: var(--success-fg);
   border: 1px solid color-mix(in srgb, var(--success-fg) 30%, transparent);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font-size: 11px;
   font-weight: 600;
 }
@@ -4676,8 +4678,77 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   color: var(--text-muted);
   border: 1px solid var(--border-muted);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font-size: 11px;
 }
 
+/* ── Convergence layer ──────────────────────────────────────────────────────
+   Appended last on purpose: these rules carry the same specificity as the
+   individual declarations above, so source order decides the tie in their
+   favour. Only colour / type / border are unified here — every rule above
+   keeps its own margins, padding and layout. */
+
+/* Helper text under a control: one spec, many legacy names. */
+.ap-hint,
+.az-hint,
+.az-hint-inline,
+.az-gguf-hint,
+.az-section-note,
+.cli-agent-hint,
+.help-topic,
+.hint-msg,
+.mcp-catalog-desc,
+.mcp-catalog-hint,
+.mcp-catalog-note,
+.mcp-tool-desc,
+.upd-notes {
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
+}
+
+/* Native form controls inside the settings body get the house skin. Scoped to
+   .s-body so the sidebar search field and anything outside the tab bodies is
+   untouched; more specific existing rules still win on width/padding. */
+.s-body input[type='text'],
+.s-body input[type='number'],
+.s-body input[type='password'],
+.s-body input[type='search'],
+.s-body select {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: var(--lh-base);
+  padding: 5px 8px;
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+.s-body input[type='text']:hover:not(:disabled),
+.s-body input[type='number']:hover:not(:disabled),
+.s-body input[type='password']:hover:not(:disabled),
+.s-body input[type='search']:hover:not(:disabled),
+.s-body select:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+.s-body input[type='text']:focus,
+.s-body input[type='number']:focus,
+.s-body input[type='password']:focus,
+.s-body input[type='search']:focus,
+.s-body select:focus {
+  outline: none;
+  border-color: var(--accent-focus);
+}
+.s-body input[type='text']:disabled,
+.s-body input[type='number']:disabled,
+.s-body input[type='password']:disabled,
+.s-body input[type='search']:disabled,
+.s-body select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.s-body select {
+  cursor: pointer;
+}
 </style>

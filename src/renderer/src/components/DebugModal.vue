@@ -440,8 +440,8 @@ onUnmounted(() => stopTail())
 
 <template>
   <Teleport to="body">
-    <div v-show="open" class="dbg-overlay" @click.self="emit('close')">
-      <div class="dbg-modal">
+    <div v-show="open" class="dbg-overlay nv-modal-overlay" @click.self="emit('close')">
+      <div class="dbg-modal nv-modal-shell nv-modal-shell--wide">
         <header class="dbg-top">
           <div class="dbg-title">{{ t('debug.title') }}</div>
           <nav class="dbg-tabs">
@@ -632,7 +632,9 @@ onUnmounted(() => stopTail())
 .dbg-overlay {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   z-index: 8000;
   display: flex;
   align-items: center;
@@ -640,15 +642,14 @@ onUnmounted(() => stopTail())
   -webkit-app-region: no-drag;
 }
 .dbg-modal {
-  width: 92vw;
-  max-width: 1100px;
+  width: min(var(--modal-w-wide), 92vw);
   height: 88vh;
   background: var(--bg-base);
   color: var(--text-bright);
   border: 1px solid var(--border-muted);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--shadow-modal);
   display: flex;
   flex-direction: column;
 }
@@ -674,7 +675,7 @@ onUnmounted(() => stopTail())
   color: var(--text-secondary);
   font-size: 12px;
   padding: 5px 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 .dbg-tabs button:hover {
@@ -772,7 +773,7 @@ onUnmounted(() => stopTail())
   background: var(--bg-muted);
   color: var(--text-bright);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   padding: 3px 9px;
   cursor: pointer;

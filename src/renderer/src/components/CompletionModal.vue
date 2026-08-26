@@ -114,15 +114,15 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body">
-    <div class="comp-overlay" @click.self="emit('close')">
+    <div class="comp-overlay nv-modal-overlay" @click.self="emit('close')">
       <canvas ref="canvasRef" class="comp-canvas" />
 
-      <div class="comp-card">
+      <div class="comp-card nv-modal-shell nv-modal-shell--compact">
         <div class="comp-emoji">🎉</div>
         <h1 class="comp-title">{{ $t('label.pipeline-completed-modal') }}</h1>
         <p class="comp-sub">All {{ totalStages }} stages finished successfully</p>
         <p class="comp-sub2">{{ $t('hint.completion-modal-body') }}</p>
-        <button class="comp-btn" @click="emit('close')">{{ $t('action.completion-close') }}</button>
+        <button class="comp-btn nv-btn" @click="emit('close')">{{ $t('action.completion-close') }}</button>
       </div>
     </div>
   </Teleport>
@@ -136,14 +136,16 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: transparent;
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   -webkit-app-region: no-drag;
 }
 
 :root[data-theme='light'] .comp-overlay {
   background: rgba(210, 225, 255, 0.5);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
 }
 
 .comp-canvas {
@@ -157,15 +159,13 @@ onUnmounted(() => {
   z-index: 1;
   background: linear-gradient(145deg, #1a1f2e, var(--bg-base));
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 20px;
+  border-radius: var(--radius-lg);
   padding: 48px 56px;
   text-align: center;
-  box-shadow:
-    0 0 60px rgba(255, 200, 0, 0.15),
-    0 24px 60px var(--shadow-overlay);
-  max-width: 420px;
-  width: 90%;
-  animation: pop-in 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  box-shadow: var(--shadow-modal);
+  max-width: var(--modal-w-compact);
+  width: min(var(--modal-w-compact), 92vw);
+  animation: pop-in var(--motion-base) var(--ease-out) forwards;
 }
 
 :root[data-theme='light'] .comp-card {
@@ -235,7 +235,9 @@ onUnmounted(() => {
   border-radius: 10px;
   padding: 12px 32px;
   cursor: pointer;
-  transition: transform 0.15s, box-shadow 0.15s;
+  transition:
+    transform var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
   letter-spacing: 0.02em;
 }
 

@@ -56,7 +56,7 @@ function statusLabel(status: AgentOverviewStatus): string {
 
 <template>
   <div class="ao-backdrop" @click="emit('close')" />
-  <div class="ao-pop" @click.stop>
+  <div class="ao-pop nv-popover" @click.stop>
     <div class="ao-head">
       <span class="ao-head-title">{{ t('agentOverview.title') }}</span>
       <button class="ao-btn" data-act="close" :title="t('agentOverview.close')" @click="emit('close')">✕</button>
@@ -98,10 +98,10 @@ function statusLabel(status: AgentOverviewStatus): string {
   width: 320px;
   max-height: 60vh;
   overflow-y: auto;
-  border-radius: 8px;
+  border-radius: var(--radius-popover);
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-popover);
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -123,7 +123,7 @@ function statusLabel(status: AgentOverviewStatus): string {
   background: var(--bg-hover);
   color: var(--text-secondary);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 7px;
   font-size: 10px;
   cursor: pointer;
@@ -141,7 +141,7 @@ function statusLabel(status: AgentOverviewStatus): string {
   width: 100%;
   padding: 5px 6px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
   font: inherit;

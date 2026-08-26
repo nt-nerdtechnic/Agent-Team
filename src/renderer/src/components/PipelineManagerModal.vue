@@ -581,8 +581,8 @@ function buildAiContext(): string {
 
 <template>
   <Teleport to="body">
-    <div v-show="open" class="pm-overlay" @click.self="emit('close')">
-      <div class="pm-modal">
+    <div v-show="open" class="pm-overlay nv-modal-overlay" @click.self="emit('close')">
+      <div class="pm-modal nv-modal-shell nv-modal-shell--wide">
   <div class="app">
     <header class="top">
       <div class="title">Pipeline Manager</div>
@@ -641,7 +641,7 @@ function buildAiContext(): string {
       <!-- Detail view: pipeline header + stage editor -->
       <template v-else>
         <div class="pl-detail-header">
-          <button class="ghost back-btn" @click="plBackToList">← Back</button>
+          <button class="ghost back-btn nv-btn" @click="plBackToList">← Back</button>
           <template v-if="plRenamingId === plEditingId">
             <input
               v-model="plRenameText" class="pl-input pl-rename" spellcheck="false"
@@ -680,7 +680,7 @@ function buildAiContext(): string {
           </div>
           <div class="split">
             <aside class="split-list">
-              <button class="primary new-btn" @click="sStartNew">{{ $t('action.add-stage') }}</button>
+              <button class="primary new-btn nv-btn nv-btn--primary" @click="sStartNew">{{ $t('action.add-stage') }}</button>
               <ul>
                 <li
                   v-for="(s, idx) in sActiveStages" :key="s.id"
@@ -707,8 +707,8 @@ function buildAiContext(): string {
               <div class="detail-head">
                 <h3>{{ sIsNew ? $t('label.new-stage') : $t('label.edit-stage') }}</h3>
                 <div class="row-g gap">
-                  <button v-if="!sIsNew" class="danger" @click="sConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
-                  <button class="primary" :disabled="!sCanSave || sSaving" @click="sSave">{{ sSaving ? $t('label.saving') : sIsNew ? $t('action.create') : $t('settings.roles.save') }}</button>
+                  <button v-if="!sIsNew" class="danger nv-btn nv-btn--danger" @click="sConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
+                  <button class="primary nv-btn nv-btn--primary" :disabled="!sCanSave || sSaving" @click="sSave">{{ sSaving ? $t('label.saving') : sIsNew ? $t('action.create') : $t('settings.roles.save') }}</button>
                 </div>
               </div>
               <p v-if="sError" class="err-msg">{{ sError }}</p>
@@ -774,7 +774,7 @@ function buildAiContext(): string {
                     <div class="field"><label class="lbl">{{ $t('label.kickoff-body') }}</label><textarea v-model="sSlotDraft.kickoffBody" rows="4" spellcheck="false" class="mono"></textarea></div>
                     <div class="row-g gap">
                       <button class="ghost" @click="sCancelAddSlot">{{ $t('action.cancel') }}</button>
-                      <button class="primary" :disabled="!sSlotDraft.label.trim()" @click="sSaveEditSlot">Save slot</button>
+                      <button class="primary nv-btn nv-btn--primary" :disabled="!sSlotDraft.label.trim()" @click="sSaveEditSlot">Save slot</button>
                     </div>
                   </div>
                 </template>
@@ -797,7 +797,7 @@ function buildAiContext(): string {
                   <div class="field"><label class="lbl">{{ $t('label.kickoff-body') }}</label><textarea v-model="sSlotDraft.kickoffBody" rows="4" spellcheck="false" class="mono"></textarea></div>
                   <div class="row-g gap">
                     <button class="ghost" @click="sCancelAddSlot">{{ $t('action.cancel') }}</button>
-                    <button class="primary" :disabled="!sSlotDraft.label.trim()" @click="sConfirmAddSlot">{{ $t('action.add') }}</button>
+                    <button class="primary nv-btn nv-btn--primary" :disabled="!sSlotDraft.label.trim()" @click="sConfirmAddSlot">{{ $t('action.add') }}</button>
                   </div>
                 </div>
               </div>
@@ -820,7 +820,7 @@ function buildAiContext(): string {
       </div>
       <div class="split">
         <aside class="split-list">
-          <button class="primary new-btn" @click="rStartNew">{{ $t('settings.roles.new-role') }}</button>
+          <button class="primary new-btn nv-btn nv-btn--primary" @click="rStartNew">{{ $t('settings.roles.new-role') }}</button>
           <ul>
             <li
               v-for="r in rSorted" :key="r.key"
@@ -836,8 +836,8 @@ function buildAiContext(): string {
           <div class="detail-head">
             <h3>{{ rDraft.isNew ? $t('label.new-role') : $t('label.edit-role') }}</h3>
             <div class="row-g gap">
-              <button v-if="!rDraft.isNew" class="danger" @click="rConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
-              <button class="primary" :disabled="!rCanSave || rSaving" @click="rSave">{{ rSaving ? $t('label.saving') : rDraft.isNew ? $t('action.create') : $t('settings.roles.save') }}</button>
+              <button v-if="!rDraft.isNew" class="danger nv-btn nv-btn--danger" @click="rConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
+              <button class="primary nv-btn nv-btn--primary" :disabled="!rCanSave || rSaving" @click="rSave">{{ rSaving ? $t('label.saving') : rDraft.isNew ? $t('action.create') : $t('settings.roles.save') }}</button>
             </div>
           </div>
           <p v-if="rError" class="err-msg">{{ rError }}</p>
@@ -889,7 +889,7 @@ function buildAiContext(): string {
         <p>{{ $t('hint.delete-stage-warning') }}</p>
         <div class="modal-actions">
           <button class="ghost" @click="sConfirmDelete = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" @click="sDoDelete">{{ $t('action.delete') }}</button>
+          <button class="danger nv-btn nv-btn--danger" @click="sDoDelete">{{ $t('action.delete') }}</button>
         </div>
       </div>
     </div>
@@ -899,7 +899,7 @@ function buildAiContext(): string {
         <p>{{ $t('hint.reset-stages-warning') }}</p>
         <div class="modal-actions">
           <button class="ghost" @click="sConfirmReset = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" @click="sDoReset">{{ $t('action.reset') }}</button>
+          <button class="danger nv-btn nv-btn--danger" @click="sDoReset">{{ $t('action.reset') }}</button>
         </div>
       </div>
     </div>
@@ -909,7 +909,7 @@ function buildAiContext(): string {
         <p>{{ $t('settings.roles.cannot-undo') }}</p>
         <div class="modal-actions">
           <button class="ghost" @click="rConfirmDelete = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" @click="rDoDelete">{{ $t('action.delete') }}</button>
+          <button class="danger nv-btn nv-btn--danger" @click="rDoDelete">{{ $t('action.delete') }}</button>
         </div>
       </div>
     </div>
@@ -919,7 +919,7 @@ function buildAiContext(): string {
         <p>{{ $t('settings.roles.reset-confirm-body') }}</p>
         <div class="modal-actions">
           <button class="ghost" @click="rConfirmReset = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" @click="rDoReset">{{ $t('action.reset-defaults') }}</button>
+          <button class="danger nv-btn nv-btn--danger" @click="rDoReset">{{ $t('action.reset-defaults') }}</button>
         </div>
       </div>
     </div>
@@ -933,7 +933,9 @@ function buildAiContext(): string {
 .pm-overlay {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   z-index: 8000;
   display: flex;
   align-items: center;
@@ -941,13 +943,12 @@ function buildAiContext(): string {
   -webkit-app-region: no-drag;
 }
 .pm-modal {
-  width: 92vw;
-  max-width: 1100px;
+  width: min(var(--modal-w-wide), 92vw);
   height: 88vh;
   border: 1px solid var(--border-muted);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--shadow-modal);
 }
 .pm-close {
   border: none;
@@ -969,7 +970,7 @@ function buildAiContext(): string {
   height: 100%;
   background: var(--bg-inset);
   color: var(--text-bright);
-  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  font-family: var(--font-ui);
   font-size: 13px;
   overflow: hidden;
 }
@@ -996,7 +997,7 @@ function buildAiContext(): string {
   color: var(--text-secondary);
   font-size: 12px;
   padding: 5px 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 .tabs button:hover {
@@ -1354,7 +1355,7 @@ button {
   color: var(--text-bright);
   font-size: 12px;
   padding: 7px 14px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 button:disabled {

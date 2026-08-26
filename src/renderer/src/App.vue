@@ -14326,10 +14326,10 @@ function paneIsCommander(p: ActivePane): boolean {
   z-index: 1000;
   width: 280px;
   padding: 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-popover);
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-popover);
   font-size: 12px;
   color: var(--text-secondary);
   user-select: none;

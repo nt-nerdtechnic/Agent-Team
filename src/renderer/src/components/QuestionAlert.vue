@@ -94,8 +94,8 @@ const queueBadge = computed(() =>
 
 <template>
   <Teleport to="body">
-    <div v-if="visible && questions.length > 0" class="modal" @keydown.esc="emit('cancel')">
-      <div class="card">
+    <div v-if="visible && questions.length > 0" class="modal nv-modal-overlay" @keydown.esc="emit('cancel')">
+      <div class="card nv-modal-shell nv-modal-shell--standard">
         <header>
           <div class="who">
             <span class="dot"></span>
@@ -173,8 +173,8 @@ const queueBadge = computed(() =>
           <span v-else-if="!allAnswered" class="hint">Answer all {{ questions.length }} question(s) to send.</span>
           <span v-else class="hint ok">⌘+Enter to send</span>
           <div class="actions">
-            <button class="ghost" @click="emit('cancel')" :disabled="autoMode">Cancel</button>
-            <button class="primary" :disabled="autoMode || !allAnswered" @click="submit">
+            <button class="ghost nv-btn" @click="emit('cancel')" :disabled="autoMode">Cancel</button>
+            <button class="primary nv-btn nv-btn--primary" :disabled="autoMode || !allAnswered" @click="submit">
               {{ questions.length > 1 ? `Send all ${questions.length} answers` : 'Send answer' }}
             </button>
           </div>
@@ -188,7 +188,9 @@ const queueBadge = computed(() =>
 .modal {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -199,15 +201,15 @@ const queueBadge = computed(() =>
   background: var(--bg-base);
   border: 1px solid var(--border-default);
   border-left: 4px solid var(--attention-fg);
-  border-radius: 8px;
-  width: min(620px, 92vw);
+  border-radius: var(--radius-lg);
+  width: min(var(--modal-w-standard), 92vw);
   max-height: 88vh;
   display: flex;
   flex-direction: column;
   color: var(--text-bright);
-  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
-  box-shadow: 0 12px 48px var(--shadow-overlay);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 header {
@@ -262,7 +264,7 @@ header {
   cursor: pointer;
   font-size: 14px;
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 .x:hover {
   background: var(--bg-muted);
@@ -318,7 +320,7 @@ header {
   border: 1px solid var(--border-default);
   color: var(--text-bright);
   padding: 10px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   text-align: left;
   font-size: 13px;
@@ -404,7 +406,7 @@ button {
   color: var(--text-bright);
   font-size: 12px;
   padding: 7px 14px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 button:disabled {

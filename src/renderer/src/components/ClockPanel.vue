@@ -84,7 +84,7 @@ const projectCreatedText = computed(() => {
 
 <template>
   <div class="ck-backdrop" @click="emit('close')" />
-  <div class="ck-pop" @click.stop>
+  <div class="ck-pop nv-popover" @click.stop>
     <div class="ck-head">
       <span class="ck-head-title">{{ t('clock.title') }}</span>
       <button class="ck-btn" data-act="close" :title="t('clock.close')" @click="emit('close')">✕</button>
@@ -126,10 +126,10 @@ const projectCreatedText = computed(() => {
   bottom: 30px;
   z-index: 1000;
   width: 300px;
-  border-radius: 8px;
+  border-radius: var(--radius-popover);
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-popover);
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -151,7 +151,7 @@ const projectCreatedText = computed(() => {
   background: var(--bg-hover);
   color: var(--text-secondary);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 7px;
   font-size: 10px;
   cursor: pointer;
@@ -180,7 +180,7 @@ const projectCreatedText = computed(() => {
   overflow-wrap: anywhere;
 }
 .ck-row[data-row='build'] .ck-v {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   color: var(--text-secondary);
 }
 </style>

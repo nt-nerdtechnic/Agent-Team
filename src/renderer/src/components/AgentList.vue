@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import ViewPanel, { type LayoutMode } from './ViewPanel.vue'
+import HistoryIcon from './HistoryIcon.vue'
 import type { ActivePaneView } from './ControlPane.vue'
 import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 
@@ -63,7 +64,7 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
           :model-value="layoutMode"
           @update:model-value="emit('update:layoutMode', $event)"
         />
-        <button class="history-btn" :title="$t('label.history')" @click="emit('open-history')">📋</button>
+        <button class="history-btn" :title="$t('label.history')" @click="emit('open-history')"><HistoryIcon /></button>
       </div>
     </div>
     <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
@@ -213,6 +214,7 @@ button.history-btn {
   align-items: center;
   justify-content: center;
 }
+button.history-btn :deep(svg) { width: 15px; height: 15px; }
 button.history-btn:hover {
   color: var(--text-bright);
   border-color: var(--accent-fg);

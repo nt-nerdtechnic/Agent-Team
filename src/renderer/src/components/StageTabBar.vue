@@ -199,7 +199,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
 
   <Teleport to="body">
     <div v-if="actionMenu.show" class="tab-action-backdrop" @click="actionMenu.show = false" />
-    <div v-if="actionMenu.show" class="tab-action-menu" :style="{ top: actionMenu.y + 'px', left: actionMenu.x + 'px' }">
+    <div v-if="actionMenu.show" class="tab-action-menu nv-popover" :style="{ top: actionMenu.y + 'px', left: actionMenu.x + 'px' }">
       <button class="tab-action-item" @click="chooseMove()">移到其他分組</button>
       <button class="tab-action-item danger" @click="chooseClose()">關閉所有 pane</button>
     </div>
@@ -249,8 +249,8 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   font-family: inherit;
   cursor: pointer;
   white-space: nowrap;
-  transition: color 0.12s, border-color 0.12s, background 0.12s;
-  border-radius: 4px 4px 0 0;
+  transition: color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   margin-bottom: -1px; /* overlap the bar's bottom border */
 }
 .tab-btn:hover {
@@ -286,11 +286,11 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   width: 14px;
   height: 14px;
   margin-left: 2px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   color: var(--text-muted);
   font-size: 10px;
   opacity: 0;
-  transition: opacity 0.12s, color 0.12s, background 0.12s;
+  transition: opacity var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .tab-btn:hover .tab-close { opacity: 0.7; }
 .tab-close:hover {
@@ -311,7 +311,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   color: var(--text-muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
-  transition: background 0.12s, color 0.12s;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .tab-btn.active .tab-count {
   background: var(--accent-subtle);
@@ -322,7 +322,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   width: 80px;
   background: var(--bg-base);
   border: 1px solid var(--accent-focus);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   color: var(--text-primary);
   font-size: 12px;
   font-family: inherit;
@@ -340,14 +340,14 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   height: 24px;
   margin-left: 4px;
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
   flex-shrink: 0;
-  transition: color 0.12s, border-color 0.12s, background 0.12s;
+  transition: color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .tab-add-btn:hover,
 .tab-rebuild-all-btn:hover:not(:disabled) {
@@ -382,10 +382,10 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
 .tab-action-menu {
   position: fixed;
   z-index: 2000;
-  background: var(--bg-overlay, #1e1e1e);
+  background: var(--bg-overlay);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  border-radius: var(--radius-popover);
+  box-shadow: var(--shadow-popover);
   padding: 4px;
   display: flex;
   flex-direction: column;
@@ -398,7 +398,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   text-align: left;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: 12px;
   font-family: inherit;

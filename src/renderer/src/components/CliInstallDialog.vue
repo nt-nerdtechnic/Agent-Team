@@ -251,8 +251,8 @@ function relaunch(): void {
 </script>
 
 <template>
-  <div class="ci-page" @click.self="emit('close')">
-    <section class="ci-dialog" role="dialog" aria-modal="true">
+  <div class="ci-page nv-modal-overlay" @click.self="emit('close')">
+    <section class="ci-dialog nv-modal-shell nv-modal-shell--standard" role="dialog" aria-modal="true">
       <header class="ci-top">
         <div>
           <div class="ci-kicker">{{ $t('cli-install.kicker') }}</div>
@@ -409,7 +409,7 @@ function relaunch(): void {
             <div class="ci-row center">
               <button
                 v-if="origin === 'pane'"
-                class="ci-btn primary ci-relaunch"
+                class="ci-btn primary ci-relaunch nv-btn nv-btn--primary"
                 @click="relaunch"
               >
                 {{ $t('cli-install.relaunch', { label }) }}
@@ -425,15 +425,15 @@ function relaunch(): void {
           {{ $t('cli-install.dont-ask', { label }) }}
         </label>
         <span />
-        <button class="ci-btn ghost ci-redetect" :disabled="loading || !!installing" @click="onboarding.refresh({ fresh: true })">
+        <button class="ci-btn ghost ci-redetect nv-btn" :disabled="loading || !!installing" @click="onboarding.refresh({ fresh: true })">
           {{ loading ? $t('label.detecting') : $t('action.re-detect') }}
         </button>
-        <button class="ci-btn ghost ci-close" @click="emit('close')">
+        <button class="ci-btn ghost ci-close nv-btn" @click="emit('close')">
           {{ step === 'verify' ? $t('cli-install.close') : $t('cli-install.not-now') }}
         </button>
         <button
           v-if="step !== 'verify' && dep && dep.can_install"
-          class="ci-btn primary ci-install"
+          class="ci-btn primary ci-install nv-btn nv-btn--primary"
           :disabled="!!installing || phase === 'waiting'"
           @click="runInstall"
         >
@@ -462,21 +462,22 @@ function relaunch(): void {
   align-items: center;
   justify-content: center;
   padding: 28px;
-  background: rgba(0, 0, 0, .58);
-  backdrop-filter: blur(3px);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   color: var(--text-primary);
   -webkit-app-region: no-drag;
 }
 .ci-dialog {
-  width: min(620px, calc(100vw - 56px));
+  width: min(var(--modal-w-standard), 92vw);
   max-height: min(680px, calc(100vh - 56px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-default);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: var(--bg-base);
-  box-shadow: 0 22px 70px rgba(0, 0, 0, .48);
+  box-shadow: var(--shadow-modal);
 }
 .ci-top {
   display: flex; align-items: center; justify-content: space-between; gap: 24px;
@@ -535,10 +536,12 @@ h2 { margin: 0 0 8px; color: var(--text-bright); font-size: 19px; }
 .ci-footer { display: flex; align-items: center; gap: 10px; margin-top: auto; padding: 14px 28px; border-top: 1px solid var(--border-muted); flex-wrap: wrap; }
 .ci-footer span { flex: 1; }
 .ci-dont-ask { display: flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
-.ci-btn { border: 1px solid var(--border-default); border-radius: 7px; padding: 8px 13px; cursor: pointer; color: var(--text-primary); background: var(--bg-subtle); text-decoration: none; font-size: 13px; }
+.ci-btn { border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 13px; cursor: pointer; color: var(--text-primary); background: var(--bg-subtle); text-decoration: none; font-size: 13px; transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out); }
 .ci-btn.primary { border-color: var(--accent-emphasis); background: var(--accent-emphasis); color: var(--text-on-emphasis); }
 .ci-btn.ghost { background: transparent; }
-.ci-btn:disabled { opacity: .55; cursor: default; }
+.ci-btn:hover:not(:disabled) { background: var(--bg-hover-strong); border-color: var(--border-strong); }
+.ci-btn.primary:hover:not(:disabled) { background: var(--accent-focus); border-color: var(--accent-focus); }
+.ci-btn:disabled { opacity: .5; cursor: not-allowed; }
 @media (max-width: 620px) {
   .ci-page { padding: 14px; }
   .ci-dialog { width: calc(100vw - 28px); }
