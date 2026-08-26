@@ -11544,6 +11544,11 @@ async function ensurePaneWorkspaceOnScreen(paneId: string): Promise<boolean> {
  *  otherwise sit blank rather than empty. */
 const switchingWorkspace = ref(false)
 const switchingWorkspaceName = ref('')
+/** Which switch owns the cover. The sidebar stays clickable while one runs —
+ *  the cover is over the stage, not the list — so a second workspace can be
+ *  picked mid-switch. Without this the first run to finish uncovers a stage
+ *  the second is still rebuilding, and the blank it was added to fill is back. */
+let switchCoverSeq = 0
 
 async function switchToWorkspace(path: string): Promise<void> {
   if (isDetachedWindow) return // see adoptWorkspace
@@ -11571,6 +11576,7 @@ async function switchToWorkspace(path: string): Promise<void> {
   // out rather than tearing them down — so without this the area goes blank
   // and stays blank while the entered workspace's panes are restored, one CLI
   // probe each. Blank reads as "the click did nothing".
+  const coverSeq = ++switchCoverSeq
   switchingWorkspaceName.value = path.split('/').filter(Boolean).pop() ?? path
   switchingWorkspace.value = true
   try {
@@ -11611,7 +11617,10 @@ async function switchToWorkspace(path: string): Promise<void> {
     // finally, not after the last await: every path out of here — the decline
     // above, a throw from restore — must uncover the stage, or the window is
     // left showing a spinner over panes that are already there.
-    switchingWorkspace.value = false
+    //
+    // Only if this is still the newest switch: an older one finishing must not
+    // uncover a stage a newer one is still rebuilding.
+    if (coverSeq === switchCoverSeq) switchingWorkspace.value = false
   }
 }
 

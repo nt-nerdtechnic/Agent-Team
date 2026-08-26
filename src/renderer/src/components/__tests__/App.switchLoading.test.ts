@@ -41,8 +41,11 @@ describe('the stage says a switch is happening', () => {
     // throw from restore. Either would leave a spinner sitting over panes that
     // are already there, with no way to clear it short of a reload.
     expect(fn).toContain('} finally {')
+    // To the end of the function rather than a fixed window: everything after
+    // the finally IS the finally, and a character count only measures how long
+    // the comment above the line happens to be.
     const at = fn.indexOf('} finally {')
-    expect(fn.slice(at, at + 400)).toContain('switchingWorkspace.value = false')
+    expect(fn.slice(at)).toContain('switchingWorkspace.value = false')
     // And the flag is cleared in exactly one place — the finally.
     expect(fn.split('switchingWorkspace.value = false')).toHaveLength(2)
   })
@@ -72,6 +75,20 @@ describe('the stage says a switch is happening', () => {
     // making the user wait.
     expect(appSource).toContain('.ws-switch-leave-active')
     expect(appSource).not.toContain('.ws-switch-enter-active')
+  })
+
+  it('lets only the newest switch uncover the stage', () => {
+    // The cover is over the stage, not the sidebar, so the list stays clickable
+    // while a switch runs and a second workspace can be picked mid-switch. Both
+    // runs then race to the same finally, and the first to get there would
+    // uncover a stage the second is still rebuilding — putting back exactly the
+    // blank this was added to fill.
+    expect(fn).toContain('const coverSeq = ++switchCoverSeq')
+    expect(fn).toContain('if (coverSeq === switchCoverSeq) switchingWorkspace.value = false')
+    // Claimed before the first await, or the second run could claim first.
+    expect(fn.indexOf('const coverSeq = ++switchCoverSeq')).toBeLessThan(
+      fn.indexOf('await onWorkspaceBrowse(path, { keepPanes: true })')
+    )
   })
 
   it('is the only way a switch can happen', () => {
