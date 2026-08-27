@@ -189,8 +189,8 @@ def main() -> None:
         raise AssertionError(f"expected one public shell.run catalog entry, got {shell_entries}")
     if schema_shell_modes != {"allowlist", "full"}:
         raise AssertionError("manifest shell modes and public capability policy differ")
-    if catalog.get("hostShellExecutableAllowlist") != ["git"]:
-        raise AssertionError("Host shell executable allowlist must contain only git")
+    if catalog.get("hostShellExecutableAllowlist") != ["git", "gh", "glab"]:
+        raise AssertionError("Host shell executable allowlist must contain only git, gh, and glab")
     if "hostShellSubcommands" in catalog or "hostShellArgPatterns" in catalog:
         raise AssertionError("Host shell contract must not define subcommand or argument rules")
     print(
