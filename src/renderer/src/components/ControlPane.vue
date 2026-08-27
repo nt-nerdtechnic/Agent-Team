@@ -1105,10 +1105,28 @@ function onWsDragEnd(e: DragEvent, path: string): void {
   if (outside) emit('detach-workspace', path, e.screenX, e.screenY)
 }
 
+/** Roughly what the menu occupies, for the edge flip below.
+ *
+ *  Measured rather than guessed would be better, but the element does not
+ *  exist until this sets wsMenu — and a menu that appears in the wrong place
+ *  and then jumps is worse than one placed from a constant. Kept generous:
+ *  overshooting flips a menu that would have fitted, undershooting lets one
+ *  hang off the edge, and only the second is a bug. */
+const WS_MENU_H = 96
+const WS_MENU_W = 170
+
 function openWsMenu(ev: MouseEvent, path: string, canClose: boolean): void {
   ev.preventDefault()
   addMenuOpen.value = false
-  wsMenu.value = { path, canClose, x: ev.clientX, y: ev.clientY }
+  // Right-clicking near the bottom put the menu under the status bar, which
+  // paints over it: it opened downward from the cursor with nothing to stop it
+  // leaving the window. Flip it above the cursor instead — the same way a
+  // native menu does — and keep it inside the right edge.
+  const y = ev.clientY + WS_MENU_H > window.innerHeight
+    ? Math.max(0, ev.clientY - WS_MENU_H)
+    : ev.clientY
+  const x = Math.max(0, Math.min(ev.clientX, window.innerWidth - WS_MENU_W))
+  wsMenu.value = { path, canClose, x, y }
 }
 function closeWsMenu(): void {
   wsMenu.value = null
@@ -3342,7 +3360,10 @@ button.icon-btn.muted:hover {
    the ＋ menu is fixed: the pane list scrolls. */
 .ws-ctx-menu {
   position: fixed;
-  z-index: 61;
+  /* Above the status bar (200) and the titlebar (200). A context menu is the
+     frontmost thing on screen while it is open; at 61 the status bar painted
+     over the bottom of any menu opened near it. */
+  z-index: 300;
   min-width: 150px;
   padding: 4px 0;
   border: 1px solid var(--border);
