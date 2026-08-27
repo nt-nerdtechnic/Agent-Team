@@ -198,6 +198,40 @@ describe('ControlPane – workspace sections', () => {
     expect(heads[1].attributes('data-state')).toBe('idle')
   })
 
+  it('asks to reorder when a heading is dropped on another', async () => {
+    const second = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({ workspaces: [current(), second] })
+    const heads = wrapper.findAll('.ws-head--current')
+    const data = new Map([['application/x-workspace-path', '/Users/me/Desktop/Other']])
+    await heads[0].trigger('drop', {
+      dataTransfer: { getData: (t: string) => data.get(t) ?? '', types: [...data.keys()] },
+    })
+    expect(wrapper.emitted('reorder-workspace')?.[0]).toEqual([
+      '/Users/me/Desktop/Other',
+      '/Users/me/Desktop/Agent-Team',
+    ])
+  })
+
+  it('does not ask when a heading is dropped on itself', async () => {
+    // A drop on the row you picked up is a cancelled drag, not a reorder.
+    const second = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({ workspaces: [current(), second] })
+    const data = new Map([['application/x-workspace-path', '/Users/me/Desktop/Agent-Team']])
+    await wrapper.findAll('.ws-head--current')[0].trigger('drop', {
+      dataTransfer: { getData: (t: string) => data.get(t) ?? '', types: [...data.keys()] },
+    })
+    expect(wrapper.emitted('reorder-workspace')).toBeUndefined()
+  })
+
+  it('ignores a pane drag over a workspace heading', async () => {
+    // The pane rows carry application/x-pane-id. Accepting it here would draw
+    // a workspace drop line for a drag that cannot land on a heading.
+    wrapper = mountWith({ workspaces: [current(), current({ path: '/x', label: 'x' })] })
+    const head = wrapper.findAll('.ws-head--current')[0]
+    await head.trigger('dragover', { dataTransfer: { types: ['application/x-pane-id'] } })
+    expect(head.classes()).not.toContain('ws-head--drop')
+  })
+
   it('shows no group heading when nobody has made a group', () => {
     // An untouched workspace must look exactly as it did before this existed.
     // A lone "manual" heading over everything distinguishes nothing.

@@ -99,6 +99,10 @@ import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
   buildMentionInsert,
+  rankMentionCandidates,
+  recordMentionRecents,
+  MENTION_BROADCAST_ADDRESS,
+  type MentionCandidate,
   buildPaneContextPaste,
   shouldMentionOnDrop,
   buildPaneStatusReply,
@@ -111,7 +115,7 @@ import {
 } from './lib/cliContext'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
 import { activityMeansWorking, allSlotsFinished, applyLoopWait, applyTurnProgress, detailMeansToolUse, loopWaitBackoffMs, loopWaitHonoured, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal, type LoopWaitState } from './lib/completion'
-import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
+import { reorderByIds, reorderStrings, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
 import { resolveDragBatch, reorderBatchByIds } from './lib/paneBatchDrag'
 import { AGENT_SPECS, type PaneArgContext } from './agents'
@@ -2753,13 +2757,49 @@ async function remoteAddressOf(paneId: string): Promise<string | null> {
   return remoteTargetByPane.get(paneId) ?? null
 }
 
-// Messaging names offered by pane `paneId`'s @-mention autocomplete menu: every
-// OTHER pane that has a messaging name (self excluded), then the qualified
-// addresses of panes open in other workspace windows.
-function mentionCandidatesFor(paneId: string): string[] {
-  const others = panes.value
+// Addresses recently completed through the @-mention menu, newest first. Local
+// like the messagingNames map above and for the same reason it is not in
+// ui_settings: losing it costs an ordering, not a capability, so it is not
+// worth a SQLite write and a cross-window broadcast on every mention.
+const MENTION_RECENTS_KEY = 'agentTeam.mentionRecents'
+const MENTION_RECENTS_CAP = 12
+
+function loadMentionRecents(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MENTION_RECENTS_KEY) ?? '[]') as unknown
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function rememberMentionPick(addresses: string[]): void {
+  const next = recordMentionRecents(loadMentionRecents(), addresses, MENTION_RECENTS_CAP)
+  try { localStorage.setItem(MENTION_RECENTS_KEY, JSON.stringify(next)) } catch { /* ignore */ }
+}
+
+// Addresses offered by pane `paneId`'s @-mention autocomplete menu: every OTHER
+// pane that has a messaging name (self excluded), then the qualified addresses
+// of panes open in other workspace windows, with the recently used hoisted.
+//
+// The group and status words are resolved HERE because useTerminal owns no i18n
+// scope, and the ordering is decided here because recency is remembered here.
+function mentionCandidatesFor(paneId: string): MentionCandidate[] {
+  const localGroup = i18n.global.t('mention.group-local')
+  const others: MentionCandidate[] = panes.value
     .filter((x) => x.id !== paneId && x.messagingName)
-    .map((x) => x.messagingName as string)
+    .map((x) => {
+      // Only a realized pane in THIS window can report a status; a cold-restore
+      // placeholder has no terminal to ask yet, and the menu shows a hollow dot
+      // rather than guessing one.
+      const status = paneRefs[x.id]?.displayStatus
+      return {
+        address: x.messagingName as string,
+        group: localGroup,
+        status,
+        statusLabel: status ? i18n.global.t(paneStatusLabelKey(status)) : undefined,
+      }
+    })
   // Offer the broadcast keyword first once there are ≥2 recipients — picking it
   // sends to every other pane at once (see isBroadcastTarget / sendBroadcast).
   // `all` stays workspace-local; cross-workspace sends are always explicit.
@@ -2771,8 +2811,23 @@ function mentionCandidatesFor(paneId: string): string[] {
   // "everyone here" is not worth keeping when "here" became ambiguous. Typing
   // it by hand still broadcasts window-wide.
   const canBroadcast = others.length >= 2 && extraWorkspaces.value.length === 0
-  const local = canBroadcast ? ['all', ...others] : others
-  return [...local, ...remoteMessagingTargets.value]
+  const broadcast: MentionCandidate[] = canBroadcast
+    ? [{
+        address: MENTION_BROADCAST_ADDRESS,
+        group: localGroup,
+        statusLabel: i18n.global.t('mention.broadcast-hint'),
+      }]
+    : []
+  const remoteGroup = i18n.global.t('mention.group-remote')
+  const remote: MentionCandidate[] = remoteMessagingTargets.value.map((address) => ({
+    address,
+    group: remoteGroup,
+  }))
+  return rankMentionCandidates(
+    [...broadcast, ...others, ...remote],
+    loadMentionRecents(),
+    i18n.global.t('mention.group-recent')
+  )
 }
 
 /** Mention mode for a pane drop: an "@" typed immediately before the drop means
@@ -11744,6 +11799,21 @@ async function closeWorkspace(path: string): Promise<void> {
   collapsedWorkspaces.value = next
 }
 
+/** Drag one workspace heading onto another → put it there in the list.
+ *
+ *  The order is the order the window took each workspace on, which is a fact
+ *  about history rather than a preference — this is what makes it a preference.
+ *  Persisted with the list itself, so a reload keeps it; per window, because
+ *  which project you want at the top is a property of the window you are
+ *  looking at, the same way the sidebar's collapse state is. */
+function reorderWorkspace(fromPath: string, toPath: string): void {
+  if (isDetachedWindow) return
+  const next = [...workspaceOrder.value]
+  if (!reorderStrings(next, fromPath, toPath)) return
+  workspaceOrder.value = next
+  persistExtraWorkspaces()
+}
+
 /** Drag a workspace heading out of the window → give it its own window.
  *
  *  The inverse of adopting one, and deliberately not closeWorkspace: that kills
@@ -13248,6 +13318,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @switch-to-workspace="switchToWorkspace"
       @close-workspace="closeWorkspace"
       @detach-workspace="detachWorkspace"
+      @reorder-workspace="reorderWorkspace"
       @reveal-workspace-folder="revealWorkspaceFolder"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
@@ -13584,6 +13655,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :cli-profiles="cliProfilesApi"
           :workspace-path="p.workspacePath"
           :mention-candidates="mentionCandidatesFor(p.id)"
+          @mention-pick="rememberMentionPick"
           :loop-active="p.loopActive"
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"

@@ -14,6 +14,21 @@ export function reorderByIds<T extends { id: string }>(items: T[], fromId: strin
   return true
 }
 
+/** Move `from` to `to`'s position in a list whose items ARE their identity.
+ *
+ *  Same semantics as reorderByIds, for plain strings — workspace paths, which
+ *  have no wrapper object to carry an id. Returns false when nothing moved, so
+ *  the caller can skip persisting a no-op drop onto the row you picked up. */
+export function reorderStrings(items: string[], from: string, to: string): boolean {
+  if (from === to) return false
+  const at = items.indexOf(from)
+  const onto = items.indexOf(to)
+  if (at < 0 || onto < 0) return false
+  const [moved] = items.splice(at, 1)
+  items.splice(onto, 0, moved)
+  return true
+}
+
 /** Re-sort `items` in place so the items whose ids appear in `idOrder` follow
  *  that order. Only the slots occupied by listed items are permuted — items
  *  whose id is not in `idOrder` stay exactly where they are, and ids in

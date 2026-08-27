@@ -1,9 +1,38 @@
 import { describe, it, expect } from 'vitest'
-import { reorderByIds, sortByIdOrder } from '../paneOrder'
+import { reorderStrings, reorderByIds, sortByIdOrder } from '../paneOrder'
 
 const panes = (): { id: string }[] => [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }]
 
 const ids = (items: { id: string }[]): string[] => items.map((it) => it.id)
+
+describe('reorderStrings', () => {
+  it('moves an item onto another position', () => {
+    const list = ['a', 'b', 'c']
+    expect(reorderStrings(list, 'c', 'a')).toBe(true)
+    expect(list).toEqual(['c', 'a', 'b'])
+  })
+
+  it('reports no move when dropped on itself', () => {
+    // The caller skips persisting on false — a drop on the row you picked up
+    // should not write the same order back.
+    const list = ['a', 'b']
+    expect(reorderStrings(list, 'a', 'a')).toBe(false)
+    expect(list).toEqual(['a', 'b'])
+  })
+
+  it('reports no move when either item is unknown', () => {
+    const list = ['a', 'b']
+    expect(reorderStrings(list, 'a', 'zz')).toBe(false)
+    expect(reorderStrings(list, 'zz', 'a')).toBe(false)
+    expect(list).toEqual(['a', 'b'])
+  })
+
+  it('moves later items backwards, not just forwards', () => {
+    const list = ['a', 'b', 'c', 'd']
+    expect(reorderStrings(list, 'a', 'd')).toBe(true)
+    expect(list).toEqual(['b', 'c', 'd', 'a'])
+  })
+})
 
 describe('reorderByIds', () => {
   it('moves an earlier item onto a later target (dragged item takes the target index)', () => {

@@ -100,8 +100,11 @@ describe('the drag gesture itself', () => {
   })
 
   it('is offered only when there is somewhere to detach from', () => {
+    // One guard, two gestures: released on another heading the drag reorders,
+    // released outside the window it detaches. Both need a second workspace —
+    // hence the shared name.
     expect(paneSource).toContain('!props.detachedWindow && localWorkspaceRows.value.length > 1')
-    expect(paneSource).toContain(':draggable="canDetachWorkspace"')
+    expect(paneSource).toContain(':draggable="canDragWorkspace"')
   })
 
   it('carries its own drag type', () => {

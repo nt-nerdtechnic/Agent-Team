@@ -449,6 +449,7 @@ const emit = defineEmits<{
   (e: 'switch-to-workspace', path: string): void
   (e: 'close-workspace', path: string): void
   (e: 'detach-workspace', path: string, x: number, y: number): void
+  (e: 'reorder-workspace', fromPath: string, toPath: string): void
   (e: 'reveal-workspace-folder', path: string): void
   (e: 'interrupt', paneId: string): void
   (e: 'rebuild', paneId: string): void
@@ -1014,9 +1015,38 @@ const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | n
 // Only when this window holds more than one: dragging out the only workspace
 // would empty this window to fill a new one, which is a no-op the long way
 // round. A detached window is already one group of one workspace.
-const canDetachWorkspace = computed(
+/** Whether a workspace heading can be dragged at all.
+ *
+ *  One gesture, two outcomes — the same split the stage tabs make: released on
+ *  another heading it reorders, released outside the window it detaches. Both
+ *  need a second workspace to be meaningful: there is nothing to reorder
+ *  against, and pulling out the only one empties this window to fill a new. */
+const canDragWorkspace = computed(
   () => !props.detachedWindow && localWorkspaceRows.value.length > 1
 )
+
+/** The heading a workspace drag is hovering, for the drop line. */
+const wsDragOverPath = ref<string>('')
+let draggingWorkspacePath = ''
+
+function onWsDragOver(e: DragEvent, path: string): void {
+  // Values are unreadable during dragover (protected mode); the type is not.
+  if (!e.dataTransfer?.types.includes('application/x-workspace-path')) return
+  if (path === draggingWorkspacePath) return
+  e.preventDefault()
+  wsDragOverPath.value = path
+}
+
+function onWsDragLeave(path: string): void {
+  if (wsDragOverPath.value === path) wsDragOverPath.value = ''
+}
+
+function onWsDrop(e: DragEvent, path: string): void {
+  wsDragOverPath.value = ''
+  const from = e.dataTransfer?.getData('application/x-workspace-path') ?? ''
+  if (!from || from === path) return
+  emit('reorder-workspace', from, path)
+}
 /** What the row does, for its tooltip.
  *
  *  Dragging a heading out is invisible otherwise — nothing about the row says
@@ -1028,12 +1058,12 @@ function wsHeadTitle(path: string): string {
   if (!props.detachedWindow && path !== workspacePath.value) {
     parts.push(i18n.global.t('label.workspace-switch-hint'))
   }
-  if (canDetachWorkspace.value) parts.push(i18n.global.t('label.workspace-detach-hint'))
+  if (canDragWorkspace.value) parts.push(i18n.global.t('label.workspace-detach-hint'))
   return parts.join(' · ')
 }
 
 function onWsDragStart(e: DragEvent, path: string): void {
-  if (!canDetachWorkspace.value) {
+  if (!canDragWorkspace.value) {
     e.preventDefault()
     return
   }
@@ -1041,9 +1071,12 @@ function onWsDragStart(e: DragEvent, path: string): void {
   // in this list (which check application/x-pane-id).
   e.dataTransfer?.setData('application/x-workspace-path', path)
   if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+  draggingWorkspacePath = path
 }
 function onWsDragEnd(e: DragEvent, path: string): void {
-  if (!canDetachWorkspace.value) return
+  wsDragOverPath.value = ''
+  draggingWorkspacePath = ''
+  if (!canDragWorkspace.value) return
   const outside =
     e.clientX < 0 || e.clientY < 0 || e.clientX > window.innerWidth || e.clientY > window.innerHeight
   if (outside) emit('detach-workspace', path, e.screenX, e.screenY)
@@ -1652,11 +1685,16 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           :class="{
             'ws-head--viewing': ws.path === workspacePath,
             'ws-head--switchable': !detachedWindow && ws.path !== workspacePath,
+            'ws-head--drop': wsDragOverPath === ws.path,
           }"
           :title="wsHeadTitle(ws.path)"
-          :draggable="canDetachWorkspace"
+          :draggable="canDragWorkspace"
           @dragstart="onWsDragStart($event, ws.path)"
           @dragend="onWsDragEnd($event, ws.path)"
+          @dragover="onWsDragOver($event, ws.path)"
+          @dragenter="onWsDragOver($event, ws.path)"
+          @dragleave="onWsDragLeave(ws.path)"
+          @drop.prevent="onWsDrop($event, ws.path)"
           @click="!detachedWindow && ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
           @contextmenu="openWsMenu($event, ws.path, ws.path !== workspacePath)"
         >
@@ -3118,6 +3156,12 @@ button.icon-btn.muted:hover {
 /* The workspace on screen. The others in this window keep running; their
    headings read as links to switch to. */
 .ws-head--viewing .ws-name { color: var(--accent-bright, var(--text-bright)); }
+/* Where a dragged workspace would land. A line above the row rather than a
+   filled background: the heading already uses background for hover, and a drop
+   marker that looks like hover says the wrong thing about what is about to
+   happen. */
+.ws-head--drop { box-shadow: inset 0 2px 0 0 var(--accent-fg); }
+
 /* The row being viewed has no click action, so the cursor is free to say the
    one thing it can do. A switchable row keeps `pointer`: clicking to switch is
    its primary action, and the tooltip carries the drag. */
