@@ -11,6 +11,7 @@ import { SPEC as claude } from './claude'
 import { SPEC as codex } from './codex'
 import { SPEC as copilot } from './copilot'
 import { SPEC as cursor } from './cursor'
+import { SPEC as droid } from './droid'
 import { SPEC as grok } from './grok'
 import { SPEC as kilo } from './kilo'
 import { SPEC as kimi } from './kimi'
@@ -37,6 +38,7 @@ const ORDERED = [
   cursor,
   aider,
   muse,
+  droid,
   terminal
 ] as const
 
