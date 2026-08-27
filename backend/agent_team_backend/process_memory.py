@@ -3,15 +3,17 @@
 `ps` RSS is the obvious source and the wrong one: it counts shared pages once
 per process, which over-reports a fleet of same-binary CLIs by a wide margin
 (measured at ~40% for a screenful of `claude` processes). macOS exposes the
-number the kernel actually charges a process — `phys_footprint` — through
-`footprint(1)`, and that is what a user comparing our figure against Activity
-Monitor will see.
+number the kernel actually charges a process — `phys_footprint` — and that is
+what a user comparing our figure against Activity Monitor will see.
 
-The cost is one subprocess per sweep, not per process: footprint accepts a list
-of pids and prints a header line per target, so a full sweep of thirty panes is
-a single call of a few hundred milliseconds. It is still far too slow for a
-poll loop, so this is called when someone opens the memory panel, never on a
-timer.
+That counter is read straight from the kernel through `proc_pid_rusage` (see
+`proc_rusage`), which costs a syscall per pid and cannot time out. The
+`footprint(1)` subprocess it replaced is kept as a fallback for the case where
+the syscall cannot be resolved at all: correct, but superlinear in the pid
+count, because footprint de-duplicates multiply-mapped regions across every
+target it is handed. Measured here, twelve pids took 0.33s and a hundred and
+fifty took 16.5s — which is how a busy machine ended up reporting no memory at
+all, the sweep having hit its own timeout.
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ import logging
 import re
 import subprocess
 import sys
+
+from . import proc_rusage
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +37,11 @@ _HEADER_RE = re.compile(r"\[(\d+)\]:.*?Footprint:\s*(\d+)\s*B", re.IGNORECASE)
 #: everything, and a timeout here must not read as "no memory in use".
 _SWEEP_TIMEOUT_S = 20.0
 
-#: Beyond this many pids the sweep is skipped rather than run: the argv would
-#: be unwieldy and the panel is a summary, not an audit.
-_MAX_PIDS = 400
+#: Beyond this many pids the sweep is skipped rather than run: the panel is a
+#: summary, not an audit. The syscall path is linear and would cope with far
+#: more, but the fallback builds an argv out of these and should not be handed
+#: an unbounded one.
+_MAX_PIDS = 4000
 
 
 def available() -> bool:
@@ -59,6 +65,14 @@ def footprints(pids: list[int]) -> dict[int, int]:
     if not unique or len(unique) > _MAX_PIDS:
         if unique:
             log.info("footprint sweep skipped: %d pids over the cap", len(unique))
+        return {}
+    sampled = proc_rusage.sample(unique)
+    if sampled:
+        return {pid: bytes_ for pid, (bytes_, _cpu) in sampled.items()}
+    # Either the syscall is unavailable on this build, or every target died
+    # between the caller listing them and the sweep. The subprocess path
+    # answers both the same way it always did.
+    if proc_rusage.available():
         return {}
     try:
         proc = subprocess.run(

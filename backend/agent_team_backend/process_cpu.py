@@ -13,8 +13,10 @@ actually wants to show. This module only takes the readings; the differencing
 lives in the caller, so that two windows sampling at different rates each get
 their own interval instead of fighting over one shared previous sample.
 
-Like `process_memory`, one subprocess per sweep, not per process: `ps` accepts
-the whole pid list at once.
+On macOS the counter is read straight from the kernel through `proc_pid_rusage`
+(see `proc_rusage`) — a syscall per pid, no subprocess to spawn or time out,
+and the same figure `ps -o time=` prints once converted out of mach time units.
+Everywhere else `ps` takes the whole pid list in one call.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ import subprocess
 import sys
 import time
 
+from . import proc_rusage
+
 log = logging.getLogger(__name__)
 
 #: `  22751   1:02.34` — pid then accumulated CPU time, one process per line.
@@ -36,8 +40,8 @@ _ROW_RE = re.compile(r"^\s*(\d+)\s+(\S+)\s*$")
 _SWEEP_TIMEOUT_S = 5.0
 
 #: Same cap as the footprint sweep — beyond this the panel is an audit, not a
-#: summary, and the argv gets unwieldy.
-_MAX_PIDS = 400
+#: summary, and the `ps` fallback's argv gets unwieldy.
+_MAX_PIDS = 4000
 
 
 def available() -> bool:
@@ -98,6 +102,14 @@ def cpu_times(pids: list[int]) -> tuple[dict[int, float], float]:
         if unique:
             log.info("cpu sweep skipped: %d pids over the cap", len(unique))
         return {}, taken_at
+    sampled = proc_rusage.sample(unique)
+    if sampled:
+        return {pid: cpu for pid, (_bytes, cpu) in sampled.items()}, time.time()
+    # Either the syscall is unavailable on this platform, or every target died
+    # between the caller listing them and the sweep. `ps` answers both the same
+    # way it always did.
+    if proc_rusage.available():
+        return {}, time.time()
     try:
         proc = subprocess.run(
             ["ps", "-o", "pid=,time=", "-p", ",".join(str(p) for p in unique)],
