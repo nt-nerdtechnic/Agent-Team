@@ -8639,6 +8639,15 @@ async function doCloseWorkspace(): Promise<void> {
   // end of this function iterates nothing. The dialog says the workspace is
   // being closed while its agents keep running in the background.
   const paneIdsToKill = panesInView.value.map((p) => p.id)
+  // Let go of it. Clearing currentWorkspace alone left the workspace in
+  // workspaceOrder, so the window still claimed to hold it: main kept
+  // reporting it open — the Recent list showed the badge on a project that had
+  // just been closed — and the sidebar listed it as a workspace this window
+  // holds, alongside the panes that had just been killed.
+  const closing = currentWorkspace.value
+  const remaining = workspaceOrder.value.filter((w) => normWs(w) !== normWs(closing))
+  workspaceOrder.value = remaining
+  persistExtraWorkspaces()
   // Show Welcome screen immediately so the button feels responsive.
   // The async cleanup (abort / kill panes) runs after the gate is lifted.
   workspaceSelected.value = false
@@ -8665,6 +8674,11 @@ async function doCloseWorkspace(): Promise<void> {
     await sendQuiet('pipeline.abort', { workspace_path: wsPathForAbort, reason: 'user' })
   }
   await onPipelineReset(paneIdsToKill)
+  // Closing one of several is not "back to the picker": the others are still
+  // held and their agents are still running, so a Welcome screen over them
+  // says the window is empty when it is not. Land on one of them instead.
+  const next = remaining[0]
+  if (next) await switchToWorkspace(next)
 }
 
 // Titlebar 📁 button: open the current workspace folder in Finder.

@@ -216,6 +216,47 @@ describe('several workspaces in one window', () => {
     expect(appSource.slice(box, box + 220)).toContain('-webkit-app-region: no-drag')
   })
 
+  it('lets go of a workspace it closes', () => {
+    // Clearing currentWorkspace alone left it in workspaceOrder, so the window
+    // still claimed to hold it: main kept reporting it open — the Recent list
+    // showed the badge on a project just closed — and the sidebar listed it
+    // beside the panes that had been killed.
+    const at = appSource.indexOf('async function doCloseWorkspace')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('const remaining = workspaceOrder.value.filter')
+    expect(fn).toContain('workspaceOrder.value = remaining')
+    expect(fn).toContain('persistExtraWorkspaces()')
+  })
+
+  it('captures what it holds before blanking the current workspace', () => {
+    // panesInView and extraWorkspaces are both derived from currentWorkspace.
+    // Reading either after it goes blank answers about a different set — which
+    // is why the pane capture already sits above, and the release must too.
+    const at = appSource.indexOf('async function doCloseWorkspace')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn.indexOf('const closing = currentWorkspace.value')).toBeLessThan(
+      fn.indexOf("currentWorkspace.value = ''")
+    )
+  })
+
+  it('lands on another held workspace rather than the picker', () => {
+    // Closing one of several is not "back to the picker": the others are still
+    // held and still running, so a Welcome screen over them says the window is
+    // empty when it is not.
+    const at = appSource.indexOf('async function doCloseWorkspace')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('const next = remaining[0]')
+    expect(fn).toContain('if (next) await switchToWorkspace(next)')
+    // After the teardown, not before — the switch must not interleave with the
+    // kill of the workspace being closed.
+    expect(fn.indexOf('await onPipelineReset(paneIdsToKill)')).toBeLessThan(
+      fn.indexOf('if (next) await switchToWorkspace(next)')
+    )
+  })
+
   it('asks before a switch stops a running pipeline', () => {
     // Panes survive a switch; a pipeline cannot — `pipeline` is one per window,
     // so entering another project overwrites the state tracking this one's run
