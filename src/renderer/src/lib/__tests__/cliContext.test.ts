@@ -21,7 +21,14 @@ import {
   stripInputSequences,
   BRACKETED_PASTE_START,
   BRACKETED_PASTE_END,
-  CLI_PASTE_BUFFER_CAP
+  CLI_PASTE_BUFFER_CAP,
+  filterMentionCandidates,
+  rankMentionCandidates,
+  recordMentionRecents,
+  buildMentionPickData,
+  applyMentionPickToInput,
+  MENTION_BROADCAST_ADDRESS,
+  type MentionCandidate
 } from '../cliContext'
 
 describe('screenToClientPoint', () => {
@@ -630,5 +637,167 @@ describe('shouldOpenMentionMenu', () => {
   it('ignores non-"@" characters', () => {
     expect(shouldOpenMentionMenu('a', '')).toBe(false)
     expect(shouldOpenMentionMenu(' ', 'tell ')).toBe(false)
+  })
+})
+
+
+// The @-mention menu grew from a one-shot name list into a searchable picker.
+// These are the rules the imperative overlay leans on — kept pure so the
+// filtering, ordering and PTY payload stay testable without a terminal.
+
+const cand = (address: string, group?: string, status?: string): MentionCandidate =>
+  ({ address, group, status })
+
+describe('filterMentionCandidates', () => {
+  const all = [cand('all'), cand('claude-1'), cand('codex-2'), cand('myproj/codex-1')]
+
+  it('returns everything for an empty query', () => {
+    expect(filterMentionCandidates(all, '').map((c) => c.address))
+      .toEqual(['all', 'claude-1', 'codex-2', 'myproj/codex-1'])
+  })
+
+  it('matches anywhere in the address, not just the start', () => {
+    // "myproj/codex-1" must answer to "cod" — the folder prefix would otherwise
+    // hide every cross-workspace pane from a search for its agent.
+    expect(filterMentionCandidates(all, 'cod').map((c) => c.address))
+      .toEqual(['codex-2', 'myproj/codex-1'])
+  })
+
+  it('matches the workspace prefix too', () => {
+    expect(filterMentionCandidates(all, 'myproj').map((c) => c.address))
+      .toEqual(['myproj/codex-1'])
+  })
+
+  it('ignores case in both directions', () => {
+    expect(filterMentionCandidates(all, 'CODEX').map((c) => c.address))
+      .toEqual(['codex-2', 'myproj/codex-1'])
+    expect(filterMentionCandidates([cand('Claude-1')], 'claude').map((c) => c.address))
+      .toEqual(['Claude-1'])
+  })
+
+  it('returns nothing when the query matches nothing — the menu closes on this', () => {
+    expect(filterMentionCandidates(all, 'zzz')).toEqual([])
+  })
+
+  it('copies rather than aliasing the input array', () => {
+    const out = filterMentionCandidates(all, '')
+    expect(out).not.toBe(all)
+  })
+})
+
+describe('rankMentionCandidates', () => {
+  const all = [cand('all', 'local'), cand('claude-1', 'local'), cand('codex-2', 'local'), cand('proj/x-1', 'remote')]
+
+  it('hoists recents in recents order, newest first', () => {
+    const out = rankMentionCandidates(all, ['codex-2', 'proj/x-1'], 'Recent')
+    expect(out.map((c) => c.address)).toEqual(['codex-2', 'proj/x-1', 'all', 'claude-1'])
+  })
+
+  it('re-groups a hoisted candidate so it sits under the recents header', () => {
+    // Without this the row would be lifted to the top while still labelled
+    // "this window", landing under whatever header happened to be drawn first.
+    const out = rankMentionCandidates(all, ['proj/x-1'], 'Recent')
+    expect(out[0]).toMatchObject({ address: 'proj/x-1', group: 'Recent' })
+    expect(out.find((c) => c.address === 'claude-1')?.group).toBe('local')
+  })
+
+  it('ignores recents that are no longer offered (pane closed)', () => {
+    const out = rankMentionCandidates(all, ['gone-9', 'codex-2'], 'Recent')
+    expect(out.map((c) => c.address)).toEqual(['codex-2', 'all', 'claude-1', 'proj/x-1'])
+  })
+
+  it('never duplicates a candidate listed twice in recents', () => {
+    const out = rankMentionCandidates(all, ['codex-2', 'codex-2'], 'Recent')
+    expect(out.filter((c) => c.address === 'codex-2')).toHaveLength(1)
+  })
+
+  it('is a plain copy when there are no recents', () => {
+    expect(rankMentionCandidates(all, [], 'Recent').map((c) => c.address))
+      .toEqual(['all', 'claude-1', 'codex-2', 'proj/x-1'])
+  })
+
+  it('does not mutate the candidates it was given', () => {
+    const input = [cand('a', 'local')]
+    rankMentionCandidates(input, ['a'], 'Recent')
+    expect(input[0].group).toBe('local')
+  })
+})
+
+describe('recordMentionRecents', () => {
+  it('puts the newest pick first', () => {
+    expect(recordMentionRecents(['b'], ['a'], 12)).toEqual(['a', 'b'])
+  })
+
+  it('keeps a multi-pick in insertion order, first-picked ending up first', () => {
+    // Picking "a b" means a was ticked before b, so a is the more recent
+    // intent to preserve at the front of the list.
+    expect(recordMentionRecents([], ['a', 'b'], 12)).toEqual(['a', 'b'])
+  })
+
+  it('promotes an address that was already in the list rather than duplicating it', () => {
+    expect(recordMentionRecents(['a', 'b', 'c'], ['c'], 12)).toEqual(['c', 'a', 'b'])
+  })
+
+  it('caps the list', () => {
+    expect(recordMentionRecents(['b', 'c', 'd'], ['a'], 2)).toEqual(['a', 'b'])
+  })
+
+  it('leaves the list alone when nothing was picked', () => {
+    expect(recordMentionRecents(['a', 'b'], [], 12)).toEqual(['a', 'b'])
+  })
+})
+
+describe('buildMentionPickData', () => {
+  it('erases the typed query and inserts the address, in one write', () => {
+    // The user typed "@cod"; the three DEL bytes take "cod" back before the
+    // full name lands, so the prompt reads "@codex-1 " and never "@codcodex-1".
+    expect(buildMentionPickData('cod', ['codex-1'])).toBe('\x7f\x7f\x7fcodex-1 ')
+  })
+
+  it('sends just the address when nothing was typed', () => {
+    expect(buildMentionPickData('', ['codex-1'])).toBe('codex-1 ')
+  })
+
+  it('space-separates a multi-pick and still ends with one space', () => {
+    expect(buildMentionPickData('', ['a', 'b'])).toBe('a b ')
+  })
+
+  it('writes nothing when there is nothing to insert', () => {
+    // Guards the empty-list case: erasing the query without inserting anything
+    // would silently eat what the user typed.
+    expect(buildMentionPickData('cod', [])).toBe('')
+  })
+})
+
+describe('applyMentionPickToInput', () => {
+  it('replaces the typed query with the address in the draft buffer', () => {
+    // This buffer decides whether the pane counts as "being typed at", and the
+    // menu writes to the PTY through a path term.onData never sees — so it has
+    // to keep the buffer honest itself.
+    expect(applyMentionPickToInput('傳給 @cod', 'cod', ['codex-1'])).toBe('傳給 @codex-1 ')
+  })
+
+  it('appends when nothing was typed', () => {
+    expect(applyMentionPickToInput('傳給 @', '', ['codex-1'])).toBe('傳給 @codex-1 ')
+  })
+
+  it('leaves the buffer untouched when nothing was picked', () => {
+    expect(applyMentionPickToInput('傳給 @cod', 'cod', [])).toBe('傳給 @cod')
+  })
+
+  it('agrees with buildMentionPickData on what lands after the "@"', () => {
+    const query = 'cl'
+    const picked = ['claude-1', 'codex-2']
+    const wire = buildMentionPickData(query, picked)
+    const buffer = applyMentionPickToInput(`@${query}`, query, picked)
+    // Strip the DELs from the wire form and it must equal what the buffer kept
+    // after the "@" — the two spellings drifting apart is the bug this catches.
+    expect(buffer).toBe('@' + wire.replace(/\x7f/g, ''))
+  })
+})
+
+describe('MENTION_BROADCAST_ADDRESS', () => {
+  it('is the keyword App.vue offers and the menu treats as exclusive', () => {
+    expect(MENTION_BROADCAST_ADDRESS).toBe('all')
   })
 })

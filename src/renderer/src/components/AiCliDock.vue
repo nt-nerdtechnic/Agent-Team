@@ -30,6 +30,7 @@ import { settingsGet, settingsSet } from '../lib/settings'
 import { CLI_AGENT_SPECS } from '../agents'
 import { bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
 import type { useBackend } from '../composables/useBackend'
+import type { MentionCandidate } from '../lib/cliContext'
 import AiCliTerminal from './AiCliTerminal.vue'
 
 const props = withDefaults(
@@ -185,20 +186,27 @@ watch(
 // autocomplete, so a stale snapshot costs nothing; routing always re-resolves
 // in the backend. This panel is not itself registered in the roster, so the
 // mentions go one way: from here out to the main window's panes.
-const mentionTargets = ref<string[]>([])
+const mentionTargets = ref<MentionCandidate[]>([])
 async function refreshMentionTargets(): Promise<void> {
   if (props.backend.status.value !== 'connected') return
   try {
     const resp = await props.backend.send<{
       panes?: Array<{ pane_id?: string; qualified_name?: string }>
     }>('agent_msg.list', {})
+    // Every address here lives in another window, so none of them carries a
+    // status this panel could read — the menu draws hollow dots and says so by
+    // omission rather than inventing one.
+    const group = t('mention.group-remote')
     mentionTargets.value = (resp.payload?.panes ?? [])
       .filter((p) => p.qualified_name && p.pane_id !== props.paneId)
-      .map((p) => p.qualified_name as string)
+      .map((p) => ({ address: p.qualified_name as string, group }))
   } catch {
     mentionTargets.value = []
   }
 }
+// Stable identity so the terminal's prop does not churn on every render; the
+// polled list is read through it when the menu opens.
+const mentionCandidateGetter = (): MentionCandidate[] => mentionTargets.value
 watch(() => props.backend.status.value, () => void refreshMentionTargets(), { immediate: true })
 const mentionPollTimer = setInterval(() => void refreshMentionTargets(), 10_000)
 onUnmounted(() => clearInterval(mentionPollTimer))
@@ -360,7 +368,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
       :pane-id="paneId"
       :backend="backend"
       :workspace-path="workspacePath"
-      :mention-candidates="mentionTargets"
+      :mention-candidates="mentionCandidateGetter"
       class="ai-cli-term"
     />
   </div>

@@ -7,6 +7,7 @@ import type { useBackend } from '../composables/useBackend'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import { extractDropPaths, escapeDraggedPath, stabilizeDroppedPaths } from '../lib/drop'
 import { CLI_CONTEXT_MIME, PANE_BATCH_MIME, PANE_ID_MIME, resolveCliDropSources, writeCliPaneDragPayload } from '../lib/cliContext'
+import type { MentionCandidate } from '../lib/cliContext'
 import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
 import { paneStatusLabelKey } from '../lib/paneStatusLabel'
@@ -72,9 +73,14 @@ interface Props {
   backend: ReturnType<typeof useBackend>
   cliProfiles: ReturnType<typeof useCliProfiles>
   workspacePath?: string
-  /** Messaging names of the OTHER CLI panes (self excluded), for the
-   *  @-mention autocomplete menu inside this pane's terminal. */
-  mentionCandidates?: string[]
+  /** Resolves the addresses offered by this pane's @-mention menu (self
+   *  excluded), with the group and status words already translated by the host.
+   *
+   *  A getter rather than a ready-made array: building the list reads every
+   *  pane's live status, and a plain prop would rebuild it on every render —
+   *  once a second, for every pane, to feed a menu that is almost never open.
+   *  Passing the resolver keeps the cost on the `@` keystroke that needs it. */
+  mentionCandidates?: (paneId: string) => MentionCandidate[]
   /** Whether the layout currently shows this pane. Paged-out panes stay mounted
    *  (their terminals must survive), so the terminal uses this to skip
    *  display-only upkeep instead of running it for an invisible pane. */
@@ -111,6 +117,9 @@ const emit = defineEmits<{
   /** The user typed into a STOPped pane (Enter/printable), taking over — App.vue
    *  clears + un-persists the STOP badge. */
   (e: 'user-resume'): void
+  /** An @-mention was completed in this pane's terminal — App.vue records the
+   *  chosen addresses so the menu can offer them first next time. */
+  (e: 'mention-pick', addresses: string[]): void
   (e: 'first-output'): void
   /** This pane's PTY did not survive a backend outage — App.vue resumes the
    *  CLI session so the conversation continues instead of leaving a dead pane. */
@@ -186,7 +195,8 @@ const terminal = useTerminal(props.paneId, props.backend, {
   workspacePath: props.workspacePath,
   onClear: () => emit('rebuild-clean'),
   onUserResume: () => emit('user-resume'),
-  mentionCandidates: () => props.mentionCandidates ?? [],
+  mentionCandidates: () => props.mentionCandidates?.(props.paneId) ?? [],
+  onMentionPick: (addresses) => emit('mention-pick', addresses),
   onScreen: () => props.onScreen ?? true,
   onFirstOutput: () => emit('first-output'),
   onClipboardFailure,

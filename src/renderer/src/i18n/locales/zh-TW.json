@@ -2141,6 +2141,12 @@
     "duration-hours": "{count} 小時",
     "duration-minutes": "{count} 分"
   },
+  "mention": {
+    "group-recent": "最近",
+    "group-local": "本視窗",
+    "group-remote": "其他工作區",
+    "broadcast-hint": "全部"
+  },
   "paneStatus": {
     "running": "執行中",
     "idle": "閒置",

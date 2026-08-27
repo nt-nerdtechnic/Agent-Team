@@ -11,7 +11,16 @@ import { AGENT_SPECS } from '../agents'
 import { createResizeController, type ResizeController } from './useTerminalResize'
 import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFontSize'
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
-import { chunkForPty, shouldOpenMentionMenu, stripInputSequences } from '../lib/cliContext'
+import {
+  applyMentionPickToInput,
+  buildMentionPickData,
+  chunkForPty,
+  filterMentionCandidates,
+  MENTION_BROADCAST_ADDRESS,
+  shouldOpenMentionMenu,
+  stripInputSequences,
+  type MentionCandidate,
+} from '../lib/cliContext'
 import { settingsGet, settingsSet } from '../lib/settings'
 import { extractClipboardImage, saveClipboardImage } from '../lib/clipboardImage'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
@@ -1073,10 +1082,18 @@ interface UseTerminalOptions {
   workspacePath?: string
   onClear?: () => void
   onUserResume?: () => void
-  /** Getter for the OTHER CLI panes' messaging names (already excluding self).
+  /** Getter for the OTHER CLI panes' addresses (already excluding self), with
+   *  the pre-translated group and status words the menu draws beside them.
    *  Feeds the @-mention autocomplete menu. Read lazily at trigger time so the
-   *  list stays current as panes come and go. */
-  mentionCandidates?: () => string[]
+   *  list stays current as panes come and go.
+   *
+   *  The host resolves the words because this composable owns no i18n scope,
+   *  and it orders the list because recency is the host's to remember — see
+   *  onMentionPick. */
+  mentionCandidates?: () => MentionCandidate[]
+  /** The addresses a mention pick just inserted, for the host to record as
+   *  recently used (it feeds the next call's ordering). */
+  onMentionPick?: (addresses: string[]) => void
   onFirstOutput?: () => void
   /** Whether App's layout currently shows this pane (onScreenPaneIds). Paged-out
    *  panes stay mounted so their terminals survive, which also means every
@@ -1693,9 +1710,17 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
   // ── @-mention floating autocomplete ──────────────────────────────────────────
   // Imperative-DOM overlay (mirrors showTerminalFilePicker) listing the OTHER CLI
-  // panes' messaging names. It steals DOM focus to its own card AND handles keys
-  // at the document capture layer, so ↑/↓/Enter/Esc never reach xterm while open.
-  // Picking a name sends `name + ' '` straight to the PTY, completing `@codex-1 `.
+  // panes' addresses. It steals DOM focus to its own card AND handles keys at the
+  // document capture layer, so ↑/↓/Enter/Esc never reach xterm while open.
+  //
+  // Typed characters go to the PTY AND narrow the list. Sending them is what
+  // keeps the prompt honest — the user sees "@cod" where they typed it — and it
+  // is also the escape hatch: when the filter empties, the menu just closes and
+  // the CLI's own "@" completion takes over with every character already in
+  // place. Nothing to re-send, nothing to rewind.
+  //
+  // Picking writes one PTY frame that erases the query and inserts the
+  // addresses (buildMentionPickData), completing `@codex-1 `.
   let _mentionMenuCleanup: (() => void) | null = null
 
   function closeMentionMenu(): void {
@@ -1706,7 +1731,23 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     }
   }
 
-  function openMentionMenu(candidates: string[]): void {
+  /** Dot colour per pane status, matching the sidebar's .status-dot so one pane
+   *  never reads green here and amber there. Statuses this window cannot read
+   *  (`all`, panes in another workspace window) get no dot fill at all. */
+  function mentionStatusColor(status: string | undefined): string {
+    switch (status) {
+      case 'running': return 'var(--success-fg)'
+      case 'awaiting': return 'var(--warning-fg)'
+      case 'idle': return 'var(--attention-fg)'
+      case 'starting': return 'var(--status-starting-fg)'
+      case 'error': return 'var(--danger-fg)'
+      case 'exited':
+      case 'stopped': return 'var(--text-disabled)'
+      default: return ''
+    }
+  }
+
+  function openMentionMenu(candidates: MentionCandidate[]): void {
     if (_mentionMenuCleanup) return          // one menu at a time
     if (!candidates.length) return           // nothing to offer
     const host = mountedEl
@@ -1730,68 +1771,241 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     })
 
     const card = document.createElement('div')
+    card.className = 'term-mention-card'
     card.tabIndex = 0
     Object.assign(card.style, {
       position: 'fixed', left: `${cellLeft}px`, top: `${cellBottom}px`,
-      width: '200px', maxHeight: '240px', overflowY: 'auto',
-      background: '#161b22', border: '1px solid #30363d', borderRadius: '6px',
-      boxShadow: '0 8px 24px rgba(0,0,0,0.6)', outline: 'none',
-      padding: '4px 0', boxSizing: 'border-box',
+      width: '248px', maxHeight: '260px', overflowY: 'auto',
+      background: 'var(--bg-overlay)', border: '1px solid var(--border-default)',
+      borderRadius: '6px', boxShadow: 'var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.6))',
+      outline: 'none', padding: '4px 0', boxSizing: 'border-box',
     })
 
+    // The query line only appears once there is something to report, so an
+    // untouched menu looks exactly like the one that shipped before.
+    const queryEl = document.createElement('div')
+    queryEl.className = 'term-mention-query'
+    Object.assign(queryEl.style, {
+      display: 'none', gap: '8px', alignItems: 'center', padding: '4px 12px 6px',
+      margin: '0 0 4px', borderBottom: '1px solid var(--border-default)',
+      color: 'var(--text-muted)', fontSize: '12px',
+    })
+    const queryTextEl = document.createElement('span')
+    Object.assign(queryTextEl.style, { flex: '1', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
+    const queryCountEl = document.createElement('span')
+    queryEl.append(queryTextEl, queryCountEl)
+
+    const listEl = document.createElement('div')
+    card.append(queryEl, listEl)
+
+    let query = ''
     let selectedIdx = 0
+    /** Addresses ticked with Space, in tick order — the order they are inserted. */
+    const checked: string[] = []
+    let visible: MentionCandidate[] = candidates
     const rows: HTMLElement[] = []
 
     function renderSelection(): void {
       rows.forEach((row, i) => {
-        row.style.background = i === selectedIdx ? 'rgba(56,139,253,0.2)' : ''
+        const on = i === selectedIdx
+        row.style.background = on ? 'var(--bg-selected)' : ''
+        row.classList.toggle('is-selected', on)
       })
       rows[selectedIdx]?.scrollIntoView({ block: 'nearest' })
     }
 
-    function pick(idx: number): void {
-      const name = candidates[idx]
-      closeMentionMenu()
-      term.focus()
-      if (name && inputTransportReady()) {
-        void backend.send('terminal.input', {
-          terminal_session_id: sessionId.value,
-          data: name + ' ',
-        })
-      }
+    /** Address text with the matched run tinted, so a filtered list shows WHY
+     *  each row survived. Built from indexOf rather than a regex: an address is
+     *  arbitrary user text and would otherwise need escaping. */
+    function appendHighlighted(el: HTMLElement, address: string): void {
+      const at = query ? address.toLowerCase().indexOf(query.toLowerCase()) : -1
+      if (at < 0) { el.textContent = address; return }
+      const hit = document.createElement('span')
+      hit.className = 'term-mention-hit'
+      hit.textContent = address.slice(at, at + query.length)
+      Object.assign(hit.style, { color: 'var(--accent-fg)', fontWeight: '700' })
+      el.append(
+        document.createTextNode(address.slice(0, at)),
+        hit,
+        document.createTextNode(address.slice(at + query.length))
+      )
     }
 
-    candidates.forEach((name, i) => {
-      const row = document.createElement('div')
-      row.textContent = name
-      Object.assign(row.style, {
-        padding: '6px 12px', cursor: 'pointer', color: '#e6edf3', fontSize: '13px',
-        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-      })
-      row.addEventListener('mouseenter', () => { selectedIdx = i; renderSelection() })
-      row.addEventListener('mousedown', (e) => { e.preventDefault(); pick(i) })
-      rows.push(row)
-      card.appendChild(row)
-    })
+    function buildRows(): void {
+      listEl.replaceChildren()
+      rows.length = 0
+      // Headers only earn their space when they separate something: a filtered
+      // list is usually one group, and a lone header above every row is noise.
+      const groups = new Set(visible.map((c) => c.group).filter(Boolean))
+      const showGroups = groups.size > 1
+      let lastGroup: string | undefined
+      visible.forEach((cand, i) => {
+        if (showGroups && cand.group && cand.group !== lastGroup) {
+          lastGroup = cand.group
+          const hdr = document.createElement('div')
+          hdr.className = 'term-mention-group'
+          hdr.textContent = cand.group
+          Object.assign(hdr.style, {
+            padding: '5px 12px 2px', color: 'var(--text-muted)', fontSize: '10.5px',
+            letterSpacing: '0.06em', textTransform: 'uppercase',
+          })
+          listEl.appendChild(hdr)
+        }
+        const row = document.createElement('div')
+        row.className = 'term-mention-row'
+        row.dataset.address = cand.address
+        Object.assign(row.style, {
+          display: 'flex', alignItems: 'center', gap: '8px',
+          padding: '5px 12px', cursor: 'pointer', color: 'var(--text-primary)',
+          fontSize: '13px', whiteSpace: 'nowrap',
+        })
 
+        const isChecked = checked.includes(cand.address)
+        const box = document.createElement('span')
+        box.className = 'term-mention-box'
+        row.classList.toggle('is-checked', isChecked)
+        Object.assign(box.style, {
+          flex: 'none', width: '11px', height: '11px', borderRadius: '3px',
+          border: `1px solid ${isChecked ? 'var(--accent-fg)' : 'var(--text-disabled)'}`,
+          background: isChecked ? 'var(--accent-fg)' : 'transparent',
+        })
+
+        const dot = document.createElement('span')
+        dot.className = 'term-mention-dot'
+        if (cand.status) dot.dataset.status = cand.status
+        const fill = mentionStatusColor(cand.status)
+        Object.assign(dot.style, {
+          flex: 'none', width: '7px', height: '7px', borderRadius: '50%',
+          background: fill || 'transparent',
+          border: fill ? 'none' : '1px solid var(--text-disabled)',
+        })
+
+        const name = document.createElement('span')
+        name.className = 'term-mention-name'
+        Object.assign(name.style, { flex: '1', overflow: 'hidden', textOverflow: 'ellipsis' })
+        appendHighlighted(name, cand.address)
+
+        row.append(box, dot, name)
+        if (cand.statusLabel) {
+          const tag = document.createElement('span')
+          tag.className = 'term-mention-status'
+          tag.textContent = cand.statusLabel
+          Object.assign(tag.style, { flex: 'none', color: 'var(--text-muted)', fontSize: '11px' })
+          row.appendChild(tag)
+        }
+
+        row.addEventListener('mouseenter', () => { selectedIdx = i; renderSelection() })
+        row.addEventListener('mousedown', (e) => { e.preventDefault(); selectedIdx = i; pick() })
+        rows.push(row)
+        listEl.appendChild(row)
+      })
+    }
+
+    function renderQueryLine(): void {
+      const show = query !== '' || checked.length > 0
+      queryEl.style.display = show ? 'flex' : 'none'
+      if (!show) return
+      queryTextEl.textContent = query ? `@${query}` : ''
+      queryCountEl.textContent = checked.length
+        ? `✓ ${checked.length}`
+        : `${visible.length}`
+    }
+
+    /** Re-derive the visible list from the current query and redraw. Returns
+     *  false when nothing matches — the caller closes the menu and hands the
+     *  prompt back to the CLI's own completion. */
+    function refilter(): boolean {
+      const next = filterMentionCandidates(candidates, query)
+      if (!next.length) return false
+      const keep = visible[selectedIdx]?.address
+      visible = next
+      const at = keep ? next.findIndex((c) => c.address === keep) : -1
+      selectedIdx = at >= 0 ? at : 0
+      buildRows()
+      renderQueryLine()
+      renderSelection()
+      placeCard()
+      return true
+    }
+
+    function toggleCheck(): void {
+      const cand = visible[selectedIdx]
+      if (!cand) return
+      const at = checked.indexOf(cand.address)
+      if (at >= 0) {
+        checked.splice(at, 1)
+      } else if (cand.address === MENTION_BROADCAST_ADDRESS) {
+        // Broadcast and roll-call are different gestures — "everyone" plus two
+        // named panes would send those two twice.
+        checked.length = 0
+        checked.push(cand.address)
+      } else {
+        const bc = checked.indexOf(MENTION_BROADCAST_ADDRESS)
+        if (bc >= 0) checked.splice(bc, 1)
+        checked.push(cand.address)
+      }
+      buildRows()
+      renderQueryLine()
+      renderSelection()
+    }
+
+    function pick(): void {
+      // No ticks means the highlighted row — so a user who never discovers
+      // multi-select keeps the single-pick behaviour exactly as it was.
+      const addresses = checked.length ? [...checked] : [visible[selectedIdx]?.address].filter(Boolean) as string[]
+      const data = buildMentionPickData(query, addresses)
+      closeMentionMenu()
+      term.focus()
+      if (!data || !inputTransportReady()) return
+      // This write bypasses term.onData, so nothing else will correct the draft
+      // buffer that decides whether the pane counts as "being typed at".
+      inputBuffer = applyMentionPickToInput(inputBuffer, query, addresses)
+      syncDraft()
+      void backend.send('terminal.input', {
+        terminal_session_id: sessionId.value,
+        data,
+      })
+      opts?.onMentionPick?.(addresses)
+    }
+
+    /** Send a keystroke the menu intercepted, keeping the draft buffer in step.
+     *
+     *  These writes bypass term.onData, which is the ONLY thing that normally
+     *  maintains inputBuffer — so without this the buffer would not contain the
+     *  query the user just typed, and pick()'s slice would eat that many
+     *  characters of the real prompt instead ("傳給 @cod" → "傳codex-1 "). */
+    function sendToPty(data: string): void {
+      if (!inputTransportReady()) return
+      if (data === '\x7f') inputBuffer = inputBuffer.slice(0, -1)
+      else inputBuffer += data
+      syncDraft()
+      void backend.send('terminal.input', { terminal_session_id: sessionId.value, data })
+    }
+
+    /** Anchor the card under the cursor cell, clamped to the viewport. Re-run
+     *  after the list changes size: a filter that shortens the card would
+     *  otherwise leave a card flipped above the cursor floating away from it. */
+    function placeCard(): void {
+      const cardRect = card.getBoundingClientRect()
+      let left = cellLeft
+      let top = cellBottom
+      if (left + cardRect.width > window.innerWidth) left = window.innerWidth - cardRect.width - 8
+      if (left < 4) left = 4
+      if (top + cardRect.height > window.innerHeight) top = cellTop - cardRect.height  // flip above
+      if (top < 4) top = 4
+      card.style.left = `${left}px`
+      card.style.top = `${top}px`
+    }
+
+    buildRows()
     root.appendChild(card)
     document.body.appendChild(root)
-
-    // Clamp to the viewport now that the card has a measured size.
-    const cardRect = card.getBoundingClientRect()
-    let left = cellLeft
-    let top = cellBottom
-    if (left + cardRect.width > window.innerWidth) left = window.innerWidth - cardRect.width - 8
-    if (left < 4) left = 4
-    if (top + cardRect.height > window.innerHeight) top = cellTop - cardRect.height  // flip above
-    if (top < 4) top = 4
-    card.style.left = `${left}px`
-    card.style.top = `${top}px`
+    placeCard()
 
     // Document-capture keydown: intercept the menu's keys before xterm's textarea
     // can see them (capture phase + stopPropagation), so the CLI receives nothing
-    // while the menu is open. Any other printable key / Backspace dismisses the
-    // menu and is re-sent to the PTY so typing continues uninterrupted.
+    // it should not while the menu is open. Printable keys are the exception —
+    // they reach the PTY AND narrow the list (see the header note).
     const onDocKeydown = (e: KeyboardEvent): void => {
       // IME guard, same contract as the xterm handler below: while a
       // composition is live, e.key is a raw pre-edit keystroke ('ㄒ', 'j',
@@ -1800,18 +2014,22 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // needed, so composing in a pane with the mention menu open produced
       // garbage. Let the browser drive the composition; the committed text
       // arrives through term.onData like any other input.
+      //
+      // MUST stay the first branch: every branch below assumes e.key is real.
       if (e.isComposing || e.keyCode === 229) return
       if (e.key === 'ArrowDown') {
         e.preventDefault(); e.stopPropagation()
-        if (selectedIdx < candidates.length - 1) { selectedIdx++; renderSelection() }
+        if (selectedIdx < visible.length - 1) { selectedIdx++; renderSelection() }
       } else if (e.key === 'ArrowUp') {
         e.preventDefault(); e.stopPropagation()
         if (selectedIdx > 0) { selectedIdx--; renderSelection() }
       } else if (e.key === 'Enter' || e.key === 'Tab') {
         e.preventDefault(); e.stopPropagation()
-        pick(selectedIdx)
+        pick()
       } else if (e.key === 'Escape') {
         e.preventDefault(); e.stopPropagation()
+        // Deliberately does NOT erase the query: the characters are already on
+        // the prompt, and taking them back would undo typing the user meant.
         closeMentionMenu(); term.focus()
       } else if (e.metaKey || e.ctrlKey || e.altKey) {
         // A shortcut chord (Cmd+A, etc.) — cancel the menu but let the chord
@@ -1819,19 +2037,26 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         // the terminal so the chord (e.g. Cmd+V paste) lands there and typing
         // continues — closing the focused card would otherwise drop focus to
         // <body>, swallowing the chord and every keystroke after it.
+        //
+        // Stays ABOVE the Space branch so Cmd+Space (IME switch) is still a
+        // chord and never a tick.
         closeMentionMenu(); term.focus()
+      } else if (e.key === ' ') {
+        e.preventDefault(); e.stopPropagation()
+        toggleCheck()
       } else if (e.key === 'Backspace') {
         e.preventDefault(); e.stopPropagation()
-        closeMentionMenu(); term.focus()
-        if (inputTransportReady()) {
-          void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: '\x7f' })
-        }
+        sendToPty('\x7f')
+        if (!query) { closeMentionMenu(); term.focus(); return }
+        query = query.slice(0, -1)
+        if (!refilter()) { closeMentionMenu(); term.focus() }
       } else if (e.key.length === 1) {
         e.preventDefault(); e.stopPropagation()
-        closeMentionMenu(); term.focus()
-        if (inputTransportReady()) {
-          void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: e.key })
-        }
+        // The character goes to the PTY either way — that is what makes an
+        // empty filter a clean handover rather than a lost keystroke.
+        sendToPty(e.key)
+        query += e.key
+        if (!refilter()) { closeMentionMenu(); term.focus() }
       }
     }
 
@@ -1844,6 +2069,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       root.remove()
     }
 
+    renderQueryLine()
     renderSelection()
     card.focus()
   }

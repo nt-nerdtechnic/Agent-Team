@@ -8,20 +8,23 @@ import { onMounted, ref, watch } from 'vue'
 import { useTerminal } from '../composables/useTerminal'
 import { useTheme } from '../composables/useTheme'
 import type { useBackend } from '../composables/useBackend'
+import type { MentionCandidate } from '../lib/cliContext'
 
 const props = defineProps<{
   paneId: string
   backend: ReturnType<typeof useBackend>
   workspacePath?: string
-  /** Names offered by the @-mention menu. Read lazily on every `@` keystroke,
-   *  so the host can keep refreshing the list behind this prop. */
-  mentionCandidates?: string[]
+  /** Resolves the addresses offered by the @-mention menu, with the group and
+   *  status words already translated by the host. A getter, called on the `@`
+   *  keystroke rather than on every render — see TerminalPane's copy of this
+   *  prop for why. */
+  mentionCandidates?: (paneId: string) => MentionCandidate[]
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
 const terminal = useTerminal(props.paneId, props.backend, {
   workspacePath: props.workspacePath,
-  mentionCandidates: () => props.mentionCandidates ?? [],
+  mentionCandidates: () => props.mentionCandidates?.(props.paneId) ?? [],
 })
 const { theme } = useTheme()
 watch(theme, () => terminal.updateXtermTheme())

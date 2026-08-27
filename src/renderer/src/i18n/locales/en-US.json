@@ -2141,6 +2141,12 @@
     "duration-hours": "{count}h",
     "duration-minutes": "{count}m"
   },
+  "mention": {
+    "group-recent": "Recent",
+    "group-local": "This window",
+    "group-remote": "Other workspaces",
+    "broadcast-hint": "everyone"
+  },
   "paneStatus": {
     "running": "running",
     "idle": "idle",

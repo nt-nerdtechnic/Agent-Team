@@ -13654,7 +13654,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :backend="backend"
           :cli-profiles="cliProfilesApi"
           :workspace-path="p.workspacePath"
-          :mention-candidates="mentionCandidatesFor(p.id)"
+          :mention-candidates="mentionCandidatesFor"
           @mention-pick="rememberMentionPick"
           :loop-active="p.loopActive"
           :loop-wait-until="p.loopWaitUntil"
