@@ -4552,7 +4552,17 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
 async function onManualSpawn(payload: SpawnPayload): Promise<string | null> {
   // The synthetic manual tab deliberately has no run-group id; a real tab
   // keeps its own id instead of falling back to a background pipeline group.
-  const spawnGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
+  //
+  // Only when spawning into the workspace on screen, though. Run groups are
+  // per-workspace and only the viewed one's are loaded, so stamping a pane
+  // bound for another workspace with an id from THIS one's set gives it a
+  // group no tab over there lists — the pane lands in the sidebar and on no
+  // tab at all, which is indistinguishable from the spawn having failed.
+  const target = payload.workspacePath || currentWorkspace.value
+  const onScreen = normWs(target) === normWs(currentWorkspace.value)
+  const spawnGroupId = onScreen
+    ? resolveManualSpawnGroupId(runGroups.value, activeTab.value)
+    : ''
   const paneId = await spawnPane({
     agentKey: payload.agentKey,
     roleKey: payload.roleKey,
@@ -6981,6 +6991,9 @@ async function onWorkspaceCheck(path: string): Promise<void> {
       }
     }
     _loadRunGroups(path, resp.project)
+    // Now that this workspace's groups are authoritative, drop any group id on
+    // its panes that belongs to some other workspace's set.
+    void repairForeignRunGroups(path)
     // Apply the persisted tab order from project.json. Groups not listed (or
     // an absent field) keep their stored order.
     const savedTabOrder = resp.project.tab_order
@@ -11298,6 +11311,31 @@ function reorderRunGroupTab(fromKey: string, toKey: string): void {
   if (!reorderByIds(runGroups.value, fromKey, toKey)) return
   _saveRunGroups()
   void persistTabOrder()
+}
+
+/** Clear a run group id that this workspace does not have.
+ *
+ *  Run groups are per-workspace, so an id from another workspace's set matches
+ *  no tab here: the pane shows in the sidebar and on no tab at all — running
+ *  and unreachable, which reads as the spawn having failed. buildStageTabs
+ *  deliberately does not paper over this (a pane on no tab means something is
+ *  wrong, and hiding it in the manual tab would hide the fault too), so the
+ *  data is repaired instead of the view.
+ *
+ *  The only source was the ＋ on another workspace's heading, which stamped
+ *  the pane with the VIEWED workspace's group. That is fixed at the source;
+ *  this clears the panes that were already written that way.
+ */
+async function repairForeignRunGroups(path: string): Promise<void> {
+  const known = new Set(runGroups.value.map((g) => g.id))
+  const strays = panes.value.filter(
+    (p) => normWs(p.workspacePath) === normWs(path) && p.runGroupId && !known.has(p.runGroupId),
+  )
+  if (!strays.length) return
+  for (const pane of strays) {
+    if (await persistPaneRunGroup(pane, '')) pane.runGroupId = undefined
+  }
+  syncViews()
 }
 
 /** Move a pane — and the rest of its multi-selection, if it is part of one —
