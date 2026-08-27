@@ -4381,6 +4381,18 @@ async def _terminal_create_impl(
         transaction["attribution_future"] = attribution_future
         transaction["attribution_started"] = True
         await asyncio.shield(attribution_future)
+        # The live "THIS SESSION" tally is process-lifetime only, so a resumed
+        # session reads 0 after a backend restart. Now that the pane owns this
+        # session id, re-derive its real total from the vendor log. Fire and
+        # forget — a multi-MB parse must not delay the create ack below.
+        app.schedule_live_token_backfill(
+            workspace_path=ws_for_pane,
+            pane_id=term.pane_id,
+            # Same bucket key the token sink uses (slot_key or pane_id).
+            bucket_pane_key=app._stable_pane_key(metadata, "") or term.pane_id,
+            vendor=agent_key,
+            session_id=explicit_session_id,
+        )
     if transaction["cancelled"]:
         raise _TerminalCreateCancelled
     if getattr(term, "closed", False):
@@ -5799,6 +5811,19 @@ async def pane_set_run_group(session: "Session", msg_id: str, msg_type: str, pay
         pane_id=payload["pane_id"],
         run_group_id=payload.get("run_group_id", ""),
     )
+    if project is None:
+        # Say so rather than answering ok: the caller acts on this reply by
+        # dropping the pane's group id locally, which must not happen when
+        # nothing was written.
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "PANE_NOT_FOUND",
+                f"no pane record for {payload['pane_id']!r} in this workspace",
+            )
+        )
+        return
     await session.send_json(
         make_response(msg_id, msg_type, app._project_payload(project))
     )

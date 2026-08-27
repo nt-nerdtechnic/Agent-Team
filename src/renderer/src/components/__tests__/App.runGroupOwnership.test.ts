@@ -13,10 +13,12 @@ import { buildStageTabs } from '../../lib/stageTabs'
 // hits that window every time, since ensureSavedGroup saves once per restored
 // pane.
 //
-// What it looks like afterwards: the panes keep their run_group_id, so they
-// match no tab, and buildStageTabs deliberately does not adopt them into the
-// manual tab either — the whole strip stops rendering and the panes are listed
-// in the sidebar but reachable from nowhere.
+// What it looked like afterwards: the panes kept their run_group_id, so they
+// matched no tab, and buildStageTabs did not adopt them into the manual tab
+// either — the whole strip stopped rendering and the panes were listed in the
+// sidebar but reachable from nowhere. Two things answer that now: buildStageTabs
+// surfaces a tab for an id no record matches, and adoptOrphanRunGroups puts the
+// record back under that same id rather than clearing the pane.
 //
 // Source-scanned, like the other App.*.test.ts files: App.vue cannot be
 // mounted, since backend and terminal lifecycles start on mount.
@@ -130,22 +132,43 @@ describe('restore puts back a tab whose record was lost', () => {
     expect(occurrences(restore, '? ensureSavedGroup(savedGid)')).toBe(2)
   })
 
-  it('repairs foreign group ids only after restore has had its say', () => {
-    // Run before the panes are back, the repair sees nothing to fix on a cold
-    // start; run before ensureSavedGroup, it reads a legitimately saved id as
-    // foreign and clears the pane instead of recreating its tab.
+  it('adopts orphaned group ids only after restore has had its say', () => {
+    // Run before the panes are back, the adoption sees nothing to put back on a
+    // cold start; run before ensureSavedGroup, it would rebuild a record the
+    // restore is about to write anyway.
     const check = body('onWorkspaceCheck')
     const restoreAt = check.indexOf('await restoreWorkspacePanes(resp, path, undefined,')
-    const repairAt = check.indexOf('void repairForeignRunGroups(path)')
+    const adoptAt = check.indexOf('adoptOrphanRunGroups(path)')
     const resolveAt = check.indexOf('activeTab.value = resolveActiveTab(runGroups.value, activeTab.value)')
     expect(restoreAt).toBeGreaterThan(-1)
-    expect(repairAt).toBeGreaterThan(restoreAt)
-    expect(repairAt).toBeLessThan(resolveAt)
+    expect(adoptAt).toBeGreaterThan(restoreAt)
+    expect(adoptAt).toBeLessThan(resolveAt)
     // And nowhere earlier in the check, which is where it used to sit.
-    expect(check.slice(0, restoreAt)).not.toContain('repairForeignRunGroups')
+    expect(check.slice(0, restoreAt)).not.toContain('adoptOrphanRunGroups')
   })
 
-  it('is why the same id matters: only then does the pane land on a tab', () => {
+  it('rebuilds the missing record instead of clearing the pane that named it', () => {
+    // The pane's run_group_id is the only surviving record of the assignment,
+    // so clearing it — the repair this replaced did exactly that — destroys the
+    // grouping with no way back. Nothing in here may write a pane's group id —
+    // neither in memory (`runGroupId = undefined`) nor through the persist
+    // helper the old repair called with an empty id.
+    const adopt = body('adoptOrphanRunGroups')
+    expect(adopt).toContain('const gid = pane.runGroupId')
+    expect(adopt).not.toContain('persistPaneRunGroup')
+    expect(adopt).not.toMatch(/runGroupId\s*=[^=]/)
+  })
+
+  it('puts the orphaned id itself back into runGroups', () => {
+    // Under the same id, so the pane it came from lands on that very tab.
+    const adopt = body('adoptOrphanRunGroups')
+    expect(adopt).toContain('runGroups.value = [')
+    expect(adopt).toContain('...runGroups.value,')
+    expect(adopt).toContain('createdAt: runGroupCreatedAt(id)')
+    expect(adopt).toContain('_saveRunGroups()')
+  })
+
+  it('is why the same id matters: only then does the pane land on its own tab', () => {
     const pane = { id: 'p1', runGroupId: 'rg-7' }
     const strip = (groupId: string) =>
       buildStageTabs({
@@ -155,9 +178,47 @@ describe('restore puts back a tab whose record was lost', () => {
         detachedGroupId: '',
         detachedGroupIds: new Set<string>(),
         manualLabel: 'manual',
+        orphanLabel: 'recovered',
       })
     expect(strip('rg-7')[0].paneIds).toEqual(['p1'])
-    // A fresh id loses the pane entirely — it is not promoted to the manual tab.
-    expect(strip('rg-new').flatMap((t) => t.paneIds)).toEqual([])
+    // A fresh id still leaves the pane reachable — the safety net catches it —
+    // but on a nameless recovered tab, while the rebuilt group sits empty.
+    expect(strip('rg-new').map((t) => [t.key, t.label, t.paneIds])).toEqual([
+      ['rg-new', 'Run 1', []],
+      ['rg-7', 'recovered', ['p1']],
+    ])
+  })
+})
+
+describe('a move between tabs that did not persist does not stay on screen', () => {
+  it('puts the pane back on the tab it came from when the write fails', () => {
+    // The move is optimistic — the pane jumps tabs before the write lands — so
+    // a failed write leaves the screen showing a move that did not happen: the
+    // record still names the old group, and the next restore takes the pane
+    // back without a word.
+    const move = body('movePaneToGroup')
+    expect(move).toContain('const previous = pane.runGroupId')
+    expect(move).toContain(
+      'if (!(await persistPaneRunGroup(pane, targetGroupId))) pane.runGroupId = previous',
+    )
+  })
+
+  it('remembers the old group before overwriting it', () => {
+    // Read after the optimistic assignment, `previous` is the new value and
+    // the restore is a no-op.
+    const move = body('movePaneToGroup')
+    expect(move.indexOf('const previous = pane.runGroupId')).toBeLessThan(
+      move.indexOf('pane.runGroupId = targetGroupId'),
+    )
+  })
+
+  it('restores per pane, not per batch', () => {
+    // A drag can carry a multi-selection, and the writes are independent: one
+    // failing must not undo the ones that landed, nor be covered by them.
+    const move = body('movePaneToGroup')
+    const loopAt = move.indexOf('for (const id of paneDragBatch(paneId))')
+    expect(loopAt).toBeGreaterThan(-1)
+    expect(move.indexOf('const previous = pane.runGroupId')).toBeGreaterThan(loopAt)
+    expect(move.indexOf('pane.runGroupId = previous')).toBeGreaterThan(loopAt)
   })
 })

@@ -193,4 +193,62 @@ describe('buildWorkspaceGroups', () => {
   it('returns nothing when the window has no workspace at all', () => {
     expect(build({ here: '', order: [] })).toEqual([])
   })
+
+  it('lists a workspace no list holds but a pane still names', () => {
+    // Detaching a workspace takes it out of the order without taking its panes
+    // with it, and a manual resume can start one in a folder this window never
+    // adopted. The stage shows those panes either way; without a row of their
+    // own they had no heading to sit under — not hidden but missing, and a
+    // restore placeholder among them could be opened from nowhere else.
+    const rows = build({
+      here: A,
+      order: [A],
+      panes: [pane('a1', A), pane('stray', C)],
+      lineage: [row('a1'), row('stray')],
+    })
+    expect(rows.map((r) => r.path)).toEqual([A, C])
+    const orphaned = rows.find((r) => r.path === C)
+    expect(orphaned?.lineage.map((l) => l.id)).toEqual(['stray'])
+    expect(orphaned?.count).toBe(1)
+    expect(orphaned?.label).toBe('gamma')
+    // Same shape as any other row — the fallback shares one builder with the
+    // held workspaces, so grouping is not a second implementation.
+    expect(orphaned?.groups).toEqual([{ id: '', name: '', rows: [row('stray')] }])
+  })
+
+  it('splits a fallback row into run groups like any other row', () => {
+    const rows = build({
+      here: A,
+      order: [A],
+      panes: [pane('x', C, 'g1'), pane('y', C)],
+      lineage: [row('x'), row('y')],
+      runGroups: [{ id: 'g1', name: 'one' }],
+    })
+    expect(rows.find((r) => r.path === C)?.groups.map((g) => [g.id, g.rows.map((r) => r.id)]))
+      .toEqual([['g1', ['x']], ['', ['y']]])
+  })
+
+  it('does not list a workspace twice for panes it already holds', () => {
+    // The fallback runs after both lists, over the same seen set, so a pane in
+    // a workspace already on screen adds nothing.
+    const rows = build({
+      here: A,
+      order: [A, B],
+      panes: [pane('a1', A), pane('b1', B), pane('b2', `${B}/`)],
+      lineage: [row('a1'), row('b1'), row('b2')],
+    })
+    expect(rows.map((r) => r.path)).toEqual([A, B])
+    expect(rows.find((r) => r.path === B)?.lineage.map((l) => l.id)).toEqual(['b1', 'b2'])
+  })
+
+  it('lists an unheld workspace once however many panes name it', () => {
+    const rows = build({
+      here: A,
+      order: [A],
+      panes: [pane('s1', C), pane('s2', C)],
+      lineage: [row('s1'), row('s2')],
+    })
+    expect(rows.map((r) => r.path)).toEqual([A, C])
+    expect(rows[1].count).toBe(2)
+  })
 })

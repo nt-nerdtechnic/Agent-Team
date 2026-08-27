@@ -22,6 +22,16 @@ export function gridPageCount(paneCount: number, preset: GridPreset): number {
   return Math.max(1, Math.ceil(paneCount / (d.cols * d.rows)))
 }
 
+/** The page a pane sits on, from its index in the paged list. Jumping to a pane
+ *  has to bring its page with it: under a fixed preset the pane is otherwise
+ *  focused on a page nobody is looking at, and the jump appears to do nothing.
+ *  'auto' pages nothing, so everything is on page 0. */
+export function gridPageOf(index: number, preset: GridPreset): number {
+  const d = gridPresetDims(preset)
+  if (!d || index < 0) return 0
+  return Math.floor(index / (d.cols * d.rows))
+}
+
 /** Panes on the given page. Out-of-range pages clamp to the last page. */
 export function gridPageSlice<T>(panes: T[], preset: GridPreset, page: number): T[] {
   const d = gridPresetDims(preset)
