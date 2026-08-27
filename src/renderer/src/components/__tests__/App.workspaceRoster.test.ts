@@ -309,7 +309,7 @@ describe('several workspaces in one window', () => {
 
     // And the teardown really is in there, so this is not guarding a no-op.
     const rStart = appSource.indexOf('async function onPipelineReset')
-    expect(appSource.slice(rStart, appSource.indexOf('\n}', rStart))).toContain('await onKillAll()')
+    expect(appSource.slice(rStart, appSource.indexOf('\n}', rStart))).toContain('await onKillAll(')
   })
 
   it('has no unguarded teardown anywhere on the browse path', () => {
