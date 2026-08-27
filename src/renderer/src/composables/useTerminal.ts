@@ -3233,6 +3233,129 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       return ''
     }
   }
+  // Fetch the pane's recorded transcript from the backend so a restore can show
+  // the conversation, not just the last screenful.
+  //
+  // Why this exists alongside the localStorage snapshot: xterm keeps NO
+  // scrollback for the alternate buffer and discards lines that scroll off it,
+  // so for a full-screen TUI the snapshot can only ever capture the current
+  // screen (see serializeSnapshot's Ceiling note). The transcript on disk has
+  // no such ceiling — the backend appended every chunk as it arrived.
+  //
+  // It is safe to write straight into a terminal of any width because the
+  // backend already stripped every escape sequence before the bytes reached
+  // the file (terminals.py `_clean_for_log`): no cursor positioning means
+  // nothing can land in the wrong cell. The tradeoff is that colour and TUI
+  // chrome are gone — this restores what was said, not how it looked.
+  // Ceiling on the chunk loop below. TRANSCRIPT_MAX_BYTES / chunk size gives 4;
+  // this leaves room without letting a wrong total_chunks spin forever.
+  const TRANSCRIPT_CHUNK_LIMIT = 16
+
+  async function fetchTranscript(): Promise<string> {
+    const workspacePath = opts?.workspacePath ?? ''
+    if (!workspacePath || !activeAgentKey) return ''
+    // One request per chunk: the backend caps a frame at 64KB so a transcript
+    // cannot hold the session send lock in front of a heartbeat. Loop until it
+    // says we have them all, with a hard stop so a bad total_chunks cannot spin.
+    let out = ''
+    try {
+      for (let chunk = 0; chunk < TRANSCRIPT_CHUNK_LIMIT; chunk++) {
+        const r = await backend.send<{ text: string; total_chunks: number }>(
+          'terminal.history',
+          {
+            workspace_path: workspacePath,
+            agent_key: activeAgentKey,
+            pane_id: paneId,
+            chunk,
+          },
+          5000,
+        )
+        if (!r.ok || !r.payload) break
+        out += r.payload.text ?? ''
+        if (chunk + 1 >= (r.payload.total_chunks ?? 1)) break
+      }
+    } catch { return '' }
+    return out
+  }
+
+  // Plain text -> terminal bytes: the file has bare \n line endings, which a
+  // terminal renders as "down one row, same column" — every line would start
+  // where the previous one ended. Only \r\n returns to column 0.
+  function transcriptToTerm(text: string): string {
+    return text.replace(/\r?\n/g, '\r\n')
+  }
+
+  // How recently the PTY must have produced output for a width change to clear
+  // the alternate screen. Sized to the RUNNING badge's hysteresis so "active"
+  // means the same thing in both places.
+  const ALT_CLEAR_ACTIVITY_MS = 4_000
+
+  // Clear the ALTERNATE screen after a width change so the CLI redraws it.
+  //
+  // This is PuTTY's behaviour, and it is why a full-screen TUI never looks
+  // stale there: term_size() throws the whole alternate screen away and
+  // rebuilds it blank at the new width (terminal.c:1927-1940), then marks
+  // disptext ATTR_INVALID so everything repaints. The application gets a blank
+  // canvas plus SIGWINCH and draws itself correctly.
+  //
+  // xterm.js keeps the old alternate-buffer contents across a resize instead,
+  // and it cannot reflow them (it reflows the normal buffer only), so a TUI
+  // that does not repaint on its own leaves the previous width's frame on
+  // screen — the truncated status line and short rules in a widened pane.
+  //
+  // Only ESC[2J ESC[H: it clears the screen the TUI owns, and while the
+  // alternate buffer is active that screen has no scrollback behind it, so no
+  // history is at risk. The normal buffer — where the conversation lives for
+  // line-mode CLIs — is never touched, and neither is any mode state.
+  async function clearAltScreenForRedraw(): Promise<void> {
+    if (term.buffer?.active?.type !== 'alternate') return
+    // Only clear a CLI that is still producing output.
+    //
+    // Clearing assumes the application will repaint, and an IDLE Claude Code
+    // does not: it ignores SIGWINCH while its alternate buffer is quiescent
+    // (measured 2026-07-23 — the numeric resize really does change cols and it
+    // still will not redraw). Clearing such a pane replaces a stale-but-
+    // readable frame with a blank one that nothing refills until the next
+    // output, which reads as a broken pane.
+    //
+    // PuTTY has the same failure mode and accepts it. We do not, because the
+    // trade is asymmetric: for an idle pane the old frame is wrong-width but
+    // still says what happened, and the moment the CLI does emit anything it
+    // paints at the new width anyway. So idle keeps its residue; only an
+    // actively-drawing CLI gets the blank canvas.
+    if (Date.now() - lastRawActivityAt.value > ALT_CLEAR_ACTIVITY_MS) {
+      nudgeIdleTuiToRepaint()
+      return
+    }
+    term.write('\x1b[2J\x1b[H')
+  }
+
+  // Ask an IDLE full-screen TUI to repaint, without clearing anything.
+  //
+  // The clear above is off-limits for an idle pane (nothing would refill it),
+  // but an idle pane is exactly the common case — most panes sit at their
+  // prompt — so leaving it at "known limitation" means the feature almost never
+  // fires. This is the one nudge available that is neither destructive nor
+  // visible: a focus-out/focus-in pair.
+  //
+  // It is only sent when the CLI has TURNED FOCUS REPORTING ON itself
+  // (DECSET 1004, surfaced by xterm as modes.sendFocusMode). Under that mode
+  // these two sequences are ordinary, expected input that the application asked
+  // to receive — unlike synthetic keystrokes, which would land in the prompt.
+  // With the mode off, nothing is sent at all.
+  //
+  // Whether Ink actually re-renders on refocus is unproven; if it does not,
+  // this costs two bytes and changes nothing. That asymmetry is why it is worth
+  // trying before falling back to blanking idle panes the way PuTTY does.
+  function nudgeIdleTuiToRepaint(): void {
+    if (!sessionId.value) return
+    if (!term.modes?.sendFocusMode) return
+    void backend.send('terminal.input', {
+      terminal_session_id: sessionId.value,
+      data: '\x1b[O\x1b[I',
+    })
+  }
+
   function saveScrollSnapshot(): void {
     const key = scrollSnapKey()
     let lines = SCROLL_SNAP_LINES
@@ -3694,10 +3817,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // it captured, mouse tracking and bracketed paste among them) and before
     // bindSessionHandlers, so live output can never interleave into it.
     if (!snapshotReplayed) {
-      const snap = loadScrollSnapshot()
-      if (snap) {
+      // Same preference as the resume path: the transcript has no
+      // alternate-buffer ceiling, and being plain text it re-wraps to whatever
+      // width this pane has now. It also arms the width reflow — a pane
+      // restored from the snapshot alone has nothing to rebuild itself from, so
+      // it would keep the old width's line breaks for the rest of its life.
+      const transcript = await fetchTranscript()
+      const snap = transcript ? '' : loadScrollSnapshot()
+      if (transcript || snap) {
         snapshotReplayed = true
-        term.write(snap)
+        term.write(transcript ? transcriptToTerm(transcript) : snap)
       }
     }
     // Reset mouse tracking modes so no stale xterm mouse state forwards events
@@ -3909,10 +4038,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // The snapshot is a serialized buffer — glyphs and colours, no cursor
       // positioning — so it renders correctly whatever width this pane now has.
       // It re-wraps; it cannot land in the wrong cell.
-      const snap = loadScrollSnapshot()
-      if (snap) {
+      // Prefer the backend transcript: it has no alternate-buffer ceiling, so
+      // for a full-screen TUI this is the difference between the whole
+      // conversation and the last screenful. The serialized snapshot is the
+      // fallback — it keeps colour, but only holds what xterm still had.
+      const transcript = await fetchTranscript()
+      const snap = transcript ? '' : loadScrollSnapshot()
+      if (transcript || snap) {
         snapshotReplayed = true
-        term.write(snap)
+        term.write(transcript ? transcriptToTerm(transcript) : snap)
         // Reset any mouse tracking modes the previous session may have enabled.
         // Bracketed paste goes too, and only here: the snapshot just replayed
         // the OLD session's `?2004h`, but the process about to start is a new
@@ -4108,6 +4242,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     backend.send,
     () => !!pendingSpawn.value,
     () => { void createWhenMeasurable() },
+    clearAltScreenForRedraw,
   )
 
   // Shared zoom → this pane. A new font size means a new cell size, so refit to

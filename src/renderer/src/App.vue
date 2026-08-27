@@ -532,6 +532,15 @@ const WS_PATH_KEY = 'agentTeam.currentWorkspace'
 // restore — see onWorkspaceCheck.
 const _bootWorkspace = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
 const _bootIsDuplicate = new URLSearchParams(window.location.search).get('duplicate') === '1'
+// Set by main when this window is reopened from the saved session snapshot
+// (index.ts passes restore: '1'). Distinguishes "the app restored this
+// workspace for you" from "the user deliberately opened it" — an empty
+// workspace is a normal thing to open on purpose, but being restored INTO an
+// empty one leaves nothing to act on, so that case returns to the picker.
+const _bootIsRestore = new URLSearchParams(window.location.search).get('restore') === '1'
+// The check runs once, on the restore that opened this window. Later emptiness
+// is the user's own doing (they closed the last pane) and must not eject them.
+let restoreEmptyCheckPending = _bootIsRestore
 let suppressPaneRestoreOnce = _bootWorkspace !== '' && _bootIsDuplicate
 // Detached child window: shows only one run group of its workspace. When set,
 // this window renders just that group's tab/panes and never persists the shared
@@ -5610,10 +5619,18 @@ async function onInterrupt(paneId: string): Promise<void> {
   }
 }
 
-async function onKillAll(): Promise<void> {
+async function onKillAll(paneIds?: readonly string[]): Promise<void> {
   // The workspace on screen only. Killing another project's agents from a
   // button attached to this one's list would be unrecoverable and unasked for.
-  for (const p of [...panesInView.value]) await onKill(p.id, { markRemoved: false })
+  //
+  // `paneIds` exists for callers that must clear the workspace state BEFORE the
+  // teardown runs: panesInView is derived from extraWorkspaces ("every
+  // workspace this window holds except the current one"), so once
+  // currentWorkspace is blank every workspace counts as extra, the view empties
+  // and this kills nothing at all. Such a caller captures the list first and
+  // passes it in. See doCloseWorkspace.
+  const ids = paneIds ?? panesInView.value.map((p) => p.id)
+  for (const id of [...ids]) await onKill(id, { markRemoved: false })
 }
 
 // ── Batch actions on the multi-select set (right-click a selected pane) ───────
@@ -7028,6 +7045,33 @@ async function onWorkspaceCheck(path: string): Promise<void> {
       if (!activeHasPanes) {
         const firstFull = stageTabs.value.find((t) => (paneCountByGroup[t.key] ?? 0) > 0)
         if (firstFull) activeTab.value = firstFull.key
+      }
+    }
+    // A restore that produced nothing goes back to the workspace picker.
+    //
+    // The block above rescues an empty ACTIVE TAB by switching to a tab that
+    // has panes; this is the case it cannot rescue — no tab has any. That
+    // happens when the snapshot named a workspace whose project.json is gone,
+    // empty, or failed to load, and the result is a window with a sidebar
+    // reading "No agents running." and no way forward that looks like anything
+    // but a broken app. Welcome is the screen that offers a way forward, and it
+    // doubles as the switcher, so the restored workspace is still one click
+    // away rather than lost.
+    //
+    // Guarded to the restoring boot only: opening an empty workspace on purpose
+    // is legitimate, and so is closing your last pane.
+    if (restoreEmptyCheckPending) {
+      restoreEmptyCheckPending = false
+      if (panes.value.length === 0) {
+        workspaceSelected.value = false
+        // The boot wrote these when it took the workspace_path param; leaving
+        // them set would send the next reload straight back into the same empty
+        // workspace, past the picker. Mirrors doCloseWorkspace's cleanup.
+        try {
+          sessionStorage.removeItem(WS_SELECTED_KEY)
+          sessionStorage.removeItem(WS_PATH_KEY)
+        } catch { /* sessionStorage unavailable — non-fatal */ }
+        return
       }
     }
     // Let tab-derived visibility and Grid page state settle after the final
@@ -8542,7 +8586,7 @@ async function onPipelineAbort(): Promise<void> {
   if (pipeline.workspacePath) await onWorkspaceCheck(pipeline.workspacePath)
 }
 
-async function onPipelineReset(): Promise<void> {
+async function onPipelineReset(paneIds?: readonly string[]): Promise<void> {
   cancelAllWatchers()
   stageCompletions.clear()
   for (const k of Array.from(stageRouters.keys())) disposeStageRouter(k)
@@ -8553,7 +8597,7 @@ async function onPipelineReset(): Promise<void> {
   // Reset is the destructive action: tear down ALL panes (pipeline + manual) so
   // the workspace returns to a clean slate. onKill handles each pane's
   // watcher/timer/session teardown and removes it from the view.
-  await onKillAll()
+  await onKillAll(paneIds)
   pipeline.task = ''
   pipeline.stageIndex = -1
   pipeline.state = 'idle'
@@ -8588,6 +8632,13 @@ function onConfirmCloseWorkspace(): void {
 
 async function doCloseWorkspace(): Promise<void> {
   confirmCloseWorkspace.value = false
+  // Capture the panes BEFORE any state is cleared. panesInView is derived from
+  // extraWorkspaces, which is every workspace this window holds EXCEPT the
+  // current one — so the moment currentWorkspace goes blank below, every
+  // workspace becomes "extra", panesInView empties, and the onKillAll at the
+  // end of this function iterates nothing. The dialog says the workspace is
+  // being closed while its agents keep running in the background.
+  const paneIdsToKill = panesInView.value.map((p) => p.id)
   // Show Welcome screen immediately so the button feels responsive.
   // The async cleanup (abort / kill panes) runs after the gate is lifted.
   workspaceSelected.value = false
@@ -8613,7 +8664,7 @@ async function doCloseWorkspace(): Promise<void> {
     stopGlobalManagerRouter()
     await sendQuiet('pipeline.abort', { workspace_path: wsPathForAbort, reason: 'user' })
   }
-  await onPipelineReset()
+  await onPipelineReset(paneIdsToKill)
 }
 
 // Titlebar 📁 button: open the current workspace folder in Finder.
@@ -13274,6 +13325,19 @@ function paneIsCommander(p: ActivePane): boolean {
         @click="reattachThisWindow"
         :title="$t('action.reattach-group')"
       >⇲</button>
+      <!-- Back to the Welcome picker, which doubles as the workspace switcher.
+           Removed by accident in 2a53718c: only the button went, while
+           onSwitchWorkspace, the @switch-workspace binding and the i18n string
+           all stayed, leaving the feature reachable by nothing. Restored here
+           rather than in ControlPane's old spot because the workspace identity
+           now lives in the titlebar, next to the detach button it pairs with. -->
+      <button
+        v-if="!isDetachedWindow && workspaceSelected"
+        class="titlebar-ws-btn"
+        @mousedown.stop
+        @click="onSwitchWorkspace"
+        :title="$t('action.switch-workspace')"
+      >↺</button>
       <button class="titlebar-gear" @mousedown.stop @click="showSettings = true" title="Settings (⌘,)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>

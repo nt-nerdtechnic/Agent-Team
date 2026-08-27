@@ -51,7 +51,13 @@ from .skills_store import (
     SkillValidationError,
     SkillsStoreError,
 )
-from .spawn_history import canonical_workspace_path, filter_foreign_entries
+from .spawn_history import (
+    canonical_workspace_path,
+    filter_foreign_entries,
+    read_pane_transcript,
+    TRANSCRIPT_MAX_BYTES,
+    TRANSCRIPT_CHUNK_CHARS,
+)
 
 if TYPE_CHECKING:
     from .app import Session
@@ -4608,6 +4614,58 @@ async def client_diagnostic(session: "Session", msg_id: str, msg_type: str, payl
         else:
             client_log.info("%s: %s", category, message)
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
+@handler("terminal.history")
+async def terminal_history(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Return a pane's recorded transcript so a restore can replay its history.
+
+    Exists because xterm keeps no scrollback for the alternate buffer and drops
+    lines that scroll off it, so a restored pane could show only what the CLI
+    repaints — the conversation above it was simply gone. The transcript on
+    disk is ANSI-stripped plain text (terminals.py `_clean_for_log`), which is
+    why replaying it is width-safe: there are no cursor coordinates to land in
+    the wrong cell. It restores the conversation, not the coloured screen.
+
+    The caller names a pane, never a path: the filename is derived from
+    agent_key + pane_id, so this cannot be pointed at an arbitrary file.
+    """
+    workspace_path = str(payload.get("workspace_path") or "")
+    agent_key = str(payload.get("agent_key") or "")
+    pane_id = str(payload.get("pane_id") or "")
+    if not (workspace_path and agent_key and pane_id):
+        await session.send_json(make_response(msg_id, msg_type, {"ok": False, "text": ""}))
+        return
+    max_bytes = int(payload.get("max_bytes") or TRANSCRIPT_MAX_BYTES)
+    # Plain file IO, but a long-lived pane's transcript can run to hundreds of
+    # KB across several days' files — off the event loop so a restore storm
+    # cannot stall it.
+    text, truncated = await asyncio.to_thread(
+        read_pane_transcript, workspace_path, agent_key, pane_id, max_bytes
+    )
+    # Answer ONE chunk per request. A whole transcript runs to hundreds of KB,
+    # and shipping that as a single frame would hold the session send lock for
+    # one serialize+write — long enough to sit in front of a heartbeat pong,
+    # which is the shape behind the spurious-disconnect reports. terminal.output
+    # slices at this size for the same reason; the caller loops for the rest.
+    chunks = [
+        text[i : i + TRANSCRIPT_CHUNK_CHARS]
+        for i in range(0, len(text), TRANSCRIPT_CHUNK_CHARS)
+    ] or [""]
+    index = max(0, int(payload.get("chunk") or 0))
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "ok": True,
+                "text": chunks[index] if index < len(chunks) else "",
+                "chunk": index,
+                "total_chunks": len(chunks),
+                "truncated": truncated,
+            },
+        )
+    )
 
 
 @handler("terminal.resize")
