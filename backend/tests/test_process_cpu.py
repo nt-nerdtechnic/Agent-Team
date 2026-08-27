@@ -27,7 +27,46 @@ class TestTimeParsing:
         assert process_cpu.parse_cpu_time("1:2:3:4") is None
 
 
+class TestSyscallSweep:
+    """The path every real sweep takes: `proc_pid_rusage`, no subprocess."""
+
+    def test_reads_the_kernel_counter_without_spawning_anything(self, monkeypatch):
+        monkeypatch.setattr(
+            process_cpu.proc_rusage, "sample", lambda pids: {1: (500, 62.34), 2: (700, 600.0)}
+        )
+        monkeypatch.setattr(process_cpu.subprocess, "run", _must_not_run)
+        measured, taken_at = process_cpu.cpu_times([1, 2])
+        assert measured == {1: 62.34, 2: 600.0}
+        assert taken_at > 0
+
+    def test_reports_nothing_when_the_syscall_answers_for_no_pid(self, monkeypatch):
+        monkeypatch.setattr(process_cpu.proc_rusage, "sample", lambda pids: {})
+        monkeypatch.setattr(process_cpu.proc_rusage, "available", lambda: True)
+        monkeypatch.setattr(process_cpu.subprocess, "run", _must_not_run)
+        assert process_cpu.cpu_times([1, 2])[0] == {}
+
+    # The caller divides by the interval between two readings, so the clock is
+    # read after the sweep — charging its duration to the interval would
+    # understate every percentage.
+    def test_timestamps_the_reading_after_the_sweep(self, monkeypatch):
+        clock = {"t": 100.0}
+        monkeypatch.setattr(process_cpu.time, "time", lambda: clock["t"])
+
+        def slow(_pids):
+            clock["t"] = 105.0
+            return {1: (0, 1.0)}
+
+        monkeypatch.setattr(process_cpu.proc_rusage, "sample", slow)
+        assert process_cpu.cpu_times([1])[1] == 105.0
+
+    def test_still_applies_the_pid_cap(self, monkeypatch):
+        monkeypatch.setattr(process_cpu.proc_rusage, "sample", _must_not_run)
+        assert process_cpu.cpu_times(list(range(1, process_cpu._MAX_PIDS + 50)))[0] == {}
+
+
 class TestSweep:
+    """The `ps` fallback, for a platform without the syscall."""
+
     def test_reads_the_pid_and_time_from_each_row(self, monkeypatch):
         _fake_run(monkeypatch, "  22751   1:02.34\n  23178  10:00.00\n")
         measured, _ = process_cpu.cpu_times([22751, 23178])
@@ -57,6 +96,7 @@ class TestSweep:
         def boom(*_args, **_kwargs):
             raise OSError("no ps here")
 
+        _force_fallback(monkeypatch)
         monkeypatch.setattr(process_cpu.subprocess, "run", boom)
         measured, taken_at = process_cpu.cpu_times([1])
         assert measured == {}
@@ -67,18 +107,12 @@ class TestSweep:
         assert process_cpu.available() is False
         assert process_cpu.cpu_times([1])[0] == {}
 
-    def test_skips_a_sweep_beyond_the_pid_cap(self, monkeypatch):
-        def counting(*_args, **_kwargs):
-            raise AssertionError("should not run")
-
-        monkeypatch.setattr(process_cpu.subprocess, "run", counting)
-        assert process_cpu.cpu_times(list(range(1, process_cpu._MAX_PIDS + 50)))[0] == {}
-
     # The caller divides by the interval between two readings, so the clock has
     # to be read after the subprocess returns — charging its duration to the
     # interval would understate every percentage.
     def test_timestamps_the_reading_after_the_command_returns(self, monkeypatch):
         clock = {"t": 100.0}
+        _force_fallback(monkeypatch)
         monkeypatch.setattr(process_cpu.time, "time", lambda: clock["t"])
 
         class Result:
@@ -109,7 +143,19 @@ class TestGrouping:
         assert process_cpu.sum_by_group({"sess-a": [1, 2]}, {}) == {"sess-a": 0.0}
 
 
+def _must_not_run(*_args, **_kwargs):
+    raise AssertionError("the syscall path should have answered")
+
+
+def _force_fallback(monkeypatch) -> None:
+    """Pretend the syscall cannot be resolved, so the subprocess path runs."""
+    monkeypatch.setattr(process_cpu.proc_rusage, "available", lambda: False)
+    monkeypatch.setattr(process_cpu.proc_rusage, "sample", lambda pids: {})
+
+
 def _fake_run(monkeypatch, stdout: str, returncode: int = 0, capture_argv=None):
+    _force_fallback(monkeypatch)
+
     class Result:
         def __init__(self) -> None:
             self.stdout = stdout

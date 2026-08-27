@@ -43,6 +43,48 @@ never `SPEC: AgentSpec`. The annotation widens `agentKey` to `string`, and
 annotated spec collapses that union everywhere. A compile-time assertion in
 `agents/__tests__/specs.test.ts` fails if this regresses.
 
+## Where your vendor shows up in the UI
+
+Registering the spec is all the wiring there is — every surface below reads
+the assembled list, so none of them needs an edit. What the list is, though,
+passes through one filter that is easy to mistake for a bug:
+
+```
+agents/<key>.ts  →  agents/index.ts (ORDERED)  →  AGENT_SPECS / CLI_AGENT_SPECS
+                                                          │
+                        App.vue `enabledAgentSpecs` ──────┘
+                        (user's Settings → CLI Agents order + disabled list)
+                                     │
+                                     ├─ ControlPane `manualAgentSpecs` — the ＋
+                                     │  menu on a workspace heading, and
+                                     │  "Handle Issue As…" (terminal filtered out)
+                                     └─ everything else reads the unfiltered list:
+                                        CliAccountsPane, TokenStatsPanel,
+                                        DebugModal, PipelineManagerModal,
+                                        AgentMessagesPanel, useTerminal
+```
+
+Three consequences worth knowing before you go looking for a missing entry:
+
+- **The ＋ menu is a user-filtered subset, not the vendor list.**
+  `useCliAgentPrefs` keeps a *disabled* list (a blocklist) and a custom
+  *order*. A brand-new vendor appears with no action from the user: it is not
+  in anyone's blocklist, and `orderedAgentKeys` appends keys it has never seen
+  after the ordered ones. It lands at the END of the menu, which is where to
+  look first. Both lists are per-workspace (`project.json` ui_state), with the
+  global KV as the fallback — so a vendor can be visible in one workspace and
+  hidden in another.
+- **Not being installed does not hide a vendor.** The menu shows every enabled
+  vendor and marks the missing ones with a badge (`missingClis`, refreshed on
+  backend connect and on dropdown focus). So "it is in the menu" says nothing
+  about whether the binary exists, and "it is missing from the menu" is never
+  explained by a missing binary.
+- **The renderer is a build artifact.** A newly registered vendor reaches a
+  running app only after that app is rebuilt (packaged build) or its dev
+  server restarted — and only if the branch it was added on is the one being
+  built. Checking the menu of an installed release for a vendor that lives on
+  a feature branch will always come up empty.
+
 ## Install detection
 
 Set `install_dep=Dep(...)` in your vendor's `SPEC` (see any existing

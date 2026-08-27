@@ -6,6 +6,7 @@ import { PANE_BATCH_MIME } from '../lib/cliContext'
 import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import { paneStatusLabelKey } from '../lib/paneStatusLabel'
+import { rollupTabStatus } from '../lib/tabStatus'
 import RebuildIcon from './RebuildIcon.vue'
 import HistoryIcon from './HistoryIcon.vue'
 import FolderIcon from './FolderIcon.vue'
@@ -92,6 +93,8 @@ export interface WorkspaceGroupRow {
   collapsed: boolean
   count: number
   lineage: PaneLineageRow[]
+  /** The same rows, split into run groups. */
+  groups: { id: string; name: string; rows: PaneLineageRow[] }[]
 }
 
 export interface ActivePaneView {
@@ -336,6 +339,39 @@ const localWorkspaceRows = computed<(WorkspaceGroupRow | null)[]>(() => {
   const rows = props.workspaces?.filter((w) => w.isCurrent) ?? []
   return rows.length ? rows : [null]
 })
+
+/** A group's spine state: the same signal its tab already shows.
+ *
+ *  An identity palette was the first attempt — a colour per group, hashed from
+ *  its id. It told you WHICH group a row belonged to, which the heading right
+ *  above it already says. Rolling up the run state instead makes the colour
+ *  carry what the heading does not: whether anything in that group is moving.
+ *  Reusing rollupTabStatus rather than restating its rule also means the
+ *  sidebar cannot drift from the tab bar — one definition of "active", not two.
+ */
+function groupState(rows: readonly { pane: ActivePaneView }[]): string {
+  return rollupTabStatus(rows.map((r) => r.pane.status))
+}
+
+/** One workspace's rows, split into run groups and resolved to panes.
+ *
+ *  A single ungrouped section renders WITHOUT a heading: a workspace where
+ *  nobody has made a group should look exactly as it does today, and a lone
+ *  "manual" heading over everything is a label that distinguishes nothing. */
+function groupSectionsOf(
+  ws: WorkspaceGroupRow | null
+): { id: string; name: string; state: string; bare: boolean; rows: ReturnType<typeof panesOf> }[] {
+  if (!ws) return [{ id: '', name: '', state: 'empty', bare: true, rows: orderedPanes.value }]
+  const byId = new Map(props.panes.map((pane) => [pane.id, pane]))
+  const bare = ws.groups.length <= 1 && (ws.groups[0]?.id ?? '') === ''
+  return ws.groups.map((g) => {
+    const rows = g.rows.flatMap((r) => {
+      const pane = byId.get(r.id)
+      return pane ? [{ pane, depth: r.depth, hasChildren: r.hasChildren, collapsed: r.collapsed }] : []
+    })
+    return { id: g.id, name: g.name, state: groupState(rows), bare, rows }
+  })
+}
 
 /** The panes belonging to one section, in lineage order. */
 function panesOf(
@@ -1658,8 +1694,23 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             @click.stop="toggleAddMenu($event, ws.path)"
           >＋</button>
         </li>
+        <template v-for="g in groupSectionsOf(ws)" :key="`${ws?.path ?? ''}/${g.id}`">
+        <!-- The group layer sits BESIDE the lineage rather than above it: a
+             spine on the left edge, not another step of indentation. Indentation
+             is already spent on parent/child panes, and a third level would push
+             an MCP child's name past the width it has. -->
         <li
-          v-for="{ pane: p, depth, hasChildren, collapsed: folded } in panesOf(ws)"
+          v-if="!g.bare"
+          v-show="!ws?.collapsed"
+          class="ws-grp"
+          :data-state="g.state"
+        >
+          <span class="ws-grp-key"></span>
+          <span class="ws-grp-name">{{ g.name || $t('label.manual-spawn') }}</span>
+          <span class="ws-count">{{ g.rows.length }}</span>
+        </li>
+        <li
+          v-for="{ pane: p, depth, hasChildren, collapsed: folded } in g.rows"
           v-show="!ws?.collapsed"
           :key="p.id"
           class="agent-item"
@@ -1753,6 +1804,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             </div>
           </template>
         </li>
+        </template>
         </template>
         <!-- Workspaces open in another window. The registry knows their name,
              agent and busy flag; everything else needs the window that owns
@@ -3208,6 +3260,50 @@ button.icon-btn.muted:hover {
   color: var(--danger-bright, #e05252);
 }
 .ws-ctx-opt.danger:hover { background: var(--danger-subtle, rgb(224 82 82 / 12%)); }
+/* ── Run group layer ────────────────────────────────────────────────────────
+   A spine down the left edge, not another step of indentation: indentation is
+   already spent on parent/child panes, and a third level would push an MCP
+   child's name past the width it has. The spine also survives scrolling — the
+   heading leaves the viewport, the colour does not. */
+.ws-grp {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 2px 18px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  user-select: none;
+}
+/* Same three states, same tokens, as StageTabBar's tab dot — the sidebar must
+   not be able to say "active" where the tab says otherwise. */
+.ws-grp-key {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--border-default);
+}
+.ws-grp[data-state='active'] .ws-grp-key { background: var(--success-fg); }
+.ws-grp[data-state='idle'] .ws-grp-key { background: var(--attention-emphasis); }
+.ws-grp-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The spine is a border rather than a pseudo-element so it composes with the
+   lineage margin: an indented child keeps its own left edge, and the spine
+   stays where the group starts. */
+/* No spine down the rows. One was tried: a colour running beside a group so
+   that scrolling past its heading still told you which group you were in.
+   Then the colour became the group's RUN STATE rather than its identity —
+   which is the more useful signal, and the tab bar's own — and at that point
+   the stripe could no longer answer the question it existed for: two groups
+   that are both running are both green. The heading says which group; the dot
+   says whether it is moving. A stripe repeating the dot down every row adds
+   ink, not information. */
+
 .agent-item {
   background: transparent;
   border: 1px solid transparent;

@@ -3,7 +3,32 @@
 from agent_team_backend import process_memory
 
 
+class TestSyscallSweep:
+    """The path every real sweep takes: `proc_pid_rusage`, no subprocess."""
+
+    def test_reads_the_kernel_counter_without_spawning_anything(self, monkeypatch):
+        monkeypatch.setattr(
+            process_memory.proc_rusage, "sample", lambda pids: {1: (500, 2.5), 2: (700, 1.0)}
+        )
+        monkeypatch.setattr(process_memory.subprocess, "run", _must_not_run)
+        assert process_memory.footprints([1, 2]) == {1: 500, 2: 700}
+
+    # Every target died between the caller listing them and the sweep. That is
+    # a real empty answer, not a reason to pay for the subprocess as well.
+    def test_reports_nothing_when_the_syscall_answers_for_no_pid(self, monkeypatch):
+        monkeypatch.setattr(process_memory.proc_rusage, "sample", lambda pids: {})
+        monkeypatch.setattr(process_memory.proc_rusage, "available", lambda: True)
+        monkeypatch.setattr(process_memory.subprocess, "run", _must_not_run)
+        assert process_memory.footprints([1, 2]) == {}
+
+    def test_still_applies_the_pid_cap(self, monkeypatch):
+        monkeypatch.setattr(process_memory.proc_rusage, "sample", _must_not_run)
+        assert process_memory.footprints(list(range(1, process_memory._MAX_PIDS + 50))) == {}
+
+
 class TestFootprintParsing:
+    """The `footprint(1)` fallback, for a build where the syscall will not resolve."""
+
     # footprint prints a per-target header carrying both the pid and the total,
     # then a long per-region table. Only the header matters, and parsing it is
     # what keeps a thirty-pane sweep to one subprocess.
@@ -46,6 +71,7 @@ class TestFootprintParsing:
         def boom(*_args, **_kwargs):
             raise OSError("no footprint here")
 
+        _force_fallback(monkeypatch)
         monkeypatch.setattr(process_memory.subprocess, "run", boom)
         assert process_memory.footprints([1]) == {}
 
@@ -83,7 +109,19 @@ class TestGrouping:
         assert process_memory.sum_by_group({"sess-a": [1, 2]}, {}) == {"sess-a": 0}
 
 
+def _must_not_run(*_args, **_kwargs):
+    raise AssertionError("the syscall path should have answered")
+
+
+def _force_fallback(monkeypatch) -> None:
+    """Pretend the syscall cannot be resolved, so the subprocess path runs."""
+    monkeypatch.setattr(process_memory.proc_rusage, "available", lambda: False)
+    monkeypatch.setattr(process_memory.proc_rusage, "sample", lambda pids: {})
+
+
 def _fake_run(monkeypatch, stdout: str, returncode: int = 0, capture_argv=None):
+    _force_fallback(monkeypatch)
+
     class Result:
         def __init__(self) -> None:
             self.stdout = stdout

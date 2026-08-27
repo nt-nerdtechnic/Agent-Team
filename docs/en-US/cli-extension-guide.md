@@ -9,9 +9,9 @@ checks CI enforces; the records in Part 2 here predate it and name files that
 have since moved.
 
 Current built-in agent keys are `claude`, `codex`, `antigravity`, `grok`,
-`kimi`, `opencode`, `qwen`, `kilo`, `pi`, `copilot`, `cursor`, `aider`, and
-`muse`. One key identifies a vendor on both sides — `agentKey` in the
-frontend, `agent_key` in the backend.
+`kimi`, `opencode`, `qwen`, `kilo`, `pi`, `copilot`, `cursor`, `aider`,
+`muse`, and `droid`. One key identifies a vendor on both sides — `agentKey`
+in the frontend, `agent_key` in the backend.
 
 ---
 
@@ -191,3 +191,27 @@ supported later, they belong as provider/env profiles on existing CLIs.
 | `copilot` (Copilot CLI, brew cask `copilot-cli` / npm `@github/copilot`) | `copilot --resume=<uuid>` (unknown id ⇒ starts a new session with that UUID) | `--yolo` | `~/.copilot/session-state/<uuid>/events.jsonl` + `workspace.yaml` (cwd); root via `COPILOT_HOME`. Format captured live from v1.0.75: tokens ONLY on `session.shutdown` `modelMetrics` (input already includes cache, output already includes reasoning) — handled codex-style as cumulative deltas. `assistant.turn_end` is an explicit turn_complete signal. |
 | `cursor` (Cursor CLI, closed-source; binary `agent`, older `cursor-agent`) | `cursor-agent --resume=<uuid>` | `--force` (alias `--yolo`) | Hardest reader, entirely defensive: per-session `~/.cursor/chats/<hash>/<uuid>/store.db` with undocumented protobuf `blobs` — marker binding is a raw UTF-8 bytes scan (capped), workspace filter treats md5(cwd) as best-effort only, and **no token data exists locally** (empty stats are expected). Community-reverse-engineered layout, NOT yet validated against a live install; the IDE's `~/.cursor/projects/*/agent-transcripts/*.jsonl` is a different store — do not read it. |
 | `aider` (Aider, pip `aider-chat`) | `aider --restore-chat-history` (no session id — lossy, may be LLM-summarized) | `--yes-always` | Only Markdown reader: per-project `<git root>/.aider.chat.history.md`, sections split on `# aider chat started at …` (session id = started-at slug), user lines `#### ` (markers bind against the LAST section only), tokens from `> Tokens: X sent, Y received` lines. Watcher routes via the `LogReader.claims_path()` hook added for this; events are rescan-driven (~30s latency). No Rebuild button and no detecting-session overlay on the frontend — both depend on real session ids. |
+
+### Droid (`droid`, Factory) — added 2026-08-27
+
+Homebrew cask (`brew install --cask droid`), verified against 0.204.0. The
+integration is a close structural twin of Claude Code — per-cwd session
+directories, hook events of the same names — which is exactly what made it
+dangerous: three properties that *look* like Claude's are not, and each one
+fails silently rather than loudly.
+
+| Aspect | What holds for droid |
+|---|---|
+| Resume | `droid --resume <uuid>` (`-r` is the same option). `--session-id` exists only on `droid exec`, so an interactive pane cannot pin an id at launch — hence `needsSessionMarker: true` plus the single-candidate cwd fallback. |
+| YOLO | `--auto high`. `--skip-permissions-unsafe` is documented only under `droid exec`; the interactive binary **silently ignores unknown flags** (confirmed with a deliberately bogus one), so a probe that "didn't error" proves nothing — the same trap that shipped a crashing `--auto` for opencode. |
+| Session storage | `~/.factory/sessions/<encoded-cwd>/<uuid>.jsonl`, **not** the `projects/` path the docs describe. Also falls back to a flat `sessions/` and `sessions/btw/` for forks — `session_exists` checks all three, or a forked pane is reported missing and replaced. |
+| cwd encoding | Replaces **only path separators** (`realpath` → strip trailing seps → strip leading `/` → each `/` run → `-`, then one leading `-`). `encode_claude_cwd` flattens every non-alphanumeric character and therefore **cannot** be reused: it would miss the directory for any path holding a dot, underscore or hyphen. |
+| Turn end | A separate `agent_turn_outcome` record (`{turnId, reason, resultKind}`) with 17 `reason` values. There is no `stop_reason` field in the JSONL at all — that name appears in the binary only inside the bundled Anthropic SDK and in OTel attributes. Every outcome emits `turn_complete` whatever the reason: a cancelled turn has still stopped, and withholding the event parks the pane mid-turn forever. |
+| Tokens | Absent per message (only an opaque `tokens` integer). The breakdown lives in the sidecar `<uuid>.settings.json` as a **running total**, so the reader differences it and keeps one replace-in-place marker rather than a key per line (GitHub #23). `thinkingTokens` is deliberately not added to output pending a real session. |
+| Env | `DROID_PARENT_SESSION_ID` is droid's `CLAUDE_CODE_CHILD_SESSION`: inherited, a spawned pane becomes a child of the parent's session and silently writes no transcript of its own. Stripped via `home_env_vars`, along with `FACTORY_HOME_OVERRIDE` and `FACTORY_RUNTIME_SETTINGS_PATH`. |
+| Terminal | Emits `ESC[?2004h` during startup (`bracketedPaste: true`) and never `ESC[?1049h` — it repaints the normal buffer, so `fullScreenTui` stays unset. |
+
+Record shapes came from droid's own zod schemas and read loops inside the
+250MB bundle, cross-checked against a real session file. `verifiedTurnText`
+stays unset: no authenticated session has exercised the assistant/outcome path
+yet.

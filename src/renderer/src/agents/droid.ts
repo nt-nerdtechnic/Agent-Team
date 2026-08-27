@@ -1,0 +1,49 @@
+/** Droid (Factory) — per-vendor agent spec (see types.ts; assembled by index.ts). */
+
+import type { AgentSpec } from './types'
+
+export const SPEC = {
+  agentKey: 'droid',
+  label: 'Droid',
+  defaultCommand: 'droid',
+  // Droid has no boolean "skip every prompt" flag on its INTERACTIVE command:
+  // `droid --help` (0.204.0) lists only `--auto <level>` with low|medium|high.
+  // `--skip-permissions-unsafe` exists, but `droid exec --help` is the only
+  // place that documents it, and the interactive binary silently ignores
+  // unknown flags (verified: a deliberately bogus flag still starts the TUI),
+  // so "it did not error" proves nothing here. `--auto high` is the documented
+  // unattended level and is what YOLO mode appends.
+  skipPermissionFlag: '--auto high',
+  // `-r, --resume [sessionId]` — the id is the session file's stem.
+  resumeArgs: (id) => `--resume ${id}`,
+  supportsRebuild: true,
+  // Measured on a real PTY (0.204.0): droid emits `ESC[?2004h` during startup,
+  // before it even finishes authenticating, and keeps it on.
+  bracketedPaste: true,
+  // Deliberately NOT fullScreenTui: the same PTY capture shows droid never
+  // sends `ESC[?1049h`. It repaints the normal buffer (`ESC[2J ESC[3J ESC[H`)
+  // instead of switching to the alternate screen, so the default
+  // excludeAltBuffer snapshot already captures its conversation.
+  //
+  // Verbatim from the CLI on an expired/absent login:
+  //   "Error during droid execution: Authentication failed. Please log in
+  //    using /login or set a valid FACTORY_API_KEY environment variable."
+  // Anchored on both halves so ordinary text mentioning /login can't match,
+  // and tolerant of whitespace runs because a narrow pane hard-wraps it.
+  loginExpired: {
+    pattern: /authentication\s+failed.{0,60}?please\s+log\s+in\s+using\s+\/login(?:\s|$)/i,
+    loginCommand: '/login',
+  },
+  // Droid names its session directory after the encoded cwd
+  // (~/.factory/sessions/<encoded-cwd>/<uuid>.jsonl), so a session is scoped to
+  // a workspace — but it cannot pin a session id at launch (`--session-id`
+  // exists only on `droid exec`, not on the interactive command), so two panes
+  // in one workspace would be indistinguishable. The kickoff marker is what
+  // separates them, exactly as it does for the other markered vendors.
+  needsSessionMarker: true,
+  //
+  // verifiedTurnText stays unset: the reader carries turn text, but it has not
+  // been validated against a real authenticated session yet — the same bar the
+  // other eleven unflagged vendors are held to.
+  hint: 'generalist'
+} as const satisfies AgentSpec
