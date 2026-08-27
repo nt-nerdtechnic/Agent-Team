@@ -148,6 +148,17 @@ const comparison: CompareRow[] = [
         <code>target_lost</code>：訊息確實送出去了，只是已經無法確認它做完沒有——
         這不是送出失敗，不要重送。
       </p>
+      <p class="mh-note">
+        同一個工作區裡可以有兩個 pane 同名，這時候光靠名字說不清要找誰，
+        上面幾個工具會直接以 <code>ambiguous-target</code> 拒絕，而不是隨便挑一個。
+        要指定其中一個，就把 <code>cli_list_targets</code> 回傳的 <code>pane_id</code>
+        當參數傳給 <code>cli_send</code>、<code>cli_send_and_wait</code>、
+        <code>cli_read_log</code>、<code>cli_get_status</code> 或
+        <code>cli_wait_idle</code>，這時候位址參數就不用填了。
+        平常還是用名字比較好讀；pane 換了新的 CLI 重開之後 id 會換一個，
+        遇到 <code>unknown-pane-id</code> 重新查一次即可。跨裝置的 pane 沒有本機 id，
+        只能用名字定址。
+      </p>
 
       <h3 class="mh-h3">哪些 CLI 接得到</h3>
       <p class="mh-p">

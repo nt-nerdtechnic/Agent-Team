@@ -8,6 +8,7 @@ import { setBatchDragImage } from '../lib/batchDragImage'
 import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 import { rollupTabStatus } from '../lib/tabStatus'
 import RebuildIcon from './RebuildIcon.vue'
+import AddPaneIcon from './AddPaneIcon.vue'
 import HistoryIcon from './HistoryIcon.vue'
 import FolderIcon from './FolderIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
@@ -1081,6 +1082,27 @@ const canDragWorkspace = computed(
   () => !props.detachedWindow && localWorkspaceRows.value.length > 1
 )
 
+/** Whether every workspace this window holds is already folded shut, which is
+ *  what turns the header button from "collapse all" into "expand all". */
+const allWorkspacesCollapsed = computed(() => {
+  const rows = localWorkspaceRows.value.filter((w): w is WorkspaceGroupRow => !!w)
+  return rows.length > 0 && rows.every((w) => w.collapsed)
+})
+
+/** Fold or unfold every workspace at once.
+ *
+ *  One toggle rather than a pair: with the list already folded, a "collapse
+ *  all" that does nothing is a button that looks broken. The label and the
+ *  icon follow the state so it always says what pressing it will do.
+ */
+function toggleAllWorkspaces(): void {
+  const collapse = !allWorkspacesCollapsed.value
+  for (const ws of localWorkspaceRows.value) {
+    if (!ws) continue
+    if (ws.collapsed !== collapse) emit('toggle-workspace', ws.path)
+  }
+}
+
 /** Groups folded shut in the sidebar.
  *
  *  Keyed by workspace AND group: run groups are per-workspace, and the
@@ -1160,10 +1182,28 @@ function onWsDragEnd(e: DragEvent, path: string): void {
   if (outside) emit('detach-workspace', path, e.screenX, e.screenY)
 }
 
+/** Roughly what the menu occupies, for the edge flip below.
+ *
+ *  Measured rather than guessed would be better, but the element does not
+ *  exist until this sets wsMenu — and a menu that appears in the wrong place
+ *  and then jumps is worse than one placed from a constant. Kept generous:
+ *  overshooting flips a menu that would have fitted, undershooting lets one
+ *  hang off the edge, and only the second is a bug. */
+const WS_MENU_H = 96
+const WS_MENU_W = 170
+
 function openWsMenu(ev: MouseEvent, path: string, canClose: boolean): void {
   ev.preventDefault()
   addMenuOpen.value = false
-  wsMenu.value = { path, canClose, x: ev.clientX, y: ev.clientY }
+  // Right-clicking near the bottom put the menu under the status bar, which
+  // paints over it: it opened downward from the cursor with nothing to stop it
+  // leaving the window. Flip it above the cursor instead — the same way a
+  // native menu does — and keep it inside the right edge.
+  const y = ev.clientY + WS_MENU_H > window.innerHeight
+    ? Math.max(0, ev.clientY - WS_MENU_H)
+    : ev.clientY
+  const x = Math.max(0, Math.min(ev.clientX, window.innerWidth - WS_MENU_W))
+  wsMenu.value = { path, canClose, x, y }
 }
 function closeWsMenu(): void {
   wsMenu.value = null
@@ -1828,6 +1868,13 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
              an agent inside one. Always present — the section is a list of
              projects whether or not any is grouped yet. -->
         <button
+          v-if="!detachedWindow && localWorkspaceRows.some((w) => w)"
+          class="hdr-fold-ws"
+          :title="allWorkspacesCollapsed ? $t('action.expand-all-folders') : $t('action.collapse-all-folders')"
+          :aria-label="allWorkspacesCollapsed ? $t('action.expand-all-folders') : $t('action.collapse-all-folders')"
+          @click="toggleAllWorkspaces"
+        >{{ allWorkspacesCollapsed ? '⌄' : '›' }}</button>
+        <button
           v-if="!detachedWindow"
           class="hdr-add-ws"
           :title="$t('action.open-workspace-picker')"
@@ -1908,7 +1955,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             :aria-expanded="addMenuOpen && addMenuWorkspace === ws.path"
             :title="canSpawn ? `${$t('action.add-to-grid')} · ${pickedAgentLabel}` : $t('label.set-workspace-first')"
             @click.stop="toggleAddMenu($event, ws.path)"
-          >＋</button>
+          ><AddPaneIcon /></button>
         </li>
         <template v-for="g in groupSectionsOf(ws)" :key="`${ws?.path ?? ''}/${g.id}`">
         <!-- The group layer sits BESIDE the lineage rather than above it: a
@@ -1953,8 +2000,12 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             >{{ folded ? '▸' : '▾' }}</button>
             <span v-else-if="depth" class="lineage-spacer"></span>
             <span class="status-dot" :data-state="p.status" :title="$t(paneStatusLabelKey(p.status))"></span>
+            <!-- No MCP tag beside it. `origin === 'mcp'` is still recorded and
+                 still drives spawn behaviour; it just does not need a badge.
+                 The indentation already says an agent spawned this pane, and
+                 the badge repeated it on the one row where the pane's own name
+                 has least room. -->
             <span v-if="p.origin === 'pipeline'" class="pipe-tag">P{{ p.stageId }}</span>
-            <span v-else-if="p.origin === 'mcp'" class="mcp-tag" :title="$t('label.spawned-by-agent')">MCP</span>
             <input
               v-if="renamingPaneId === p.id"
               v-focus
@@ -2784,7 +2835,10 @@ button.link {
 }
 /* Sized to the header's text, not to the 32px action buttons beside it: once
    the list is grouped this is the only control left up here. */
-.hdr-add-ws {
+/* The fold-all control shares the ＋'s box but not its class: one class for
+   both made "find the add button" return whichever came first in the DOM. */
+.hdr-add-ws,
+.hdr-fold-ws {
   flex: none;
   border: none;
   background: none;
@@ -2794,7 +2848,8 @@ button.link {
   line-height: 1;
   color: var(--text-muted);
 }
-.hdr-add-ws:hover { color: var(--text-bright); }
+.hdr-add-ws:hover,
+.hdr-fold-ws:hover { color: var(--text-bright); }
 button.history-btn {
   background: transparent;
   border: 1px solid var(--border-default);
@@ -3389,17 +3444,28 @@ button.icon-btn.muted:hover {
   font-size: var(--font-3xs);
   font-variant-numeric: tabular-nums;
 }
+/* Boxed and centred like .ws-act rather than sized by a font: the ＋ used to
+   be a full-width character, whose weight came from the typeface and so could
+   never match the stroke icons beside it. */
 .ws-add {
   flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-btn-sm);
+  height: var(--icon-btn-sm);
+  padding: 0;
   border: none;
   background: none;
-  padding: 0 2px;
   cursor: pointer;
-  font-size: var(--font-xs);
   line-height: 1;
   color: var(--text-muted);
   opacity: 0.65;
 }
+/* One pixel over the 11px its siblings use. This is the row's primary action
+   and its mark carries three elements to their one, so equal pixel size would
+   read as smaller and busier; 12px restores the balance without breaking rank. */
+.ws-add :deep(svg) { width: 12px; height: 12px; }
 .ws-head:hover .ws-add { opacity: 1; }
 .ws-add:hover { color: var(--text-bright); }
 
@@ -3493,7 +3559,10 @@ button.icon-btn.muted:hover {
    the ＋ menu is fixed: the pane list scrolls. */
 .ws-ctx-menu {
   position: fixed;
-  z-index: 61;
+  /* Above the status bar (200) and the titlebar (200). A context menu is the
+     frontmost thing on screen while it is open; at 61 the status bar painted
+     over the bottom of any menu opened near it. */
+  z-index: 300;
   min-width: 150px;
   padding: 4px 0;
   border: 1px solid var(--border);
@@ -3846,15 +3915,6 @@ button.icon-btn.muted:hover {
 }
 /* Agent-spawned pane. Distinct hue from .pipe-tag so the two provenance marks
    are never confused; both sit in the same slot before the name. */
-.mcp-tag {
-  font-size: 9px;
-  font-weight: 700;
-  background: var(--done-muted, var(--bg-muted));
-  color: var(--done-fg, var(--text-secondary));
-  padding: 1px 5px;
-  border-radius: var(--radius-xs);
-  flex: none;
-}
 /* Fold control for a pane that has children. Sized to match .lineage-spacer so
    a childless row at the same depth still lines up with its siblings. */
 .lineage-caret {

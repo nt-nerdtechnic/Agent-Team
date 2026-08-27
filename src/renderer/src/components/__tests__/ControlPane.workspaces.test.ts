@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
 
@@ -196,6 +198,88 @@ describe('ControlPane – workspace sections', () => {
     // because it IS the same function.
     expect(heads[0].attributes('data-state')).toBe('active')
     expect(heads[1].attributes('data-state')).toBe('idle')
+  })
+
+  it('folds every workspace from the section header', async () => {
+    const second = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({ workspaces: [current(), second] })
+    await wrapper.find('.hdr-fold-ws').trigger('click')
+    const asked = wrapper.emitted('toggle-workspace')?.map((c) => c[0])
+    expect(asked).toEqual(['/Users/me/Desktop/Agent-Team', '/Users/me/Desktop/Other'])
+  })
+
+  it('asks only for the workspaces that would change', async () => {
+    // Emitting for one already folded would toggle it back open — the button
+    // would fold half the list and unfold the other half.
+    const open = current()
+    const shut = current({ path: '/Users/me/Desktop/Other', label: 'Other', collapsed: true })
+    wrapper = mountWith({ workspaces: [open, shut] })
+    await wrapper.find('.hdr-fold-ws').trigger('click')
+    expect(wrapper.emitted('toggle-workspace')?.map((c) => c[0]))
+      .toEqual(['/Users/me/Desktop/Agent-Team'])
+  })
+
+  it('turns into expand-all once everything is folded', async () => {
+    const a = current({ collapsed: true })
+    const b = current({ path: '/Users/me/Desktop/Other', label: 'Other', collapsed: true })
+    wrapper = mountWith({ workspaces: [a, b] })
+    // A "collapse all" that does nothing is a button that looks broken.
+    expect(wrapper.find('.hdr-fold-ws').attributes('title')).toBe('action.expand-all-folders')
+    await wrapper.find('.hdr-fold-ws').trigger('click')
+    expect(wrapper.emitted('toggle-workspace')?.map((c) => c[0])).toEqual([
+      '/Users/me/Desktop/Agent-Team',
+      '/Users/me/Desktop/Other',
+    ])
+  })
+
+  it('offers nothing to fold when the list is ungrouped', async () => {
+    wrapper = mountWith({})
+    expect(wrapper.find('.hdr-fold-ws').exists()).toBe(false)
+  })
+
+  it('flips the context menu up near the bottom edge', async () => {
+    // It opened downward from the cursor with nothing to stop it leaving the
+    // window, and the status bar paints over that strip — so a right-click low
+    // in the list produced a menu with its last item sliced off.
+    wrapper = mountWith({ workspaces: [current()] })
+    Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true })
+    Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true })
+    await wrapper.find('.ws-head--current').trigger('contextmenu', { clientX: 40, clientY: 780 })
+    const menu = wrapper.find('.ws-ctx-menu')
+    expect(menu.exists()).toBe(true)
+    // Above the cursor, not below it.
+    const top = Number.parseInt(menu.attributes('style')?.match(/top:\s*(\d+)px/)?.[1] ?? '-1', 10)
+    expect(top).toBeLessThan(780)
+  })
+
+  it('opens downward when there is room', async () => {
+    wrapper = mountWith({ workspaces: [current()] })
+    Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true })
+    await wrapper.find('.ws-head--current').trigger('contextmenu', { clientX: 40, clientY: 100 })
+    const menu = wrapper.find('.ws-ctx-menu')
+    const top = Number.parseInt(menu.attributes('style')?.match(/top:\s*(\d+)px/)?.[1] ?? '-1', 10)
+    expect(top).toBe(100)
+  })
+
+  it('keeps the menu inside the right edge', async () => {
+    wrapper = mountWith({ workspaces: [current()] })
+    Object.defineProperty(window, 'innerWidth', { value: 400, configurable: true })
+    Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true })
+    await wrapper.find('.ws-head--current').trigger('contextmenu', { clientX: 390, clientY: 100 })
+    const menu = wrapper.find('.ws-ctx-menu')
+    const left = Number.parseInt(menu.attributes('style')?.match(/left:\s*(\d+)px/)?.[1] ?? '-1', 10)
+    expect(left).toBeLessThan(390)
+  })
+
+  it('sits above the status bar', async () => {
+    // The bar is z-index 200 and painted over the menu at 61. A context menu
+    // is the frontmost thing on screen while it is open.
+    const src = readFileSync(resolve(process.cwd(), 'src/renderer/src/components/ControlPane.vue'), 'utf8')
+    const at = src.indexOf('.ws-ctx-menu {')
+    expect(at).toBeGreaterThan(-1)
+    const block = src.slice(at, at + 420)
+    const z = Number.parseInt(block.match(/z-index:\s*(\d+)/)?.[1] ?? '0', 10)
+    expect(z).toBeGreaterThan(200)
   })
 
   it('folds a group shut without touching the others', async () => {

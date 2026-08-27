@@ -157,6 +157,12 @@ def _add(into: dict[str, int], delta: dict[str, int]) -> None:
     into["calls"] += int(delta.get("calls", 0))
 
 
+def _live_key(pane_id: str, session_id: str | None) -> str:
+    """Bucket key for the live per-session tally. Falls back to the bare pane id
+    when the reader could not name a session, so the pane still has one bucket."""
+    return f"{pane_id}::{session_id}" if session_id else pane_id
+
+
 def _coerce_schema(value: Any) -> int:
     try:
         return int(value)
@@ -305,6 +311,10 @@ class TokensStore:
         # with an in-flight background batch.
         self._flush_lock = RLock()
         self._workspace_cache: dict[str, dict[str, Any]] = {}
+        # Per-session live tallies: workspace_path -> "<pane_id>::<session_id>"
+        # -> bucket. Process-lifetime only — never persisted, never flushed, so
+        # a restart deliberately zeroes it ("this session" semantics).
+        self._live_by_pane: dict[str, dict[str, dict[str, int]]] = {}
 
         # Dirty tracking (mutated inside _lock, consumed by the flush path).
         self._dirty_workspaces: set[str] = set()
@@ -1084,6 +1094,7 @@ class TokensStore:
         vendor: str,           # "claude" | "codex" | "analyzer"
         agent_key: str | None = None,
         pane_id: str | None = None,
+        session_id: str | None = None,
         stage_id: str | None = None,
         input_tokens: int = 0,
         output_tokens: int = 0,
@@ -1174,6 +1185,11 @@ class TokensStore:
                 _add(cum["by_vendor"].setdefault(vendor, _empty_bucket()), delta)
                 if stage_id:
                     _add(cum["by_stage"].setdefault(stage_id, _empty_bucket()), delta)
+                # live per-session tally — unlike by_pane above this is not
+                # gated on an active run, so a manually opened CLI pane counts.
+                if pane_id:
+                    live = self._live_by_pane.setdefault(workspace_path, {})
+                    _add(live.setdefault(_live_key(pane_id, session_id), _empty_bucket()), delta)
                 self._dirty_workspaces.add(workspace_path)
 
             # --- global state ---
@@ -1225,9 +1241,28 @@ class TokensStore:
                     # last 20 only — keep payload small
                     "runs": deepcopy(workspace_doc["runs"][-20:]),
                     "cumulative": deepcopy(workspace_doc["cumulative"]),
+                    "live_by_pane": deepcopy(
+                        self._live_by_pane.get(workspace_path, {})
+                        if workspace_path
+                        else {}
+                    ),
                 },
                 "global": deepcopy(self._global_data),
             }
+
+    def forget_pane(self, pane_id: str) -> None:
+        """Drop a closed pane's live buckets across every workspace. The key is
+        "<pane_id>::<session_id>" (or the bare pane id), so match on the prefix
+        to catch a pane that went through several sessions."""
+        if not pane_id:
+            return
+        prefix = f"{pane_id}::"
+        with self._lock:
+            for buckets in self._live_by_pane.values():
+                for key in [
+                    k for k in buckets if k == pane_id or k.startswith(prefix)
+                ]:
+                    buckets.pop(key, None)
 
     # ───────────────────────── Reset ────────────────────────────────
 
@@ -1244,6 +1279,10 @@ class TokensStore:
                         task=cur["task"],
                         run_dir=cur.get("run_dir", ""),
                     )
+                else:
+                    # Without a run the panel's top block shows the live
+                    # per-session tally, so that is what its reset clears.
+                    self._live_by_pane.pop(workspace_path, None)
                 self._dirty_workspaces.add(workspace_path)
             elif scope == "workspace" and workspace_path:
                 self._workspace_cache[workspace_path] = _empty_workspace_doc()

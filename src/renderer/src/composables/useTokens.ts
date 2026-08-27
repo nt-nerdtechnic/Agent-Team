@@ -37,6 +37,9 @@ export interface TokensSnapshot {
     current_run: RunSnapshot | null
     runs: RunSnapshot[]
     cumulative: CumulativeSnapshot
+    // Per-session live tallies, keyed "<pane_id>::<session_id>" (or the bare
+    // pane id). Backend process lifetime only — resets when the backend does.
+    live_by_pane: Record<string, TokenBucket>
   }
   global: GlobalSnapshot
 }

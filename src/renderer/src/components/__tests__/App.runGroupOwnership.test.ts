@@ -1,0 +1,163 @@
+// @vitest-environment happy-dom
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { buildStageTabs } from '../../lib/stageTabs'
+
+// runGroups is one ref for whichever workspace is on screen, and a switch
+// reaches the two halves of that pairing at different times: currentWorkspace
+// changes immediately, the entered workspace's groups arrive several awaits
+// later. In between, a save keyed off currentWorkspace wrote the LEAVING
+// workspace's list into the ENTERED workspace's record — [] whenever the
+// leaving project never made a group, so a wipe rather than a no-op. Restore
+// hits that window every time, since ensureSavedGroup saves once per restored
+// pane.
+//
+// What it looks like afterwards: the panes keep their run_group_id, so they
+// match no tab, and buildStageTabs deliberately does not adopt them into the
+// manual tab either — the whole strip stops rendering and the panes are listed
+// in the sidebar but reachable from nowhere.
+//
+// Source-scanned, like the other App.*.test.ts files: App.vue cannot be
+// mounted, since backend and terminal lifecycles start on mount.
+const appSource = readFileSync(resolve(process.cwd(), 'src/renderer/src/App.vue'), 'utf8')
+
+/** A top-level declaration's text, up to the next one. */
+function body(name: string): string {
+  for (const pat of [`async function ${name}(`, `function ${name}(`]) {
+    const at = appSource.indexOf(pat)
+    if (at < 0) continue
+    const rest = appSource.slice(at + pat.length)
+    const next = /\n(?:async )?function \w+|\nconst \w+ =|\n\/\*\*/.exec(rest)
+    return appSource.slice(at, at + pat.length + (next ? next.index : 4000))
+  }
+  throw new Error(`${name} not found`)
+}
+
+const occurrences = (haystack: string, needle: string): number =>
+  haystack.split(needle).length - 1
+
+describe('run groups are saved only into the workspace they belong to', () => {
+  it('remembers which workspace the loaded list came from', () => {
+    // The owner has to be stamped by the load itself. Anything later — a watch,
+    // a nextTick — reopens the same gap it exists to close.
+    const load = body('_loadRunGroups')
+    expect(load).toContain('runGroupsOwner.value = path')
+    expect(load.indexOf('runGroupsOwner.value = path')).toBeLessThan(
+      load.indexOf('runGroups.value ='),
+    )
+  })
+
+  it('refuses to persist a list that belongs to another workspace', () => {
+    const save = body('_saveRunGroups')
+    const guard = 'if (normWs(runGroupsOwner.value) !== normWs(ws)) return'
+    expect(save).toContain(guard)
+    // Ahead of the write, not merely present somewhere in the function.
+    expect(save.indexOf(guard)).toBeLessThan(save.indexOf("sendQuiet('project.set_ui_state'"))
+  })
+
+  it('compares the owner against the very path it would write under', () => {
+    // Checking one workspace and sending another is the same bug with an extra
+    // step, so the payload's workspace_path and the guarded value are one
+    // binding.
+    const save = body('_saveRunGroups')
+    expect(save).toContain('const ws = currentWorkspace.value')
+    expect(save).toContain('normWs(ws)')
+    expect(save).toContain('workspace_path: ws')
+  })
+
+  it('leaves no second path that persists the list unguarded', () => {
+    // _loadRunGroups writes the migrated legacy list under its own `path`
+    // argument, which is by construction the workspace it just read. Every
+    // other persist has to go through the guarded save.
+    const total = occurrences(appSource, 'run_groups: runGroups.value')
+    const owned =
+      occurrences(body('_saveRunGroups'), 'run_groups: runGroups.value') +
+      occurrences(body('_loadRunGroups'), 'run_groups: runGroups.value')
+    expect(total).toBe(owned)
+  })
+
+  it('hands ownership over with the list a peer window sends', () => {
+    // The union merge re-saves what it added. Adopting the merged list without
+    // moving the owner with it would make that save a silent no-op — and the
+    // groups the peer lacked would never reach disk.
+    const sync = body('onRunGroupsRemoteSync')
+    expect(sync).toContain('runGroupsOwner.value = ws')
+    expect(sync.indexOf('runGroupsOwner.value = ws')).toBeLessThan(
+      sync.indexOf('runGroups.value = merged'),
+    )
+  })
+})
+
+describe('a superseded workspace check keeps its hands off runGroups', () => {
+  it('rechecks the sequence immediately before loading the groups', () => {
+    // pipelinesApi.setActivePipeline and stagesApi.refresh sit between the
+    // earlier guard and this load, and either can span a switch. A superseded
+    // check landing here pairs the workspace now on screen with the groups of
+    // the one being left.
+    expect(body('onWorkspaceCheck')).toContain(
+      'if (seq !== workspaceCheckSeq || currentWorkspace.value !== path) return\n' +
+        '    _loadRunGroups(path, resp.project)',
+    )
+  })
+
+  it('does not lean on the guard taken before those awaits', () => {
+    // The check already guards once, further up. What made a second one
+    // necessary is the awaits between them — and what keeps it sufficient is
+    // that nothing awaits again before the load.
+    const check = body('onWorkspaceCheck')
+    const guard = 'if (seq !== workspaceCheckSeq || currentWorkspace.value !== path) return'
+    const loadAt = check.indexOf('_loadRunGroups(path, resp.project)')
+    const first = check.indexOf(guard)
+    const second = check.lastIndexOf(guard, loadAt)
+    expect(first).toBeLessThan(second)
+    expect(check.slice(first, second)).toContain('await')
+    expect(check.slice(second, loadAt)).not.toContain('await')
+  })
+})
+
+describe('restore puts back a tab whose record was lost', () => {
+  it('recreates the missing group under the id the pane already holds', () => {
+    // Routing the pane to some other group instead would be written back by the
+    // spawn upsert, permanently replacing the saved assignment.
+    const restore = body('restoreWorkspacePanes')
+    expect(restore).toContain('const ensureSavedGroup = (gid: string): string => {')
+    expect(restore).toContain('if (!runGroups.value.some((g) => g.id === gid)) {')
+    expect(restore).toContain('runGroups.value = [...runGroups.value, { id: gid,')
+    expect(restore).toContain('return gid')
+    // Both restore shapes — cold placeholders and the eager detached/only-group
+    // path — take a saved id through it.
+    expect(occurrences(restore, '? ensureSavedGroup(savedGid)')).toBe(2)
+  })
+
+  it('repairs foreign group ids only after restore has had its say', () => {
+    // Run before the panes are back, the repair sees nothing to fix on a cold
+    // start; run before ensureSavedGroup, it reads a legitimately saved id as
+    // foreign and clears the pane instead of recreating its tab.
+    const check = body('onWorkspaceCheck')
+    const restoreAt = check.indexOf('await restoreWorkspacePanes(resp, path, undefined,')
+    const repairAt = check.indexOf('void repairForeignRunGroups(path)')
+    const resolveAt = check.indexOf('activeTab.value = resolveActiveTab(runGroups.value, activeTab.value)')
+    expect(restoreAt).toBeGreaterThan(-1)
+    expect(repairAt).toBeGreaterThan(restoreAt)
+    expect(repairAt).toBeLessThan(resolveAt)
+    // And nowhere earlier in the check, which is where it used to sit.
+    expect(check.slice(0, restoreAt)).not.toContain('repairForeignRunGroups')
+  })
+
+  it('is why the same id matters: only then does the pane land on a tab', () => {
+    const pane = { id: 'p1', runGroupId: 'rg-7' }
+    const strip = (groupId: string) =>
+      buildStageTabs({
+        panes: [pane],
+        groups: [{ id: groupId, name: 'Run 1' }],
+        isDetached: false,
+        detachedGroupId: '',
+        detachedGroupIds: new Set<string>(),
+        manualLabel: 'manual',
+      })
+    expect(strip('rg-7')[0].paneIds).toEqual(['p1'])
+    // A fresh id loses the pane entirely — it is not promoted to the manual tab.
+    expect(strip('rg-new').flatMap((t) => t.paneIds)).toEqual([])
+  })
+})

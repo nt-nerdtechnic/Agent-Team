@@ -12,7 +12,8 @@ Design (mirrors LogWatcher):
 A change anywhere in the working tree, or in the first-level git-state files
 under `.git/` (index, HEAD, refs, MERGE_HEAD, …), marks that workspace dirty.
 A short debounce coalesces bursts (e.g. a build writing many files, or `git
-checkout` touching thousands) into a single `on_change(ws_path)` call.
+checkout` touching thousands) into a single `on_change(ws_path, paths)`
+call, `paths` being the workspace-relative files the window touched.
 
 Noise is filtered in the handler: build/dependency dirs (node_modules, .venv,
 dist, …) and git-internal churn (.git/objects, .git/logs, *.lock) never
@@ -33,6 +34,9 @@ from watchdog.observers import Observer
 log = logging.getLogger("agent_team_backend.git_watcher")
 
 ChangeSink = Callable[[str], Awaitable[None]]
+# Same debounce, one extra argument: the workspace-relative paths that made the
+# window dirty, each with the watchdog event type that touched it.
+PathChangeSink = Callable[[str, list[tuple[str, str]]], Awaitable[None]]
 
 # Working-tree path segments that should never trigger a git refresh. These are
 # build artefacts / dependency trees that aren't tracked but churn constantly.
@@ -81,7 +85,7 @@ class _RepoHandler(FileSystemEventHandler):
         self,
         root: Path,
         ws_path: str,
-        on_dirty: Callable[[str], None],
+        on_dirty: Callable[[str, list[tuple[str, str]]], None],
         on_plans_dirty: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__()
@@ -103,8 +107,54 @@ class _RepoHandler(FileSystemEventHandler):
             self._is_plan_doc(src) or (dest and self._is_plan_doc(dest))
         ):
             self._on_plans_dirty(self._ws_path)
-        if self._is_relevant(src) or (dest and self._is_relevant(dest)):
-            self._on_dirty(self._ws_path)
+        src_ok = self._is_relevant(src)
+        dest_ok = bool(dest) and self._is_relevant(dest)
+        if src_ok or dest_ok:
+            self._on_dirty(
+                self._ws_path, self._changed_paths(event, src, dest, src_ok, dest_ok)
+            )
+
+    def _changed_paths(
+        self,
+        event: FileSystemEvent,
+        src: str,
+        dest: str,
+        src_ok: bool,
+        dest_ok: bool,
+    ) -> list[tuple[str, str]]:
+        """The (workspace-relative path, change) pairs this event contributes.
+
+        A move is the only event naming two files — the old path is gone and
+        the new one has appeared — so it splits into a deleted and a created
+        entry; every other type maps to itself. Directory events carry no pair
+        at all: they still mark the workspace dirty (the git refresh must fire
+        exactly as before), they are just not file changes worth recording.
+        """
+        if event.is_directory:
+            return []
+        if event.event_type == "moved":
+            pairs = []
+            if src_ok:
+                pairs.append((src, "deleted"))
+            if dest_ok:
+                pairs.append((dest, "created"))
+        elif src_ok:
+            pairs = [(src, str(event.event_type))]
+        else:
+            pairs = []
+        out: list[tuple[str, str]] = []
+        for path, change in pairs:
+            rel = self._rel(path)
+            if rel:
+                out.append((rel, change))
+        return out
+
+    def _rel(self, src: str) -> str:
+        """`src` as a path relative to the repo root, or "" if it is outside."""
+        try:
+            return str(Path(src).resolve().relative_to(self._root))
+        except (ValueError, OSError):
+            return ""
 
     def _is_plan_doc(self, src: str) -> bool:
         """True for a user-facing plan or report document (HTML or markdown) directly
@@ -161,11 +211,11 @@ class _RepoHandler(FileSystemEventHandler):
 
 class GitWatcher:
     """One Observer, many repos. Lazily `watch()` a workspace the first time the
-    GitPane looks at it; debounced `on_change(ws_path)` fires on disk changes."""
+    GitPane looks at it; debounced `on_change(ws_path, paths)` fires on disk changes."""
 
     def __init__(
         self,
-        on_change: ChangeSink,
+        on_change: PathChangeSink,
         *,
         on_plans_change: ChangeSink | None = None,
         debounce_s: float = 0.4,
@@ -177,6 +227,8 @@ class GitWatcher:
         self._observer: Observer | None = None
         self._roots: dict[str, Path] = {}  # ws_path -> resolved root
         self._pending: dict[str, asyncio.TimerHandle] = {}
+        # ws_path -> the (rel_path, event_type) pairs seen in the open window
+        self._dirty_paths: dict[str, set[tuple[str, str]]] = {}
         self._pending_plans: dict[str, asyncio.TimerHandle] = {}
         self._started = False
 
@@ -196,6 +248,7 @@ class GitWatcher:
         for th in self._pending.values():
             th.cancel()
         self._pending.clear()
+        self._dirty_paths.clear()
         for th in self._pending_plans.values():
             th.cancel()
         self._pending_plans.clear()
@@ -236,20 +289,24 @@ class GitWatcher:
 
     # ───────────────────────── debounce (loop thread) ─────────────────────
 
-    def _mark_dirty_threadsafe(self, ws_path: str) -> None:
+    def _mark_dirty_threadsafe(
+        self, ws_path: str, paths: list[tuple[str, str]]
+    ) -> None:
         """Called from the watchdog observer thread → hop to the loop thread."""
         loop = self._loop
         if loop is None or loop.is_closed():
             return
         try:
-            loop.call_soon_threadsafe(self._schedule_fire, ws_path)
+            loop.call_soon_threadsafe(self._schedule_fire, ws_path, paths)
         except RuntimeError:
             pass  # loop closed mid-flight
 
-    def _schedule_fire(self, ws_path: str) -> None:
+    def _schedule_fire(self, ws_path: str, paths: list[tuple[str, str]]) -> None:
         loop = self._loop
         if loop is None:
             return
+        if paths:
+            self._dirty_paths.setdefault(ws_path, set()).update(paths)
         existing = self._pending.get(ws_path)
         if existing is not None:
             existing.cancel()
@@ -259,7 +316,8 @@ class GitWatcher:
 
     def _fire(self, ws_path: str) -> None:
         self._pending.pop(ws_path, None)
-        asyncio.create_task(self._on_change(ws_path))
+        paths = sorted(self._dirty_paths.pop(ws_path, set()))
+        asyncio.create_task(self._on_change(ws_path, paths))
 
     # ─────────────────── plans channel (same debounce model) ──────────────
 

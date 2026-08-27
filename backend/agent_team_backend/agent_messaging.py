@@ -626,7 +626,8 @@ def resolve(from_pane_id: str, to: str) -> ResolveResult:
         return _resolve_error(
             "ambiguous-target",
             f'ambiguous target "{name}" in workspace "{ws_part}" '
-            f"({len(hits)} panes share that name) — rename one of them",
+            f"({len(hits)} panes share that name) — pass pane_id instead of a "
+            f"name to say which one, or rename one of them",
             name=name,
             ws=ws_part,
             n=len(hits),
@@ -634,6 +635,37 @@ def resolve(from_pane_id: str, to: str) -> ResolveResult:
     entry = hits[0]
     cross = sender is None or sender.workspace_path != entry.workspace_path
     return _accept(entry, target, cross_workspace=cross)
+
+
+def resolve_pane_id(from_pane_id: str, pane_id: str) -> ResolveResult:
+    """Resolve a pane by its id rather than by its address.
+
+    The one thing a name cannot do: name a pane when two of them share a name.
+    Two panes in one workspace are legitimately allowed to be called the same
+    thing, and `resolve` refuses them both rather than guessing — an id is how
+    a caller says which. It is resolved through the alias table, so an id a CLI
+    was handed before a window reload or a detach — which rebuild a pane around
+    the same running CLI — still names it. An id does not survive a pane rebuilt
+    around a fresh CLI: that path declares no former ids, so nothing links them.
+
+    An id names a pane on this machine only: a remote pane is not in the
+    registry, and its id was minted by a registry this one has never seen.
+    """
+    ident = (pane_id or "").strip()
+    if not ident:
+        return _resolve_error("empty-target", "empty pane_id")
+    entry = current(ident)
+    if entry is None:
+        return _resolve_error(
+            "unknown-pane-id",
+            f'unknown pane_id "{ident}" — it names no pane on this machine. '
+            f"Pane ids change when a pane is rebuilt; read a fresh one from "
+            f"cli_list_targets",
+            pane_id=ident,
+        )
+    sender = _PANES.get(from_pane_id)
+    cross = sender is None or sender.workspace_path != entry.workspace_path
+    return _accept(entry, entry.qualified_name, cross_workspace=cross)
 
 
 def _hint_matches(

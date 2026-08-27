@@ -93,6 +93,48 @@ export function createResizeController(
     resizeFrameTimer = setTimeout(fire, 100)
   }
 
+  // Wipe the TUI's divider lines just before the PTY learns its new width.
+  //
+  // Claude Code repaints on SIGWINCH but never clears first: a recording of its
+  // output across a resize has ESC[2J and ESC[K zero times — it homes the
+  // cursor and draws over whatever is there. That works while the width holds
+  // still. When it changes, the new frame no longer covers the old one, and the
+  // previous width's divider survives beside the new one: the stray short rule
+  // under the prompt, measured live as a 94-column rule left over after a
+  // widen to 105.
+  //
+  // Only lines that are ENTIRELY box-drawing horizontals are touched. They
+  // carry no information — the CLI redraws them as part of the frame — so
+  // erasing one can lose nothing, which is what makes this safe to do blind.
+  // Content lines are never considered, and the cursor is saved and restored so
+  // the CLI's own position is undisturbed.
+  //
+  // Runs BEFORE sendResizeNow: the SIGWINCH that follows is what makes the CLI
+  // repaint, so the old rules have to be gone by the time the new frame lands.
+  const RULE_ONLY = /^[\u2500-\u257f\u2014\u2015-]+$/
+  function eraseStaleRules(): void {
+    // Self-contained try/catch ON PURPOSE. The caller wraps fit + sendResizeNow
+    // in one catch, so anything thrown here would swallow the resize itself and
+    // the PTY would never learn its new width — a cosmetic cleanup must never
+    // be able to break sizing. (Caught in tests, where the mocked buffer has no
+    // viewportY: every resize silently stopped being sent.)
+    try {
+      const buf = term.buffer?.active
+      if (!buf || buf.type === 'alternate') return
+      const top = buf.viewportY
+      if (typeof top !== 'number' || !Number.isFinite(top)) return
+      const out: string[] = []
+      for (let y = 0; y < term.rows; y++) {
+        const text = buf.getLine(top + y)?.translateToString(true).trim() ?? ''
+        if (text.length >= 3 && RULE_ONLY.test(text)) out.push(`\x1b[${y + 1};1H\x1b[2K`)
+      }
+      if (!out.length) return
+      // ESC 7 / ESC 8 (DECSC/DECRC) rather than CSI s/u: the latter collides
+      // with the left-right-margin sequence when DECLRMM is on.
+      term.write(`\x1b7${out.join('')}\x1b8`)
+    } catch { /* cosmetic only — never let this affect the resize */ }
+  }
+
   // Single source of truth for sizing: fit xterm to its container, then push
   // that size to the backend. Entry points: the (debounced) ResizeObserver,
   // the post-spawn frame, the reconciler, and fitTerminal().
@@ -129,7 +171,9 @@ export function createResizeController(
         // drains output around its resize ack, so ordering is preserved server
         // side; the brief client window where xterm is narrower than the PTY is
         // the same tradeoff VSCode's integrated terminal accepts.
+        const colsBefore = term.cols
         fit.fit()
+        if (term.cols !== colsBefore) eraseStaleRules()
         sendResizeNow()
       } catch { /* ignore transient fit errors during teardown */ }
     }

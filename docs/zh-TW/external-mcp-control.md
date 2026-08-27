@@ -38,9 +38,10 @@ Settings → MCP 底下的「說明」分頁
 這個 Endpoint 只接受三種呼叫端憑證：Pane 自己的憑證（Navide spawn claude/codex
 Pane 時產生）、Backend 自身的內部「host」憑證（供其自有 CLI 接線使用），以及
 上述的外部憑證 —— 由 Settings 的開關控管。外部呼叫端沒有 Pane 身分，因此也
-沒有自己的 Workspace：每個定址到 Pane 的 Tool（`cli_send`、`cli_read_log`、
-`cli_get_status`、`cli_wait_idle`）都必須使用完整的 `<folder>/<pane>` 形式，
-而不是裸的 Pane 名稱；每個定址到 UI 狀態（`ui_invoke`、`ui_snapshot`、
+沒有自己的 Workspace：每個定址到 Pane 的 Tool（`cli_send`、`cli_send_and_wait`、
+`cli_read_log`、`cli_get_status`、`cli_wait_idle`）都必須使用完整的 `<folder>/<pane>` 形式，
+而不是裸的 Pane 名稱（或是給一個 `pane_id`：它指名唯一一個 Pane，本身就已經是完整
+限定的，因此不受這條規則約束）；每個定址到 UI 狀態（`ui_invoke`、`ui_snapshot`、
 `ui_list_actions`）或 Plan 文件（`plan_*`）的 Tool 都必須明確給定
 `workspace_path` —— 以 Pane 身分執行的呼叫端可以省略，並取得該 Pane 自己的
 Workspace。
@@ -84,12 +85,12 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 
 | Tool | 參數 | 功能 |
 |---|---|---|
-| `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`pane_id`（每個 `ui.pane.*` action 都吃這個鍵）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
-| `cli_send` | `to`、`text`、`wait_for_delivery_s=0`（上限 120） | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
+| `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`pane_id`（每個 `ui.pane.*` action 都吃這個鍵，也可以在下面那幾個 Pane Tool 上取代 `address`）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
+| `cli_send` | `to`、`text`、`wait_for_delivery_s=0`（上限 120）、`pane_id?` | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
 | `cli_check_message` | `msg_key` | 某次 `cli_send` 的結果：`{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 你自己送出、目前卡住或失敗的訊息：`{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20`（上限 200） | **僅限 CLI Pane。** 目前排給*你*、還沒送進來的訊息：`{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
-| `cli_send_and_wait` | `to`、`text`、`timeout_s=60`（上限 120） | `cli_send` 再加上等待該回合結束；回傳 `cli_wait_idle` 的結果，外加 `{ok, target, msg_key}` |
+| `cli_send_and_wait` | `to`、`text`、`timeout_s=60`（上限 120）、`pane_id?` | `cli_send` 再加上等待該回合結束；回傳 `cli_wait_idle` 的結果，外加 `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`、`name`、`task`、`workspace_path`（非 Pane 呼叫端必填） | 帶著一項任務 Spawn 新的 CLI Pane；回傳 `{ok, name, address}`，若該次 Spawn 跨過 Advisory 門檻則另附 `advisories` |
 
 `cli_send` 在訊息*被接受*遞送時就回傳，不是在另一個 Agent 讀到時才回傳。
@@ -197,9 +198,9 @@ Diagnostics，可透過 `ui_diagnostics` 讀取。
 
 | Tool | 參數 | 功能 |
 |---|---|---|
-| `cli_read_log` | `target`、`tail_lines=200`、`since?` | Pane 對話記錄的尾端（≤512KB 且 ≤`tail_lines` 行）；回傳 `next_cursor` 與 `rotated` |
-| `cli_get_status` | `target` | `{busy, agent_key, last_activity?, ui?}` —— 當擁有該 Pane 的視窗有回應時，`ui` 鏡射 `ui.pane.getStatus` |
-| `cli_wait_idle` | `target`、`timeout_s=60`（上限 120） | 阻擋直到該 Pane 進入 Idle 或逾時；回傳 `{idle, source, waited_s, last_activity?, ui_status?}`，逾時再加上 `reason` |
+| `cli_read_log` | `target`、`tail_lines=200`、`since?`、`pane_id?` | Pane 對話記錄的尾端（≤512KB 且 ≤`tail_lines` 行）；回傳 `next_cursor` 與 `rotated` |
+| `cli_get_status` | `target`、`pane_id?` | `{busy, agent_key, last_activity?, ui?}` —— 當擁有該 Pane 的視窗有回應時，`ui` 鏡射 `ui.pane.getStatus` |
+| `cli_wait_idle` | `target`、`timeout_s=60`（上限 120）、`pane_id?` | 阻擋直到該 Pane 進入 Idle 或逾時；回傳 `{idle, source, waited_s, last_activity?, ui_status?}`，逾時再加上 `reason` |
 
 `cli_read_log` 的 `since` 提供增量讀取：把上一次呼叫回傳的 `next_cursor` 傳回來，
 就只會拿到該 Pane 自那之後說的內容，而不必重讀同一段尾端。這個 Cursor 是
@@ -281,6 +282,60 @@ copilot/cursor/droid/kilo/muse/opencode 的 `turn_complete` 是 CLI 自己說回
 agentKey, workspacePath, status?}], activeTab, settingsOpen,
 openWorkspaces}`。
 
+### 預覽記錄
+
+每個 Workspace 都保有一條「這裡被改了什麼、被顯示了什麼」的記錄軌，持久化在該
+Workspace 的 `.agent-team/navide.db`，重啟 Navide 後仍在。這三個 Tool 是 Agent
+這一端的入口：回報自己的寫入、讀回其他寫入者回報的內容，以及把某個東西推到使用者
+眼前。
+
+| Tool | 參數 | 功能 |
+|---|---|---|
+| `preview_record` | `rel_path`、`change="modified"`、`note`、`kind="file"`、`content`、`title`、`workspace_path` | 回報你剛剛建立、修改或刪除的檔案；回傳 `{uid, created_at, rel_path, change, merged}`，外加 `warning?` |
+| `preview_list` | `limit=50`（上限 300）、`since=0`、`change`、`agent`、`workspace_path` | 讀回這條記錄軌，最新的在前；回傳 `{workspace_path, entries, truncated}`，外加 `warning?` |
+| `preview_show` | `rel_path`、`kind="file"`、`content`、`title`、`workspace_path` | 把檔案、diff 或內嵌內容推進右側 rail 的預覽面板；回傳視窗自己的 `{ok, result, error}` 外加 `recorded`，`ok` 時再加上 `uid`、`merged` 與 `warning?` |
+
+`workspace_path` 的行為與 `plan_*` 這組 Tool 完全一致：Pane 呼叫端可以省略它，會取
+得該 Pane 自己的 Workspace；Host 或外部呼叫端沒有 Pane 身分，必須傳入，否則呼叫會
+錯誤。
+
+`preview_list` 的 `entries` 中每個元素都有 `uid`、`created_at`（Epoch 毫秒）、
+`change`、`rel_path`、`kind`、`title`、`source`、`pane_id`、`agent`、`tool`、
+`note` 與 `payload`。
+
+| 欄位 | 值域 |
+|---|---|
+| `change` | `created`、`modified`、`deleted`、`shown` |
+| `source` | `user`（在 App 內操作）、`agent`（MCP 呼叫或 CLI Hook）、`watcher`（檔案系統兜底，**無歸屬**） |
+| `kind` | `file`、`diff`、`snippet`、`html`、`markdown` |
+
+`preview_record` 只接受 `created`、`modified` 與 `deleted`。`shown` 只由
+`preview_show` 寫入，而且要等擁有該 Workspace 的視窗確認收下這次推送之後才寫 ——
+沒有人看到的預覽永遠不會被記成 shown。`preview_list` 的 `change` 過濾器四種都接受。
+
+`kind` 決定 `rel_path` 與 `content` 哪一個是必填：`file` 與 `diff` 以路徑定址，需要
+`rel_path`（相對於 Workspace）；`snippet`、`html` 與 `markdown` 本身*就是*酬載，需要
+`content`，上限 512 K 字元 —— 超過會直接拒絕，而不是截斷。`note` 上限 500 字元，
+是截斷而不是拒絕。
+
+**歸屬是從呼叫端的憑證讀出來的**，絕不是從參數：記錄下來的 `pane_id` 與 `agent` 就是
+呼叫端 Pane 自己的，沒有任何參數能讓呼叫端冒充成別的 Pane。Host 或外部呼叫端寫入的
+記錄則沒有歸屬。
+
+`merged: true` 代表這次事件被折進記錄軌上既有的一筆 —— 同路徑、同 `change`、2 秒之
+內，通常是因為檔案系統 watcher 先到了 —— 因此沒有新增任何東西，`uid` 是 `""` 而
+`created_at` 是 0。這條記錄軌每個 Workspace 保留最新的 300 筆，超過就汰除最舊的。
+
+`warning` 的意思與 `plan_create` 上的相同：沒有任何 Live 的 Navide Pane 使用
+`workspace_path`，因此這筆記錄落在使用者看不到的地方。
+
+**這條記錄軌的寫入者不只這三個 Tool。** 當 CLI Agent 透過 `Write`、`Edit`、
+`MultiEdit` 或 `NotebookEdit` 改檔時，Navide 會自動記錄並帶上完整歸屬 —— 但僅限有
+Hook 機制的廠商，目前是 **claude、qwen 與 copilot**。其餘所有檔案變更都由檔案系統
+watcher 兜底，以 `source: "watcher"` 且無歸屬的形式記錄。因此 `preview_list` 看到的
+畫面比該 Workspace 上所有 `preview_record` 呼叫的總和更完整，而沒有 `pane_id` 的
+記錄代表沒有人認領這次變更 —— 不是沒有東西造成它。
+
 ## Pane 的 id 活得比 Pane 久
 
 CLI Pane 的連線 URL 只在 Pane 生成的那一刻寫入一次，CLI Process 只要還活著就一直
@@ -292,6 +347,16 @@ CLI Pane 的連線 URL 只在 Pane 生成的那一刻寫入一次，CLI Process 
 實際附著的 Pane」的身分被回答：`plan_*` 預設的 Workspace 一樣、`cli_list_targets`
 裡的 `you` 一樣、`cli_send` 用來判斷裸名與自寄的身分也一樣。重載兩次也不會斷鏈 ——
 每一跳都會被壓平到當前的 Pane —— 而且 id 永遠不允許跟著 Pane 跨到別的 Workspace。
+
+id 不只是身分，也是一個位址。`cli_send`、`cli_send_and_wait`、`cli_read_log`、
+`cli_get_status`、`cli_wait_idle` 都吃一個 `pane_id`，用來取代它們原本的位址參數；
+當一個 Workspace 裡有兩個 Pane 同名時，這是唯一搆得到其中某一個的辦法 —— 同時對應
+到兩者的名稱會以 `ambiguous-target` 被拒絕，而不是隨便猜一個。它走的是同一張表，所
+以一個撐過重載或 detach 的 id，會定址到它一路跟過去的那個 Pane。它撐不過的是用一個
+**全新**的 CLI 重建出來的 Pane：那條路徑不會宣告任何舊 id，於是那些 Tool 會回
+`unknown-pane-id` —— 意思是「去 `cli_list_targets` 讀一個新的 id」，不是「那個 Pane
+不見了」。遠端 Pane 的 id 是另一台機器的名冊鑄出來的，不算這裡的 id，所以跨裝置的目
+標仍然要用名稱定址。
 
 Pane 的[Push 通道](inter-cli-messaging.md#push-通道)大致也是這樣跟著走，但有一個例外。
 重載視窗會保留通道，Run Group 從拆出的子視窗收回來也會。**拆出（detach）**則不會：

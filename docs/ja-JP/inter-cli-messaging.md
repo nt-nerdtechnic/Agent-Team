@@ -40,13 +40,28 @@ CLI Pane で `@` を入力すると、そこから宛先に指定できるすべ
 した直後に Pane を別の Pane 上へドロップすると、その Pane のアドレスが挿入され
 ます。
 
-アドレスは常に Handle です。Pane にはもう一つ内部的な **id** があり、それが現れる
-のは一箇所だけ——CLI が生成されるときに渡される MCP 接続 URL で、`cli_send` などの
-Tool はこれで呼び出し元を知ります。その id は中のプロセスではなく Pane に属するの
-で、止まっていない CLI の周りに作り直された Pane（ウィンドウのリロード、デタッチ）
-は新しい id を得る一方、CLI は古いものを持ち続けます。古い id はそのプロセスが実際
-に結びついている Pane に解決され続けます。
-[外部 MCP 制御](external-mcp-control.md#pane-の-id-は-pane-より長く生きる)を参照
+アドレスは常に Handle です。Pane にはもう一つ内部的な **id** があり、用途は二つあり
+ます。一つは CLI が生成されるときに渡される MCP 接続 URL で、`cli_send` などの Tool
+はこれで呼び出し元を知ります。もう一つは、Handle では言い分けられないときに「どの
+Pane か」を指名することです。`cli_send`、`cli_send_and_wait`、`cli_read_log`、
+`cli_get_status`、`cli_wait_idle` はいずれも `pane_id` を取り、与えられた場合はアド
+レスの代わりにそれが使われます。同じ Workspace にある二つの Pane が同じ名前を持つこ
+とは正当に許されており、その両方に一致するアドレスは推測されるのではなく
+`ambiguous-target` として拒否されます。id は「こちらだ」と言うための手段です。
+`cli_list_targets` は各 Pane のアドレスの隣に、その時点の id を並べて返します。
+
+id に手を伸ばすのは Handle では足りないときだけにしてください。Handle は読みやすく、
+`@` メニューが補完するものであり、id が耐えられないことに耐えます。新しい CLI の周り
+に作り直された Pane は新しい id を鋳造し、以前の id を一切申告しないため、先に控えた
+id は解決しなくなることがあります。`unknown-pane-id` は「`cli_list_targets` から新し
+い id を読み直せ」という意味であって、「その Pane はもういない」という意味ではありま
+せん。id はこのマシンの中だけのものでもあるので、別のデバイスにある Pane は id を持
+たず、`<device>/<workspace>/<pane>` の名前でしか指定できません。
+
+その id は中のプロセスではなく Pane に属するので、止まっていない CLI の周りに作り直
+された Pane（ウィンドウのリロード、デタッチ）は新しい id を得る一方、CLI は古いもの
+を持ち続けます。古い id はそのプロセスが実際に結びついている Pane に解決され続けま
+す。[外部 MCP 制御](external-mcp-control.md#pane-の-id-は-pane-より長く生きる)を参照
 してください。
 
 ---
@@ -696,6 +711,7 @@ MCP の `cli_send` から、あるいは別の Machine から中継されたも�
 | `no-report` | 相手の Window が結果を報告しなかった |
 | `unknown-workspace` / `ambiguous-workspace` | `<folder>/<pane>` アドレスが、開いている Workspace のどれにも一致しなかった、または複数に一致した |
 | `unknown-target-in-workspace` / `ambiguous-target` | Workspace は解決したが、Pane 名が一致しなかった、または 2 つに一致した |
+| `unknown-pane-id` | このマシンのどの Pane も指さない `pane_id` — `cli_list_targets` から新しいものを読み直す |
 
 ---
 

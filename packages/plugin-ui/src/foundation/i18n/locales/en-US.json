@@ -55,6 +55,7 @@
     "reason-unknown-workspace": "No open workspace named “{ws}”",
     "reason-ambiguous-workspace": "“{ws}” matches {n} workspaces — use the full path",
     "reason-unknown-target-in-workspace": "No pane named “{name}” in workspace “{ws}”",
+    "reason-unknown-pane-id": "No pane with id “{pane_id}” on this machine",
     "reason-ambiguous-target": "{n} panes in “{ws}” are named “{name}” — rename one of them",
     "reason-target-offline": "“{to}” is offline — its window disconnected {seconds}s ago; the pane still exists",
     "reason-unknown-device": "Unknown device “{device}” — addressing another machine needs the cross-device roster, which is not available yet",
@@ -638,7 +639,8 @@
     "expand-subtree": "Expand subtree",
     "collapse-subtree": "Collapse subtree",
     "detach-group": "Open in its own window",
-    "reattach-group": "Merge back"
+    "reattach-group": "Merge back",
+    "expand-all-folders": "Expand all folders"
   },
   "settings": {
     "search": {
@@ -1611,7 +1613,8 @@
     "tasker": "Schedule",
     "messages": "Messages",
     "current-run": "Current run",
-    "no-active-run": "No active run.",
+    "current-session": "This session",
+    "n-panes": "{count} pane(s)",
     "workspace-elsewhere-hint": "Open in another window — click to go there",
     "workspace-switch-hint": "Click to switch this window to it",
     "workspace-detach-hint": "Drag outside the window to give it its own",
@@ -2218,6 +2221,21 @@
     "empty-hint": "Click a file, or let an agent push something here.",
     "show-file": "Show in preview",
     "show-diff": "Show diff in preview",
+    "track-title": "Recent changes",
+    "track-clear": "Clear",
+    "track-no-match": "No records match this filter.",
+    "filter-all": "All",
+    "filter-user": "You",
+    "filter-agent": "Agent",
+    "filter-watcher": "Watcher",
+    "change-created": "created",
+    "change-modified": "modified",
+    "change-deleted": "deleted",
+    "change-shown": "shown",
+    "age-now": "now",
+    "age-minutes": "{n}m",
+    "age-hours": "{n}h",
+    "age-days": "{n}d",
     "foreign-workspace": "other workspace"
   },
   "restore": {

@@ -24,6 +24,8 @@ interface ActivePane {
   roleLabel: string
   stageId?: string
   slotLabel?: string
+  /** Present at runtime on ActivePaneView; keys this pane's live bucket. */
+  sessionId?: string
 }
 
 interface Props {
@@ -168,6 +170,29 @@ const EMPTY: TokenBucket = { input: 0, output: 0, calls: 0 }
 
 const currentRun = computed(() => snapshot.value?.workspace?.current_run ?? null)
 const runTotals = computed<TokenBucket>(() => currentRun.value?.totals ?? EMPTY)
+
+// Live per-session tallies, keyed "<pane_id>::<session_id>" (or the bare pane
+// id). These accrue whether or not a pipeline run is active, so a manually
+// opened CLI pane still reports numbers.
+const liveByPane = computed<Record<string, TokenBucket>>(
+  () => snapshot.value?.workspace?.live_by_pane ?? {}
+)
+const liveTotals = computed<TokenBucket>(() => {
+  const out: TokenBucket = { input: 0, output: 0, calls: 0 }
+  for (const b of Object.values(liveByPane.value)) {
+    out.input += b.input
+    out.output += b.output
+    out.calls += b.calls
+  }
+  return out
+})
+const livePaneCount = computed(
+  () => Object.values(liveByPane.value).filter((b) => b.calls > 0).length
+)
+// The top block shows the run when there is one and this session otherwise.
+const topTotals = computed<TokenBucket>(() =>
+  currentRun.value ? runTotals.value : liveTotals.value
+)
 const cumulative = computed<TokenBucket>(() =>
   snapshot.value?.workspace?.cumulative?.totals ?? EMPTY
 )
@@ -214,22 +239,26 @@ const stageRows = computed(() => {
 })
 
 const paneRows = computed(() => {
-  const map = currentRun.value?.by_pane ?? {}
+  const run = currentRun.value
+  const map = run ? run.by_pane : liveByPane.value
   return (props.panes ?? []).map((p) => {
     // Prefer stable key (stageId:slotLabel) so data survives frontend restarts.
     // Fall back to UUID for manual panes that have no stage/slot.
     const stableKey = p.stageId && p.slotLabel ? `${p.stageId}:${p.slotLabel}`
                     : p.stageId || p.id
+    // Without a run the buckets are session-scoped, so the session id is part
+    // of the key; the stable/UUID chain below still covers a pane with none.
+    const liveKey = p.sessionId ? `${p.id}::${p.sessionId}` : p.id
     return {
       id: p.id,
       label: p.agentLabel,
       sub: p.roleLabel,
-      bucket: map[stableKey] ?? map[p.id] ?? EMPTY
+      bucket: (run ? undefined : map[liveKey]) ?? map[stableKey] ?? map[p.id] ?? EMPTY
     }
   })
 })
 
-const collapsedTotal = computed(() => fmt(runTotals.value.input + runTotals.value.output))
+const collapsedTotal = computed(() => fmt(topTotals.value.input + topTotals.value.output))
 
 // ─────────────────────── Formatting helpers ───────────────────────────────
 
@@ -251,7 +280,10 @@ const { confirm: notifyConfirm } = useNotify()
 
 async function confirmReset(scope: ResetScope): Promise<void> {
   const msg = {
-    run: 'Reset the current pipeline run’s token counters? Workspace cumulative and global totals stay intact.',
+    // Without a run the ⟲ next to it clears this session's live tally instead.
+    run: currentRun.value
+      ? 'Reset the current pipeline run’s token counters? Workspace cumulative and global totals stay intact.'
+      : 'Reset this session’s token counters? Workspace cumulative and global totals stay intact.',
     workspace: 'Wipe all token data for this workspace (current run + runs history + cumulative)? Global totals stay intact.',
     global: 'Wipe global all-time token totals? This affects every workspace.'
   }[scope]
@@ -274,7 +306,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
       >
         <span class="rail-icon">{{ t.icon }}</span>
         <span class="rail-label">{{ $t(t.labelKey) }}</span>
-        <span v-if="t.id === 'tokens' && runTotals.calls > 0" class="rail-badge">{{ collapsedTotal }}</span>
+        <span v-if="t.id === 'tokens' && topTotals.calls > 0" class="rail-badge">{{ collapsedTotal }}</span>
       </button>
     </div>
 
@@ -322,18 +354,20 @@ async function confirmReset(scope: ResetScope): Promise<void> {
         <!-- Current run total -->
         <section class="block">
           <div class="block-hdr">
-            <span class="block-title">{{ $t('label.current-run') }}</span>
+            <span class="block-title">{{ currentRun ? $t('label.current-run') : $t('label.current-session') }}</span>
             <button class="reset-btn" title="Reset run counter" @click="confirmReset('run')">⟲</button>
           </div>
           <div v-if="currentRun" class="run-meta" :title="currentRun.task">
             <span class="run-id">{{ currentRun.run_id || '—' }}</span>
           </div>
-          <div v-else class="muted">{{ $t('label.no-active-run') }}</div>
+          <div v-else-if="livePaneCount > 0" class="run-meta">
+            <span class="run-id">{{ $t('label.n-panes', { count: livePaneCount }) }}</span>
+          </div>
           <div class="totals">
-            <div class="cell"><div class="big">{{ fmt(runTotals.input) }}</div><div class="lbl">{{ $t('label.in') }}</div></div>
-            <div class="cell"><div class="big">{{ fmt(runTotals.output) }}</div><div class="lbl">{{ $t('label.out') }}</div></div>
-            <div class="cell"><div class="big">{{ fmt(runTotals.input + runTotals.output) }}</div><div class="lbl">{{ $t('label.total') }}</div></div>
-            <div class="cell"><div class="big">{{ runTotals.calls }}</div><div class="lbl">{{ $t('label.calls') }}</div></div>
+            <div class="cell"><div class="big">{{ fmt(topTotals.input) }}</div><div class="lbl">{{ $t('label.in') }}</div></div>
+            <div class="cell"><div class="big">{{ fmt(topTotals.output) }}</div><div class="lbl">{{ $t('label.out') }}</div></div>
+            <div class="cell"><div class="big">{{ fmt(topTotals.input + topTotals.output) }}</div><div class="lbl">{{ $t('label.total') }}</div></div>
+            <div class="cell"><div class="big">{{ topTotals.calls }}</div><div class="lbl">{{ $t('label.calls') }}</div></div>
           </div>
         </section>
 

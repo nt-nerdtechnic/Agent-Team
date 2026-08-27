@@ -35,6 +35,7 @@ import QuestionAlert from './components/QuestionAlert.vue'
 import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import { asAgentPush, normalizePreviewTarget } from './preview/previewTarget'
 import { usePreview } from './preview/usePreview'
+import { usePreviewLog } from './preview/usePreviewLog'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { agentUsesBracketedPaste } from '@navide/plugin-shell'
@@ -2423,6 +2424,7 @@ onMounted(() => {
     persistClear: msgLog.persistClear,
   })
   void msgLog.hydrate()
+  void previewLog.refresh()
   // pollAwaitingPanes runs BEFORE syncPaneBusy: it can flip a pane to AWAITING,
   // and the busy report that follows must carry that same tick's status.
   _msgPumpTimer = window.setInterval(() => {
@@ -4709,7 +4711,17 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
 async function onManualSpawn(payload: SpawnPayload): Promise<string | null> {
   // The synthetic manual tab deliberately has no run-group id; a real tab
   // keeps its own id instead of falling back to a background pipeline group.
-  const spawnGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
+  //
+  // Only when spawning into the workspace on screen, though. Run groups are
+  // per-workspace and only the viewed one's are loaded, so stamping a pane
+  // bound for another workspace with an id from THIS one's set gives it a
+  // group no tab over there lists — the pane lands in the sidebar and on no
+  // tab at all, which is indistinguishable from the spawn having failed.
+  const target = payload.workspacePath || currentWorkspace.value
+  const onScreen = normWs(target) === normWs(currentWorkspace.value)
+  const spawnGroupId = onScreen
+    ? resolveManualSpawnGroupId(runGroups.value, activeTab.value)
+    : ''
   const paneId = await spawnPane({
     agentKey: payload.agentKey,
     roleKey: payload.roleKey,
@@ -6343,6 +6355,10 @@ registerCommand('ui.pane.getStatus', (args) => {
 // external MCP client see an in-window anomaly a "ok: true" reply hid. See
 // plan_mcp.ui_diagnostics for the MCP-facing tool that calls this action.
 const preview = usePreview()
+// The record track next to the live target. Wired here rather than in
+// PreviewPanel so it hydrates at startup instead of waiting for the rail to be
+// opened; the composable itself re-snapshots on reconnect and project switch.
+const previewLog = usePreviewLog(backend, currentWorkspace)
 // A preview target names a workspace path. After switching project that path
 // may not even be open any more, and showing it against the new workspace
 // would be wrong rather than merely stale. Watching the ref covers all four
@@ -6783,6 +6799,15 @@ interface DeferredRestoreMetadata {
 
 interface RestoredPaneSpawnOptions {
   saved: ProjectPane
+  /** The placeholder's live parent, when realizing one.
+   *
+   *  `saved` is a snapshot taken when the workspace loaded. Realizing the
+   *  PARENT gives it a new id and rekeyLineage repoints its children in
+   *  memory — but the snapshot still names the retired id. Realizing a child
+   *  from `saved` alone would write that dead pointer back over the live one,
+   *  and a child with no resolvable parent is a root: it leaves the subtree
+   *  and sorts to the end of the list. */
+  spawnedBy?: string
   workspacePath: string
   runGroupId?: string
   sessionHomeId?: string
@@ -6839,7 +6864,8 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     commandOverride: opts.commandOverride,
     workspacePath: opts.workspacePath,
     origin: saved.origin,
-    spawnedBy: saved.spawned_by || undefined,
+    // Live value first — see RestoredPaneSpawnOptions.spawnedBy.
+    spawnedBy: opts.spawnedBy || saved.spawned_by || undefined,
     runGroupId: opts.runGroupId,
     isResume: opts.isResume,
     skipRoleInjection: opts.isResume,
@@ -7136,6 +7162,11 @@ async function onWorkspaceCheck(path: string): Promise<void> {
         await stagesApi.refresh()
       }
     }
+    // The two awaits above can span a workspace switch, and runGroups is one
+    // ref for whichever workspace is on screen: loading a superseded check's
+    // groups here would pair the entered workspace with the left one's tabs,
+    // and every pane would match none of them.
+    if (seq !== workspaceCheckSeq || currentWorkspace.value !== path) return
     _loadRunGroups(path, resp.project)
     // Apply the persisted tab order from project.json. Groups not listed (or
     // an absent field) keep their stored order.
@@ -7187,6 +7218,12 @@ async function onWorkspaceCheck(path: string): Promise<void> {
       // before or during restore (the await can span a user pause).
       coldRestoreBatch = await restoreWorkspacePanes(resp, path, undefined, () => seq !== workspaceCheckSeq)
     }
+    // Only now that the panes are back: a group id is only foreign once the
+    // restore has had its say, and restore recreates a tab whose record was
+    // lost under the same id (ensureSavedGroup). Running before it, this saw
+    // no panes at all on a cold start — and on a switch, panes kept across it
+    // whose tabs the entered workspace had lost, which it cleared as foreign.
+    void repairForeignRunGroups(path)
     activeTab.value = resolveActiveTab(runGroups.value, activeTab.value)
     // If the active tab has no panes (e.g. old project.json panes landed in a
     // different group via fallback), switch to the first tab that has panes so
@@ -7456,6 +7493,12 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         command: saved.command ?? '',
         workspacePath,
         origin: saved.origin,
+        // Without this a placeholder has no parent, so buildPaneLineage cannot
+        // link it: an agent-spawned pane came back flat and in spawn order
+        // until it was realized, which is when the tree finally appeared. The
+        // backend persists and re-keys spawned_by precisely so the shape
+        // survives a restart — dropping it here threw that away.
+        spawnedBy: saved.spawned_by || undefined,
         outputLogFile: saved.output_log_file || undefined,
         runGroupId: runGroupId || undefined,
         injectionStatus: 'pending',
@@ -7838,6 +7881,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
       saved,
       workspacePath: batch.workspacePath,
       runGroupId: placeholder.runGroupId || undefined,
+      spawnedBy: placeholder.spawnedBy,
       sessionHomeId: placeholder.sessionHomeId,
       profileId: saved.profile_id,
       commandOverride,
@@ -11132,10 +11176,25 @@ const activeTab = ref<string>('')
 // between the two windows.
 const applyingRemote = ref(false)
 
+// The workspace runGroups holds the groups OF. A switch sets currentWorkspace
+// first and loads the entered workspace's groups several awaits later, so in
+// between the pair disagrees: runGroups still belongs to the workspace being
+// left while currentWorkspace already names the one being entered. Any save
+// landing in that window wrote the leaving workspace's list over the entered
+// one's — [] for a project that never made a group, which is not a no-op but
+// a wipe. Its panes keep their run_group_id, so they match no tab and cannot
+// be reached from any of them: present in the sidebar, on screen nowhere.
+// Restore alone fires enough saves (ensureSavedGroup per restored pane) to hit
+// the window every time. Nothing recovers from it either — repairForeignRunGroups
+// runs before those panes exist, so it finds no strays to clear.
+const runGroupsOwner = ref<string>('')
+
 function _saveRunGroups(): void {
   if (applyingRemote.value || isDetachedWindow) return
   const ws = currentWorkspace.value
   if (!ws) return
+  // Never write one workspace's groups into another's record.
+  if (normWs(runGroupsOwner.value) !== normWs(ws)) return
   void sendQuiet('project.set_ui_state', {
     workspace_path: ws,
     run_groups: runGroups.value,
@@ -11239,6 +11298,9 @@ function onRunGroupsRemoteSync(raw: unknown): void {
   const missing = runGroups.value.filter((g) => !incomingIds.has(g.id) && referenced.has(g.id))
   const merged = missing.length ? [...d.run_groups, ...missing] : d.run_groups
   applyingRemote.value = true
+  // The guard above already pinned this to the viewed workspace, and the
+  // merged list is now what this window holds for it.
+  runGroupsOwner.value = ws
   runGroups.value = merged
   activeTab.value = resolveActiveTab(merged, activeTab.value)
   currentRunGroupId.value = merged[merged.length - 1]?.id ?? ''
@@ -11348,6 +11410,7 @@ onMounted(() => {
 const DEFAULT_RUN_GROUP_ID = 'rg-default'
 
 function _loadRunGroups(path: string, project: NonNullable<ProjectPayload['project']>): void {
+  runGroupsOwner.value = path
   const legacyKey = `agentTeam.runGroups.${path}`
   const stored = project.ui_run_groups
   if (Array.isArray(stored)) {
@@ -11459,6 +11522,31 @@ function reorderRunGroupTab(fromKey: string, toKey: string): void {
   if (!reorderByIds(runGroups.value, fromKey, toKey)) return
   _saveRunGroups()
   void persistTabOrder()
+}
+
+/** Clear a run group id that this workspace does not have.
+ *
+ *  Run groups are per-workspace, so an id from another workspace's set matches
+ *  no tab here: the pane shows in the sidebar and on no tab at all — running
+ *  and unreachable, which reads as the spawn having failed. buildStageTabs
+ *  deliberately does not paper over this (a pane on no tab means something is
+ *  wrong, and hiding it in the manual tab would hide the fault too), so the
+ *  data is repaired instead of the view.
+ *
+ *  The only source was the ＋ on another workspace's heading, which stamped
+ *  the pane with the VIEWED workspace's group. That is fixed at the source;
+ *  this clears the panes that were already written that way.
+ */
+async function repairForeignRunGroups(path: string): Promise<void> {
+  const known = new Set(runGroups.value.map((g) => g.id))
+  const strays = panes.value.filter(
+    (p) => normWs(p.workspacePath) === normWs(path) && p.runGroupId && !known.has(p.runGroupId),
+  )
+  if (!strays.length) return
+  for (const pane of strays) {
+    if (await persistPaneRunGroup(pane, '')) pane.runGroupId = undefined
+  }
+  syncViews()
 }
 
 /** Move a pane — and the rest of its multi-selection, if it is part of one —

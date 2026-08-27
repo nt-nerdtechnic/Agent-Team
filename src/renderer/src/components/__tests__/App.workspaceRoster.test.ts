@@ -215,6 +215,81 @@ describe('several workspaces in one window', () => {
     expect(appSource.slice(box, box + 220)).toContain('-webkit-app-region: no-drag')
   })
 
+  it('does not stamp another workspace group onto a pane', () => {
+    // Run groups are per-workspace and only the viewed one's are loaded. The
+    // ＋ on another workspace's heading spawns THERE; giving that pane a group
+    // from THIS workspace's set leaves it on no tab over there — in the
+    // sidebar, running, and unreachable.
+    const at = appSource.indexOf('async function onManualSpawn')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('const onScreen = normWs(target) === normWs(currentWorkspace.value)')
+    expect(fn).toContain('const spawnGroupId = onScreen')
+    // The branch exists, and its false arm is the empty id — a pane bound for
+    // another workspace is ungrouped there, not stamped from this one's set.
+    expect(fn).toContain("    : ''")
+  })
+
+  it('repairs a pane already carrying a foreign group', () => {
+    // The data is repaired rather than the view: buildStageTabs deliberately
+    // leaves such a pane off every tab, because a pane on no tab means
+    // something is wrong and hiding it in the manual tab would hide that too.
+    const at = appSource.indexOf('async function repairForeignRunGroups')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('const known = new Set(runGroups.value.map((g) => g.id))')
+    expect(fn).toContain('!known.has(p.runGroupId)')
+    // Cleared on disk first — a local-only clear comes back on the next load.
+    expect(fn).toContain("if (await persistPaneRunGroup(pane, '')) pane.runGroupId = undefined")
+  })
+
+  it('repairs only after this workspace groups are authoritative', () => {
+    // Before _loadRunGroups the list still belongs to the workspace being left,
+    // so every id would look foreign and every pane would be stripped.
+    expect(appSource.indexOf('_loadRunGroups(path, resp.project)')).toBeLessThan(
+      appSource.indexOf('void repairForeignRunGroups(path)')
+    )
+  })
+
+  it('realizes a child against its live parent, not the snapshot', () => {
+    // `saved` is a snapshot taken when the workspace loaded. Realizing the
+    // PARENT gives it a new id and rekeyLineage repoints its children in
+    // memory — but the snapshot still names the retired id. Writing that back
+    // over the live value makes the child parentless, and a child with no
+    // resolvable parent is a root: it leaves the subtree and sorts to the end.
+    const at = appSource.indexOf('async function spawnRestoredPane')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('spawnedBy: opts.spawnedBy || saved.spawned_by || undefined')
+  })
+
+  it('hands realize the placeholder live parent', () => {
+    const at = appSource.indexOf('async function performRealizeRestoredPane')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('spawnedBy: placeholder.spawnedBy')
+  })
+
+  it('keeps rekeyLineage as the thing that maintains it', () => {
+    // The live value is only worth preferring because something keeps it
+    // current. Every path that gives a pane a new id calls this.
+    const at = appSource.indexOf('function rekeyLineage(')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('if (p.spawnedBy === oldId)')
+  })
+
+  it('gives a restore placeholder its parent', () => {
+    // Without it buildPaneLineage cannot link the pane: an agent-spawned pane
+    // came back flat and in spawn order until it was realized, which is when
+    // the tree finally appeared. The backend persists and re-keys spawned_by
+    // precisely so the shape survives a restart.
+    const at = appSource.indexOf('const placeholder: ActivePane = {')
+    expect(at).toBeGreaterThan(-1)
+    const block = appSource.slice(at, appSource.indexOf('panes.value.push(placeholder)', at))
+    expect(block).toContain('spawnedBy: saved.spawned_by || undefined')
+  })
+
   it('lets go of a workspace it closes', () => {
     // Clearing currentWorkspace alone left it in workspaceOrder, so the window
     // still claimed to hold it: main kept reporting it open — the Recent list

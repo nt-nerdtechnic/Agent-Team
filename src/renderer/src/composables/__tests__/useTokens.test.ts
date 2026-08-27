@@ -10,7 +10,8 @@ function snapshot(workspacePath: string): TokensSnapshot {
     workspace: {
       current_run: null,
       runs: [],
-      cumulative: { totals: bucket, by_vendor: {}, by_stage: {} }
+      cumulative: { totals: bucket, by_vendor: {}, by_stage: {} },
+      live_by_pane: {}
     },
     global: { all_time: bucket, by_vendor: {}, by_day: {} }
   }
