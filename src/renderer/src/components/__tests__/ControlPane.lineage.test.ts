@@ -103,16 +103,21 @@ describe('ControlPane – lineage tree', () => {
     expect(wrapper.find('.lineage-caret').text()).toBe('▸')
   })
 
-  it('marks agent-spawned panes with an MCP tag', () => {
+  it('does not badge agent-spawned panes', () => {
+    // origin === 'mcp' is still recorded and still drives spawn behaviour; it
+    // just does not need a badge. The indentation already says an agent
+    // spawned this pane, and the badge repeated it on the row where the
+    // pane's own name has least room to begin with.
     wrapper = mountWith({
       lineage: [
         { id: 'root', depth: 0, hasChildren: true, collapsed: false },
         { id: 'kid-1', depth: 1, hasChildren: false, collapsed: false }
       ]
     })
-    const tags = wrapper.findAll('.mcp-tag')
-    expect(tags).toHaveLength(1)
-    expect(tags[0].text()).toBe('MCP')
+    expect(wrapper.findAll('.mcp-tag')).toHaveLength(0)
+    // The child is still under its parent — the signal that replaced it.
+    const rows = wrapper.findAll('.agent-item')
+    expect(rows[1].attributes('style')).toContain('margin-left')
   })
 
   it('skips lineage rows whose pane has not arrived yet', () => {

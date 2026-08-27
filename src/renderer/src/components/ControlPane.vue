@@ -1822,8 +1822,12 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             >{{ folded ? '▸' : '▾' }}</button>
             <span v-else-if="depth" class="lineage-spacer"></span>
             <span class="status-dot" :data-state="p.status" :title="$t(paneStatusLabelKey(p.status))"></span>
+            <!-- No MCP tag beside it. `origin === 'mcp'` is still recorded and
+                 still drives spawn behaviour; it just does not need a badge.
+                 The indentation already says an agent spawned this pane, and
+                 the badge repeated it on the one row where the pane's own name
+                 has least room. -->
             <span v-if="p.origin === 'pipeline'" class="pipe-tag">P{{ p.stageId }}</span>
-            <span v-else-if="p.origin === 'mcp'" class="mcp-tag" :title="$t('label.spawned-by-agent')">MCP</span>
             <input
               v-if="renamingPaneId === p.id"
               v-focus
@@ -3716,15 +3720,6 @@ button.icon-btn.muted:hover {
 }
 /* Agent-spawned pane. Distinct hue from .pipe-tag so the two provenance marks
    are never confused; both sit in the same slot before the name. */
-.mcp-tag {
-  font-size: 9px;
-  font-weight: 700;
-  background: var(--done-muted, var(--bg-muted));
-  color: var(--done-fg, var(--text-secondary));
-  padding: 1px 5px;
-  border-radius: var(--radius-xs);
-  flex: none;
-}
 /* Fold control for a pane that has children. Sized to match .lineage-spacer so
    a childless row at the same depth still lines up with its siblings. */
 .lineage-caret {
