@@ -8,6 +8,7 @@ import { setBatchDragImage } from '../lib/batchDragImage'
 import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 import { rollupTabStatus } from '../lib/tabStatus'
 import RebuildIcon from './RebuildIcon.vue'
+import AddPaneIcon from './AddPaneIcon.vue'
 import HistoryIcon from './HistoryIcon.vue'
 import FolderIcon from './FolderIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
@@ -1758,7 +1759,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             :aria-expanded="addMenuOpen && addMenuWorkspace === ws.path"
             :title="canSpawn ? `${$t('action.add-to-grid')} · ${pickedAgentLabel}` : $t('label.set-workspace-first')"
             @click.stop="toggleAddMenu($event, ws.path)"
-          >＋</button>
+          ><AddPaneIcon /></button>
         </li>
         <template v-for="g in groupSectionsOf(ws)" :key="`${ws?.path ?? ''}/${g.id}`">
         <!-- The group layer sits BESIDE the lineage rather than above it: a
@@ -3226,17 +3227,28 @@ button.icon-btn.muted:hover {
   font-size: var(--font-3xs);
   font-variant-numeric: tabular-nums;
 }
+/* Boxed and centred like .ws-act rather than sized by a font: the ＋ used to
+   be a full-width character, whose weight came from the typeface and so could
+   never match the stroke icons beside it. */
 .ws-add {
   flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-btn-sm);
+  height: var(--icon-btn-sm);
+  padding: 0;
   border: none;
   background: none;
-  padding: 0 2px;
   cursor: pointer;
-  font-size: var(--font-xs);
   line-height: 1;
   color: var(--text-muted);
   opacity: 0.65;
 }
+/* One pixel over the 11px its siblings use. This is the row's primary action
+   and its mark carries three elements to their one, so equal pixel size would
+   read as smaller and busier; 12px restores the balance without breaking rank. */
+.ws-add :deep(svg) { width: 12px; height: 12px; }
 .ws-head:hover .ws-add { opacity: 1; }
 .ws-add:hover { color: var(--text-bright); }
 

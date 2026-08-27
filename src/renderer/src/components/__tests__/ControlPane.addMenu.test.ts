@@ -100,6 +100,18 @@ describe('ControlPane – the ＋ menu', () => {
     expect(opts[0].classes()).toContain('on')
   })
 
+  it('opens with an icon rather than a text glyph', async () => {
+    // It used to be the full-width character ＋. A glyph takes its weight from
+    // the typeface, so it could not match the stroke icons beside it at any
+    // font-size — the mismatch was structural, not a matter of picking a
+    // better character. Asserting the button carries no text keeps a future
+    // "just use a character" from quietly regressing that.
+    wrapper = mountWith()
+    const add = wrapper.find('.ws-add')
+    expect(add.text()).toBe('')
+    expect(add.html()).toContain('add-pane-icon')
+  })
+
   it('keeps the plain shell out of the scrolling list', async () => {
     // The list is a capped scroller (see the fit tests at the bottom of this
     // file). A shell added to it would be the last entry with every CLI
