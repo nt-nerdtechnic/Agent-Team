@@ -36,7 +36,11 @@ def _plan_html(stage: str) -> str:
 def _handlers(root: Path) -> tuple[_RepoHandler, list[str], list[str]]:
     git_hits: list[str] = []
     plans_hits: list[str] = []
-    h = _RepoHandler(root.resolve(), str(root), git_hits.append, plans_hits.append)
+    h = _RepoHandler(
+        root.resolve(), str(root),
+        lambda ws, _paths: git_hits.append(ws),
+        plans_hits.append,
+    )
     return h, git_hits, plans_hits
 
 
@@ -45,6 +49,7 @@ class _FakeEvent:
         self.src_path = src_path
         self.event_type = event_type
         self.dest_path = dest_path
+        self.is_directory = False
 
 
 def test_plan_doc_event_fires_plans_channel_not_git(tmp_path: Path) -> None:
@@ -109,7 +114,7 @@ async def test_watcher_plan_write_fires_plans_sink_debounced(tmp_path: Path) -> 
     git_fired: list[str] = []
     plans_fired: list[str] = []
 
-    async def git_sink(ws: str) -> None:
+    async def git_sink(ws: str, paths: list[tuple[str, str]]) -> None:
         git_fired.append(ws)
 
     async def plans_sink(ws: str) -> None:

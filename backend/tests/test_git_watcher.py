@@ -11,7 +11,7 @@ from agent_team_backend.git_watcher import GitWatcher, _RepoHandler
 
 
 def _handler(root: Path) -> _RepoHandler:
-    return _RepoHandler(root.resolve(), str(root), lambda _ws: None)
+    return _RepoHandler(root.resolve(), str(root), lambda _ws, _paths: None)
 
 
 def test_working_tree_file_is_relevant(tmp_path: Path) -> None:
@@ -97,7 +97,7 @@ def test_git_internal_churn_is_ignored(tmp_path: Path) -> None:
 async def test_on_change_fires_debounced_on_file_write(tmp_path: Path) -> None:
     fired: list[str] = []
 
-    async def sink(ws: str) -> None:
+    async def sink(ws: str, paths: list[tuple[str, str]]) -> None:
         fired.append(ws)
 
     watcher = GitWatcher(sink, debounce_s=0.1)
@@ -117,7 +117,7 @@ async def test_on_change_fires_debounced_on_file_write(tmp_path: Path) -> None:
 async def test_noise_write_does_not_fire(tmp_path: Path) -> None:
     fired: list[str] = []
 
-    async def sink(ws: str) -> None:
+    async def sink(ws: str, paths: list[tuple[str, str]]) -> None:
         fired.append(ws)
 
     watcher = GitWatcher(sink, debounce_s=0.1)

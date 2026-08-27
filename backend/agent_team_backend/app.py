@@ -76,7 +76,7 @@ from .mcp_settings import (
     MCPSettingsStore,
     redact_mcp_server_secrets,
 )
-from .plan_index import PlanIndex
+from .plan_index import PlanIndex, resolve_plan_root
 from .plan_provisioning import ensure_plan_assets, plan_spec_exists
 from .profile_migration import migrate_legacy_claude_homes
 from .profiles_store import CliProfilesStore
@@ -93,6 +93,7 @@ from .tokens_store import TokensStore
 from .ui_settings import UiSettingsStore
 from .history_store import HistoryStore
 from .agent_message_log import AgentMessageLog
+from .preview_log import MAX_ROWS as PREVIEW_MAX_ROWS, PreviewLog
 from . import git_service
 from . import issue_service
 from . import fs_service
@@ -123,6 +124,7 @@ stages_store = StagesStore(db=database)
 tokens_store = TokensStore(db=database)
 history_store = HistoryStore(databases=workspace_databases)
 plan_index = PlanIndex(databases=workspace_databases)
+preview_log = PreviewLog(databases=workspace_databases)
 # Cross-workspace by construction, so it lives in the global database.
 agent_message_log = AgentMessageLog(db=database)
 codex_home_manager = CodexHomeManager()
@@ -445,9 +447,97 @@ class Session:
             log.warning("send_event failed: %s", err)
 
 
-async def _broadcast_git_changed(ws_path: str) -> None:
-    """GitWatcher sink: a repo's working tree / .git changed on disk."""
-    await broadcast(make_event("git.changed", {"workspace_path": ws_path}))
+# ── Preview record: one track per project root ──────────────────────────────
+# Every writer (this file's two, the preview.log_* handlers, the MCP tools)
+# resolves the workspace it was handed to the project root first. A workspace
+# opened on a subdirectory otherwise starts a second `.agent-team` database one
+# level down, and the panel — which reads the root's — never shows those rows.
+
+
+def _preview_workspace(ws_path: str) -> str:
+    """The project root a preview record for `ws_path` belongs to.
+
+    Only the database moves: `rel_path` stays relative to the workspace the
+    caller named, because that is what the panel resolves it against.
+
+    Falls back to `ws_path` itself for anything `resolve_plan_root` cannot
+    place (no repository, not a directory): recording somewhere is better than
+    the write path raising.
+    """
+    try:
+        return resolve_plan_root(ws_path) or ws_path
+    except Exception as err:  # noqa: BLE001
+        log.warning("preview workspace resolution failed for %s: %s", ws_path, err)
+        return ws_path
+
+
+# watchdog event type -> preview_log change. The watcher already split a
+# `moved` into its deleted and created halves (only it sees both paths), so
+# nothing else reaches here; an unknown type is dropped rather than guessed at.
+_GIT_EVENT_CHANGES = {
+    "created": "created",
+    "modified": "modified",
+    "deleted": "deleted",
+}
+
+
+def _record_watcher_changes(
+    ws_path: str, entries: list[dict[str, str]]
+) -> tuple[str, list[dict[str, Any]]]:
+    """Land the watcher's unattributed view of a change burst. Runs off-loop:
+    a `git checkout` can debounce thousands of paths into one call.
+
+    Returns the root the rows landed in and the rows worth broadcasting —
+    at most the store's own ceiling, because a burst that long has already
+    pruned everything older than its own tail.
+    """
+    root = _preview_workspace(ws_path)
+    rows: list[dict[str, Any]] = []
+    for entry in entries:
+        row = preview_log.append(
+            root,
+            change=entry["change"],
+            kind="file",
+            rel_path=entry["rel_path"],
+            title=os.path.basename(entry["rel_path"]),
+            source="watcher",
+        )
+        if row is not None:
+            rows.append(row)
+    return root, rows[-PREVIEW_MAX_ROWS:]
+
+
+async def _broadcast_git_changed(
+    ws_path: str, paths: list[tuple[str, str]] | None = None
+) -> None:
+    """GitWatcher sink: a repo's working tree / .git changed on disk.
+
+    `paths` is additive — `workspace_path` stays exactly as the existing
+    `git.changed` consumers read it."""
+    entries = [
+        {"rel_path": rel_path, "change": _GIT_EVENT_CHANGES[event_type]}
+        for rel_path, event_type in (paths or [])
+        if event_type in _GIT_EVENT_CHANGES
+    ]
+    if entries:
+        try:
+            root, rows = await asyncio.to_thread(_record_watcher_changes, ws_path, entries)
+            # One frame for the whole burst: a checkout that debounces into
+            # thousands of paths would otherwise put thousands of events on
+            # every window's socket. The other two writers report a single
+            # change at a time and keep sending `entry`.
+            if rows:
+                await broadcast(
+                    make_event(
+                        "preview.recorded", {"workspace_path": root, "entries": rows}
+                    )
+                )
+        except Exception as err:  # noqa: BLE001
+            log.warning("preview record from watcher failed for %s: %s", ws_path, err)
+    await broadcast(make_event("git.changed", {
+        "workspace_path": ws_path,
+        "paths": entries,
+    }))
 
 
 async def _broadcast_plans_changed(ws_path: str) -> None:
@@ -801,6 +891,7 @@ def forget_pane_activity(pane_id: str) -> None:
     _pane_activity.pop(pane_id, None)
     hook_drain.forget_pane(pane_id)
     push_delivery.forget_pane(pane_id)
+    tokens_store.forget_pane(pane_id)
 
 
 async def _on_log_activity(event: ActivityEvent) -> None:
@@ -948,6 +1039,7 @@ async def _on_log_token_usage(usage: TokenUsage) -> TokenSinkResult:
             # Prefer stable slot_key as the by_pane bucket so data survives
             # frontend restarts; fall back to ephemeral pane_id for manual panes.
             pane_id=attributed.slot_key or attributed.pane_id,
+            session_id=usage.session_id,
             stage_id=attributed.stage_id,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
@@ -992,6 +1084,12 @@ def _register_workspace_and_backfill(workspace_path: str) -> None:
     # <workspace>/.agent-team/plans/. Idempotent, never overwrites, never
     # raises — see plan_provisioning.
     ensure_plan_assets(workspace_path)
+    # Start watching for disk changes here rather than waiting for the GitPane's
+    # first `git.status`: the watcher is the only catch-all writer of the
+    # preview record, and until this call it never saw a workspace nobody had
+    # opened Git on. Idempotent, and a no-op before start().
+    if _git_watcher is not None:
+        _git_watcher.watch(workspace_path)
     if is_new and _log_watcher is not None:
         # New association → parse from this workspace's independent checkpoint
         # so cumulative populates without double-counting Global. Scope to THIS
@@ -1470,6 +1568,59 @@ _HOOK_VENDORS = frozenset(
 # vendor's hook file, not something the vendor spec exposes.
 _SUBAGENT_COUNTING_VENDORS = frozenset({"claude"})
 
+# Tools whose PreToolUse payload names a file the agent is about to write.
+# Read-only tools carry a file_path too, so the set — not the field — is what
+# decides whether a hook becomes a preview record.
+_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def _record_hook_file_write(
+    vendor: str,
+    pane_id: str,
+    ws_path: str,
+    tool_name: str,
+    payload: dict,
+) -> tuple[str, dict[str, Any]] | None:
+    """Log a PreToolUse write as an attributed preview record.
+
+    PreToolUse fires *before* the tool runs, which is the only moment the
+    created/modified split can be read off the filesystem. Paths outside the
+    pane's workspace are dropped: a preview record lives in that workspace's
+    database and means nothing outside it.
+
+    Returns the root the row landed in and the row itself, or None when there
+    was nothing to record or the store folded the event into an existing row.
+    """
+    if tool_name not in _WRITE_TOOLS or not ws_path:
+        return None
+    tool_input = payload.get("tool_input")
+    raw_path = (tool_input or {}).get("file_path") if isinstance(tool_input, dict) else None
+    abs_path = str(raw_path or "")
+    if not abs_path or not os.path.isabs(abs_path):
+        return None
+    # realpath both sides so a symlink cannot point out of the workspace; the
+    # target need not exist yet (Write creating a file is the common case).
+    resolved = os.path.realpath(abs_path)
+    root = os.path.realpath(ws_path)
+    if resolved != root and not resolved.startswith(root + os.sep):
+        return None
+    rel_path = os.path.relpath(resolved, root)
+    # The gate above stays the pane's workspace; only the database the row
+    # lands in moves up to the project root.
+    record_root = _preview_workspace(ws_path)
+    row = preview_log.append(
+        record_root,
+        change="modified" if os.path.exists(resolved) else "created",
+        kind="file",
+        rel_path=rel_path,
+        title=os.path.basename(resolved),
+        source="agent",
+        pane_id=pane_id or None,
+        agent=vendor,
+        tool=tool_name,
+    )
+    return (record_root, row) if row is not None else None
+
 
 @app.post("/hooks/{vendor}")
 async def cli_hook(vendor: str, request: Request) -> Any:
@@ -1544,6 +1695,25 @@ async def cli_hook(vendor: str, request: Request) -> Any:
             subagent_tracker.note_tool_use(pane_id, str(payload.get("tool_name") or ""))
         elif event_kind == "subagent_stop":
             subagent_tracker.note_subagent_stop(pane_id)
+    if event_kind == "pre_tool_use":
+        # Beside the tracker rather than inside it: the preview record is not
+        # gated on subagent counting, and a failure here must never disturb the
+        # response this endpoint owes the busy-state path.
+        try:
+            recorded = _record_hook_file_write(
+                vendor, pane_id or "", ws_path or "", str(payload.get("tool_name") or ""), payload
+            )
+            # Inside the same guard as the write: the panels seeing this row
+            # matter less than the response this endpoint owes the busy path.
+            if recorded is not None:
+                await broadcast(
+                    make_event(
+                        "preview.recorded",
+                        {"workspace_path": recorded[0], "entry": recorded[1]},
+                    )
+                )
+        except Exception as err:  # noqa: BLE001
+            log.warning("preview record from %s hook failed: %s", vendor, err)
     # Stop-hook delivery: a claude pane with a message waiting is told to keep
     # going and act on it, instead of stopping and being typed at afterwards.
     # Only claude, because only its Stop hook can block — and only its hook
