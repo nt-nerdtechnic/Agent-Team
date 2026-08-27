@@ -6595,3 +6595,124 @@ async def agent_msg_log_clear(session: "Session", msg_id: str, msg_type: str, pa
         [str(s) for s in keep] if keep is not None else None
     )
     await session.send_json(make_response(msg_id, msg_type, {"deleted": deleted}))
+
+
+# ── Preview record track (preview.log_*) ────────────────────────────────────
+# The preview panel's record track is backend-authored and per-workspace. The
+# watcher and the MCP tools write straight into the store; these handlers cover
+# the third writer — a user action inside the app — plus the read the panel
+# hydrates from. Unlike agent_msg.log_*, a write here IS broadcast: every window
+# showing that workspace has the same track on screen.
+
+
+@handler("preview.log_snapshot")
+async def preview_log_snapshot(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    workspace_path = str(payload.get("workspace_path") or "")
+    if not workspace_path:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", "preview.log_snapshot needs a workspace_path"
+            )
+        )
+        return
+    # Same root every writer resolves to (see app._preview_workspace), or a
+    # window opened on a subdirectory reads a database nobody writes into.
+    # `root` goes back with the entries (as plans.list_docs does) because the
+    # broadcast carries this resolved value too: a window that only knew the
+    # raw path it was opened on would drop every live `preview.recorded`.
+    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    raw_limit = payload.get("limit", 50)
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError, OverflowError):
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", "preview.log_snapshot needs a numeric limit"
+            )
+        )
+        return
+    # tail() clamps the limit to the store's own ceiling.
+    entries = app.preview_log.tail(workspace_path, limit)
+    await session.send_json(
+        make_response(msg_id, msg_type, {"entries": entries, "root": workspace_path})
+    )
+
+
+@handler("preview.log_append")
+async def preview_log_append(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    workspace_path = str(payload.get("workspace_path") or "")
+    change = str(payload.get("change") or "")
+    if not workspace_path or not change:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "BAD_REQUEST",
+                "preview.log_append needs a workspace_path and a change",
+            )
+        )
+        return
+    # The broadcast below carries this same value, so it has to be the
+    # normalised one the snapshot reads back.
+    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    entry = app.preview_log.append(
+        workspace_path,
+        change=change,
+        kind=str(payload.get("kind") or "file"),
+        rel_path=payload.get("rel_path"),
+        title=payload.get("title"),
+        # A row written through this handler is by definition the user acting
+        # inside the app, so the wire does not get to claim agent or watcher.
+        source="user",
+        pane_id=payload.get("pane_id"),
+        note=payload.get("note"),
+    )
+    # None means the store rejected the row or folded it into one already on the
+    # feed — there is nothing new for the other windows to show.
+    if entry is not None:
+        await app.broadcast(
+            make_event(
+                "preview.recorded", {"workspace_path": workspace_path, "entry": entry}
+            )
+        )
+    await session.send_json(make_response(msg_id, msg_type, {"entry": entry}))
+
+
+@handler("preview.log_clear")
+async def preview_log_clear(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    workspace_path = str(payload.get("workspace_path") or "")
+    if not workspace_path:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", "preview.log_clear needs a workspace_path"
+            )
+        )
+        return
+    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    raw_before = payload.get("before")
+    before: int | None = None
+    if raw_before is not None:
+        try:
+            before = int(raw_before)
+        except (TypeError, ValueError, OverflowError):
+            await session.send_json(
+                make_error(
+                    msg_id, msg_type, "BAD_REQUEST", "preview.log_clear before must be a timestamp"
+                )
+            )
+            return
+    removed = app.preview_log.clear(workspace_path, before=before)
+    if removed:
+        await app.broadcast(
+            make_event(
+                "preview.log_cleared",
+                {"workspace_path": workspace_path, "before": before, "removed": removed},
+            )
+        )
+    await session.send_json(make_response(msg_id, msg_type, {"removed": removed}))

@@ -51,6 +51,7 @@ from agent_team_backend.plan_meta import (
     write_plan_meta,
 )
 from agent_team_backend.plan_provisioning import TEMPLATE_FILENAME, ensure_plan_assets
+from agent_team_backend.preview_log import MAX_INLINE_CHARS, MAX_ROWS
 
 PLANS_REL_DIR = ".agent-team/plans"
 
@@ -806,10 +807,16 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
     with same_workspace false and "you" set to the credential kind ("host" or
     "external"); always use the qualified address. Read-only.
 
-    `pane_id` is that pane's internal id, and it is the key every `ui.pane.*`
-    action takes (`ui.pane.close`, `ui.pane.focus`, `ui.pane.getStatus` via
-    ui_invoke) — those reject a pane NAME. Use `address` to talk to a pane and
-    `pane_id` to act on it. Remote targets have no local id and carry none.
+    `pane_id` is that pane's internal id. It is the key every `ui.pane.*` action
+    takes (`ui.pane.close`, `ui.pane.focus`, `ui.pane.getStatus` via ui_invoke)
+    — those reject a pane NAME — and it is also accepted by cli_send,
+    cli_send_and_wait, cli_read_log, cli_get_status and cli_wait_idle in place
+    of an address. Prefer `address`: it is stable and readable, and it survives
+    the pane being rebuilt. Reach for `pane_id` when an address cannot say
+    which pane you mean — two targets below with the SAME address are two panes
+    sharing a name, and every one of those tools refuses that address as
+    "ambiguous-target" rather than guessing between them. Remote targets have no
+    local id and carry none, so they can only be addressed by name.
 
     `offline` marks a pane whose Navide window has lost its connection: it still
     exists and is expected back, but sending to it fails until it returns.
@@ -1068,7 +1075,11 @@ async def _send_to_device(
 
 @server.tool()
 async def cli_send(
-    to: str, text: str, ctx: Context, wait_for_delivery_s: float = 0.0
+    to: str,
+    text: str,
+    ctx: Context,
+    wait_for_delivery_s: float = 0.0,
+    pane_id: str = "",
 ) -> dict[str, Any]:
     """Send an instruction to another CLI pane, in this or another workspace.
 
@@ -1079,6 +1090,16 @@ async def cli_send(
     text is delivered verbatim and submitted for the receiving agent to act on,
     once that pane is idle; it is queued if the pane is mid-turn. An unknown or
     ambiguous target is refused rather than guessed.
+
+    `pane_id` addresses one exact pane and makes `to` unnecessary — copy it from
+    cli_list_targets. Reach for it when a name cannot say which pane you mean:
+    two panes in one workspace may share a name, and that is refused as
+    "ambiguous-target" however the name is spelled. It also survives a rename.
+    It names a pane on this machine only, so a cross-device target must still be
+    addressed by name. An id follows its pane through a window reload or a
+    detach, but a pane restarted around a fresh CLI gets a new one — treat
+    "unknown-pane-id" as "read a fresh id from cli_list_targets", not as "that
+    pane is gone".
 
     Delivery is asynchronous: this returns once the message is accepted for
     delivery, not once the other agent has read it. Returns
@@ -1135,40 +1156,54 @@ async def cli_send(
     if not (text or "").strip():
         return {"ok": False, "error": "text is empty"}
     me = caller.pane_id if caller.kind == "pane" else ""
-    if caller.kind != "pane" and "/" not in (to or ""):
+    target_id = (pane_id or "").strip()
+    # An id is already as qualified as an address gets, so the rule that a
+    # caller with no workspace of its own must name one does not apply to it.
+    if not target_id and caller.kind != "pane" and "/" not in (to or ""):
         return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
     wait_s = min(max(float(wait_for_delivery_s), 0.0), _WAIT_IDLE_MAX_TIMEOUT_S)
 
-    address = agent_messaging.parse_target(to)
-    if address.device_id and not agent_messaging.is_local_device(address.device_id):
-        relayed = await _send_to_device(address, text, caller=caller, me=me)
-        # None means no server was ever configured on this machine; falling
-        # through leaves the answer exactly what it was before cross-device
-        # addressing existed. A configured-but-unreachable server does not come
-        # back as None — it answers "link-offline" above.
-        if relayed is not None:
-            return await _with_delivery_wait(relayed, wait_s)
-
-    result = agent_messaging.resolve(me, to)
-    if result.pane is None:
-        # Only now is the leading segment reconsidered as a device *name*. A
-        # target that resolves on this machine never reaches here, so naming a
-        # laptop after a folder can never redirect an address that works today
-        # (see agent_messaging.parse_remote_target). With no server configured
-        # the roster is empty and this is a no-op, leaving the answer below
-        # exactly what it always was.
-        remote = agent_messaging.parse_remote_target(to)
-        if remote.error:
-            return {"ok": False, "error": remote.error, "error_code": remote.code}
-        if remote.address is not None:
-            relayed = await _send_to_device(remote.address, text, caller=caller, me=me)
+    if target_id:
+        # An id skips address resolution entirely — including the cross-device
+        # path, which an id cannot reach anyway.
+        result = agent_messaging.resolve_pane_id(me, target_id)
+        if result.pane is None:
+            return {
+                "ok": False,
+                "error": result.error,
+                "error_code": result.code or "unknown-pane-id",
+            }
+    else:
+        address = agent_messaging.parse_target(to)
+        if address.device_id and not agent_messaging.is_local_device(address.device_id):
+            relayed = await _send_to_device(address, text, caller=caller, me=me)
+            # None means no server was ever configured on this machine; falling
+            # through leaves the answer exactly what it was before cross-device
+            # addressing existed. A configured-but-unreachable server does not come
+            # back as None — it answers "link-offline" above.
             if relayed is not None:
                 return await _with_delivery_wait(relayed, wait_s)
-        return {
-            "ok": False,
-            "error": result.error or f'unknown target "{to}"',
-            "error_code": result.code or "unknown-target",
-        }
+
+        result = agent_messaging.resolve(me, to)
+        if result.pane is None:
+            # Only now is the leading segment reconsidered as a device *name*. A
+            # target that resolves on this machine never reaches here, so naming a
+            # laptop after a folder can never redirect an address that works today
+            # (see agent_messaging.parse_remote_target). With no server configured
+            # the roster is empty and this is a no-op, leaving the answer below
+            # exactly what it always was.
+            remote = agent_messaging.parse_remote_target(to)
+            if remote.error:
+                return {"ok": False, "error": remote.error, "error_code": remote.code}
+            if remote.address is not None:
+                relayed = await _send_to_device(remote.address, text, caller=caller, me=me)
+                if relayed is not None:
+                    return await _with_delivery_wait(relayed, wait_s)
+            return {
+                "ok": False,
+                "error": result.error or f'unknown target "{to}"',
+                "error_code": result.code or "unknown-target",
+            }
     if me and result.pane.pane_id == me:
         return {"ok": False, "error": "that is your own pane"}
 
@@ -1726,15 +1761,54 @@ def _read_log_window(path: Path, since: int | None, tail_lines: int) -> tuple[st
     return "\n".join(lines), byte_truncated or line_truncated, rotated, size
 
 
+# ── Resolving a pane for the read-only cli_* tools ─────────────────────────
+def _resolve_pane_target(
+    caller: "_Caller", me: str, target: str, pane_id: str
+) -> tuple[Any, dict[str, Any] | None]:
+    """Resolve `pane_id` when one was given, `target` otherwise.
+
+    Shared by the tools that only read a pane, so an id means the same thing in
+    all of them as it does in cli_send. Returns (result, failure): `failure` is
+    the error dict to hand straight back, or None when `result.pane` is set.
+    """
+    from agent_team_backend import agent_messaging
+
+    ident = (pane_id or "").strip()
+    if ident:
+        result = agent_messaging.resolve_pane_id(me, ident)
+        if result.pane is None:
+            return result, {
+                "ok": False,
+                "error": result.error,
+                "error_code": result.code or "unknown-pane-id",
+            }
+        return result, None
+    if caller.kind != "pane" and "/" not in (target or ""):
+        return None, {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
+    result = agent_messaging.resolve(me, target)
+    if result.pane is None:
+        return result, {
+            "ok": False,
+            "error": result.error or f'unknown target "{target}"',
+            "error_code": result.code or "unknown-target",
+        }
+    return result, None
+
+
 @server.tool()
 async def cli_read_log(
-    target: str, ctx: Context, tail_lines: int = 200, since: int | None = None
+    target: str,
+    ctx: Context,
+    tail_lines: int = 200,
+    since: int | None = None,
+    pane_id: str = "",
 ) -> dict[str, Any]:
     """Read a CLI pane's conversation log file.
 
     `target` uses the same addressing as cli_send (cli_list_targets shows the
     forms); a caller with no pane identity must use the qualified
-    `<folder>/<pane>` form. Returns
+    `<folder>/<pane>` form. `pane_id` names one exact pane and makes `target`
+    unnecessary — cli_send documents when to reach for it. Returns
     {ok, target, log_path, text, truncated, next_cursor, rotated} — `text` is
     at most 512KB and `tail_lines` lines, whichever is smaller; `truncated` is
     true when older content was dropped to fit. Fails when the target is
@@ -1747,23 +1821,16 @@ async def cli_read_log(
     means anything — the call then returns a plain tail with `rotated: true`,
     so treat that read as a fresh start rather than as new output.
     """
-    from agent_team_backend import agent_messaging, app
+    from agent_team_backend import app
 
     try:
         caller = _resolve_caller(ctx)
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     me = caller.pane_id if caller.kind == "pane" else ""
-    if caller.kind != "pane" and "/" not in (target or ""):
-        return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
-
-    result = agent_messaging.resolve(me, target)
-    if result.pane is None:
-        return {
-            "ok": False,
-            "error": result.error or f'unknown target "{target}"',
-            "error_code": result.code or "unknown-target",
-        }
+    result, failure = _resolve_pane_target(caller, me, target, pane_id)
+    if failure is not None:
+        return failure
 
     def _find_log_path() -> str:
         project = app.project_store.peek(result.pane.workspace_path)
@@ -1819,33 +1886,26 @@ def _activity_summary(pane_id: str) -> dict[str, Any] | None:
 
 
 @server.tool()
-async def cli_get_status(target: str, ctx: Context) -> dict[str, Any]:
+async def cli_get_status(target: str, ctx: Context, pane_id: str = "") -> dict[str, Any]:
     """Report whether a CLI pane is busy and its most recent activity.
 
-    `target` uses the same addressing as cli_send. Returns {ok, name,
+    `target` uses the same addressing as cli_send, and `pane_id` names one
+    exact pane instead. Returns {ok, name,
     agent_key, busy, last_activity?, ui?}. `last_activity`, when known, is
     {type: "agent_active"|"turn_complete", text? (turn_complete only),
     age_seconds}. `ui`, when the owning Navide window answers in time, is
     {status, buffer, logPath?} straight from the renderer; it is omitted
     (not a failure) when the window does not reply.
     """
-    from agent_team_backend import agent_messaging
 
     try:
         caller = _resolve_caller(ctx)
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     me = caller.pane_id if caller.kind == "pane" else ""
-    if caller.kind != "pane" and "/" not in (target or ""):
-        return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
-
-    result = agent_messaging.resolve(me, target)
-    if result.pane is None:
-        return {
-            "ok": False,
-            "error": result.error or f'unknown target "{target}"',
-            "error_code": result.code or "unknown-target",
-        }
+    result, failure = _resolve_pane_target(caller, me, target, pane_id)
+    if failure is not None:
+        return failure
     pane = result.pane
 
     status: dict[str, Any] = {
@@ -1911,10 +1971,13 @@ def _ui_status_is_idle(payload: dict[str, Any]) -> bool:
 
 
 @server.tool()
-async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> dict[str, Any]:
+async def cli_wait_idle(
+    target: str, ctx: Context, timeout_s: float = 60.0, pane_id: str = ""
+) -> dict[str, Any]:
     """Block until a CLI pane goes idle, or a timeout passes.
 
-    `target` uses the same addressing as cli_send. `timeout_s` is capped at
+    `target` uses the same addressing as cli_send, and `pane_id` names one
+    exact pane instead. `timeout_s` is capped at
     120s. Three signals settle it, in the order they become available: the
     pane's last activity was a turn_complete (aider/antigravity/claude/codex/
     copilot/cursor/kilo/muse/opencode report one directly, so detection is
@@ -1953,16 +2016,9 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     me = caller.pane_id if caller.kind == "pane" else ""
-    if caller.kind != "pane" and "/" not in (target or ""):
-        return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
-
-    result = agent_messaging.resolve(me, target)
-    if result.pane is None:
-        return {
-            "ok": False,
-            "error": result.error or f'unknown target "{target}"',
-            "error_code": result.code or "unknown-target",
-        }
+    result, failure = _resolve_pane_target(caller, me, target, pane_id)
+    if failure is not None:
+        return failure
     pane_id = result.pane.pane_id
 
     workspace_path = result.pane.workspace_path
@@ -2091,7 +2147,7 @@ def _never_arrived(sent: dict[str, Any], started: float) -> dict[str, Any]:
 
 @server.tool()
 async def cli_send_and_wait(
-    to: str, text: str, ctx: Context, timeout_s: float = 60.0
+    to: str, text: str, ctx: Context, timeout_s: float = 60.0, pane_id: str = ""
 ) -> dict[str, Any]:
     """Send an instruction to another CLI pane and wait for it to finish it.
 
@@ -2101,7 +2157,8 @@ async def cli_send_and_wait(
     message to actually GO IN first, then remembers the target's last activity
     before sending and only accepts a turn NEWER than that as your answer.
 
-    `to`, `text` and addressing are cli_send's. `timeout_s` (capped at 120s)
+    `to`, `text`, `pane_id` and addressing are cli_send's — an id given here
+    addresses both halves, the send and the wait. `timeout_s` (capped at 120s)
     covers the whole thing, not just the wait: at most half of it is spent
     getting the message in, and whatever is left waits for the turn.
 
@@ -2139,7 +2196,7 @@ async def cli_send_and_wait(
     is absent from every other source. A send that is refused outright returns
     cli_send's {ok: false, error} unchanged.
     """
-    from agent_team_backend import agent_messaging, app
+    from agent_team_backend import app
 
     try:
         caller = _resolve_caller(ctx)
@@ -2148,22 +2205,16 @@ async def cli_send_and_wait(
     me = caller.pane_id if caller.kind == "pane" else ""
     # Same gate as cli_send, applied before the resolve below so an unqualified
     # address gets the same answer here as it would there.
-    if caller.kind != "pane" and "/" not in (to or ""):
-        return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
-    resolved = agent_messaging.resolve(me, to)
-    if resolved.pane is None:
-        return {
-            "ok": False,
-            "error": resolved.error or f'unknown target "{to}"',
-            "error_code": resolved.code or "unknown-target",
-        }
-    pane_id = resolved.pane.pane_id
+    resolved, failure = _resolve_pane_target(caller, me, to, pane_id)
+    if failure is not None:
+        return failure
+    target_pane_id = resolved.pane.pane_id
 
-    baseline = app.pane_activity(pane_id)
+    baseline = app.pane_activity(target_pane_id)
     baseline_ts = baseline["ts_monotonic"] if baseline else None
 
     def has_new_activity() -> bool:
-        current = app.pane_activity(pane_id)
+        current = app.pane_activity(target_pane_id)
         if current is None:
             return False
         return baseline_ts is None or current["ts_monotonic"] > baseline_ts
@@ -2177,7 +2228,9 @@ async def cli_send_and_wait(
     # to be answered in what is left, and its hold reason is a far more useful
     # answer than "timeout, busy".
     delivery_budget = timeout / 2
-    sent = await cli_send(to, text, ctx, wait_for_delivery_s=delivery_budget)
+    sent = await cli_send(
+        to, text, ctx, wait_for_delivery_s=delivery_budget, pane_id=pane_id
+    )
     if not sent.get("ok"):
         return sent
     if delivery_budget > 0 and sent.get("status") != "delivered":
@@ -2223,7 +2276,7 @@ async def cli_send_and_wait(
         left = remaining()
         if left <= 0:
             break
-        waited = await cli_wait_idle(to, ctx, timeout_s=left)
+        waited = await cli_wait_idle(to, ctx, timeout_s=left, pane_id=pane_id)
         if waited.get("ok") is False:
             return target_lost(waited)
         if not waited.get("idle"):
@@ -2430,6 +2483,285 @@ async def ui_diagnostics(
         action="ui.diagnostics.read",
         args={"sinceSeq": since_seq, "paneId": pane_id, "limit": limit},
     )
+
+
+# ── Preview record (preview_record / preview_list / preview_show) ───────────
+# One feed per workspace of what was changed or shown there, persisted by
+# preview_log in the workspace database. These tools are the agent's end of it:
+# a session reports its own writes, reads back what other writers reported, and
+# pushes something in front of the user. The vocabulary mirrors preview_log's,
+# minus what an agent must not claim by hand — "shown" is written by
+# preview_show itself, only after the window confirms it took the push.
+
+_RECORDABLE_CHANGES = ("created", "modified", "deleted")
+_LISTABLE_CHANGES = (*_RECORDABLE_CHANGES, "shown")
+_PREVIEW_KINDS = ("file", "diff", "snippet", "html", "markdown")
+_INLINE_KINDS = ("snippet", "html", "markdown")
+
+
+def _preview_log() -> Any:
+    """The app-level PreviewLog, resolved at call time (app.py imports this
+    module, so the singleton cannot be reached at import time)."""
+    from agent_team_backend import app as _app
+
+    return _app.preview_log
+
+
+def _preview_pane(caller: _Caller) -> Any:
+    """The calling pane's registry entry, or None for a non-pane caller.
+
+    Attribution is taken from the credential, never from an argument: a caller
+    cannot claim to be a pane it is not, and host/external callers simply
+    record without attribution.
+    """
+    if caller.kind != "pane":
+        return None
+    from agent_team_backend import agent_messaging
+
+    return agent_messaging.get(caller.pane_id)
+
+
+async def _broadcast_preview_row(workspace_path: str, row: dict[str, Any] | None) -> None:
+    """Put a freshly recorded row on every window showing that workspace.
+
+    A None row is the store saying nothing new is on the feed (rejected, or
+    folded into a record already there), so there is nothing to announce.
+    """
+    if row is None:
+        return
+    from agent_team_backend import app as _app
+    from agent_team_backend.ipc import make_event
+
+    await _app.broadcast(
+        make_event("preview.recorded", {"workspace_path": workspace_path, "entry": row})
+    )
+
+
+def _preview_content(kind: str, rel_path: str, content: str) -> str:
+    """Validate the kind/rel_path/content combination; returns the payload.
+
+    File-backed kinds are addressed by path and carry no payload; inline kinds
+    are the payload and have no path. Getting this wrong is the one failure the
+    renderer reports as a flat "invalid preview target", so it is caught here.
+    """
+    if kind not in _PREVIEW_KINDS:
+        raise FsError(f"invalid kind: {kind!r} (valid: {', '.join(_PREVIEW_KINDS)})")
+    if kind not in _INLINE_KINDS:
+        if not rel_path:
+            raise FsError(f"kind {kind!r} previews a file — pass rel_path")
+        return ""
+    if not content:
+        raise FsError(f"kind {kind!r} previews inline content — pass content")
+    if len(content) > MAX_INLINE_CHARS:
+        raise FsError(
+            f"content is {len(content)} characters, over the {MAX_INLINE_CHARS} "
+            "limit — write it to a file and preview that instead"
+        )
+    return content
+
+
+@server.tool()
+async def preview_record(
+    ctx: Context,
+    rel_path: str = "",
+    change: str = "modified",
+    note: str = "",
+    kind: str = "file",
+    content: str = "",
+    title: str = "",
+    workspace_path: str = "",
+) -> dict[str, Any]:
+    """Report a file you just created, modified or deleted in this workspace.
+
+    Call it once per write, right after the write lands: the user then sees
+    what you touched in Navide's Preview panel, and other sessions read it back
+    with preview_list. The record is persisted in the workspace and survives
+    restarts. Attribution (which pane, which agent) comes from your own
+    credential — there is nothing to pass for it.
+
+    change is one of created, modified, deleted; a preview push is recorded by
+    preview_show instead, so "shown" is not accepted here. kind defaults to
+    "file": pass rel_path (workspace-relative) for kind "file" or "diff", or
+    content for an inline "snippet" / "html" / "markdown" record. note is a
+    short reason ("added the retry guard"); title labels an inline record.
+
+    Returns {uid, created_at, rel_path, change, merged}. merged is true when
+    the event folded into a record already on the feed — same path, same
+    change, a couple of seconds apart, e.g. the file watcher got there first —
+    in which case nothing new was added and uid is "" with created_at 0. A
+    "warning" field means no live Navide pane uses workspace_path, so the user
+    cannot see this record where it landed.
+
+    workspace_path defaults to your own pane's workspace; pass it only to
+    record against another project.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    change = str(change or "").strip()
+    if change not in _RECORDABLE_CHANGES:
+        raise FsError(
+            f"invalid change: {change!r} (valid: {', '.join(_RECORDABLE_CHANGES)})"
+        )
+    kind = str(kind or "").strip()
+    rel_path = str(rel_path or "").strip()
+    payload = _preview_content(kind, rel_path, content)
+    pane = _preview_pane(caller)
+    row = await asyncio.to_thread(
+        _preview_log().append,
+        workspace_path,
+        change=change,
+        kind=kind,
+        rel_path=rel_path or None,
+        title=title or None,
+        source="agent",
+        pane_id=pane.pane_id if pane else None,
+        agent=(pane.agent_key or None) if pane else None,
+        note=note or None,
+        payload=payload or None,
+    )
+    await _broadcast_preview_row(workspace_path, row)
+    result: dict[str, Any] = {
+        "uid": row["uid"] if row else "",
+        "created_at": row["created_at"] if row else 0,
+        "rel_path": rel_path,
+        "change": change,
+        "merged": row is None,
+    }
+    warning = await asyncio.to_thread(_workspace_mismatch_warning, workspace_path)
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@server.tool()
+async def preview_list(
+    ctx: Context,
+    limit: int = 50,
+    since: int = 0,
+    change: str = "",
+    agent: str = "",
+    workspace_path: str = "",
+) -> dict[str, Any]:
+    """Read back what has been created, modified, deleted or shown here.
+
+    Use it to catch up on a workspace before editing in it: the feed carries
+    what other sessions, the user, and the file watcher did, newest first, and
+    survives restarts.
+
+    limit caps how many come back (300 at most). since takes a created_at from
+    an earlier call and returns only what happened after it, so you can poll
+    without re-reading. change filters to one of created / modified / deleted /
+    shown; agent filters to one vendor key (e.g. "claude").
+
+    Returns {workspace_path, entries, truncated}; truncated is true when the
+    limit cut the answer off, so raise it or page with since. Each entry has
+    uid, created_at (epoch milliseconds), change, rel_path, kind, title, source
+    (user / agent / watcher), pane_id, agent, tool, note, payload.
+
+    workspace_path defaults to your own pane's workspace; pass it only to read
+    another project's feed.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    change = str(change or "").strip()
+    if change and change not in _LISTABLE_CHANGES:
+        raise FsError(
+            f"invalid change: {change!r} (valid: {', '.join(_LISTABLE_CHANGES)})"
+        )
+    limit = max(1, min(int(limit), MAX_ROWS))
+    entries = await asyncio.to_thread(
+        _preview_log().tail,
+        workspace_path,
+        limit,
+        since=int(since) or None,
+        change=change or None,
+        agent=str(agent or "").strip() or None,
+    )
+    result: dict[str, Any] = {
+        "workspace_path": workspace_path,
+        "entries": entries,
+        "truncated": len(entries) >= limit,
+    }
+    warning = await asyncio.to_thread(_workspace_mismatch_warning, workspace_path)
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@server.tool()
+async def preview_show(
+    ctx: Context,
+    rel_path: str = "",
+    kind: str = "file",
+    content: str = "",
+    title: str = "",
+    workspace_path: str = "",
+) -> dict[str, Any]:
+    """Show a file, a diff, or inline content in Navide's Preview panel.
+
+    This is how you put something in front of the user without them going
+    looking for it: the file you just rewrote, the diff you want reviewed, a
+    rendered report. The push reaches the Navide window that owns the
+    workspace, and only lands on the record feed once that window confirms it
+    took it — so a push nobody saw is never recorded as shown.
+
+    kind "file" or "diff" needs rel_path (workspace-relative); "snippet",
+    "html" and "markdown" need content (512 KB at most) and take an optional
+    title.
+
+    Returns the window's own reply — {ok, result, error} — plus recorded
+    (whether a "shown" record was landed), uid, and merged (true when the push
+    folded into an identical one already on the feed). ok false means no window
+    took it: nothing was recorded, and the error says whether workspace_path is
+    wrong or the window did not answer in time.
+
+    workspace_path defaults to your own pane's workspace, which is the window
+    the user is looking at; pass it only to show something in another project's
+    window.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    kind = str(kind or "").strip()
+    rel_path = str(rel_path or "").strip()
+    payload = _preview_content(kind, rel_path, content)
+    pane = _preview_pane(caller)
+    args: dict[str, Any] = {"kind": kind, "source": "agent"}
+    if pane is not None:
+        args["origin"] = pane.name
+    if kind in _INLINE_KINDS:
+        args["content"] = payload
+        if title:
+            args["title"] = title
+    else:
+        args["workspacePath"] = workspace_path
+        args["relPath"] = rel_path
+    reply = await _ui_request(workspace_path, "invoke", action="ui.preview.show", args=args)
+    result: dict[str, Any] = dict(reply)
+    if result.get("ok") is not True:
+        # The window never took it, so recording it as shown would log
+        # something the user did not see.
+        result["recorded"] = False
+        return result
+    row = await asyncio.to_thread(
+        _preview_log().append,
+        workspace_path,
+        change="shown",
+        kind=kind,
+        rel_path=rel_path or None,
+        title=title or None,
+        source="agent",
+        pane_id=pane.pane_id if pane else None,
+        agent=(pane.agent_key or None) if pane else None,
+        payload=payload or None,
+    )
+    await _broadcast_preview_row(workspace_path, row)
+    result["recorded"] = True
+    result["uid"] = row["uid"] if row else ""
+    result["merged"] = row is None
+    warning = await asyncio.to_thread(_workspace_mismatch_warning, workspace_path)
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 # ── ASGI mount + lifecycle ──────────────────────────────────────────────────
