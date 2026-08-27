@@ -252,6 +252,17 @@ describe('several workspaces in one window', () => {
     )
   })
 
+  it('gives a restore placeholder its parent', () => {
+    // Without it buildPaneLineage cannot link the pane: an agent-spawned pane
+    // came back flat and in spawn order until it was realized, which is when
+    // the tree finally appeared. The backend persists and re-keys spawned_by
+    // precisely so the shape survives a restart.
+    const at = appSource.indexOf('const placeholder: ActivePane = {')
+    expect(at).toBeGreaterThan(-1)
+    const block = appSource.slice(at, appSource.indexOf('panes.value.push(placeholder)', at))
+    expect(block).toContain('spawnedBy: saved.spawned_by || undefined')
+  })
+
   it('lets go of a workspace it closes', () => {
     // Clearing currentWorkspace alone left it in workspaceOrder, so the window
     // still claimed to hold it: main kept reporting it open — the Recent list

@@ -7313,6 +7313,12 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         command: saved.command ?? '',
         workspacePath,
         origin: saved.origin,
+        // Without this a placeholder has no parent, so buildPaneLineage cannot
+        // link it: an agent-spawned pane came back flat and in spawn order
+        // until it was realized, which is when the tree finally appeared. The
+        // backend persists and re-keys spawned_by precisely so the shape
+        // survives a restart — dropping it here threw that away.
+        spawnedBy: saved.spawned_by || undefined,
         outputLogFile: saved.output_log_file || undefined,
         runGroupId: runGroupId || undefined,
         injectionStatus: 'pending',
