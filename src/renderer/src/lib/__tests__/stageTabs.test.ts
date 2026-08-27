@@ -17,6 +17,7 @@ function tabs(over: Partial<StageTabInput> = {}) {
     detachedGroupId: '',
     detachedGroupIds: new Set<string>(),
     manualLabel: 'manual',
+    orphanLabel: 'orphan',
     ...over,
   })
 }
@@ -100,11 +101,12 @@ describe('buildStageTabs', () => {
     expect(t.map((x) => x.key)).toEqual(['g1', 'g2', 'manual'])
   })
 
-  it('ignores a pane whose group no longer exists', () => {
-    // Its tab is gone; it is not silently promoted to the manual tab, which
-    // would make that count disagree with what the tab shows.
+  it('surfaces an orphan tab for panes whose group record is missing', () => {
+    // A pane with a missing group record is given an orphan tab so it is not
+    // lost from the UI while keeping its run group identity.
     const t = tabs({ groups: [G1], panes: [pane('a', 'g1'), pane('ghost', 'deleted-group')] })
-    expect(t).toHaveLength(1)
+    expect(t).toHaveLength(2)
     expect(t[0].paneIds).toEqual(['a'])
+    expect(t[1]).toMatchObject({ key: 'deleted-group', label: 'orphan', paneIds: ['ghost'] })
   })
 })
