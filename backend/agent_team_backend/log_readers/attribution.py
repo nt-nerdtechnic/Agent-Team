@@ -260,6 +260,14 @@ class Attribution:
         log.debug("registered pane=%s vendor=%s cwd=%s baseline=%d files marker=%s",
                   pane_id, vendor, cwd, len(baseline), session_marker or "(none)")
 
+    def slot_key_for(self, pane_id: str) -> str:
+        """The registered pane's tokens_store bucket key ("" when unknown).
+        Callers that credit tokens outside the attribute() path need the same
+        `slot_key or pane_id` choice the sink makes."""
+        with self._lock:
+            reg = self._panes.get(pane_id)
+            return reg.slot_key if reg else ""
+
     def unregister_pane(self, pane_id: str) -> None:
         with self._lock:
             reg = self._panes.pop(pane_id, None)

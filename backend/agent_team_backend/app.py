@@ -14,6 +14,7 @@ import signal
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -809,6 +810,21 @@ async def _maybe_announce_session(usage: TokenUsage) -> None:
     bound = await asyncio.to_thread(attribution.maybe_announce_session, usage)
     if not bound:
         return
+    # Second backfill hook, for the vendors that cannot pin a session id at
+    # spawn (they bind here, at first match) and for a pane that switches to
+    # another session mid-life. terminal.create's hook covers the pinned-id
+    # case; seed_live's one-shot guard makes the overlap harmless.
+    ws_for_seed = bound.workspace_path or usage.cwd
+    schedule_live_token_backfill(
+        workspace_path=ws_for_seed,
+        pane_id=bound.pane_id,
+        bucket_pane_key=attribution.slot_key_for(bound.pane_id) or bound.pane_id,
+        vendor=usage.vendor,
+        # The live bucket is keyed by the id the token sink passes through
+        # (usage.session_id), which is not always the resume id announced here.
+        session_id=usage.session_id,
+        session_file=bound.session_file,
+    )
     await broadcast(make_event("session.detected", {
         "vendor": usage.vendor,
         "pane_id": bound.pane_id,
@@ -973,6 +989,92 @@ def _schedule_tokens_broadcast(workspace_path: str) -> None:
         )
 
     asyncio.create_task(_fire())
+
+
+# ── live per-session token backfill ───────────────────────────────────────
+#
+# The live "THIS SESSION" tally only ever sees events the watcher ingests
+# during this process's lifetime, so after a backend restart a long-running
+# CLI session reads 0 while the CLI's own footer shows its full total. When a
+# pane binds to a known session id we re-derive that total straight from the
+# vendor log and fold it into the live bucket (tokens_store.seed_live — never
+# through record(), which would double-count into cumulative/global).
+#
+# Dedicated single-worker pool, NOT the shared default executor: a session
+# file can be tens of MB and enumerating a vendor's session tree stats
+# thousands of paths. Concurrent heavy work on the shared pool has starved
+# backend startup three separate times (list_recent, onboarding, plugin
+# activation) — max_workers=1 also serializes bursts of pane spawns.
+_live_backfill_pool = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="tokens-backfill"
+)
+
+
+def _scan_session_total(
+    vendor: str, workspace_path: str, session_id: str, session_file: str
+) -> dict[str, int] | None:
+    """Locate this session's log and sum it. Runs on the backfill pool."""
+    reader = next((r for r in _readers if r.vendor == vendor), None)
+    if reader is None:
+        return None
+    path = Path(session_file) if session_file else None
+    if path is None or not path.exists():
+        # No hint from the caller (Claude pins its id at spawn, before any
+        # file exists): find the file whose id matches, scoped to this
+        # workspace's folder when the vendor's layout allows it.
+        scoped = reader.session_files_for_workspace(workspace_path)
+        candidates = scoped if scoped is not None else reader.session_files()
+        path = next(
+            (p for p in candidates if reader.session_id_from_path(p) == session_id),
+            None,
+        )
+    if path is None or not path.exists():
+        return None  # brand-new session — nothing to backfill yet
+    return reader.total_usage_for_session(path, session_id)
+
+
+def schedule_live_token_backfill(
+    *,
+    workspace_path: str,
+    pane_id: str,
+    bucket_pane_key: str,
+    vendor: str,
+    session_id: str,
+    session_file: str = "",
+) -> None:
+    """Fire-and-forget: bring a bound pane's live tally up to the session's
+    real total. Never awaited by the caller — `terminal.create` must ack
+    without waiting for a multi-MB parse, and the pane works fine meanwhile;
+    the panel just updates when the broadcast lands."""
+    if not (workspace_path and bucket_pane_key and session_id):
+        return  # no session pinned yet — nothing to backfill (total would be 0)
+    # Cheap pre-check on the loop: skips already-seeded panes without paying
+    # for a thread, and captures the baseline the scan is diffed against.
+    already = tokens_store.live_seed_state(workspace_path, bucket_pane_key, session_id)
+    if already is None:
+        return
+
+    async def _run() -> None:
+        try:
+            total = await asyncio.get_running_loop().run_in_executor(
+                _live_backfill_pool,
+                _scan_session_total,
+                vendor, workspace_path, session_id, session_file,
+            )
+            if not total or not (total["input"] or total["output"]):
+                return
+            if tokens_store.seed_live(
+                workspace_path, bucket_pane_key, session_id, total, already
+            ):
+                _schedule_tokens_broadcast(workspace_path)
+                log.info(
+                    "live token backfill pane=%s vendor=%s session=%s in=%d out=%d",
+                    pane_id, vendor, session_id, total["input"], total["output"],
+                )
+        except Exception as err:  # noqa: BLE001 — cosmetic tally, never fatal
+            log.warning("live token backfill failed for pane=%s: %s", pane_id, err)
+
+    asyncio.create_task(_run())
 
 
 # Historic-log backfill can enqueue hundreds of files; coalesce the per-file

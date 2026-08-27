@@ -408,6 +408,33 @@ class LogReader(ABC):
                 continue
         return False
 
+    def total_usage_for_session(
+        self, path: Path, session_id: str
+    ) -> dict[str, int]:
+        """Sum EVERY usage event this log holds for one session.
+
+        Pure arithmetic for the live per-session backfill: it re-parses the
+        whole source with a throwaway dedup set, so nothing is recorded,
+        checkpointed, or credited to cumulative/global — replaying through
+        the ingestion pipeline would double-count history it already holds.
+
+        The `session_id` filter is what makes this correct for the vendors
+        whose sessions share one source (a single SQLite DB for every
+        session); for a one-file-per-session vendor it matches every event.
+        Pass "" to take the whole file unfiltered.
+
+        Heavy (session files reach tens of MB) — callers MUST run it off the
+        event loop. Vendors inherit this; none should need to override it.
+        """
+        totals = {"input": 0, "output": 0, "calls": 0}
+        for usage in self.parse_session_file(path, set()):
+            if session_id and usage.session_id != session_id:
+                continue
+            totals["input"] += int(usage.input_tokens)
+            totals["output"] += int(usage.output_tokens)
+            totals["calls"] += 1
+        return totals
+
     def parse_activity(
         self, path: Path, seen_keys: set[str]
     ) -> list[ActivityEvent]:
