@@ -92,6 +92,25 @@ vendor file) so Navide can detect, install, and update your CLI. The
 onboarding wizard aggregates every vendor's entry automatically — no
 other file to edit.
 
+## The marketing site (`navide-web`)
+
+The public site lists the supported CLIs, and it counts them by fetching this
+very directory through the GitHub API — so a vendor appears there on its own
+once the commit is on `main`, with no copy edit and no redeploy. Two things in
+`src/vendors.ts` are still hardcoded and will lag:
+
+- `ICONS` — an unlisted vendor falls back to the generic terminal glyph. Add
+  `<key>: "/vendor-icons/<key>.svg"`, drop the official asset in
+  `public/vendor-icons/` (downscale raster sources to 84 px; the frame renders
+  at 38–42 px), and record where it came from in that directory's `README.md`.
+- `LABELS` — an unlisted key is title-cased (`droid` → "Droid"), which is often
+  right, but `LABELS` also *is* `FALLBACK`, the roster shown when the API call
+  fails. Unauthenticated GitHub allows 60 requests/hour per IP, so that path is
+  hit routinely, not rarely — a vendor missing from `LABELS` silently
+  disappears from the site whenever the limit is reached.
+
+Neither blocks the vendor from working; both make the site quietly wrong.
+
 ## Known exemptions
 
 "No shared module carries per-vendor branches" holds for the orchestration
