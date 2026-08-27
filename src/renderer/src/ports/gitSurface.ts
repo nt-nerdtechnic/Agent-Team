@@ -1,4 +1,4 @@
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '../../../shared/gitCompatibility'
 import type { InjectionKey } from 'vue'
 import type { PortResponse, ReactiveValue } from '@navide/plugin-ui/shared'
 import type {

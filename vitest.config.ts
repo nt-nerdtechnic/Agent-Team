@@ -16,8 +16,6 @@ export default defineConfig({
       '@navide/plugin-ui/shared': resolve(__dirname, 'packages/plugin-ui/src/shared/index.ts'),
       '@navide/plugin-ui/foundation': resolve(__dirname, 'packages/plugin-ui/src/foundation/index.ts'),
       '@navide/plugin-ui': resolve(__dirname, 'packages/plugin-ui/src/index.ts'),
-      '@navide/git-feature/testing': resolve(__dirname, 'plugins/navide-git/src/git-feature/testing.ts'),
-      '@navide/git-feature': resolve(__dirname, 'plugins/navide-git/src/git-feature/index.ts'),
       '@navide/terminal/testing': resolve(__dirname, 'src/renderer/src/platform/terminal/testing.ts'),
       '@navide/terminal': resolve(__dirname, 'src/renderer/src/platform/terminal/index.ts'),
       '@navide/plugin-shell': resolve(__dirname, 'src/renderer/src/platform/plugin-shell/index.ts'),

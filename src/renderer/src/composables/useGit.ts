@@ -1,6 +1,6 @@
 import { ref, computed, watch, onScopeDispose } from 'vue'
 import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
-import type { GitRequestType, GitTransport } from '@navide/git-feature'
+import type { GitRequestType, GitTransport } from '../../../shared/gitCompatibility'
 import type { GitCredentialPort } from '../ports/gitSurface'
 
 export interface GitFileEntry {

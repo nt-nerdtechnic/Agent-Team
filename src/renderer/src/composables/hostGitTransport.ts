@@ -1,8 +1,8 @@
 import {
   type GitRequestType,
   type GitTransport,
-} from '@navide/git-feature'
-import { HOST_GIT_TIMEOUT_MS } from '../../../shared/gitCompatibility'
+  HOST_GIT_TIMEOUT_MS,
+} from '../../../shared/gitCompatibility'
 import type { useBackend } from './useBackend'
 
 export type HostGitBackend = Pick<ReturnType<typeof useBackend>, 'status' | 'send' | 'on'>

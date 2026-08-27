@@ -146,6 +146,7 @@ async function migrateBundledGitPreferencesUnlocked(
     await prepareGitStorageSnapshot(store, packageVersion, sourceSnapshot)
     const activeMarker = await read(store, 'plugin', MIGRATION_MARKER, packageVersion, 'active', null)
     const pluginMigrationComplete = activeMarker.found && activeMarker.value === true
+    let promotedCandidate = false
 
     if (!pluginMigrationComplete) {
       for (const key of GIT_STORAGE_KEYS) {
@@ -162,6 +163,7 @@ async function migrateBundledGitPreferencesUnlocked(
           { pluginId: GIT_PLUGIN_ID, packageVersion, tier: 'candidate' },
           { pluginId: GIT_PLUGIN_ID, packageVersion, tier: 'active' },
         )
+        promotedCandidate = true
       } catch (error) {
         // A pre-existing active snapshot is the user's authoritative state. Do
         // not replace it; mark it once so subsequent opens stay idempotent.
@@ -173,7 +175,7 @@ async function migrateBundledGitPreferencesUnlocked(
       }
     }
 
-    return { migrated: !pluginMigrationComplete, completed: true }
+    return { migrated: promotedCandidate, completed: true }
   } catch (error) {
     console.warn('[git] v2 storage migration skipped:', error instanceof Error ? error.message : String(error))
     return { migrated: false, completed: false }

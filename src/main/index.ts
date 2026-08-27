@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process'
 import { startBackend, getResolvedUserPath, type BackendHandle } from './backend'
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
-import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, registerLegacyBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
+import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, registerBundledMiniIde, registerBundledPlans, registerLegacyBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
 import {
   isTrustedPluginManagementSender,
   registerPluginIpc,
@@ -733,6 +733,27 @@ const approvedBackendPluginCatalog = () =>
 // Storage usage & cleanup: clears only Electron-owned caches (Chromium HTTP/
 // code/GPU caches, electron-updater downloads). Never user state.
 registerStorageIpc()
+
+// Mini-IDE and Plans remain on their established bundled v1 delivery path
+// until the B6/B7 production migrations replace those paths. Verified
+// installed copies retain the precedence implemented by the registration
+// helpers; this compatibility wiring must not be removed as part of Git's B4
+// cutover.
+const bundledMiniIde = registerBundledMiniIde(frontendPluginManager, {
+  isPackaged: app.isPackaged,
+  resourcesPath: process.resourcesPath,
+})
+if (!bundledMiniIde.registered) {
+  console.warn(`[main] bundled mini-IDE unavailable: ${bundledMiniIde.reason}`)
+}
+
+const bundledPlans = registerBundledPlans(frontendPluginManager, {
+  isPackaged: app.isPackaged,
+  resourcesPath: process.resourcesPath,
+})
+if (!bundledPlans.registered) {
+  console.warn(`[main] bundled Plans unavailable: ${bundledPlans.reason}`)
+}
 
 ipcMain.handle('backend:info', () => backendInfoPayload())
 

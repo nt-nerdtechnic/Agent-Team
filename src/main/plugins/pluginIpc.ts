@@ -414,7 +414,9 @@ export function registerPluginIpc(
             packageVersion: pkg.version,
             system: [...policy.system],
             ...(policy.shell ? { shell: policy.shell } : {}),
-            ...(policy.shell === 'full' ? { highRiskShellConfirmed: true } : {}),
+            ...(policy.shell === 'full' && args.riskConfirmed === true
+              ? { highRiskShellConfirmed: true }
+              : {}),
             storage: true,
           })
         } else {

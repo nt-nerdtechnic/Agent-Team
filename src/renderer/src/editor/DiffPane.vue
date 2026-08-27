@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useNotify } from '@navide/plugin-ui/foundation'
 import { parseHunks, buildPatch, hunkHasChanges, toSideBySide, type Hunk } from '../lib/git-diff'
 import { loadImageDataUrl } from '../lib/imageData'
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '../../../shared/gitCompatibility'
 import type { GitFileAccessPort } from '../ports/gitSurface'
 
 const props = defineProps<{

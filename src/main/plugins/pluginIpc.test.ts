@@ -980,6 +980,36 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
     }
   })
 
+  it('records full-shell approval only after explicit risk confirmation', async () => {
+    const { bytes, digest } = buildPkg('acme.demo', 'acme', { shell: 'full' })
+    installFetch(signedDetail(digest), bytes, digest)
+    const root = mkdtempSync(join(tmpdir(), 'navide-plugin-ipc-full-shell-'))
+    try {
+      const manager = new FrontendPluginManager()
+      const prepareHandler = register(root, manager)
+      await prepareHandler(null, { namespace: 'acme', name: 'demo' })
+      const commitHandler = handlers.get('plugins:commitInstall')
+      if (!commitHandler) throw new Error('commitInstall handler not registered')
+
+      expect(() => commitHandler(null, {
+        id: 'acme.demo',
+        publisherConfirmed: true,
+      })).toThrow(/capability and backend risk confirmation/)
+
+      commitHandler(null, {
+        id: 'acme.demo',
+        publisherConfirmed: true,
+        riskConfirmed: true,
+      })
+      expect(new PluginCapabilityGrantStore(root).get('acme.demo', '1.0.0')).toMatchObject({
+        shell: 'full',
+        highRiskShellConfirmed: true,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('persists the confirmed Manifest v2 grant only after a successful commit and removes it on uninstall', async () => {
     const { bytes, digest } = buildPkg('acme.demo', 'acme', {
       system: ['fs', 'ui'],

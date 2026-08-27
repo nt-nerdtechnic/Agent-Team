@@ -193,4 +193,24 @@ describe('Git v2 storage migration', () => {
     await expect(store.execute(readExecution('active', 'plugin', 'agentTeam.git.logScope', null)))
       .resolves.toEqual({ found: true, value: 'current' })
   })
+
+  it('reports no migration when a pre-existing active snapshot remains authoritative', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-git-storage-existing-active-'))
+    roots.push(root)
+    const store = new PluginStorageStore(root)
+    await store.execute({
+      address: 'storage.set',
+      args: { scope: 'plugin', key: 'agentTeam.git.logScope', value: 'all' },
+      partition: { pluginId, workspaceId: null, key: 'agentTeam.git.logScope' },
+      snapshot: { pluginId, packageVersion: version, tier: 'active' },
+    })
+
+    await expect(migrateBundledGitPreferences(store, {
+      packageVersion: version,
+      sourceSnapshot: null,
+      legacySettings: { 'agentTeam.git.logScope': 'current' },
+    })).resolves.toEqual({ migrated: false, completed: true })
+    await expect(store.execute(readExecution('active', 'plugin', 'agentTeam.git.logScope', null)))
+      .resolves.toEqual({ found: true, value: 'all' })
+  })
 })

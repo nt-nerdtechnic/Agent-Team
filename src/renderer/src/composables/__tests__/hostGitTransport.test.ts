@@ -7,12 +7,12 @@ import type {
   GitRequestType,
   GitTransport,
   GitTransportError,
-} from '@navide/git-feature'
+} from '../../../../shared/gitCompatibility'
 import type {
   GitTransportContractHarness,
   GitTransportRequestRecord,
-} from '@navide/git-feature/testing'
-import { runGitTransportContract } from '@navide/git-feature/testing'
+} from '../../../../shared/gitCompatibility.testing'
+import { runGitTransportContract } from '../../../../shared/gitCompatibility.testing'
 
 interface HostHarness {
   backend: HostGitBackend

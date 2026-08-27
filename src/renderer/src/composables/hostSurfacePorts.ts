@@ -1,4 +1,4 @@
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '../../../shared/gitCompatibility'
 import type { useBackend } from './useBackend'
 import type {
   ConflictStages,

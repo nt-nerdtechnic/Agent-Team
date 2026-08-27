@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// Plans is an ordinary installed contribution. These tests keep the empty
-// catalog behavior separate from the generic left-region placement path.
+// Plans stays on its bundled Host-owned tab until the B6 production migration
+// moves it to a Manifest v2 contribution.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
@@ -18,16 +18,6 @@ const minimalProps = {
   analyzerStatus: { available: false, version: '', defaultModel: '', models: [], benchmarkResults: [] },
   autoAnswerEnabled: false,
   existingProject: null,
-  pluginContributions: [{
-    pluginId: 'navide.plans',
-    packageVersion: '1.0.0',
-    contributionKey: 'navide.plans.left',
-    title: 'Plans',
-    icon: null,
-    kind: 'custom',
-    location: 'left',
-    manifestOrder: 0,
-  }],
 } as unknown as Record<string, unknown>
 
 // Minimal backend so the Explorer/Git/Plans child panes (all `v-if="backend"`)
@@ -59,17 +49,17 @@ describe('ControlPane – Plans sidebar tab', () => {
     expect(wrapper.find('.plans-btn').exists()).toBe(false)
   })
 
-  it('renders an installed Plans contribution in the sidebar icon rail', () => {
+  it('renders the retained Plans tab in the sidebar icon rail', () => {
     const btns = wrapper.findAll('.sidebar-tabs .tab-btn')
-    // agents, pipeline, explorer, installed Plans contribution
+    // agents, pipeline, explorer, retained Plans
     expect(btns).toHaveLength(4)
     expect(btns[3].attributes('title')).toContain('Plans')
   })
 
-  it('mounts the generic contribution host when the Plans tab is picked', async () => {
-    expect(wrapper.findComponent({ name: 'PluginRegionHost' }).exists()).toBe(false)
+  it('mounts the retained PlanPane when the Plans tab is picked', async () => {
+    expect(wrapper.findComponent({ name: 'PlanPane' }).exists()).toBe(false)
     await wrapper.findAll('.sidebar-tabs .tab-btn')[3].trigger('click')
     await wrapper.vm.$nextTick()
-    expect(wrapper.findComponent({ name: 'PluginRegionHost' }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'PlanPane' }).exists()).toBe(true)
   })
 })

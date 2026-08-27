@@ -1,6 +1,6 @@
 import { ref, watch, onScopeDispose } from 'vue'
 import type { DiscoveredRepo, GitStatus } from './useGit'
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '../../../shared/gitCompatibility'
 
 export interface RepoBadge {
   branch: string

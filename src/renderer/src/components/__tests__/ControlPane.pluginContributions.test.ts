@@ -128,4 +128,20 @@ describe('ControlPane manifest-driven plugin placement', () => {
     expect(wrapper.get('[data-legacy-recovery-label]').text()).toBe('Legacy recovery')
     wrapper.unmount()
   })
+
+  it('renders navide.git in the fixed Git slot with its change badge', () => {
+    const wrapper = mountPane([
+      contribution({
+        pluginId: 'navide.git',
+        contributionKey: 'navide.git.left',
+        title: 'Git',
+        icon: 'data:image/png;base64,git-icon',
+      }),
+    ], { gitChangesCount: 7 })
+
+    const tab = wrapper.get('[data-plugin-contribution="navide.git.left"]')
+    expect(tab.attributes('title')).toContain('⌘4')
+    expect(tab.get('.git-badge').text()).toBe('7')
+    wrapper.unmount()
+  })
 })

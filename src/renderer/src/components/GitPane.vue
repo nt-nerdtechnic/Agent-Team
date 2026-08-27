@@ -11,7 +11,7 @@ import { useGit } from '../composables/useGit'
 import type { IgnoreTarget, GitWorktree } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
 import type { IssueDetail } from '../composables/useIssues'
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '../../../shared/gitCompatibility'
 import type {
   GitAccountPort,
   GitCredentialPort,

@@ -12,7 +12,6 @@
     "paths": {
       "#git-feature": ["plugins/navide-git/src/git-feature/index.ts"],
       "#git-feature/testing": ["plugins/navide-git/src/git-feature/testing.ts"],
-      "@navide/git-feature": ["plugins/navide-git/src/git-feature/index.ts"],
       "@navide/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
       "@navide/plugin-contracts": ["packages/plugin-contracts/src/index.ts"],
       "@navide/plugin-ui": ["packages/plugin-ui/src/index.ts"],

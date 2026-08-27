@@ -68,7 +68,6 @@ export default defineConfig({
       { find: '@navide/plugin-ui/foundation', replacement: resolve(__dirname, 'packages/plugin-ui/src/foundation/index.ts') },
       { find: '@navide/terminal', replacement: resolve(__dirname, 'src/renderer/src/platform/terminal/index.ts') },
       { find: '@navide/plugin-shell', replacement: resolve(__dirname, 'src/renderer/src/platform/plugin-shell/index.ts') },
-      { find: '@navide/git-feature', replacement: resolve(__dirname, 'plugins/navide-git/src/git-feature/index.ts') },
     ],
   },
   define: {

@@ -15,8 +15,6 @@
     "paths": {
       "@navide/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
       "@navide/plugin-contracts": ["packages/plugin-contracts/src/index.ts"],
-      "@navide/git-feature": ["plugins/navide-git/src/git-feature/index.ts"],
-      "@navide/git-feature/testing": ["plugins/navide-git/src/git-feature/testing.ts"],
       "@navide/plugin-ui/shared": ["packages/plugin-ui/src/shared/index.ts"],
       "@navide/plugin-ui/shared/testing": ["packages/plugin-ui/src/shared/testing.ts"],
       "@navide/terminal": ["src/renderer/src/platform/terminal/index.ts"],
@@ -34,7 +32,6 @@
     "src/shared/**/*.ts",
     "packages/plugin-contracts/src/**/*.ts",
     "packages/plugin-sdk/src/**/*.ts",
-    "plugins/navide-git/src/git-feature/**/*.ts",
     "packages/plugin-ui/src/**/*.ts",
     "packages/plugin-ui/src/**/*.vue"
   ]

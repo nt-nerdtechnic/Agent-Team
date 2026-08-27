@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onUnmounted, ref, watch } from 'vue'
 import type { PaneArgContext } from '@navide/plugin-shell'
 import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
 import { PANE_BATCH_MIME } from '@navide/terminal'
@@ -18,6 +18,10 @@ import { registerCommand } from '@navide/plugin-ui/shared'
 import { useUpdater } from '../composables/useUpdater'
 import { i18n } from '@navide/plugin-ui/foundation'
 import { useNotify } from '@navide/plugin-ui/foundation'
+
+// Plans remains a Host-owned bundled surface until the B6 migration moves the
+// complete frontend/backend feature behind a Manifest v2 contribution.
+const PlanPane = defineAsyncComponent(() => import('../editor/PlanPane.vue'))
 
 // Re-exported from the canonical per-vendor specs — this was a hand-kept
 // structural mirror before stage 2 of the one-file-per-vendor refactor.
@@ -535,7 +539,7 @@ watch(
 
 // ── Top-level tab: core tabs plus recovery Git and Manifest contributions ─────
 const _TAB_KEY = 'agentTeam.sidebarTab'
-type SidebarTab = 'agents' | 'pipeline' | 'explorer' | 'git' | `plugin:${string}`
+type SidebarTab = 'agents' | 'pipeline' | 'explorer' | 'git' | 'plans' | `plugin:${string}`
 const CORE_SIDEBAR_TABS = ['agents', 'pipeline', 'explorer'] as const
 type CoreSidebarTab = (typeof CORE_SIDEBAR_TABS)[number]
 const legacyGitRecovery = computed(() => props.legacyGitRecovery === true)
@@ -546,6 +550,8 @@ const pluginTabs = computed(() =>
     .filter((entry) => entry.location === 'left')
     .map((entry) => ({ ...entry, tabId: pluginTabId(entry.contributionKey) }))
 )
+const gitPluginTab = computed(() => pluginTabs.value.find((entry) => entry.pluginId === 'navide.git') ?? null)
+const genericPluginTabs = computed(() => pluginTabs.value.filter((entry) => entry.pluginId !== 'navide.git'))
 const failedPluginIcons = ref(new Set<string>())
 const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): string =>
   `${entry.contributionKey}\u0000${entry.icon ?? ''}`
@@ -563,7 +569,7 @@ const sidebarTab = ref<SidebarTab>(
       // Backward-compat: unknown / legacy values fall back to the first tab.
       const isKnown = v !== null && (
         v === 'agents' || v === 'pipeline' || v === 'explorer' ||
-        v.startsWith('plugin:') || (v === 'git' && legacyGitRecovery.value)
+        v === 'plans' || v.startsWith('plugin:') || (v === 'git' && legacyGitRecovery.value)
       )
       return isKnown ? v : 'agents'
     } catch { return 'agents' }
@@ -581,7 +587,8 @@ watch(pluginTabs, (tabs) => {
   }
 }, { immediate: true })
 
-// Cmd+1/2/3/4 → switch core tabs, with Cmd+4 reserved for recovery Git.
+// Cmd+1/2/3/4/5 preserve the established Agents / Pipeline / Explorer / Git /
+// Plans positions. V2 Git owns the same fourth command slot as recovery Git.
 //
 // These used to be a bare `document.addEventListener('keydown')` sitting
 // outside the keybinding system, which meant Settings could neither list nor
@@ -589,7 +596,7 @@ watch(pluginTabs, (tabs) => {
 // switching the sidebar. They are ordinary commands now; only the text-input
 // guard stayed behind, because the central dispatcher does not look at
 // `e.target` and this shortcut must not fire while someone is typing.
-const SIDEBAR_TABS: SidebarTab[] = [...CORE_SIDEBAR_TABS, 'git']
+const SIDEBAR_TABS: SidebarTab[] = [...CORE_SIDEBAR_TABS, 'git', 'plans']
 
 function typingInTextField(): boolean {
   const el = document.activeElement as HTMLElement | null
@@ -618,8 +625,7 @@ registerCommand('workbench.action.focusSourceControl', () => {
     selectSidebarTab('git')
     return
   }
-  const first = pluginTabs.value[0]
-  if (first) selectSidebarTab(first.tabId)
+  if (gitPluginTab.value) selectSidebarTab(gitPluginTab.value.tabId)
 })
 // Cmd+Shift+U → spawn an agent with the currently picked CLI/role (the green
 // "Open Agent" button); spawn() itself no-ops when canSpawn is false.
@@ -661,7 +667,10 @@ function backToList(): void {
 // the detail view, so the panel can't render blank after the opened pipeline
 // goes away. Used by the tab buttons and Cmd+Shift+E/R/G.
 function selectSidebarTab(tab: SidebarTab): void {
-  if (tab === 'git' && !legacyGitRecovery.value) return
+  if (tab === 'git' && !legacyGitRecovery.value) {
+    if (gitPluginTab.value) sidebarTab.value = gitPluginTab.value.tabId
+    return
+  }
   sidebarTab.value = tab
   if (tab === 'pipeline') sidebarView.value = 'list'
 }
@@ -1098,7 +1107,29 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <span v-if="gitChangesCount > 0" class="git-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
       </button>
       <button
-        v-for="pluginTab in pluginTabs"
+        v-else-if="gitPluginTab"
+        :class="['tab-btn', 'plugin-tab-btn', { active: sidebarTab === gitPluginTab.tabId }]"
+        :data-plugin-contribution="gitPluginTab.contributionKey"
+        :title="`${gitPluginTab.title} (⌘4)`"
+        @click="selectSidebarTab(gitPluginTab.tabId)"
+      >
+        <img
+          v-if="hasPluginIcon(gitPluginTab)"
+          class="plugin-tab-icon"
+          :src="gitPluginTab.icon ?? ''"
+          width="18"
+          height="18"
+          alt=""
+          @error="markPluginIconFailed(gitPluginTab)"
+        />
+        <span v-else class="plugin-tab-fallback" aria-hidden="true">◇</span>
+        <span v-if="gitChangesCount > 0" class="git-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
+      </button>
+      <button :class="['tab-btn', { active: sidebarTab === 'plans' }]" title="Plans (⌘5)" @click="selectSidebarTab('plans')">
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2a1 1 0 0 0-1 1H2.75A1.75 1.75 0 0 0 1 4.75v9.5c0 .966.784 1.75 1.75 1.75h10.5A1.75 1.75 0 0 0 15 14.25v-9.5A1.75 1.75 0 0 0 13.25 3H12a1 1 0 0 0-1-1H5Zm0 2h6v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4Zm-2.25.5H4a2.5 2.5 0 0 0 2 1h4a2.5 2.5 0 0 0 2-1h1.25a.25.25 0 0 1 .25.25v9.5a.25.25 0 0 1-.25.25H2.75a.25.25 0 0 1-.25-.25v-9.5a.25.25 0 0 1 .25-.25Z"/></svg>
+      </button>
+      <button
+        v-for="pluginTab in genericPluginTabs"
         :key="pluginTab.tabId"
         :class="['tab-btn', 'plugin-tab-btn', { active: sidebarTab === pluginTab.tabId }]"
         :data-plugin-contribution="pluginTab.contributionKey"
@@ -1612,6 +1643,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       </section>
     </div><!-- /pipeline-detail-scroll -->
     </div><!-- end pipeline tab · detail view -->
+
+    <!-- Plans remains Host-owned until the B6 package migration. -->
+    <PlanPane
+      v-if="backend && sidebarTab === 'plans'"
+      class="plans-split"
+      :workspace-path="workspace ?? ''"
+      :backend="backend"
+    />
 
     <Teleport to="body">
       <div v-if="confirmingRestart" class="restart-modal" @click.self="confirmingRestart = false">
@@ -2944,6 +2983,11 @@ button.icon-btn.muted:hover {
   gap: 12px;
   padding: 0 14px 14px;
   min-height: 0;
+}
+.plans-split {
+  flex: 1;
+  min-height: 0;
+  margin: 0 -14px -14px;
 }
 /* ExplorerPane fills its part-top container */
 .pane-split .part-top > * {

@@ -5,7 +5,7 @@ import {
   type GitTransport,
   type GitTransportError,
   type GitTransportStatusSource,
-} from '@navide/git-feature'
+} from '../../../../shared/gitCompatibility'
 import {
   createPluginGitTransport,
   type PluginGitSdk,
@@ -14,8 +14,8 @@ import {
 import type {
   GitTransportContractHarness,
   GitTransportRequestRecord,
-} from '@navide/git-feature/testing'
-import { runGitTransportContract } from '@navide/git-feature/testing'
+} from '../../../../shared/gitCompatibility.testing'
+import { runGitTransportContract } from '../../../../shared/gitCompatibility.testing'
 
 interface SdkHarness {
   readonly sdk: PluginGitSdk

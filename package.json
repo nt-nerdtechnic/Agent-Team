@@ -15,7 +15,7 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "pnpm run build:git && electron-vite build",
+    "build": "pnpm run build:official-plugins && pnpm run build:git:legacy && electron-vite build",
     "build:official-plugins": "pnpm run build:mini-ide && pnpm run build:plans && pnpm run build:git:v2",
     "build:mini-ide": "vite build --config vite.mini-ide.config.ts",
     "build:plans": "vite build --config vite.plans.config.ts",
@@ -56,6 +56,14 @@
       {
         "from": "backend/dist/agent_team_backend",
         "to": "bin/agent_team_backend"
+      },
+      {
+        "from": "dist-plugins/mini-ide",
+        "to": "plugins/mini-ide"
+      },
+      {
+        "from": "dist-plugins/plans",
+        "to": "plugins/plans"
       },
       {
         "from": "dist-plugins/navide-git",

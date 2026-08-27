@@ -1,10 +1,10 @@
 import {
-  DEFAULT_GIT_TIMEOUT_MS,
+  HOST_GIT_TIMEOUT_MS,
   type GitEventType,
   type GitRequestType,
   type GitTransport,
   type GitTransportStatusSource,
-} from '@navide/git-feature'
+} from '../../../shared/gitCompatibility'
 import type { PortResponse } from '@navide/plugin-ui/shared'
 
 export type PluginGitSdkResponse<TPayload = unknown> = PortResponse<TPayload>
@@ -31,7 +31,7 @@ export function createPluginGitTransport(sdk: PluginGitSdk): GitTransport {
     async send<TPayload = unknown>(
       type: GitRequestType,
       payload: Record<string, unknown> = {},
-      timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+      timeoutMs = HOST_GIT_TIMEOUT_MS,
     ) {
       try {
         const response = await sdk.request<TPayload>(type, payload, timeoutMs)

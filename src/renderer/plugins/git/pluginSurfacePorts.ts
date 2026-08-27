@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import type { GitTransport } from '@navide/git-feature'
+import type { GitTransport } from '../../../shared/gitCompatibility'
 import type {
   GitAccountViewPort,
   GitAccountPublic,
@@ -21,7 +21,7 @@ import type {
   TerminalOutputEvent,
 } from '@navide/terminal'
 import type { Issue, IssueDetail, IssueProviderInfo } from '../../src/composables/useIssues'
-import type { GitTransportStatusSource } from '@navide/git-feature'
+import type { GitTransportStatusSource } from '../../../shared/gitCompatibility'
 
 export interface PluginCapabilitySdk {
   readonly status: GitTransportStatusSource
