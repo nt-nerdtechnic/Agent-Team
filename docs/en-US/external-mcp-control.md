@@ -42,9 +42,10 @@ credential (minted when Navide spawns a claude/codex pane), this backend's
 internal "host" credential (used by its own CLI wiring), and the external
 credential described above — gated on the Settings toggle. An external
 caller has no pane identity and therefore no workspace of its own: every
-tool that addresses a pane (`cli_send`, `cli_read_log`, `cli_get_status`,
-`cli_wait_idle`) requires the fully-qualified `<folder>/<pane>` form rather
-than a bare pane name, and every tool that addresses UI state
+tool that addresses a pane (`cli_send`, `cli_send_and_wait`, `cli_read_log`,
+`cli_get_status`, `cli_wait_idle`) requires the fully-qualified `<folder>/<pane>` form rather
+than a bare pane name — or a `pane_id`, which names one exact pane and is
+already fully qualified — and every tool that addresses UI state
 (`ui_invoke`, `ui_snapshot`, `ui_list_actions`) or a plan document
 (`plan_*`) requires an explicit `workspace_path` — a caller running as a
 pane may omit it and get that pane's own workspace.
@@ -90,12 +91,12 @@ documents the addresses, the idle gate and the guard rails they share.
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `pane_id` (the key every `ui.pane.*` action takes), `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
-| `cli_send` | `to`, `text`, `wait_for_delivery_s=0` (capped at 120) | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
+| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `pane_id` (the key every `ui.pane.*` action takes, and an alternative to `address` on the pane tools below), `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
+| `cli_send` | `to`, `text`, `wait_for_delivery_s=0` (capped at 120), `pane_id?` | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
 | `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | Your own sends that are stuck or failed: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20` (capped at 200) | **CLI panes only.** What is queued *for you* and has not gone in yet: `{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
-| `cli_send_and_wait` | `to`, `text`, `timeout_s=60` (capped at 120) | `cli_send` plus the wait for that turn to finish; returns `cli_wait_idle`'s result plus `{ok, target, msg_key}` |
+| `cli_send_and_wait` | `to`, `text`, `timeout_s=60` (capped at 120), `pane_id?` | `cli_send` plus the wait for that turn to finish; returns `cli_wait_idle`'s result plus `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller) | Spawn a new CLI pane with a task; returns `{ok, name, address}`, plus `advisories` when the spawn crossed an advisory threshold |
 
 `cli_send` returns once the message is *accepted* for delivery, not once the
@@ -229,9 +230,9 @@ recorded as diagnostics, readable via `ui_diagnostics`.
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `cli_read_log` | `target`, `tail_lines=200`, `since?` | Tail of the pane's conversation log (≤512KB and ≤`tail_lines` lines); returns `next_cursor` and `rotated` |
-| `cli_get_status` | `target` | `{busy, agent_key, last_activity?, ui?}` — `ui` mirrors `ui.pane.getStatus` when the owning window answers |
-| `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120) | Blocks until the pane is idle or the timeout passes; returns `{idle, source, waited_s, last_activity?, ui_status?}`, plus `reason` on timeout |
+| `cli_read_log` | `target`, `tail_lines=200`, `since?`, `pane_id?` | Tail of the pane's conversation log (≤512KB and ≤`tail_lines` lines); returns `next_cursor` and `rotated` |
+| `cli_get_status` | `target`, `pane_id?` | `{busy, agent_key, last_activity?, ui?}` — `ui` mirrors `ui.pane.getStatus` when the owning window answers |
+| `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120), `pane_id?` | Blocks until the pane is idle or the timeout passes; returns `{idle, source, waited_s, last_activity?, ui_status?}`, plus `reason` on timeout |
 
 `cli_read_log`'s `since` reads incrementally: pass back the `next_cursor` from
 your previous call to get only what the pane has said since then, instead of
@@ -326,6 +327,68 @@ argument shape.
 agentKey, workspacePath, status?}], activeTab, settingsOpen,
 openWorkspaces}`.
 
+### Preview records
+
+Every workspace keeps one feed of what was changed or shown in it, persisted
+in that workspace's `.agent-team/navide.db` so it survives a Navide restart.
+These three tools are an agent's end of that feed: report your own writes,
+read back what other writers reported, and push something in front of the
+user.
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `preview_record` | `rel_path`, `change="modified"`, `note`, `kind="file"`, `content`, `title`, `workspace_path` | Report a file you just created, modified or deleted; returns `{uid, created_at, rel_path, change, merged}`, plus `warning?` |
+| `preview_list` | `limit=50` (capped at 300), `since=0`, `change`, `agent`, `workspace_path` | Read the feed back, newest first; returns `{workspace_path, entries, truncated}`, plus `warning?` |
+| `preview_show` | `rel_path`, `kind="file"`, `content`, `title`, `workspace_path` | Push a file, diff or inline content into the right rail's preview panel; returns the window's own `{ok, result, error}` plus `recorded`, and on `ok` also `uid`, `merged` and `warning?` |
+
+`workspace_path` behaves exactly as it does for the `plan_*` tools: a pane
+caller may omit it and gets that pane's own workspace; a host or external
+caller has no pane identity and must pass it, or the call errors.
+
+Each element of `preview_list`'s `entries` has `uid`, `created_at` (epoch
+milliseconds), `change`, `rel_path`, `kind`, `title`, `source`, `pane_id`,
+`agent`, `tool`, `note` and `payload`.
+
+| Field | Values |
+|---|---|
+| `change` | `created`, `modified`, `deleted`, `shown` |
+| `source` | `user` (done in the app), `agent` (an MCP call or a CLI hook), `watcher` (the filesystem catch-all, **unattributed**) |
+| `kind` | `file`, `diff`, `snippet`, `html`, `markdown` |
+
+`preview_record` accepts only `created`, `modified` and `deleted`. `shown` is
+written by `preview_show` alone, and only once the owning window confirms it
+took the push — a preview nobody saw is never recorded as shown. `preview_list`'s
+`change` filter accepts all four.
+
+`kind` decides which of `rel_path` and `content` is required: `file` and `diff`
+address a file and need `rel_path` (workspace-relative); `snippet`, `html` and
+`markdown` *are* the payload and need `content`, capped at 512 K characters —
+over that the call is rejected outright rather than truncated. `note` is
+capped at 500 characters and is truncated rather than rejected.
+
+**Attribution is read off the caller's credential**, never off an argument:
+the recorded `pane_id` and `agent` are the calling pane's own, and there is no
+parameter that lets a caller claim to be a different pane. A host or external
+caller records without attribution.
+
+`merged: true` means the event folded into a record already on the feed — same
+path, same change, within 2 seconds, typically because the filesystem watcher
+got there first — so nothing new was added, and `uid` is `""` with `created_at`
+0. The feed keeps the newest 300 rows per workspace and drops the oldest past
+that.
+
+`warning` means the same thing it does on `plan_create`: no live Navide pane
+uses `workspace_path`, so the record landed where the user is not looking.
+
+**The feed has writers other than these tools.** When a CLI agent edits a file
+through `Write`, `Edit`, `MultiEdit` or `NotebookEdit`, Navide records it
+automatically and with full attribution — but only for the vendors that have a
+hook mechanism, currently **claude, qwen and copilot**. Every other file change
+is caught by the filesystem watcher and recorded with `source: "watcher"` and
+no attribution. `preview_list` is therefore a fuller picture than the sum of
+the `preview_record` calls made against a workspace, and an entry without a
+`pane_id` means nobody claimed the change — not that nothing made it.
+
 ## A pane's id outlives its pane
 
 A CLI pane's connection URL is written once, when the pane spawns, and the CLI
@@ -341,6 +404,18 @@ the `plan_*` tools default to, the same `you` in `cli_list_targets`, the same
 identity `cli_send` checks a bare name and a self-send against. Reloading twice
 does not break the chain — each hop is flattened onto the current pane — and an
 id is never allowed to follow a pane into another workspace.
+
+An id is an address as well as an identity. `cli_send`, `cli_send_and_wait`,
+`cli_read_log`, `cli_get_status` and `cli_wait_idle` each take a `pane_id` that
+is used in place of their address argument, and it is the only way to reach one
+of two panes in a workspace that share a name — a name matching both is refused
+as `ambiguous-target` rather than guessed at. It resolves through the same
+table, so an id that outlived a reload or a detach addresses the pane it
+followed. What it does not outlive is a pane rebuilt around a *fresh* CLI: that
+path declares no former ids, and those tools answer `unknown-pane-id`, which
+means "read a fresh id from `cli_list_targets`", not "that pane is gone". A
+remote pane's id was minted by another machine's registry and is not one of
+these, so a cross-device target is still addressed by name.
 
 A pane's [push channel](inter-cli-messaging.md#push-channels) mostly follows the
 same way, with one exception. A window reload keeps it, and so does a run group

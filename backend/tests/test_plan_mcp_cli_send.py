@@ -173,6 +173,117 @@ async def test_send_refuses_unknown_ambiguous_and_self(
     assert captured == []
 
 
+# ── Addressing one exact pane by id ────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_pane_id_names_one_of_two_panes_sharing_a_name(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The case a name cannot express: two panes, one workspace, same name."""
+    _seed()
+    agent_messaging.register("pd", "reviewer", "/ws/dup")
+    agent_messaging.register("pe", "reviewer", "/ws/dup")
+
+    by_name = await plan_mcp.cli_send("dup/reviewer", "x", _ctx())
+    assert by_name["ok"] is False and by_name["error_code"] == "ambiguous-target"
+    # The refusal points at the way out rather than only at renaming.
+    assert "pane_id" in by_name["error"]
+
+    result = await plan_mcp.cli_send("", "second one please", _ctx(), pane_id="pe")
+    assert result["ok"] is True
+    assert result["target"] == "dup/reviewer"
+    assert result["cross_workspace"] is True
+    assert len(captured) == 1
+    assert captured[0]["payload"]["target_pane_id"] == "pe"
+    assert captured[0]["payload"]["content"] == "second one please"
+
+
+@pytest.mark.asyncio
+async def test_pane_id_wins_over_a_to_that_would_resolve_elsewhere(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_send("beta/reviewer", "x", _ctx(), pane_id="pc")
+    assert result["ok"] is True
+    assert captured[0]["payload"]["target_pane_id"] == "pc"
+    assert result["cross_workspace"] is False
+
+
+@pytest.mark.asyncio
+async def test_pane_id_that_names_nothing_is_refused(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_send("", "x", _ctx(), pane_id="nope")
+    assert result["ok"] is False
+    assert result["error_code"] == "unknown-pane-id"
+    assert "cli_list_targets" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_pane_id_follows_a_rebuilt_pane(captured: list[dict[str, Any]]) -> None:
+    """An id handed to a CLI before its pane was rebuilt still reaches it."""
+    _seed()
+    agent_messaging.unregister("pb")
+    agent_messaging.register("pb2", "reviewer", "/ws/beta", agent_key="codex")
+    agent_messaging.add_aliases("pb2", ["pb"], "/ws/beta")
+
+    result = await plan_mcp.cli_send("", "x", _ctx(), pane_id="pb")
+    assert result["ok"] is True
+    assert captured[0]["payload"]["target_pane_id"] == "pb2"
+
+
+@pytest.mark.asyncio
+async def test_pane_id_reports_an_offline_pane_as_offline(
+    captured: list[dict[str, Any]],
+) -> None:
+    """Same distinction a name gets: the address is right, the window is away."""
+    _seed()
+    owner = object()
+    agent_messaging.register("pf", "away", "/ws/beta", owner=owner)
+    agent_messaging.drop_owner(owner)
+
+    result = await plan_mcp.cli_send("", "x", _ctx(), pane_id="pf")
+    assert result["ok"] is False
+    assert result["error_code"] == "target-offline"
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_pane_id_still_refuses_your_own_pane(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_send("", "x", _ctx(), pane_id="pa")
+    assert result["ok"] is False and "your own pane" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_pane_id_frees_an_external_caller_from_qualifying_the_target(
+    captured: list[dict[str, Any]],
+) -> None:
+    """An id is as qualified as an address gets, so the workspace rule that a
+    caller without one must name a workspace does not apply."""
+    _seed()
+    unqualified = await plan_mcp.cli_send("reviewer", "x", _external_ctx())
+    assert unqualified["ok"] is False
+
+    result = await plan_mcp.cli_send("", "x", _external_ctx(), pane_id="pb")
+    assert result["ok"] is True
+    assert captured[0]["payload"]["target_pane_id"] == "pb"
+    assert result["cross_workspace"] is True
+
+
+@pytest.mark.asyncio
+async def test_pane_id_is_ignored_when_blank(captured: list[dict[str, Any]]) -> None:
+    """A blank id must not shadow the address — it is simply not given."""
+    _seed()
+    result = await plan_mcp.cli_send("beta/reviewer", "x", _ctx(), pane_id="   ")
+    assert result["ok"] is True
+    assert captured[0]["payload"]["target_pane_id"] == "pb"
+
+
 @pytest.mark.asyncio
 async def test_send_refuses_empty_text(captured: list[dict[str, Any]]) -> None:
     _seed()
@@ -520,11 +631,11 @@ async def test_tools_are_registered_without_a_ctx_argument() -> None:
     tools = {t.name: t for t in await plan_mcp.server.list_tools()}
     assert set(tools) >= {
         "cli_send", "cli_list_targets", "cli_open_agent", "cli_check_message",
-        "cli_send_and_wait",
+        "cli_send_and_wait", "cli_read_log", "cli_get_status", "cli_wait_idle",
     }
     # The Context parameter is injected, never asked of the agent.
     assert set((tools["cli_send"].inputSchema.get("properties") or {})) == {
-        "to", "text", "wait_for_delivery_s",
+        "to", "text", "wait_for_delivery_s", "pane_id",
     }
     assert not (tools["cli_list_targets"].inputSchema.get("properties") or {})
     assert set((tools["cli_open_agent"].inputSchema.get("properties") or {})) == {
@@ -532,8 +643,14 @@ async def test_tools_are_registered_without_a_ctx_argument() -> None:
     }
     assert set((tools["cli_check_message"].inputSchema.get("properties") or {})) == {"msg_key"}
     assert set((tools["cli_send_and_wait"].inputSchema.get("properties") or {})) == {
-        "to", "text", "timeout_s",
+        "to", "text", "timeout_s", "pane_id",
     }
+    # Every tool that addresses a pane takes an id as the unambiguous
+    # alternative to a name; adding one without it has to fail here.
+    for name in ("cli_send", "cli_send_and_wait", "cli_read_log",
+                 "cli_get_status", "cli_wait_idle"):
+        props = set(tools[name].inputSchema.get("properties") or {})
+        assert "pane_id" in props, f"{name} cannot address a pane by id"
 
 
 # ── external / host callers (no pane identity) ──────────────────────────────

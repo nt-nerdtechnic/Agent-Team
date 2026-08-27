@@ -11,7 +11,11 @@ from typing import Any
 import pytest
 
 from agent_team_backend import agent_messaging, app
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
+from agent_team_backend.plugins.builtin.navide_plans import (
+    plan_mcp,
+    plan_mcp_auth,
+    plan_mcp_wiring,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -727,3 +731,243 @@ async def test_send_and_wait_still_answers_a_zero_timeout_the_old_way(
     assert result["ok"] is True
     assert result["source"] == "timeout"
     assert result["reason"] == "never_started"
+
+
+# ── Addressing one exact pane by id ──────────────────────────────────────
+# `pane_id` names one exact pane instead of the address argument, and has to
+# mean the same thing in every tool that reads a pane as it does in cli_send.
+
+
+def _external_ctx() -> Any:
+    """A Context authenticated as an external client (no pane identity)."""
+    plan_mcp_auth.set_external_enabled(True)
+    params = {"client": "external", "t": plan_mcp_auth.external_token()}
+    return SimpleNamespace(
+        request_context=SimpleNamespace(request=SimpleNamespace(query_params=params))
+    )
+
+
+def _seed_twins(workspace: str) -> None:
+    """Two panes sharing one name in one workspace, plus a caller outside it.
+
+    The caller sits elsewhere on purpose: a bare name never leaves its own
+    workspace, so only the qualified form reaches these two — and that is the
+    form that refuses them as ambiguous rather than guessing.
+    """
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+    agent_messaging.register("pw1", "worker", workspace, agent_key="claude")
+    agent_messaging.register("pw2", "worker", workspace, agent_key="codex")
+
+
+@pytest.mark.asyncio
+async def test_read_log_by_pane_id_reads_the_twin_a_name_cannot(tmp_path: Path) -> None:
+    _seed_twins(str(tmp_path))
+    for pane, text in (("pw1", "first twin\n"), ("pw2", "second twin\n")):
+        log = tmp_path / f"{pane}.log"
+        log.write_text(text, encoding="utf-8")
+        app.project_store.record_manual_pane_spawn(
+            str(tmp_path), pane_id=pane, agent="claude", output_log_file=str(log)
+        )
+
+    by_name = await plan_mcp.cli_read_log(f"{tmp_path.name}/worker", _ctx(pane_id="other"))
+    assert by_name["ok"] is False
+    assert by_name["error_code"] == "ambiguous-target"
+
+    result = await plan_mcp.cli_read_log("", _ctx(pane_id="other"), pane_id="pw2")
+    assert result["ok"] is True
+    assert result["log_path"] == str(tmp_path / "pw2.log")
+    assert result["text"] == "second twin"
+
+
+@pytest.mark.asyncio
+async def test_read_log_refuses_a_pane_id_that_names_nothing(tmp_path: Path) -> None:
+    _seed_pane(tmp_path)
+    result = await plan_mcp.cli_read_log("", _ctx(), pane_id="nope")
+    assert result["ok"] is False
+    assert result["error_code"] == "unknown-pane-id"
+
+
+@pytest.mark.asyncio
+async def test_read_log_ignores_a_blank_pane_id(tmp_path: Path) -> None:
+    """A blank id must not shadow the address — it is simply not given."""
+    _seed_pane(tmp_path)
+    log = tmp_path / "conv.log"
+    log.write_text("line1\n", encoding="utf-8")
+    app.project_store.record_manual_pane_spawn(
+        str(tmp_path), pane_id="pw", agent="claude", output_log_file=str(log)
+    )
+
+    result = await plan_mcp.cli_read_log("worker", _ctx(), pane_id="   ")
+
+    assert result["ok"] is True
+    assert result["text"] == "line1"
+
+
+@pytest.mark.asyncio
+async def test_read_log_by_pane_id_frees_an_external_caller_from_qualifying(
+    tmp_path: Path,
+) -> None:
+    """An id is as qualified as an address gets, so the rule that a caller
+    without a pane must name a workspace has nothing left to enforce."""
+    _seed_pane(tmp_path)
+    log = tmp_path / "conv.log"
+    log.write_text("line1\n", encoding="utf-8")
+    app.project_store.record_manual_pane_spawn(
+        str(tmp_path), pane_id="pw", agent="claude", output_log_file=str(log)
+    )
+
+    unqualified = await plan_mcp.cli_read_log("worker", _external_ctx())
+    assert unqualified["ok"] is False
+    assert "qualified" in unqualified["error"]
+
+    result = await plan_mcp.cli_read_log("", _external_ctx(), pane_id="pw")
+    assert result["ok"] is True
+    assert result["target"] == f"{tmp_path.name}/worker"
+    assert result["text"] == "line1"
+
+
+@pytest.mark.asyncio
+async def test_get_status_by_pane_id_reports_the_twin_a_name_cannot() -> None:
+    _seed_twins("/ws/alpha")
+    agent_messaging.set_busy("pw2", True)
+    app._record_pane_activity("pw2", "turn_complete", "the second twin spoke")
+
+    by_name = await plan_mcp.cli_get_status("alpha/worker", _ctx(pane_id="other"))
+    assert by_name["ok"] is False
+    assert by_name["error_code"] == "ambiguous-target"
+
+    result = await plan_mcp.cli_get_status("", _ctx(pane_id="other"), pane_id="pw2")
+    assert result["ok"] is True
+    # The twins differ only by agent_key here, which is how this says which one
+    # answered — both carry the same name and the same qualified address.
+    assert result["agent_key"] == "codex"
+    assert result["busy"] is True
+    assert result["last_activity"]["text"] == "the second twin spoke"
+
+
+@pytest.mark.asyncio
+async def test_get_status_refuses_a_pane_id_that_names_nothing() -> None:
+    agent_messaging.register("pa", "caller", "/ws/alpha")
+    result = await plan_mcp.cli_get_status("", _ctx(), pane_id="nope")
+    assert result["ok"] is False
+    assert result["error_code"] == "unknown-pane-id"
+
+
+@pytest.mark.asyncio
+async def test_get_status_ignores_a_blank_pane_id() -> None:
+    agent_messaging.register("pa", "caller", "/ws/alpha")
+    agent_messaging.register("pw", "worker", "/ws/alpha", agent_key="codex")
+
+    result = await plan_mcp.cli_get_status("worker", _ctx(), pane_id="   ")
+
+    assert result["ok"] is True
+    assert result["agent_key"] == "codex"
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_by_pane_id_waits_on_the_twin_a_name_cannot() -> None:
+    _seed_twins("/ws/alpha")
+    app._record_pane_activity("pw2", "turn_complete", "second twin done")
+
+    by_name = await plan_mcp.cli_wait_idle(
+        "alpha/worker", _ctx(pane_id="other"), timeout_s=0.05
+    )
+    assert by_name["ok"] is False
+    assert by_name["error_code"] == "ambiguous-target"
+
+    result = await plan_mcp.cli_wait_idle("", _ctx(pane_id="other"), pane_id="pw2")
+
+    assert result["idle"] is True
+    assert result["source"] == "turn_complete"
+    assert result["last_activity"]["text"] == "second twin done"
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_refuses_a_pane_id_that_names_nothing() -> None:
+    agent_messaging.register("pa", "caller", "/ws/alpha")
+    result = await plan_mcp.cli_wait_idle("", _ctx(), pane_id="nope", timeout_s=0.05)
+    assert result["ok"] is False
+    assert result["error_code"] == "unknown-pane-id"
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_ignores_a_blank_pane_id() -> None:
+    agent_messaging.register("pa", "caller", "/ws/alpha")
+    agent_messaging.register("pw", "worker", "/ws/alpha")
+    app._record_pane_activity("pw", "turn_complete", "done")
+
+    result = await plan_mcp.cli_wait_idle("worker", _ctx(), pane_id="   ", timeout_s=0.05)
+
+    assert result["idle"] is True
+    assert result["source"] == "turn_complete"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_by_pane_id_reaches_the_twin_a_name_cannot(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    """An id given here addresses both halves — the send, and the wait for the
+    turn it should produce — so the reply has to come from the same twin the
+    message went into."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    _seed_twins("/ws/alpha")
+
+    by_name = await plan_mcp.cli_send_and_wait(
+        "alpha/worker", "go", _ctx(pane_id="other"), timeout_s=0.1
+    )
+    assert by_name["ok"] is False
+    assert by_name["error_code"] == "ambiguous-target"
+    assert broadcasts == []
+
+    async def the_second_twin_replies() -> None:
+        await asyncio.sleep(0.02)
+        app._record_pane_activity("pw2", "turn_complete", "second twin done")
+
+    delivery = _deliver_when_sent(broadcasts)
+    task = asyncio.create_task(the_second_twin_replies())
+    result = await plan_mcp.cli_send_and_wait(
+        "", "go", _ctx(pane_id="other"), timeout_s=2.0, pane_id="pw2"
+    )
+    await task
+    await delivery
+
+    assert result["ok"] is True
+    assert result["idle"] is True
+    assert result["source"] == "turn_complete"
+    assert result["last_activity"]["text"] == "second twin done"
+    assert broadcasts[0]["payload"]["target_pane_id"] == "pw2"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_refuses_a_pane_id_that_names_nothing(
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    _seed_pair()
+    result = await plan_mcp.cli_send_and_wait("", "go", _ctx(), timeout_s=0.1, pane_id="nope")
+    assert result["ok"] is False
+    assert result["error_code"] == "unknown-pane-id"
+    assert broadcasts == []
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_ignores_a_blank_pane_id(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    _seed_pair()
+
+    async def worker_replies() -> None:
+        await asyncio.sleep(0.02)
+        app._record_pane_activity("pw", "turn_complete", "fresh")
+
+    delivery = _deliver_when_sent(broadcasts)
+    task = asyncio.create_task(worker_replies())
+    result = await plan_mcp.cli_send_and_wait(
+        "worker", "go", _ctx(), timeout_s=2.0, pane_id="   "
+    )
+    await task
+    await delivery
+
+    assert result["ok"] is True
+    assert result["idle"] is True
+    assert broadcasts[0]["payload"]["target_pane_id"] == "pw"

@@ -560,6 +560,84 @@ def test_resolve_address_refuses_a_foreign_device_before_looking_anywhere() -> N
     assert result.params["to"] == f"{FOREIGN_DEVICE}/beta/reviewer"
 
 
+# ── Resolution by pane id ──────────────────────────────────────────────────
+def test_resolve_pane_id_names_one_of_two_panes_sharing_a_name() -> None:
+    """The whole reason an id exists: two panes in one workspace may share a
+    name, and `resolve` refuses both rather than guessing."""
+    agent_messaging.register("p1", "sender", "/ws/alpha")
+    agent_messaging.register("p2", "claude-2", "/ws/beta")
+    agent_messaging.register("p3", "claude-2", "/ws/beta")
+    assert agent_messaging.resolve("p1", "beta/claude-2").code == "ambiguous-target"
+
+    result = agent_messaging.resolve_pane_id("p1", "p3")
+
+    assert result.pane is not None and result.pane.pane_id == "p3"
+    assert result.code is None and result.error is None
+
+
+def test_resolve_pane_id_follows_the_alias_table() -> None:
+    """A window reload or a detach rebuilds the pane around the same running
+    CLI under a new id — the id that CLI was handed at spawn time has to keep
+    naming it, or every id an agent holds goes stale on a reload."""
+    agent_messaging.register("p1", "sender", "/ws/alpha")
+    agent_messaging.register("p2", "reviewer", "/ws/beta")
+    agent_messaging.unregister("p2")
+    agent_messaging.register("p2-rebuilt", "reviewer", "/ws/beta")
+    agent_messaging.add_aliases("p2-rebuilt", ["p2"], "/ws/beta")
+
+    result = agent_messaging.resolve_pane_id("p1", "p2")
+
+    assert result.pane is not None and result.pane.pane_id == "p2-rebuilt"
+
+
+def test_resolve_pane_id_refuses_a_blank_id() -> None:
+    # Whitespace has to fail like an empty string: the MCP tools treat a blank
+    # id as "not given" and fall back to the address, so a blank one reaching
+    # here at all means the caller meant an id and typed nothing.
+    _seed_two_workspaces()
+    for ident in ("", "   "):
+        result = agent_messaging.resolve_pane_id("p1", ident)
+        assert result.pane is None, ident
+        assert result.code == "empty-target", ident
+
+
+def test_resolve_pane_id_refuses_an_unknown_id() -> None:
+    """Kept apart from "offline": an id nothing answers to means the pane was
+    rebuilt around a fresh CLI, and the answer is to read a new id — not to
+    retry the one in hand."""
+    _seed_two_workspaces()
+    result = agent_messaging.resolve_pane_id("p1", "never-existed")
+
+    assert result.pane is None
+    assert result.code == "unknown-pane-id"
+    assert result.params == {"pane_id": "never-existed"}
+    assert result.error is not None and "cli_list_targets" in result.error
+
+
+def test_resolve_pane_id_reports_an_offline_pane_as_offline() -> None:
+    # Same distinction an address gets: the pane is right, its window is away.
+    window = object()
+    agent_messaging.register("p1", "sender", "/ws/alpha")
+    agent_messaging.register("p2", "reviewer", "/ws/beta", owner=window)
+    agent_messaging.drop_owner(window)
+
+    result = agent_messaging.resolve_pane_id("p1", "p2")
+
+    assert result.pane is None
+    assert result.code == "target-offline"
+
+
+def test_resolve_pane_id_flags_cross_workspace_like_an_address_does() -> None:
+    """`cross_workspace` drives how the delivery is labelled to the recipient,
+    so an id must compute it the same way a name does — including for a caller
+    with no pane of its own, whose message comes from outside every one."""
+    _seed_two_workspaces()
+
+    assert agent_messaging.resolve_pane_id("p1", "p2").cross_workspace is False
+    assert agent_messaging.resolve_pane_id("p1", "p3").cross_workspace is True
+    assert agent_messaging.resolve_pane_id("", "p2").cross_workspace is True
+
+
 # ── WS handlers ────────────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_register_handler_mirrors_pane() -> None:

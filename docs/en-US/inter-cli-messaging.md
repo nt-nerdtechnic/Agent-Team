@@ -35,13 +35,28 @@ Typing `@` in a CLI pane opens a completion menu of every handle you can
 address from there, including panes in other workspace windows. Dropping a pane
 onto another pane right after typing `@` inserts that pane's address.
 
-An address is always a handle. A pane also has an internal **id**, and it shows
-up in exactly one place: the MCP connection URL a CLI is spawned with, which is
-how `cli_send` and the rest know who is calling. That id belongs to the pane
-rather than to the process inside it, so a pane rebuilt around a CLI that never
-stopped — a window reload, a detach — gets a new one while the CLI keeps
-quoting the old. The old id goes on resolving to the pane the process is
-attached to; see [External MCP control](external-mcp-control.md#a-panes-id-outlives-its-pane).
+An address is always a handle. A pane also has an internal **id**, and it has
+two uses. One is the MCP connection URL a CLI is spawned with, which is how
+`cli_send` and the rest know who is calling. The other is saying which pane you
+mean when a handle cannot: `cli_send`, `cli_send_and_wait`, `cli_read_log`,
+`cli_get_status` and `cli_wait_idle` each take a `pane_id`, and when one is
+given it is used instead of the address. Two panes in one workspace are allowed
+to share a name, and an address matching both is refused as `ambiguous-target`
+rather than guessed at — an id is how you say which one of them you meant.
+`cli_list_targets` lists the current id of every pane next to its address.
+
+Reach for an id only when a handle cannot do the job. The handle is readable,
+it is what the `@` menu completes, and it survives what an id does not: a pane
+restarted around a fresh CLI mints a new id and declares no former ones, so an
+id noted earlier can stop resolving — `unknown-pane-id` means "read a fresh id
+from `cli_list_targets`", not "that pane is gone". Ids are local to this
+machine as well, so a pane on another device has none and can only be reached
+by its `<device>/<workspace>/<pane>` name.
+
+The id belongs to the pane rather than to the process inside it, so a pane
+rebuilt around a CLI that never stopped — a window reload, a detach — gets a
+new one while the CLI keeps quoting the old. The old id goes on resolving to
+the pane the process is attached to; see [External MCP control](external-mcp-control.md#a-panes-id-outlives-its-pane).
 
 ---
 
@@ -695,6 +710,7 @@ still never persisted.
 | `no-report` | The other window never reported an outcome |
 | `unknown-workspace` / `ambiguous-workspace` | A `<folder>/<pane>` address that matched no open workspace, or several |
 | `unknown-target-in-workspace` / `ambiguous-target` | The workspace resolved, but the pane name did not — or matched twice |
+| `unknown-pane-id` | A `pane_id` that names no pane on this machine — read a fresh one from `cli_list_targets` |
 
 ---
 

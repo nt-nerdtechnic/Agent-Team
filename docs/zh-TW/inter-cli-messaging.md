@@ -34,11 +34,24 @@ Pane 空下來時，把訊息輸入進去。
 Handle，包含其他 Workspace 視窗中的 Pane。剛輸入 `@` 之後把一個 Pane 拖放到另一
 個 Pane 上，會插入該 Pane 的位址。
 
-位址永遠是 Handle。Pane 另外還有一個內部 **id**，而它只出現在一個地方：CLI 生成時
-拿到的 MCP 連線 URL —— `cli_send` 這些 Tool 就是靠它知道呼叫者是誰。那個 id 屬於
-Pane 本身，不屬於裡面的 Process，所以用一個從未停止的 CLI 重建出來的 Pane（重載視
-窗、拆出視窗）會拿到新的 id，而 CLI 仍然帶著舊的。舊 id 會繼續解析到該 Process 實
-際附著的 Pane；詳見
+位址永遠是 Handle。Pane 另外還有一個內部 **id**，而它有兩個用途。一個是 CLI 生成時
+拿到的 MCP 連線 URL —— `cli_send` 這些 Tool 就是靠它知道呼叫者是誰。另一個是在
+Handle 說不清楚的時候指名你要的是哪一個 Pane：`cli_send`、`cli_send_and_wait`、
+`cli_read_log`、`cli_get_status`、`cli_wait_idle` 都吃一個 `pane_id`，給了它就用它
+取代位址。同一個 Workspace 裡的兩個 Pane 本來就可以同名，而同時對應到兩者的位址會
+以 `ambiguous-target` 被拒絕、而不是隨便猜一個 —— id 就是你說出「是這一個」的方
+式。`cli_list_targets` 會在每個 Pane 的位址旁邊一併列出它當下的 id。
+
+只有在 Handle 辦不到的時候才動用 id。Handle 讀得懂、是 `@` 選單會補完的東西，而且
+撐得過 id 撐不過的事：用一個全新的 CLI 重啟出來的 Pane 會鑄一個新 id，而且不會宣告
+任何舊 id，所以早先記下的 id 可能就解析不到了 —— `unknown-pane-id` 的意思是「去
+`cli_list_targets` 讀一個新的 id」，不是「那個 Pane 不見了」。id 也只在這台機器上算
+數，所以另一台裝置上的 Pane 沒有 id，只能用它的 `<device>/<workspace>/<pane>` 名稱
+定址。
+
+那個 id 屬於 Pane 本身，不屬於裡面的 Process，所以用一個從未停止的 CLI 重建出來的
+Pane（重載視窗、拆出視窗）會拿到新的 id，而 CLI 仍然帶著舊的。舊 id 會繼續解析到該
+Process 實際附著的 Pane；詳見
 [外部 MCP 控制](external-mcp-control.md#pane-的-id-活得比-pane-久)。
 
 ---
@@ -605,6 +618,7 @@ Agent 不必有 Messages 面板可看，也能讀到同一個原因 ——
 | `no-report` | 另一個視窗始終沒有回報結果 |
 | `unknown-workspace` / `ambiguous-workspace` | 一個沒有對應到任何開啟中 Workspace、或對應到多個的 `<folder>/<pane>` 位址 |
 | `unknown-target-in-workspace` / `ambiguous-target` | Workspace 解析成功，但 Pane 名稱沒有 —— 或是對應到兩個 |
+| `unknown-pane-id` | 一個在這台機器上指不到任何 Pane 的 `pane_id` —— 去 `cli_list_targets` 讀一個新的 |
 
 ---
 

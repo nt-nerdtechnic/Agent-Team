@@ -44,8 +44,10 @@ Credential（Navide が claude/codex の Pane を Spawn するときに発行）
 内部の「host」Credential（自身の CLI 配線が使用）、そして上記の外部 Credential
 — これは Settings の Toggle で制御されます。外部の呼び出し元は Pane の Identity
 を持たず、したがって自分の Workspace も持ちません。Pane を指定するすべての Tool
-（`cli_send`、`cli_read_log`、`cli_get_status`、`cli_wait_idle`）は、素の Pane 名
-ではなく完全修飾の `<folder>/<pane>` 形式を必要とし、UI State を指定する Tool
+（`cli_send`、`cli_send_and_wait`、`cli_read_log`、`cli_get_status`、`cli_wait_idle`）
+は、素の Pane 名
+ではなく完全修飾の `<folder>/<pane>` 形式（あるいは、唯一の Pane を指名し、それ自体
+がすでに完全修飾である `pane_id`）を必要とし、UI State を指定する Tool
 （`ui_invoke`、`ui_snapshot`、`ui_list_actions`）や Plan Document を指定する Tool
 （`plan_*`）は明示的な `workspace_path` を必要とします。Pane として動作する
 呼び出し元はこれを省略でき、その場合その Pane 自身の Workspace が使われます。
@@ -91,12 +93,12 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 
 | Tool | パラメータ | 動作 |
 |---|---|---|
-| `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`pane_id`（すべての `ui.pane.*` アクションが取るキー）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
-| `cli_send` | `to`, `text`, `wait_for_delivery_s=0`（上限 120） | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返し、待機を指定した場合はその結末も返す |
+| `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`pane_id`（すべての `ui.pane.*` アクションが取るキーであり、下の Pane 系 Tool では `address` の代わりにもなる）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
+| `cli_send` | `to`, `text`, `wait_for_delivery_s=0`（上限 120）, `pane_id?` | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返し、待機を指定した場合はその結末も返す |
 | `cli_check_message` | `msg_key` | 一つの `cli_send` の結末: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 自分の送信のうち滞留中または失敗しているもの: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20`（上限 200） | **CLI Pane 専用。** *自分宛*に Queue され、まだ入っていないもの: `{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
-| `cli_send_and_wait` | `to`, `text`, `timeout_s=60`（上限 120） | `cli_send` に加えてその Turn の完了まで待機。`cli_wait_idle` の結果に `{ok, target, msg_key}` を付けて返す |
+| `cli_send_and_wait` | `to`, `text`, `timeout_s=60`（上限 120）, `pane_id?` | `cli_send` に加えてその Turn の完了まで待機。`cli_wait_idle` の結果に `{ok, target, msg_key}` を付けて返す |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path`（Pane 以外の呼び出し元では必須） | Task 付きで新しい CLI Pane を Spawn。`{ok, name, address}` を返し、Spawn が Advisory の閾値を越えた場合は `advisories` も返す |
 
 `cli_send` は、メッセージが配信のために*受理された*時点で返り、相手の Agent が
@@ -225,9 +227,9 @@ CLI Pane を保持でき、Spawn の連鎖は任意の深さで実行できま�
 
 | Tool | パラメータ | 動作 |
 |---|---|---|
-| `cli_read_log` | `target`, `tail_lines=200`, `since?` | Pane の会話 Log の末尾（≤512KB かつ ≤`tail_lines` 行）。`next_cursor` と `rotated` を返す |
-| `cli_get_status` | `target` | `{busy, agent_key, last_activity?, ui?}` — `ui` は所有ウィンドウが応答したときに `ui.pane.getStatus` を反映 |
-| `cli_wait_idle` | `target`, `timeout_s=60`（上限 120） | Pane が Idle になるか Timeout するまで Block。`{idle, source, waited_s, last_activity?, ui_status?}` を返し、Timeout 時は `reason` も返す |
+| `cli_read_log` | `target`, `tail_lines=200`, `since?`, `pane_id?` | Pane の会話 Log の末尾（≤512KB かつ ≤`tail_lines` 行）。`next_cursor` と `rotated` を返す |
+| `cli_get_status` | `target`, `pane_id?` | `{busy, agent_key, last_activity?, ui?}` — `ui` は所有ウィンドウが応答したときに `ui.pane.getStatus` を反映 |
+| `cli_wait_idle` | `target`, `timeout_s=60`（上限 120）, `pane_id?` | Pane が Idle になるか Timeout するまで Block。`{idle, source, waited_s, last_activity?, ui_status?}` を返し、Timeout 時は `reason` も返す |
 
 `cli_read_log` の `since` は増分読み取りです。前回の呼び出しの `next_cursor` を
 渡し戻すと、同じ末尾を読み直す代わりに、それ以降に Pane が述べた分だけを取得
@@ -316,6 +318,67 @@ Turn に対する判定ではない唯一のものです。待機が判定に至
 `buildUiActionSnapshot`）。`{workspace, panes: [{id, name?, agentKey,
 workspacePath, status?}], activeTab, settingsOpen, openWorkspaces}` です。
 
+### プレビュー記録
+
+各 Workspace は「そこで何が変更され、何が表示されたか」の Feed を一本持ちます。
+その Workspace の `.agent-team/navide.db` に永続化されるため、Navide を再起動しても
+残ります。この三つの Tool は Agent 側の入り口です。自分の書き込みを報告し、他の
+書き込み者が報告した内容を読み戻し、何かをユーザーの目の前に押し出します。
+
+| Tool | パラメータ | 動作 |
+|---|---|---|
+| `preview_record` | `rel_path`, `change="modified"`, `note`, `kind="file"`, `content`, `title`, `workspace_path` | 今作成・変更・削除したファイルを報告。`{uid, created_at, rel_path, change, merged}` に加えて `warning?` を返す |
+| `preview_list` | `limit=50`（上限 300）, `since=0`, `change`, `agent`, `workspace_path` | Feed を新しい順に読み戻す。`{workspace_path, entries, truncated}` に加えて `warning?` を返す |
+| `preview_show` | `rel_path`, `kind="file"`, `content`, `title`, `workspace_path` | ファイル・diff・インラインコンテンツを右レールのプレビューパネルへ Push。ウィンドウ自身の `{ok, result, error}` に `recorded` を加えて返し、`ok` のときはさらに `uid`, `merged`, `warning?` も返す |
+
+`workspace_path` の振る舞いは `plan_*` 群と完全に同じです。Pane 呼び出し元は省略でき、
+その Pane 自身の Workspace になります。Host や外部 Client は Pane の身元を持たないため
+必ず渡す必要があり、渡さなければ Error になります。
+
+`preview_list` の `entries` の各要素は `uid`, `created_at`（Epoch ミリ秒）, `change`,
+`rel_path`, `kind`, `title`, `source`, `pane_id`, `agent`, `tool`, `note`,
+`payload` を持ちます。
+
+| フィールド | 値域 |
+|---|---|
+| `change` | `created`, `modified`, `deleted`, `shown` |
+| `source` | `user`（App 内の操作）, `agent`（MCP 呼び出しまたは CLI Hook）, `watcher`（File System によるフォールバック、**帰属なし**） |
+| `kind` | `file`, `diff`, `snippet`, `html`, `markdown` |
+
+`preview_record` が受け付けるのは `created`, `modified`, `deleted` だけです。`shown`
+は `preview_show` だけが書き込み、しかも所有ウィンドウが Push を受け取ったと確認した
+後にのみ書かれます — 誰も見ていないプレビューが shown として記録されることはありま
+せん。`preview_list` の `change` フィルタは四つとも受け付けます。
+
+`kind` が `rel_path` と `content` のどちらを必須にするかを決めます。`file` と `diff`
+はファイルを Path で指すので `rel_path`（Workspace 相対）が必要です。`snippet`,
+`html`, `markdown` はそれ自体が Payload なので `content` が必要で、上限は 512 K 文字
+— 超えた場合は切り詰めではなく、その場で拒否されます。`note` は上限 500 文字で、
+こちらは拒否ではなく切り詰めです。
+
+**帰属は呼び出し元の Credential から読み取られ**、引数からは決して読みません。記録
+される `pane_id` と `agent` は呼び出し元 Pane 自身のものであり、別の Pane を騙る
+パラメータは存在しません。Host や外部 Client の記録には帰属が付きません。
+
+`merged: true` は、そのイベントが Feed 上の既存の記録に畳み込まれたことを意味します
+— 同じ Path、同じ `change`、2 秒以内、典型的には File System の Watcher が先に
+到達した場合です。この場合は何も追加されず、`uid` は `""`、`created_at` は 0 に
+なります。Feed は Workspace ごとに最新 300 行を保持し、それを超えた古いものから
+捨てます。
+
+`warning` の意味は `plan_create` のときと同じです。`workspace_path` を使っている
+Live な Navide Pane が一つもないため、その記録はユーザーが見ていない場所に着地して
+います。
+
+**この Feed の書き込み者はこの三つの Tool だけではありません。** CLI Agent が
+`Write`, `Edit`, `MultiEdit`, `NotebookEdit` でファイルを編集すると、Navide が完全な
+帰属付きで自動的に記録します — ただし Hook の仕組みを持つベンダーに限られ、現在は
+**claude, qwen, copilot** の三つです。それ以外のファイル変更はすべて File System の
+Watcher がフォールバックとして拾い、`source: "watcher"`、帰属なしで記録されます。
+したがって `preview_list` が見せる像は、その Workspace に対する `preview_record`
+呼び出しの総和よりも広く、`pane_id` を持たない記録は「誰もその変更を名乗り出て
+いない」ことを意味します — 何もそれを起こしていない、という意味ではありません。
+
 ## Pane の id は Pane より長く生きる
 
 CLI Pane の接続 URL は Pane が生成された瞬間に一度だけ書かれ、CLI プロセスは動いて
@@ -330,6 +393,18 @@ Run Group のデタッチ、そしてそれを戻す操作は、いずれも動�
 分宛て送信を判定する identity も同じです。二度リロードしても連鎖は切れず（各ホップ
 は現在の Pane に畳み込まれます）、id が Pane について別の Workspace に移ることは決し
 て許されません。
+
+id は identity であると同時にアドレスでもあります。`cli_send`、
+`cli_send_and_wait`、`cli_read_log`、`cli_get_status`、`cli_wait_idle` はいずれも
+`pane_id` を取り、それぞれのアドレス引数の代わりに使われます。同じ Workspace で名前
+を共有する二つの Pane の一方に届く唯一の方法がこれです。両方に一致する名前は推測さ
+れるのではなく `ambiguous-target` として拒否されるからです。解決は同じテーブルを通る
+ので、リロードやデタッチを越えて生き延びた id は、それが付いていった先の Pane を指し
+ます。越えられないのは**新しい** CLI の周りに作り直された Pane です。その経路は以前
+の id を一切申告しないため、これらの Tool は `unknown-pane-id` を返します。これは
+「`cli_list_targets` から新しい id を読み直せ」であって、「その Pane はもういない」で
+はありません。リモートの Pane の id は別のマシンのレジストリが鋳造したもので、ここで
+言う id ではないので、クロスデバイスの宛先は依然として名前で指定します。
 
 Pane の [Push Channel](inter-cli-messaging.md#push-channel) もおおむね同じように付
 いていきますが、一つ例外があります。ウィンドウのリロードでは保持され、デタッチされ
