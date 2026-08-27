@@ -3307,47 +3307,48 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // alternate buffer is active that screen has no scrollback behind it, so no
   // history is at risk. The normal buffer — where the conversation lives for
   // line-mode CLIs — is never touched, and neither is any mode state.
-  async function clearAltScreenForRedraw(): Promise<void> {
-    if (term.buffer?.active?.type !== 'alternate') return
-    // Only clear a CLI that is still producing output.
+  async function repaintAfterWidthChange(): Promise<void> {
+    // MEASURED 2026-08-27, by spawning `claude` on a real PTY and counting what
+    // it emits: ESC[?1049h zero times, ESC[?1004h once, ESC[nG 51 times. Claude
+    // Code does NOT use the alternate buffer — it paints the normal buffer with
+    // absolute column moves, and it DOES turn focus reporting on.
     //
-    // Clearing assumes the application will repaint, and an IDLE Claude Code
-    // does not: it ignores SIGWINCH while its alternate buffer is quiescent
-    // (measured 2026-07-23 — the numeric resize really does change cols and it
-    // still will not redraw). Clearing such a pane replaces a stale-but-
-    // readable frame with a blank one that nothing refills until the next
-    // output, which reads as a broken pane.
-    //
-    // PuTTY has the same failure mode and accepts it. We do not, because the
-    // trade is asymmetric: for an idle pane the old frame is wrong-width but
-    // still says what happened, and the moment the CLI does emit anything it
-    // paints at the new width anyway. So idle keeps its residue; only an
-    // actively-drawing CLI gets the blank canvas.
-    if (Date.now() - lastRawActivityAt.value > ALT_CLEAR_ACTIVITY_MS) {
-      nudgeIdleTuiToRepaint()
+    // The previous version opened by bailing out unless the buffer was the
+    // alternate one, which made the whole thing dead code for every Claude
+    // pane — it fell out on line one. Two older notes said otherwise
+    // (a 2026-07-23 log line reading alt=true, and agents/claude.ts still
+    // carrying fullScreenTui: true); the PTY probe settles it against them.
+    const isAlt = term.buffer?.active?.type === 'alternate'
+    const active = Date.now() - lastRawActivityAt.value <= ALT_CLEAR_ACTIVITY_MS
+
+    // A genuine alternate-buffer TUI (vim, a pager) that is mid-draw: hand it a
+    // blank canvas at the new width, which is what PuTTY does on every resize
+    // (terminal.c term_size rebuilds the alt screen empty, then marks disptext
+    // ATTR_INVALID). Safe there because xterm keeps no scrollback behind an
+    // alternate buffer, so nothing can be lost.
+    if (isAlt && active) {
+      term.write('\x1b[2J\x1b[H')
       return
     }
-    term.write('\x1b[2J\x1b[H')
+
+    // Everything else — including every Claude pane — gets the nudge only.
+    // Clearing is not an option in the normal buffer: the conversation sits in
+    // the scrollback right behind the screen, and a CLI that does not repaint
+    // would leave a hole in it.
+    nudgeTuiToRepaint()
   }
 
-  // Ask an IDLE full-screen TUI to repaint, without clearing anything.
+  // Ask a TUI to repaint, without writing anything to the screen.
   //
-  // The clear above is off-limits for an idle pane (nothing would refill it),
-  // but an idle pane is exactly the common case — most panes sit at their
-  // prompt — so leaving it at "known limitation" means the feature almost never
-  // fires. This is the one nudge available that is neither destructive nor
-  // visible: a focus-out/focus-in pair.
+  // Only sent when the CLI has turned focus reporting ON itself (DECSET 1004,
+  // surfaced by xterm as modes.sendFocusMode — Claude Code does, measured
+  // above). Under that mode a focus-out/focus-in pair is ordinary input the
+  // application asked to receive, unlike synthetic keystrokes, which would land
+  // in the prompt. With the mode off nothing is sent at all.
   //
-  // It is only sent when the CLI has TURNED FOCUS REPORTING ON itself
-  // (DECSET 1004, surfaced by xterm as modes.sendFocusMode). Under that mode
-  // these two sequences are ordinary, expected input that the application asked
-  // to receive — unlike synthetic keystrokes, which would land in the prompt.
-  // With the mode off, nothing is sent at all.
-  //
-  // Whether Ink actually re-renders on refocus is unproven; if it does not,
-  // this costs two bytes and changes nothing. That asymmetry is why it is worth
-  // trying before falling back to blanking idle panes the way PuTTY does.
-  function nudgeIdleTuiToRepaint(): void {
+  // Whether Ink re-renders on refocus is still unproven — the previous attempt
+  // never actually ran, so it has never been tested in a real pane.
+  function nudgeTuiToRepaint(): void {
     if (!sessionId.value) return
     if (!term.modes?.sendFocusMode) return
     void backend.send('terminal.input', {
@@ -4242,7 +4243,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     backend.send,
     () => !!pendingSpawn.value,
     () => { void createWhenMeasurable() },
-    clearAltScreenForRedraw,
+    repaintAfterWidthChange,
   )
 
   // Shared zoom → this pane. A new font size means a new cell size, so refit to

@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createMockBackend, withScope } from './mockBackend'
 
 // Seeded before useTerminal is imported — the module reads `terminal-last-size`
@@ -187,7 +189,7 @@ describe('useTerminal — transcript history and width reflow', () => {
     scope.stop()
   })
 
-  describe('alternate-screen clear on width change', () => {
+  describe('repaint after a width change', () => {
     it('blanks the alternate screen so the CLI repaints at the new width', async () => {
       const { mock, result, scope } = resumePane(TRANSCRIPT)
       await doResume(result)
@@ -256,19 +258,35 @@ describe('useTerminal — transcript history and width reflow', () => {
       scope.stop()
     })
 
-    it('leaves a normal-buffer pane completely alone', async () => {
-      const { result, scope } = resumePane(TRANSCRIPT)
+    it('never writes to the screen of a normal-buffer pane', async () => {
+      // Claude Code paints the NORMAL buffer (measured: zero ESC[?1049h), and
+      // the conversation sits in the scrollback right behind that screen, so
+      // clearing would punch a hole in the history. The nudge is all it gets.
+      const { mock, result, scope } = resumePane(TRANSCRIPT)
       await doResume(result)
       bufferType.value = 'normal'
+      focusMode.value = true
       writes.length = 0
 
       await reflow.fn?.()
 
-      // The conversation of a line-mode CLI lives in the normal buffer, which
-      // has scrollback behind it — clearing that would destroy history.
       expect(writes).toEqual([])
       expect(clears.count).toBe(0)
+      expect(mock.sent.filter((s) => s.type === 'terminal.input').at(-1)?.payload)
+        .toMatchObject({ data: '\x1b[O\x1b[I' })
       scope.stop()
+    })
+
+    it('reaches a normal-buffer pane at all — the guard used to skip them', () => {
+      // Regression for the dead-code bug: the function opened with
+      // `if (type !== 'alternate') return`, so every Claude pane fell out on
+      // line one and none of this ever ran.
+      const src = readFileSync(
+        resolve(process.cwd(), 'src/renderer/src/composables/useTerminal.ts'), 'utf8')
+      const at = src.indexOf('async function repaintAfterWidthChange(')
+      expect(at).toBeGreaterThan(-1)
+      const body = src.slice(at, src.indexOf('\n  }', at))
+      expect(body).not.toContain("!== 'alternate') return")
     })
   })
 })
