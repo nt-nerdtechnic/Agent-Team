@@ -1143,7 +1143,13 @@ function wsMenuAction(kind: 'reveal' | 'copy' | 'close'): void {
 // Fixed, not absolute: the pane list scrolls under `overflow-y: auto`, which
 // would clip a menu positioned inside it.
 const addMenuAnchor = ref<{ top: number; bottom: number; right: number } | null>(null)
-const ADD_MENU_MAX_H = 300
+/** Tallest the ＋ menu gets: the roster scroller's cap (`.ws-add-scroll`,
+ *  360px) plus the fixed furniture around it — role picker, two dividers,
+ *  the Terminal and Manual-spawn buttons, and the menu's own padding. Only
+ *  used to decide whether the menu opens downwards or flips up, so it has to
+ *  track that CSS cap; leaving it at the old 300 would have let a menu open
+ *  downwards into a gap it no longer fits in. */
+const ADD_MENU_MAX_H = 450
 
 const addMenuStyle = computed(() => {
   const a = addMenuAnchor.value
@@ -3280,7 +3286,27 @@ button.icon-btn.muted:hover {
   font-size: 11.5px;
 }
 .ws-add-div { height: 1px; margin: 4px 0; background: var(--border-muted); }
-.ws-add-scroll { max-height: 200px; overflow-y: auto; }
+/* Tall enough for the whole roster, capped against the viewport so a short
+ * window still gets a menu that fits. 200px was set when ten vendors was the
+ * whole list; at fourteen it cut the last four off with nothing on screen
+ * saying so, and they read as unsupported. Each row is ~24px (12px text +
+ * 3px padding either side), so 360px carries fifteen. */
+.ws-add-scroll {
+  max-height: min(360px, 45vh);
+  overflow-y: auto;
+  /* Scroll affordance. The two fades are painted in the scroller's own
+   * coordinate space (`local`), so each one is visible only while content is
+   * hidden in that direction; the two shadows stay pinned to the box
+   * (`scroll`) and are covered by a fade once that end is reached. Pure CSS —
+   * no scroll listener. The list must never again look complete when it is
+   * not: that mistake has now been made twice here (see the Terminal entry's
+   * comment in the template). */
+  background:
+    linear-gradient(var(--bg-elevated, var(--bg-secondary)) 30%, transparent) top / 100% 14px no-repeat local,
+    linear-gradient(transparent, var(--bg-elevated, var(--bg-secondary)) 70%) bottom / 100% 14px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, rgb(0 0 0 / 22%), transparent) top / 100% 5px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, rgb(0 0 0 / 22%), transparent) bottom / 100% 5px no-repeat scroll;
+}
 .ws-add-opt {
   display: flex;
   align-items: center;

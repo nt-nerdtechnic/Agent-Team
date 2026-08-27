@@ -1,7 +1,11 @@
 // @vitest-environment happy-dom
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
+import { CLI_AGENT_SPECS } from '../../agents'
 
 // The ＋ on the workspace heading opens a menu of CLIs. It is a second door
 // onto the spawn card's own pickedAgent/pickedRole, NOT a second copy of them:
@@ -97,11 +101,13 @@ describe('ControlPane – the ＋ menu', () => {
   })
 
   it('keeps the plain shell out of the scrolling list', async () => {
-    // The list caps at 200px and scrolls. An eleventh entry — which is what a
-    // shell would be with every CLI enabled — sits below the fold, where it
-    // reads as missing rather than as needing a scroll. Rendered is not the
-    // same as visible, and a test that only asked "is it in the DOM" passed
-    // while the thing was unreachable.
+    // The list is a capped scroller (see the fit tests at the bottom of this
+    // file). A shell added to it would be the last entry with every CLI
+    // enabled, i.e. the first one below the fold — where it reads as missing
+    // rather than as needing a scroll. Rendered is not the same as visible,
+    // and a test that only asked "is it in the DOM" passed while the thing was
+    // unreachable. Deliberately not restating the cap in px here: this comment
+    // said "200px" long after the cap had moved.
     wrapper = mountWith()
     await openMenu(wrapper)
     expect(wrapper.find('.ws-add-scroll .ws-add-term').exists()).toBe(false)
@@ -357,5 +363,67 @@ describe('ControlPane – the ＋ menu', () => {
     expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(true)
     await wrapper.find('.spawn-modal-backdrop').trigger('click')
     expect(wrapper.find('.spawn-modal-backdrop').exists()).toBe(false)
+  })
+})
+
+// ── the roster has to FIT, not merely render ────────────────────────────────
+//
+// This file already says it above: rendered is not the same as visible. The ＋
+// menu's CLI list is a capped scroller, and when the roster outgrew that cap
+// the entries below the fold read as vendors Navide did not support. That has
+// now happened twice — once at eleven (handled by moving Terminal out of the
+// list) and again at fourteen, where cursor/aider/muse/droid were all hidden.
+//
+// No mounted test can catch it: jsdom and happy-dom have no layout, so all
+// fourteen buttons are "in the DOM" either way. These read the source instead,
+// which is the only place the fact lives.
+const COMPONENT_SRC = readFileSync(
+  resolve(process.cwd(), 'src/renderer/src/components/ControlPane.vue'),
+  'utf-8'
+)
+
+/** Height of one `.ws-add-opt`: 12px text (--font-xs) plus 3px padding either
+ *  side. Rounded up on purpose — overestimating a row makes the required cap
+ *  larger, which fails safe; underestimating would let a too-short cap pass. */
+const ROW_PX = 24
+
+/** Everything in the menu that is not the scroller: its own padding, the role
+ *  picker, two dividers, and the Terminal + Manual-spawn buttons. */
+const FURNITURE_PX = 80
+
+function scrollerCapPx(): number {
+  const m = COMPONENT_SRC.match(/\.ws-add-scroll\s*\{[\s\S]*?max-height:\s*min\((\d+)px/)
+  if (!m) throw new Error('.ws-add-scroll has no `max-height: min(<n>px, …)` cap')
+  return Number(m[1])
+}
+
+function flipThresholdPx(): number {
+  const m = COMPONENT_SRC.match(/const ADD_MENU_MAX_H = (\d+)/)
+  if (!m) throw new Error('ADD_MENU_MAX_H not found')
+  return Number(m[1])
+}
+
+describe('ControlPane – the ＋ menu fits its roster', () => {
+  it('the scroller is tall enough to show every CLI at once', () => {
+    const needed = CLI_AGENT_SPECS.length * ROW_PX
+    expect(scrollerCapPx()).toBeGreaterThanOrEqual(needed)
+  })
+
+  it('the flip threshold tracks the scroller cap', () => {
+    // ADD_MENU_MAX_H decides whether the menu opens downwards or flips up. It
+    // is a hand-kept mirror of the CSS cap, so raising one without the other
+    // lets the menu open downwards into a gap it no longer fits in — which is
+    // exactly the drift that left it at 300 while the menu grew.
+    expect(flipThresholdPx()).toBeGreaterThanOrEqual(scrollerCapPx() + FURNITURE_PX)
+  })
+
+  it('the scroller shows that it scrolls', () => {
+    // A capped list with no affordance is what made a truncated roster read as
+    // a complete one. The fades are `local` (they move with the content, so
+    // each shows only while something is hidden that way) over `scroll`
+    // shadows pinned to the box.
+    const block = COMPONENT_SRC.match(/\.ws-add-scroll\s*\{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(block).toContain('no-repeat local')
+    expect(block).toContain('no-repeat scroll')
   })
 })
