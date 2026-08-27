@@ -200,6 +200,43 @@ describe('ControlPane – workspace sections', () => {
     expect(heads[1].attributes('data-state')).toBe('idle')
   })
 
+  it('folds every workspace from the section header', async () => {
+    const second = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({ workspaces: [current(), second] })
+    await wrapper.find('.hdr-fold-ws').trigger('click')
+    const asked = wrapper.emitted('toggle-workspace')?.map((c) => c[0])
+    expect(asked).toEqual(['/Users/me/Desktop/Agent-Team', '/Users/me/Desktop/Other'])
+  })
+
+  it('asks only for the workspaces that would change', async () => {
+    // Emitting for one already folded would toggle it back open — the button
+    // would fold half the list and unfold the other half.
+    const open = current()
+    const shut = current({ path: '/Users/me/Desktop/Other', label: 'Other', collapsed: true })
+    wrapper = mountWith({ workspaces: [open, shut] })
+    await wrapper.find('.hdr-fold-ws').trigger('click')
+    expect(wrapper.emitted('toggle-workspace')?.map((c) => c[0]))
+      .toEqual(['/Users/me/Desktop/Agent-Team'])
+  })
+
+  it('turns into expand-all once everything is folded', async () => {
+    const a = current({ collapsed: true })
+    const b = current({ path: '/Users/me/Desktop/Other', label: 'Other', collapsed: true })
+    wrapper = mountWith({ workspaces: [a, b] })
+    // A "collapse all" that does nothing is a button that looks broken.
+    expect(wrapper.find('.hdr-fold-ws').attributes('title')).toBe('action.expand-all-folders')
+    await wrapper.find('.hdr-fold-ws').trigger('click')
+    expect(wrapper.emitted('toggle-workspace')?.map((c) => c[0])).toEqual([
+      '/Users/me/Desktop/Agent-Team',
+      '/Users/me/Desktop/Other',
+    ])
+  })
+
+  it('offers nothing to fold when the list is ungrouped', async () => {
+    wrapper = mountWith()
+    expect(wrapper.find('.hdr-fold-ws').exists()).toBe(false)
+  })
+
   it('flips the context menu up near the bottom edge', async () => {
     // It opened downward from the cursor with nothing to stop it leaving the
     // window, and the status bar paints over that strip — so a right-click low

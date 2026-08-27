@@ -622,7 +622,8 @@
     "expand-subtree": "Expand subtree",
     "collapse-subtree": "Collapse subtree",
     "detach-group": "Open in its own window",
-    "reattach-group": "Merge back"
+    "reattach-group": "Merge back",
+    "expand-all-folders": "Expand all folders"
   },
   "settings": {
     "search": {

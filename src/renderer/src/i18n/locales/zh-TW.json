@@ -358,7 +358,7 @@
     "abort-merge": "中止合併",
     "resolve-conflicts": "解決衝突",
     "show-hidden-files": "顯示隱藏檔案",
-    "collapse-all-folders": "收合所有資料夾",
+    "collapse-all-folders": "收合所有專案",
     "cancel": "取消",
     "ok": "確定",
     "submit": "送出",
@@ -622,7 +622,8 @@
     "expand-subtree": "展開子項",
     "collapse-subtree": "收合子項",
     "detach-group": "拖出成獨立視窗",
-    "reattach-group": "收回主視窗"
+    "reattach-group": "收回主視窗",
+    "expand-all-folders": "展開所有專案"
   },
   "settings": {
     "search": {

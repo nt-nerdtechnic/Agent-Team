@@ -1026,6 +1026,27 @@ const canDragWorkspace = computed(
   () => !props.detachedWindow && localWorkspaceRows.value.length > 1
 )
 
+/** Whether every workspace this window holds is already folded shut, which is
+ *  what turns the header button from "collapse all" into "expand all". */
+const allWorkspacesCollapsed = computed(() => {
+  const rows = localWorkspaceRows.value.filter((w): w is WorkspaceGroupRow => !!w)
+  return rows.length > 0 && rows.every((w) => w.collapsed)
+})
+
+/** Fold or unfold every workspace at once.
+ *
+ *  One toggle rather than a pair: with the list already folded, a "collapse
+ *  all" that does nothing is a button that looks broken. The label and the
+ *  icon follow the state so it always says what pressing it will do.
+ */
+function toggleAllWorkspaces(): void {
+  const collapse = !allWorkspacesCollapsed.value
+  for (const ws of localWorkspaceRows.value) {
+    if (!ws) continue
+    if (ws.collapsed !== collapse) emit('toggle-workspace', ws.path)
+  }
+}
+
 /** Groups folded shut in the sidebar.
  *
  *  Keyed by workspace AND group: run groups are per-workspace, and the
@@ -1696,6 +1717,13 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <!-- Adds a WORKSPACE, not an agent: the per-workspace ＋ below opens
              an agent inside one. Always present — the section is a list of
              projects whether or not any is grouped yet. -->
+        <button
+          v-if="!detachedWindow && localWorkspaceRows.some((w) => w)"
+          class="hdr-fold-ws"
+          :title="allWorkspacesCollapsed ? $t('action.expand-all-folders') : $t('action.collapse-all-folders')"
+          :aria-label="allWorkspacesCollapsed ? $t('action.expand-all-folders') : $t('action.collapse-all-folders')"
+          @click="toggleAllWorkspaces"
+        >{{ allWorkspacesCollapsed ? '⌄' : '›' }}</button>
         <button
           v-if="!detachedWindow"
           class="hdr-add-ws"
@@ -2644,7 +2672,10 @@ button.link {
 }
 /* Sized to the header's text, not to the 32px action buttons beside it: once
    the list is grouped this is the only control left up here. */
-.hdr-add-ws {
+/* The fold-all control shares the ＋'s box but not its class: one class for
+   both made "find the add button" return whichever came first in the DOM. */
+.hdr-add-ws,
+.hdr-fold-ws {
   flex: none;
   border: none;
   background: none;
@@ -2654,7 +2685,8 @@ button.link {
   line-height: 1;
   color: var(--text-muted);
 }
-.hdr-add-ws:hover { color: var(--text-bright); }
+.hdr-add-ws:hover,
+.hdr-fold-ws:hover { color: var(--text-bright); }
 button.history-btn {
   background: transparent;
   border: 1px solid var(--border-default);
