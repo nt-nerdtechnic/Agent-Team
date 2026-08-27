@@ -41,6 +41,25 @@ describe('the branch pill follows the workspace', () => {
     expect(fn).toContain("'git.status', { workspace_path: currentWorkspace.value }")
   })
 
+  it('offers to open the folder beside the path', () => {
+    // Rides with the path, not the name: it acts on the folder, and the folder
+    // is what is on screen while hovering. A button on a bar showing a project
+    // name would read as acting on the project.
+    expect(appSource).toContain('class="titlebar-reveal"')
+    expect(appSource).toContain('@click="revealWorkspaceFolder(currentWorkspace)"')
+    const at = appSource.indexOf('.titlebar-reveal {')
+    expect(at).toBeGreaterThan(-1)
+    expect(appSource.slice(at, at + 120)).toContain('display: none')
+    expect(appSource).toContain('.titlebar-id:hover .titlebar-reveal { display: block; }')
+  })
+
+  it('opens the real path, not the shortened one', () => {
+    // The bar shows ~/… — handing that to the OS would open a folder named
+    // "~" if anything at all.
+    expect(appSource).toContain('@click="revealWorkspaceFolder(currentWorkspace)"')
+    expect(appSource).not.toContain('revealWorkspaceFolder(workspaceDisplayPath)')
+  })
+
   it('hides the pill rather than rendering an empty branch', () => {
     expect(appSource).toContain('<span v-if="statusBarGit.branch" class="sb-item sb-git">')
   })

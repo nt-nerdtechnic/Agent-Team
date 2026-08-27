@@ -13326,6 +13326,15 @@ function paneIsCommander(p: ActivePane): boolean {
         <span class="titlebar-id">
           <span class="titlebar-name titlebar-name--ws">{{ workspaceBaseName }}</span>
           <span v-if="workspaceDisplayPath" class="titlebar-path">{{ workspaceDisplayPath }}</span>
+          <!-- Rides with the path rather than the name: it acts on the folder,
+               and the folder is what is on screen while hovering. -->
+          <button
+            v-if="workspaceDisplayPath"
+            class="titlebar-reveal"
+            :title="$t('action.open-in-finder')"
+            :aria-label="$t('action.open-in-finder')"
+            @click="revealWorkspaceFolder(currentWorkspace)"
+          >⤴</button>
         </span>
         <span class="titlebar-spacer"></span>
       </template>
@@ -14503,6 +14512,21 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .titlebar-id:hover .titlebar-name--ws { display: none; }
 .titlebar-id:hover .titlebar-path { display: block; }
+/* Appears with the path and only with it: a button on a bar that otherwise
+   shows a project name would read as acting on the project, not the folder. */
+.titlebar-reveal {
+  display: none;
+  flex: none;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.titlebar-id:hover .titlebar-reveal { display: block; }
+.titlebar-reveal:hover { color: var(--text-bright); }
 /* Fills the bar between the traffic lights and the gear, and stays draggable
    so the empty stretch still moves the window. */
 .titlebar-spacer {
