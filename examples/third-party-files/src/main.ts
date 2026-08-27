@@ -1,5 +1,6 @@
 import { definePlugin, PluginError, type PluginContext } from '@navide/plugin-sdk'
-import { createPluginButton } from '@navide/plugin-ui'
+import { installPluginContext, NAVIDE_UI_TOKENS, usePluginContext } from '@navide/plugin-ui'
+import { createApp, defineComponent, h } from 'vue'
 
 export const lastRun: {
   allowedContent: string | null
@@ -35,15 +36,27 @@ async function activate(context: PluginContext): Promise<void> {
   if (typeof document === 'undefined') return
   const mount = document.querySelector('#app')
   if (!mount) return
-  const status = document.createElement('p')
-  status.textContent = `Read ${file.content.length} characters; shell: ${lastRun.deniedCode ?? 'allowed'}`
-  mount.append(status)
-  mount.prepend(
-    createPluginButton({
-      label: 'Refresh file',
-      onClick: () => context.lifecycle.reportProgress('Refresh requested'),
+  const app = createApp(
+    defineComponent({
+      setup() {
+        const pluginContext = usePluginContext()
+        return () =>
+          h('section', { style: { color: NAVIDE_UI_TOKENS.colorText } }, [
+            h(
+              'button',
+              {
+                type: 'button',
+                onClick: () => pluginContext.lifecycle.reportProgress('Refresh requested'),
+              },
+              'Refresh file'
+            ),
+            h('p', `Read ${file.content.length} characters; shell: ${lastRun.deniedCode ?? 'allowed'}`),
+          ])
+      },
     })
   )
+  installPluginContext(app, context)
+  app.mount(mount)
 }
 
 export const plugin = definePlugin(activate)

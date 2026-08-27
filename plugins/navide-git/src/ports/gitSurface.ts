@@ -1,7 +1,7 @@
 import type { GitTransport } from '#git-feature'
 import type { InjectionKey } from 'vue'
-import type { PortResponse } from '@navide/plugin-ui-vue/shared'
-import type { ReactiveValue } from '@navide/plugin-ui-vue/shared'
+import type { PortResponse } from '@navide/plugin-ui/shared'
+import type { ReactiveValue } from '@navide/plugin-ui/shared'
 import type {
   ConflictStages,
   DiscoveredRepo,

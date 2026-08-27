@@ -7,9 +7,9 @@ import type { useStages } from '../composables/useStages'
 import type { useAnalyzer } from '../composables/useAnalyzer'
 import type { usePipelines } from '../composables/usePipelines'
 import { MCP_CATALOG, isMcpInstalled, type McpCatalogEntry } from '../data/mcpCatalog'
-import { useTheme } from '@navide/ui-foundation'
+import { useTheme } from '@navide/plugin-ui/foundation'
 import { useSettings } from '../composables/useSettings'
-import { settingsGet, settingsSet } from '@navide/shared'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import {
   USAGE_ENABLED_KEY,
   USAGE_REFRESH_OPTIONS,

@@ -26,7 +26,7 @@
 //   yet, kill() would be a no-op and a hung create uncancellable).
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsGet, settingsSet } from '@navide/shared'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { CLI_AGENT_SPECS } from '../agents'
 import { bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
 import type { TerminalDockPort } from '@navide/terminal'

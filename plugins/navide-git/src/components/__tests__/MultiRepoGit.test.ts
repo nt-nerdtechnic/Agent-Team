@@ -5,8 +5,8 @@ import { ref } from 'vue'
 import {
   seedSettings,
   settingsGet,
-} from '@navide/plugin-ui-vue/shared'
-import { __resetSettingsForTest } from '@navide/plugin-ui-vue/shared/testing'
+} from '@navide/plugin-ui/shared'
+import { __resetSettingsForTest } from '@navide/plugin-ui/shared/testing'
 
 // Stub useRepoDiscovery so we can control the repositories list.
 const mockRepositories = ref<{ rel_path: string; abs_path: string; branch: string; badge: { branch: string; dirtyCount: number } }[]>([])

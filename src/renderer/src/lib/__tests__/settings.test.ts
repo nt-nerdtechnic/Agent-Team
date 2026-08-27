@@ -13,8 +13,8 @@ import {
   SETTINGS_FLUSH_DEBOUNCE_MS,
   MIGRATED_LOCALSTORAGE_KEYS,
   PURGED_LOCALSTORAGE_KEYS,
-} from '@navide/shared'
-import { __resetSettingsForTest } from '@navide/shared/testing'
+} from '@navide/plugin-ui/shared'
+import { __resetSettingsForTest } from '@navide/plugin-ui/shared/testing'
 import { readHostBootstrapSettings } from '../settingsBootstrap'
 
 function stubBootstrap(raw: string | undefined): void {

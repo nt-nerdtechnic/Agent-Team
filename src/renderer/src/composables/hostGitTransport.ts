@@ -1,8 +1,8 @@
 import {
-  DEFAULT_GIT_TIMEOUT_MS,
   type GitRequestType,
   type GitTransport,
 } from '@navide/git-feature'
+import { HOST_GIT_TIMEOUT_MS } from '../../../shared/gitCompatibility'
 import type { useBackend } from './useBackend'
 
 export type HostGitBackend = Pick<ReturnType<typeof useBackend>, 'status' | 'send' | 'on'>
@@ -18,7 +18,7 @@ export function createHostGitTransport(backend: HostGitBackend): GitTransport {
     async send<TPayload = unknown>(
       type: GitRequestType,
       payload: Record<string, unknown> = {},
-      timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+      timeoutMs = HOST_GIT_TIMEOUT_MS,
     ) {
       try {
         const response = await backend.send<TPayload>(type, payload, timeoutMs)

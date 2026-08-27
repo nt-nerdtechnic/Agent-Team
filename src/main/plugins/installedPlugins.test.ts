@@ -209,6 +209,7 @@ describe('Manifest v2 contract corpus', () => {
       contributionKey: 'acme.files.left',
       kind: 'custom',
       location: 'left',
+      iconFile: '/plugins/acme.files/assets/files.png',
       entryFile: '/plugins/acme.files/frontend/left/index.html',
     })
   })

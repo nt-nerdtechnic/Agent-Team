@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
 import CliAccountsPane from '../CliAccountsPane.vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import {
   cliAccountSwitchKey,
   createCliAccountSwitchHandler,
@@ -44,8 +44,8 @@ const notify = {
   confirm: vi.fn(async (..._args: unknown[]) => true),
   prompt: vi.fn(async () => null),
 }
-vi.mock('@navide/ui-foundation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => notify,
 }))
 

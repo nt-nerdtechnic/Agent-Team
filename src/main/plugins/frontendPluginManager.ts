@@ -31,6 +31,7 @@ import {
   type CapabilityResponse,
   type AuthenticatedRuntimeBinding,
   type HostCapabilityContext,
+  type HostCapabilityGrant,
   type PublicCapabilityExecutionPlan,
   type TerminalOutputBatcher,
 } from './pluginCapabilityBroker'
@@ -68,10 +69,10 @@ import {
 import { AI_CLI_PROFILES } from '../../shared/aiCliProfiles'
 import { resolveWsType } from './capabilityMap'
 import {
-  GIT_HOST_READ_ONLY_KEYS,
-  GIT_USER_PREFERENCE_KEYS,
-  GIT_WORKSPACE_REPOSITORY_KEY,
-} from '@navide/git-feature'
+  HOST_GIT_READ_ONLY_KEYS as GIT_HOST_READ_ONLY_KEYS,
+  HOST_GIT_USER_PREFERENCE_KEYS as GIT_USER_PREFERENCE_KEYS,
+  HOST_GIT_WORKSPACE_REPOSITORY_KEY as GIT_WORKSPACE_REPOSITORY_KEY,
+} from '../../shared/gitCompatibility'
 import {
   buildPluginContributionCatalog,
   type PluginContributionCatalogEntry,
@@ -109,7 +110,8 @@ export interface PluginViewLaunchDescriptor {
   kind: 'custom'
   location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
   title: string
-  icon?: string
+  /** Host-verified on-disk icon identity. It never crosses to the renderer. */
+  iconFile?: string
   entryFile: string
 }
 
@@ -596,6 +598,13 @@ export class FrontendPluginManager {
   private readonly gitContributionStates = new Map<number, GitContributionState>()
   /** Main-owned safeStorage adapter for the first-party Git account surface. */
   private gitAccountHandlers: GitAccountHandlers | null = null
+  private capabilityGrantResolver:
+    | ((pluginId: string, packageVersion: string) => HostCapabilityGrant | null)
+    | null = null
+  private activationFailureHandler:
+    | ((failure: { pluginId: string; packageVersion: string; reason: string }) => void)
+    | null = null
+  private readonly pendingActivations = new Map<string, ReturnType<typeof setTimeout>>()
   /** Opaque picker provenance for the private first-party Git bridge. */
   private readonly gitPathGrants = new Map<string, GitPathGrant>()
   /** `terminal_session_id` → authenticated route ownership. v2 teardown
@@ -697,6 +706,78 @@ export class FrontendPluginManager {
         'aider',
         'muse',
       ],
+      storageSnapshots: new Map([
+        ['candidate', packageVersion],
+        ['active', packageVersion],
+        ['previous', packageVersion],
+      ]),
+      storageSnapshotTier: 'active',
+    }
+  }
+
+  setCapabilityGrantResolver(
+    resolver: ((pluginId: string, packageVersion: string) => HostCapabilityGrant | null) | null
+  ): void {
+    this.capabilityGrantResolver = resolver
+  }
+
+  setActivationFailureHandler(
+    handler: ((failure: { pluginId: string; packageVersion: string; reason: string }) => void) | null
+  ): void {
+    this.activationFailureHandler = handler
+  }
+
+  private settleActivation(instanceId: string): void {
+    const timer = this.pendingActivations.get(instanceId)
+    if (timer) clearTimeout(timer)
+    this.pendingActivations.delete(instanceId)
+  }
+
+  private failActivation(instanceId: string, reason: string): void {
+    const plugin = this.running.get(instanceId)
+    if (!plugin || !this.pendingActivations.has(instanceId)) return
+    this.settleActivation(instanceId)
+    const packageVersion = plugin.capabilityContext?.runtimeBinding?.packageVersion
+    if (!packageVersion) return
+    this.activationFailureHandler?.({ pluginId: plugin.id, packageVersion, reason })
+  }
+
+  private contributionCapabilityContext(
+    descriptor: PluginLaunchDescriptor,
+    view: PluginViewLaunchDescriptor,
+    workspacePath: string
+  ): HostCapabilityContext | null {
+    const packageVersion = descriptor.packageVersion
+    const policy = descriptor.capabilityPolicy
+    if (!packageVersion || policy?.kind !== 'manifest-v2') return null
+    const grant = this.capabilityGrantResolver?.(descriptor.id, packageVersion) ?? null
+    if (!grant || grant.packageVersion !== packageVersion || grant.storage !== true) return null
+    if (
+      grant.shell !== policy.shell ||
+      grant.system.length !== policy.system.length ||
+      grant.system.some((namespace) => !policy.system.includes(namespace)) ||
+      (policy.shell === 'full' && grant.highRiskShellConfirmed !== true)
+    ) return null
+    const installed = this.installedPackages.get(descriptor.id)
+    return {
+      publisherEligible:
+        isReservedPluginId(descriptor.id) &&
+        (installed?.provenance === 'official-registry' ||
+          installed?.provenance === 'factory-bundled'),
+      userGrant: grant,
+      runtimeBinding: {
+        pluginId: descriptor.id,
+        packageVersion,
+        workspaceId: this.workspaceIdForPath(workspacePath),
+        instanceId: null,
+        audience:
+          descriptor.id === GIT_PLUGIN_ID && view.location === 'left'
+            ? 'git-left'
+            : descriptor.id === GIT_PLUGIN_ID && view.location === 'window'
+              ? 'git-window'
+              : view.contributionKey,
+      },
+      aiCliProfiles: Object.keys(AI_CLI_PROFILES),
       storageSnapshots: new Map([
         ['candidate', packageVersion],
         ['active', packageVersion],
@@ -1506,7 +1587,10 @@ export class FrontendPluginManager {
     // Plugins announce readiness; it is only logged (activation is not gated on it).
     ipcMain.on(IPC_READY, (event) => {
       const plugin = this.instanceForSender(event.sender.id)
-      if (plugin) console.log(`[plugin] ${plugin.id} ready`)
+      if (plugin) {
+        this.settleActivation(plugin.instanceId)
+        console.log(`[plugin] ${plugin.id} ready`)
+      }
     })
 
     // A plugin dismisses its own view (e.g. the mini-IDE's Esc-close). Scoped
@@ -2637,6 +2721,7 @@ export class FrontendPluginManager {
   private forgetInstance(instanceId: string, view?: WebContentsView): RunningPlugin | undefined {
     const plugin = this.running.get(instanceId)
     if (!plugin || (view && plugin.view !== view)) return undefined
+    this.settleActivation(instanceId)
     plugin.detachHostResize?.()
     plugin.detachHostResize = null
     plugin.detachHostClosed?.()
@@ -2871,6 +2956,13 @@ export class FrontendPluginManager {
       pendingTargets: [],
     }
     this.running.set(instanceId, record)
+    if (isV2Identity && this.activationFailureHandler) {
+      const timer = setTimeout(() => {
+        this.failActivation(instanceId, 'plugin readiness handshake timed out')
+      }, 10_000)
+      timer.unref?.()
+      this.pendingActivations.set(instanceId, timer)
+    }
     if (openedViaLegacyAdapter) this.legacyInstances.set(descriptor.id, instanceId)
     this.bySender.set(record.senderId, instanceId)
     this.applyBounds(record, bounds)
@@ -2894,9 +2986,22 @@ export class FrontendPluginManager {
     // than destroy() (renderer crash, Electron teardown), drop the record so
     // the next open() recreates instead of loading into a destroyed view.
     view.webContents.once('destroyed', () => {
+      this.failActivation(instanceId, 'plugin renderer exited before readiness')
       const plugin = this.forgetInstance(instanceId, view)
       if (plugin) this.detachView(plugin)
     })
+
+    view.webContents.on(
+      'did-fail-load',
+      (_event, errorCode: number, errorDescription: string, _url: string, isMainFrame: boolean) => {
+        if (isMainFrame) {
+          this.failActivation(
+            instanceId,
+            `entry load failed: ${errorDescription} (${errorCode})`
+          )
+        }
+      }
+    )
 
     // Open targets sent before the entry finished loading are queued and
     // flushed here (mirrors the legacy editor window's did-finish-load flush).
@@ -3246,6 +3351,50 @@ export class FrontendPluginManager {
     return { loaded: true, pluginId }
   }
 
+  /** Load one App-bundled Manifest v2 package through the same descriptor,
+   * catalog, grant, and instance runtime as a Registry package. App bundle
+   * integrity is the trust source, so no Registry receipt is consulted. */
+  loadFactoryPlugin(
+    packageDir: string,
+    expectedPluginId: string,
+  ):
+    | {
+        loaded: true
+        pluginId: string
+        packageVersion: string
+        activation: PluginActivationCatalogEntry
+      }
+    | { loaded: false; reason: string } {
+    if (this.installedPackages.has(expectedPluginId)) {
+      return { loaded: false, reason: 'installed package is active' }
+    }
+    const scanned = loadPluginDir(packageDir)
+    if (scanned.error) return { loaded: false, reason: scanned.error }
+    const activation = scanned.activation
+    const summary = scanned.packageSummary
+    if (!activation || !summary) {
+      return { loaded: false, reason: 'factory package must use Manifest v2' }
+    }
+    if (activation.pluginId !== expectedPluginId || summary.id !== expectedPluginId) {
+      return {
+        loaded: false,
+        reason: `expected factory plugin '${expectedPluginId}', received '${activation.pluginId}'`,
+      }
+    }
+    if (!scanned.descriptor) {
+      return { loaded: false, reason: 'factory package must contribute a frontend view' }
+    }
+    summary.provenance = 'factory-bundled'
+    activation.provenance = 'factory-bundled'
+    this.registerInstalledPackage(summary, scanned.descriptor, { official: true })
+    return {
+      loaded: true,
+      pluginId: activation.pluginId,
+      packageVersion: activation.packageVersion,
+      activation,
+    }
+  }
+
   /** Replace one installed package's inventory and optional frontend descriptor
    *  together. A backend-only update therefore cannot retain an older view. */
   registerInstalledPackage(
@@ -3315,6 +3464,14 @@ export class FrontendPluginManager {
     if (view.location === 'window') {
       return { ok: false, error: 'window contributions require a dedicated Host window' }
     }
+    const capabilityContext = this.contributionCapabilityContext(
+      descriptor,
+      view,
+      options.workspacePath ?? ''
+    )
+    if (descriptor.capabilityPolicy?.kind === 'manifest-v2' && !capabilityContext) {
+      return { ok: false, error: 'package-version capability grant is missing' }
+    }
 
     const key = this.contributionInstanceKey(hostWindow, contributionKey)
     const existing = this.contributionInstances.get(key)
@@ -3337,6 +3494,7 @@ export class FrontendPluginManager {
       const handle = await this.openView(descriptor, view, {
         ...options,
         hostWindow,
+        capabilityContext,
       })
       this.contributionInstances.set(key, handle)
       return { ok: true }
@@ -3360,6 +3518,14 @@ export class FrontendPluginManager {
     if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
     if (view.location !== 'window') {
       return { ok: false, error: 'contribution is not a window view' }
+    }
+    const capabilityContext = this.contributionCapabilityContext(
+      descriptor,
+      view,
+      options.workspacePath ?? ''
+    )
+    if (descriptor.capabilityPolicy?.kind === 'manifest-v2' && !capabilityContext) {
+      return { ok: false, error: 'package-version capability grant is missing' }
     }
 
     const key = this.contributionInstanceKey(hostWindow, contributionKey)
@@ -3386,6 +3552,7 @@ export class FrontendPluginManager {
         bounds: 'fill',
         closeHostOnHide: true,
         mirrorTitle: true,
+        capabilityContext,
       })
       this.contributionInstances.set(key, handle)
       return { ok: true }
@@ -3618,12 +3785,14 @@ export class FrontendPluginManager {
    *  remove/update flow so a removed plugin's window does not linger. Removing
    *  a marketplace override of a bundled builtin re-registers the bundled copy
    *  (recorded by {@link registerBuiltin}) so the surface keeps working. */
-  removeInstalledPlugin(id: string): void {
+  removeInstalledPlugin(id: string, opts: { restoreBuiltin?: boolean } = {}): void {
     this.preparePluginRemoval(id)
     this.installedPackages.delete(id)
     this.descriptors.delete(id)
-    const fallback = this.builtinFallbacks.get(id)
-    if (fallback) this.registerDescriptor(fallback, { builtin: true })
+    if (opts.restoreBuiltin !== false) {
+      const fallback = this.builtinFallbacks.get(id)
+      if (fallback) this.registerDescriptor(fallback, { builtin: true })
+    }
   }
 
   /** Push an event to a plugin view (fed by the backend server-push fan-out
@@ -3987,76 +4156,6 @@ export function bundledGitDir(source: BundledMiniIdeSource): string {
   return source.isPackaged
     ? join(source.resourcesPath, 'plugins', 'git')
     : join(source.devRoot ?? join(__dirname, '../..'), 'dist-plugins', 'git')
-}
-
-/** Active production Manifest v2 package directory. */
-export function bundledGitV2Dir(source: BundledMiniIdeSource): string {
-  return source.isPackaged
-    ? join(source.resourcesPath, 'plugins', 'navide-git')
-    : join(source.devRoot ?? join(__dirname, '../..'), 'dist-plugins', 'navide-git')
-}
-
-function registerScannedGitV2(
-  manager: FrontendPluginManager,
-  dir: string
-): { registered: boolean; reason?: string } {
-  const scanned = loadPluginDir(dir)
-  if (!scanned.descriptor) {
-    return { registered: false, reason: `${dir}: ${scanned.error ?? 'invalid plugin dir'}` }
-  }
-  if (
-    scanned.descriptor.id !== GIT_PLUGIN_ID ||
-    !nonEmptyString(scanned.descriptor.packageVersion) ||
-    scanned.descriptor.capabilityPolicy?.kind !== 'manifest-v2'
-  ) {
-    return { registered: false, reason: `${dir}: not a canonical Git Manifest v2 package` }
-  }
-  const keys = new Set(scanned.descriptor.views?.map((view) => view.contributionKey) ?? [])
-  for (const key of [`${GIT_PLUGIN_ID}.left`, `${GIT_PLUGIN_ID}.window`]) {
-    if (!keys.has(key)) return { registered: false, reason: `${dir}: missing view '${key}'` }
-  }
-  for (const view of scanned.descriptor.views ?? []) {
-    if (!existsSync(view.entryFile)) {
-      return { registered: false, reason: `${dir}: entry file missing (${view.entryFile})` }
-    }
-  }
-  manager.registerBuiltin(scanned.descriptor)
-  return { registered: true }
-}
-
-/**
- * Register the app-bundled Git surface as a builtin descriptor at startup,
- * mirroring {@link registerBundledPlans} exactly (same precedence order and
- * fail-closed validation). Never throws: a missing dir, invalid manifest,
- * spoofed id, or missing entry file returns `registered: false` with a reason
- * (caller logs), so a corrupt bundle degrades instead of crashing startup.
- */
-export function registerBundledGit(
-  manager: FrontendPluginManager,
-  source: BundledMiniIdeSource
-): { registered: boolean; reason?: string } {
-  const v2 = registerScannedGitV2(manager, bundledGitV2Dir(source))
-  if (v2.registered) return v2
-  // An installed, Host-approved package may already own this id. Its
-  // descriptor remains authoritative when the bundled copy is unavailable.
-  if (manager.getDescriptor(GIT_PLUGIN_ID)) return { registered: true }
-  // Keep the independently built legacy bundle as a recoverable startup
-  // fallback. A malformed or missing v2 package must not erase the user's Git
-  // surface; normal startup still selects v2 whenever its complete descriptor
-  // validates.
-  const legacy = registerLegacyBundledGit(manager, source)
-  return legacy.registered ? { registered: true } : v2
-}
-
-/** Select the startup descriptor from a main-process-owned recovery mode. */
-export function registerBundledGitStartup(
-  manager: FrontendPluginManager,
-  source: BundledMiniIdeSource,
-  recoveryMode: 'normal' | 'legacy' = 'normal',
-): { registered: boolean; reason?: string } {
-  return recoveryMode === 'legacy'
-    ? registerLegacyBundledGit(manager, source)
-    : registerBundledGit(manager, source)
 }
 
 /** Explicit rollback registration for diagnostics and recovery tooling. The

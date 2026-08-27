@@ -50,6 +50,22 @@ export interface GitCredential {
   expectedHost: string
 }
 
+/** Main-owned recovery transition. The renderer can only move into recovery;
+ * there is deliberately no public event or API for switching back. */
+export interface GitRecoveryChanged {
+  legacy: true
+}
+
+function isGitRecoveryChanged(payload: unknown): payload is GitRecoveryChanged {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    'legacy' in payload &&
+    payload.legacy === true
+  )
+}
+
 export interface GitContributionState {
   workspacePath: string
   analyzerModel: string
@@ -70,8 +86,15 @@ export interface InstalledPluginSummary {
   id: string
   requires: string[]
   sensitive: string[]
-  provenance?: 'official-registry' | 'developer-local-unpacked'
+  provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
+}
+
+export interface FactoryPluginSummary {
+  id: string
+  version: string | null
+  active: boolean
+  optedOut: boolean
 }
 
 export interface MarketplaceExtension {
@@ -121,6 +144,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
   stopBackend: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('backend:stop'),
   onBackendChanged: (cb: (info: BackendInfo) => void): void => {
     ipcRenderer.on('backend:changed', (_event, info: BackendInfo) => cb(info))
+  },
+  onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void): (() => void) => {
+    const listener = (_event: unknown, payload: unknown): void => {
+      if (isGitRecoveryChanged(payload)) cb(payload)
+    }
+    ipcRenderer.on('git:recoveryChanged', listener)
+    return () => ipcRenderer.removeListener('git:recoveryChanged', listener)
   },
   onMenuAction: (cb: (action: string) => void): void => {
     ipcRenderer.on('menu:action', (_event, action: string) => cb(action))
@@ -557,6 +587,8 @@ contextBridge.exposeInMainWorld('agentTeam', {
   plugins: {
     listInstalled: (): Promise<InstalledPluginSummary[]> =>
       ipcRenderer.invoke('plugins:listInstalled'),
+    listFactoryPackages: (): Promise<FactoryPluginSummary[]> =>
+      ipcRenderer.invoke('plugins:listFactoryPackages'),
     listContributions: (): Promise<Array<{
       pluginId: string
       packageVersion: string | null
@@ -571,13 +603,11 @@ contextBridge.exposeInMainWorld('agentTeam', {
       contributionKey: string
       workspace_path: string
       bounds: { x: number; y: number; width: number; height: number }
-      query?: string
     }): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('plugins:openContribution', args),
     openContributionWindow: (args: {
       contributionKey: string
       workspace_path: string
-      query?: string
     }): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('plugins:openContributionWindow', args),
     updateContribution: (args: {
@@ -606,5 +636,7 @@ contextBridge.exposeInMainWorld('agentTeam', {
       ipcRenderer.invoke('plugins:commitInstall', { id, ...approval }),
     remove: (id: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('plugins:remove', { id }),
+    restoreFactoryPackage: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('plugins:restoreFactoryPackage', { id }),
   },
 })

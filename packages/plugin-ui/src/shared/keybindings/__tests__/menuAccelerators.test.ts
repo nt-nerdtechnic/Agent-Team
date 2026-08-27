@@ -26,7 +26,7 @@ import {
 import { canonicalizeKeySpec, validateKeySpec } from '../parseKey'
 
 const MENU_SOURCE = join(process.cwd(), 'src/main/menu.ts')
-const DEFAULTS_SOURCE = join(process.cwd(), 'packages/plugin-ui-vue/src/shared/keybindings/defaults.ts')
+const DEFAULTS_SOURCE = join(process.cwd(), 'packages/plugin-ui/src/shared/keybindings/defaults.ts')
 
 // The menu's own doc comment names roles it deliberately does NOT install
 // (`role: 'copy'`, forceReload, the zoom family). Scanning them as real entries

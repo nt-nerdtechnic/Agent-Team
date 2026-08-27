@@ -42,8 +42,8 @@ vi.mock('@navide/terminal', async (importOriginal) => {
 
 const toasts = vi.hoisted(() => [] as Array<{ message: string, type?: string }>)
 
-vi.mock('@navide/ui-foundation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => ({
     toast: (message: string, opts?: { type?: string }) => { toasts.push({ message, type: opts?.type }) }
   }),

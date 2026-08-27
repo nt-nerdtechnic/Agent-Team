@@ -73,11 +73,15 @@ The classic form still works unchanged:
 
 If a release needs the retained Git recovery bundle, launch the application
 from its main-process environment with `NAVIDE_GIT_RECOVERY=legacy`. Normal
-startup must omit the variable and select Git v2. Verify the Git left and
-window surfaces open against an existing workspace and that the existing Git
-preferences and repository selection are still present. To restore v2, quit
-the application, remove the variable, and relaunch. The switch does not edit
-Plugin Storage or legacy seed data.
+startup omits the variable: a verified Marketplace package is preferred, then
+the removable factory `navide.git` package tries v2. A durable user opt-out
+leaves Git absent until **Restore** is selected in Extensions. Load, mount, or
+ready failure may select legacy for that process; trust and permission failures
+must remain fail closed. Verify the Git left and window surfaces open against
+an existing workspace, the Extensions entry reports the expected source and
+version, and existing Git preferences and repository selection are still
+present. To retry v2, quit the application, remove the variable, and relaunch.
+Recovery does not edit Plugin Storage or legacy seed data.
 
 ## Notes
 

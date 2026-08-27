@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { parseHunks, buildPatch, hunkHasChanges, toSideBySide, type Hunk } from '../lib/git-diff'
 import { loadImageDataUrl } from '../lib/imageData'
 import type { GitTransport } from '@navide/git-feature'

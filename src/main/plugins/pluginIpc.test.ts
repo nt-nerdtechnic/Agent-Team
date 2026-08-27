@@ -26,6 +26,7 @@ import { defaultInstallerDeps, type InstallerTrustConfig } from './pluginInstall
 import type { PluginActivationCatalogEntry } from './installedPlugins'
 import { projectBackendPluginActivationCatalog } from './pluginBackendActivationCatalog'
 import { makeZip } from './zipFixture'
+import { PluginCapabilityGrantStore } from './pluginCapabilityGrantStore'
 
 const { handlers, browserWindowFromWebContents } = vi.hoisted(() => ({
   handlers: new Map<string, (...a: unknown[]) => unknown>(),
@@ -51,7 +52,8 @@ import { FrontendPluginManager } from './frontendPluginManager'
 
 function buildPkg(
   packageId = 'acme.demo',
-  publisherId = 'acme'
+  publisherId = 'acme',
+  permissions: Record<string, unknown> = {}
 ): { bytes: Uint8Array; digest: string } {
   const manifest = JSON.stringify({
     schemaVersion: 2,
@@ -60,7 +62,7 @@ function buildPkg(
     name: 'Demo',
     version: '1.0.0',
     publisher: publisherId,
-    permissions: {},
+    permissions,
     marketplace: { description: 'Demo frontend', license: 'MIT' },
     contributes: {
       views: [
@@ -367,7 +369,10 @@ describe('plugin management sender authorization', () => {
     ).toBe(false)
   })
 
-  it('projects manifest view contributions without first-party special cases', () => {
+  it('projects sanitized manifest icons without exposing Host file paths', () => {
+    const resolveContributionIcon = vi.fn((iconFile: string) =>
+      iconFile.endsWith('primary.png') ? 'data:image/png;base64,AAAA' : null
+    )
     const manager = {
       listContributionCatalog: () => [
         {
@@ -375,7 +380,7 @@ describe('plugin management sender authorization', () => {
           packageVersion: '1.2.3',
           contributionKey: 'acme.tools.secondary',
           title: 'Secondary',
-          icon: null,
+          iconFile: null,
           kind: 'custom',
           location: 'right',
           manifestOrder: 0,
@@ -385,7 +390,7 @@ describe('plugin management sender authorization', () => {
           packageVersion: '1.2.3',
           contributionKey: 'acme.tools.primary',
           title: 'Primary',
-          icon: 'icons/primary.svg',
+          iconFile: '/plugins/acme.tools/icons/primary.png',
           kind: 'custom',
           location: 'left',
           manifestOrder: 1,
@@ -393,11 +398,14 @@ describe('plugin management sender authorization', () => {
       ],
       listInstalledPackages: () => [],
     } as unknown as FrontendPluginManager
-    registerPluginIpc(manager, '/plugins', () => true)
+    registerPluginIpc(manager, '/plugins', () => true, undefined, undefined, {
+      resolveContributionIcon,
+    })
 
     const handler = handlers.get('plugins:listContributions')
     if (!handler) throw new Error('contribution catalog handler not registered')
-    expect(handler(null)).toEqual([
+    const projected = handler(null) as Array<Record<string, unknown>>
+    expect(projected).toEqual([
       {
         pluginId: 'acme.tools',
         packageVersion: '1.2.3',
@@ -413,12 +421,17 @@ describe('plugin management sender authorization', () => {
         packageVersion: '1.2.3',
         contributionKey: 'acme.tools.primary',
         title: 'Primary',
-        icon: 'icons/primary.svg',
+        icon: 'data:image/png;base64,AAAA',
         kind: 'custom',
         location: 'left',
         manifestOrder: 1,
       },
     ])
+    expect(resolveContributionIcon).toHaveBeenCalledOnce()
+    expect(resolveContributionIcon).toHaveBeenCalledWith(
+      '/plugins/acme.tools/icons/primary.png'
+    )
+    expect(projected[1]).not.toHaveProperty('iconFile')
   })
 
   it('rejects unauthorized senders on every plugins channel before side effects', async () => {
@@ -543,6 +556,57 @@ describe('plugins:remove boundary validation', () => {
       expect(removeInstalledPlugin).toHaveBeenCalledWith('acme.demo')
       expect(order).toEqual(['stop', 'cleanup', 'remove'])
       expect(onActivationChange).toHaveBeenCalledWith({ pluginId: 'acme.demo' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('records factory removal without restoring its builtin descriptor', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-remove-factory-'))
+    const manager = new FrontendPluginManager()
+    const removeInstalledPlugin = vi
+      .spyOn(manager, 'removeInstalledPlugin')
+      .mockImplementation(() => undefined)
+    const onFactoryPackageRemoved = vi.fn()
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        cleanupPluginStorage: vi.fn(async () => undefined),
+        factoryPackageIds: ['navide.git'],
+        onFactoryPackageRemoved,
+      })
+      const removeHandler = handlers.get('plugins:remove')
+      if (!removeHandler) throw new Error('remove handler not registered')
+
+      await expect(removeHandler(null, { id: 'navide.git' })).resolves.toEqual({ ok: true })
+      expect(onFactoryPackageRemoved).toHaveBeenCalledWith('navide.git')
+      expect(removeInstalledPlugin).toHaveBeenCalledWith('navide.git', {
+        restoreBuiltin: false,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('restores an opted-out factory package through the Host lifecycle callback', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-restore-factory-'))
+    const manager = new FrontendPluginManager()
+    const restoreFactoryPackage = vi.fn(async () => undefined)
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        restoreFactoryPackage,
+        listFactoryPackages: () => [
+          { id: 'navide.git', version: '0.1.0', active: false, optedOut: true },
+        ],
+      })
+      const listHandler = handlers.get('plugins:listFactoryPackages')
+      const restoreHandler = handlers.get('plugins:restoreFactoryPackage')
+      if (!listHandler || !restoreHandler) throw new Error('factory handlers not registered')
+
+      expect(listHandler(null)).toEqual([
+        { id: 'navide.git', version: '0.1.0', active: false, optedOut: true },
+      ])
+      await expect(restoreHandler(null, { id: 'navide.git' })).resolves.toEqual({ ok: true })
+      expect(restoreFactoryPackage).toHaveBeenCalledWith('navide.git')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -911,6 +975,44 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       await expect(removeHandler(null, { id: 'acme.demo' })).resolves.toEqual({ ok: true })
       expect(listHandler(null)).toEqual([])
       expect(existsSync(join(root, 'acme.demo'))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('persists the confirmed Manifest v2 grant only after a successful commit and removes it on uninstall', async () => {
+    const { bytes, digest } = buildPkg('acme.demo', 'acme', {
+      system: ['fs', 'ui'],
+      shell: 'allowlist',
+    })
+    installFetch(signedDetail(digest), bytes, digest)
+    const root = mkdtempSync(join(tmpdir(), 'navide-capability-grant-install-'))
+    try {
+      const manager = new FrontendPluginManager()
+      const prepareHandler = register(root, manager)
+      await prepareHandler(null, { namespace: 'acme', name: 'demo' })
+      const grants = new PluginCapabilityGrantStore(root)
+      expect(grants.get('acme.demo', '1.0.0')).toBeNull()
+
+      const commitHandler = handlers.get('plugins:commitInstall')
+      const removeHandler = handlers.get('plugins:remove')
+      if (!commitHandler || !removeHandler) throw new Error('plugin lifecycle handlers not registered')
+      expect(
+        commitHandler(null, {
+          id: 'acme.demo',
+          publisherConfirmed: true,
+          riskConfirmed: true,
+        })
+      ).toEqual({ id: 'acme.demo', requires: ['fs', 'ui', 'shell'] })
+      expect(grants.get('acme.demo', '1.0.0')).toEqual({
+        packageVersion: '1.0.0',
+        system: ['fs', 'ui'],
+        shell: 'allowlist',
+        storage: true,
+      })
+
+      await removeHandler(null, { id: 'acme.demo' })
+      expect(grants.get('acme.demo', '1.0.0')).toBeNull()
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

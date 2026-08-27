@@ -4,7 +4,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { ref } from 'vue'
 
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
-vi.mock('@navide/plugin-ui-vue/foundation', () => ({
+vi.mock('@navide/plugin-ui/foundation', () => ({
   useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn(async () => false) }),
 }))
 
@@ -32,14 +32,17 @@ function responseFor(type: string): { ok: true; payload: unknown; error: null } 
   return { ok: true, payload: {}, error: null }
 }
 
-function mountPane(workspacePath: string) {
+function mountPane(
+  workspacePath: string,
+  send: (type: string) => Promise<unknown> = async (type: string) => responseFor(type),
+) {
   const wrapper = mount(GitPane, {
     attachTo: document.body,
     props: {
       workspacePath,
       gitTransport: {
         status: { value: 'connected' },
-        send: vi.fn(async (type: string) => responseFor(type)) as never,
+        send: vi.fn(send) as never,
         on: vi.fn(() => () => {}),
       },
       fileAccess: { readFile: vi.fn(), writeFile: vi.fn(), readImage: vi.fn() },
@@ -70,5 +73,32 @@ describe('GitPane menu ownership', () => {
     expect(document.querySelector(`${secondMenu}.tp-dropdown`)).not.toBeNull()
     first.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     expect(document.querySelector(`${secondMenu}.tp-dropdown`)).not.toBeNull()
+  })
+
+  it('shows an actionable status error instead of repository initialization and retries', async () => {
+    let statusFailed = true
+    const send = vi.fn(async (type: string) => {
+      if (type === 'git.status' && statusFailed) {
+        return {
+          ok: false,
+          payload: null,
+          error: { code: 'CAPABILITY_DENIED', message: 'Git capability is unavailable' },
+        }
+      }
+      return responseFor(type)
+    })
+    const wrapper = mountPane('/workspace/repo', send)
+    await flushPromises()
+
+    expect(wrapper.find('.status-error-panel').text()).toContain('Git capability is unavailable')
+    expect(wrapper.find('.init-panel').exists()).toBe(false)
+
+    statusFailed = false
+    await wrapper.find('.status-retry').trigger('click')
+    await flushPromises()
+
+    expect(send.mock.calls.filter(([type]) => type === 'git.status')).toHaveLength(2)
+    expect(wrapper.find('.status-error-panel').exists()).toBe(false)
+    expect(wrapper.find('.init-panel').exists()).toBe(false)
   })
 })

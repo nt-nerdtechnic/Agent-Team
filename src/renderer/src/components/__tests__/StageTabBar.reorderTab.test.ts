@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import StageTabBar, { type TabItem } from '../StageTabBar.vue'
 
 // Coverage for run-group tab drag-reorder on the StageTabBar. Tab drags carry

@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises, config } from '@vue/test-utils'
 import { ref, nextTick } from 'vue'
 import PlanFileView from '../PlanFileView.vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 // PlanFileView now uses vue-i18n for its inline edit controls; install it for
 // every mount in this file (vitest isolates modules per file, so no leak).
@@ -49,8 +49,8 @@ function makeBackend(content = PLAN_RAW) {
 }
 
 // Stub useNotify so toast calls don't throw.
-vi.mock('@navide/ui-foundation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn() }),
 }))
 

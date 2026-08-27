@@ -6,7 +6,7 @@ let nextMenuOwnerId = 0
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsGet, settingsSet } from '@navide/shared'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { useGit } from '../composables/useGit'
 import type { IgnoreTarget, GitWorktree } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
@@ -19,7 +19,7 @@ import type {
   GitPaneUiPort,
   IssuePort,
 } from '../ports/gitSurface'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { computeGraph, laneColor } from '../lib/git-graph'
 import { guardedDiscard } from '../lib/discardConfirm'
 import { closeGitPaneMenusOnEscape } from '../lib/gitMenuEscape'
@@ -69,9 +69,9 @@ function openBranchDiffTab(base = 'main'): void {
 }
 
 const {
-  gitStatus, loadStatus, discoveredRepos, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
+  gitStatus, statusError, statusLoaded, loadStatus, discoveredRepos, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
   gitWorktrees, gitConfig, gitConfigAllowedKeys,
-  isCommitting, isGenerating, isInitializing,
+  isLoadingStatus, isCommitting, isGenerating, isInitializing,
   syncOutput, syncError, gitError, clearGitError,
   initRepo, stageFile, unstageFile, stageAll, stageFiles, unstageFiles, discardFiles,
   fetchRemote, pullOnly, pushOnly, pushUpstream, sync,
@@ -1576,6 +1576,15 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 
     <div v-if="!workspacePath" class="empty-state">{{ $t('label.select-workspace') }}</div>
 
+    <div v-else-if="statusError" class="status-error-panel">
+      <div class="init-title">{{ statusError }}</div>
+      <button class="btn-primary w-full status-retry" :disabled="isLoadingStatus" @click="loadStatus">
+        {{ $t('action.retry') }}
+      </button>
+    </div>
+
+    <div v-else-if="!statusLoaded" class="empty-state">{{ $t('label.loading') }}</div>
+
     <!-- ── Init panel ─────────────────────────────────────── -->
     <div v-else-if="!gitStatus.is_git_repo" class="init-panel">
       <svg class="init-svg" width="32" height="32" viewBox="0 0 16 16" fill="var(--success-fg)">
@@ -2762,7 +2771,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 }
 
 /* ── Init panel ─────────────────────────────────────────────────────────────── */
-.init-panel {
+.init-panel,
+.status-error-panel {
   display: flex; flex-direction: column; align-items: center;
   gap: 10px; padding: 28px 20px; text-align: center;
 }

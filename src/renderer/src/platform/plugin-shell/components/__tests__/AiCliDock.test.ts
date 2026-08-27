@@ -10,7 +10,7 @@ import { CLI_AGENT_SPECS } from '../../agents'
 import { bracketedPaste } from '../../lib/aiCliContext'
 import type { TerminalDockPort } from '@navide/terminal'
 
-let i18n: typeof import('@navide/ui-foundation').i18n
+let i18n: typeof import('@navide/plugin-ui/foundation').i18n
 let AiCliDock: typeof import('../AiCliDock.vue').default
 
 const settingsState = vi.hoisted(() => ({
@@ -55,7 +55,7 @@ const terminalStub = defineComponent({
 })
 
 beforeAll(async () => {
-  const settingsModule = resolve(process.cwd(), 'packages/plugin-ui-vue/src/shared/index.ts')
+  const settingsModule = resolve(process.cwd(), 'packages/plugin-ui/src/shared/index.ts')
   vi.doMock(settingsModule, () => ({
     settingsGet: vi.fn(
       (key: string, def: string | null) => settingsState.stored[key] ?? def
@@ -65,7 +65,7 @@ beforeAll(async () => {
       settingsState.stored[key] = value
     }),
   }))
-  i18n = (await import('@navide/ui-foundation')).i18n
+  i18n = (await import('@navide/plugin-ui/foundation')).i18n
   i18n.global.locale.value = 'en-US'
   AiCliDock = (await import('../AiCliDock.vue')).default
 })

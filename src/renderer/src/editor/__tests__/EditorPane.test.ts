@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { defineComponent, h, ref, nextTick } from 'vue'
 import EditorPane from '../EditorPane.vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 // Monaco cannot run in happy-dom — replace the editor view with a stub that
 // just renders the bound content.
@@ -18,8 +18,8 @@ vi.mock('../view/EditorViewMonaco.vue', () => ({
 }))
 
 // Stub useNotify so toast calls don't throw.
-vi.mock('@navide/ui-foundation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn() }),
 }))
 

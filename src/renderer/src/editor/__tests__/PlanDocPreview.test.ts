@@ -7,7 +7,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { ref } from 'vue'
 import PlanDocPreview from '../PlanDocPreview.vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 i18n.global.locale.value = 'en-US'
 

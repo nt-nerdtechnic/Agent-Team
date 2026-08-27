@@ -1,5 +1,6 @@
 # `@navide/plugin-ui`
 
-Small, framework-neutral UI primitives and semantic token references for
-third-party Navide plugin views. It has no dependency on Vue, Electron, or any
+Vue components, capability-backed controllers, shared presentation services,
+and semantic token references for Navide plugin views. The package depends only
+on public plugin contracts and peer UI runtimes; it never imports Electron or a
 private Navide feature package.

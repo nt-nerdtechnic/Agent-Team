@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const repositoryRoot = resolve(__dirname, '../..')
@@ -19,6 +19,9 @@ const emitManifest: Plugin = {
     manifest.version = appVersion
     mkdirSync(outDir, { recursive: true })
     writeFileSync(resolve(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+    const assetsDir = resolve(outDir, 'assets')
+    mkdirSync(assetsDir, { recursive: true })
+    copyFileSync(resolve(packageRoot, 'assets/git.png'), resolve(assetsDir, 'git.png'))
   },
 }
 
@@ -29,10 +32,10 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: '#git-feature', replacement: resolve(packageRoot, 'src/git-feature/index.ts') },
-      { find: '@navide/plugin-ui-vue/styles.css', replacement: resolve(repositoryRoot, 'packages/plugin-ui-vue/src/foundation/styles.css') },
-      { find: '@navide/plugin-ui-vue/shared', replacement: resolve(repositoryRoot, 'packages/plugin-ui-vue/src/shared/index.ts') },
-      { find: '@navide/plugin-ui-vue/foundation', replacement: resolve(repositoryRoot, 'packages/plugin-ui-vue/src/foundation/index.ts') },
-      { find: '@navide/plugin-ui-vue', replacement: resolve(repositoryRoot, 'packages/plugin-ui-vue/src/index.ts') },
+      { find: '@navide/plugin-ui/styles.css', replacement: resolve(repositoryRoot, 'packages/plugin-ui/src/foundation/styles.css') },
+      { find: '@navide/plugin-ui/shared', replacement: resolve(repositoryRoot, 'packages/plugin-ui/src/shared/index.ts') },
+      { find: '@navide/plugin-ui/foundation', replacement: resolve(repositoryRoot, 'packages/plugin-ui/src/foundation/index.ts') },
+      { find: '@navide/plugin-ui', replacement: resolve(repositoryRoot, 'packages/plugin-ui/src/index.ts') },
     ],
   },
   build: {

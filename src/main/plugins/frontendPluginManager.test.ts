@@ -449,6 +449,22 @@ describe('registerDescriptor reserved-id guard', () => {
     expect(mgr.listInstalledPackages()).toEqual([])
   })
 
+  it('can remove an installed package without restoring its remembered builtin', () => {
+    const mgr = new FrontendPluginManager()
+    const bundled = devPlansPluginDescriptor()
+    mgr.registerBuiltin(bundled)
+    mgr.registerInstalledPackage(
+      { id: PLANS_PLUGIN_ID, requires: [], provenance: 'official-registry' },
+      undefined,
+      { official: true },
+    )
+
+    mgr.removeInstalledPlugin(PLANS_PLUGIN_ID, { restoreBuiltin: false })
+
+    expect(mgr.getDescriptor(PLANS_PLUGIN_ID)).toBeUndefined()
+    expect(mgr.listInstalledPackages()).toEqual([])
+  })
+
   it('registers an ordinary third-party descriptor', () => {
     const mgr = new FrontendPluginManager()
     mgr.registerDescriptor(descriptor('acme.demo'))
@@ -494,7 +510,7 @@ describe('registerDescriptor reserved-id guard', () => {
         packageVersion: null,
         contributionKey: 'acme.files.left',
         title: 'Files',
-        icon: null,
+        iconFile: null,
         kind: 'custom',
         location: 'left',
         manifestOrder: 0,
@@ -504,12 +520,141 @@ describe('registerDescriptor reserved-id guard', () => {
         packageVersion: null,
         contributionKey: 'acme.files.window',
         title: 'Files window',
-        icon: null,
+        iconFile: null,
         kind: 'custom',
         location: 'window',
         manifestOrder: 1,
       },
     ])
+  })
+
+  it('derives an exact per-instance context when a catalog contribution opens', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDescriptor: PluginLaunchDescriptor = {
+      ...descriptor('acme.files'),
+      packageVersion: '1.2.3',
+      capabilityPolicy: {
+        kind: 'manifest-v2',
+        system: ['fs'],
+        grants: [{ permission: 'system', namespace: 'fs' }],
+      },
+      views: [{
+        id: 'left',
+        contributionKey: 'acme.files.left',
+        kind: 'custom',
+        location: 'left',
+        title: 'Files',
+        entryFile: '/plugins/acme.files/frontend/left/index.html',
+      }],
+    }
+    mgr.registerInstalledPackage(
+      { id: 'acme.files', requires: ['fs'], provenance: 'official-registry' },
+      packageDescriptor,
+    )
+    const resolveGrant = vi.fn(() => ({
+      packageVersion: '1.2.3',
+      system: ['fs'] as const,
+      storage: true,
+    }))
+    mgr.setCapabilityGrantResolver(resolveGrant)
+    const host = new FakeBrowserWindow()
+
+    await expect(mgr.openContribution(asHost(host), 'acme.files.left', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })).resolves.toEqual({ ok: true })
+
+    expect(resolveGrant).toHaveBeenCalledWith('acme.files', '1.2.3')
+    const running = [...(mgr as unknown as {
+      running: Map<string, { capabilityContext: HostCapabilityContext | null }>
+    }).running.values()]
+    expect(running[0].capabilityContext).toMatchObject({
+      publisherEligible: false,
+      userGrant: { packageVersion: '1.2.3', system: ['fs'], storage: true },
+      runtimeBinding: {
+        pluginId: 'acme.files',
+        packageVersion: '1.2.3',
+        instanceId: expect.any(String),
+        workspaceId: expect.any(String),
+        audience: 'acme.files.left',
+      },
+      storageSnapshotTier: 'active',
+    })
+  })
+
+  it('fails closed when a catalog contribution lacks an exact approved grant', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDescriptor: PluginLaunchDescriptor = {
+      ...descriptor('acme.files'),
+      packageVersion: '1.2.3',
+      capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+      views: [{
+        id: 'left',
+        contributionKey: 'acme.files.left',
+        kind: 'custom',
+        location: 'left',
+        title: 'Files',
+        entryFile: '/plugins/acme.files/frontend/left/index.html',
+      }],
+    }
+    mgr.registerInstalledPackage(
+      { id: 'acme.files', requires: ['fs'], provenance: 'official-registry' },
+      packageDescriptor,
+    )
+    mgr.setCapabilityGrantResolver(() => null)
+
+    await expect(mgr.openContribution(asHost(new FakeBrowserWindow()), 'acme.files.left', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })).resolves.toEqual({ ok: false, error: 'package-version capability grant is missing' })
+  })
+
+  it('reports an early selected-v2 activation failure exactly once', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor: PluginLaunchDescriptor = {
+      id: 'navide.git',
+      packageVersion: '1.0.0',
+      requires: ['fs'],
+      capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+      devUrl: '',
+      entryFile: '/plugins/navide.git/frontend/left/index.html',
+      views: [{
+        id: 'left',
+        contributionKey: 'navide.git.left',
+        kind: 'custom',
+        location: 'left',
+        title: 'Git',
+        entryFile: '/plugins/navide.git/frontend/left/index.html',
+      }],
+    }
+    mgr.registerInstalledPackage(
+      { id: 'navide.git', requires: ['fs'], provenance: 'official-registry' },
+      descriptor,
+      { official: true },
+    )
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion: '1.0.0', system: ['fs'], storage: true,
+    }))
+    const onFailure = vi.fn()
+    mgr.setActivationFailureHandler(onFailure)
+    const host = new FakeBrowserWindow()
+    await mgr.openContribution(asHost(host), 'navide.git.left', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })
+    const webContents = (host.children[0] as FakeViewLike).webContents as unknown as {
+      emit(event: string, ...args: unknown[]): void
+    }
+
+    webContents.emit('did-fail-load', {}, -105, 'NAME_NOT_RESOLVED', 'file:///plugin', true)
+    webContents.emit('did-fail-load', {}, -105, 'NAME_NOT_RESOLVED', 'file:///plugin', true)
+
+    expect(onFailure).toHaveBeenCalledTimes(1)
+    expect(onFailure).toHaveBeenCalledWith({
+      pluginId: 'navide.git',
+      packageVersion: '1.0.0',
+      reason: 'entry load failed: NAME_NOT_RESOLVED (-105)',
+    })
   })
 })
 
@@ -596,6 +741,76 @@ describe('loadInstalledPlugins official receipt gate', () => {
     )
     return { id, version: '1.0.0', digest, signature }
   }
+
+  it('loads a validated Host-bundled Manifest v2 package through the installed runtime', () => {
+    writeV2Plugin('factory-git', { id: 'navide.git', frontend: true })
+    const mgr = new FrontendPluginManager()
+
+    const result = mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git')
+
+    expect(result).toMatchObject({ loaded: true, pluginId: 'navide.git', packageVersion: '1.0.0' })
+    expect(mgr.getDescriptor('navide.git')?.packageVersion).toBe('1.0.0')
+    expect(mgr.listInstalledPackages()).toEqual([
+      { id: 'navide.git', requires: [], provenance: 'factory-bundled' },
+    ])
+  })
+
+  it('treats the App-bundled Git package as publisher-eligible only after an exact grant', async () => {
+    writeV2Plugin('factory-git', { id: 'navide.git', frontend: true })
+    const mgr = new FrontendPluginManager()
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git').loaded).toBe(true)
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion: '1.0.0',
+      system: [],
+      storage: true,
+    }))
+    const host = new FakeBrowserWindow()
+
+    await expect(mgr.openContribution(asHost(host), 'navide.git.main', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })).resolves.toEqual({ ok: true })
+
+    const running = [...(mgr as unknown as {
+      running: Map<string, { capabilityContext: HostCapabilityContext | null }>
+    }).running.values()]
+    expect(running[0].capabilityContext).toMatchObject({
+      publisherEligible: true,
+      userGrant: { packageVersion: '1.0.0', system: [], storage: true },
+      runtimeBinding: { pluginId: 'navide.git', packageVersion: '1.0.0' },
+    })
+  })
+
+  it('does not let a Host-bundled package replace an active Registry package', () => {
+    writeV2Plugin('factory-git', { id: 'navide.git', version: '1.0.0', frontend: true })
+    const mgr = new FrontendPluginManager()
+    mgr.registerInstalledPackage(
+      { id: 'navide.git', requires: [], provenance: 'official-registry' },
+      {
+        ...descriptor('navide.git'),
+        packageVersion: '2.0.0',
+        capabilityPolicy: { kind: 'manifest-v2', system: [], grants: [] },
+      },
+      { official: true },
+    )
+
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git')).toMatchObject({
+      loaded: false,
+      reason: 'installed package is active',
+    })
+    expect(mgr.getDescriptor('navide.git')?.packageVersion).toBe('2.0.0')
+  })
+
+  it('rejects a factory package whose manifest claims another identity', () => {
+    writeV2Plugin('factory-git', { id: 'acme.git', frontend: true })
+    const mgr = new FrontendPluginManager()
+
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git')).toMatchObject({
+      loaded: false,
+      reason: expect.stringMatching(/expected.*navide\.git/i),
+    })
+    expect(mgr.listInstalledPackages()).toEqual([])
+  })
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'navide-plugins-'))

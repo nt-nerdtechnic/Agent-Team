@@ -6,7 +6,7 @@
 // xterm, scrollback, UTF-8 and resize behavior stays inside useTerminal.
 import { onMounted, ref, watch } from 'vue'
 import { useTerminal } from '@navide/terminal'
-import { useTheme } from '@navide/ui-foundation'
+import { useTheme } from '@navide/plugin-ui/foundation'
 import type { TerminalDockPort } from '@navide/terminal'
 import { agentProfileFor } from '../agentProfile'
 

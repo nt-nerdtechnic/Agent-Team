@@ -21,18 +21,21 @@ describe('navide.git production package boundary', () => {
     const manifest = JSON.parse(readFileSync(join(packageRoot, 'manifest.json'), 'utf8')) as {
       schemaVersion: number
       id: string
+      marketplace: { icon?: string }
       permissions: { system?: string[]; shell?: string }
-      contributes?: { views?: Array<{ id: string; kind: string; location: string; entry: string }> }
+      contributes?: { views?: Array<{ id: string; kind: string; location: string; entry: string; icon?: string }> }
     }
 
     expect(manifest.schemaVersion).toBe(2)
     expect(manifest.id).toBe('navide.git')
     expect(manifest.permissions.system).toEqual(['fs', 'ui', 'aiCli'])
     expect(manifest.permissions.shell).toBe('allowlist')
+    expect(manifest.marketplace.icon).toBe('assets/git.png')
     expect(manifest.contributes?.views).toEqual([
-      { id: 'left', kind: 'custom', location: 'left', title: 'Git', entry: 'frontend/left/index.html' },
-      { id: 'window', kind: 'custom', location: 'window', title: 'Git', entry: 'frontend/window/index.html' },
+      { id: 'left', kind: 'custom', location: 'left', title: 'Git', icon: 'assets/git.png', entry: 'frontend/left/index.html' },
+      { id: 'window', kind: 'custom', location: 'window', title: 'Git', icon: 'assets/git.png', entry: 'frontend/window/index.html' },
     ])
+    expect(existsSync(join(packageRoot, 'assets/git.png'))).toBe(true)
   })
 
   it('loads through the same Manifest v2 directory loader as third-party packages', () => {
@@ -64,7 +67,7 @@ describe('navide.git production package boundary', () => {
       'mount.ts',
       'pluginSurfacePorts.ts',
     ].map((path) => readFileSync(join(packageRoot, 'src', path), 'utf8')).join('\n')
-    expect(source).toContain('@navide/plugin-ui-vue')
+    expect(source).toContain('@navide/plugin-ui')
     expect(source).not.toContain('@navide/terminal')
     expect(source).not.toContain('@navide/plugin-shell')
     expect(source).not.toMatch(/callCapability\(['"]terminal['"]/)

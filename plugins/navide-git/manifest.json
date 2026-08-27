@@ -11,6 +11,7 @@
     "shell": "allowlist"
   },
   "marketplace": {
+    "icon": "assets/git.png",
     "description": "Browse and manage workspace Git repositories in the left region or a separate window.",
     "license": "MIT",
     "repository": "https://github.com/nt-nerdtechnic/Navide",
@@ -23,6 +24,7 @@
         "kind": "custom",
         "location": "left",
         "title": "Git",
+        "icon": "assets/git.png",
         "entry": "frontend/left/index.html"
       },
       {
@@ -30,6 +32,7 @@
         "kind": "custom",
         "location": "window",
         "title": "Git",
+        "icon": "assets/git.png",
         "entry": "frontend/window/index.html"
       }
     ]

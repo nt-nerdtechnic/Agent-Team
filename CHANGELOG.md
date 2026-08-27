@@ -6,28 +6,32 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Added
 
-- Add the public Plugin Platform v2 contracts, SDK CLI, UI package boundary,
+- Add the public Plugin Platform v2 contracts, SDK CLI, unified Vue UI package,
   and an external-workspace frontend package smoke workflow with fail-closed
   capability-denial coverage.
-- Use the same optional package lifecycle and public dependency graph for
-  official and third-party plugins. The base App build no longer embeds or
-  automatically installs official plugin artifacts.
+- Use the same Manifest, catalog, grant, instance, and capability lifecycle for
+  official and third-party plugins. Until Marketplace acquisition is available,
+  the App includes a removable factory Git package whose durable opt-out and
+  explicit Extensions restore do not bypass that shared runtime.
 - Add the Issue 16 Host-managed durable plugin/workspace storage adapter and
   lifecycle seams with authenticated package/workspace identity,
   version-matched candidate/active/previous snapshot selection, atomic JSON
-  persistence, and stable quota errors. Production grant/context wiring is
-  deferred to the later runtime integration.
+  persistence, stable quota errors, and Host-derived package-version grants.
 - Enforce Manifest v2 coarse `system` namespace and `shell` grants through the
   Host capability catalog, authenticated workspace binding, package-version
   approval, and fail-closed AI CLI/shell request planning.
 - Allow the canonical `git` executable through Manifest v2 `shell.run`
   allowlist mode without adding a Git permission or first-party bypass.
-- Ship the official first-party `navide.git` Manifest v2 production package
+- Add the optional official `navide.git` Manifest v2 package
   with isolated left and window custom views from one active package version,
   Host-owned Git contribution/account bridges, workspace storage continuity,
   and a retained legacy rollback path. Git-specific production source now lives
   in the plugin package; remote credentials remain Host-injected and the
-  lifecycle selector uses a crash-safe atomic write.
+  lifecycle selector uses a crash-safe atomic write. Approved v2 activation is
+  attempted first; load/mount/readiness failure selects the retained legacy
+  renderer for that process, while security and permission denials fail closed.
+  Contribution artwork is decoded by the Host and rendered from the shared
+  manifest catalog with a generic fallback for missing or invalid icons.
 - Configurable lazy CLI restore: resume one CLI, the first Grid page, or the active tab when opening a workspace; preserve manual-tab grouping and recover uniquely attributable missing Claude conversations on realization.
 - Add Meta Muse Code as a spawnable CLI agent, including install detection and one-click install. Resume, log reading and credential switching remain unavailable for it until they are verified against a real installation.
 - Validate Manifest v2 frontend contributions consistently in the App and marketplace registry, including strict view discovery and package-entry checks.
@@ -84,6 +88,9 @@ All notable released changes to Navide will be documented in this file. The form
 - Write every injection into a CLI pane as a bracketed paste for the vendors whose TUI keeps the mode on, instead of only multi-line ones, and send the paste guards as whole writes so a chunk boundary can never cut one in half.
 
 ### Fixed
+
+- Fill the complete Host slot with the isolated Git v2 left contribution,
+  without exposing the browser's default white canvas or outer page margin.
 
 - Make Git account sign-in safer by limiting saved credentials to the selected
   Git host, protecting clone destinations chosen in the folder picker, and

@@ -16,9 +16,9 @@ import type {
   GitPaneUiPort,
   IssuePort,
 } from './ports/gitSurface'
-import type { PortResponse } from '@navide/plugin-ui-vue/shared'
-import type { KeybindingsPort } from '@navide/plugin-ui-vue/shared'
-import type { SettingsBackend } from '@navide/plugin-ui-vue/shared'
+import type { PortResponse } from '@navide/plugin-ui/shared'
+import type { KeybindingsPort } from '@navide/plugin-ui/shared'
+import type { SettingsBackend } from '@navide/plugin-ui/shared'
 import type { Issue, IssueDetail, IssueProviderInfo } from './composables/useIssues'
 import type { GitTransportStatusSource } from '#git-feature'
 import type { GitContributionAction, GitContributionState } from './ports/gitContribution'

@@ -20,7 +20,7 @@
 
 import { ref, computed, nextTick, onMounted, onUnmounted, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useKeybindings, registerCommand, setContext } from '@navide/shared'
+import { useKeybindings, registerCommand, setContext } from '@navide/plugin-ui/shared'
 import {
   useGit,
   type BlameEntry,
@@ -29,9 +29,9 @@ import {
   type GitFileEntry
 } from './composables/useGit'
 import { useIssues } from './composables/useIssues'
-import { useNotify } from '@navide/ui-foundation'
-import { useTheme } from '@navide/ui-foundation'
-import { settingsGet, onSettingsChanged } from '@navide/shared'
+import { useNotify } from '@navide/plugin-ui/foundation'
+import { useTheme } from '@navide/plugin-ui/foundation'
+import { settingsGet, onSettingsChanged } from '@navide/plugin-ui/shared'
 import {
   GIT_BRANCH_DIFF_KEY,
   GIT_ACCOUNTS_KEY,

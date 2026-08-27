@@ -1,7 +1,7 @@
 import type { Ref, ShallowRef } from 'vue'
 import type { Terminal } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
-import type { PortResponse } from '@navide/shared'
+import type { PortResponse } from '@navide/plugin-ui/shared'
 
 type ResizeRequest = (sessionId: string, cols: number, rows: number) => Promise<PortResponse>
 

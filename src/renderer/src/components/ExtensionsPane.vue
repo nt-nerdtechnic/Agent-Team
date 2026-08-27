@@ -7,11 +7,15 @@
 // All privileged work is brokered through the main process via
 // `window.agentTeam.plugins`; this component holds no secrets and never touches
 // package bytes.
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 
 const plugins = window.agentTeam?.plugins
 
 const installed = ref<InstalledPluginSummary[]>([])
+const factoryPackages = ref<FactoryPluginSummary[]>([])
+const nonFactoryInstalled = computed(() =>
+  installed.value.filter((plugin) => plugin.provenance !== 'factory-bundled')
+)
 const results = ref<MarketplaceExtension[]>([])
 const query = ref('')
 const busy = ref(false)
@@ -25,7 +29,10 @@ const publisherConfirmed = ref(false)
 
 async function refreshInstalled(): Promise<void> {
   if (!plugins) return
-  installed.value = await plugins.listInstalled()
+  ;[installed.value, factoryPackages.value] = await Promise.all([
+    plugins.listInstalled(),
+    plugins.listFactoryPackages(),
+  ])
 }
 
 async function search(): Promise<void> {
@@ -124,6 +131,20 @@ async function remove(id: string): Promise<void> {
   await refreshInstalled()
 }
 
+async function restoreFactoryPackage(id: string): Promise<void> {
+  if (!plugins) return
+  busy.value = true
+  error.value = ''
+  try {
+    await plugins.restoreFactoryPackage(id)
+    await refreshInstalled()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = false
+  }
+}
+
 onMounted(refreshInstalled)
 </script>
 
@@ -132,9 +153,35 @@ onMounted(refreshInstalled)
     <p v-if="error" class="ext-error" role="alert">{{ error }}</p>
 
     <section class="ext-section">
+      <h3>Bundled</h3>
+      <ul class="ext-list">
+        <li
+          v-for="p in factoryPackages"
+          :key="p.id"
+          class="ext-installed ext-factory"
+          :data-factory-id="p.id"
+        >
+          <span class="ext-id">{{ p.id === 'navide.git' ? 'Bundled Git' : p.id }}</span>
+          <span v-if="p.version" class="ext-requires">{{ p.version }}</span>
+          <span class="ext-badge" :class="p.active ? 'ext-active' : 'ext-removed'">
+            {{ p.active ? 'Active' : p.optedOut ? 'Removed' : 'Unavailable' }}
+          </span>
+          <button
+            v-if="p.optedOut"
+            class="ext-restore"
+            :disabled="busy"
+            @click="restoreFactoryPackage(p.id)"
+          >
+            Restore
+          </button>
+        </li>
+      </ul>
+    </section>
+
+    <section class="ext-section">
       <h3>Installed</h3>
       <ul class="ext-list">
-        <li v-for="p in installed" :key="p.id" class="ext-installed" :data-id="p.id">
+        <li v-for="p in nonFactoryInstalled" :key="p.id" class="ext-installed" :data-id="p.id">
           <span class="ext-id">{{ p.id }}</span>
           <span v-if="p.sensitive.length" class="ext-badge ext-sensitive">
             sensitive: {{ p.sensitive.join(', ') }}
@@ -143,7 +190,7 @@ onMounted(refreshInstalled)
           <span v-if="p.warning" class="ext-badge ext-dev-warning">{{ p.warning }}</span>
           <button class="ext-remove" @click="remove(p.id)">Remove</button>
         </li>
-        <li v-if="!installed.length" class="ext-empty">No plugins installed.</li>
+        <li v-if="!nonFactoryInstalled.length" class="ext-empty">No plugins installed.</li>
       </ul>
     </section>
 
@@ -250,8 +297,17 @@ onMounted(refreshInstalled)
   color: #c77400;
   font-size: 11px;
 }
+.ext-badge.ext-active {
+  color: #1a7f37;
+  font-size: 11px;
+}
+.ext-badge.ext-removed {
+  color: #c77400;
+  font-size: 11px;
+}
 .ext-remove,
-.ext-install {
+.ext-install,
+.ext-restore {
   margin-left: auto;
 }
 .ext-search {

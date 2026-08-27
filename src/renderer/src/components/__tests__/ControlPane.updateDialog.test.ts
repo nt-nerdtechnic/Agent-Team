@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { nextTick } from 'vue'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import type { UpdateState } from '../../../../shared/updater'
 
 const minimalProps = {

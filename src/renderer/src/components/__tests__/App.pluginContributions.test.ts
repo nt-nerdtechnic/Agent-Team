@@ -22,4 +22,21 @@ describe('generic plugin placement boot wiring', () => {
     )
     expect(mainSource).toContain("loadWindow(win, { window: 'main', ...params, ...mainBootParams })")
   })
+
+  it('accepts a recovery notification as a sticky renderer state', () => {
+    expect(appSource).toMatch(
+      /const legacyGitRecovery = ref\(new URLSearchParams\(window\.location\.search\)\.get\(['"]legacy_git_recovery['"]\) === ['"]1['"]\)/
+    )
+    expect(appSource).toContain('onGitRecoveryChanged')
+    expect(appSource).toContain('legacyGitRecovery.value = true')
+    expect(appSource).toContain('stopGitRecoveryChanged?.()')
+    expect(appSource).toContain(':legacy-git-recovery="legacyGitRecovery"')
+  })
+
+  it('uses the typed recovery listener exposed by preload', () => {
+    const preloadSource = readFileSync(resolve(process.cwd(), 'src/preload/index.ts'), 'utf8')
+    expect(preloadSource).toContain('onGitRecoveryChanged')
+    expect(preloadSource).toMatch(/payload\.legacy === true/)
+    expect(preloadSource).toContain('removeListener')
+  })
 })

@@ -10,7 +10,7 @@ import { mount, flushPromises, type DOMWrapper, type VueWrapper } from '@vue/tes
 import { defineComponent, h, ref } from 'vue'
 import { extractDropPaths, shellEscape } from '../../lib/drop'
 import { aiTerminalPaneId } from '@navide/plugin-shell'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 // Control surface for the stubbed CLI terminal: tests seed the PTY state the
 // dock sees at mount and read back what "Resolve with agent" pasted into it.
@@ -221,7 +221,7 @@ vi.mock('../../composables/useBackend', () => {
 })
 
 import GitWindowApp from '../../GitWindowApp.vue'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { useBackend } from '../../composables/useBackend'
 import { createHostGitTransport } from '../../composables/hostGitTransport'
 import { createHostGitSurfacePorts, createHostTerminalDockPort } from '../../composables/hostSurfacePorts'

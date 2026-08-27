@@ -4,7 +4,7 @@
 // assertion goes through the real composable rather than a stubbed prop.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import AgentMessagesPanel from '../AgentMessagesPanel.vue'
 import {
   useAgentMessaging,

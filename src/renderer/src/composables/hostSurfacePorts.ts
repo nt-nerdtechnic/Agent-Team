@@ -20,7 +20,7 @@ import type {
   GitWindowUiPort,
   IssuePort,
 } from '../ports/gitSurface'
-import type { KeybindingsPort } from '@navide/shared'
+import type { KeybindingsPort } from '@navide/plugin-ui/shared'
 import { useGitAccounts } from './useGitAccounts'
 import type {
   TerminalCreateRequest,

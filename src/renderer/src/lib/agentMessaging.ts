@@ -20,7 +20,7 @@
 // terminal buffer.
 
 import { AGENT_SPECS } from '@navide/plugin-shell'
-import { enUSMessages } from '@navide/ui-foundation'
+import { enUSMessages } from '@navide/plugin-ui/foundation'
 
 export const MSG_START = '---MSG-START---'
 export const MSG_END = '---MSG-END---'

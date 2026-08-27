@@ -1,7 +1,7 @@
 # Keyboard Shortcuts Reference
 
 This Mini-IDE's keybindings align with VS Code / Cursor conventions.
-All rules are defined in `packages/plugin-ui-vue/src/shared/keybindings/defaults.ts` and resolved
+All rules are defined in `packages/plugin-ui/src/shared/keybindings/defaults.ts` and resolved
 via `useKeybindings` (capture-phase), with support for chord keys (e.g. `⌘K ⌘K`)
 and when-clause conditions.
 
@@ -35,7 +35,7 @@ rules the editor writes.
 |----------|--------|
 | `⌘B` | Toggle sidebar |
 | `⌘⇧E` | Focus Explorer |
-| `⌘⇧G` | Open the Git window from the main window; focus the Source Control sidebar inside the Mini IDE (when find is closed) |
+| `⌘⇧G` | Open the Git window when Git is active; focus the Source Control sidebar inside the Mini IDE (when find is closed) |
 | `⌘⇧I` | Open the Mini IDE window |
 | `⌘J` | Toggle AI Terminal panel |
 | `⌘⇧A` | Toggle AI Terminal panel |

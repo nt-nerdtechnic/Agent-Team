@@ -1,7 +1,5 @@
 import type { JsonValue } from '../../../packages/plugin-contracts/src/index'
-import {
-  GIT_USER_PREFERENCE_KEYS,
-} from '@navide/git-feature'
+import { HOST_GIT_USER_PREFERENCE_KEYS } from '../../shared/gitCompatibility'
 import type { StoragePartition, StorageSnapshotRef } from './pluginCapabilityBroker'
 import type {
   HostStorageSnapshotIdentity,
@@ -9,7 +7,7 @@ import type {
   StorageExecution,
 } from './pluginStorage'
 
-export const GIT_STORAGE_KEYS = GIT_USER_PREFERENCE_KEYS
+export const GIT_STORAGE_KEYS = HOST_GIT_USER_PREFERENCE_KEYS
 
 const MIGRATION_MARKER = '__navide_git_storage_migration_v2'
 const GIT_PLUGIN_ID = 'navide.git'

@@ -5,7 +5,7 @@
 // must carry hover/AT text — a bare colour is not a signal for everyone.
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import StageTabBar, { type TabItem } from '../StageTabBar.vue'
 
 const tabs: TabItem[] = [

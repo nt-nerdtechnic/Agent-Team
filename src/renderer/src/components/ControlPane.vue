@@ -14,10 +14,10 @@ import type { DisplayStatus } from '@navide/terminal'
 import type { Role, RoleKey } from '../data/roles'
 import type { Stage, StageId } from '../data/stages'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
-import { registerCommand } from '@navide/shared'
+import { registerCommand } from '@navide/plugin-ui/shared'
 import { useUpdater } from '../composables/useUpdater'
-import { i18n } from '@navide/ui-foundation'
-import { useNotify } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 
 // Re-exported from the canonical per-vendor specs — this was a hand-kept
 // structural mirror before stage 2 of the one-file-per-vendor refactor.
@@ -546,6 +546,16 @@ const pluginTabs = computed(() =>
     .filter((entry) => entry.location === 'left')
     .map((entry) => ({ ...entry, tabId: pluginTabId(entry.contributionKey) }))
 )
+const failedPluginIcons = ref(new Set<string>())
+const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): string =>
+  `${entry.contributionKey}\u0000${entry.icon ?? ''}`
+const hasPluginIcon = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): boolean =>
+  Boolean(entry.icon) && !failedPluginIcons.value.has(pluginIconFailureKey(entry))
+function markPluginIconFailed(entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): void {
+  const failures = new Set(failedPluginIcons.value)
+  failures.add(pluginIconFailureKey(entry))
+  failedPluginIcons.value = failures
+}
 const sidebarTab = ref<SidebarTab>(
   (() => {
     try {
@@ -1095,7 +1105,16 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         :title="pluginTab.title"
         @click="selectSidebarTab(pluginTab.tabId)"
       >
-        <span aria-hidden="true">◇</span>
+        <img
+          v-if="hasPluginIcon(pluginTab)"
+          class="plugin-tab-icon"
+          :src="pluginTab.icon ?? ''"
+          width="18"
+          height="18"
+          alt=""
+          @error="markPluginIconFailed(pluginTab)"
+        />
+        <span v-else class="plugin-tab-fallback" aria-hidden="true">◇</span>
       </button>
     </div>
 
@@ -1116,22 +1135,24 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           :workspace-path="workspace ?? ''"
           :visible="true"
         />
-        <GitPluginHostSlot
-          v-if="legacyGitRecovery && backend && sidebarTab === 'git'"
-          :workspace-path="workspace ?? ''"
-          :visible="true"
-          :backend="backend"
-          :analyzer-model="analyzerModel"
-          :dispatch-targets="dispatchTargets"
-          :available-agents="availableAgents"
-          :issue-handoffs="issueHandoffs"
-          @changes-count="$emit('changes-count', $event)"
-          @open-workspace="$emit('workspace-browse', $event)"
-          @dispatch-issue="$emit('dispatch-issue', $event)"
-          @spawn-for-issue="$emit('spawn-for-issue', $event)"
-          @focus-pane="$emit('focus-pane', $event)"
-          @open-git-accounts="$emit('open-git-accounts')"
-        />
+        <template v-if="legacyGitRecovery && backend && sidebarTab === 'git'">
+          <div class="legacy-recovery-label" data-legacy-recovery-label>Legacy recovery</div>
+          <GitPluginHostSlot
+            :workspace-path="workspace ?? ''"
+            :visible="true"
+            :backend="backend"
+            :analyzer-model="analyzerModel"
+            :dispatch-targets="dispatchTargets"
+            :available-agents="availableAgents"
+            :issue-handoffs="issueHandoffs"
+            @changes-count="$emit('changes-count', $event)"
+            @open-workspace="$emit('workspace-browse', $event)"
+            @dispatch-issue="$emit('dispatch-issue', $event)"
+            @spawn-for-issue="$emit('spawn-for-issue', $event)"
+            @focus-pane="$emit('focus-pane', $event)"
+            @open-git-accounts="$emit('open-git-accounts')"
+          />
+        </template>
       </div>
     </div>
 
@@ -1655,6 +1676,12 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   color: var(--text-bright);
   background: var(--bg-muted);
 }
+.plugin-tab-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
 .git-badge {
   position: absolute;
   top: -2px;
@@ -1673,6 +1700,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   padding: 0 3px;
   line-height: 1;
   border: 1px solid var(--bg-base);
+}
+.legacy-recovery-label {
+  padding: 5px 10px;
+  color: var(--attention-fg);
+  background: var(--bg-muted);
+  border-bottom: 1px solid var(--border-muted);
+  font-size: 11px;
+  font-weight: 600;
 }
 .dot {
   width: 8px;

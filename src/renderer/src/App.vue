@@ -26,7 +26,7 @@ import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { agentUsesBracketedPaste } from '@navide/plugin-shell'
-import { useNotify, useTheme } from '@navide/ui-foundation'
+import { useNotify, useTheme } from '@navide/plugin-ui/foundation'
 import { migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from '@navide/terminal'
 import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
 import type { PushOutcome, RouteResult } from './composables/useAgentMessaging'
@@ -79,7 +79,7 @@ import {
   type StageId,
   type StageSlot
 } from './data/stages'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from '@navide/terminal'
@@ -172,7 +172,7 @@ import {
   type RestoreSessionTrigger,
   type WorkspaceRestoreSession,
 } from './lib/resumeBehavior'
-import { initSettingsBackend, settingsGet, settingsSet } from '@navide/shared'
+import { initSettingsBackend, settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { pickWhatsNew, type WhatsNewEntry } from './lib/whatsNew'
 import { initUsage } from './composables/useUsage'
 import {
@@ -199,7 +199,7 @@ import {
 } from './lib/cliAwaitingInput'
 import { markerTurnActionFor } from './lib/sessionMarkerTurn'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
-import { initKeybindingsPort, useKeybindings, registerCommand, setContext } from '@navide/shared'
+import { initKeybindingsPort, useKeybindings, registerCommand, setContext } from '@navide/plugin-ui/shared'
 import { useUiActionBus } from './composables/useUiActionBus'
 import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
 import { useStatusBarPopover } from './composables/useStatusBarPopover'
@@ -489,7 +489,7 @@ const WS_PATH_KEY = 'agentTeam.currentWorkspace'
 // restore — see onWorkspaceCheck.
 const _bootWorkspace = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
 const _bootIsDuplicate = new URLSearchParams(window.location.search).get('duplicate') === '1'
-const legacyGitRecovery = new URLSearchParams(window.location.search).get('legacy_git_recovery') === '1'
+const legacyGitRecovery = ref(new URLSearchParams(window.location.search).get('legacy_git_recovery') === '1')
 let suppressPaneRestoreOnce = _bootWorkspace !== '' && _bootIsDuplicate
 // Detached child window: shows only one run group of its workspace. When set,
 // this window renders just that group's tab/panes and never persists the shared
@@ -3515,8 +3515,12 @@ function onGitContributionAction(envelope: {
 
 let stopGitContributionActions: (() => void) | null = null
 let stopPluginContributionChanges: (() => void) | null = null
+let stopGitRecoveryChanged: (() => void) | null = null
 onMounted(() => {
   stopGitContributionActions = window.agentTeam?.onGitContributionAction?.(onGitContributionAction) ?? null
+  stopGitRecoveryChanged = window.agentTeam?.onGitRecoveryChanged?.((change) => {
+    if (change.legacy) legacyGitRecovery.value = true
+  }) ?? null
   void refreshPluginContributions()
   stopPluginContributionChanges = window.agentTeam?.plugins?.onContributionsChanged?.(() => {
     void refreshPluginContributions()
@@ -3525,6 +3529,8 @@ onMounted(() => {
 onUnmounted(() => {
   stopGitContributionActions?.()
   stopGitContributionActions = null
+  stopGitRecoveryChanged?.()
+  stopGitRecoveryChanged = null
   stopPluginContributionChanges?.()
   stopPluginContributionChanges = null
 })

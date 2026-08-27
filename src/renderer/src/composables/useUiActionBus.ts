@@ -1,4 +1,4 @@
-import { invokeCommand, listCommands } from '@navide/shared'
+import { invokeCommand, listCommands } from '@navide/plugin-ui/shared'
 import { currentDiagnosticSeq, takeDiagnosticsSince } from '../lib/uiDiagnostics'
 
 /**

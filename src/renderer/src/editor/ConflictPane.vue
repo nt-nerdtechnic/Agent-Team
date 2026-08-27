@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import {
   parseConflicts, buildResolved, countConflicts, hasConflicts,
   type FileSection, type ConflictChoice,

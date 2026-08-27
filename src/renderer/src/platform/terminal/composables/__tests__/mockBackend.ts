@@ -1,6 +1,6 @@
 import { ref, effectScope, type EffectScope } from 'vue'
 import type { TerminalDockPort } from '../../ports/terminalDock'
-import type { PortResponse } from '@navide/shared'
+import type { PortResponse } from '@navide/plugin-ui/shared'
 
 // Lightweight stand-in for useBackend() used by composable tests. It records
 // outgoing send() calls, lets a test preset per-type responses, and exposes

@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { ref } from 'vue'
 import PlansPane from '../PlansPane.vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { parseHtmlPlanMeta } from '../../composables/usePlanHtml'
 import { parsePlanMeta } from '../../composables/usePlanFile'
 
@@ -121,8 +121,8 @@ const notify = {
   confirm: vi.fn(async () => true),
 }
 
-vi.mock('@navide/ui-foundation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => notify,
 }))
 

@@ -12,7 +12,7 @@ import type {
   GitWindowUiPort,
   IssuePort,
 } from '../../src/ports/gitSurface'
-import type { PortResponse, KeybindingsPort } from '@navide/shared'
+import type { PortResponse, KeybindingsPort } from '@navide/plugin-ui/shared'
 import type {
   TerminalCreateRequest,
   TerminalDockPort,

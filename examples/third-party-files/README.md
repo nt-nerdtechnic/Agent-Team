@@ -17,10 +17,11 @@ pnpm test:run src/main/plugins/pluginExternalWorkspace.test.ts
 
 The smoke test copies this example into a temporary project outside the Navide
 workspace and replaces only the three unpublished public packages with local
-tarballs. It installs those package tarballs with an isolated temporary pnpm
-store using `pnpm install --offline`, then uses the repository's installed
-TypeScript and Vite CLI entries to typecheck and build the external project.
-The smoke test does not install TypeScript or Vite tarballs offline.
+tarballs. It installs those package tarballs from the repository's populated
+pnpm store with `pnpm install --offline`, supplies the Host's already-installed
+Vue peer runtime, then uses the repository's TypeScript and Vite CLI entries to
+typecheck and build the external project. The smoke test does not install
+TypeScript, Vite, Vue, or vue-i18n tarballs offline.
 
 After the public packages are published, run the workflow from this directory:
 

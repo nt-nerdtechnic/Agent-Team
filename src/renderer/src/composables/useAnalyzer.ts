@@ -1,6 +1,6 @@
 import { onScopeDispose, ref, shallowRef, watch } from 'vue'
 import type { useBackend } from './useBackend'
-import { settingsGet, settingsSet } from '@navide/shared'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 
 const BENCHMARK_STORAGE_KEY = 'agent-team.benchmark-results'
 

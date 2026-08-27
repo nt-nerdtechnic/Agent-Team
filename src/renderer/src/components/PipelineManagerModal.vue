@@ -6,7 +6,7 @@
 import { computed, ref, watch } from 'vue'
 import type { useBackend } from '../composables/useBackend'
 import type { TerminalDockPort } from '@navide/terminal'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { AiCliDock } from '@navide/plugin-shell'
 import type { useRoles, Role } from '../composables/useRoles'
 import type { usePipelines, PipelineSummary } from '../composables/usePipelines'

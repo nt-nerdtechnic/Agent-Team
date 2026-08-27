@@ -1,5 +1,5 @@
 import { ref, computed, watch, onScopeDispose } from 'vue'
-import { settingsGet, settingsSet } from '@navide/shared'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import type { GitRequestType, GitTransport } from '@navide/git-feature'
 import type { GitCredentialPort } from '../ports/gitSurface'
 
@@ -194,6 +194,8 @@ export function useGit(
   const { send, on } = transport
 
   const gitStatus = ref<GitStatus>(emptyStatus())
+  const statusError = ref('')
+  const statusLoaded = ref(false)
   // Nested git repos found by scanning downward when the root is NOT a repo.
   const discoveredRepos = ref<DiscoveredRepo[]>([])
   const showIgnored = ref(false)
@@ -253,8 +255,10 @@ export function useGit(
 
   async function loadStatus(): Promise<void> {
     const ws = workspacePath()
+    statusError.value = ''
     if (!ws) {
       gitStatus.value = emptyStatus()
+      statusLoaded.value = false
       return
     }
     isLoadingStatus.value = true
@@ -263,8 +267,9 @@ export function useGit(
         workspace_path: ws,
         include_ignored: showIgnored.value,
       })
-      if (resp.ok && resp.payload && workspacePath() === ws) {
+      if (resp.ok && resp.payload && typeof resp.payload.is_git_repo === 'boolean' && workspacePath() === ws) {
         gitStatus.value = resp.payload
+        statusLoaded.value = true
         // Root isn't a repo — git only searches upward, so scan downward for
         // nested repos to offer in the empty state. Clear stale results first.
         if (resp.payload.is_git_repo) {
@@ -272,9 +277,16 @@ export function useGit(
         } else {
           void discoverRepositories()
         }
+      } else if (workspacePath() === ws) {
+        const payloadError = (resp.payload as { error?: unknown } | null)?.error
+        statusError.value = resp.error?.message
+          || (typeof payloadError === 'string' ? payloadError : '')
+          || 'Unable to load Git status'
       }
-    } catch {
-      // transient WS error — loading flag reset in finally
+    } catch (error) {
+      if (workspacePath() === ws) {
+        statusError.value = error instanceof Error ? error.message : String(error)
+      }
     } finally {
       if (workspacePath() === ws) isLoadingStatus.value = false
     }
@@ -1501,6 +1513,7 @@ export function useGit(
   // Refresh when workspace changes
   watch(workspacePath, () => {
     gitStatus.value = emptyStatus()
+    statusLoaded.value = false
     gitLog.value = []
     gitBranches.value = []
     gitStashes.value = []
@@ -1696,7 +1709,7 @@ export function useGit(
 
   return {
     // state
-    gitStatus, discoveredRepos, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
+    gitStatus, statusError, statusLoaded, discoveredRepos, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
     gitWorktrees, gitConfig,
     logScope, logOrder, logLimit, canLoadMoreLog,
     isLoadingStatus, isLoadingLog, isInitializing,

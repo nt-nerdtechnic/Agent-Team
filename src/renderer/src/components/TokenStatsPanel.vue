@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
 import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
-import { settingsGet, settingsSet } from '@navide/shared'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { useTokens, type TokenBucket, type ResetScope } from '../composables/useTokens'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import type { useBackend } from '../composables/useBackend'
 import HistoryPanel from './HistoryPanel.vue'
 import TaskerPanel from './TaskerPanel.vue'

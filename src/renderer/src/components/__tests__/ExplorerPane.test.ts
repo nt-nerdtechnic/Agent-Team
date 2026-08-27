@@ -3,15 +3,15 @@ import { describe, it, expect, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ExplorerPane from '../ExplorerPane.vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import type { BackendStatus } from '../../composables/useBackend'
 
 // Stub useNotify so toast/alert/confirm calls don't throw (shared spies so
 // tests can assert on them).
 const notify = vi.hoisted(() => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn() }))
-vi.mock('@navide/ui-foundation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => notify,
 }))
 

@@ -5,7 +5,7 @@ import {
   type GitTransport,
   type GitTransportStatusSource,
 } from '#git-feature'
-import type { PortResponse } from '@navide/plugin-ui-vue/shared'
+import type { PortResponse } from '@navide/plugin-ui/shared'
 
 export type PluginGitSdkResponse<TPayload = unknown> = PortResponse<TPayload>
 

@@ -20,7 +20,7 @@ import { join } from 'node:path'
 import { COMMAND_IDS } from '../commandCatalog'
 
 const APP_SRC = join(process.cwd(), 'src', 'renderer', 'src')
-const SHARED_SRC = join(process.cwd(), 'packages/plugin-ui-vue/src/shared')
+const SHARED_SRC = join(process.cwd(), 'packages/plugin-ui/src/shared')
 
 // Comments are stripped before matching: prose that merely mentions
 // `registerCommand('...')` — including the doc comment on COMMAND_IDS itself —

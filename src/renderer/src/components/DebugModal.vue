@@ -12,7 +12,7 @@
 // fire while a terminal has focus (Esc is the CLI's own interrupt key).
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsGet, settingsSet } from '@navide/shared'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 import { aiTerminalPaneId, bracketedPaste, resolveCliCommand } from '@navide/plugin-shell'
 import {

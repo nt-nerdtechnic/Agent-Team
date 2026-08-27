@@ -1,5 +1,5 @@
 import { onScopeDispose, ref, type InjectionKey } from 'vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { paneCanRebuild } from '@navide/plugin-shell'
 import type { useBackend } from './useBackend'
 

@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ref } from 'vue'
 import { useUiActionBus, handleUiInvokeRequest, type UiInvokeRequest } from '../useUiActionBus'
-import { registerCommand } from '@navide/shared'
-import { _resetRegistry } from '@navide/shared/testing'
+import { registerCommand } from '@navide/plugin-ui/shared'
+import { _resetRegistry } from '@navide/plugin-ui/shared/testing'
 import { recordDiagnostic, _resetDiagnostics } from '../../lib/uiDiagnostics'
 import { createMockBackend, flush } from './mockBackend'
 

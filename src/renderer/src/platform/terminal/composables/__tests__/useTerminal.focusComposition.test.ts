@@ -104,7 +104,7 @@ vi.mock('@xterm/addon-fit', () => ({
 }))
 
 import { useTerminal } from '../useTerminal'
-import { getContext } from '@navide/shared'
+import { getContext } from '@navide/plugin-ui/shared'
 
 describe('useTerminal — focus transitions and stale IME composition', () => {
   afterEach(() => {

@@ -109,26 +109,23 @@ The `emitManifest()` hook writes `manifest.json` into the output directory at
 `closeBundle`, so the build output is itself a valid, loadable plugin
 directory.
 
-### 3. Register the build
+### 3. Package the build
 
-In `package.json`, add a `build:<name>` script and chain it into `build`. To
-ship the plugin inside the app, add its output to `build.extraResources`:
+Keep Marketplace plugin builds independent from the base App build. Validate
+and package their output with the public `navide-plugin` CLI, then install them
+through the same catalog lifecycle used by other packages. A factory package
+may be included in Electron `extraResources` only as an acquisition fallback;
+after discovery it must use that same installed Manifest, catalog, grant,
+instance, and capability lifecycle. Factory provenance must not bypass trust or
+authorization checks.
 
-```json
-{ "from": "dist-plugins/<name>", "to": "plugins/<name>" }
-```
+### 4. Open contributions through the catalog
 
-### 4. Register the plugin with the host
-
-In `src/main/plugins/frontendPluginManager.ts`, follow the Git plugin block:
-add the plugin id constant, a `bundled<Name>Dir()` resolver, a
-`registerBundled<Name>()` function, a dev descriptor, a query-string builder,
-and an `open<Name>PluginView()` entry point. Then call
-`registerBundled<Name>()` from `src/main/index.ts`.
-
-Keep the dev descriptor's `requires` identical to the manifest your Vite config
-emits. If they drift, dev runs deny capability calls that the packaged build
-allows — a failure that only reproduces under `AGENT_TEAM_PLUGIN_DEV=1`.
+Do not add package-specific registration code to Electron main. The Host reads
+the installed manifest, publishes its contributions in the catalog, and opens
+them through the generic placement and capability-context path. First-party
+and third-party packages use the same runtime; trust and publisher eligibility
+remain independent inputs to that runtime.
 
 ### 5. Receive host parameters
 

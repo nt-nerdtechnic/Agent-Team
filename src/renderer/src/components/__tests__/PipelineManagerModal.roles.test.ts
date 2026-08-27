@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, effectScope, type EffectScope } from 'vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import { useRoles, type Role } from '../../composables/useRoles'
 import { usePipelines } from '../../composables/usePipelines'

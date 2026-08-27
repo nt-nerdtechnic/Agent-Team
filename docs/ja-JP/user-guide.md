@@ -87,7 +87,7 @@ Token Stats は対応 Local CLI Log を Parse し、Usage を Workspace、Pane�
 
 ## Git と Review
 
-Git View は Repository Discovery、Working Tree Inspection、Staging、Commit、Branch、Remote、Issue、関連 Workflow をサポートします。Multi-repository Workspace では、検出された Repository を切り替えられます。
+Marketplace Install が利用可能になるまで、Navide は削除可能な Official Git Factory Package を提供します。Active Package Version は Embedded Left View と Dedicated Git Window の両方を提供します。Extensions で Bundled Git を削除すると再起動後も削除状態が維持され、同じ画面の **Restore** で Factory Copy を復元できます。Verified Marketplace Version が存在する場合はそちらが優先されます。Git View は Repository Discovery、Working Tree Inspection、Staging、Commit、Branch、Remote、Issue、関連 Workflow をサポートし、Multi-repository Workspace では検出された Repository を切り替えられます。Repository Operation は Navide の Host／Backend Boundary 内に留まり、GitHub／GitLab Issue Detection は利用可能な場合に設定済みの `gh` または `glab` CLI を使用します。選択された v2 Package が Load、Mount、または Ready Report に失敗した場合、その Process では Retained Legacy Git Renderer を明示して使用します。Security／Trust／Permission Denial は Fallback を Trigger しません。
 
 特に Automatic または Parallel Run の後は、Commit 前に変更を確認してください。Agent-generated Change が Git Panel に表示されたというだけで、安全になるわけではありません。
 

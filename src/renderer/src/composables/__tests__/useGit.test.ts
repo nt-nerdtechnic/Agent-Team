@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi } from 'vitest'
 import { useGit } from '../useGit'
-import { __resetSettingsForTest } from '@navide/shared/testing'
+import { __resetSettingsForTest } from '@navide/plugin-ui/shared/testing'
 import { createMockBackend, withScope, flush } from './mockBackend'
 
 const WS = '/tmp/test-workspace'
@@ -40,6 +40,43 @@ describe('useGit', () => {
 
     expect(result.gitStatus.value.is_git_repo).toBe(false)
     expect(mock.sent.find(s => s.type === 'git.status')).toBeUndefined()
+    scope.stop()
+  })
+
+  it('exposes git.status failures and clears them after a successful retry', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('git.status', null, {
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED', message: 'Git capability is unavailable' },
+    })
+
+    const { result, scope } = withScope(() => useGit(() => WS, mock.backend))
+    await flush()
+
+    expect(result.statusError.value).toBe('Git capability is unavailable')
+    expect(result.statusLoaded.value).toBe(false)
+    expect(result.gitStatus.value.is_git_repo).toBe(false)
+
+    mock.setResponse('git.status', mockStatus)
+    mock.setResponse('git.log', { commits: [] })
+    await result.loadStatus()
+
+    expect(result.statusError.value).toBe('')
+    expect(result.statusLoaded.value).toBe(true)
+    expect(result.gitStatus.value.is_git_repo).toBe(true)
+    scope.stop()
+  })
+
+  it('exposes a rejected git.status request without treating it as a repository result', async () => {
+    const mock = createMockBackend('connected')
+    mock.setRejection('git.status', 'ws not open')
+
+    const { result, scope } = withScope(() => useGit(() => WS, mock.backend))
+    await flush()
+
+    expect(result.statusError.value).toBe('ws not open')
+    expect(result.statusLoaded.value).toBe(false)
+    expect(result.gitStatus.value.is_git_repo).toBe(false)
     scope.stop()
   })
 

@@ -35,6 +35,7 @@ import {
 import {
   isManifestV2,
   loadPluginDir,
+  manifestCapabilityPolicy,
   manifestToActivation,
   manifestToInstalledPackageSummary,
   type PluginActivationCatalogEntry,
@@ -51,6 +52,7 @@ import {
 } from './pluginInstalledTrust'
 import { currentPluginHostTarget } from './pluginTarget'
 import type { FrontendPluginManager } from './frontendPluginManager'
+import { PluginCapabilityGrantStore } from './pluginCapabilityGrantStore'
 
 /** Development-only endpoint. It is intentionally not the official Registry
  * identity: a local Registry must establish trust through root approval. */
@@ -102,8 +104,15 @@ interface InstalledSummary {
   id: string
   requires: string[]
   sensitive: string[]
-  provenance?: 'official-registry' | 'developer-local-unpacked'
+  provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
+}
+
+export interface FactoryPackageSummary {
+  id: string
+  version: string | null
+  active: boolean
+  optedOut: boolean
 }
 
 export interface PluginTrustRefreshController {
@@ -114,6 +123,8 @@ export interface PluginTrustRefreshController {
 }
 
 export interface PluginIpcOptions {
+  /** Convert a Host-verified icon file into renderer-safe image bytes. */
+  resolveContributionIcon?: (iconFile: string) => string | null
   verifyCommittedInstall?: (
     pluginDir: string,
     pluginId: string,
@@ -125,6 +136,11 @@ export interface PluginIpcOptions {
   }) => void
   /** Actual uninstall boundary; rollback/quarantine paths deliberately do not call this. */
   cleanupPluginStorage?: (pluginId: string) => Promise<void>
+  factoryPackageIds?: readonly string[]
+  listFactoryPackages?: () => FactoryPackageSummary[]
+  restoreFactoryPackage?: (pluginId: string) => Promise<void> | void
+  onFactoryPackageRemoved?: (pluginId: string) => void
+  onPackageInstalled?: (pluginId: string) => void
 }
 
 function assertPluginRemovalTarget(pluginsRoot: string, value: unknown): string {
@@ -181,6 +197,7 @@ export function registerPluginIpc(
 ): PluginTrustRefreshController {
   // Packages verified by prepareInstall, awaiting a commit, keyed by plugin id.
   const prepared = new Map<string, { pkg: PreparedInstall }>()
+  const capabilityGrants = new PluginCapabilityGrantStore(pluginsRoot)
 
   const assertAuthorized = (event: IpcMainInvokeEvent): void => {
     if (!authorizeSender(event)) throw new Error('unauthorized plugin management request')
@@ -193,7 +210,7 @@ export function registerPluginIpc(
       {
         id: string
         requires: string[]
-        provenance?: 'official-registry' | 'developer-local-unpacked'
+        provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
         warning?: string
       }
     >()
@@ -212,8 +229,27 @@ export function registerPluginIpc(
 
   ipcMain.handle('plugins:listContributions', (event) => {
     assertAuthorized(event)
-    return manager.listContributionCatalog()
+    return manager.listContributionCatalog().map(({ iconFile, ...entry }) => ({
+      ...entry,
+      icon: iconFile ? options.resolveContributionIcon?.(iconFile) ?? null : null,
+    }))
   })
+
+  ipcMain.handle('plugins:listFactoryPackages', (event): FactoryPackageSummary[] => {
+    assertAuthorized(event)
+    return options.listFactoryPackages?.() ?? []
+  })
+
+  ipcMain.handle(
+    'plugins:restoreFactoryPackage',
+    async (event, args: { id?: unknown } | null) => {
+      assertAuthorized(event)
+      const id = assertPluginRemovalTarget(pluginsRoot, args?.id)
+      if (!options.restoreFactoryPackage) throw new Error('factory package restore is unavailable')
+      await options.restoreFactoryPackage(id)
+      return { ok: true }
+    }
+  )
 
   ipcMain.handle('plugins:marketplaceSearch', async (event, query?: string) => {
     assertAuthorized(event)
@@ -314,6 +350,9 @@ export function registerPluginIpc(
       // passed post-write verification and manager registration.
       const previousSummary = manager.listInstalledPackages().find((item) => item.id === pkg.id)
       const previousDescriptor = manager.getDescriptor(pkg.id)
+      const previousGrant = previousDescriptor?.packageVersion
+        ? capabilityGrants.get(pkg.id, previousDescriptor.packageVersion)
+        : null
       const previousActivation =
         previousSummary?.provenance === 'official-registry'
           ? loadPluginDir(join(pluginsRoot, pkg.id)).activation
@@ -368,11 +407,25 @@ export function registerPluginIpc(
         // is what allows a verified `navide.` install to claim its reserved id.
         options.onActivationChange?.({ pluginId: pkg.id })
         manager.registerInstalledPackage(summary, descriptor, { official: pkg.official })
+        if (isManifestV2(pkg.manifest)) {
+          const policy = manifestCapabilityPolicy(pkg.manifest)
+          if (policy.kind !== 'manifest-v2') throw new Error('invalid Manifest v2 capability policy')
+          capabilityGrants.set(pkg.id, {
+            packageVersion: pkg.version,
+            system: [...policy.system],
+            ...(policy.shell ? { shell: policy.shell } : {}),
+            ...(policy.shell === 'full' ? { highRiskShellConfirmed: true } : {}),
+            storage: true,
+          })
+        } else {
+          capabilityGrants.remove(pkg.id)
+        }
         if (publisherRequiresTrust) {
           publisherTrust.trust(pkg.publisherId, pkg.id)
           publisherConsentPersisted = true
         }
         if (activation?.backend) options.onActivationChange?.({ pluginId: pkg.id, activation })
+        options.onPackageInstalled?.(pkg.id)
         transaction.finalize()
         prepared.delete(args.id)
         return {
@@ -393,6 +446,13 @@ export function registerPluginIpc(
           // Preserve the original install failure if quarantine/rollback fails.
         }
         cleanupFailedPluginInstall(manager, options.onActivationChange, pkg.id)
+        try {
+          if (previousGrant) capabilityGrants.set(pkg.id, previousGrant)
+          else capabilityGrants.remove(pkg.id)
+        } catch {
+          // Preserve the original install failure. A malformed or missing
+          // exact package-version grant remains fail-closed at activation.
+        }
         if (previousSummary) {
           try {
             manager.registerInstalledPackage(
@@ -435,8 +495,17 @@ export function registerPluginIpc(
     // the package and prepared state intact so the caller can retry. The
     // manager deliberately remains registered but stopped until this succeeds.
     await cleanupPluginStorage(id)
+    capabilityGrants.remove(id)
     removePlugin(pluginsRoot, id)
-    manager.removeInstalledPlugin(id)
+    if (options.factoryPackageIds?.includes(id)) {
+      if (!options.onFactoryPackageRemoved) {
+        throw new Error('factory package removal is unavailable')
+      }
+      options.onFactoryPackageRemoved(id)
+      manager.removeInstalledPlugin(id, { restoreBuiltin: false })
+    } else {
+      manager.removeInstalledPlugin(id)
+    }
     prepared.delete(id)
     options.onActivationChange?.({ pluginId: id })
     return { ok: true }

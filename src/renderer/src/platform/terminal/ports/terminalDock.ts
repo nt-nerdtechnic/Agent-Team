@@ -1,5 +1,5 @@
 import type { TerminalExitDetails, TerminalStartupProbe } from '../lib/terminalLifecycle'
-import type { PortResponse, ReactiveValue } from '@navide/shared'
+import type { PortResponse, ReactiveValue } from '@navide/plugin-ui/shared'
 import type { InjectionKey } from 'vue'
 
 export interface TerminalSpawnOptions {

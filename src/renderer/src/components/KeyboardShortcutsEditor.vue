@@ -17,24 +17,24 @@ import {
   serializeUserRules,
   setRowKeys,
   type BindingRow,
-} from '@navide/shared'
-import { commandI18nKey } from '@navide/shared'
-import { formatKeySpec, keySpecToTokens } from '@navide/shared'
+} from '@navide/plugin-ui/shared'
+import { commandI18nKey } from '@navide/plugin-ui/shared'
+import { formatKeySpec, keySpecToTokens } from '@navide/plugin-ui/shared'
 import {
   MENU_OWNED_SPECS,
   NATIVE_MENU_KEYS,
   TERMINAL_KEYS,
   splitKeyTokens,
   type ExternalKeyRow,
-} from '@navide/shared'
-import { eventToKeyString, validateKeySpec } from '@navide/shared'
+} from '@navide/plugin-ui/shared'
+import { eventToKeyString, validateKeySpec } from '@navide/plugin-ui/shared'
 import {
   getUserRules,
   onUserRulesChanged,
   saveUserRules,
   setKeyCaptureActive,
-} from '@navide/shared'
-import type { KeybindingRule } from '@navide/shared'
+} from '@navide/plugin-ui/shared'
+import type { KeybindingRule } from '@navide/plugin-ui/shared'
 
 type FilterMode = 'all' | 'customized' | 'conflicts'
 

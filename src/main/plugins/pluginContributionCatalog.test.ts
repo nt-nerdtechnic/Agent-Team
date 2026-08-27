@@ -41,12 +41,30 @@ describe('plugin contribution catalog', () => {
       packageVersion: '1.0.0',
       contributionKey: 'acme.plugin.left',
       title: 'Left',
-      icon: null,
+      iconFile: null,
       kind: 'custom',
       location: 'left',
       manifestOrder: 0,
     })
     expect('instanceId' in entry).toBe(false)
+  })
+
+  it('keeps the Host-verified icon identity internal to the catalog', () => {
+    const [entry] = buildPluginContributionCatalog([
+      descriptor('acme.plugin', [
+        {
+          id: 'left',
+          contributionKey: 'acme.plugin.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Left',
+          iconFile: '/plugins/acme.plugin/assets/icon.png',
+          entryFile: '/plugins/acme.plugin/left.html',
+        },
+      ]),
+    ])
+
+    expect(entry.iconFile).toBe('/plugins/acme.plugin/assets/icon.png')
   })
 
   it('preserves every approved placement for generic Host composition', () => {

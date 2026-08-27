@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref } from 'vue'
 import EditorWindowApp from '../../EditorWindowApp.vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 i18n.global.locale.value = 'en-US'
 
@@ -85,7 +85,7 @@ vi.mock('../../composables/useBackend', () => ({
   }),
 }))
 
-vi.mock('@navide/shared', () => ({
+vi.mock('@navide/plugin-ui/shared', () => ({
   initSettingsBackend: vi.fn(),
   settingsGet: vi.fn((_key: string, def: unknown) => def),
   settingsSet: vi.fn(),
@@ -97,8 +97,8 @@ vi.mock('@navide/plugin-shell', async (importOriginal) => ({
   AiCliDock: stub('AiCliDock').default,
 }))
 
-vi.mock('@navide/ui-foundation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn() }),
   useTheme: () => ({ theme: ref('dark'), setTheme: vi.fn(), loadTheme: vi.fn() }),
   BUILTIN_THEMES: [],
@@ -109,8 +109,8 @@ vi.mock('@navide/ui-foundation', async (importOriginal) => ({
 // command bodies without a keybinding runtime.
 const commands = vi.hoisted(() => new Map<string, () => unknown>())
 
-vi.mock('@navide/shared', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/shared')>()),
+vi.mock('@navide/plugin-ui/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/shared')>()),
   initKeybindingsPort: vi.fn(),
   useKeybindings: vi.fn(),
   registerCommand: vi.fn((id: string, fn: () => unknown) => { commands.set(id, fn) }),

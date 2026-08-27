@@ -9,10 +9,10 @@ import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import { ref } from 'vue'
 import PlanWindowApp from '../../PlanWindowApp.vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { resolvePlanStore } from '../../composables/planStore'
 import { aiTerminalPaneId } from '@navide/plugin-shell'
-import { setContext, setUserRules } from '@navide/shared'
+import { setContext, setUserRules } from '@navide/plugin-ui/shared'
 
 i18n.global.locale.value = 'en-US'
 
@@ -74,8 +74,8 @@ function setPlatform(mac: boolean): void {
 // Notify mock: section-delete confirms host-side; default accept.
 const toastMock = vi.hoisted(() => vi.fn())
 const confirmMock = vi.hoisted(() => vi.fn(async () => true))
-vi.mock('@navide/ui-foundation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => ({ toast: toastMock, alert: vi.fn(), confirm: confirmMock }),
   useTheme: () => ({ theme: ref('dark'), setTheme: vi.fn(), loadTheme: vi.fn() }),
 }))
@@ -250,8 +250,8 @@ vi.mock('../../composables/useBackend', () => ({
   }),
 }))
 
-vi.mock('@navide/shared', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/shared')>()),
+vi.mock('@navide/plugin-ui/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/shared')>()),
   initSettingsBackend: vi.fn(),
   settingsGet: vi.fn((_key: string, def: unknown) => def),
   settingsSet: vi.fn(),

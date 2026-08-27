@@ -12,7 +12,7 @@ import {
 } from 'typescript'
 import { describe, expect, it } from 'vitest'
 
-const localesDir = resolve('packages/plugin-ui-vue/src/foundation/i18n/locales')
+const localesDir = resolve('packages/plugin-ui/src/foundation/i18n/locales')
 const localeFiles = readdirSync(localesDir).filter((fileName) => fileName.endsWith('.json')).sort()
 
 function leafKeys(value: unknown, prefix = ''): string[] {

@@ -1,6 +1,6 @@
 import { ref } from 'vue'
-import { i18n } from '@navide/ui-foundation'
-import { settingsGet, settingsSet } from '@navide/shared'
+import { i18n } from '@navide/plugin-ui/foundation'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 
 const LANGUAGE_KEY = 'agent-team:language'
 const SUPPORTED = new Set(['zh-TW', 'en-US'])

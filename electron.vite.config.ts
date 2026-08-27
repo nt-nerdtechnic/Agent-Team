@@ -64,11 +64,11 @@ export default defineConfig({
     resolve: {
       alias: {
         '@navide/git-feature': resolve(__dirname, 'plugins/navide-git/src/git-feature/index.ts'),
-        '@navide/shared': resolve(__dirname, 'packages/plugin-ui-vue/src/shared/index.ts'),
+        '@navide/plugin-ui/shared': resolve(__dirname, 'packages/plugin-ui/src/shared/index.ts'),
         '@navide/terminal': resolve(__dirname, 'src/renderer/src/platform/terminal/index.ts'),
         '@navide/plugin-shell': resolve(__dirname, 'src/renderer/src/platform/plugin-shell/index.ts'),
-        '@navide/ui-foundation/styles.css': resolve(__dirname, 'packages/plugin-ui-vue/src/foundation/styles.css'),
-        '@navide/ui-foundation': resolve(__dirname, 'packages/plugin-ui-vue/src/foundation/index.ts'),
+        '@navide/plugin-ui/styles.css': resolve(__dirname, 'packages/plugin-ui/src/foundation/styles.css'),
+        '@navide/plugin-ui/foundation': resolve(__dirname, 'packages/plugin-ui/src/foundation/index.ts'),
       },
     },
     server: {

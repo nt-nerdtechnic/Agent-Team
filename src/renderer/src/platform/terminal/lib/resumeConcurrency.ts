@@ -6,7 +6,7 @@
 // the request timeout ("request terminal.create timeout" → pane setup failed).
 // Fresh spawns are light and stay unthrottled. User-adjustable in Settings.
 
-import { settingsGet } from '@navide/shared'
+import { settingsGet } from '@navide/plugin-ui/shared'
 
 /** Settings-store key (ui_settings.json via lib/settings.ts). */
 export const RESUME_CONCURRENCY_SETTING_KEY = 'agentTeam.resumeConcurrency'

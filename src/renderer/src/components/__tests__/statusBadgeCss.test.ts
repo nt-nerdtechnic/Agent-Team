@@ -114,6 +114,6 @@ describe('every pane status is styled on every surface that paints one', () => {
         surface.selector('question')
       )
     }
-    expect(read('packages/plugin-ui-vue/src/foundation/styles/tokens/semantic.css')).not.toContain('--question-fg')
+    expect(read('packages/plugin-ui/src/foundation/styles/tokens/semantic.css')).not.toContain('--question-fg')
   })
 })

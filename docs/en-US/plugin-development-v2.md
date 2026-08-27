@@ -38,9 +38,9 @@ Third-party plugins may depend only on these public package names:
   error codes, and JSON Schema exports.
 - `@navide/plugin-sdk`: activation, capability calls, events, lifecycle, view,
   and target APIs.
-- `@navide/plugin-ui`: stable design tokens and UI primitives.
-- `@navide/plugin-ui-vue`: Vue bindings, shared presentation services, and
-  safe capability-backed UI controllers that do not expose Host transports.
+- `@navide/plugin-ui`: Vue components, shared presentation services, stable
+  design tokens, and safe capability-backed UI controllers that do not expose
+  Host transports.
 
 Official and third-party packages use the same public dependency graph and the
 same install, activation, update, rollback, and uninstall lifecycle. Official
@@ -774,7 +774,7 @@ grant.
 
 ### First-party production Git package (Issue 19)
 
-The official `navide.git` package is the first production consumer of the
+The removable factory-installed `navide.git` package is the first production consumer of the
 Manifest v2 custom-view and Host-owned storage seams. Its `left` contribution
 is embedded in the workbench and its `window` contribution is opened in the
 dedicated Git window; the Host resolves both from one active package
@@ -793,10 +793,18 @@ terminal dimensions, redraw dimensions, and stop force semantics.
 The bridge also preserves the existing Git contribution behavior (repository
 tabs, change counts, issue dispatch/spawn handoffs, pane focus, account
 settings, and Git window targets) while keeping workspace and view identity
-Host-owned. The legacy Git renderer remains available as a rollback path until
-the replacement is independently reviewed and manually verified. Issue 19
-does not remove the legacy implementation or implement later Plans/Skills
-migration or marketplace lifecycle work.
+Host-owned. Factory acquisition and verified Marketplace acquisition both feed
+the same Manifest, catalog, exact-version grant, instance, and capability
+runtime; factory provenance is not a permission bypass. Removing Bundled Git
+records a durable opt-out, and Extensions provides the explicit restore action.
+When the selected, trusted, approved `navide.git` version fails to
+load, mount, or report ready, the Host retires that package's v2 instances and
+uses the retained legacy renderer for the remainder of the process. Trust,
+signature, revocation, grant, and capability denials fail closed and never
+trigger the legacy path. An invalid installed package is also not hidden by the
+factory or legacy copy. `NAVIDE_GIT_RECOVERY=legacy` remains the explicit operator override.
+Issue 19 does not remove the legacy implementation or implement later
+Plans/Skills migration or marketplace lifecycle work.
 
 ### Embedded AI CLI public mapping
 

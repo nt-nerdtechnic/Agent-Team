@@ -17,13 +17,13 @@
       "@navide/plugin-contracts": ["packages/plugin-contracts/src/index.ts"],
       "@navide/git-feature": ["plugins/navide-git/src/git-feature/index.ts"],
       "@navide/git-feature/testing": ["plugins/navide-git/src/git-feature/testing.ts"],
-      "@navide/shared": ["packages/plugin-ui-vue/src/shared/index.ts"],
-      "@navide/shared/testing": ["packages/plugin-ui-vue/src/shared/testing.ts"],
+      "@navide/plugin-ui/shared": ["packages/plugin-ui/src/shared/index.ts"],
+      "@navide/plugin-ui/shared/testing": ["packages/plugin-ui/src/shared/testing.ts"],
       "@navide/terminal": ["src/renderer/src/platform/terminal/index.ts"],
       "@navide/terminal/testing": ["src/renderer/src/platform/terminal/testing.ts"],
       "@navide/plugin-shell": ["src/renderer/src/platform/plugin-shell/index.ts"],
-      "@navide/ui-foundation": ["packages/plugin-ui-vue/src/foundation/index.ts"],
-      "@navide/ui-foundation/*": ["packages/plugin-ui-vue/src/foundation/*"]
+      "@navide/plugin-ui/foundation": ["packages/plugin-ui/src/foundation/index.ts"],
+      "@navide/plugin-ui/foundation/*": ["packages/plugin-ui/src/foundation/*"]
     }
   },
   "include": [
@@ -35,7 +35,7 @@
     "packages/plugin-contracts/src/**/*.ts",
     "packages/plugin-sdk/src/**/*.ts",
     "plugins/navide-git/src/git-feature/**/*.ts",
-    "packages/plugin-ui-vue/src/**/*.ts",
-    "packages/plugin-ui-vue/src/**/*.vue"
+    "packages/plugin-ui/src/**/*.ts",
+    "packages/plugin-ui/src/**/*.vue"
   ]
 }

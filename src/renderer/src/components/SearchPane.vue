@@ -2,8 +2,8 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
-import { settingsGet, settingsSet } from '@navide/shared'
-import { useNotify } from '@navide/ui-foundation'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
+import { useNotify } from '@navide/plugin-ui/foundation'
 
 const props = defineProps<{
   workspacePath: string

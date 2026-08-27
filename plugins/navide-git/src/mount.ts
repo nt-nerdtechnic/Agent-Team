@@ -9,8 +9,8 @@ import { createApp } from 'vue'
 import {
   createAiCliSessionController,
   type AiCliPluginContext,
-} from '@navide/plugin-ui-vue'
-import { i18n } from '@navide/plugin-ui-vue/foundation'
+} from '@navide/plugin-ui'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { useBackend } from './capabilityBackend'
 import { createPluginGitTransport, type PluginGitSdk } from './sdkGitTransport'
 import {
@@ -29,10 +29,11 @@ import {
   GIT_TRANSPORT_KEY,
   GIT_UI_KEY,
 } from './ports/gitSurface'
-import { initKeybindingsPort, initSettingsBackend, seedSettings } from '@navide/plugin-ui-vue/shared'
+import { initKeybindingsPort, initSettingsBackend, seedSettings } from '@navide/plugin-ui/shared'
 
 // Theme token layers — order matters: primitives → semantic roles → themes.
-import '@navide/plugin-ui-vue/styles.css'
+import '@navide/plugin-ui/styles.css'
+import './pluginDocument.css'
 
 import GitWindowApp from './GitWindowApp.vue'
 import GitLeftApp from './GitLeftApp.vue'

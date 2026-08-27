@@ -6,7 +6,7 @@
 // capability backend, IPC/WebSocket details, or Host routes.
 
 import { createApp } from 'vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { useBackend } from './capabilityBackend'
 import { createPluginGitTransport, type PluginGitSdk } from './sdkGitTransport'
 import {
@@ -26,10 +26,10 @@ import {
   GIT_UI_KEY,
 } from '../../src/ports/gitSurface'
 import { TERMINAL_DOCK_KEY } from '@navide/terminal'
-import { initKeybindingsPort, initSettingsBackend, seedSettings } from '@navide/shared'
+import { initKeybindingsPort, initSettingsBackend, seedSettings } from '@navide/plugin-ui/shared'
 
 // Theme token layers — order matters: primitives → semantic roles → themes.
-import '@navide/ui-foundation/styles.css'
+import '@navide/plugin-ui/styles.css'
 
 import GitWindowApp from '../../src/GitWindowApp.vue'
 

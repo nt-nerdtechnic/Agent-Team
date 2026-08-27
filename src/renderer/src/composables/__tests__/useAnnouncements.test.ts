@@ -8,7 +8,7 @@ import type { UpdateState } from '../../../../shared/updater'
 
 const store = vi.hoisted(() => new Map<string, unknown>())
 
-vi.mock('@navide/shared', () => ({
+vi.mock('@navide/plugin-ui/shared', () => ({
   settingsGet: (key: string, fallback: unknown) => (store.has(key) ? store.get(key) : fallback),
   settingsSet: (key: string, value: unknown) => {
     store.set(key, value)
@@ -21,7 +21,7 @@ const READ_IDS_KEY = 'agentTeam.announcements.readIds'
 async function load() {
   vi.resetModules()
   const mod = await import('../useAnnouncements')
-  const { i18n } = await import('@navide/ui-foundation')
+  const { i18n } = await import('@navide/plugin-ui/foundation')
   return { ...mod, i18n }
 }
 

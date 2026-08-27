@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import AnnouncementsPanel from '../AnnouncementsPanel.vue'
 import type { Announcement } from '../../composables/useAnnouncements'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 function release(version: string, read = false): Announcement {
   return {

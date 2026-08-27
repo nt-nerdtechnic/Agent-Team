@@ -204,10 +204,22 @@ view cannot refresh another workspace. Plugin Storage owns Git preferences and
 the selected repository value; older project/local values are read-only runtime
 seeds and never replace a newer storage value.
 
-The normal startup descriptor is v2. Electron main may select the retained
-legacy descriptor only with `NAVIDE_GIT_RECOVERY=legacy`; that switch clears
-live v2 Git instances but leaves Plugin Storage snapshots and legacy seeds
-unchanged. This is a production recovery path, not a generic version lifecycle.
+Git uses the same installed Manifest, catalog, exact-version grant, instance,
+and capability runtime as third-party packages. Until Marketplace acquisition
+is available, the App ships a factory `navide.git` package and activates it on a
+fresh profile. A verified Marketplace version takes precedence. Removing the
+factory package records a durable opt-out; restart does not reinstall it, and
+the Extensions view is the only place that restores it.
+
+Electron main tries the selected v2 descriptor first. A load, mount, or ready
+failure retires the whole v2 Git package and selects the retained legacy
+descriptor for the remainder of that process. Trust, signature, revocation,
+grant, and capability denials fail closed without fallback. An installed
+`navide.git` directory that fails validation also remains a visible hard
+failure instead of being hidden by the factory or legacy copy.
+`NAVIDE_GIT_RECOVERY=legacy` forces the recovery descriptor before activation.
+Neither recovery path mutates Plugin Storage snapshots or legacy seeds. This
+is a compatibility recovery path, not a generic version lifecycle.
 
 ## Architectural direction
 

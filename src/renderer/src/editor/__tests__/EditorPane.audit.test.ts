@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref, nextTick } from 'vue'
 import EditorPane from '../EditorPane.vue'
-import { i18n } from '@navide/ui-foundation'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 // Stateful Monaco view stub: enough surface for selection, external edits and
 // find/replace to run against the bound modelValue.
@@ -61,8 +61,8 @@ const notify = vi.hoisted(() => ({
   alert: vi.fn(async () => undefined),
   confirm: vi.fn(async () => true),
 }))
-vi.mock('@navide/ui-foundation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@navide/ui-foundation')>()),
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => notify,
 }))
 

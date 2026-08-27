@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import MultiRepoGit from './components/MultiRepoGit.vue'
-import { onSettingsChanged, settingsGet } from '@navide/plugin-ui-vue/shared'
+import { onSettingsChanged, settingsGet } from '@navide/plugin-ui/shared'
 import type { GitSurfacePorts, LegacyRepoSelectionPort } from './ports/gitSurface'
 import type { GitContributionState } from './ports/gitContribution'
 import type { PluginGitContributionHostPort } from './pluginSurfacePorts'
@@ -52,23 +52,38 @@ async function dispatch(action: Parameters<PluginGitContributionHostPort['dispat
 </script>
 
 <template>
-  <MultiRepoGit
-    :workspace-path="workspacePath"
-    :legacy-repo-selection="legacyRepoSelection"
-    :surface-ports="surfacePorts"
-    :analyzer-model="analyzerModel"
-    :dispatch-targets="state.dispatchTargets"
-    :available-agents="state.availableAgents"
-    :issue-handoffs="state.issueHandoffs"
-    @changes-count="dispatch({ operation: 'changes_count', count: $event })"
-    @open-workspace="dispatch({ operation: 'open_workspace', path: $event.path, grant: $event.grant })"
-    @open-file="dispatch({ operation: 'open_file', payload: $event })"
-    @open-conflict="dispatch({ operation: 'open_conflict', payload: $event })"
-    @open-diff="dispatch({ operation: 'open_diff', payload: $event })"
-    @open-branch-diff="dispatch({ operation: 'open_branch_diff', payload: $event })"
-    @dispatch-issue="dispatch({ operation: 'dispatch_issue', payload: $event })"
-    @spawn-for-issue="dispatch({ operation: 'spawn_for_issue', payload: $event })"
-    @focus-pane="dispatch({ operation: 'focus_pane', paneId: $event })"
-    @open-git-accounts="dispatch({ operation: 'open_git_accounts' })"
-  />
+  <div class="git-left-root">
+    <MultiRepoGit
+      :workspace-path="workspacePath"
+      :legacy-repo-selection="legacyRepoSelection"
+      :surface-ports="surfacePorts"
+      :analyzer-model="analyzerModel"
+      :dispatch-targets="state.dispatchTargets"
+      :available-agents="state.availableAgents"
+      :issue-handoffs="state.issueHandoffs"
+      @changes-count="dispatch({ operation: 'changes_count', count: $event })"
+      @open-workspace="dispatch({ operation: 'open_workspace', path: $event.path, grant: $event.grant })"
+      @open-file="dispatch({ operation: 'open_file', payload: $event })"
+      @open-conflict="dispatch({ operation: 'open_conflict', payload: $event })"
+      @open-diff="dispatch({ operation: 'open_diff', payload: $event })"
+      @open-branch-diff="dispatch({ operation: 'open_branch_diff', payload: $event })"
+      @dispatch-issue="dispatch({ operation: 'dispatch_issue', payload: $event })"
+      @spawn-for-issue="dispatch({ operation: 'spawn_for_issue', payload: $event })"
+      @focus-pane="dispatch({ operation: 'focus_pane', paneId: $event })"
+      @open-git-accounts="dispatch({ operation: 'open_git_accounts' })"
+    />
+  </div>
 </template>
+
+<style scoped>
+.git-left-root {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
+</style>

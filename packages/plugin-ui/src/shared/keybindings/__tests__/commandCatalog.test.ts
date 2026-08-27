@@ -101,7 +101,7 @@ describe('shipped locales cover every command title', () => {
   // is only a fallback for a command added between releases.
   const load = (locale: string) =>
     JSON.parse(
-      readFileSync(join(process.cwd(), `packages/plugin-ui-vue/src/foundation/i18n/locales/${locale}.json`), 'utf-8'),
+      readFileSync(join(process.cwd(), `packages/plugin-ui/src/foundation/i18n/locales/${locale}.json`), 'utf-8'),
     ).settings.keybindings.cmd as Record<string, string>
 
   for (const locale of ['en-US', 'zh-TW']) {

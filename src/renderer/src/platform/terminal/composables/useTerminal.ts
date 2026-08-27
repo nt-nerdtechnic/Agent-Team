@@ -13,7 +13,7 @@ import { chunkForPty, shouldOpenMentionMenu, stripInputSequences } from '../lib/
 import { extractClipboardImage } from '../lib/clipboardImage'
 import { createThrottledDiag, diagLog } from '../lib/diagLog'
 import { TERMINAL_CREATE_TIMEOUT_MS, formatTerminalExit, isTerminalCrashLoopOpen, recordTerminalExit, terminalCrashKey } from '../lib/terminalLifecycle'
-import { settingsGet, settingsSet, setContext } from '@navide/shared'
+import { settingsGet, settingsSet, setContext } from '@navide/plugin-ui/shared'
 
 import type { ITheme } from '@xterm/xterm'
 import type { TerminalDockPort, TerminalSpawnOptions } from '../ports/terminalDock'

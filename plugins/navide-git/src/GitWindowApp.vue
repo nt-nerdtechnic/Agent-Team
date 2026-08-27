@@ -20,8 +20,8 @@
 
 import { ref, computed, onMounted, onUnmounted, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { SafeAiCliPanel, type AiCliSessionController } from '@navide/plugin-ui-vue'
-import { useKeybindings, registerCommand, setContext } from '@navide/plugin-ui-vue/shared'
+import { SafeAiCliPanel, type AiCliSessionController } from '@navide/plugin-ui'
+import { useKeybindings, registerCommand, setContext } from '@navide/plugin-ui/shared'
 import {
   useGit,
   type BlameEntry,
@@ -30,8 +30,8 @@ import {
   type GitFileEntry
 } from './composables/useGit'
 import { useIssues } from './composables/useIssues'
-import { useNotify, useTheme } from '@navide/plugin-ui-vue/foundation'
-import { settingsGet, onSettingsChanged } from '@navide/plugin-ui-vue/shared'
+import { useNotify, useTheme } from '@navide/plugin-ui/foundation'
+import { settingsGet, onSettingsChanged } from '@navide/plugin-ui/shared'
 import {
   GIT_BRANCH_DIFF_KEY,
   GIT_FILE_ACCESS_KEY,

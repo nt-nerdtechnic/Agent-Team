@@ -1074,7 +1074,7 @@ def test_every_resolve_code_has_a_ui_string() -> None:
 
     for locale in ("en-US", "zh-TW"):
         strings = json.loads(
-            (root / f"packages/plugin-ui-vue/src/foundation/i18n/locales/{locale}.json").read_text()
+            (root / f"packages/plugin-ui/src/foundation/i18n/locales/{locale}.json").read_text()
         )["msg"]
         missing = sorted(c for c in codes if f"reason-{c}" not in strings)
         assert not missing, f"{locale} is missing msg.reason-* for: {missing}"

@@ -4,7 +4,7 @@ import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 const repositoryRoot = resolve(import.meta.dirname, '../../..')
-const publicVueRoot = join(repositoryRoot, 'packages/plugin-ui-vue/src')
+const publicVueRoot = join(repositoryRoot, 'packages/plugin-ui/src')
 const pluginRoot = join(repositoryRoot, 'plugins/navide-git/src')
 
 function sourceFiles(root: string): string[] {
@@ -37,14 +37,13 @@ function importSpecifiers(source: string): string[] {
 describe('public Vue plugin ownership boundary', () => {
   it('publishes explicit shared and foundation subpaths', () => {
     const manifest = JSON.parse(
-      readFileSync(join(repositoryRoot, 'packages/plugin-ui-vue/package.json'), 'utf8'),
+      readFileSync(join(repositoryRoot, 'packages/plugin-ui/package.json'), 'utf8'),
     ) as { exports: Record<string, unknown> }
 
     expect(Object.keys(manifest.exports).sort()).toEqual([
       '.',
       './foundation',
       './shared',
-      './shared/testing',
       './styles.css',
     ])
   })
@@ -52,7 +51,7 @@ describe('public Vue plugin ownership boundary', () => {
   it('keeps the public Vue package independent from Host implementation paths', () => {
     for (const path of sourceFiles(publicVueRoot)) {
       const imports = importSpecifiers(readFileSync(path, 'utf8'))
-      expect(imports, relative(repositoryRoot, path)).not.toContain('@navide/shared')
+      expect(imports, relative(repositoryRoot, path)).not.toContain('@navide/plugin-ui/shared')
       expect(
         imports.some((specifier) => specifier.includes('src/renderer')),
         relative(repositoryRoot, path),
@@ -66,8 +65,6 @@ describe('public Vue plugin ownership boundary', () => {
 
   it('limits navide.git to public packages and package-local Git modules', () => {
     const forbidden = [
-      '@navide/shared',
-      '@navide/ui-foundation',
       '@navide/terminal',
       '@navide/plugin-shell',
       '@navide/git-feature',

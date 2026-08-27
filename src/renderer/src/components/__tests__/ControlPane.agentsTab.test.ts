@@ -2,8 +2,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
-import { executeCommand } from '@navide/shared'
-import { _resetRegistry } from '@navide/shared/testing'
+import { executeCommand } from '@navide/plugin-ui/shared'
+import { _resetRegistry } from '@navide/plugin-ui/shared/testing'
 
 // The agent list, spawn card and resume notice moved out of the Pipeline tab
 // into their own Agents tab. Anything that drives them programmatically has to

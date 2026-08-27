@@ -61,6 +61,16 @@ export default defineConfig({
   // WebContentsView (no dev server here — this entry is always loadFile'd).
   base: './',
   plugins: [vue(), emitManifest()],
+  resolve: {
+    alias: [
+      { find: '@navide/plugin-ui/shared', replacement: resolve(__dirname, 'packages/plugin-ui/src/shared/index.ts') },
+      { find: '@navide/plugin-ui/styles.css', replacement: resolve(__dirname, 'packages/plugin-ui/src/foundation/styles.css') },
+      { find: '@navide/plugin-ui/foundation', replacement: resolve(__dirname, 'packages/plugin-ui/src/foundation/index.ts') },
+      { find: '@navide/terminal', replacement: resolve(__dirname, 'src/renderer/src/platform/terminal/index.ts') },
+      { find: '@navide/plugin-shell', replacement: resolve(__dirname, 'src/renderer/src/platform/plugin-shell/index.ts') },
+      { find: '@navide/git-feature', replacement: resolve(__dirname, 'plugins/navide-git/src/git-feature/index.ts') },
+    ],
+  },
   define: {
     __APP_BUILD__: JSON.stringify(`v${APP_VERSION} plugin`),
   },

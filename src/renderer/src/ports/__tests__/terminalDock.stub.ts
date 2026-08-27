@@ -6,7 +6,7 @@ import type {
   TerminalFileListResult,
   TerminalOutputEvent,
 } from '@navide/terminal'
-import type { PortResponse } from '@navide/shared'
+import type { PortResponse } from '@navide/plugin-ui/shared'
 
 function ok<T>(payload: T | null = null): PortResponse<T> {
   return { ok: true, payload, error: null }

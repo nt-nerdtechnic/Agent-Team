@@ -70,6 +70,40 @@ describe('ControlPane manifest-driven plugin placement', () => {
     wrapper.unmount()
   })
 
+  it('renders a catalog icon at the fixed sidebar size', () => {
+    const wrapper = mountPane([
+      contribution({ icon: 'data:image/png;base64,icon-data' }),
+    ])
+
+    const icon = wrapper.get('.plugin-tab-icon')
+    expect(icon.element.tagName).toBe('IMG')
+    expect(icon.attributes('src')).toBe('data:image/png;base64,icon-data')
+    expect(icon.attributes('width')).toBe('18')
+    expect(icon.attributes('height')).toBe('18')
+    expect(icon.attributes('alt')).toBe('')
+    wrapper.unmount()
+  })
+
+  it('uses the generic fallback when a contribution has no icon', () => {
+    const wrapper = mountPane([contribution()])
+
+    expect(wrapper.get('.plugin-tab-fallback').text()).toBe('◇')
+    expect(wrapper.find('.plugin-tab-icon').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('uses the generic fallback when a catalog icon fails to load', async () => {
+    const wrapper = mountPane([
+      contribution({ icon: 'data:image/png;base64,broken-icon' }),
+    ])
+
+    await wrapper.get('.plugin-tab-icon').trigger('error')
+
+    expect(wrapper.get('.plugin-tab-fallback').text()).toBe('◇')
+    expect(wrapper.find('.plugin-tab-icon').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('does not render the legacy Git tab in normal mode', () => {
     const wrapper = mountPane([])
     expect(wrapper.find('[data-legacy-git-tab]').exists()).toBe(false)
@@ -91,6 +125,7 @@ describe('ControlPane manifest-driven plugin placement', () => {
     await tab.trigger('click')
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent({ name: 'GitPluginHostSlot' }).exists()).toBe(true)
+    expect(wrapper.get('[data-legacy-recovery-label]').text()).toBe('Legacy recovery')
     wrapper.unmount()
   })
 })

@@ -192,7 +192,7 @@ describe('third-party plugin external workspace', () => {
         const require = createRequire(import.meta.url)
         const typescriptCli = resolveInstalledPackageBin(repository, 'typescript', 'tsc', require)
         const viteCli = resolveInstalledPackageBin(repository, 'vite', 'vite', require)
-        const pnpmStorePath = join(temporaryRoot, 'pnpm-store')
+        const pnpmStorePath = runPnpmOrThrow(['store', 'path'], repository).stdout.trim()
 
         cpSync(join(repository, 'examples', 'third-party-files'), externalProject, {
           recursive: true,
@@ -207,6 +207,11 @@ describe('third-party plugin external workspace', () => {
         for (const packageName of Object.keys(packageTarballs)) {
           externalPackageJson.dependencies[packageName] = `file:${packageTarballs[packageName]}`
         }
+        // Vue and vue-i18n are Host-provided peers of @navide/plugin-ui. The
+        // external gate installs only the public Navide tarballs offline, then
+        // links the repository's already-installed peer runtime explicitly.
+        delete externalPackageJson.dependencies.vue
+        delete externalPackageJson.dependencies['vue-i18n']
         delete externalPackageJson.devDependencies.typescript
         delete externalPackageJson.devDependencies.vite
         writeFileSync(externalPackageJsonPath, `${JSON.stringify(externalPackageJson, null, 2)}\n`)
@@ -214,7 +219,9 @@ describe('third-party plugin external workspace', () => {
         expect(JSON.stringify(externalPackageJson)).not.toContain('workspace:')
         expect(JSON.stringify(externalPackageJson)).not.toContain('@navide/feature-')
         expect(
-          Object.values(externalPackageJson.dependencies).every((value) => value.startsWith('file:'))
+          Object.entries(externalPackageJson.dependencies)
+            .filter(([name]) => name.startsWith('@navide/'))
+            .every(([, value]) => value.startsWith('file:'))
         ).toBe(true)
         expect(externalPackageJson.devDependencies.typescript).toBeUndefined()
         expect(externalPackageJson.devDependencies.vite).toBeUndefined()
@@ -224,11 +231,17 @@ describe('third-party plugin external workspace', () => {
             'install',
             '--offline',
             '--ignore-scripts',
+            '--config.auto-install-peers=false',
             '--lockfile=false',
             '--store-dir',
             pnpmStorePath,
           ],
           externalProject
+        )
+        symlinkSync(realpathSync(join(repository, 'node_modules', 'vue')), join(externalProject, 'node_modules', 'vue'))
+        symlinkSync(
+          realpathSync(join(repository, 'node_modules', 'vue-i18n')),
+          join(externalProject, 'node_modules', 'vue-i18n')
         )
         runNodeEntryOrThrow(
           typescriptCli,

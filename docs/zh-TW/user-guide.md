@@ -87,7 +87,7 @@ Token Stats 解析相容的本機 CLI Log，將 Usage 歸屬到 Workspace、Pane
 
 ## Git 與 Review
 
-Git View 支援 Repository Discovery、Working Tree Inspection、Staging、Commit、Branch、Remote、Issue 與相關工作流。Multi-repository Workspace 可以在偵測到的 Repository 間切換。Production Git Package 同時提供嵌入式左側 View 與獨立 Git Window，兩者由同一個 Active Package Version 提供。Repository Operation 仍經由 Navide Host／Backend 邊界處理；GitHub 與 GitLab Issue Detection 在可用時使用設定的 `gh` 或 `glab` CLI。若嵌入式 View 無法建立或更新，會顯示可恢復的不可用狀態並提供手動 Retry，不會因每次 geometry 變更而自動重試。
+在 Marketplace 安裝功能完成前，Navide 會提供可移除的官方 Git Factory Package。其 Active Package Version 會同時提供嵌入式左側 View 與獨立 Git Window。在 Extensions 移除 Bundled Git 後，重新啟動也不會自動裝回；可在同一處按 **Restore** 恢復 Factory Copy。若存在已驗證的 Marketplace Version，會優先使用該版本。Git View 支援 Repository Discovery、Working Tree Inspection、Staging、Commit、Branch、Remote、Issue 與相關工作流；Multi-repository Workspace 可以在偵測到的 Repository 間切換。Repository Operation 仍經由 Navide Host／Backend 邊界處理；GitHub 與 GitLab Issue Detection 在可用時使用設定的 `gh` 或 `glab` CLI。若選定的 v2 Package 無法 Load、Mount 或回報 Ready，Navide 會明確標示並在該次 Process 使用保留的 Legacy Git Renderer；Security、Trust 或 Permission Denial 不會觸發 Fallback。
 
 Commit 前務必審查變更，特別是在 Automation 或 Parallel Run 之後。Agent 生成的變更不會因為顯示在 Git Panel 中就自動變得安全。
 

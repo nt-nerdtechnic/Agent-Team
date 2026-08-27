@@ -6,7 +6,7 @@ import { useExplorer, type FsEntry } from '../composables/useExplorer'
 import { useGit } from '../composables/useGit'
 import { createHostGitTransport } from '../composables/hostGitTransport'
 import { createHostGitCredentialPort } from '../composables/hostSurfacePorts'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 
 const props = defineProps<{
   workspacePath: string

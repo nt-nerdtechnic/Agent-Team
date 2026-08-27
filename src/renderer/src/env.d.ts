@@ -37,6 +37,10 @@ interface GitCredential {
   expectedHost: string
 }
 
+interface GitRecoveryChanged {
+  legacy: true
+}
+
 declare global {
   // Build tag injected by electron.vite.config.ts (git short-hash + dirty + time).
   const __APP_BUILD__: string
@@ -53,6 +57,7 @@ declare global {
       restartBackend: () => Promise<BackendInfo>
       stopBackend: () => Promise<{ ok: boolean }>
       onBackendChanged: (cb: (info: BackendInfo) => void) => void
+      onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void) => () => void
       onMenuAction: (cb: (action: string) => void) => void
       setRecentWorkspaces: (list: { path: string; name: string; exists: boolean }[]) => void
       openMainWindow: (args?: { workspace_path?: string }) => Promise<{ ok: boolean }>
@@ -282,6 +287,7 @@ declare global {
       }
       plugins?: {
         listInstalled: () => Promise<InstalledPluginSummary[]>
+        listFactoryPackages: () => Promise<FactoryPluginSummary[]>
         listContributions: () => Promise<Array<{
           pluginId: string
           packageVersion: string | null
@@ -296,12 +302,10 @@ declare global {
           contributionKey: string
           workspace_path: string
           bounds: { x: number; y: number; width: number; height: number }
-          query?: string
         }) => Promise<{ ok: boolean; error?: string }>
         openContributionWindow: (args: {
           contributionKey: string
           workspace_path: string
-          query?: string
         }) => Promise<{ ok: boolean; error?: string }>
         updateContribution: (args: {
           contributionKey: string
@@ -321,6 +325,7 @@ declare global {
           approval?: { publisherConfirmed?: boolean; riskConfirmed?: boolean }
         ) => Promise<{ id: string; requires: string[] }>
         remove: (id: string) => Promise<{ ok: boolean }>
+        restoreFactoryPackage: (id: string) => Promise<{ ok: boolean }>
       }
     }
   }
@@ -329,8 +334,15 @@ declare global {
     id: string
     requires: string[]
     sensitive: string[]
-    provenance?: 'official-registry' | 'developer-local-unpacked'
+    provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
     warning?: string
+  }
+
+  interface FactoryPluginSummary {
+    id: string
+    version: string | null
+    active: boolean
+    optedOut: boolean
   }
 
   interface MarketplaceExtension {

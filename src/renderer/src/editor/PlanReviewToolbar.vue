@@ -23,7 +23,7 @@ import type { PlanMeta, ReviewNote, PlanTodo, TodoStatus, PlanStage } from '../c
 import type { PlanStore, PlanCtx } from '../composables/planStore'
 import type { useBackend } from '../composables/useBackend'
 import { sharePlanToGit } from '../composables/planShare'
-import { useNotify } from '@navide/ui-foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 
 const props = defineProps<{

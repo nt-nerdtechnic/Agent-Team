@@ -102,8 +102,8 @@ describe('plugin Git production composition', () => {
       expect(graph.has(sourcePath), relativePath).toBe(true)
       expect(graph.get(sourcePath), relativePath).not.toMatch(/useBackend|backend\.send|backend\.on|window\.agentTeam|:backend=/)
     }
-    expect(graphText).toContain("from '@navide/shared'")
-    expect(graphText).toContain("from '@navide/ui-foundation'")
+    expect(graphText).toContain("from '@navide/plugin-ui/shared'")
+    expect(graphText).toContain("from '@navide/plugin-ui/foundation'")
     expect(graphText).toContain("from '@navide/terminal'")
     expect(graphText).toContain("from '@navide/plugin-shell'")
     for (const relativePath of [

@@ -15,7 +15,8 @@ export interface PluginContributionCatalogEntry {
   packageVersion: string | null
   contributionKey: string
   title: string
-  icon: string | null
+  /** Host-only, verified on-disk identity. IPC must project this to safe bytes. */
+  iconFile: string | null
   kind: 'custom'
   location: PluginContributionLocation
   manifestOrder: number
@@ -34,7 +35,7 @@ export function buildPluginContributionCatalog(
         packageVersion: descriptor.packageVersion ?? null,
         contributionKey: view.contributionKey,
         title: view.title,
-        icon: view.icon ?? null,
+        iconFile: view.iconFile ?? null,
         kind: view.kind,
         location: view.location,
         manifestOrder,
