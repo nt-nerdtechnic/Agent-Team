@@ -278,3 +278,119 @@ def test_legacy_event_key_still_drains_via_record(tmp_path: Path) -> None:
     assert store.snapshot(None)["global"]["all_time"]["calls"] == 1
     store.flush()
     assert _kv(tmp_path, "tokens.legacy_event_keys")["keys"] == []
+
+
+# ───────────────── live per-session tally (no persistence) ─────────────────
+
+
+def test_live_bucket_accrues_without_an_active_run(store: TokensStore, workspace: str) -> None:
+    """A manually opened CLI pane has no run, so by_pane stays empty — but the
+    live tally is what the panel reads in that case and must still count."""
+    store.record(
+        workspace, source="cli", vendor="claude",
+        pane_id="pane-a", session_id="sess-1",
+        input_tokens=10, output_tokens=20,
+    )
+    snap = store.snapshot(workspace)
+    assert snap["workspace"]["current_run"] is None
+    assert snap["workspace"]["live_by_pane"] == {
+        "pane-a::sess-1": {"input": 10, "output": 20, "calls": 1},
+    }
+
+
+def test_live_bucket_falls_back_to_bare_pane_id(store: TokensStore, workspace: str) -> None:
+    store.record(
+        workspace, source="cli", vendor="claude", pane_id="pane-a",
+        input_tokens=1, output_tokens=2,
+    )
+    live = store.snapshot(workspace)["workspace"]["live_by_pane"]
+    assert live == {"pane-a": {"input": 1, "output": 2, "calls": 1}}
+
+
+def test_live_and_run_buckets_both_accrue(store: TokensStore, workspace: str) -> None:
+    store.start_run(workspace, run_id="r1", task="t", run_dir="runs/r1")
+    store.record(
+        workspace, source="cli", vendor="claude",
+        pane_id="pane-a", session_id="sess-1",
+        input_tokens=10, output_tokens=20,
+    )
+    ws = store.snapshot(workspace)["workspace"]
+    assert ws["current_run"]["by_pane"]["pane-a"] == {"input": 10, "output": 20, "calls": 1}
+    assert ws["live_by_pane"]["pane-a::sess-1"] == {"input": 10, "output": 20, "calls": 1}
+
+
+def test_live_bucket_ignores_duplicate_events(store: TokensStore, workspace: str) -> None:
+    for _ in range(2):
+        store.record(
+            workspace, source="cli", vendor="claude",
+            pane_id="pane-a", session_id="sess-1",
+            input_tokens=10, output_tokens=20, dedup_key="evt-1",
+        )
+    live = store.snapshot(workspace)["workspace"]["live_by_pane"]
+    assert live["pane-a::sess-1"] == {"input": 10, "output": 20, "calls": 1}
+
+
+def test_forget_pane_drops_every_session_of_that_pane(store: TokensStore, workspace: str) -> None:
+    for session in ("sess-1", "sess-2"):
+        store.record(
+            workspace, source="cli", vendor="claude",
+            pane_id="pane-a", session_id=session,
+            input_tokens=10, output_tokens=20,
+        )
+    store.record(
+        workspace, source="cli", vendor="claude",
+        pane_id="pane-b", session_id="sess-3",
+        input_tokens=5, output_tokens=5,
+    )
+    store.forget_pane("pane-a")
+    live = store.snapshot(workspace)["workspace"]["live_by_pane"]
+    assert set(live) == {"pane-b::sess-3"}
+
+
+def test_reset_run_without_a_run_clears_the_live_tally(store: TokensStore, workspace: str) -> None:
+    store.record(
+        workspace, source="cli", vendor="claude",
+        pane_id="pane-a", session_id="sess-1",
+        input_tokens=10, output_tokens=20,
+    )
+    snap = store.reset("run", workspace_path=workspace)
+    assert snap["workspace"]["live_by_pane"] == {}
+    # Cumulative + global untouched, same as a run reset.
+    assert snap["workspace"]["cumulative"]["totals"]["input"] == 10
+    assert snap["global"]["all_time"]["input"] == 10
+
+
+def test_reset_run_with_a_run_keeps_the_live_tally(store: TokensStore, workspace: str) -> None:
+    store.start_run(workspace, run_id="r1", task="t", run_dir="runs/r1")
+    store.record(
+        workspace, source="cli", vendor="claude",
+        pane_id="pane-a", session_id="sess-1",
+        input_tokens=10, output_tokens=20,
+    )
+    snap = store.reset("run", workspace_path=workspace)
+    assert snap["workspace"]["current_run"]["totals"]["calls"] == 0
+    assert snap["workspace"]["live_by_pane"]["pane-a::sess-1"]["calls"] == 1
+
+
+def test_live_tally_is_not_persisted(tmp_path: Path) -> None:
+    """"This session" semantics: a restart starts the live tally over."""
+    kwargs = {
+        "global_path": tmp_path / "global-tokens.json",
+        "workspace_base_dir": tmp_path / "workspaces",
+    }
+    ws = str(tmp_path / "ws")
+    store = TokensStore(**kwargs)
+    store.record(
+        ws, source="cli", vendor="claude", pane_id="pane-a", session_id="sess-1",
+        input_tokens=10, output_tokens=20,
+    )
+    store.flush()
+
+    snap = TokensStore(**kwargs).snapshot(ws)
+    assert snap["workspace"]["live_by_pane"] == {}
+    # The durable tallies did survive.
+    assert snap["workspace"]["cumulative"]["totals"]["input"] == 10
+
+
+def test_snapshot_without_a_workspace_still_has_live_by_pane(store: TokensStore) -> None:
+    assert store.snapshot(None)["workspace"]["live_by_pane"] == {}
