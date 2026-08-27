@@ -37,11 +37,19 @@ function mountWith(extra: Record<string, unknown>): VueWrapper {
   })
 }
 
-const current = (over: Record<string, unknown> = {}) => ({
-  path: '/Users/me/Desktop/Agent-Team', label: 'Agent-Team',
-  displayPath: '~/Desktop/Agent-Team', isCurrent: true, collapsed: false,
-  count: 2, lineage: [], ...over
-})
+/** A workspace row. `groups` mirrors whatever lineage the caller supplied: the
+ *  sidebar renders through the group sections now, so a row without them shows
+ *  no panes at all — and every test here is about the panes. */
+const current = (over: Record<string, unknown> = {}) => {
+  const row = {
+    path: '/Users/me/Desktop/Agent-Team', label: 'Agent-Team',
+    displayPath: '~/Desktop/Agent-Team', isCurrent: true, collapsed: false,
+    count: 2, lineage: [], ...over
+  }
+  // A caller that supplies its own groups means to test them; otherwise the
+  // row gets the one ungrouped section an untouched workspace has.
+  return 'groups' in row ? row : { ...row, groups: [{ id: '', name: '', rows: row.lineage }] }
+}
 
 describe('ControlPane – workspace sections', () => {
   let wrapper: VueWrapper
@@ -159,6 +167,47 @@ describe('ControlPane – workspace sections', () => {
     expect(wrapper.findAll('.ws-name').map((n) => n.text())).toEqual(['Agent-Team', 'Other'])
     // One pane under each, not both under the first.
     expect(wrapper.findAll('.agent-item')).toHaveLength(2)
+  })
+
+  it('colours a group spine by the same rollup its tab uses', async () => {
+    // The colour used to be an identity palette hashed from the group id. That
+    // said WHICH group a row belonged to — which the heading right above it
+    // already says. The run state says something the heading does not.
+    wrapper = mountWith({
+      panes: [
+        { id: 'p1', agentLabel: 'A', status: 'running', command: 'c', origin: 'manual', isMinimized: false, isCommander: false },
+        { id: 'p2', agentLabel: 'B', status: 'idle', command: 'c', origin: 'manual', isMinimized: false, isCommander: false },
+      ],
+      workspaces: [current({
+        count: 2,
+        lineage: [
+          { id: 'p1', depth: 0, hasChildren: false, collapsed: false },
+          { id: 'p2', depth: 0, hasChildren: false, collapsed: false },
+        ],
+        groups: [
+          { id: 'g1', name: '主要開發', rows: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }] },
+          { id: 'g2', name: '需求整理', rows: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }] },
+        ],
+      })],
+    })
+    const heads = wrapper.findAll('.ws-grp')
+    expect(heads).toHaveLength(2)
+    // 'running' rolls up to active; 'idle' does not. Same rule as the tab dot,
+    // because it IS the same function.
+    expect(heads[0].attributes('data-state')).toBe('active')
+    expect(heads[1].attributes('data-state')).toBe('idle')
+  })
+
+  it('shows no group heading when nobody has made a group', () => {
+    // An untouched workspace must look exactly as it did before this existed.
+    // A lone "manual" heading over everything distinguishes nothing.
+    wrapper = mountWith({
+      workspaces: [current({
+        count: 1,
+        lineage: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }],
+      })],
+    })
+    expect(wrapper.findAll('.ws-grp')).toHaveLength(0)
   })
 
   it('collapsing one local workspace leaves the other alone', () => {

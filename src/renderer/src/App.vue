@@ -11806,6 +11806,7 @@ interface WorkspaceGroupRow {
   collapsed: boolean
   count: number
   lineage: PaneLineageRow[]
+  groups: { id: string; name: string; rows: PaneLineageRow[] }[]
 }
 
 const workspaceGroups = computed<WorkspaceGroupRow[]>(() =>
@@ -11814,6 +11815,10 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() =>
     order: workspaceOrder.value,
     panes: panes.value,
     lineage: paneLineage.value,
+    // Only the viewed workspace's groups exist here — they are persisted per
+    // workspace — so another workspace this window holds lists its panes
+    // ungrouped until you switch to it.
+    runGroups: runGroups.value,
     collapsed: collapsedWorkspaces.value,
     homeDir: homeDir.value,
   })

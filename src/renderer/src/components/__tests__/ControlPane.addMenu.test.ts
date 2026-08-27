@@ -30,6 +30,9 @@ const workspaceRow = {
   collapsed: false,
   count: 1,
   lineage: [],
+  // The sidebar renders through the group sections; a row without them shows
+  // no panes. One ungrouped section is what an untouched workspace looks like.
+  groups: [{ id: '', name: '', rows: [] }],
   remote: []
 }
 
@@ -114,7 +117,7 @@ describe('ControlPane – the ＋ menu', () => {
     expect(lone.attributes('title')).toBe('')
 
     wrapper.unmount()
-    const second = { ...workspaceRow, path: '/Users/me/Desktop/other', label: 'other' }
+    const second = { ...workspaceRow, path: '/Users/me/Desktop/other', label: 'other', groups: [{ id: '', name: '', rows: [] }] }
     wrapper = mountWith({ workspaces: [workspaceRow, second] })
     const rows = wrapper.findAll('.ws-head--current')
     expect(rows[0].attributes('draggable')).toBe('true')
@@ -150,7 +153,7 @@ describe('ControlPane – the ＋ menu', () => {
 
   it('starts the shell in the workspace whose heading was clicked', async () => {
     // The ＋ belongs to one row, and a window can hold several workspaces.
-    const second = { ...workspaceRow, path: '/Users/me/Desktop/other', label: 'other' }
+    const second = { ...workspaceRow, path: '/Users/me/Desktop/other', label: 'other', groups: [{ id: '', name: '', rows: [] }] }
     wrapper = mountWith({ workspaces: [workspaceRow, second] })
     await wrapper.findAll('.ws-add')[1].trigger('click')
     await wrapper.find('.ws-add-term').trigger('click')
@@ -211,7 +214,8 @@ describe('ControlPane – the ＋ menu', () => {
         { ...workspaceRow, lineage: [] },
         {
           path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop',
-          isCurrent: true, collapsed: false, count: 0, lineage: [], remote: []
+          isCurrent: true, collapsed: false, count: 0, lineage: [],
+          groups: [{ id: '', name: '', rows: [] }], remote: []
         }
       ]
     })
@@ -231,7 +235,8 @@ describe('ControlPane – the ＋ menu', () => {
         { ...workspaceRow, lineage: [] },
         {
           path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop',
-          isCurrent: true, collapsed: false, count: 0, lineage: [], remote: []
+          isCurrent: true, collapsed: false, count: 0, lineage: [],
+          groups: [{ id: '', name: '', rows: [] }], remote: []
         }
       ]
     })

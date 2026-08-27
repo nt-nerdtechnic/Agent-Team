@@ -8,9 +8,14 @@ import { buildWorkspaceGroups, workspaceParentPath, type LineageRow } from '../w
 
 const HOME = '/Users/me'
 
-const pane = (id: string, ws: string): { id: string; workspacePath: string } => ({
+const pane = (
+  id: string,
+  ws: string,
+  runGroupId = '',
+): { id: string; workspacePath: string; runGroupId: string } => ({
   id,
   workspacePath: ws,
+  runGroupId,
 })
 const row = (id: string, depth = 0): LineageRow => ({
   id,
@@ -28,6 +33,7 @@ function build(over: Partial<Parameters<typeof buildWorkspaceGroups>[0]> = {}) {
     order: [A],
     panes: [],
     lineage: [],
+    runGroups: [],
     collapsed: new Set<string>(),
     homeDir: HOME,
     ...over,
@@ -54,6 +60,82 @@ describe('workspaceParentPath', () => {
 })
 
 describe('buildWorkspaceGroups', () => {
+  it('splits a workspace into its run groups, in tab order', () => {
+    const rows = build({
+      panes: [pane('a', A, 'g2'), pane('b', A, 'g1'), pane('c', A, 'g2')],
+      lineage: [row('a'), row('b'), row('c')],
+      runGroups: [{ id: 'g1', name: '需求整理' }, { id: 'g2', name: '主要開發' }],
+    })
+    // Tab order, not spawn order: the sidebar and the tabs must name things in
+    // the same sequence or they read as two different lists.
+    expect(rows[0].groups.map((g) => g.name)).toEqual(['需求整理', '主要開發'])
+    expect(rows[0].groups[1].rows.map((r) => r.id)).toEqual(['a', 'c'])
+  })
+
+  it('renders in grouped order, because that is what the eye walks', () => {
+    // lineage IS the render order — shift-range selection walks it.
+    const rows = build({
+      panes: [pane('a', A, 'g2'), pane('b', A, 'g1')],
+      lineage: [row('a'), row('b')],
+      runGroups: [{ id: 'g1', name: 'one' }, { id: 'g2', name: 'two' }],
+    })
+    expect(rows[0].lineage.map((r) => r.id)).toEqual(['b', 'a'])
+  })
+
+  it('keeps a child with its parent', () => {
+    // An MCP child inherits its parent's runGroupId at spawn, so a subtree is
+    // always whole. If that ever stopped being true, grouping would tear a
+    // child away from the parent it is indented under.
+    const rows = build({
+      panes: [pane('p', A, 'g1'), pane('kid', A, 'g1'), pane('other', A, 'g2')],
+      lineage: [row('p'), row('kid', 1), row('other')],
+      runGroups: [{ id: 'g1', name: 'one' }, { id: 'g2', name: 'two' }],
+    })
+    const first = rows[0].groups[0]
+    expect(first.rows.map((r) => r.id)).toEqual(['p', 'kid'])
+    expect(first.rows[1].depth).toBe(1)
+  })
+
+  it('puts ungrouped panes last, as leftovers rather than a group', () => {
+    const rows = build({
+      panes: [pane('loose', A), pane('g', A, 'g1')],
+      lineage: [row('loose'), row('g')],
+      runGroups: [{ id: 'g1', name: 'one' }],
+    })
+    expect(rows[0].groups.map((g) => g.id)).toEqual(['g1', ''])
+    expect(rows[0].groups[1].name).toBe('')
+  })
+
+  it('drops a group with no panes', () => {
+    // A heading with nothing under it is a dead row: it cannot be collapsed
+    // into anything, and the tab bar already lists the empty group.
+    const rows = build({
+      panes: [pane('a', A, 'g1')],
+      lineage: [row('a')],
+      runGroups: [{ id: 'g1', name: 'one' }, { id: 'empty', name: 'two' }],
+    })
+    expect(rows[0].groups.map((g) => g.id)).toEqual(['g1'])
+  })
+
+  it('keeps panes of a group the tab bar does not list', () => {
+    // Another workspace's groups, or one deleted while its panes lived on.
+    // Losing the rows would lose the panes from the sidebar entirely.
+    const rows = build({
+      panes: [pane('a', A, 'ghost')],
+      lineage: [row('a')],
+      runGroups: [],
+    })
+    expect(rows[0].groups).toHaveLength(1)
+    expect(rows[0].groups[0].id).toBe('')
+    expect(rows[0].groups[0].rows.map((r) => r.id)).toEqual(['a'])
+  })
+
+  it('is one ungrouped section when nobody has made a group', () => {
+    // Which is what makes an untouched workspace render exactly as before.
+    const rows = build({ panes: [pane('a', A)], lineage: [row('a')] })
+    expect(rows[0].groups).toEqual([{ id: '', name: '', rows: [{ id: 'a', depth: 0, hasChildren: false, collapsed: false }] }])
+  })
+
   it('lists the workspaces the window holds, in the order it took them on', () => {
     const rows = build({ here: B, order: [A, B] })
     expect(rows.map((r) => r.path)).toEqual([A, B])
