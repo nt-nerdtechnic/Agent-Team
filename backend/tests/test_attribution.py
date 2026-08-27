@@ -588,6 +588,92 @@ def test_codex_marker_waits_for_session_meta(codex_attr: tuple[Attribution, Path
     assert attr.maybe_bind_by_marker(usage) == ("p1", "real-id")
 
 
+def _codex_subagent_meta(sid: str, parent: str) -> str:
+    """A sub-agent rollout's opening session_meta, as codex 0.149 writes it."""
+    return json.dumps({"type": "session_meta", "payload": {
+        "id": sid, "session_id": parent, "parent_thread_id": parent,
+        "forked_from_id": parent, "thread_source": "subagent", "cwd": "/ws",
+        "source": {"subagent": {"thread_spawn": {
+            "parent_thread_id": parent, "depth": 1, "agent_path": "/root/explore",
+        }}},
+    }})
+
+
+def test_codex_home_path_ignores_subagent_rollout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A sub-agent thread must never be pinned as the pane's session: codex
+    refuses direct input on it, so a pane resumed onto one is unusable. The
+    parent rollout in the same home keeps the binding."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".codex-panes" / "home-old" / "sessions" / "2026" / "08" / "24"
+    root.mkdir(parents=True)
+    parent = root / "rollout-2026-08-24T15-31-28-parent-id.jsonl"
+    parent.write_text(
+        json.dumps({"type": "session_meta", "payload": {
+            "id": "parent-id", "thread_source": "user", "cwd": "/ws"}}) + "\n"
+    )
+    attr = Attribution([FakeReader("codex", tmp_path / ".codex")], workspaces_path=tmp_path / "ws.json")
+    attr.register_pane(
+        "live-pane", vendor="codex", cwd="/ws", workspace_path="/ws",
+        session_home_id="home-old",
+    )
+    first = attr.maybe_announce_session(
+        _make_usage("codex", session_id=parent.stem, file_path=str(parent), cwd="/ws")
+    )
+    assert first is not None
+    assert first.resume_id == "parent-id"
+
+    # The sub-agent codex spawns lands in the SAME home, newer than the parent.
+    child = root / "rollout-2026-08-24T15-43-28-child-id.jsonl"
+    child.write_text(
+        _codex_subagent_meta("child-id", "parent-id") + "\n"
+        + json.dumps({"type": "session_meta", "payload": {
+            "id": "parent-id", "thread_source": "user", "cwd": "/ws"}}) + "\n"
+    )
+
+    child_usage = _make_usage(
+        "codex", session_id=child.stem, file_path=str(child), cwd="/ws"
+    )
+    assert attr.maybe_announce_session(child_usage) is None
+
+    # Refusing the ID must not cost the pane its EVENTS: routing runs off the
+    # per-pane home in the PATH, not off the announced resume id, so the
+    # sub-agent's activity still reaches the pane that spawned it — and does
+    # not fall through to the same-cwd guess that a sibling could win.
+    attr.register_pane(
+        "sibling", vendor="codex", cwd="/ws", workspace_path="/ws",
+        session_home_id="home-other",
+    )
+    assert attr.attribute(child_usage).pane_id == "live-pane"
+
+
+def test_codex_marker_ignores_subagent_rollout(codex_attr: tuple[Attribution, Path]) -> None:
+    """A sub-agent rollout is forked from the parent's history, so it carries
+    the pane's kickoff marker too — the marker path must not bind on it."""
+    attr, root = codex_attr
+    attr.register_pane(
+        "p1", vendor="codex", cwd="/ws", workspace_path="/ws",
+        session_marker="at-pane:p1",
+    )
+    marker_record = json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "<!-- agent-team-session: at-pane:p1 -->"}],
+        },
+    })
+    child = root / "rollout-2026-08-24T15-43-28-child-id.jsonl"
+    child.write_text(
+        _codex_subagent_meta("child-id", "parent-id") + "\n" + marker_record + "\n",
+        encoding="utf-8",
+    )
+    usage = _make_usage("codex", session_id=child.stem, file_path=str(child), cwd="/ws")
+
+    assert attr.maybe_bind_by_marker(usage) is None
+
+
 def test_codex_home_path_prevents_same_cwd_first_claim(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     root = tmp_path / ".codex-panes"

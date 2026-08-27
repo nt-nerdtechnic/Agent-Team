@@ -8,7 +8,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { useGit } from '../composables/useGit'
-import type { IgnoreTarget, GitWorktree } from '../composables/useGit'
+import type { DiscoveredRepo, IgnoreTarget, GitWorktree } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
 import type { IssueDetail } from '../composables/useIssues'
 import type { GitTransport } from '#git-feature'
@@ -59,6 +59,7 @@ const emit = defineEmits<{
   (e: 'dispatch-issue', payload: { paneId: string; issue: IssueDetail }): void
   (e: 'focus-pane', paneId: string): void
   (e: 'open-git-accounts'): void
+  (e: 'force-discovered', repos: DiscoveredRepo[]): void
 }>()
 
 function openBranchDiffTab(base = 'main'): void {
@@ -66,7 +67,7 @@ function openBranchDiffTab(base = 'main'): void {
 }
 
 const {
-  gitStatus, statusError, statusLoaded, loadStatus, discoveredRepos, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
+  gitStatus, statusError, statusLoaded, loadStatus, discoveredRepos, discoverySkipped, discoverRepositories, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
   gitWorktrees, gitConfig, gitConfigAllowedKeys,
   isLoadingStatus, isCommitting, isGenerating, isInitializing,
   syncOutput, syncError, gitError, clearGitError,
@@ -443,6 +444,18 @@ async function doInitInFolder(): Promise<void> {
   const r = await initRepo(true, picked.path)
   if (!r.ok) { initError.value = r.error || 'git init failed'; return }
   emit('open-workspace', picked)
+}
+
+const forcingScan = ref(false)
+async function doForceScan(): Promise<void> {
+  if (forcingScan.value) return
+  forcingScan.value = true
+  try {
+    await discoverRepositories(true)
+    emit('force-discovered', [...discoveredRepos.value])
+  } finally {
+    forcingScan.value = false
+  }
 }
 
 async function openPickedWorkspace(defaultPath: string): Promise<void> {
@@ -1623,6 +1636,14 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           {{ connecting ? $t('label.connecting') : $t('action.connect-to-remote') }}
         </button>
         <p v-if="connectError" class="err-text">{{ connectError }}</p>
+      </div>
+
+      <div v-if="discoverySkipped && !props.hideDiscoveredRepos" class="discovered-box">
+        <div class="clone-title">{{ $t('label.discovery-skipped-title') }}</div>
+        <div class="clone-hint">{{ $t('label.discovery-skipped-hint') }}</div>
+        <button class="btn-ghost w-full nv-btn nv-btn--ghost" style="font-size:11px" :disabled="forcingScan" @click="doForceScan">
+          {{ forcingScan ? $t('label.scanning-repos') : $t('action.scan-repos-anyway') }}
+        </button>
       </div>
 
       <!-- Nested repos found by scanning downward (git rev-parse only looks up) -->

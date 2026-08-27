@@ -155,6 +155,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
   onMenuAction: (cb: (action: string) => void): void => {
     ipcRenderer.on('menu:action', (_event, action: string) => cb(action))
   },
+  // Returns a disposer — subscribed per useBackend scope. Fires when the
+  // machine wakes, so the renderer can rebuild a socket that slept through it.
+  onSystemResumed: (cb: () => void): (() => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on('system:resumed', listener)
+    return () => ipcRenderer.removeListener('system:resumed', listener)
+  },
   setRecentWorkspaces: (list: { path: string; name: string; exists: boolean }[]): void =>
     ipcRenderer.send('menu:setRecents', list),
   pickWorkspace: (defaultPath?: string): Promise<string | null> =>
@@ -164,6 +171,11 @@ contextBridge.exposeInMainWorld('agentTeam', {
   listOpenWorkspaces: (): Promise<string[]> => ipcRenderer.invoke('workspace:listOpen'),
   focusWorkspaceWindow: (workspacePath: string): Promise<boolean> =>
     ipcRenderer.invoke('workspace:focusExisting', workspacePath),
+  reportAdoptedWorkspaces: (paths: string[]): void =>
+    ipcRenderer.send('window:reportAdoptedWorkspaces', paths),
+  takeRestoredAdoptedWorkspaces: (): Promise<string[]> =>
+    ipcRenderer.invoke('window:takeRestoredAdopted'),
+  // Returns a disposer, like the workspace listener below.
   // Returns a disposer — Welcome mounts/unmounts with the workspace gate.
   onOpenWorkspacesChanged: (cb: () => void): (() => void) => {
     const listener = (): void => cb()
@@ -182,7 +194,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.invoke('window:openMain', args ?? {}),
   detachGroup: (args: { groupId: string; workspacePath: string; bounds?: { x: number; y: number; width: number; height: number } }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:detachGroup', args),
+  detachWorkspace: (args: { workspacePath: string; bounds?: { x: number; y: number; width: number; height: number } }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('window:detachWorkspace', args),
   getDetachedGroups: (): Promise<string[]> => ipcRenderer.invoke('window:getDetachedGroups'),
+  /** Merge a detached group back. Omit groupId from the detached window itself
+   *  — main resolves it from the sender. */
+  reattachGroup: (args?: { groupId?: string }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('window:reattachGroup', args ?? {}),
   onGroupDetached: (cb: (groupId: string) => void): void => {
     ipcRenderer.on('group:detached', (_event, arg: { groupId: string }) => cb(arg.groupId))
   },
@@ -193,6 +211,11 @@ contextBridge.exposeInMainWorld('agentTeam', {
     const listener = (_event: unknown, payload: { pipelineId?: string }): void => handler(payload ?? {})
     ipcRenderer.on('menu:open-pipeline-manager', listener)
     return () => ipcRenderer.removeListener('menu:open-pipeline-manager', listener)
+  },
+  onOpenResourceManager: (handler: () => void): (() => void) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('menu:open-resource-manager', listener)
+    return () => ipcRenderer.removeListener('menu:open-resource-manager', listener)
   },
   openPlansWindow: (args: { workspace_path: string; rel_path?: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:openPlans', {
@@ -457,6 +480,28 @@ contextBridge.exposeInMainWorld('agentTeam', {
     error?: string
   }> =>
     ipcRenderer.invoke('cli:get-pane-buffer', paneId),
+  // Resource Manager row actions: the window lists panes from every main
+  // window, so jumping to one or reclaiming it has to be relayed to whichever
+  // window owns it.
+  requestPaneAction: (args: {
+    paneId: string
+    action: 'focus' | 'reclaim'
+  }): Promise<{ ok?: boolean; error?: string }> => ipcRenderer.invoke('pane:action', args),
+  onPaneActionRequest: (
+    handler: (
+      paneId: string,
+      action: 'focus' | 'reclaim'
+    ) => Promise<{ ok?: boolean; error?: string }> | { ok?: boolean; error?: string }
+  ): void => {
+    ipcRenderer.on(
+      'pane:action:request',
+      (_event, requestId: string, paneId: string, action: 'focus' | 'reclaim') => {
+        void Promise.resolve(handler(paneId, action)).then((result) => {
+          ipcRenderer.send('pane:action:reply', requestId, result)
+        })
+      }
+    )
+  },
   onCliPaneBufferRequest: (
     handler: (
       paneId: string
@@ -509,6 +554,10 @@ contextBridge.exposeInMainWorld('agentTeam', {
   reportTerminalSelection: (selection: string): void => {
     ipcRenderer.send('terminal:selection-changed', selection)
   },
+  // Edit > Copy fell through to a copy that cannot work over a terminal, so the
+  // clipboard is unchanged. The focused pane turns this into a visible notice.
+  onTerminalCopyEmpty: (cb: (branch: string) => void) =>
+    ipcRenderer.on('terminal:copy-empty', (_event, branch: string) => cb(branch)),
   setBadgeCount: (count: number): void => {
     ipcRenderer.send('window:setBadgeCount', count)
   },
@@ -528,6 +577,7 @@ contextBridge.exposeInMainWorld('agentTeam', {
   },
   restore: {
     getPending: (): Promise<string[] | null> => ipcRenderer.invoke('restore:getPending'),
+    getSkipped: (): Promise<string[]> => ipcRenderer.invoke('restore:getSkipped'),
     apply: (): Promise<{ ok: boolean; opened: number }> => ipcRenderer.invoke('restore:apply'),
     dismiss: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('restore:dismiss'),
     getAutoRestore: (): Promise<boolean> => ipcRenderer.invoke('restore:getAutoRestore'),

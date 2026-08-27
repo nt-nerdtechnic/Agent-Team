@@ -75,8 +75,8 @@ async function onSubmit(): Promise<void> {
 <template>
   <Teleport to="body">
     <template v-if="show && prompt">
-      <div class="tp-backdrop" @click="emit('cancel')" />
-      <div class="cred-quick-input" @click.stop @keydown.esc="emit('cancel')">
+      <div class="tp-backdrop nv-modal-overlay" @click="emit('cancel')" />
+      <div class="cred-quick-input nv-modal-shell nv-modal-shell--compact" @click.stop @keydown.esc="emit('cancel')">
         <div class="qi-title">{{ $t('label.git-credential-title', { host: prompt.host }) }}</div>
 
         <input
@@ -122,9 +122,9 @@ async function onSubmit(): Promise<void> {
 
         <div class="qi-actions">
           <span class="qi-kbd-hint">↵ {{ step === 'username' ? $t('action.next') : $t('action.submit') }} &nbsp;·&nbsp; Esc {{ $t('action.cancel') }}</span>
-          <button class="btn-ghost sm" @click="emit('cancel')">{{ $t('action.cancel') }}</button>
-          <button v-if="step === 'username'" class="btn-primary" @click="goToPassword">{{ $t('action.next') }}</button>
-          <button v-else class="btn-primary" @click="onSubmit">{{ $t('action.submit') }}</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="emit('cancel')">{{ $t('action.cancel') }}</button>
+          <button v-if="step === 'username'" class="btn-primary nv-btn nv-btn--primary" @click="goToPassword">{{ $t('action.next') }}</button>
+          <button v-else class="btn-primary nv-btn nv-btn--primary" @click="onSubmit">{{ $t('action.submit') }}</button>
         </div>
       </div>
     </template>
@@ -136,6 +136,9 @@ async function onSubmit(): Promise<void> {
   position: fixed;
   inset: 0;
   z-index: 9998;
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
 }
 /* VS Code/Cursor Quick Input: a single narrow bar anchored near the top of
    the window, not a centered modal box. */
@@ -145,15 +148,23 @@ async function onSubmit(): Promise<void> {
   top: 18vh;
   left: 50%;
   transform: translateX(-50%);
-  width: min(440px, 85vw);
+  width: min(var(--modal-w-compact), 92vw);
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-lg);
   padding: 10px 12px;
-  box-shadow: 0 8px 24px var(--shadow-scrim);
+  box-shadow: var(--shadow-modal);
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* Local entry animation: the shared .nv-modal-shell keyframes end on
+     `transform: none`, which would drop this bar's translateX centering
+     while it plays. Same motion, centering preserved. */
+  animation: qi-modal-in var(--motion-base) var(--ease-out);
+}
+@keyframes qi-modal-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px) scale(0.985); }
+  to { opacity: 1; transform: translateX(-50%); }
 }
 .qi-title {
   font-size: 11.5px;
@@ -163,18 +174,18 @@ async function onSubmit(): Promise<void> {
 .qi-input {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 7px 9px;
 }
-.qi-input.sm { font-size: 12px; padding: 5px 8px; }
+.qi-input.sm { font-size: var(--font-xs); padding: 5px 8px; }
 .qi-input:focus {
   outline: none;
   border-color: var(--accent-focus);
 }
 .qi-hint {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
   margin: 0;
   line-height: 1.4;
@@ -183,7 +194,7 @@ async function onSubmit(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   cursor: pointer;
 }
@@ -200,17 +211,92 @@ async function onSubmit(): Promise<void> {
   margin-right: auto;
 }
 
-/* Mirrors GitPane.vue's .btn-primary/.btn-ghost — scoped styles don't cross
-   component boundaries, so these are redefined locally with the same tokens. */
+/* Canonical button spec — byte-identical in GitPane.vue,
+   GitCredentialModal.vue and GitHistoryModal.vue. Scoped styles don't cross
+   component boundaries, so the house spec is restated in each; keep the three
+   copies in sync. Colours preserve each variant's existing identity (Git's
+   primary action stays green); only the scale and the four states are new. */
+.btn-primary,
+.btn-ghost,
+.btn-danger {
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  line-height: var(--lh-tight);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
+}
 .btn-primary {
-  background: var(--success-emphasis); color: var(--text-on-emphasis); border: 1px solid var(--success-strong);
-  border-radius: 5px; font-size: 12px; padding: 5px 10px; cursor: pointer;
+  background: var(--success-emphasis);
+  border-color: var(--success-strong);
+  color: var(--text-on-emphasis);
 }
-.btn-primary:hover { background: var(--success-strong); }
+.btn-primary:hover:not(:disabled) {
+  background: var(--success-strong);
+  border-color: var(--success-strong);
+}
 .btn-ghost {
-  background: transparent; border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-secondary); font-size: 12px; padding: 4px 8px; cursor: pointer;
+  background: transparent;
+  border-color: var(--border-default);
+  color: var(--text-secondary);
 }
-.btn-ghost:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.btn-ghost.sm { font-size: 11px; padding: 3px 7px; }
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.btn-danger {
+  background: var(--danger-emphasis);
+  border-color: var(--danger-emphasis);
+  color: var(--text-on-emphasis);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-bright);
+  border-color: var(--danger-bright);
+}
+.btn-ghost.btn-danger {
+  background: transparent;
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
+}
+.btn-ghost.btn-danger:hover:not(:disabled) {
+  background: var(--danger-subtle);
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
+}
+.btn-primary.sm,
+.btn-ghost.sm,
+.btn-danger.sm {
+  padding: 3px 7px;
+  font-size: var(--font-2xs);
+}
+.btn-ghost.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+  flex: 0 0 auto;
+}
+.btn-primary:active:not(:disabled),
+.btn-ghost:active:not(:disabled),
+.btn-danger:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn-primary:focus-visible,
+.btn-ghost:focus-visible,
+.btn-danger:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.btn-primary:disabled,
+.btn-ghost:disabled,
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 </style>

@@ -1059,8 +1059,20 @@ function expireCorrelations(now: number): void {
  * gate and the delivery log all apply per recipient). Returns one log entry per
  * recipient; empty when there is no one else to send to.
  */
-function sendBroadcast(from: string, content: string, opts: SendOptions = {}): AgentMessage[] {
-  const targets = [...paneByName.keys()].filter((name) => name !== from)
+/** @param opts.only  Optional per-pane filter on the recipients.
+ *
+ *  The registry knows a pane's name and agent, not its workspace, and one
+ *  window can now hold several — so the caller, which does know, decides who
+ *  counts as "everyone here". Without it the recipients are every registered
+ *  pane, exactly as before. */
+function sendBroadcast(
+  from: string,
+  content: string,
+  opts: SendOptions & { only?: (paneId: string) => boolean } = {},
+): AgentMessage[] {
+  const targets = [...paneByName.entries()]
+    .filter(([name, paneId]) => name !== from && (!opts.only || opts.only(paneId)))
+    .map(([name]) => name)
   return targets.map((to) => sendMessage(from, to, content, opts))
 }
 

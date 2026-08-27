@@ -190,7 +190,7 @@ onMounted(refreshInstalled)
           <span v-if="p.warning" class="ext-badge ext-dev-warning">{{ p.warning }}</span>
           <button class="ext-remove" @click="remove(p.id)">Remove</button>
         </li>
-        <li v-if="!nonFactoryInstalled.length" class="ext-empty">No plugins installed.</li>
+        <li v-if="!nonFactoryInstalled.length" class="ext-empty nv-empty">No plugins installed.</li>
       </ul>
     </section>
 
@@ -260,7 +260,7 @@ onMounted(refreshInstalled)
      the <h1> the settings modal renders above it; the modal already reserves the
      gap below that title, so no top padding here. */
   padding: 0 22px 12px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -287,15 +287,15 @@ onMounted(refreshInstalled)
 .ext-ns,
 .ext-requires {
   color: var(--text-muted, #888);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .ext-badge.ext-sensitive {
   color: #c77400;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .ext-badge.ext-dev-warning {
   color: #c77400;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .ext-badge.ext-active {
   color: #1a7f37;
@@ -336,7 +336,7 @@ onMounted(refreshInstalled)
 }
 .ext-trust-badge {
   display: inline-block;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   padding: 2px 6px;
   border-radius: 4px;
@@ -353,5 +353,27 @@ onMounted(refreshInstalled)
   display: flex;
   gap: 8px;
   margin-top: 12px;
+}
+/* These six buttons declare nothing of their own — they are native browser
+ * buttons. Hover therefore darkens what the platform already painted instead
+ * of replacing the fill: an overlay colour here would flip a light native
+ * button to a dark one on hover, which is a bigger change than the missing
+ * feedback it fixes. The search button is reached structurally because it has
+ * no class of its own. */
+.ext-remove,
+.ext-install,
+.ext-search button,
+.ext-confirm-publisher,
+.ext-confirm-risk,
+.ext-cancel {
+  transition: filter var(--motion-fast) var(--ease-out);
+}
+.ext-remove:hover:not(:disabled),
+.ext-install:hover:not(:disabled),
+.ext-search button:hover:not(:disabled),
+.ext-confirm-publisher:hover:not(:disabled),
+.ext-confirm-risk:hover:not(:disabled),
+.ext-cancel:hover:not(:disabled) {
+  filter: brightness(0.93);
 }
 </style>

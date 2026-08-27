@@ -112,7 +112,8 @@ class PaneRecord:
     profile_id: str = ""            # CLI account pin: the profile this pane was spawned on ("__default__" = real home; "" = legacy/unpinned). Restore re-spawns in the SAME account regardless of the current active default.
     spawn_status: str = "pending"   # pending / spawned / removed
     run_group_id: str = ""
-    origin: str = "manual"          # "pipeline" | "manual"
+    origin: str = "manual"          # "pipeline" | "manual" | "mcp"  (non-pipeline records are matched with != "pipeline")
+    spawned_by: str = ""            # pane_id of the parent that spawned this pane; "" = root. Re-keyed on restore alongside pane_id — a stale value is worse than none (see _rekey_spawned_by).
     stage_id: str = ""
     stage_index: int = -1
     slot_label: str = ""
@@ -123,6 +124,8 @@ class PaneRecord:
     auto_name_source: str = ""      # "heuristic" | "llm"; an llm name may upgrade a heuristic one once
     output_log_file: str = ""       # conversation log path recorded at spawn time
     stopped: bool = False           # STOP badge: a stop action was issued and the user hasn't taken over yet
+    is_minimized: bool = False      # collapsed to the sidebar. The renderer has been sending this since the feature shipped; the handler was missing, so it never persisted.
+    collapsed: bool = False         # lineage subtree folded in the agent lists. Lives here, not in a Project-level id set: pane_id is regenerated every restart, so such a set would silently empty itself.
 
 
 @dataclass
@@ -495,7 +498,7 @@ class ProjectStore:
             for s in stage_blueprint
         ]
         # Clear stale pipeline panes from previous runs; preserve manual panes.
-        project.panes = [p for p in project.panes if p.origin == "manual"]
+        project.panes = [p for p in project.panes if p.origin != "pipeline"]
         # Each pipeline run gets its own log file.
         project.log_file_name = _make_log_filename(task_description)
         self.save(project)
@@ -621,6 +624,11 @@ class ProjectStore:
                               stage_id=stage.stage_id, stage_index=stage_index, slot_label=slot_label)
             project.panes.append(pane)
         self._adopt_pending_stub(project, pane, pane_id)
+        # Same re-key as the manual path: a pipeline pane has no parent of its
+        # own, but it can be one — an MCP spawn from inside it produces children
+        # whose spawned_by points here.
+        if pane.pane_id != pane_id:
+            self._rekey_spawned_by(project, pane.pane_id, pane_id)
         pane.pane_id = pane_id
         pane.spawn_status = "spawned"
         if agent: pane.agent = agent
@@ -664,6 +672,7 @@ class ProjectStore:
         pane = self._find_slot_pane(project, stage_index, slot_label)
         if pane is None:
             return project
+        self._adopt_orphans(project, pane)
         pane.spawn_status = "removed"
         pane.kickoff_status = "none"
         self.save(project)
@@ -674,6 +683,66 @@ class ProjectStore:
             log_file_name=project.log_file_name,
         )
         return project
+
+    @staticmethod
+    def _rekey_spawned_by(project: "Project", old_id: str, new_id: str) -> None:
+        """Point every child of `old_id` at `new_id`.
+
+        Called whenever a record's pane_id is rewritten (restore / rebuild).
+        Self-references are dropped rather than kept: a record that ends up its
+        own parent would make the lineage walk loop forever.
+        """
+        if not old_id or old_id == new_id:
+            return
+        for child in project.panes:
+            if child.spawned_by == old_id:
+                child.spawned_by = "" if child.pane_id == new_id else new_id
+
+    @staticmethod
+    def _adopt_orphans(project: "Project", dying: "PaneRecord") -> None:
+        """Re-parent a closing pane's children onto its own parent.
+
+        Keeping partial lineage beats dropping it: the children of a closed
+        middle node stay related to the grandparent instead of all becoming
+        roots. When the dying pane was itself a root the children become roots
+        too, which is the same outcome.
+
+        This must run in the same save() as the spawn_status change, and it
+        must run here rather than in the renderer: the frontend's panes list
+        only holds the panes of ONE window, so a detached window's children —
+        or another run group's — would be missed entirely.
+        """
+        grandparent = dying.spawned_by
+        for child in project.panes:
+            if child.spawned_by != dying.pane_id:
+                continue
+            if not grandparent or grandparent == child.pane_id:
+                child.spawned_by = ""
+                continue
+            child.spawned_by = "" if ProjectStore._would_cycle(
+                project, child.pane_id, grandparent, skip=dying.pane_id
+            ) else grandparent
+
+    @staticmethod
+    def _would_cycle(
+        project: "Project", pane_id: str, parent_id: str, *, skip: str = ""
+    ) -> bool:
+        """True if making `parent_id` the parent of `pane_id` closes a loop.
+
+        Walks up from the proposed parent. `skip` is the pane being removed —
+        it is about to leave, so links through it do not count. The visited set
+        also stops a pre-existing cycle from spinning here forever.
+        """
+        by_id = {p.pane_id: p for p in project.panes}
+        seen = {pane_id}
+        cur = parent_id
+        while cur and cur != skip:
+            if cur in seen:
+                return True
+            seen.add(cur)
+            nxt = by_id.get(cur)
+            cur = nxt.spawned_by if nxt else ""
+        return False
 
     def _find_manual_pane(
         self, project: "Project", pane_id: str, previous_pane_id: str = "", session_id: str = ""
@@ -690,7 +759,7 @@ class ProjectStore:
         # re-key is moving onto that id — otherwise the old record survives as
         # a spawned ghost that restore resurrects. Match the real record first;
         # _adopt_pending_stub then folds the stub into it.
-        manual = [p for p in project.panes if p.origin == "manual"]
+        manual = [p for p in project.panes if p.origin != "pipeline"]
         for match in (
             lambda p: p.pane_id == pane_id and p.spawn_status != "pending",
             lambda p: bool(previous_pane_id) and p.pane_id == previous_pane_id,
@@ -716,13 +785,23 @@ class ProjectStore:
         profile_id: str = "",
         run_group_id: str = "",
         output_log_file: str = "",
+        origin: str = "",
+        spawned_by: str = "",
     ) -> Project:
         project = self.load_or_create(workspace_path)
         pane = self._find_manual_pane(project, pane_id, previous_pane_id, session_id)
         if pane is None:
-            pane = PaneRecord(pane_id=pane_id, origin="manual")
+            pane = PaneRecord(pane_id=pane_id, origin=origin or "manual")
             project.panes.append(pane)
         self._adopt_pending_stub(project, pane, pane_id)
+        # pane_id is regenerated on every restart and re-linked via
+        # previous_pane_id. Any child still pointing spawned_by at this
+        # record's OLD id becomes a dead pointer the instant we overwrite it,
+        # so rewrite the children first — in this same save(), never as a
+        # follow-up RPC. A stale lineage is worse than no lineage: spawn-depth
+        # checks read it and would mis-count.
+        if pane.pane_id != pane_id:
+            self._rekey_spawned_by(project, pane.pane_id, pane_id)
         pane.pane_id = pane_id
         pane.agent = agent
         pane.role = role
@@ -733,6 +812,10 @@ class ProjectStore:
         if profile_id: pane.profile_id = profile_id
         if run_group_id: pane.run_group_id = run_group_id
         if output_log_file: pane.output_log_file = output_log_file
+        # Guarded like the fields above: an omitted origin must not blank an
+        # existing record back to "manual" (that would strip the mcp marker).
+        if origin: pane.origin = origin
+        if spawned_by: pane.spawned_by = spawned_by
         # A rebuild hop owns its session: retire any OTHER spawned manual
         # record sharing it (legacy duplicate accumulation) so restore cannot
         # resurrect a ghost pane. Gated on previous_pane_id for the same
@@ -740,7 +823,7 @@ class ProjectStore:
         # with a live pane on purpose.
         if previous_pane_id and session_id:
             for other in project.panes:
-                if (other is not pane and other.origin == "manual"
+                if (other is not pane and other.origin != "pipeline"
                         and other.session_id == session_id
                         and other.spawn_status == "spawned"):
                     other.spawn_status = "removed"
@@ -772,13 +855,14 @@ class ProjectStore:
         sid = session_id.strip()
         matches = [
             p for p in project.panes
-            if p.origin == "manual"
+            if p.origin != "pipeline"
             and p.spawn_status != "removed"
             and (p.pane_id == pane_id or (sid and p.session_id == sid))
         ]
         if not matches:
             return project
         for pane in matches:
+            self._adopt_orphans(project, pane)
             pane.spawn_status = "removed"
         self.save(project)
         self.append_event(
@@ -1040,6 +1124,38 @@ class ProjectStore:
         if pane is None:
             return project
         pane.stopped = stopped
+        self.save(project)
+        return project
+
+    def set_pane_minimized(
+        self,
+        workspace_path: str,
+        *,
+        pane_id: str,
+        is_minimized: bool,
+    ) -> Project:
+        """Persist the collapsed-to-sidebar state. No-op if pane not found."""
+        project = self.load_or_create(workspace_path)
+        pane = next((p for p in project.panes if p.pane_id == pane_id), None)
+        if pane is None:
+            return project
+        pane.is_minimized = is_minimized
+        self.save(project)
+        return project
+
+    def set_pane_collapsed(
+        self,
+        workspace_path: str,
+        *,
+        pane_id: str,
+        collapsed: bool,
+    ) -> Project:
+        """Persist whether this pane's lineage subtree is folded in the lists."""
+        project = self.load_or_create(workspace_path)
+        pane = next((p for p in project.panes if p.pane_id == pane_id), None)
+        if pane is None:
+            return project
+        pane.collapsed = collapsed
         self.save(project)
         return project
 

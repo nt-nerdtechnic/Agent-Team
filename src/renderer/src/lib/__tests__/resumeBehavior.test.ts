@@ -10,6 +10,7 @@ import {
   runWithConcurrency,
   settleWorkspaceRestoreSession,
   stripPinnedSessionId,
+  stripDeadOpencodeAutoFlag,
 } from '../resumeBehavior'
 
 describe('normalizeResumeBehavior', () => {
@@ -146,6 +147,29 @@ describe('stripPinnedSessionId', () => {
       'claude --dangerously-skip-permissions'
     )
     expect(stripPinnedSessionId('')).toBe('')
+  })
+})
+
+describe('stripDeadOpencodeAutoFlag', () => {
+  it('drops the flag a saved opencode pane could never have run', () => {
+    expect(stripDeadOpencodeAutoFlag('opencode', 'opencode --auto')).toBe('opencode')
+    expect(stripDeadOpencodeAutoFlag('opencode', 'opencode --auto --port 1234'))
+      .toBe('opencode --port 1234')
+  })
+
+  it('leaves kilo alone — its root command really takes --auto', () => {
+    expect(stripDeadOpencodeAutoFlag('kilo', 'kilo --auto')).toBe('kilo --auto')
+  })
+
+  it('leaves an opencode command without the flag untouched', () => {
+    expect(stripDeadOpencodeAutoFlag('opencode', 'opencode --port 1234'))
+      .toBe('opencode --port 1234')
+    expect(stripDeadOpencodeAutoFlag('opencode', '')).toBe('')
+  })
+
+  it('does not touch a longer flag that merely starts with --auto', () => {
+    expect(stripDeadOpencodeAutoFlag('opencode', 'opencode --autoupdate'))
+      .toBe('opencode --autoupdate')
   })
 })
 

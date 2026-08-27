@@ -323,6 +323,28 @@ async def test_list_targets_excludes_the_caller_and_flags_own_workspace() -> Non
 
 
 @pytest.mark.asyncio
+async def test_list_targets_carries_the_pane_id_ui_actions_need() -> None:
+    """Every ui.pane.* action takes a pane id and rejects a name, so a roster
+    without ids names panes it cannot tell you how to close or focus."""
+    _seed()
+    result = await plan_mcp.cli_list_targets(_ctx())
+
+    by_address = {t["address"]: t for t in result["targets"]}
+    assert by_address["beta/reviewer"]["pane_id"] == "pb"
+    assert by_address["alpha/helper"]["pane_id"] == "pc"
+
+
+@pytest.mark.asyncio
+async def test_list_targets_carries_the_pane_id_for_a_caller_without_a_pane() -> None:
+    """The host/external branch builds its targets separately — the id has to
+    survive that path too, and those callers are the ones driving ui_invoke."""
+    _seed()
+    result = await plan_mcp.cli_list_targets(_external_ctx())
+
+    assert {t["pane_id"] for t in result["targets"]} == {"pa", "pb", "pc"}
+
+
+@pytest.mark.asyncio
 async def test_list_targets_reports_an_unidentified_caller() -> None:
     _seed()
     result = await plan_mcp.cli_list_targets(_ctx(pane_id=None))
@@ -922,7 +944,7 @@ async def test_list_targets_without_a_server_is_byte_for_byte_what_it_always_was
     result = await plan_mcp.cli_list_targets(_ctx())
     assert set(result) == {"you", "targets"}
     assert set(result["targets"][0]) == {
-        "name", "address", "workspace_path", "same_workspace", "busy", "offline",
+        "name", "address", "pane_id", "workspace_path", "same_workspace", "busy", "offline",
     }
 
 

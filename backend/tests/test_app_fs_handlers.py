@@ -58,6 +58,38 @@ async def test_fs_delete_handler_runs_in_worker_thread(
 
 
 @pytest.mark.asyncio
+async def test_fs_list_dir_offloads_the_plan_watch_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Registering a plan watch resolves the workspace and schedules a recursive
+    observer — blocking syscalls that stall for minutes on a wedged mount, so
+    they must not run on the event loop (issue #24)."""
+    (tmp_path / ".agent-team" / "plans").mkdir(parents=True)
+    threaded_fns: list[Any] = []
+    orig_to_thread = asyncio.to_thread
+
+    async def spy(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        threaded_fns.append(fn)
+        return await orig_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(app.asyncio, "to_thread", spy)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "l1",
+        "type": "fs.list_dir",
+        "payload": {"workspace_path": str(tmp_path), "rel_path": ".agent-team/plans"},
+    })
+
+    assert app._watch_plans_workspace in threaded_fns
+    # The watch has to be registered before the scan it makes observable.
+    assert threaded_fns.index(app._watch_plans_workspace) < threaded_fns.index(
+        fs_service.list_dir
+    )
+    assert session.websocket.sent[0]["payload"]["ok"] is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_fs_delete_handler_reports_trash_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

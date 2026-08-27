@@ -416,6 +416,9 @@ class VendorSpec:
     session_exists: Callable[[str, str], bool] | None = None
 
     # --- spawn environment ---
+    # Vendor-specific defaults added only when neither the request nor the
+    # inherited process environment provides the variable.
+    spawn_env_defaults: tuple[tuple[str, str], ...] = ()
     # Env var names that relocate this CLI's home/config; the backend strips
     # them from inherited env at startup and from probe spawns.
     home_env_vars: tuple[str, ...] = ()

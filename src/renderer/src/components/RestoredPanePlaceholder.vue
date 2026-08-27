@@ -93,7 +93,7 @@ function activate(): void {
   padding: 5px 32px 5px 12px;
   background: var(--bg-subtle);
   border-bottom: 1px solid var(--border-muted);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
 }
 
@@ -106,7 +106,7 @@ function activate(): void {
 .header-sub {
   overflow: hidden;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -150,7 +150,7 @@ function activate(): void {
   background: none;
   color: var(--text-disabled);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--font-md);
   line-height: 1;
 }
 
@@ -172,7 +172,7 @@ function activate(): void {
   color: var(--text-secondary);
   cursor: pointer;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 
 .resume-icon {

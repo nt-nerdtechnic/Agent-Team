@@ -300,7 +300,7 @@ onMounted(() => {
   gap: 8px;
   padding: 4px 10px;
   border-bottom: 1px solid var(--border-color, rgba(128, 128, 128, 0.25));
-  font-size: 12px;
+  font-size: var(--font-xs);
   flex: none;
 }
 .fpv-name {
@@ -325,7 +325,7 @@ onMounted(() => {
   border: 1px solid var(--border-color, rgba(128, 128, 128, 0.35));
   border-radius: 4px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 8px;
   cursor: pointer;
   white-space: nowrap;
@@ -430,11 +430,11 @@ onMounted(() => {
 .fpv-card-hint {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .fpv-hex-status {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .fpv-hex-status--error {
   color: var(--danger-fg, #e5534b);
@@ -445,8 +445,8 @@ onMounted(() => {
   padding: 8px 12px;
   overflow: auto;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: var(--font-2xs);
+  line-height: var(--lh-base);
   white-space: pre;
   background: var(--bg-subtle, rgba(128, 128, 128, 0.08));
   border-radius: 6px;

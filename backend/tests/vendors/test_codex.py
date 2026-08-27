@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -449,3 +451,98 @@ def test_parse_activity_last_text_sentinel_coexists_with_the_mark(
         if e.event_type == "turn_complete"
     ]
     assert [e.text for e in turns] == ["Reply body"]
+
+
+def _meta(cwd: str) -> dict:
+    return {"type": "session_meta", "payload": {"cwd": cwd}}
+
+
+def _expire_files_cache(reader: CodexLogReader) -> None:
+    # The scan cache spans one rescan cycle; tests fast-forward past the TTL.
+    reader._files_cached_at = float("-inf")
+
+
+def test_session_files_reuses_scan_within_ttl(fake_codex_session: Path) -> None:
+    reader = CodexLogReader()
+    _write_jsonl(fake_codex_session, [_meta("/ws")])
+    assert len(reader.session_files()) == 1
+
+    sibling = fake_codex_session.with_name("rollout-second.jsonl")
+    _write_jsonl(sibling, [_meta("/ws")])
+    # Still inside the TTL: the cached sweep is served, the new file unseen.
+    assert len(reader.session_files()) == 1
+    _expire_files_cache(reader)
+    assert len(reader.session_files()) == 2
+
+
+def test_cwd_header_is_read_once_and_cached(fake_codex_session: Path) -> None:
+    reader = CodexLogReader()
+    _write_jsonl(fake_codex_session, [_meta("/ws")])
+    assert reader.session_files_for_workspace("/ws") == [fake_codex_session]
+
+    # Rewriting the header must not matter: session_meta is immutable in real
+    # rollouts, so the cached cwd keeps serving without reopening the file.
+    _write_jsonl(fake_codex_session, [_meta("/other")])
+    _expire_files_cache(reader)
+    assert reader.session_files_for_workspace("/ws") == [fake_codex_session]
+    assert reader.session_files_for_workspace("/other") == []
+
+
+def test_missing_header_is_retried_not_cached(fake_codex_session: Path) -> None:
+    reader = CodexLogReader()
+    # Header not landed yet (rollout mid-write): no meta record at all.
+    _write_jsonl(fake_codex_session, [_token_count_event(1, 0, 1, 0)])
+    assert reader.session_files_for_workspace("/ws") == []
+
+    _write_jsonl(fake_codex_session, [_meta("/ws"), _token_count_event(1, 0, 1, 0)])
+    _expire_files_cache(reader)
+    assert reader.session_files_for_workspace("/ws") == [fake_codex_session]
+
+
+def test_stale_missing_header_is_negatively_cached(fake_codex_session: Path) -> None:
+    reader = CodexLogReader()
+    _write_jsonl(fake_codex_session, [_token_count_event(1, 0, 1, 0)])
+    stale = time.time() - CodexLogReader._HEADER_GRACE_S - 1
+    os.utime(fake_codex_session, (stale, stale))
+    assert reader.session_files_for_workspace("/ws") == []
+
+    # The miss is cached: a real rollout only appends, so an old headerless
+    # file never gains a header — even this rewrite must not be re-read.
+    _write_jsonl(fake_codex_session, [_meta("/ws")])
+    _expire_files_cache(reader)
+    assert reader.session_files_for_workspace("/ws") == []
+
+
+def test_deleted_rollout_drops_its_negative_header_cache(
+    fake_codex_session: Path,
+) -> None:
+    reader = CodexLogReader()
+    _write_jsonl(fake_codex_session, [_token_count_event(1, 0, 1, 0)])
+    stale = time.time() - CodexLogReader._HEADER_GRACE_S - 1
+    os.utime(fake_codex_session, (stale, stale))
+    assert reader.session_files_for_workspace("/ws") == []
+
+    fake_codex_session.unlink()
+    _expire_files_cache(reader)
+    assert reader.session_files() == []  # prunes the stale miss entry
+
+    # Same path reborn as a fresh rollout must be read for real.
+    _write_jsonl(fake_codex_session, [_meta("/ws")])
+    _expire_files_cache(reader)
+    assert reader.session_files_for_workspace("/ws") == [fake_codex_session]
+
+
+def test_deleted_rollout_drops_its_header_cache(fake_codex_session: Path) -> None:
+    reader = CodexLogReader()
+    _write_jsonl(fake_codex_session, [_meta("/ws1")])
+    assert reader.session_files_for_workspace("/ws1") == [fake_codex_session]
+
+    fake_codex_session.unlink()
+    _expire_files_cache(reader)
+    assert reader.session_files() == []  # prunes the stale header entry
+
+    # Same path reborn with a different cwd must be read fresh.
+    _write_jsonl(fake_codex_session, [_meta("/ws2")])
+    _expire_files_cache(reader)
+    assert reader.session_files_for_workspace("/ws2") == [fake_codex_session]
+    assert reader.session_files_for_workspace("/ws1") == []

@@ -7,6 +7,8 @@ import {
   SPAWN_END,
   isQualifiedTarget,
   isTurnInFlight,
+  TURN_SILENCE_MS,
+  TURN_STALE_MS,
   VENDORS_WITHOUT_TURN_END,
   parseMessages,
   parseSpawns,
@@ -523,11 +525,33 @@ describe('isTurnInFlight', () => {
     expect(isTurnInFlight(NOW - 100, NOW - 500, NOW)).toBe(true)
   })
 
-  it('never infers the end from silence for a vendor that reports turn ends', () => {
+  it('does not infer the end from silence for a vendor that reports turn ends', () => {
     // Activity is logged per output line, not as a heartbeat: a CLI running a
     // long tool call, or sitting on a permission prompt, is silent but very
-    // much mid-turn. Injecting there would answer the prompt.
-    expect(isTurnInFlight(NOW - 5 * 60_000, 0, NOW)).toBe(true)
+    // much mid-turn. Injecting there would answer the prompt. Well inside the
+    // fuse below, so silence on its own still proves nothing here.
+    expect(isTurnInFlight(NOW - 60_000, 0, NOW)).toBe(true)
+  })
+
+  it('still bounds mid-turn for a vendor that reports turn ends', () => {
+    // GitHub #21. This assertion used to read `NOW - 5 * 60_000 -> true`,
+    // which pinned the defect as the spec: an unbounded `return true` meant a
+    // single lost turn_complete parked the pane outside inter-CLI messaging
+    // for the rest of the session — reported as busy:true next to an idle
+    // prompt, 8.5 h old, with every cli_send silently dropped. The turn-end
+    // record is still the trusted signal; the fuse only stops a miss from
+    // lasting forever.
+    expect(isTurnInFlight(NOW - (TURN_STALE_MS - 1_000), 0, NOW)).toBe(true)
+    expect(isTurnInFlight(NOW - (TURN_STALE_MS + 1_000), 0, NOW)).toBe(false)
+  })
+
+  it('gives a vendor with a real turn end a far longer rope than a silence-only one', () => {
+    // The two bounds serve different jobs and must not converge: 20 s is a
+    // detection window, 120 s is a fuse. At 30 s the silence-only vendor is
+    // done and the trusted one is emphatically not.
+    expect(TURN_STALE_MS).toBeGreaterThan(TURN_SILENCE_MS * 4)
+    expect(isTurnInFlight(NOW - 30_000, 0, NOW, { inferEndFromSilence: true })).toBe(false)
+    expect(isTurnInFlight(NOW - 30_000, 0, NOW)).toBe(true)
   })
 
   it('infers the end from silence only where that is the only signal', () => {

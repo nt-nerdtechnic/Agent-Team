@@ -8,7 +8,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { useGit } from '../composables/useGit'
-import type { IgnoreTarget, GitWorktree } from '../composables/useGit'
+import type { IgnoreTarget, GitWorktree, DiscoveredRepo } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
 import type { IssueDetail } from '../composables/useIssues'
 import type { GitTransport } from '../../../shared/gitCompatibility'
@@ -62,6 +62,9 @@ const emit = defineEmits<{
   (e: 'dispatch-issue', payload: { paneId: string; issue: IssueDetail }): void
   (e: 'focus-pane', paneId: string): void
   (e: 'open-git-accounts'): void
+  // Result of a user-triggered forced scan, handed to a host that keeps its own
+  // discovery list (MultiRepoGit) so it never has to repeat the walk.
+  (e: 'force-discovered', repos: DiscoveredRepo[]): void
 }>()
 
 function openBranchDiffTab(base = 'main'): void {
@@ -69,7 +72,7 @@ function openBranchDiffTab(base = 'main'): void {
 }
 
 const {
-  gitStatus, statusError, statusLoaded, loadStatus, discoveredRepos, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
+  gitStatus, statusError, statusLoaded, loadStatus, discoveredRepos, discoverySkipped, discoverRepositories, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
   gitWorktrees, gitConfig, gitConfigAllowedKeys,
   isLoadingStatus, isCommitting, isGenerating, isInitializing,
   syncOutput, syncError, gitError, clearGitError,
@@ -452,6 +455,23 @@ async function doInitInFolder(): Promise<void> {
   const r = await initRepo(true, picked)
   if (!r.ok) { initError.value = r.error || 'git init failed'; return }
   emit('open-workspace', picked)
+}
+
+// ── forced repo discovery ───────────────────────────────────────────────────────
+// Only reachable from the button below: on a cloud-synced folder the backend
+// skips the downward scan, and walking it anyway can take minutes.
+const forcingScan = ref(false)
+async function doForceScan(): Promise<void> {
+  if (forcingScan.value) return
+  forcingScan.value = true
+  try {
+    await discoverRepositories(true)
+    // Hand the freshly walked list to the host instead of letting it run its
+    // own forced scan — one click must cost exactly one tree walk.
+    emit('force-discovered', [...discoveredRepos.value])
+  } finally {
+    forcingScan.value = false
+  }
 }
 
 // ── clone ───────────────────────────────────────────────────────────────────────
@@ -1592,13 +1612,13 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       </svg>
       <div class="init-title">{{ $t('status.not-git-repo') }}</div>
       <div class="init-desc">{{ $t('error.not-git-repo-desc') }}</div>
-      <button class="btn-primary w-full" :disabled="isInitializing" @click="doInit(true)">
+      <button class="btn-primary w-full nv-btn nv-btn--primary" :disabled="isInitializing" @click="doInit(true)">
         {{ isInitializing ? $t('label.initializing') : $t('error.initialize-repository') }}
       </button>
-      <button class="btn-ghost w-full" style="font-size:11px" :disabled="isInitializing" @click="doInit(false)">
+      <button class="btn-ghost w-full nv-btn nv-btn--ghost" style="font-size:11px" :disabled="isInitializing" @click="doInit(false)">
         {{ $t('label.init-no-gitignore') }}
       </button>
-      <button class="btn-ghost w-full" style="font-size:11px" :disabled="isInitializing" @click="doInitInFolder">
+      <button class="btn-ghost w-full nv-btn nv-btn--ghost" style="font-size:11px" :disabled="isInitializing" @click="doInitInFolder">
         {{ $t('label.init-in-folder') }}
       </button>
       <p v-if="initError" class="err-text">{{ initError }}</p>
@@ -1613,10 +1633,19 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           :placeholder="$t('label.repo-url-placeholder')"
           :disabled="connecting"
         />
-        <button class="btn-ghost w-full" :disabled="connecting" @click="doConnect">
+        <button class="btn-ghost w-full nv-btn nv-btn--ghost" :disabled="connecting" @click="doConnect">
           {{ connecting ? $t('label.connecting') : $t('action.connect-to-remote') }}
         </button>
         <p v-if="connectError" class="err-text">{{ connectError }}</p>
+      </div>
+
+      <!-- Downward scan skipped: cloud-synced folder, user must opt in -->
+      <div v-if="discoverySkipped && !props.hideDiscoveredRepos" class="discovered-box">
+        <div class="clone-title">{{ $t('label.discovery-skipped-title') }}</div>
+        <div class="clone-hint">{{ $t('label.discovery-skipped-hint') }}</div>
+        <button class="btn-ghost w-full nv-btn nv-btn--ghost" style="font-size:11px" :disabled="forcingScan" @click="doForceScan">
+          {{ forcingScan ? $t('label.scanning-repos') : $t('action.scan-repos-anyway') }}
+        </button>
       </div>
 
       <!-- Nested repos found by scanning downward (git rev-parse only looks up) -->
@@ -1952,8 +1981,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         <div v-if="mergeConflictContext" class="merge-conflict-context">{{ mergeConflictContext }}</div>
         <div v-for="f in mergeConflictFiles" :key="f" class="clean-file conflict-file">{{ f }}</div>
         <div class="merge-conflict-actions">
-          <button class="btn-danger" @click="doConflictAbort">{{ $t('action.abort-merge') }}</button>
-          <button class="btn-primary" @click="doConflictKeep">{{ $t('action.resolve-conflicts') }}</button>
+          <button class="btn-danger nv-btn nv-btn--danger" @click="doConflictAbort">{{ $t('action.abort-merge') }}</button>
+          <button class="btn-primary nv-btn nv-btn--primary" @click="doConflictKeep">{{ $t('action.resolve-conflicts') }}</button>
         </div>
       </div>
 
@@ -1971,8 +2000,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           />
         </div>
         <div class="clean-actions">
-          <button class="btn-ghost" @click="showStashPrompt = false">{{ $t('action.cancel') }}</button>
-          <button class="btn-primary" @click="doStash">{{ $t('action.save-draft') }}</button>
+          <button class="btn-ghost nv-btn nv-btn--ghost" @click="showStashPrompt = false">{{ $t('action.cancel') }}</button>
+          <button class="btn-primary nv-btn nv-btn--primary" @click="doStash">{{ $t('action.save-draft') }}</button>
         </div>
         <p v-if="stashError" class="err-text">{{ stashError }}</p>
       </div>
@@ -2209,8 +2238,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       <div v-if="branchExpanded" class="collapsible-body">
         <div class="input-row">
           <input v-model="newBranchName" class="git-input" :placeholder="$t('label.create-branch-placeholder')" @keydown.enter="doCreateBranch" />
-          <button class="btn-ghost sm" :disabled="branchCreating || !newBranchName.trim() || /\s|\.\./.test(newBranchName.trim()) || newBranchName.trim().startsWith('-')" @click="doCreateBranch">＋</button>
-          <button class="btn-ghost sm" :class="{ active: showRemoteBranches }" :title="showRemoteBranches ? $t('action.hide-remote-branches') : $t('action.show-remote-branches')" @click="showRemoteBranches = !showRemoteBranches">⇅</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" :disabled="branchCreating || !newBranchName.trim() || /\s|\.\./.test(newBranchName.trim()) || newBranchName.trim().startsWith('-')" @click="doCreateBranch">＋</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" :class="{ active: showRemoteBranches }" :title="showRemoteBranches ? $t('action.hide-remote-branches') : $t('action.show-remote-branches')" @click="showRemoteBranches = !showRemoteBranches">⇅</button>
         </div>
         <p v-if="branchError || mergeError || rebaseError" class="err-text">{{ branchError || mergeError || rebaseError }}</p>
         <p v-if="mergeOutput || rebaseOutput" class="ok-text">{{ mergeOutput || rebaseOutput }}</p>
@@ -2375,7 +2404,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         <div class="input-row" style="margin-top:6px">
           <input v-model="newRemoteName" class="git-input" placeholder="Name" style="width:72px;flex:0 0 auto" />
           <input v-model="newRemoteUrl" class="git-input" placeholder="URL" />
-          <button class="btn-ghost sm" :disabled="!newRemoteName.trim() || !newRemoteUrl.trim()" @click="doAddRemote">＋</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" :disabled="!newRemoteName.trim() || !newRemoteUrl.trim()" @click="doAddRemote">＋</button>
         </div>
         <p v-if="remotesMgrError" class="err-text">{{ remotesMgrError }}</p>
         </div>
@@ -2401,7 +2430,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         <div class="input-row" style="margin-top:6px; flex-wrap:wrap; gap:4px">
           <input v-model="newTagName" class="git-input" placeholder="v1.0.0" style="flex:1;min-width:72px" />
           <input v-model="newTagMessage" class="git-input" placeholder="Message" style="flex:2;min-width:80px" />
-          <button class="btn-ghost sm" :disabled="!newTagName.trim()" @click="doCreateTag">＋</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" :disabled="!newTagName.trim()" @click="doCreateTag">＋</button>
         </div>
         <p v-if="tagError" class="err-text">{{ tagError }}</p>
         </div>
@@ -2417,8 +2446,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         </div>
         <div v-if="worktreeExpanded" class="card-body collapsible-body">
         <div class="input-row" style="margin-bottom:6px">
-          <button class="btn-ghost sm" :disabled="worktreeBusy === '*'" :title="$t('action.prune')" @click="doPruneWorktrees">{{ $t('action.prune') }}</button>
-          <button class="btn-ghost sm" :disabled="worktreeBusy === '*'" :title="$t('action.repair')" @click="doRepairWorktrees">{{ $t('action.repair') }}</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" :disabled="worktreeBusy === '*'" :title="$t('action.prune')" @click="doPruneWorktrees">{{ $t('action.prune') }}</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" :disabled="worktreeBusy === '*'" :title="$t('action.repair')" @click="doRepairWorktrees">{{ $t('action.repair') }}</button>
         </div>
         <div v-for="wt in gitWorktrees" :key="wt.path" class="generic-row">
           <span class="wt-icon">{{ wt.is_main ? '✦' : '○' }}</span>
@@ -2445,7 +2474,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         <div class="input-row" style="margin-top:6px; flex-direction:column; gap:4px">
           <div class="input-row">
             <input v-model="newWtPath" class="git-input" :placeholder="$t('label.worktree-path-placeholder')" style="flex:2" />
-            <button class="btn-ghost sm icon-only" :title="$t('action.browse-folder')" @click="pickWorktreeDir">
+            <button class="btn-ghost sm icon-only nv-btn nv-btn--ghost" :title="$t('action.browse-folder')" @click="pickWorktreeDir">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5a.25.25 0 0 1-.2-.1l-.9-1.2C6.07 1.26 5.55 1 5 1H1.75z"/></svg>
             </button>
             <input v-if="newWtIsNew" v-model="newWtBranch" class="git-input" :placeholder="$t('label.new-worktree-branch-placeholder')" style="flex:1" />
@@ -2453,7 +2482,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
               <option value="" disabled>{{ $t('label.branch-placeholder') }}</option>
               <option v-for="b in worktreeBranchOptions" :key="b" :value="b">{{ b }}</option>
             </select>
-            <button class="btn-ghost sm" :disabled="!newWtPath.trim() || !newWtBranch.trim()" :title="$t('action.add-worktree')" @click="doAddWorktree">＋</button>
+            <button class="btn-ghost sm nv-btn nv-btn--ghost" :disabled="!newWtPath.trim() || !newWtBranch.trim()" :title="$t('action.add-worktree')" @click="doAddWorktree">＋</button>
           </div>
           <label class="check-label">
             <input v-model="newWtIsNew" type="checkbox" /> {{ $t('label.create-new-branch') }}
@@ -2490,8 +2519,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
               @keydown.enter="saveInlineEdit"
               @keydown.esc="cancelInlineEdit"
             />
-            <button class="btn-ghost sm" @click="saveInlineEdit">✓</button>
-            <button class="btn-ghost sm" @click="cancelInlineEdit">✕</button>
+            <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="saveInlineEdit">✓</button>
+            <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="cancelInlineEdit">✕</button>
           </template>
           <span v-else class="config-val clickable" @click="startInlineEdit(key)">{{ gitConfig[key] || '—' }}</span>
         </div>
@@ -2535,11 +2564,11 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           <!-- detail view -->
           <template v-else-if="selectedIssue">
             <div class="input-row" style="margin-bottom:6px">
-              <button class="btn-ghost sm" @click="closeIssueDetail">← Back</button>
+              <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="closeIssueDetail">← Back</button>
               <div class="spacer" />
               <div class="dispatch-wrap">
                 <button
-                  class="btn-ghost sm"
+                  class="btn-ghost sm nv-btn nv-btn--sm"
                   :disabled="!dispatchTargets.length"
                   :title="dispatchTargets.length ? 'Send this issue to a running agent' : 'No running agent'"
                   @click="onDispatchClick"
@@ -2551,8 +2580,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
                   >{{ t.label }}</button>
                 </div>
               </div>
-              <a class="btn-ghost sm" :href="selectedIssue.url" target="_blank" rel="noopener">Open ↗</a>
-              <button class="btn-ghost sm" :disabled="isIssueSubmitting" @click="toggleIssueState">
+              <a class="btn-ghost sm nv-btn nv-btn--sm" :href="selectedIssue.url" target="_blank" rel="noopener">Open ↗</a>
+              <button class="btn-ghost sm nv-btn nv-btn--sm" :disabled="isIssueSubmitting" @click="toggleIssueState">
                 {{ selectedIssue.state === 'open' ? 'Close' : 'Reopen' }}
               </button>
             </div>
@@ -2568,7 +2597,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
             </div>
             <div class="input-row" style="margin-top:6px; flex-direction:column; gap:4px">
               <textarea v-model="newComment" class="git-input" rows="2" placeholder="Add a comment…" />
-              <button class="btn-ghost sm" :disabled="!newComment.trim() || isIssueSubmitting" @click="submitComment">Comment</button>
+              <button class="btn-ghost sm nv-btn nv-btn--sm" :disabled="!newComment.trim() || isIssueSubmitting" @click="submitComment">Comment</button>
             </div>
           </template>
 
@@ -2578,8 +2607,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
               <input v-model="newIssueTitle" class="git-input" placeholder="Issue title" />
               <textarea v-model="newIssueBody" class="git-input" rows="3" placeholder="Description (optional)" />
               <div class="input-row">
-                <button class="btn-ghost sm" :disabled="!newIssueTitle.trim() || isIssueSubmitting" @click="submitNewIssue">Create</button>
-                <button class="btn-ghost sm" @click="showNewIssue = false">Cancel</button>
+                <button class="btn-ghost sm nv-btn nv-btn--sm" :disabled="!newIssueTitle.trim() || isIssueSubmitting" @click="submitNewIssue">Create</button>
+                <button class="btn-ghost sm nv-btn nv-btn--sm" @click="showNewIssue = false">Cancel</button>
               </div>
             </div>
             <div v-if="isLoadingIssues" class="empty-msg" style="padding:2px 0">Loading…</div>
@@ -2715,7 +2744,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       <div v-if="ignoreResult" class="ignore-modal" @click.stop>
         <div class="ignore-modal-path" :title="ignoreResult.path">{{ ignoreResult.path }}</div>
         <div class="ignore-modal-text">{{ ignoreResult.text }}</div>
-        <button class="btn-ghost sm" @click="ignoreResult = null">{{ $t('action.close') }}</button>
+        <button class="btn-ghost sm nv-btn nv-btn--sm" @click="ignoreResult = null">{{ $t('action.close') }}</button>
       </div>
     </Teleport>
 
@@ -2741,7 +2770,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
   overflow: hidden;
   background: var(--bg-base);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   user-select: none;
 }
 /* Independent scroll regions: top (commit + changes) and bottom (history/cards) */
@@ -2750,24 +2779,24 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .part-bottom { flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .part-bottom-cards { flex: 1 1 0; overflow-y: auto; min-height: 0; padding-bottom: 20px; }
 .spacer { flex: 1; }
-.err-text { color: var(--danger-fg); font-size: 11px; margin: 0; padding: 2px 12px; }
+.err-text { color: var(--danger-fg); font-size: var(--font-2xs); margin: 0; padding: 2px 12px; }
 .git-error-row,
 .commit-error-row { display: flex; align-items: flex-start; gap: 6px; }
 .git-error-x {
   flex-shrink: 0; margin-left: auto; background: transparent; border: none;
-  color: var(--danger-fg); cursor: pointer; font-size: 11px; line-height: 1; padding: 0 2px;
+  color: var(--danger-fg); cursor: pointer; font-size: var(--font-2xs); line-height: 1; padding: 0 2px;
 }
 .git-error-x:hover { color: var(--danger-bright); }
-.ok-text  { color: var(--success-fg); font-size: 11px; margin: 0; padding: 2px 4px; }
-.loading-text { color: var(--text-muted); font-size: 10px; padding: 3px 8px; }
-.empty-msg { color: var(--text-muted); font-size: 11px; font-style: italic; padding: 3px 20px 6px; }
+.ok-text  { color: var(--success-fg); font-size: var(--font-2xs); margin: 0; padding: 2px 4px; }
+.loading-text { color: var(--text-muted); font-size: var(--font-3xs); padding: 3px 8px; }
+.empty-msg { color: var(--text-muted); font-size: var(--font-2xs); font-style: italic; padding: 3px 20px 6px; }
 .w-full { width: 100%; }
 .spinner { display: inline-block; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Empty state ─────────────────────────────────────────────────────────────── */
 .empty-state {
-  color: var(--text-muted); font-size: 11px; font-style: italic; padding: 16px 12px;
+  color: var(--text-muted); font-size: var(--font-2xs); font-style: italic; padding: 16px 12px;
 }
 
 /* ── Init panel ─────────────────────────────────────────────────────────────── */
@@ -2777,23 +2806,23 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
   gap: 10px; padding: 28px 20px; text-align: center;
 }
 .init-svg { opacity: 0.8; }
-.init-title { font-size: 13px; font-weight: 600; color: var(--text-bright); }
-.init-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.6; }
-.init-desc code { background: var(--bg-subtle); padding: 1px 5px; border-radius: 3px; font-size: 10px; color: var(--accent-bright); }
+.init-title { font-size: var(--font-sm); font-weight: 600; color: var(--text-bright); }
+.init-desc { font-size: var(--font-2xs); color: var(--text-secondary); line-height: 1.6; }
+.init-desc code { background: var(--bg-subtle); padding: 1px 5px; border-radius: var(--radius-xs); font-size: var(--font-3xs); color: var(--accent-bright); }
 .clone-box {
   width: 100%; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-muted);
   display: flex; flex-direction: column; gap: 6px;
 }
-.clone-title { font-size: 11px; color: var(--text-secondary); text-align: center; }
-.clone-hint { font-size: 10px; color: var(--text-muted); margin-bottom: 6px; text-align: center; }
+.clone-title { font-size: var(--font-2xs); color: var(--text-secondary); text-align: center; }
+.clone-hint { font-size: var(--font-3xs); color: var(--text-muted); margin-bottom: 6px; text-align: center; }
 .clone-input {
   width: 100%; box-sizing: border-box; background: var(--bg-base); border: 1px solid var(--border-default);
-  border-radius: 5px; color: var(--text-primary); font-size: 11px; padding: 5px 8px;
+  border-radius: var(--radius-sm); color: var(--text-primary); font-size: var(--font-2xs); padding: 5px 8px;
 }
 .clone-input:focus { outline: none; border-color: var(--accent-emphasis); }
 .clone-dir-row { display: flex; gap: 6px; }
 .clone-dir-row .clone-input { flex: 1; }
-.clone-pick { flex-shrink: 0; font-size: 11px; }
+.clone-pick { flex-shrink: 0; font-size: var(--font-2xs); }
 /* Nested repos discovered by downward scan */
 .discovered-box {
   width: 100%; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-muted);
@@ -2801,23 +2830,23 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 }
 .repo-row {
   display: flex; align-items: center; gap: 6px; width: 100%; box-sizing: border-box;
-  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: 5px;
-  color: var(--text-primary); font-size: 11px; padding: 5px 8px; cursor: pointer; text-align: left;
+  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 5px 8px; cursor: pointer; text-align: left;
 }
 .repo-row:hover { border-color: var(--accent-emphasis); background: var(--bg-elevated); }
 .repo-icon { flex-shrink: 0; color: var(--text-muted); }
 .repo-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.repo-branch { flex-shrink: 0; font-size: 10px; color: var(--text-muted); }
+.repo-branch { flex-shrink: 0; font-size: var(--font-3xs); color: var(--text-muted); }
 /* In-progress operation banner */
 .op-banner {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   background: var(--attention-subtle); border-bottom: 1px solid var(--attention-muted);
-  padding: 5px 10px; font-size: 11px;
+  padding: 5px 10px; font-size: var(--font-2xs);
 }
 .op-text { color: var(--attention-bright); font-weight: 600; text-transform: capitalize; }
 .op-abort-btn {
   background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-fg);
-  border-radius: 4px; font-size: 11px; padding: 2px 8px; cursor: pointer; text-transform: capitalize;
+  border-radius: var(--radius-xs); font-size: var(--font-2xs); padding: 2px 8px; cursor: pointer; text-transform: capitalize;
 }
 .op-abort-btn:hover { background: var(--danger-muted); }
 .op-banner-conflict { background: var(--attention-subtle); border-bottom-color: var(--attention-muted); }
@@ -2826,28 +2855,97 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .op-banner-ready .op-text { color: var(--success-fg); font-weight: 600; }
 .op-commit-btn {
   background: var(--success-subtle); color: var(--success-fg); border: 1px solid var(--success-fg);
-  border-radius: 4px; font-size: 11px; padding: 2px 8px; cursor: pointer; margin-left: auto;
+  border-radius: var(--radius-xs); font-size: var(--font-2xs); padding: 2px 8px; cursor: pointer; margin-left: auto;
 }
 .op-commit-btn:hover { background: var(--success-muted); }
-.btn-primary {
-  background: var(--success-emphasis); color: var(--text-on-emphasis); border: 1px solid var(--success-strong);
-  border-radius: 5px; font-size: 12px; padding: 5px 10px; cursor: pointer;
-}
-.btn-primary:hover { background: var(--success-strong); }
-.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-ghost {
-  background: transparent; border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-secondary); font-size: 12px; padding: 4px 8px; cursor: pointer;
-}
-.btn-ghost:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-ghost.sm { font-size: 11px; padding: 3px 7px; }
-.btn-ghost.icon-only { display: inline-flex; align-items: center; justify-content: center; padding: 4px 6px; flex: 0 0 auto; }
+/* Canonical button spec — byte-identical in GitPane.vue,
+   GitCredentialModal.vue and GitHistoryModal.vue. Scoped styles don't cross
+   component boundaries, so the house spec is restated in each; keep the three
+   copies in sync. Colours preserve each variant's existing identity (Git's
+   primary action stays green); only the scale and the four states are new. */
+.btn-primary,
+.btn-ghost,
 .btn-danger {
-  background: var(--danger-emphasis); border: 1px solid transparent; border-radius: 4px;
-  color: var(--text-on-emphasis); font-size: 11px; padding: 4px 10px; cursor: pointer;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  line-height: var(--lh-tight);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
 }
-.btn-danger:hover { background: var(--danger-bright); }
+.btn-primary {
+  background: var(--success-emphasis);
+  border-color: var(--success-strong);
+  color: var(--text-on-emphasis);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--success-strong);
+  border-color: var(--success-strong);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.btn-danger {
+  background: var(--danger-emphasis);
+  border-color: var(--danger-emphasis);
+  color: var(--text-on-emphasis);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-bright);
+  border-color: var(--danger-bright);
+}
+.btn-ghost.btn-danger {
+  background: transparent;
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
+}
+.btn-ghost.btn-danger:hover:not(:disabled) {
+  background: var(--danger-subtle);
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
+}
+.btn-primary.sm,
+.btn-ghost.sm,
+.btn-danger.sm {
+  padding: 3px 7px;
+  font-size: var(--font-2xs);
+}
+.btn-ghost.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+  flex: 0 0 auto;
+}
+.btn-primary:active:not(:disabled),
+.btn-ghost:active:not(:disabled),
+.btn-danger:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn-primary:focus-visible,
+.btn-ghost:focus-visible,
+.btn-danger:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.btn-primary:disabled,
+.btn-ghost:disabled,
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* ── Panel header ───────────────────────────────────────────────────────────── */
 .panel-header {
@@ -2863,17 +2961,19 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .hdr-btn {
   display: flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; background: transparent; border: none;
-  border-radius: 4px; color: var(--text-muted); cursor: pointer; font-size: 12px; padding: 0;
+  border-radius: var(--radius-xs); color: var(--text-muted); cursor: pointer; font-size: var(--font-xs); padding: 0;
 }
 .hdr-btn:hover { color: var(--text-primary); background: var(--bg-active); }
 .hdr-btn.active { color: var(--accent-fg); }
 .hdr-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.hdr-btn:active:not(:disabled) { opacity: 0.8; }
+.hdr-btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-focus); }
 
 /* ── Dropdown menu ──────────────────────────────────────────────────────────── */
 .menu-anchor { position: relative; }
 .dropdown-menu {
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 100;
-  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 6px;
+  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   padding: 4px; min-width: 170px; box-shadow: 0 8px 24px rgba(1,4,9,0.8);
 }
 .menu-group-label {
@@ -2882,12 +2982,12 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 }
 .menu-item {
   display: flex; align-items: center; gap: 4px; width: 100%;
-  background: transparent; border: none; color: var(--text-primary); font-size: 12px;
-  padding: 5px 8px; border-radius: 4px; cursor: pointer; text-align: left;
+  background: transparent; border: none; color: var(--text-primary); font-size: var(--font-xs);
+  padding: 5px 8px; border-radius: var(--radius-xs); cursor: pointer; text-align: left;
 }
 .menu-item:hover { background: var(--bg-active); }
 .menu-item:disabled { opacity: 0.4; cursor: not-allowed; }
-.menu-check { width: 14px; text-align: center; font-size: 11px; color: var(--accent-fg); flex-shrink: 0; }
+.menu-check { width: 14px; text-align: center; font-size: var(--font-2xs); color: var(--accent-fg); flex-shrink: 0; }
 .menu-sep { height: 1px; background: var(--border-muted); margin: 4px 0; }
 
 /* ── Commit area ────────────────────────────────────────────────────────────── */
@@ -2899,17 +2999,17 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .commit-input-row { display: flex; gap: 5px; align-items: flex-start; }
 .commit-input {
   flex: 1; resize: none; background: var(--bg-subtle); border: 1px solid var(--border-default);
-  border-radius: 5px; color: var(--text-bright); font-size: 12px; padding: 6px 8px;
-  font-family: inherit; line-height: 1.5;
+  border-radius: var(--radius-sm); color: var(--text-bright); font-size: var(--font-xs); padding: 6px 8px;
+  font-family: inherit; line-height: var(--lh-base);
   min-height: 30px; max-height: 160px; overflow-y: auto;
   box-sizing: border-box;
 }
 .commit-input:focus { outline: none; border-color: var(--accent-focus); }
 .commit-input::placeholder { color: var(--text-muted); }
 .ai-btn {
-  flex-shrink: 0; width: 26px; height: 26px; background: transparent;
-  border: 1px solid var(--border-default); border-radius: 4px; color: var(--text-muted);
-  font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; width: var(--icon-btn-lg); height: var(--icon-btn-lg); background: transparent;
+  border: 1px solid var(--border-default); border-radius: var(--radius-xs); color: var(--text-muted);
+  font-size: var(--font-sm); cursor: pointer; display: flex; align-items: center; justify-content: center;
 }
 .ai-btn:hover { border-color: var(--accent-fg); color: var(--accent-fg); }
 .ai-btn:disabled { opacity: 0.35; cursor: not-allowed; }
@@ -2936,7 +3036,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .auto-commit-btn { gap: 4px; }
 .auto-commit-btn .ac-badge {
   font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
-  padding: 1px 5px; border-radius: 10px; flex-shrink: 0;
+  padding: 1px 5px; border-radius: var(--radius-md); flex-shrink: 0;
   background: var(--border-muted); color: var(--text-muted);
 }
 .auto-commit-btn.on {
@@ -2950,7 +3050,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .ac-status-bar {
   display: flex; align-items: center; gap: 6px;
   padding: 5px 12px;
-  font-size: 11px; color: var(--text-muted);
+  font-size: var(--font-2xs); color: var(--text-muted);
   background: color-mix(in srgb, var(--accent-fg) 6%, transparent);
   border-top: 1px solid color-mix(in srgb, var(--accent-fg) 18%, transparent);
 }
@@ -2969,14 +3069,14 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .commit-btn-row { display: flex; gap: 0; }
 .commit-main-btn {
   flex: 1; background: var(--success-emphasis); color: var(--text-on-emphasis); border: 1px solid var(--success-strong);
-  border-right: none; border-radius: 5px 0 0 5px; font-size: 12px; font-weight: 500;
-  padding: 6px 10px; cursor: pointer; transition: background 0.12s;
+  border-right: none; border-radius: 5px 0 0 5px; font-size: var(--font-xs); font-weight: 500;
+  padding: 6px 10px; cursor: pointer; transition: background var(--motion-fast) var(--ease-out);
 }
 .commit-main-btn:hover { background: var(--success-strong); }
 .commit-main-btn:disabled { background: var(--bg-subtle); border-color: var(--border-default); color: var(--text-muted); cursor: not-allowed; }
 .commit-arrow-btn {
   background: var(--success-emphasis); color: var(--text-on-emphasis); border: 1px solid var(--success-strong); border-left: 1px solid var(--success-emphasis);
-  border-radius: 0 5px 5px 0; font-size: 11px; padding: 6px 8px; cursor: pointer;
+  border-radius: 0 5px 5px 0; font-size: var(--font-2xs); padding: 6px 8px; cursor: pointer;
 }
 .commit-arrow-btn:hover { background: var(--success-strong); }
 .commit-arrow-btn:disabled { background: var(--bg-subtle); border-color: var(--border-default); color: var(--text-muted); cursor: not-allowed; }
@@ -2990,29 +3090,31 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .sec-hdr:hover { background: var(--bg-hover-faint); }
 .sec-caret { font-size: 9px; color: var(--text-muted); width: 10px; flex-shrink: 0; }
 .sec-label {
-  font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  font-size: var(--font-2xs); font-weight: 600; color: var(--text-secondary);
   letter-spacing: 0.3px;
 }
 .sec-badge {
-  font-size: 10px; color: var(--text-secondary); background: var(--bg-active);
-  border-radius: 10px; padding: 0 6px; flex-shrink: 0;
+  font-size: var(--font-3xs); color: var(--text-secondary); background: var(--bg-active);
+  border-radius: var(--radius-md); padding: 0 6px; flex-shrink: 0;
 }
 .sec-actions { display: flex; align-items: center; gap: 1px; }
 .sec-btn {
   display: flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; background: transparent; border: none;
-  border-radius: 3px; color: var(--text-muted); cursor: pointer; font-size: 12px; padding: 0;
+  border-radius: var(--radius-xs); color: var(--text-muted); cursor: pointer; font-size: var(--font-xs); padding: 0;
 }
 .sec-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
 .sec-btn.danger:hover { color: var(--danger-fg); }
 .sec-btn.always { opacity: 1; }
+.sec-btn:active:not(:disabled) { opacity: 0.8; }
+.sec-btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-focus); }
 
 /* ── Section cards (History / Stashes / Remotes / Tags / Worktrees / Config) ─── */
 .git-card {
   margin: 6px 8px;
   background: var(--bg-base);
   border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 .card-hdr {
@@ -3041,9 +3143,9 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
   padding: 5px 10px; border-top: 1px solid color-mix(in srgb, var(--accent-fg) 25%, transparent);
   background: color-mix(in srgb, var(--bg-base) 96%, transparent); flex-shrink: 0; z-index: 2;
 }
-.sel-count { font-size: 11px; color: var(--text-muted); margin-right: 4px; white-space: nowrap; }
+.sel-count { font-size: var(--font-2xs); color: var(--text-muted); margin-right: 4px; white-space: nowrap; }
 .sel-btn {
-  font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--bg-hover-strong);
+  font-size: var(--font-2xs); padding: 2px 8px; border-radius: var(--radius-xs); border: 1px solid var(--bg-hover-strong);
   background: var(--bg-hover); color: var(--text-primary); cursor: pointer;
 }
 .sel-btn:hover { background: var(--bg-hover-strong); }
@@ -3055,7 +3157,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 
 .file-status {
   flex-shrink: 0; width: 14px; text-align: center;
-  font-size: 11px; font-weight: 700; margin-right: 5px; color: var(--success-bright);
+  font-size: var(--font-2xs); font-weight: 700; margin-right: 5px; color: var(--success-bright);
 }
 .unstaged-st { color: var(--attention-fg); }
 [data-s="D"] { color: var(--danger-fg) !important; }
@@ -3063,17 +3165,17 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 [data-s="?"] { color: var(--success-bright) !important; }
 
 .file-name-only {
-  font-size: 12px; color: var(--text-primary); flex: 1; min-width: 0;
+  font-size: var(--font-xs); color: var(--text-primary); flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
 }
 .file-name-only:hover { color: var(--text-bright); }
 .file-name-main {
-  font-size: 12px; color: var(--text-primary); flex-shrink: 0; max-width: 55%;
+  font-size: var(--font-xs); color: var(--text-primary); flex-shrink: 0; max-width: 55%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
 }
 .file-name-main:hover { color: var(--text-bright); }
 .file-path-dim {
-  flex: 1; font-size: 11px; color: var(--text-muted); padding-left: 6px;
+  flex: 1; font-size: var(--font-2xs); color: var(--text-muted); padding-left: 6px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
 }
 
@@ -3086,13 +3188,13 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .row-btn {
   display: flex; align-items: center; justify-content: center;
   min-width: 20px; height: 20px; background: transparent; border: none;
-  border-radius: 3px; color: var(--text-secondary); font-size: 11px; cursor: pointer; padding: 0 2px;
+  border-radius: var(--radius-xs); color: var(--text-secondary); font-size: var(--font-2xs); cursor: pointer; padding: 0 2px;
 }
 .row-btn:hover { color: var(--text-primary); background: var(--bg-active); }
 .row-btn.danger:hover { color: var(--danger-fg); }
 .row-btn.always { opacity: 1; }
 /* Stage = primary action, emphasised and rightmost */
-.row-btn.primary { color: var(--accent-fg); font-size: 13px; font-weight: 700; }
+.row-btn.primary { color: var(--accent-fg); font-size: var(--font-sm); font-weight: 700; }
 .row-btn.primary:hover { color: var(--text-on-emphasis); background: color-mix(in srgb, var(--accent-focus) 25%, transparent); }
 /* Discard = shrunk to avoid accidental clicks */
 .row-btn.shrink { min-width: 14px; height: 14px; font-size: 8px; opacity: 0.5; padding: 0; }
@@ -3107,12 +3209,12 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .folder-caret { font-size: 9px; color: var(--text-muted); width: 10px; flex-shrink: 0; }
 .folder-icon { color: var(--text-primary); flex-shrink: 0; }
 .folder-name {
-  flex: 1; font-size: 11px; color: var(--text-secondary);
+  flex: 1; font-size: var(--font-2xs); color: var(--text-secondary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .folder-count {
-  font-size: 10px; color: var(--text-muted); background: var(--bg-hover);
-  border-radius: 8px; padding: 0 5px; flex-shrink: 0;
+  font-size: var(--font-3xs); color: var(--text-muted); background: var(--bg-hover);
+  border-radius: var(--radius-md); padding: 0 5px; flex-shrink: 0;
 }
 
 /* ── Subpanels (file history / blame) ──────────────────────────────────────── */
@@ -3124,11 +3226,11 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .yellow-border { border-left-color: var(--attention-fg) !important; }
 .green-border  { border-left-color: var(--success-fg) !important; }
 .mini-row {
-  display: flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: 11px;
+  display: flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: var(--font-2xs);
 }
 .mini-msg { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 /* Inline blame — VS Code style: each source line followed by its author/date */
-.blame-inline { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-x: auto; padding: 2px 0; }
+.blame-inline { font-family: var(--font-mono); font-size: var(--font-2xs); overflow-x: auto; padding: 2px 0; }
 /* Each row is only as wide as its content (no full-width stretch → no long trailing
    blank on short lines), full content kept, long lines scroll horizontally. */
 .blame-line { display: flex; align-items: baseline; line-height: 1.55; width: max-content; }
@@ -3137,9 +3239,9 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .blame-annot { color: var(--text-muted); font-style: italic; margin-left: 16px; white-space: nowrap; flex-shrink: 0; }
 
 /* Inline diff-blame — only changed lines, each tagged with last author/date. */
-.diffblame-inline { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-x: auto; padding: 2px 0; }
-.db-hunk-head { color: var(--accent-bright); font-size: 10px; opacity: 0.8; padding: 2px 8px; white-space: pre; }
-.db-line { display: flex; align-items: baseline; line-height: 1.5; width: max-content; padding: 0 8px; }
+.diffblame-inline { font-family: var(--font-mono); font-size: var(--font-2xs); overflow-x: auto; padding: 2px 0; }
+.db-hunk-head { color: var(--accent-bright); font-size: var(--font-3xs); opacity: 0.8; padding: 2px 8px; white-space: pre; }
+.db-line { display: flex; align-items: baseline; line-height: var(--lh-base); width: max-content; padding: 0 8px; }
 .db-no { color: var(--text-muted); min-width: 30px; text-align: right; padding-right: 8px; flex-shrink: 0; user-select: none; }
 .db-sign { width: 10px; flex-shrink: 0; text-align: center; user-select: none; }
 .db-code { white-space: pre; flex-shrink: 0; }
@@ -3158,7 +3260,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 }
 .part-resize-grip {
   height: 1px; width: 100%; background: var(--border-muted);
-  transition: background 0.12s, height 0.12s;
+  transition: background var(--motion-fast) var(--ease-out), height var(--motion-fast) var(--ease-out);
 }
 .part-resize:hover .part-resize-grip { height: 3px; background: var(--accent-focus); }
 
@@ -3170,38 +3272,38 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 }
 .branch-pill {
   display: flex; align-items: center; gap: 5px;
-  background: transparent; border: none; color: var(--text-secondary); font-size: 11px;
-  cursor: pointer; padding: 2px 5px; border-radius: 4px; min-width: 0;
+  background: transparent; border: none; color: var(--text-secondary); font-size: var(--font-2xs);
+  cursor: pointer; padding: 2px 5px; border-radius: var(--radius-xs); min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .branch-pill:hover, .branch-pill.active { color: var(--text-primary); background: var(--bg-hover); }
-.ab-text { font-size: 10px; color: var(--attention-fg); flex-shrink: 0; }
+.ab-text { font-size: var(--font-3xs); color: var(--attention-fg); flex-shrink: 0; }
 .remote-btn {
   display: flex; align-items: center; gap: 2px; background: transparent; border: none;
-  color: var(--text-muted); font-size: 12px; cursor: pointer; padding: 3px 5px; border-radius: 4px;
+  color: var(--text-muted); font-size: var(--font-xs); cursor: pointer; padding: 3px 5px; border-radius: var(--radius-xs);
   flex-shrink: 0; white-space: nowrap;
 }
 .remote-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
 .remote-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .remote-btn.busy { opacity: 1; color: var(--accent-fg); cursor: progress; }
-.publish-btn { color: var(--attention-fg); font-size: 10px; }
+.publish-btn { color: var(--attention-fg); font-size: var(--font-3xs); }
 .ahead-num { font-size: 9px; color: var(--attention-fg); font-weight: 700; }
-.account-pill { font-size: 10px; max-width: 140px; }
+.account-pill { font-size: var(--font-3xs); max-width: 140px; }
 .account-pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tp-dropdown .menu-item.active { color: var(--accent-fg); font-weight: 600; }
-.tp-dropdown .acct-meta { color: var(--text-muted); font-size: 10px; margin-left: 4px; }
-.tp-dropdown .menu-empty { padding: 4px 10px; font-size: 11px; color: var(--text-muted); }
+.tp-dropdown .acct-meta { color: var(--text-muted); font-size: var(--font-3xs); margin-left: 4px; }
+.tp-dropdown .menu-empty { padding: 4px 10px; font-size: var(--font-2xs); color: var(--text-muted); }
 
 /* ── Remote output ──────────────────────────────────────────────────────────── */
 .remote-output {
   margin: 4px 8px; background: var(--bg-inset); border: 1px solid var(--border-muted);
-  border-radius: 5px; padding: 6px 28px 6px 8px; position: relative;
+  border-radius: var(--radius-sm); padding: 6px 28px 6px 8px; position: relative;
 }
-.remote-output pre { margin: 0; font-size: 10px; color: var(--text-primary); white-space: pre-wrap; max-height: 80px; overflow: auto; }
+.remote-output pre { margin: 0; font-size: var(--font-3xs); color: var(--text-primary); white-space: pre-wrap; max-height: 80px; overflow: auto; }
 .err-pre { color: var(--danger-fg) !important; }
 .close-btn {
   position: absolute; top: 4px; right: 6px; background: transparent;
-  border: none; color: var(--text-muted); font-size: 10px; cursor: pointer;
+  border: none; color: var(--text-muted); font-size: var(--font-3xs); cursor: pointer;
 }
 
 /* ── Collapsible body (for inline sections) ─────────────────────────────────── */
@@ -3213,27 +3315,27 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 /* ── Branch panel ───────────────────────────────────────────────────────────── */
 .branch-row {
   display: flex; align-items: center; gap: 4px;
-  padding: 2px 0; font-size: 11px; border-radius: 3px;
+  padding: 2px 0; font-size: var(--font-2xs); border-radius: var(--radius-xs);
 }
 .branch-row:hover { background: var(--bg-hover-faint); }
 .branch-row.current .b-name { color: var(--accent-bright); font-weight: 600; }
-.b-check { width: 14px; color: var(--success-bright); font-size: 10px; text-align: center; flex-shrink: 0; }
+.b-check { width: 14px; color: var(--success-bright); font-size: var(--font-3xs); text-align: center; flex-shrink: 0; }
 .b-name { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-.b-track { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+.b-track { color: var(--text-muted); font-size: var(--font-3xs); flex-shrink: 0; }
 .b-name.remote { color: var(--text-muted); font-style: italic; }
-.branch-section-label { font-size: 10px; color: var(--text-muted); padding: 4px 0 2px; letter-spacing: 0.04em; text-transform: uppercase; }
+.branch-section-label { font-size: var(--font-3xs); color: var(--text-muted); padding: 4px 0 2px; letter-spacing: 0.04em; text-transform: uppercase; }
 .remote-branch-row { opacity: 0.85; }
 .remote-branch-row.remote-has-local { opacity: 0.5; }
 .remote-branch-row.remote-has-local .b-check { color: var(--success-bright); }
 .btn-ghost.active { color: var(--accent-bright); }
 .compare-panel {
   margin: 4px 0; background: var(--bg-inset); border: 1px solid var(--border-muted);
-  border-radius: 4px; padding: 6px 8px; font-size: 11px;
+  border-radius: var(--radius-xs); padding: 6px 8px; font-size: var(--font-2xs);
 }
 .compare-title { color: var(--accent-bright); font-weight: 600; margin-bottom: 3px; }
 .compare-stat  { color: var(--success-bright); margin-bottom: 2px; }
-.compare-file  { color: var(--text-secondary); font-family: monospace; font-size: 10px; }
-.sub-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; }
+.compare-file  { color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--font-3xs); }
+.sub-label { font-size: var(--font-3xs); color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; }
 
 /* ── History / commit graph ─────────────────────────────────────────────────── */
 .history-search-row {
@@ -3241,7 +3343,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 }
 .search-input {
   flex: 1; background: transparent; border: none;
-  border-bottom: 1px solid var(--border-default); color: var(--text-primary); font-size: 11px; padding: 2px 0;
+  border-bottom: 1px solid var(--border-default); color: var(--text-primary); font-size: var(--font-2xs); padding: 2px 0;
 }
 .search-input:focus { outline: none; border-bottom-color: var(--accent-focus); }
 .search-input::placeholder { color: var(--text-muted); }
@@ -3249,8 +3351,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
   display: flex; gap: 4px; padding: 2px 12px 6px;
 }
 .scope-btn {
-  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 5px;
-  color: var(--text-secondary); font-size: 10px; padding: 3px 6px; cursor: pointer;
+  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  color: var(--text-secondary); font-size: var(--font-3xs); padding: 3px 6px; cursor: pointer;
 }
 .scope-btn:hover:not(:disabled) { color: var(--text-bright); border-color: var(--accent-focus); }
 .scope-btn.active { background: var(--accent-emphasis); border-color: var(--accent-emphasis); color: var(--text-on-emphasis); }
@@ -3258,8 +3360,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .commit-list { margin-bottom: 4px; }
 .history-load-more { display: flex; justify-content: center; padding: 0 0 6px; }
 .load-more-btn {
-  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 5px;
-  color: var(--text-primary); font-size: 11px; padding: 3px 14px; cursor: pointer;
+  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 3px 14px; cursor: pointer;
 }
 .load-more-btn:hover:not(:disabled) { border-color: var(--accent-focus); color: var(--text-bright); }
 .load-more-btn:disabled { opacity: 0.5; cursor: default; }
@@ -3268,13 +3370,13 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
   gap: 6px; padding: 4px 0 6px;
 }
 .history-pagination .pg-btn {
-  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 5px;
-  color: var(--text-primary); font-size: 13px; line-height: 1; min-width: 26px;
+  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  color: var(--text-primary); font-size: var(--font-sm); line-height: 1; min-width: 26px;
   padding: 3px 8px; cursor: pointer;
 }
 .history-pagination .pg-btn:hover:not(:disabled) { border-color: var(--accent-focus); color: var(--text-bright); }
 .history-pagination .pg-btn:disabled { opacity: 0.3; cursor: default; }
-.history-pagination .pg-info { font-size: 11px; color: var(--text-secondary); min-width: 40px; text-align: center; }
+.history-pagination .pg-info { font-size: var(--font-2xs); color: var(--text-secondary); min-width: 40px; text-align: center; }
 .commit-row {
   display: flex; align-items: flex-start; gap: 0;
   padding: 0 8px 0 0; cursor: pointer;
@@ -3292,15 +3394,15 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .graph-dot.head { box-shadow: 0 0 0 1px var(--success-fg), 0 0 4px var(--success-fg); }
 .commit-body { flex: 1; min-width: 0; padding: 3px 0; }
 .commit-msg {
-  font-size: 11px; color: var(--text-primary); overflow: hidden;
+  font-size: var(--font-2xs); color: var(--text-primary); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; line-height: 1.4;
 }
 .commit-meta {
   display: flex; align-items: center; gap: 3px; margin-top: 1px; flex-wrap: wrap;
 }
-.chash { font-size: 10px; color: var(--text-muted); font-family: monospace; background: transparent; }
+.chash { font-size: var(--font-3xs); color: var(--text-muted); font-family: var(--font-mono); background: transparent; }
 .ref-pill {
-  font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: 999px; line-height: 1.5;
+  font-size: var(--font-3xs); font-weight: 600; padding: 0 5px; border-radius: 999px; line-height: var(--lh-base);
 }
 .ref-pill.local  { background: var(--accent-muted); color: var(--accent-bright); }
 .ref-pill.remote { background: var(--success-subtle); color: var(--success-bright); }
@@ -3309,12 +3411,12 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 
 .commit-detail {
   margin: 0 8px 4px 24px; background: var(--bg-inset); border: 1px solid var(--border-muted);
-  border-radius: 4px; padding: 6px 10px; font-size: 11px;
+  border-radius: var(--radius-xs); padding: 6px 10px; font-size: var(--font-2xs);
 }
 .cd-row { display: flex; gap: 8px; margin-bottom: 3px; color: var(--text-primary); }
 .cd-key { color: var(--text-muted); min-width: 46px; flex-shrink: 0; }
-.cd-body { color: var(--text-secondary); margin: 4px 0; white-space: pre-wrap; font-size: 10px; }
-.cd-file { color: var(--text-primary); font-family: monospace; font-size: 10px; padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cd-body { color: var(--text-secondary); margin: 4px 0; white-space: pre-wrap; font-size: var(--font-3xs); }
+.cd-file { color: var(--text-primary); font-family: var(--font-mono); font-size: var(--font-3xs); padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cd-file-clickable { cursor: pointer; }
 .cd-file-clickable:hover { color: var(--accent, #4a9eff); }
 .cd-file-row { display: flex; align-items: center; }
@@ -3325,19 +3427,19 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 /* ── Generic rows (stashes, remotes, tags) ──────────────────────────────────── */
 .generic-row {
   display: flex; align-items: center; gap: 6px;
-  padding: 3px 0; font-size: 11px;
+  padding: 3px 0; font-size: var(--font-2xs);
 }
 .generic-row:hover { background: var(--bg-hover-faint); }
-.stash-ref { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+.stash-ref { color: var(--text-muted); font-size: var(--font-3xs); flex-shrink: 0; }
 .stash-msg { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.remote-name { color: var(--text-muted); font-size: 10px; flex-shrink: 0; min-width: 44px; }
-.remote-url  { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-.wt-icon { color: var(--success-bright); font-size: 11px; flex-shrink: 0; width: 14px; text-align: center; }
+.remote-name { color: var(--text-muted); font-size: var(--font-3xs); flex-shrink: 0; min-width: 44px; }
+.remote-url  { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-2xs); }
+.wt-icon { color: var(--success-bright); font-size: var(--font-2xs); flex-shrink: 0; width: 14px; text-align: center; }
 .wt-name-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .wt-name-row .b-name { flex: 0 1 auto; }
 .wt-badge {
   font-size: 9px; color: var(--text-secondary); background: var(--bg-active);
-  border-radius: 8px; padding: 0 5px; flex-shrink: 0; white-space: nowrap;
+  border-radius: var(--radius-md); padding: 0 5px; flex-shrink: 0; white-space: nowrap;
 }
 .wt-badge.warn { color: var(--danger-fg); }
 
@@ -3346,16 +3448,16 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .issue-state-dot.open { background: var(--success-bright); }
 .issue-state-dot.closed { background: var(--accent-purple, #a371f7); }
 .issue-label {
-  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 8px;
+  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: var(--radius-md);
   background: var(--bg-muted); color: var(--text-muted); font-size: 9px; line-height: 14px;
 }
-.issue-detail-title { font-size: 12px; color: var(--text-primary); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.issue-detail-title { font-size: var(--font-xs); color: var(--text-primary); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
 .issue-body {
-  white-space: pre-wrap; word-break: break-word; font-size: 11px; color: var(--text-primary);
-  background: var(--bg-muted); border-radius: 4px; padding: 6px; margin: 0 0 4px; font-family: inherit;
+  white-space: pre-wrap; word-break: break-word; font-size: var(--font-2xs); color: var(--text-primary);
+  background: var(--bg-muted); border-radius: var(--radius-xs); padding: 6px; margin: 0 0 4px; font-family: inherit;
 }
 .issue-comment { border-top: 1px solid var(--border-faint, var(--border)); padding-top: 4px; margin-top: 4px; }
-.issue-handoff-badge { font-size: 11px; flex-shrink: 0; opacity: 0.75; line-height: 1; }
+.issue-handoff-badge { font-size: var(--font-2xs); flex-shrink: 0; opacity: 0.75; line-height: 1; }
 .issue-handoff-badge.handling { cursor: pointer; }
 .issue-handoff-badge.handling:hover { opacity: 1; }
 .issue-handoff-badge.pane-gone { opacity: 0.45; }
@@ -3363,52 +3465,63 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .dispatch-menu {
   position: absolute; top: 100%; right: 0; z-index: 20; margin-top: 2px;
   background: var(--bg-elevated, var(--bg-muted)); border: 1px solid var(--border);
-  border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.25); min-width: 120px; padding: 2px;
+  border-radius: var(--radius-xs); box-shadow: 0 2px 8px rgba(0,0,0,0.25); min-width: 120px; padding: 2px;
 }
 .dispatch-menu-item {
-  display: block; width: 100%; text-align: left; padding: 4px 8px; font-size: 11px;
-  background: none; border: none; color: var(--text-primary); cursor: pointer; border-radius: 3px;
+  display: block; width: 100%; text-align: left; padding: 4px 8px; font-size: var(--font-2xs);
+  background: none; border: none; color: var(--text-primary); cursor: pointer; border-radius: var(--radius-xs);
 }
 .dispatch-menu-item:hover { background: var(--bg-hover-faint); }
 
 /* ── Config ─────────────────────────────────────────────────────────────────── */
-.config-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 11px; }
-.config-key { color: var(--text-muted); min-width: 108px; flex-shrink: 0; font-family: monospace; font-size: 10px; }
+.config-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: var(--font-2xs); }
+.config-key { color: var(--text-muted); min-width: 108px; flex-shrink: 0; font-family: var(--font-mono); font-size: var(--font-3xs); }
 .config-val { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.config-val.clickable { cursor: pointer; border-radius: 3px; padding: 1px 4px; margin: -1px -4px; }
+.config-val.clickable { cursor: pointer; border-radius: var(--radius-xs); padding: 1px 4px; margin: -1px -4px; }
 .config-val.clickable:hover { background: var(--bg-muted); color: var(--text-on-emphasis); }
 .config-inline-input { flex: 1; min-width: 0; }
 
 /* ── Merge conflict modal ───────────────────────────────────────────────────── */
 .merge-conflict-box {
   margin: 4px 8px; background: var(--attention-subtle); border: 1px solid var(--warning-fg);
-  border-radius: 4px; padding: 8px 10px; font-size: 11px;
+  border-radius: var(--radius-xs); padding: 8px 10px; font-size: var(--font-2xs);
 }
 .merge-conflict-box .clean-title { color: var(--warning-fg); }
-.merge-conflict-context { color: var(--text-muted); font-size: 10px; margin-bottom: 4px; }
+.merge-conflict-context { color: var(--text-muted); font-size: var(--font-3xs); margin-bottom: 4px; }
 .conflict-file { color: var(--warning-fg) !important; opacity: 0.9; }
 .merge-conflict-actions { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
 
 /* ── Danger confirm text (shared by merge-conflict box) ──────────────────────── */
 .clean-title { color: var(--danger-fg); font-weight: 600; margin-bottom: 4px; }
-.clean-file { color: var(--text-primary); padding: 1px 4px; font-family: monospace; font-size: 10px; }
+.clean-file { color: var(--text-primary); padding: 1px 4px; font-family: var(--font-mono); font-size: var(--font-3xs); }
 .clean-actions { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
 
 .stash-box {
   margin: 4px 8px; background: var(--bg-subtle); border: 1px solid var(--border-default);
-  border-radius: 4px; padding: 8px 10px; font-size: 11px;
+  border-radius: var(--radius-xs); padding: 8px 10px; font-size: var(--font-2xs);
 }
 .stash-title { color: var(--text-primary); font-weight: 600; margin-bottom: 6px; }
 
 /* ── Inputs ─────────────────────────────────────────────────────────────────── */
 .git-input {
-  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-primary); font-size: 11px; padding: 3px 7px;
+  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-xs);
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 3px 7px;
 }
 .git-input:focus { outline: none; border-color: var(--accent-focus); }
 .input-row { display: flex; gap: 4px; }
-.check-label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); cursor: pointer; }
+.check-label { display: flex; align-items: center; gap: 4px; font-size: var(--font-2xs); color: var(--text-secondary); cursor: pointer; }
 .check-label input { accent-color: var(--accent-focus); cursor: pointer; }
+
+/* Decorative pulses use literal durations, so the global --motion-* reset
+   does not reach them. Spinners keep spinning on purpose: a frozen spinner
+   reads as a hung operation. */
+@media (prefers-reduced-motion: reduce) {
+  .ai-btn.auto-active:not(.generating) span,
+  .auto-pending-dot,
+  .ac-status-dot {
+    animation: none;
+  }
+}
 </style>
 
 <!-- Teleported dropdowns render at body level; must be non-scoped -->
@@ -3423,7 +3536,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
   z-index: 9999;
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 4px;
   min-width: 170px;
   box-shadow: 0 8px 24px var(--shadow-scrim);
@@ -3443,9 +3556,9 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
   background: transparent;
   border: none;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 5px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   text-align: left;
   font-family: inherit;
@@ -3455,7 +3568,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .tp-dropdown .menu-check {
   width: 14px;
   text-align: center;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--accent-fg);
   flex-shrink: 0;
 }
@@ -3471,7 +3584,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
   z-index: 9999;
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 4px;
   min-width: 200px;
   box-shadow: 0 8px 24px var(--shadow-scrim);
@@ -3483,9 +3596,9 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
   background: transparent;
   border: none;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 5px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   text-align: left;
   font-family: inherit;
@@ -3500,11 +3613,11 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 }
 /* Hover submenu (Add to ignore ▸) */
 .ctx-menu .menu-item.has-sub { position: relative; justify-content: space-between; }
-.ctx-menu .sub-caret { color: var(--text-muted); font-size: 10px; }
+.ctx-menu .sub-caret { color: var(--text-muted); font-size: var(--font-3xs); }
 .ctx-menu .ctx-submenu {
   position: absolute; top: -5px; left: 100%; margin-left: 2px;
   display: none; min-width: 220px;
-  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 6px;
+  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   padding: 4px; box-shadow: 0 8px 24px var(--shadow-scrim);
 }
 .ctx-menu .menu-item.has-sub:hover .ctx-submenu { display: block; }
@@ -3517,13 +3630,13 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .ignore-modal {
   position: fixed; z-index: 10000; top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(420px, 80vw); background: var(--bg-subtle); border: 1px solid var(--border-default);
-  border-radius: 8px; padding: 16px; box-shadow: 0 12px 32px rgba(1, 4, 9, 0.9);
+  border-radius: var(--radius-md); padding: 16px; box-shadow: 0 12px 32px rgba(1, 4, 9, 0.9);
   display: flex; flex-direction: column; gap: 10px;
 }
 .ignore-modal-path {
-  font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; color: var(--accent-fg);
+  font-family: var(--font-mono); font-size: var(--font-2xs); color: var(--accent-fg);
   word-break: break-all;
 }
-.ignore-modal-text { font-size: 13px; color: var(--text-primary); line-height: 1.5; }
+.ignore-modal-text { font-size: var(--font-sm); color: var(--text-primary); line-height: var(--lh-base); }
 .ignore-modal .btn-ghost { align-self: flex-end; }
 </style>

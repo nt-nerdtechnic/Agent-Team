@@ -16,9 +16,17 @@ const props = defineProps<{
   // When set, shows the diff this commit introduced (read-only: no stage/
   // unstage/discard actions) instead of the working-tree/staged diff.
   commit?: string
+  // Hides every write action (stage / unstage / discard) without changing how
+  // the diff renders. Set by the read-only rail preview panel; commit diffs
+  // are already read-only via the check below.
+  readonly?: boolean
 }>()
 
 const emit = defineEmits<{ 'open-file': [{ filepath: string; name: string }] }>()
+
+// Write actions are available only for a live working-tree/staged diff that
+// the host has not marked read-only.
+const canEdit = computed(() => !props.commit && !props.readonly)
 
 const notify = useNotify()
 
@@ -127,6 +135,7 @@ function selectedCount(hunkIdx: number): number {
 }
 
 async function apply(patch: string, reverse: boolean, cached: boolean): Promise<void> {
+  if (!canEdit.value) return
   try {
     const resp = await props.gitTransport.send<{ ok: boolean; error?: string }>('git.apply_patch', {
       workspace_path: props.workspacePath,
@@ -204,7 +213,7 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
         <div v-for="(hunk, hi) in parsed.hunks" :key="hi" class="dp-hunk" :class="{ active: hi === currentHunkIdx }">
           <div class="dp-hunk-head">
             <span class="dp-range">{{ hunk.header }}</span>
-            <span v-if="!commit" class="dp-actions">
+            <span v-if="canEdit" class="dp-actions">
               <template v-if="staged">
                 <button class="hk-btn" @click="unstageHunk(hunk)">{{ $t('action.unstage-hunk') }}</button>
               </template>
@@ -219,14 +228,14 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
             <template v-for="(row, ri) in toSideBySide(hunk)" :key="ri">
               <div class="dp-side left" :class="cellClass(row.left)">
                 <span class="dp-no">{{ row.left ? row.left.lineNo : '' }}</span>
-                <input v-if="!commit && !staged && row.left && row.left.kind === '-'" class="dp-check" type="checkbox" :checked="isSelected(hi, row.left.idx)" @change="toggleLine(hi, row.left.idx)" />
+                <input v-if="canEdit && !staged && row.left && row.left.kind === '-'" class="dp-check" type="checkbox" :checked="isSelected(hi, row.left.idx)" @change="toggleLine(hi, row.left.idx)" />
                 <span v-else class="dp-check-sp" />
                 <span class="dp-sign">{{ row.left ? row.left.kind : '' }}</span>
                 <span class="dp-code">{{ row.left ? row.left.text : '' }}</span>
               </div>
               <div class="dp-side right" :class="cellClass(row.right)">
                 <span class="dp-no">{{ row.right ? row.right.lineNo : '' }}</span>
-                <input v-if="!commit && !staged && row.right && row.right.kind === '+'" class="dp-check" type="checkbox" :checked="isSelected(hi, row.right.idx)" @change="toggleLine(hi, row.right.idx)" />
+                <input v-if="canEdit && !staged && row.right && row.right.kind === '+'" class="dp-check" type="checkbox" :checked="isSelected(hi, row.right.idx)" @change="toggleLine(hi, row.right.idx)" />
                 <span v-else class="dp-check-sp" />
                 <span class="dp-sign">{{ row.right ? row.right.kind : '' }}</span>
                 <span class="dp-code">{{ row.right ? row.right.text : '' }}</span>
@@ -254,10 +263,10 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
   border-bottom: 1px solid var(--border-muted);
   background: var(--bg-subtle);
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .dp-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 999px;
@@ -284,8 +293,8 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   background: transparent;
   border: none;
   border-radius: 4px;
@@ -297,7 +306,7 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
 .dp-tbtn:disabled { opacity: 0.35; cursor: default; }
 
 .dp-body { flex: 1; overflow: auto; }
-.dp-msg { padding: 24px; text-align: center; color: var(--text-muted); font-size: 12px; }
+.dp-msg { padding: 24px; text-align: center; color: var(--text-muted); font-size: var(--font-xs); }
 .dp-msg.err { color: var(--danger-fg); }
 
 .dp-img-wrap { display: flex; justify-content: center; padding: 24px; }
@@ -315,14 +324,14 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
   top: 0;
   z-index: 1;
 }
-.dp-range { color: var(--accent-fg); font-family: ui-monospace, Menlo, monospace; font-size: 11px; opacity: 0.85; }
+.dp-range { color: var(--accent-fg); font-family: ui-monospace, Menlo, monospace; font-size: var(--font-2xs); opacity: 0.85; }
 .dp-actions { display: flex; gap: 5px; }
 .hk-btn {
   background: var(--bg-muted);
   color: var(--text-primary);
   border: 1px solid var(--border-muted);
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 8px;
   cursor: pointer;
 }
@@ -335,15 +344,15 @@ function cellClass(cell: { kind: ' ' | '+' | '-' } | null): string {
   display: flex;
   align-items: flex-start;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   white-space: pre;
   padding-right: 8px;
   min-height: 18px;
 }
 .dp-side.left { border-right: 1px solid var(--border-muted); }
 .dp-side.empty { background: var(--bg-subtle); }
-.dp-no { width: 42px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--text-muted); user-select: none; font-size: 11px; }
+.dp-no { width: 42px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--text-muted); user-select: none; font-size: var(--font-2xs); }
 .dp-check { margin: 2px 3px 0 0; flex-shrink: 0; cursor: pointer; }
 .dp-check-sp { width: 16px; flex-shrink: 0; }
 .dp-sign { width: 10px; flex-shrink: 0; text-align: center; user-select: none; }

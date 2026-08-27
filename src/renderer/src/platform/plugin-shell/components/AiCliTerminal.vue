@@ -7,22 +7,24 @@
 import { onMounted, ref, watch } from 'vue'
 import { useTerminal } from '@navide/terminal'
 import { useTheme } from '@navide/plugin-ui/foundation'
-import type { TerminalDockPort } from '@navide/terminal'
+import type { MentionCandidate, TerminalDockPort } from '@navide/terminal'
 import { agentProfileFor } from '../agentProfile'
 
 const props = defineProps<{
   paneId: string
   terminalPort: TerminalDockPort
   workspacePath?: string
-  /** Names offered by the @-mention menu. Read lazily on every `@` keystroke,
-   *  so the host can keep refreshing the list behind this prop. */
-  mentionCandidates?: string[]
+  /** Resolves the addresses offered by the @-mention menu, with the group and
+   *  status words already translated by the host. A getter, called on the `@`
+   *  keystroke rather than on every render — see TerminalPane's copy of this
+   *  prop for why. */
+  mentionCandidates?: (paneId: string) => MentionCandidate[]
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
 const terminal = useTerminal(props.paneId, props.terminalPort, {
   workspacePath: props.workspacePath,
-  mentionCandidates: () => props.mentionCandidates ?? [],
+  mentionCandidates: () => props.mentionCandidates?.(props.paneId) ?? [],
   agentProfileFor,
 })
 const { theme } = useTheme()

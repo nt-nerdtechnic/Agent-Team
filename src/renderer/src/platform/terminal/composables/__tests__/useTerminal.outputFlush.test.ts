@@ -155,7 +155,8 @@ describe('useTerminal — output flush policy', () => {
     expect(captured.writes).toEqual([]) // nothing until the coalesce window
 
     await new Promise((r) => setTimeout(r, 120))
-    expect(captured.writes).toEqual(['ab'])
+    // One flush, chunk-by-chunk writes (xterm takes Uint8Array chunks as-is).
+    expect(captured.writes).toEqual(['a', 'b'])
     scope.stop()
   })
 
@@ -167,7 +168,7 @@ describe('useTerminal — output flush policy', () => {
 
     captured.textarea!.dispatchEvent(new Event('focus'))
     emitOutput(mock, 'new')
-    expect(captured.writes).toEqual(['oldnew']) // order preserved, single write
+    expect(captured.writes).toEqual(['old', 'new']) // order preserved, one flush
     scope.stop()
   })
 

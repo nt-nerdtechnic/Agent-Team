@@ -17,8 +17,10 @@ const appSource = readFileSync(
 
 describe('manual pane session persistence ordering', () => {
   it('spawnPane does not persist the session on its manual early-return path', () => {
+    // The guard reads `!== 'pipeline'` (not `=== 'manual'`) so that mcp-spawned
+    // panes take the same early-return path as manual ones.
     const start = appSource.indexOf(
-      "if (pane.origin === 'manual' && !pane.roleKey && !pane.kickoffPrompt) {"
+      "if (pane.origin !== 'pipeline' && !pane.roleKey && !pane.kickoffPrompt) {"
     )
     expect(start).toBeGreaterThan(-1)
     const block = appSource.slice(start, appSource.indexOf('return id', start))

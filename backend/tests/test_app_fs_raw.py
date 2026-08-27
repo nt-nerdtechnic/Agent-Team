@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 
+from agent_team_backend import app as app_module
 from agent_team_backend.app import app
 
 
@@ -162,3 +166,21 @@ def test_raw_nonexistent_workspace_rejected(client, tmp_path):
         params={"workspace": str(tmp_path / "no-such-ws"), "rel": "a.txt"},
     )
     assert resp.status_code == 400
+
+
+def test_raw_offloads_the_blocking_helper(client, workspace, monkeypatch):
+    """The route is `async def`, so FastAPI runs it on the event loop itself.
+    _resolve_safe/is_dir/is_file are real syscalls that hang for minutes on a
+    stalled cloud mount — they belong on a worker thread (issue #24)."""
+    threaded_fns: list[Any] = []
+    orig_to_thread = asyncio.to_thread
+
+    async def spy(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        threaded_fns.append(fn)
+        return await orig_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    resp = _get(client, workspace, "video.mp4")
+
+    assert resp.status_code == 200
+    assert app_module._serve_workspace_file in threaded_fns

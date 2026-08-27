@@ -58,6 +58,17 @@ def main() -> int:
         port=resolved_port,
         log_level=args.log_level,
         access_log=False,
+        # Terminal output dominates this socket: many panes, each emitting
+        # frames up to 64 KB. Deflating every one of them runs zlib on the
+        # event loop, and everything else -- including the heartbeat pong --
+        # waits behind that. The traffic is loopback, so the bytes saved buy
+        # nothing.
+        ws_per_message_deflate=False,
+        # Be explicit about the protocol-level heartbeat rather than inheriting
+        # 20s/20s. Under heavy PTY output a send can stall for seconds, and a
+        # tight server-side timeout closes connections that are busy, not dead.
+        ws_ping_interval=20.0,
+        ws_ping_timeout=60.0,
     )
     server = uvicorn.Server(config)
 

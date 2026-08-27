@@ -23,8 +23,8 @@ watch(
 
 <template>
   <Teleport to="body">
-    <div v-if="open" ref="dialog" class="restore-scope-modal" tabindex="-1" @keydown.esc="emit('cancel')">
-      <section class="restore-scope-card" role="dialog" aria-modal="true" :aria-label="$t('restore.scope-title')">
+    <div v-if="open" ref="dialog" class="restore-scope-modal nv-modal-overlay" tabindex="-1" @keydown.esc="emit('cancel')">
+      <section class="restore-scope-card nv-modal-shell nv-modal-shell--compact" role="dialog" aria-modal="true" :aria-label="$t('restore.scope-title')">
         <h2>{{ $t('restore.scope-title') }}</h2>
         <p>{{ $t('restore.scope-message', { count }) }}</p>
         <div class="scope-actions">
@@ -47,15 +47,17 @@ watch(
   display: grid;
   place-items: center;
   padding: 24px;
-  background: color-mix(in srgb, var(--bg-base) 62%, transparent);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
 }
 .restore-scope-card {
-  width: min(440px, 100%);
+  width: min(var(--modal-w-compact), 92vw);
   padding: 20px;
   border: 1px solid var(--border-default);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--bg-base);
-  box-shadow: 0 18px 45px var(--shadow-overlay);
+  box-shadow: var(--shadow-modal);
 }
 h2 { margin: 0 0 8px; font-size: 17px; }
 p { margin: 0 0 16px; color: var(--text-secondary); }
@@ -63,7 +65,7 @@ p { margin: 0 0 16px; color: var(--text-secondary); }
 button {
   min-height: 34px;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-subtle);
   color: var(--text-primary);
   cursor: pointer;

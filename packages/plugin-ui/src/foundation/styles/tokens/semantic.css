@@ -26,6 +26,78 @@
   --font-page-title: 20px;
   --font-row-title: 15px;
   --font-row-desc: 13px;
+
+  /* ── Font families ──────────────────────────────────────────── */
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang TC', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ── Type scale (7 steps) ───────────────────────────────────── */
+  --font-3xs: 10px;  /* dense UI floor: sidebar rows, status bar, tab
+                        strips. Nothing in the app should be smaller. */
+  --font-2xs: 11px;  /* badges / tags */
+  --font-xs: 12px;   /* secondary captions */
+  --font-sm: 13px;   /* list body (= --font-row-desc) */
+  --font-md: 14px;   /* primary body */
+  --font-lg: 16px;   /* section titles */
+  --font-xl: 20px;   /* page titles (= --font-page-title) */
+
+  /* ── Line heights (3 steps) ─────────────────────────────────── */
+  --lh-tight: 1.3;   /* single-line badges / tabs */
+  --lh-base: 1.5;    /* lists / forms */
+  --lh-loose: 1.65;  /* prose paragraphs */
+
+  /* ── Radius scale (4 steps + existing --radius-pill) ────────── */
+  --radius-xs: 4px;  /* badges / small tags */
+  --radius-sm: 6px;  /* buttons / inputs */
+  --radius-md: 8px;  /* popovers / menus / cards */
+  --radius-lg: 12px; /* modals / large panels (= --radius-card) */
+
+  /* ── Elevation shadows (color part resolves per theme) ──────── */
+  --shadow-popover: 0 8px 28px var(--shadow-overlay);
+  --shadow-modal: 0 16px 48px var(--shadow-scrim);
+  --shadow-floating: 0 2px 8px var(--shadow-overlay);
+
+  /*
+   * ── Z-index layers ──────────────────────────────────────────
+   * Add-only for now — do NOT bulk-replace existing z-index values.
+   * Migrate in small batches with a visual stacking check per batch.
+   * Intended mapping of today's magic numbers:
+   *   1-10            → --z-base    (in-pane layering)
+   *   20-300          → --z-sticky  (titlebar / statusbar / tab bar)
+   *   999-2100        → --z-popover (menus / popovers / tooltips)
+   *   5000-9560       → --z-modal   (dialogs and their scrims)
+   *   9998-10100      → --z-toast   (notifications, always on top)
+   */
+  --z-base: 1;
+  --z-sticky: 100;
+  --z-popover: 1000;
+  --z-modal: 2000;
+  --z-toast: 3000;
+
+  /* ── Motion (2 durations + 1 curve) ─────────────────────────── */
+  --motion-fast: 120ms; /* hover / active / color changes */
+  --motion-base: 200ms; /* panel in-out / expand-collapse */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ── Icon button containers (3 sizes) ───────────────────────── */
+  --icon-btn-sm: 20px;
+  --icon-btn-md: 24px;
+  --icon-btn-lg: 28px;
+
+  /* ── Window chrome scale ────────────────────────────────────── */
+  --chrome-titlebar: 38px;
+  --chrome-tabbar: 36px;
+  --chrome-statusbar: 24px;
+  --chrome-trafficlight: 80px;
+}
+
+/* Zero out motion tokens when the OS asks for reduced motion; covers
+ * every consumer of --motion-* in one place. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
 }
 
 :root,
@@ -139,4 +211,412 @@
   --ansi-bright-magenta: #d2a8ff;
   --ansi-bright-cyan: #56d4dd;
   --ansi-bright-white: #f0f6fc;
+}
+
+/*
+ * ═══════════════════════════════════════════════════════════════
+ * Shared component surface (Phase 2)
+ *
+ * A style-only layer: it defines the house spec for buttons, modal
+ * shells, form controls and popovers. Components opt in by adding an
+ * `nv-*` class next to their existing classes — nothing here removes
+ * or renames anything a component already declares.
+ *
+ * Specificity note: scoped component rules carry an extra
+ * [data-v-*] attribute, so they outrank the plain class selectors
+ * below. This layer therefore *fills gaps* (missing hover / active /
+ * focus-visible / disabled / transition) rather than overriding what
+ * a component already decided. Where a component must converge on the
+ * house spec, its own scoped block consumes the tokens defined here.
+ * ═══════════════════════════════════════════════════════════════
+ */
+:root {
+  /* ── Modal shell scale ──────────────────────────────────────── */
+  --modal-w-compact: 440px;   /* confirmations, single-field prompts */
+  --modal-w-standard: 620px;  /* forms, guided flows */
+  --modal-w-wide: 1100px;     /* data tables, multi-pane settings */
+  --modal-backdrop: var(--shadow-overlay);
+  --modal-backdrop-blur: 4px;
+
+  /* ── Control heights ────────────────────────────────────────── */
+  --control-h-sm: 24px;
+  --control-h-md: 28px;
+  --control-h-lg: 32px;
+
+  /* ── Popover geometry (promoted from the 4 status-bar popovers) ─ */
+  --radius-popover: var(--radius-md);
+}
+
+/* ── Button ─────────────────────────────────────────────────────
+ * `.nv-btn` is the house button. Variants are modifier classes so a
+ * component can add `nv-btn nv-btn--primary` alongside its own class.
+ */
+.nv-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: var(--lh-tight);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
+}
+.nv-btn:hover:not(:disabled):not([disabled]) {
+  background: var(--bg-hover-strong);
+  border-color: var(--border-strong);
+}
+.nv-btn:active:not(:disabled):not([disabled]) {
+  transform: translateY(1px);
+}
+.nv-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.nv-btn:disabled,
+.nv-btn[disabled],
+.nv-btn[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.nv-btn--primary {
+  background: var(--accent-emphasis);
+  border-color: var(--accent-emphasis);
+  color: var(--text-on-emphasis);
+}
+.nv-btn--primary:hover:not(:disabled):not([disabled]) {
+  background: var(--accent-focus);
+  border-color: var(--accent-focus);
+}
+
+.nv-btn--danger {
+  background: var(--danger-emphasis);
+  border-color: var(--danger-emphasis);
+  color: var(--text-on-emphasis);
+}
+.nv-btn--danger:hover:not(:disabled):not([disabled]) {
+  background: var(--danger-fg);
+  border-color: var(--danger-fg);
+}
+
+.nv-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.nv-btn--ghost:hover:not(:disabled):not([disabled]) {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--text-bright);
+}
+
+.nv-btn--sm {
+  padding: 3px 8px;
+  font-size: var(--font-xs);
+}
+
+/* Icon-only button container: three sizes from the Phase 1 scale. */
+.nv-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.nv-icon-btn:hover:not(:disabled):not([disabled]) {
+  background: var(--bg-hover-strong);
+  color: var(--text-bright);
+}
+.nv-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.nv-icon-btn--sm { width: var(--icon-btn-sm); height: var(--icon-btn-sm); }
+.nv-icon-btn--lg { width: var(--icon-btn-lg); height: var(--icon-btn-lg); }
+
+/*
+ * The 29 historical button prefixes. Names are NOT changed — this list
+ * only grants them the four interaction states and a shared corner
+ * radius. Every property here is one a scoped rule overrides if the
+ * component already made a decision, so the visible effect is limited
+ * to the buttons that were missing feedback entirely.
+ */
+.ah-icon-btn,
+.ai-cli-btn,
+.an-btn,
+.bp-btn,
+.ch-btn,
+.ci-btn,
+.cli-btn,
+.cm-btn,
+.cp-btn,
+.exp-btn,
+.ga-btn,
+.ob-btn,
+.pv-btn,
+.row-btn,
+.sel-btn,
+.stall-btn {
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
+}
+.ah-icon-btn:focus-visible,
+.ai-cli-btn:focus-visible,
+.an-btn:focus-visible,
+.bp-btn:focus-visible,
+.ch-btn:focus-visible,
+.ci-btn:focus-visible,
+.cli-btn:focus-visible,
+.cm-btn:focus-visible,
+.cp-btn:focus-visible,
+.exp-btn:focus-visible,
+.ga-btn:focus-visible,
+.ob-btn:focus-visible,
+.pv-btn:focus-visible,
+.row-btn:focus-visible,
+.sel-btn:focus-visible,
+.stall-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.ah-icon-btn:disabled,
+.ai-cli-btn:disabled,
+.an-btn:disabled,
+.bp-btn:disabled,
+.ch-btn:disabled,
+.ci-btn:disabled,
+.cli-btn:disabled,
+.cm-btn:disabled,
+.cp-btn:disabled,
+.exp-btn:disabled,
+.ga-btn:disabled,
+.ob-btn:disabled,
+.pv-btn:disabled,
+.row-btn:disabled,
+.sel-btn:disabled,
+.stall-btn:disabled {
+  cursor: not-allowed;
+}
+
+/* ── Modal shell ────────────────────────────────────────────────
+ * `.nv-modal-overlay` skins the scrim, `.nv-modal-shell` skins the
+ * card. Neither sets display/position/overflow, so adding the class
+ * to an existing overlay cannot rearrange its layout.
+ */
+.nv-modal-overlay {
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
+}
+.nv-modal-shell {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+}
+/* Opacity-only on purpose: several cards centre themselves with
+ * translate(-50%, …), and animating `transform` here would fight that. */
+@keyframes nv-modal-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes nv-modal-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.nv-modal-overlay { animation: nv-modal-scrim-in var(--motion-fast) var(--ease-out); }
+.nv-modal-shell { animation: nv-modal-in var(--motion-base) var(--ease-out); }
+
+.nv-modal-shell--compact { width: min(var(--modal-w-compact), 92vw); }
+.nv-modal-shell--standard { width: min(var(--modal-w-standard), 92vw); }
+.nv-modal-shell--wide { width: min(var(--modal-w-wide), 92vw); }
+
+/* ── Popover ────────────────────────────────────────────────────
+ * The formula the four status-bar popovers already agreed on.
+ */
+.nv-popover {
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-popover);
+  box-shadow: var(--shadow-popover);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+}
+
+/* ── Form controls ──────────────────────────────────────────────
+ * Native <input> / <select> / checkbox get the house skin. The
+ * element-level accent-color rule is deliberately unscoped: no
+ * component sets it today, so it is a pure gap fill.
+ */
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--accent-emphasis);
+}
+
+.nv-input,
+.nv-select {
+  padding: 5px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: var(--lh-base);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+.nv-input::placeholder {
+  color: var(--text-muted);
+}
+.nv-input:hover:not(:disabled),
+.nv-select:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+.nv-input:focus,
+.nv-select:focus {
+  outline: none;
+  border-color: var(--accent-focus);
+}
+.nv-input:disabled,
+.nv-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.nv-select {
+  cursor: pointer;
+}
+.nv-check {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent-emphasis);
+}
+.nv-check:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
+}
+
+/* Helper / hint text under a control — one spec, many legacy names. */
+.nv-hint {
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
+}
+
+/*
+ * ═══════════════════════════════════════════════════════════════
+ * Interaction feedback (Phase 3)
+ *
+ * Three gaps this layer fills, all of them appearance-only:
+ * pressed state, keyboard focus ring, and the shared look of the
+ * empty / loading copy panels already render. Nothing here gates or
+ * creates state — a panel with no empty-state markup stays as it is.
+ * ═══════════════════════════════════════════════════════════════
+ */
+
+/*
+ * House pressed state. `opacity` and not `transform`, because a
+ * transform here would clobber the translate() several buttons use to
+ * position themselves. Instant on purpose: press feedback that eases
+ * in reads as lag.
+ */
+button:not(:disabled):not([disabled]):active,
+[role='button']:not([aria-disabled='true']):active {
+  opacity: 0.85;
+}
+
+/*
+ * House focus ring. `outline-offset` is negative so the ring is drawn
+ * inside the button and cannot be clipped by a parent's overflow —
+ * the failure mode that made several of the existing rings invisible.
+ * Component-scoped rules carry a [data-v-*] attribute and still win,
+ * so a component that already styles focus is untouched.
+ */
+button:focus-visible,
+summary:focus-visible,
+[role='button']:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: -2px;
+}
+
+/* Pressed state for the historical button prefixes (see the Phase 2
+ * list above): they inherit the global rule, this only adds the
+ * matching :not() guards their disabled styling relies on. */
+.ah-icon-btn:active:not(:disabled),
+.ai-cli-btn:active:not(:disabled),
+.an-btn:active:not(:disabled),
+.bp-btn:active:not(:disabled),
+.ch-btn:active:not(:disabled),
+.ci-btn:active:not(:disabled),
+.cli-btn:active:not(:disabled),
+.cm-btn:active:not(:disabled),
+.cp-btn:active:not(:disabled),
+.exp-btn:active:not(:disabled),
+.ga-btn:active:not(:disabled),
+.ob-btn:active:not(:disabled),
+.pv-btn:active:not(:disabled),
+.row-btn:active:not(:disabled),
+.sel-btn:active:not(:disabled),
+.stall-btn:active:not(:disabled) {
+  opacity: 0.85;
+}
+
+/* ── Empty / loading copy ───────────────────────────────────────
+ * Appearance only. These classes go on text that already renders;
+ * they set centring, greyscale, size and breathing room so an empty
+ * list stops looking like a rendering failure. No display change —
+ * attaching one cannot restack an element's children.
+ */
+.nv-empty,
+.nv-loading {
+  padding: 28px 16px;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: var(--lh-base);
+  text-align: center;
+}
+.nv-loading {
+  color: var(--text-secondary);
+}
+/* Dense rows and inline slots, where 28px of padding would push the
+ * surrounding layout around. */
+.nv-empty--inline,
+.nv-loading--inline {
+  padding: 10px 12px;
 }

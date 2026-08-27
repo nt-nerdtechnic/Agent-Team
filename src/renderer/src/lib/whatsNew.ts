@@ -36,6 +36,171 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.91',
+    title: {
+      'zh-TW': '全新資源管理器、背景子代理追蹤、Loop 迴圈等待退避與日誌防護',
+      'en-US': 'Resource Manager, Background Subagent Tracking, Loop Wait Backoff & Log Stability',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '全新資源管理器 (Resource Manager)：整合 CPU 佔用、記憶體與 Token 消耗即時監控，支援全局面板跳轉與閒置回收。',
+        'en-US':
+          'Unified Resource Manager: real-time CPU, memory, and token monitoring with cross-window pane jumping and idle reclaim.',
+      },
+      {
+        'zh-TW':
+          '背景子代理追蹤與 Loop 等待退避：支援 <<LOOP_WAIT>> 標記與階梯式退避，精準識別子代理執行狀態，防止迴圈空轉。',
+        'en-US':
+          'Subagent Tracking & Loop Wait Backoff: supports <<LOOP_WAIT>> markers and tiered backoff to prevent loops from spinning on background tasks.',
+      },
+      {
+        'zh-TW':
+          '工作區多視窗拖曳交接：側邊欄工作區標題支援拖曳至獨立新視窗，無縫移交運作中的 Agent 會話。',
+        'en-US':
+          'Workspace Detach Gesture: drag workspace headers out to their own windows without interrupting active agent processes.',
+      },
+      {
+        'zh-TW':
+          '日誌讀取與回合結束訊號防護：修復未完成行導致 High-Water Mark 提前推進的問題，確保回合結束訊號不遺失。',
+        'en-US':
+          'Log Ingestion & Turn-End Protection: prevents half-written log lines from prematurely advancing watermarks and dropping turn ends.',
+      },
+      {
+        'zh-TW':
+          'Claude 配額直接查詢：改採 Print 模式直接非同步執行獲取額度與原因，消除終端模擬輸入的延遲與誤報。',
+        'en-US':
+          'Claude Quota Direct Probing: fetches Claude quotas directly via print mode, eliminating PTY input lag and false errors.',
+      },
+    ],
+  },
+  {
+    version: '0.1.90',
+    title: {
+      'zh-TW': '終端 PTY 二進位幀串流傳輸與後端日誌探索效能優化',
+      'en-US': 'Terminal PTY Binary Frame Streaming & Background Rescan Performance',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '終端 PTY 二進位幀傳輸：終端輸出全面改採 WebSocket Binary Frame 串流，避免 JSON 字串編碼與轉義負擔，巨量輸出更加極速流暢。',
+        'en-US':
+          'PTY Binary Frame Streaming: terminal outputs now stream over WebSocket binary frames, eliminating JSON escaping overhead for high-speed terminal throughput.',
+      },
+      {
+        'zh-TW':
+          '後端檔案探索非同步化：日誌監控（LogWatcher）磁碟檔案探索全面移至背景執行緒，徹底杜絕大型專案下的主事件循環延遲。',
+        'en-US':
+          'Non-blocking Rescan Discovery: moves disk session discovery into background threads, keeping the main asyncio event loop completely responsive.',
+      },
+    ],
+  },
+  {
+    version: '0.1.89',
+    title: {
+      'zh-TW': '官方 Brand 視覺升級、Git 多倉庫選擇器、靜音閒置回收與品質守衛',
+      'en-US': 'Official Brand Assets, Git Multi-Repo Selector, Quiet Idle Sweep & Quality Gates',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '官方 Brand Assets 視覺升級：全新深淺色 Logo、向量 SVG、macOS Canvas 規範應用程式圖標與多尺寸 Web Favicon。',
+        'en-US':
+          'Official Brand Assets: new light/dark logos, vector SVGs, macOS canvas icons, and multi-size web favicons.',
+      },
+      {
+        'zh-TW':
+          'Git 多倉庫選擇器：工作區包含多個 Git 倉庫時，Git 面板支援下拉快速切換當前焦點儲存庫。',
+        'en-US':
+          'Git Multi-Repo Selector: easily switch between repositories in multi-repository workspaces directly within the Git pane.',
+      },
+      {
+        'zh-TW':
+          '定時閒置回收靜音：背景定時掃描並回收長時間閒置的 CLI 終端時僅記錄於日誌，不再彈出打擾 Toast 提示。',
+        'en-US':
+          'Quiet Idle Sweep: background timed idle sweeps log quietly without popping up disruptive toast notifications.',
+      },
+      {
+        'zh-TW':
+          'WebSocket 指數退避重連：WebSocket 連線中斷時自動依指數退避策略重試連線（1.5s 至 30s）。',
+        'en-US':
+          'WebSocket Exponential Reconnect: automatic reconnection with exponential backoff on dropped WebSocket connections.',
+      },
+      {
+        'zh-TW':
+          'Ruff 靜態分析與發布守衛：發布流程正式引入 Ruff ASYNC 與 F821 規則檢查，嚴防未定義變數與 Event Loop 阻塞。',
+        'en-US':
+          'Release Quality Gates: integrates Ruff ASYNC and F821 checks into release gates to guard against unhandled imports and loop stalls.',
+      },
+    ],
+  },
+  {
+    version: '0.1.88',
+    title: {
+      'zh-TW': '後端 Event Loop 延遲監控、視窗最小尺寸防護與 Kimi 延遲優化',
+      'en-US': 'Event-Loop Latency Watchdog, Window Minimum Dimensions & Kimi TUI Optimization',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          'Event Loop 延遲監控看門狗：每秒探測後端排程延遲，及時發現並記錄潛在的長耗時操作。',
+        'en-US':
+          'Event-Loop Latency Watchdog: monitors and logs backend scheduling latency to catch blocking operations early.',
+      },
+      {
+        'zh-TW':
+          '視窗最小尺寸限制：為桌面視窗設定合理的最小寬高防護，避免過度縮小導致介面擠壓。',
+        'en-US':
+          'Window Minimum Dimensions: enforces minimum window bounds to prevent layout distortion when resized small.',
+      },
+      {
+        'zh-TW':
+          'Kimi CLI 退出鍵瞬間響應：預設配置 escape sequence 延遲時間，消除 Kimi TUI 介面下的選單切換延遲。',
+        'en-US':
+          'Kimi TUI Esc Sequence Fix: configures escape timeouts so menu and navigation keys respond immediately.',
+      },
+      {
+        'zh-TW':
+          'Git 倉庫受限掃描時間：大型或網路檔案系統上的倉庫探索加入時間預算，不阻塞後端事件循環。',
+        'en-US':
+          'Bounded Git Discovery: bounds filesystem repository discovery scans with a timeout budget to keep the backend responsive.',
+      },
+    ],
+  },
+  {
+    version: '0.1.87',
+    title: {
+      'zh-TW': '工作區 Slot 佈局、檔案預覽面板、Process 記憶體探針與閒置回收',
+      'en-US': 'Workbench Layout Model, File Previews, Process Memory Probes & Idle Reclaim',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '工作區 Slot 自訂佈局：支援左/右/底側欄自訂槽位與快捷鍵折疊切換。',
+        'en-US':
+          'Workbench Layout Model: custom slot containers across left, right, and bottom panels with collapse shortcuts.',
+      },
+      {
+        'zh-TW':
+          '檔案與產物預覽面板：支援 Markdown、HTML 與程式碼片段即時預覽，以及 Diff 唯讀檢視。',
+        'en-US':
+          'File & Artifact Previews: inline rendering for Markdown, HTML, code snippets, and Diff views.',
+      },
+      {
+        'zh-TW':
+          '後端 Process 記憶體探針：狀態列即時顯示後端與終端記憶體佔用與 Token 詳細統計。',
+        'en-US':
+          'Process Memory Telemetry: status bar popovers with real-time memory usage and token usage breakdowns.',
+      },
+      {
+        'zh-TW':
+          '終端長時間閒置回收：自動回收長時間無操作的 CLI 面板釋放系統記憶體，支援點擊一鍵恢復。',
+        'en-US':
+          'Terminal Idle Reclaim: automatically reclaims memory from long-idle CLI processes with one-click restore.',
+      },
+    ],
+  },
+  {
     version: '0.1.86',
     title: {
       'zh-TW': '階段分頁狀態燈號、⌘W 彈窗關閉優化、剪貼簿貼上防禦與 Dev 正式版隔離',

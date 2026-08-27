@@ -617,7 +617,7 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--border-default);
   display: flex;
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   gap: 10px;
   padding: 6px 12px;
 }
@@ -629,7 +629,7 @@ onUnmounted(() => {
 .plan-snapshot-note {
   color: var(--text-muted);
   flex: 1;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 
 .plan-snapshot-close {
@@ -638,7 +638,7 @@ onUnmounted(() => {
   border-radius: 6px;
   color: var(--text-primary);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 10px;
 }
 
@@ -650,7 +650,7 @@ onUnmounted(() => {
   align-items: center;
   color: var(--text-muted);
   display: flex;
-  font-size: 13px;
+  font-size: var(--font-sm);
   justify-content: center;
 }
 

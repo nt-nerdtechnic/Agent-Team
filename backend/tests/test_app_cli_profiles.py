@@ -1205,7 +1205,10 @@ async def test_terminal_create_active_account_gets_no_profile_env(
     })
 
     created = session.terminals.created[0]  # type: ignore[attr-defined]
-    assert created["env"] is None
+    if agent_key == "kimi":
+        assert created["env"] == {"PI_TUI_ESC_TIMEOUT": "100"}
+    else:
+        assert created["env"] is None
     assert created["env_remove"] is None
     assert not real_vault.profile_home_path(agent_key, profile["id"]).exists()
 

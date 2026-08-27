@@ -775,6 +775,11 @@ def _target_view(entry: Any, same_workspace: bool) -> dict[str, Any]:
     view: dict[str, Any] = {
         "name": entry.name,
         "address": entry.qualified_name,
+        # The messaging tools address a pane by `address`; every ui.pane.* action
+        # takes this instead. Without it here the roster names panes it cannot
+        # tell you how to focus or close, and the id↔name map is only reachable
+        # through ui_snapshot, whose shape nothing documents.
+        "pane_id": entry.pane_id,
         "workspace_path": entry.workspace_path,
         "same_workspace": same_workspace,
         "busy": entry.busy,
@@ -793,13 +798,18 @@ def _target_view(entry: Any, same_workspace: bool) -> dict[str, Any]:
 async def cli_list_targets(ctx: Context) -> dict[str, Any]:
     """List the CLI panes you can send instructions to with cli_send.
 
-    Returns {you, targets}. Each target: {name, address, workspace_path,
-    same_workspace, busy, offline}. Address a pane in YOUR workspace by its bare
-    name; a pane in another workspace window by the `<folder>/<pane>` address
-    given here. A caller with no pane identity (host / external credential) has
-    no "own workspace" — every target comes back with same_workspace false and
-    "you" set to the credential kind ("host" or "external"); always use the
-    qualified address. Read-only.
+    Returns {you, targets}. Each target: {name, address, pane_id,
+    workspace_path, same_workspace, busy, offline}. Address a pane in YOUR
+    workspace by its bare name; a pane in another workspace window by the
+    `<folder>/<pane>` address given here. A caller with no pane identity (host
+    / external credential) has no "own workspace" — every target comes back
+    with same_workspace false and "you" set to the credential kind ("host" or
+    "external"); always use the qualified address. Read-only.
+
+    `pane_id` is that pane's internal id, and it is the key every `ui.pane.*`
+    action takes (`ui.pane.close`, `ui.pane.focus`, `ui.pane.getStatus` via
+    ui_invoke) — those reject a pane NAME. Use `address` to talk to a pane and
+    `pane_id` to act on it. Remote targets have no local id and carry none.
 
     `offline` marks a pane whose Navide window has lost its connection: it still
     exists and is expected back, but sending to it fails until it returns.

@@ -59,15 +59,26 @@ describe('message-log persistence wiring (FINDINGS 4/5/6/8)', () => {
   })
 })
 
-describe('agent overview rows and popover lifetime', () => {
+describe('resource summary rows and popover lifetime', () => {
   it('blanks the vendor when it would only repeat the pane name', () => {
     // agentLabel is assigned spec.label at pane creation, so an unnamed pane's
     // name IS the vendor label — emitting both printed it twice on the default
     // path (a freshly spawned, unrenamed pane).
-    const start = appSource.indexOf('const agentOverviewRows = computed')
+    const start = appSource.indexOf('const resourceRows = computed')
     expect(start).toBeGreaterThan(-1)
     const block = appSource.slice(start, appSource.indexOf('\n})', start))
     expect(block).toContain("vendor: vendor === name ? '' : vendor")
+  })
+
+  // It reports on this machine, which is what the rest of the left side is
+  // about (branch, backend, update state) — and the card that opens from it is
+  // anchored to the same edge.
+  it('keeps the pill on the left side of the status bar', () => {
+    const left = appSource.slice(
+      appSource.indexOf('<div class="statusbar-left">'),
+      appSource.indexOf('<div class="statusbar-right">')
+    )
+    expect(left).toContain('class="sb-item sb-resource sb-clickable"')
   })
 
   it('closes the overview when the last pane leaves', () => {
@@ -76,7 +87,7 @@ describe('agent overview rows and popover lifetime', () => {
     const start = appSource.indexOf('watch(\n  () => panes.value.length,')
     expect(start).toBeGreaterThan(-1)
     const block = appSource.slice(start, appSource.indexOf('\n)', start))
-    expect(block).toContain("openPopover.value === 'agents'")
+    expect(block).toContain("openPopover.value === 'resource'")
     expect(block).toContain('closePopover()')
   })
 })

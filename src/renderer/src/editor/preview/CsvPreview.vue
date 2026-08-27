@@ -134,7 +134,7 @@ const sortedRows = computed(() => {
 .csvp-status {
   padding: 8px 12px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   flex: none;
 }
 .csvp-status--error {
@@ -147,7 +147,7 @@ const sortedRows = computed(() => {
 }
 .csvp-table {
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-variant-numeric: tabular-nums;
 }
 .csvp-th {

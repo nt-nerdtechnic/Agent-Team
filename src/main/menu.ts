@@ -60,6 +60,8 @@ export interface AppMenuHooks {
   onNewWindow?: () => void
   /** Window menu: ask the main window to open the Pipeline Manager modal. */
   onOpenPipelineManager?: () => void
+  /** Window menu: open the Resource Manager window (CPU + memory per CLI). */
+  onOpenResourceManager?: () => void
   /** Help menu: open the Navide GitHub repo. */
   onOpenRepo?: () => void
   /** Help menu: open the GitHub issues page. */
@@ -180,6 +182,10 @@ export function installApplicationMenu(
                 : `[menu] Copy: page reported no terminal selection in ${Date.now() - startedAt}ms — falling back to webContents.copy()`
             )
           }
+          // Tell the page which branch this was: webContents.copy() leaves the
+          // clipboard unchanged over a terminal, and the pane is the only place
+          // that can say so to the person who pressed the key.
+          target.send('terminal:copy-empty', selection === SELECTION_TIMED_OUT ? 'timeout' : 'no-selection')
           target.copy()
         }
       } catch { /* window torn down mid-copy — nothing useful to do */ }
@@ -297,6 +303,7 @@ export function installApplicationMenu(
       label: 'Window',
       submenu: [
         { label: 'Pipeline Manager', click: () => hooks.onOpenPipelineManager?.() },
+        { label: 'Resource Manager', click: () => hooks.onOpenResourceManager?.() },
         { type: 'separator' },
         { role: 'minimize' },
         // macOS "zoom" = maximize the window frame. Unrelated to content zoom,

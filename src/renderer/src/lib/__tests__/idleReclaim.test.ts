@@ -4,6 +4,7 @@ import {
   IDLE_RECLAIM_MIN_MINUTES,
   idleReclaimThresholdMs,
   reclaimBlockedBy,
+  RECLAIM_NOW_THRESHOLD_MS,
   type ReclaimCandidate,
 } from '../idleReclaim'
 
@@ -88,6 +89,27 @@ describe('reclaimBlockedBy', () => {
     ['no-ref', { hasRef: false }],
   ] as const)('never reclaims a pane that is %s', (reason, over) => {
     expect(reclaimBlockedBy(idleForHours(over), THRESHOLD, NOW)).toBe(reason)
+  })
+})
+
+// Pressing "reclaim now" answers the question the timer exists to answer, so
+// the age check is the only guard it skips. Everything else still refuses.
+describe('manual reclaim (RECLAIM_NOW_THRESHOLD_MS)', () => {
+  it('reclaims a pane that just went idle', () => {
+    const justIdle = idleForHours({ lastTouchedAt: NOW - 1_000 })
+    expect(reclaimBlockedBy(justIdle, RECLAIM_NOW_THRESHOLD_MS, NOW)).toBeNull()
+  })
+
+  it.each([
+    ['focused', { focused: true }],
+    ['not-idle', { displayStatus: 'awaiting' }],
+    ['has-draft', { hasDraft: true }],
+    ['no-resume-id', { resumeSessionId: '' }],
+    ['never-touched', { lastTouchedAt: 0 }],
+    ['loop-active', { loopActive: true }],
+  ] as const)('still refuses a pane that is %s', (reason, over) => {
+    const pane = idleForHours({ lastTouchedAt: NOW - 1_000, ...over })
+    expect(reclaimBlockedBy(pane, RECLAIM_NOW_THRESHOLD_MS, NOW)).toBe(reason)
   })
 })
 

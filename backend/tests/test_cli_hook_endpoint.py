@@ -285,3 +285,148 @@ def test_hook_with_no_resolvable_pane_records_nothing(
         json={"session_id": "unclaimed", "cwd": "/ws/alpha"},
     )
     assert app_module._pane_activity == {}
+
+
+# ── Background-subagent counting ───────────────────────────────────────────
+#
+# PreToolUse(Task) in, SubagentStop out. The resulting count rides on every
+# broadcast so the frontend loop can tell a turn that ended DONE from one that
+# ended to WAIT — a CLI parked on a background agent fires the Stop hook for
+# real, so nothing else it reports reveals the difference.
+
+
+@pytest.fixture()
+def attributed(monkeypatch):
+    """Resolve every session to one pane, and start it with a clean count."""
+    from agent_team_backend import subagent_tracker
+
+    pane_id = "pane-hooked"
+    subagent_tracker.reset(pane_id)
+    monkeypatch.setattr(
+        app_module.attribution, "pane_for_session", lambda _sid: (pane_id, "/tmp/ws", "")
+    )
+    yield pane_id
+    subagent_tracker.reset(pane_id)
+
+
+def _post(client: TestClient, kind: str, **body) -> None:
+    resp = client.post(
+        "/hooks/claude",
+        headers={"X-Agent-Team-Event": kind},
+        json={"session_id": "s-1", "cwd": "/tmp/ws", **body},
+    )
+    assert resp.status_code == 200
+
+
+def test_task_pre_tool_use_reports_a_pending_subagent(
+    client: TestClient, events: list[dict], attributed: str
+) -> None:
+    _post(client, "pre_tool_use", tool_name="Task")
+    payload = _payload(events)
+    assert payload["event_type"] == "agent_active"
+    assert payload["pending_subagents"] == 1
+
+
+def test_subagent_stop_clears_the_count_and_reads_as_activity(
+    client: TestClient, events: list[dict], attributed: str
+) -> None:
+    _post(client, "pre_tool_use", tool_name="Task")
+    events.clear()
+    _post(client, "subagent_stop")
+    payload = _payload(events)
+    # It joins agent_active rather than earning a third bucket: the main agent
+    # is about to pick its work back up, which is what agent_active says.
+    assert payload["event_type"] == "agent_active"
+    assert payload["detail"] == "hook:subagent_stop"
+    assert payload["pending_subagents"] == 0
+
+
+def test_a_turn_that_ends_while_a_subagent_runs_still_reports_the_count(
+    client: TestClient, events: list[dict], attributed: str
+) -> None:
+    # The reported spin, in one exchange: two background agents started, then
+    # the main agent stops to wait for them. turn_complete is truthful — the
+    # turn really ended — and pending_subagents is what says "don't continue".
+    _post(client, "pre_tool_use", tool_name="Task")
+    _post(client, "pre_tool_use", tool_name="Task")
+    events.clear()
+    _post(client, "stop")
+    payload = _payload(events)
+    assert payload["event_type"] == "turn_complete"
+    assert payload["pending_subagents"] == 2
+
+
+def test_ordinary_tool_use_does_not_report_a_subagent(
+    client: TestClient, events: list[dict], attributed: str
+) -> None:
+    _post(client, "pre_tool_use", tool_name="Read")
+    assert _payload(events)["pending_subagents"] == 0
+
+
+def test_an_unknown_event_kind_is_still_rejected(client: TestClient, events: list[dict]) -> None:
+    resp = client.post(
+        "/hooks/claude",
+        headers={"X-Agent-Team-Event": "subagent_start"},
+        json={"session_id": "s-1"},
+    )
+    assert resp.json()["ok"] is False
+    assert events == []
+
+
+def test_a_vendor_that_cannot_report_subagent_stops_never_counts(
+    client: TestClient, events: list[dict], attributed: str, monkeypatch
+) -> None:
+    """Counting needs both halves; one half alone climbs forever.
+
+    qwen installs a Notification hook and nothing else, so it can report a tool
+    going in but never a subagent coming back out. A count stuck above zero
+    would hold that pane's loop back for the whole staleness window — worse
+    than not counting at all.
+    """
+    monkeypatch.setattr(app_module, "_HOOK_VENDORS", frozenset({"claude", "qwen"}))
+    resp = client.post(
+        "/hooks/qwen",
+        headers={"X-Agent-Team-Event": "pre_tool_use"},
+        json={"session_id": "s-1", "cwd": "/tmp/ws", "tool_name": "Task"},
+    )
+    assert resp.status_code == 200
+    assert _payload(events)["pending_subagents"] == 0
+
+
+def test_the_full_wait_then_resume_hook_sequence(
+    client: TestClient, events: list[dict], attributed: str
+) -> None:
+    """One real exchange, end to end, as the hooks actually fire it.
+
+    Each step below has its own test above; this pins the SEQUENCE, which is
+    where the count is either right or useless. The frontend gate reads only
+    the last number it was told, so what matters is that every broadcast in the
+    run carries the truth at that instant — not just the first and last.
+    """
+    seen: list[tuple[str, int]] = []
+
+    def step(kind: str, **body) -> None:
+        events.clear()
+        _post(client, kind, **body)
+        p = _payload(events)
+        seen.append((p["event_type"], p["pending_subagents"]))
+
+    step("pre_tool_use", tool_name="Task")  # agent dispatches two background agents
+    step("pre_tool_use", tool_name="Task")
+    step("pre_tool_use", tool_name="Read")  # ordinary work in between
+    step("stop")                            # "still waiting" — the turn really ends
+    step("subagent_stop")                   # one comes back
+    step("stop")                            # "still waiting for the other one"
+    step("subagent_stop")                   # the last one comes back
+    step("stop")                            # now genuinely idle
+
+    assert seen == [
+        ("agent_active", 1),
+        ("agent_active", 2),
+        ("agent_active", 2),   # Read must not inflate the count
+        ("turn_complete", 2),  # ← the loop must HOLD here
+        ("agent_active", 1),
+        ("turn_complete", 1),  # ← and here
+        ("agent_active", 0),
+        ("turn_complete", 0),  # ← only here may it continue
+    ]

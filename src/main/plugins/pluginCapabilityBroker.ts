@@ -866,9 +866,10 @@ export interface TerminalOutputBatcher {
  * PTY output arrives as a dense stream of small events; forwarding each one
  * through a separate `webContents.send` floods the plugin view's IPC channel.
  * Batching per `terminal_session_id` over a short window (default 12 ms)
- * concatenates the `data` strings — safe, because the backend already decodes
- * on UTF-8 codepoint boundaries, so these are complete JS strings — and keeps
- * every other field (including `sequence`) from the LAST queued payload: the
+ * concatenates the `data` chunks — Uint8Array raw PTY bytes on the binary
+ * frame path (any byte boundary is safe: the consumer's xterm runs a
+ * streaming UTF-8 decoder), or legacy complete JS strings — and keeps every
+ * other field (including `sequence`) from the LAST queued payload: the
  * batch's data covers exactly the events up to that sequence, and the frontend
  * consumer (useTerminal) reads only `terminal_session_id` + `data`.
  *
@@ -881,30 +882,48 @@ export function createTerminalOutputBatcher(
   flushMs = 12
 ): TerminalOutputBatcher {
   interface Entry {
-    data: string
+    chunks: (string | Uint8Array)[]
     last: Record<string, unknown>
     timer: ReturnType<typeof setTimeout>
   }
   const pending = new Map<string, Entry>()
+
+  function combine(chunks: (string | Uint8Array)[]): string | Uint8Array {
+    if (chunks.every((c): c is string => typeof c === 'string')) return chunks.join('')
+    // Mixed or binary batch: normalize to one Uint8Array.
+    const enc = new TextEncoder()
+    const parts = chunks.map((c) => (typeof c === 'string' ? enc.encode(c) : c))
+    const total = parts.reduce((n, p) => n + p.length, 0)
+    const out = new Uint8Array(total)
+    let off = 0
+    for (const p of parts) {
+      out.set(p, off)
+      off += p.length
+    }
+    return out
+  }
 
   function flushSession(sessionId: string): void {
     const entry = pending.get(sessionId)
     if (!entry) return
     clearTimeout(entry.timer)
     pending.delete(sessionId)
-    deliver(sessionId, { ...entry.last, data: entry.data })
+    deliver(sessionId, { ...entry.last, data: combine(entry.chunks) })
   }
 
   function push(sessionId: string, payload: Record<string, unknown>): void {
-    const data = typeof payload.data === 'string' ? payload.data : ''
+    const data =
+      typeof payload.data === 'string' || payload.data instanceof Uint8Array
+        ? payload.data
+        : ''
     const entry = pending.get(sessionId)
     if (entry) {
-      entry.data += data
+      entry.chunks.push(data)
       entry.last = payload
       return
     }
     pending.set(sessionId, {
-      data,
+      chunks: [data],
       last: payload,
       timer: setTimeout(() => flushSession(sessionId), flushMs),
     })

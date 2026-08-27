@@ -34,6 +34,7 @@ import time
 from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec
 from ..usage_common import (
     HTTP_TIMEOUT,
+    _KEYCHAIN_COOLDOWN_S,
     _epoch_to_iso,
     _num,
     _snapshot,

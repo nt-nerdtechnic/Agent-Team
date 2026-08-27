@@ -232,6 +232,12 @@ export function createPluginTerminalDockPort(sdk: PluginCapabilitySdk): Terminal
       cols,
       rows,
     }),
+    history: (workspacePath, agentKey, paneId, chunk) => request('terminal.history', {
+      workspace_path: workspacePath,
+      agent_key: agentKey,
+      pane_id: paneId,
+      chunk,
+    }),
     onOutput: (callback: (payload: TerminalOutputEvent) => void) =>
       sdk.subscribe('terminal.output', (payload) => callback(payload as TerminalOutputEvent)),
     onExit: (callback: (payload: TerminalExitEvent) => void) =>

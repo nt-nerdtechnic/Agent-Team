@@ -9,7 +9,16 @@ import { bufferTail, createRedrawGuard, dropTuiNoise, stripAnsi } from '../lib/b
 import { createResizeController, type ResizeController } from './useTerminalResize'
 import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFontSize'
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
-import { chunkForPty, shouldOpenMentionMenu, stripInputSequences } from '../lib/cliContext'
+import {
+  applyMentionPickToInput,
+  buildMentionPickData,
+  chunkForPty,
+  filterMentionCandidates,
+  MENTION_BROADCAST_ADDRESS,
+  shouldOpenMentionMenu,
+  stripInputSequences,
+  type MentionCandidate,
+} from '../lib/cliContext'
 import { extractClipboardImage } from '../lib/clipboardImage'
 import { createThrottledDiag, diagLog } from '../lib/diagLog'
 import { TERMINAL_CREATE_TIMEOUT_MS, formatTerminalExit, isTerminalCrashLoopOpen, recordTerminalExit, terminalCrashKey } from '../lib/terminalLifecycle'
@@ -266,6 +275,29 @@ function isTerminalReport(data: string): boolean {
 let _focusOwner: Terminal | null = null
 let _selectionGlobalInstalled = false
 
+/** The focused pane's "⌘C copied nothing" reporter — only it may answer, for
+ *  the same reason `_focusOwner` exists. */
+let _emptyCopyReporter: ((origin?: string) => void) | undefined
+let _copyEmptyBridgeInstalled = false
+
+/** One ⌘C can reach both the menu accelerator and this handler; collapse them. */
+const EMPTY_COPY_DEDUPE_MS = 300
+let _lastEmptyCopyAt = 0
+
+/** When a copy last succeeded here. A renderer too busy to answer main's 300ms
+ *  selection read sends main down its "nothing selected" branch even though
+ *  this page just copied fine — without this, that reports a failure over a
+ *  copy the user watched work. */
+let _lastCopyOkAt = 0
+
+/** How long a success here silences a copy-empty from main. It must be
+ *  comfortably LONGER than main's own selection deadline (menu.ts's
+ *  SELECTION_READ_TIMEOUT_MS, 300ms): the notification this suppresses is
+ *  emitted when that deadline expires, so a window of the same length lands
+ *  exactly on the boundary and suppresses or not depending on task ordering
+ *  we do not control. */
+const COPY_OK_SUPPRESS_MS = 1_000
+
 function installTerminalSelectionGlobal(): void {
   if (_selectionGlobalInstalled) return
   _selectionGlobalInstalled = true
@@ -276,6 +308,22 @@ function installTerminalSelectionGlobal(): void {
       return ''  // disposed terminal — let main run the built-in copy
     }
   }
+}
+
+/** Main tells the page when Edit > Copy's accelerator fell through to a copy
+ *  that cannot work over a terminal. Installed once per page, and a no-op where
+ *  the bridge is absent (older preload, or a plugin view). */
+function installTerminalCopyEmptyBridge(): void {
+  if (_copyEmptyBridgeInstalled) return
+  // Claim the flag only once the subscription actually happened. Setting it
+  // first would burn the single attempt on a bridge that was not up yet and
+  // leave main unable to reach this page for the rest of the session — the
+  // same shape as the write-once hint flag this whole change exists to fix.
+  if (!window.agentTeam?.onTerminalCopyEmpty) return
+  try {
+    window.agentTeam.onTerminalCopyEmpty((branch) => { _emptyCopyReporter?.(branch) })
+    _copyEmptyBridgeInstalled = true
+  } catch { /* no bridge — the renderer's own ⌘C handler still reports */ }
 }
 
 export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error' | 'stopped'
@@ -554,11 +602,10 @@ export function expandHomePath(fp: string, home: string): string {
   return home.replace(/\/+$/, '') + fp.slice(1)
 }
 
-export function collapseHomePath(p: string, home: string): string {
-  if (!home) return p
-  const h = home.replace(/\/+$/, '')
-  return p === h || p.startsWith(`${h}/`) ? `~${p.slice(h.length)}` : p
-}
+// Moved to lib/paths so a caller that only wants the string helper does not
+// load this module. Re-exported because every existing import names it here.
+import { collapseHomePath } from '../lib/paths'
+export { collapseHomePath } from '../lib/paths'
 
 export interface PickerItem {
   abs: string
@@ -1011,10 +1058,18 @@ interface UseTerminalOptions {
   workspacePath?: string
   onClear?: () => void
   onUserResume?: () => void
-  /** Getter for the OTHER CLI panes' messaging names (already excluding self).
+  /** Getter for the OTHER CLI panes' addresses (already excluding self), with
+   *  the pre-translated group and status words the menu draws beside them.
    *  Feeds the @-mention autocomplete menu. Read lazily at trigger time so the
-   *  list stays current as panes come and go. */
-  mentionCandidates?: () => string[]
+   *  list stays current as panes come and go.
+   *
+   *  The host resolves the words because this composable owns no i18n scope,
+   *  and it orders the list because recency is the host's to remember — see
+   *  onMentionPick. */
+  mentionCandidates?: () => MentionCandidate[]
+  /** The addresses a mention pick just inserted, for the host to record as
+   *  recently used (it feeds the next call's ordering). */
+  onMentionPick?: (addresses: string[]) => void
   onFirstOutput?: () => void
   /** Whether App's layout currently shows this pane (onScreenPaneIds). Paged-out
    *  panes stay mounted so their terminals survive, which also means every
@@ -1054,6 +1109,10 @@ export type ClipboardFailureReason =
   | 'send-failed'
   /** Every chunk failed the same way — nothing of this paste reached the pane. */
   | 'send-failed-all'
+  /** ⌘C with no selection while the CLI holds the mouse — a plain drag cannot select. */
+  | 'copy-mouse-captured'
+  /** ⌘C with no selection and no mouse capture — nothing was highlighted. */
+  | 'copy-no-selection'
 
 // Whether this renderer process can create a WebGL context at all, probed once.
 //
@@ -1077,7 +1136,7 @@ function webglAvailable(): boolean {
   if (!_webglProbe) {
     console.info(
       '[terminal] WebGL unavailable — terminals run on the DOM renderer. ' +
-        'On desktop this means hardware acceleration is off (see NAVIDE_ENABLE_GPU).'
+        'On desktop GPU acceleration is on by default; NAVIDE_DISABLE_GPU=1 turns it off.'
     )
   }
   return _webglProbe
@@ -1165,6 +1224,7 @@ function releaseResumeSpawnSlot(): void {
 export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts?: UseTerminalOptions) {
   installTerminalZoomShortcuts()
   installTerminalSelectionGlobal()
+  installTerminalCopyEmptyBridge()
 
   const agentProfile = (agentKey?: string): TerminalAgentProfile | undefined =>
     terminalSpecFor(agentKey, opts?.agentProfileFor)
@@ -1248,6 +1308,12 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     _hintDragX = -1  // one shot per drag
     if (settingsGet(OPTION_SELECT_HINT_KEY, false)) return
     settingsSet(OPTION_SELECT_HINT_KEY, true)
+    showOptionSelectHint()
+  }
+
+  /** Show the hint for its usual dwell, restarting the timer if it is already up. */
+  function showOptionSelectHint(): void {
+    if (_hintTimer) clearTimeout(_hintTimer)
     optionSelectHint.value = true
     _hintTimer = setTimeout(() => { optionSelectHint.value = false }, 6000)
   }
@@ -1475,13 +1541,11 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
   const BUFFER_CAP = 128 * 1024
   const redrawGuard = createRedrawGuard()
 
+  // Only ever called from flushPendingClean, with the decoded text of every
+  // chunk that arrived inside one CLEAN_COALESCE_MS window. The raw-activity
+  // clock is NOT touched here: it is bumped per chunk in _flushPendingOutput,
+  // so liveness never waits on the coalescing timer.
   function appendClean(chunk: string): void {
-    // ANY byte counts as "process still alive" — spinners included. This feeds
-    // liveness/stall detection (App.vue safety net, resize-quiet gate) ONLY. It
-    // deliberately does NOT drive the RUNNING badge: an idle CLI that merely
-    // repaints its footer/cursor emits raw bytes too, and those must not look
-    // like work. The badge burst is built from CLEANED content below.
-    if (chunk.length > 0) lastRawActivityAt.value = Date.now()
     const cleaned = dropTuiNoise(stripAnsi(chunk))
     if (!cleaned) return
     // A focus/resize repaint re-emits content already on screen; after noise
@@ -1547,6 +1611,12 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
    *  boundary from a record — opencode a `step-finish` reason, antigravity a
    *  completed step that carries a reply. */
   function markTurnComplete(): void {
+    // turn_complete is a synchronous chain (App.vue agent.activity → here →
+    // judgeTurnText → onStageSlotCompleted → cleanBuffer read): the turn's
+    // last chunk usually lands inside the coalesce window, so settle it now.
+    // Otherwise the deferred clean pass would run AFTER the latch is dropped
+    // below, re-latch RUNNING, and the handoff would miss the final text.
+    flushPendingClean()
     turnCompleteAt.value = Date.now()
     runningLatched.value = false
     // A turn that ended is not waiting on anyone: clear the flag so a stale
@@ -1585,12 +1655,14 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
   }
 
   function markBufferPosition(): number {
+    flushPendingClean()
     return cleanBuffer.value.length
   }
 
   /** Retroactively scrub TUI noise from the existing buffer — useful when
    *  the noise-filter rules change (HMR) or a watcher arms on an old pane. */
   function recleanBuffer(): void {
+    flushPendingClean()
     cleanBuffer.value = dropTuiNoise(cleanBuffer.value)
     redrawGuard.reset(cleanBuffer.value)
   }
@@ -1619,9 +1691,17 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
 
   // ── @-mention floating autocomplete ──────────────────────────────────────────
   // Imperative-DOM overlay (mirrors showTerminalFilePicker) listing the OTHER CLI
-  // panes' messaging names. It steals DOM focus to its own card AND handles keys
-  // at the document capture layer, so ↑/↓/Enter/Esc never reach xterm while open.
-  // Picking a name sends `name + ' '` straight to the PTY, completing `@codex-1 `.
+  // panes' addresses. It steals DOM focus to its own card AND handles keys at the
+  // document capture layer, so ↑/↓/Enter/Esc never reach xterm while open.
+  //
+  // Typed characters go to the PTY AND narrow the list. Sending them is what
+  // keeps the prompt honest — the user sees "@cod" where they typed it — and it
+  // is also the escape hatch: when the filter empties, the menu just closes and
+  // the CLI's own "@" completion takes over with every character already in
+  // place. Nothing to re-send, nothing to rewind.
+  //
+  // Picking writes one PTY frame that erases the query and inserts the
+  // addresses (buildMentionPickData), completing `@codex-1 `.
   let _mentionMenuCleanup: (() => void) | null = null
 
   function closeMentionMenu(): void {
@@ -1632,7 +1712,23 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     }
   }
 
-  function openMentionMenu(candidates: string[]): void {
+  /** Dot colour per pane status, matching the sidebar's .status-dot so one pane
+   *  never reads green here and amber there. Statuses this window cannot read
+   *  (`all`, panes in another workspace window) get no dot fill at all. */
+  function mentionStatusColor(status: string | undefined): string {
+    switch (status) {
+      case 'running': return 'var(--success-fg)'
+      case 'awaiting': return 'var(--warning-fg)'
+      case 'idle': return 'var(--attention-fg)'
+      case 'starting': return 'var(--status-starting-fg)'
+      case 'error': return 'var(--danger-fg)'
+      case 'exited':
+      case 'stopped': return 'var(--text-disabled)'
+      default: return ''
+    }
+  }
+
+  function openMentionMenu(candidates: MentionCandidate[]): void {
     if (_mentionMenuCleanup) return          // one menu at a time
     if (!candidates.length) return           // nothing to offer
     const host = mountedEl
@@ -1656,65 +1752,238 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     })
 
     const card = document.createElement('div')
+    card.className = 'term-mention-card'
     card.tabIndex = 0
     Object.assign(card.style, {
       position: 'fixed', left: `${cellLeft}px`, top: `${cellBottom}px`,
-      width: '200px', maxHeight: '240px', overflowY: 'auto',
-      background: '#161b22', border: '1px solid #30363d', borderRadius: '6px',
-      boxShadow: '0 8px 24px rgba(0,0,0,0.6)', outline: 'none',
-      padding: '4px 0', boxSizing: 'border-box',
+      width: '248px', maxHeight: '260px', overflowY: 'auto',
+      background: 'var(--bg-overlay)', border: '1px solid var(--border-default)',
+      borderRadius: '6px', boxShadow: 'var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.6))',
+      outline: 'none', padding: '4px 0', boxSizing: 'border-box',
     })
 
+    // The query line only appears once there is something to report, so an
+    // untouched menu looks exactly like the one that shipped before.
+    const queryEl = document.createElement('div')
+    queryEl.className = 'term-mention-query'
+    Object.assign(queryEl.style, {
+      display: 'none', gap: '8px', alignItems: 'center', padding: '4px 12px 6px',
+      margin: '0 0 4px', borderBottom: '1px solid var(--border-default)',
+      color: 'var(--text-muted)', fontSize: '12px',
+    })
+    const queryTextEl = document.createElement('span')
+    Object.assign(queryTextEl.style, { flex: '1', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
+    const queryCountEl = document.createElement('span')
+    queryEl.append(queryTextEl, queryCountEl)
+
+    const listEl = document.createElement('div')
+    card.append(queryEl, listEl)
+
+    let query = ''
     let selectedIdx = 0
+    /** Addresses ticked with Space, in tick order — the order they are inserted. */
+    const checked: string[] = []
+    let visible: MentionCandidate[] = candidates
     const rows: HTMLElement[] = []
 
     function renderSelection(): void {
       rows.forEach((row, i) => {
-        row.style.background = i === selectedIdx ? 'rgba(56,139,253,0.2)' : ''
+        const on = i === selectedIdx
+        row.style.background = on ? 'var(--bg-selected)' : ''
+        row.classList.toggle('is-selected', on)
       })
       rows[selectedIdx]?.scrollIntoView({ block: 'nearest' })
     }
 
-    function pick(idx: number): void {
-      const name = candidates[idx]
-      closeMentionMenu()
-      term.focus()
-      if (name && inputTransportReady()) {
-        void terminalPort.input(sessionId.value, name + ' ')
-      }
+    /** Address text with the matched run tinted, so a filtered list shows WHY
+     *  each row survived. Built from indexOf rather than a regex: an address is
+     *  arbitrary user text and would otherwise need escaping. */
+    function appendHighlighted(el: HTMLElement, address: string): void {
+      const at = query ? address.toLowerCase().indexOf(query.toLowerCase()) : -1
+      if (at < 0) { el.textContent = address; return }
+      const hit = document.createElement('span')
+      hit.className = 'term-mention-hit'
+      hit.textContent = address.slice(at, at + query.length)
+      Object.assign(hit.style, { color: 'var(--accent-fg)', fontWeight: '700' })
+      el.append(
+        document.createTextNode(address.slice(0, at)),
+        hit,
+        document.createTextNode(address.slice(at + query.length))
+      )
     }
 
-    candidates.forEach((name, i) => {
-      const row = document.createElement('div')
-      row.textContent = name
-      Object.assign(row.style, {
-        padding: '6px 12px', cursor: 'pointer', color: '#e6edf3', fontSize: '13px',
-        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-      })
-      row.addEventListener('mouseenter', () => { selectedIdx = i; renderSelection() })
-      row.addEventListener('mousedown', (e) => { e.preventDefault(); pick(i) })
-      rows.push(row)
-      card.appendChild(row)
-    })
+    function buildRows(): void {
+      listEl.replaceChildren()
+      rows.length = 0
+      // Headers only earn their space when they separate something: a filtered
+      // list is usually one group, and a lone header above every row is noise.
+      const groups = new Set(visible.map((c) => c.group).filter(Boolean))
+      const showGroups = groups.size > 1
+      let lastGroup: string | undefined
+      visible.forEach((cand, i) => {
+        if (showGroups && cand.group && cand.group !== lastGroup) {
+          lastGroup = cand.group
+          const hdr = document.createElement('div')
+          hdr.className = 'term-mention-group'
+          hdr.textContent = cand.group
+          Object.assign(hdr.style, {
+            padding: '5px 12px 2px', color: 'var(--text-muted)', fontSize: '10.5px',
+            letterSpacing: '0.06em', textTransform: 'uppercase',
+          })
+          listEl.appendChild(hdr)
+        }
+        const row = document.createElement('div')
+        row.className = 'term-mention-row'
+        row.dataset.address = cand.address
+        Object.assign(row.style, {
+          display: 'flex', alignItems: 'center', gap: '8px',
+          padding: '5px 12px', cursor: 'pointer', color: 'var(--text-primary)',
+          fontSize: '13px', whiteSpace: 'nowrap',
+        })
 
+        const isChecked = checked.includes(cand.address)
+        const box = document.createElement('span')
+        box.className = 'term-mention-box'
+        row.classList.toggle('is-checked', isChecked)
+        Object.assign(box.style, {
+          flex: 'none', width: '11px', height: '11px', borderRadius: '3px',
+          border: `1px solid ${isChecked ? 'var(--accent-fg)' : 'var(--text-disabled)'}`,
+          background: isChecked ? 'var(--accent-fg)' : 'transparent',
+        })
+
+        const dot = document.createElement('span')
+        dot.className = 'term-mention-dot'
+        if (cand.status) dot.dataset.status = cand.status
+        const fill = mentionStatusColor(cand.status)
+        Object.assign(dot.style, {
+          flex: 'none', width: '7px', height: '7px', borderRadius: '50%',
+          background: fill || 'transparent',
+          border: fill ? 'none' : '1px solid var(--text-disabled)',
+        })
+
+        const name = document.createElement('span')
+        name.className = 'term-mention-name'
+        Object.assign(name.style, { flex: '1', overflow: 'hidden', textOverflow: 'ellipsis' })
+        appendHighlighted(name, cand.address)
+
+        row.append(box, dot, name)
+        if (cand.statusLabel) {
+          const tag = document.createElement('span')
+          tag.className = 'term-mention-status'
+          tag.textContent = cand.statusLabel
+          Object.assign(tag.style, { flex: 'none', color: 'var(--text-muted)', fontSize: '11px' })
+          row.appendChild(tag)
+        }
+
+        row.addEventListener('mouseenter', () => { selectedIdx = i; renderSelection() })
+        row.addEventListener('mousedown', (e) => { e.preventDefault(); selectedIdx = i; pick() })
+        rows.push(row)
+        listEl.appendChild(row)
+      })
+    }
+
+    function renderQueryLine(): void {
+      const show = query !== '' || checked.length > 0
+      queryEl.style.display = show ? 'flex' : 'none'
+      if (!show) return
+      queryTextEl.textContent = query ? `@${query}` : ''
+      queryCountEl.textContent = checked.length
+        ? `✓ ${checked.length}`
+        : `${visible.length}`
+    }
+
+    /** Re-derive the visible list from the current query and redraw. Returns
+     *  false when nothing matches — the caller closes the menu and hands the
+     *  prompt back to the CLI's own completion. */
+    function refilter(): boolean {
+      const next = filterMentionCandidates(candidates, query)
+      if (!next.length) return false
+      const keep = visible[selectedIdx]?.address
+      visible = next
+      const at = keep ? next.findIndex((c) => c.address === keep) : -1
+      selectedIdx = at >= 0 ? at : 0
+      buildRows()
+      renderQueryLine()
+      renderSelection()
+      placeCard()
+      return true
+    }
+
+    function toggleCheck(): void {
+      const cand = visible[selectedIdx]
+      if (!cand) return
+      const at = checked.indexOf(cand.address)
+      if (at >= 0) {
+        checked.splice(at, 1)
+      } else if (cand.address === MENTION_BROADCAST_ADDRESS) {
+        // Broadcast and roll-call are different gestures — "everyone" plus two
+        // named panes would send those two twice.
+        checked.length = 0
+        checked.push(cand.address)
+      } else {
+        const bc = checked.indexOf(MENTION_BROADCAST_ADDRESS)
+        if (bc >= 0) checked.splice(bc, 1)
+        checked.push(cand.address)
+      }
+      buildRows()
+      renderQueryLine()
+      renderSelection()
+    }
+
+    function pick(): void {
+      // No ticks means the highlighted row — so a user who never discovers
+      // multi-select keeps the single-pick behaviour exactly as it was.
+      const addresses = checked.length ? [...checked] : [visible[selectedIdx]?.address].filter(Boolean) as string[]
+      const data = buildMentionPickData(query, addresses)
+      closeMentionMenu()
+      term.focus()
+      if (!data || !inputTransportReady()) return
+      // This write bypasses term.onData, so nothing else will correct the draft
+      // buffer that decides whether the pane counts as "being typed at".
+      inputBuffer = applyMentionPickToInput(inputBuffer, query, addresses)
+      syncDraft()
+      void terminalPort.input(sessionId.value, data)
+      opts?.onMentionPick?.(addresses)
+    }
+
+    /** Send a keystroke the menu intercepted, keeping the draft buffer in step.
+     *
+     *  These writes bypass term.onData, which is the ONLY thing that normally
+     *  maintains inputBuffer — so without this the buffer would not contain the
+     *  query the user just typed, and pick()'s slice would eat that many
+     *  characters of the real prompt instead ("傳給 @cod" → "傳codex-1 "). */
+    function sendToPty(data: string): void {
+      if (!inputTransportReady()) return
+      if (data === '\x7f') inputBuffer = inputBuffer.slice(0, -1)
+      else inputBuffer += data
+      syncDraft()
+      void terminalPort.input(sessionId.value, data)
+    }
+
+    /** Anchor the card under the cursor cell, clamped to the viewport. Re-run
+     *  after the list changes size: a filter that shortens the card would
+     *  otherwise leave a card flipped above the cursor floating away from it. */
+    function placeCard(): void {
+      const cardRect = card.getBoundingClientRect()
+      let left = cellLeft
+      let top = cellBottom
+      if (left + cardRect.width > window.innerWidth) left = window.innerWidth - cardRect.width - 8
+      if (left < 4) left = 4
+      if (top + cardRect.height > window.innerHeight) top = cellTop - cardRect.height  // flip above
+      if (top < 4) top = 4
+      card.style.left = `${left}px`
+      card.style.top = `${top}px`
+    }
+
+    buildRows()
     root.appendChild(card)
     document.body.appendChild(root)
-
-    // Clamp to the viewport now that the card has a measured size.
-    const cardRect = card.getBoundingClientRect()
-    let left = cellLeft
-    let top = cellBottom
-    if (left + cardRect.width > window.innerWidth) left = window.innerWidth - cardRect.width - 8
-    if (left < 4) left = 4
-    if (top + cardRect.height > window.innerHeight) top = cellTop - cardRect.height  // flip above
-    if (top < 4) top = 4
-    card.style.left = `${left}px`
-    card.style.top = `${top}px`
+    placeCard()
 
     // Document-capture keydown: intercept the menu's keys before xterm's textarea
     // can see them (capture phase + stopPropagation), so the CLI receives nothing
-    // while the menu is open. Any other printable key / Backspace dismisses the
-    // menu and is re-sent to the PTY so typing continues uninterrupted.
+    // it should not while the menu is open. Printable keys are the exception —
+    // they reach the PTY AND narrow the list (see the header note).
     const onDocKeydown = (e: KeyboardEvent): void => {
       // IME guard, same contract as the xterm handler below: while a
       // composition is live, e.key is a raw pre-edit keystroke ('ㄒ', 'j',
@@ -1723,18 +1992,22 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
       // needed, so composing in a pane with the mention menu open produced
       // garbage. Let the browser drive the composition; the committed text
       // arrives through term.onData like any other input.
+      //
+      // MUST stay the first branch: every branch below assumes e.key is real.
       if (e.isComposing || e.keyCode === 229) return
       if (e.key === 'ArrowDown') {
         e.preventDefault(); e.stopPropagation()
-        if (selectedIdx < candidates.length - 1) { selectedIdx++; renderSelection() }
+        if (selectedIdx < visible.length - 1) { selectedIdx++; renderSelection() }
       } else if (e.key === 'ArrowUp') {
         e.preventDefault(); e.stopPropagation()
         if (selectedIdx > 0) { selectedIdx--; renderSelection() }
       } else if (e.key === 'Enter' || e.key === 'Tab') {
         e.preventDefault(); e.stopPropagation()
-        pick(selectedIdx)
+        pick()
       } else if (e.key === 'Escape') {
         e.preventDefault(); e.stopPropagation()
+        // Deliberately does NOT erase the query: the characters are already on
+        // the prompt, and taking them back would undo typing the user meant.
         closeMentionMenu(); term.focus()
       } else if (e.metaKey || e.ctrlKey || e.altKey) {
         // A shortcut chord (Cmd+A, etc.) — cancel the menu but let the chord
@@ -1742,19 +2015,26 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
         // the terminal so the chord (e.g. Cmd+V paste) lands there and typing
         // continues — closing the focused card would otherwise drop focus to
         // <body>, swallowing the chord and every keystroke after it.
+        //
+        // Stays ABOVE the Space branch so Cmd+Space (IME switch) is still a
+        // chord and never a tick.
         closeMentionMenu(); term.focus()
+      } else if (e.key === ' ') {
+        e.preventDefault(); e.stopPropagation()
+        toggleCheck()
       } else if (e.key === 'Backspace') {
         e.preventDefault(); e.stopPropagation()
-        closeMentionMenu(); term.focus()
-        if (inputTransportReady()) {
-          void terminalPort.input(sessionId.value, '\x7f')
-        }
+        sendToPty('\x7f')
+        if (!query) { closeMentionMenu(); term.focus(); return }
+        query = query.slice(0, -1)
+        if (!refilter()) { closeMentionMenu(); term.focus() }
       } else if (e.key.length === 1) {
         e.preventDefault(); e.stopPropagation()
-        closeMentionMenu(); term.focus()
-        if (inputTransportReady()) {
-          void terminalPort.input(sessionId.value, e.key)
-        }
+        // The character goes to the PTY either way — that is what makes an
+        // empty filter a clean handover rather than a lost keystroke.
+        sendToPty(e.key)
+        query += e.key
+        if (!refilter()) { closeMentionMenu(); term.focus() }
       }
     }
 
@@ -1767,6 +2047,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
       root.remove()
     }
 
+    renderQueryLine()
     renderSelection()
     card.focus()
   }
@@ -1783,18 +2064,74 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
   // not rAF: rAF is paused in packaged Electron when the window is occluded,
   // which would leave output stuck in _pendingOutput.)
   const _BACKGROUND_COALESCE_MS = 100
-  let _pendingOutput = ''
+  // The text side path (decode → stripAnsi/dropTuiNoise → cleanBuffer → badge
+  // burst) is NOT needed per chunk: its consumers are the RUNNING/IDLE
+  // hysteresis (BURST_GAP_MS / IDLE_CONFIRM_MS, seconds) and App.vue
+  // watchers/polls, none of which read cleanBuffer synchronously with output.
+  // Under a flood (cat of a big file, TUI repaint) a focused pane sees dozens
+  // of chunks per keystroke, and running the regex passes on each one competes
+  // with rendering for the main thread. So chunks are queued and the whole
+  // window is cleaned once, CLEAN_COALESCE_MS after the first chunk. This
+  // only applies to the focused pane's immediate writes: a background flush is
+  // already one batch per _BACKGROUND_COALESCE_MS and cleans inline, so no
+  // pane ever waits longer than 100ms to reflect output. Far below every
+  // timing gate that reads the result; sync readers call flushPendingClean().
+  const CLEAN_COALESCE_MS = 50
+  // Output arrives as raw PTY bytes (binary WS frames); legacy string chunks
+  // are still accepted defensively. Chunks are queued as-is — xterm.js takes
+  // Uint8Array natively and runs its own streaming UTF-8 decoder.
+  let _pendingOutput: (string | Uint8Array)[] = []
   let _outputTimer: ReturnType<typeof setTimeout> | null = null
+  // Streaming decoder for appendClean's text-side consumers (badge/liveness):
+  // a chunk may end mid-character, so the decoder must carry state across
+  // chunks. Recreated per session so a dead session's tail state never bleeds
+  // into the next one.
+  let _cleanDecoder = new TextDecoder('utf-8')
 
-  function _flushPendingOutput(): void {
+  function _chunkText(chunk: string | Uint8Array): string {
+    return typeof chunk === 'string' ? chunk : _cleanDecoder.decode(chunk, { stream: true })
+  }
+
+  // Chunks already written to xterm but not yet run through appendClean.
+  let _pendingClean: (string | Uint8Array)[] = []
+  let _cleanTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** Run the text side path over every queued chunk now, in arrival order.
+   *  Synchronous: after it returns cleanBuffer/badge state reflect everything
+   *  written to xterm so far. */
+  function flushPendingClean(): void {
+    if (_cleanTimer) { clearTimeout(_cleanTimer); _cleanTimer = null }
+    const chunks = _pendingClean
+    if (!chunks.length) return
+    _pendingClean = []
+    // Feed the ONE streaming decoder chunk by chunk so a multi-byte character
+    // split across chunks still decodes correctly, then clean the joined text
+    // once — an escape sequence split across chunks is stripped whole here.
+    appendClean(chunks.map(_chunkText).join(''))
+  }
+
+  function _flushPendingOutput(immediateClean = false): void {
     if (_outputTimer) { clearTimeout(_outputTimer); _outputTimer = null }
-    const chunk = _pendingOutput
-    _pendingOutput = ''
-    if (!chunk) return
+    const chunks = _pendingOutput
+    _pendingOutput = []
+    if (!chunks.length) return
     const onFirstOutput = !firstOutputSeen ? opts?.onFirstOutput : undefined
     firstOutputSeen = true
-    term.write(chunk, onFirstOutput)
-    appendClean(chunk)
+    for (let i = 0; i < chunks.length; i++) {
+      // Callback on the last write: it fires once ALL pending chunks are
+      // processed, matching the old single-string-write semantics.
+      term.write(chunks[i], i === chunks.length - 1 ? onFirstOutput : undefined)
+      // ANY byte counts as "process still alive" — spinners included. This
+      // feeds liveness/stall detection (App.vue safety net, resize-quiet gate)
+      // ONLY and stays on the chunk path; it deliberately does NOT drive the
+      // RUNNING badge: an idle CLI that merely repaints its footer/cursor emits
+      // raw bytes too. The badge burst is built from CLEANED content, batched
+      // by flushPendingClean.
+      if (chunks[i].length > 0) lastRawActivityAt.value = Date.now()
+      _pendingClean.push(chunks[i])
+    }
+    if (immediateClean) flushPendingClean()
+    else if (!_cleanTimer) _cleanTimer = setTimeout(flushPendingClean, CLEAN_COALESCE_MS)
   }
   let mounted = false
   let mountedEl: HTMLElement | null = null
@@ -1869,6 +2206,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     _ownsTerminalFocus = false
     if (_focusOwner === term) {
       _focusOwner = null
+      _emptyCopyReporter = undefined
       _cancelSelectionPush()
       _reportSelection('') // main must not answer Copy from a pane that lost focus
     }
@@ -1878,6 +2216,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     _blurredWithWindow = false
     _ownsTerminalFocus = true
     _focusOwner = term  // answers Edit > Copy for this window
+    _emptyCopyReporter = reportEmptyCopy  // …and reports a Copy that found nothing
     // Publish what is already highlighted, so Copy is right from the first
     // press rather than only after the next selection change.
     _reportSelection(term.hasSelection() ? term.getSelection() : '')
@@ -1993,6 +2332,28 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
   ): void => {
     _clipboardDiag(logMessage, 'warning')
     opts?.onClipboardFailure?.(reason, chars)
+  }
+
+  /** ⌘C produced nothing. Say so — and, where a plain drag cannot select at
+   *  all, say what to do about it. Reached from this pane's own key handler and
+   *  from main when the Edit > Copy accelerator claimed the key first. */
+  function reportEmptyCopy(origin?: string): void {
+    const now = Date.now()
+    if (now - _lastEmptyCopyAt < EMPTY_COPY_DEDUPE_MS) return
+    if (now - _lastCopyOkAt < COPY_OK_SUPPRESS_MS) return  // this page already copied it
+    _lastEmptyCopyAt = now
+    // menu.ts distinguishes a renderer too busy to answer its 300ms selection
+    // read from a page that promptly said there was nothing selected. Only the
+    // first scales with CLI output, so the log has to keep them apart.
+    const from = origin ? ` (main: ${origin})` : ''
+    if (term.modes.mouseTrackingMode !== 'none') {
+      // The once-ever flag is deliberately bypassed: being unable to rediscover
+      // ⌥-drag after the first six seconds is the bug this fixes.
+      showOptionSelectHint()
+      _clipboardFailure(`pane=${paneId} Cmd+C copied nothing — the CLI captures the mouse and there is no selection${from}`, 'copy-mouse-captured')
+    } else {
+      _clipboardFailure(`pane=${paneId} Cmd+C copied nothing — no selection${from}`, 'copy-no-selection')
+    }
   }
 
   // Set when a reattached pane is waiting to repaint. We never force_redraw at
@@ -2266,6 +2627,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
         const selection = term.getSelection()
         if (selection) {
           e.preventDefault()
+          _lastCopyOkAt = Date.now()  // suppresses a late copy-empty from main
           // Two things this has to report. Chromium rejects writeText when the
           // document is not focused, and the key is already swallowed by then,
           // so a rejection is a copy the user believes happened and did not.
@@ -2294,6 +2656,11 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
             }
           )
           return false
+        } else {
+          // Falls through untouched — the menu path still runs exactly as it
+          // does today. All this adds is a word about the empty clipboard the
+          // user is otherwise left to discover on the next paste.
+          reportEmptyCopy()
         }
       }
 
@@ -2355,7 +2722,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
           // clipboard returned from here without a trace, which is the exact
           // shape of "I pasted and the text just disappeared".
           _clipboardFailure(
-            `pane=${paneId} paste ignored — the clipboard held neither text nor an image`,
+            `pane=${paneId} paste ignored — the clipboard is empty (a copy that selected nothing is the usual cause)`,
             'empty'
           )
           return
@@ -2840,6 +3207,118 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
       return ''
     }
   }
+  // Fetch the pane's recorded transcript from the backend so a restore can show
+  // the conversation, not just the last screenful.
+  //
+  // Why this exists alongside the localStorage snapshot: xterm keeps NO
+  // scrollback for the alternate buffer and discards lines that scroll off it,
+  // so for a full-screen TUI the snapshot can only ever capture the current
+  // screen (see serializeSnapshot's Ceiling note). The transcript on disk has
+  // no such ceiling — the backend appended every chunk as it arrived.
+  //
+  // It is safe to write straight into a terminal of any width because the
+  // backend already stripped every escape sequence before the bytes reached
+  // the file (terminals.py `_clean_for_log`): no cursor positioning means
+  // nothing can land in the wrong cell. The tradeoff is that colour and TUI
+  // chrome are gone — this restores what was said, not how it looked.
+  // Ceiling on the chunk loop below. TRANSCRIPT_MAX_BYTES / chunk size gives 4;
+  // this leaves room without letting a wrong total_chunks spin forever.
+  const TRANSCRIPT_CHUNK_LIMIT = 16
+
+  async function fetchTranscript(): Promise<string> {
+    const workspacePath = opts?.workspacePath ?? ''
+    if (!workspacePath || !activeAgentKey) return ''
+    // One request per chunk: the backend caps a frame at 64KB so a transcript
+    // cannot hold the session send lock in front of a heartbeat. Loop until it
+    // says we have them all, with a hard stop so a bad total_chunks cannot spin.
+    let out = ''
+    try {
+      for (let chunk = 0; chunk < TRANSCRIPT_CHUNK_LIMIT; chunk++) {
+        const r = await terminalPort.history(workspacePath, activeAgentKey, paneId, chunk)
+        if (!r.ok || !r.payload) break
+        out += r.payload.text ?? ''
+        if (chunk + 1 >= (r.payload.total_chunks ?? 1)) break
+      }
+    } catch { return '' }
+    return out
+  }
+
+  // Plain text -> terminal bytes: the file has bare \n line endings, which a
+  // terminal renders as "down one row, same column" — every line would start
+  // where the previous one ended. Only \r\n returns to column 0.
+  function transcriptToTerm(text: string): string {
+    return text.replace(/\r?\n/g, '\r\n')
+  }
+
+  // How recently the PTY must have produced output for a width change to clear
+  // the alternate screen. Sized to the RUNNING badge's hysteresis so "active"
+  // means the same thing in both places.
+  const ALT_CLEAR_ACTIVITY_MS = 4_000
+
+  // Clear the ALTERNATE screen after a width change so the CLI redraws it.
+  //
+  // This is PuTTY's behaviour, and it is why a full-screen TUI never looks
+  // stale there: term_size() throws the whole alternate screen away and
+  // rebuilds it blank at the new width (terminal.c:1927-1940), then marks
+  // disptext ATTR_INVALID so everything repaints. The application gets a blank
+  // canvas plus SIGWINCH and draws itself correctly.
+  //
+  // xterm.js keeps the old alternate-buffer contents across a resize instead,
+  // and it cannot reflow them (it reflows the normal buffer only), so a TUI
+  // that does not repaint on its own leaves the previous width's frame on
+  // screen — the truncated status line and short rules in a widened pane.
+  //
+  // Only ESC[2J ESC[H: it clears the screen the TUI owns, and while the
+  // alternate buffer is active that screen has no scrollback behind it, so no
+  // history is at risk. The normal buffer — where the conversation lives for
+  // line-mode CLIs — is never touched, and neither is any mode state.
+  async function repaintAfterWidthChange(): Promise<void> {
+    // MEASURED 2026-08-27, by spawning `claude` on a real PTY and counting what
+    // it emits: ESC[?1049h zero times, ESC[?1004h once, ESC[nG 51 times. Claude
+    // Code does NOT use the alternate buffer — it paints the normal buffer with
+    // absolute column moves, and it DOES turn focus reporting on.
+    //
+    // The previous version opened by bailing out unless the buffer was the
+    // alternate one, which made the whole thing dead code for every Claude
+    // pane — it fell out on line one. Two older notes said otherwise
+    // (a 2026-07-23 log line reading alt=true, and agents/claude.ts still
+    // carrying fullScreenTui: true); the PTY probe settles it against them.
+    const isAlt = term.buffer?.active?.type === 'alternate'
+    const active = Date.now() - lastRawActivityAt.value <= ALT_CLEAR_ACTIVITY_MS
+
+    // A genuine alternate-buffer TUI (vim, a pager) that is mid-draw: hand it a
+    // blank canvas at the new width, which is what PuTTY does on every resize
+    // (terminal.c term_size rebuilds the alt screen empty, then marks disptext
+    // ATTR_INVALID). Safe there because xterm keeps no scrollback behind an
+    // alternate buffer, so nothing can be lost.
+    if (isAlt && active) {
+      term.write('\x1b[2J\x1b[H')
+      return
+    }
+
+    // Everything else — including every Claude pane — gets the nudge only.
+    // Clearing is not an option in the normal buffer: the conversation sits in
+    // the scrollback right behind the screen, and a CLI that does not repaint
+    // would leave a hole in it.
+    nudgeTuiToRepaint()
+  }
+
+  // Ask a TUI to repaint, without writing anything to the screen.
+  //
+  // Only sent when the CLI has turned focus reporting ON itself (DECSET 1004,
+  // surfaced by xterm as modes.sendFocusMode — Claude Code does, measured
+  // above). Under that mode a focus-out/focus-in pair is ordinary input the
+  // application asked to receive, unlike synthetic keystrokes, which would land
+  // in the prompt. With the mode off nothing is sent at all.
+  //
+  // Whether Ink re-renders on refocus is still unproven — the previous attempt
+  // never actually ran, so it has never been tested in a real pane.
+  function nudgeTuiToRepaint(): void {
+    if (!sessionId.value) return
+    if (!term.modes?.sendFocusMode) return
+    void terminalPort.input(sessionId.value, '\x1b[O\x1b[I')
+  }
+
   function saveScrollSnapshot(): void {
     const key = scrollSnapKey()
     let lines = SCROLL_SNAP_LINES
@@ -3180,12 +3659,12 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
           _echoDiag(`pane=${paneId} keystroke round-trip ${roundTrip}ms`, 'warning')
         }
       }
-      _pendingOutput += payload.data
+      _pendingOutput.push(payload.data)
       if (_ownsTerminalFocus) {
         // The user is typing in this pane — render the echo now.
         _flushPendingOutput()
       } else if (!_outputTimer) {
-        _outputTimer = setTimeout(_flushPendingOutput, _BACKGROUND_COALESCE_MS)
+        _outputTimer = setTimeout(() => _flushPendingOutput(true), _BACKGROUND_COALESCE_MS)
       }
     })
 
@@ -3287,10 +3766,16 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     // it captured, mouse tracking and bracketed paste among them) and before
     // bindSessionHandlers, so live output can never interleave into it.
     if (!snapshotReplayed) {
-      const snap = loadScrollSnapshot()
-      if (snap) {
+      // Same preference as the resume path: the transcript has no
+      // alternate-buffer ceiling, and being plain text it re-wraps to whatever
+      // width this pane has now. It also arms the width reflow — a pane
+      // restored from the snapshot alone has nothing to rebuild itself from, so
+      // it would keep the old width's line breaks for the rest of its life.
+      const transcript = await fetchTranscript()
+      const snap = transcript ? '' : loadScrollSnapshot()
+      if (transcript || snap) {
         snapshotReplayed = true
-        term.write(snap)
+        term.write(transcript ? transcriptToTerm(transcript) : snap)
       }
     }
     // Reset mouse tracking modes so no stale xterm mouse state forwards events
@@ -3495,10 +3980,15 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
       // The snapshot is a serialized buffer — glyphs and colours, no cursor
       // positioning — so it renders correctly whatever width this pane now has.
       // It re-wraps; it cannot land in the wrong cell.
-      const snap = loadScrollSnapshot()
-      if (snap) {
+      // Prefer the backend transcript: it has no alternate-buffer ceiling, so
+      // for a full-screen TUI this is the difference between the whole
+      // conversation and the last screenful. The serialized snapshot is the
+      // fallback — it keeps colour, but only holds what xterm still had.
+      const transcript = await fetchTranscript()
+      const snap = transcript ? '' : loadScrollSnapshot()
+      if (transcript || snap) {
         snapshotReplayed = true
-        term.write(snap)
+        term.write(transcript ? transcriptToTerm(transcript) : snap)
         // Reset any mouse tracking modes the previous session may have enabled.
         // Bracketed paste goes too, and only here: the snapshot just replayed
         // the OLD session's `?2004h`, but the process about to start is a new
@@ -3691,6 +4181,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     (sessionId, cols, rows) => terminalPort.redraw(sessionId, cols, rows),
     () => !!pendingSpawn.value,
     () => { void createWhenMeasurable() },
+    repaintAfterWidthChange,
   )
 
   // Shared zoom → this pane. A new font size means a new cell size, so refit to
@@ -3990,10 +4481,15 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     // buffer to keep in step here; the exit handler sets snapshotDiscarded when
     // this session's scrollback must not be persisted at all.
     if (_outputTimer) { clearTimeout(_outputTimer); _outputTimer = null }
-    if (_pendingOutput) {
-      term.write(_pendingOutput)
-      _pendingOutput = ''
+    if (_pendingOutput.length) {
+      for (const chunk of _pendingOutput) term.write(chunk)
+      _pendingOutput = []
     }
+    // Chunks that DID reach xterm must reach cleanBuffer too before the
+    // decoder below is reset, or the session's tail is lost to every reader.
+    flushPendingClean()
+    // Drop any partial-character state so it cannot bleed into a new session.
+    _cleanDecoder = new TextDecoder('utf-8')
   }
 
   onScopeDispose(() => {
@@ -4019,6 +4515,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     _cancelSelectionPush()
     if (_focusOwner === term) {
       _focusOwner = null
+      _emptyCopyReporter = undefined
       _reportSelection('') // a disposed pane must not keep answering Copy
     }
     document.querySelector('.term-file-picker-root')?.remove()
@@ -4083,6 +4580,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     clearQuestion,
     markBufferPosition,
     recleanBuffer,
+    flushPendingClean,
     readRenderedText,
     readScreenTail,
     readLineBeforeCursor,

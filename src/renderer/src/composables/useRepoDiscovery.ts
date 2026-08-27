@@ -1,5 +1,5 @@
 import { ref, watch, onScopeDispose } from 'vue'
-import type { DiscoveredRepo, GitStatus } from './useGit'
+import type { DiscoveredRepo, DiscoverReposResponse, GitStatus } from './useGit'
 import type { GitTransport } from '../../../shared/gitCompatibility'
 
 export interface RepoBadge {
@@ -17,28 +17,21 @@ export function useRepoDiscovery(
 ) {
   const { send, on } = transport
   const repositories = ref<DiscoveredRepoWithBadge[]>([])
+  // True when the backend skipped the downward scan because the workspace lives
+  // on a cloud-synced folder (walking it can block for minutes). Only a user
+  // triggered forced scan clears it — nothing retries automatically.
+  const discoverySkipped = ref(false)
+  // Workspace the user has already paid a forced walk for (via refresh(true) or
+  // a result adopted from a child pane). While it matches the current
+  // workspace, an automatic refresh that comes back skipped keeps the list the
+  // user opted into instead of collapsing it back to the root-only stub.
+  let forcedWorkspace = ''
 
-  async function refresh(): Promise<void> {
-    const ws = workspacePath()
-    if (!ws) {
-      repositories.value = []
-      return
-    }
-
-    let discovered: DiscoveredRepo[] = []
-    try {
-      const resp = await send<{ ok: boolean; repositories: DiscoveredRepo[] }>(
-        'git.discover_repositories',
-        { workspace_path: ws },
-      )
-      if (!resp.ok || !resp.payload?.ok || workspacePath() !== ws) return
-      discovered = resp.payload.repositories ?? []
-    } catch {
-      return
-    }
-
-    // Fetch lightweight status badge for each repo in parallel.
-    const withBadges = await Promise.all(
+  // Fetch a lightweight status badge for each repo in parallel.
+  async function withBadges(
+    discovered: DiscoveredRepo[],
+  ): Promise<DiscoveredRepoWithBadge[]> {
+    return Promise.all(
       discovered.map(async (repo) => {
         let badge: RepoBadge = { branch: repo.branch, dirtyCount: 0 }
         try {
@@ -59,9 +52,54 @@ export function useRepoDiscovery(
         return { ...repo, badge }
       }),
     )
+  }
+
+  // `force` makes the backend walk the tree even on a cloud-synced path. Pass it
+  // only from an explicit user action — the walk is what wedged the backend.
+  async function refresh(force = false): Promise<void> {
+    const ws = workspacePath()
+    if (!ws) {
+      repositories.value = []
+      discoverySkipped.value = false
+      forcedWorkspace = ''
+      return
+    }
+
+    let discovered: DiscoveredRepo[] = []
+    try {
+      const resp = await send<DiscoverReposResponse>(
+        'git.discover_repositories',
+        { workspace_path: ws, force },
+      )
+      if (!resp.ok || !resp.payload?.ok || workspacePath() !== ws) return
+      const skipped = resp.payload.skipped === 'cloud_storage'
+      // Don't throw away a result the user already paid a tree walk for.
+      if (skipped && forcedWorkspace === ws) return
+      discovered = resp.payload.repositories ?? []
+      discoverySkipped.value = skipped
+    } catch {
+      return
+    }
+
+    if (force) forcedWorkspace = ws
+    const badged = await withBadges(discovered)
 
     if (workspacePath() === ws) {
-      repositories.value = withBadges
+      repositories.value = badged
+    }
+  }
+
+  // Adopt a repository list a child pane already fetched with force: true. One
+  // user click must cost exactly one backend walk, so this takes over the
+  // result rather than issuing a second git.discover_repositories.
+  async function adopt(discovered: DiscoveredRepo[]): Promise<void> {
+    const ws = workspacePath()
+    if (!ws) return
+    forcedWorkspace = ws
+    discoverySkipped.value = false
+    const badged = await withBadges(discovered)
+    if (workspacePath() === ws) {
+      repositories.value = badged
     }
   }
 
@@ -92,5 +130,5 @@ export function useRepoDiscovery(
     if (_timer !== null) clearTimeout(_timer)
   })
 
-  return { repositories, refresh }
+  return { repositories, discoverySkipped, refresh, adopt }
 }

@@ -85,10 +85,37 @@ from .ipc import make_event
 
 log = logging.getLogger("agent_team_backend.terminals")
 
-EventSink = Callable[[dict[str, Any]], Awaitable[None]]
+# JSON event dicts for everything except terminal output; terminal output is
+# emitted as pre-built binary WS frames (see _build_output_frame).
+EventSink = Callable[[dict[str, Any] | bytes], Awaitable[None]]
 # Kept as a deprecated, no-op type alias — historical token sink callback.
 # Tokens are now sourced from log files (see agent_team_backend.log_readers).
 TokenEventSink = Callable[..., Awaitable[None]]
+
+# Binary terminal-output frame layout (little-endian):
+#   u8  frameType = 0x01
+#   u32 sequence
+#   u8  sessionIdLen, then sessionId utf8 bytes
+#   u8  paneIdLen,    then paneId utf8 bytes (may be 0)
+#   rest = raw PTY bytes
+# Raw bytes go straight to xterm.js (which runs its own streaming UTF-8
+# decoder), skipping the decode → JSON-escape → JSON.parse round-trips a text
+# frame paid — control-heavy PTY output ballooned ~6x under JSON escaping.
+_OUTPUT_FRAME_TYPE = 0x01
+
+
+def output_frame_session_id(frame: bytes) -> str | None:
+    """Session id of a binary terminal-output frame, or None if malformed.
+
+    Only the header is touched — routing (app._active_emit) must not pay for
+    scanning the payload.
+    """
+    if len(frame) < 7 or frame[0] != _OUTPUT_FRAME_TYPE:
+        return None
+    sid_len = frame[5]
+    if len(frame) < 6 + sid_len + 1:
+        return None
+    return frame[6 : 6 + sid_len].decode("utf-8", errors="replace")
 
 
 @dataclass
@@ -364,30 +391,27 @@ class TerminalService:
         self._emit = emit
         self._token_event_sink = token_event_sink
         self._loop = asyncio.get_event_loop()
-        # Per-session output batching state
-        self._out_buffers: dict[str, list[str]] = {}   # session_id -> pending chunks
+        # Per-session output batching state — raw PTY bytes, shipped verbatim
+        # in binary WS frames (xterm.js decodes UTF-8 itself).
+        self._out_buffers: dict[str, list[bytes]] = {}  # session_id -> pending chunks
         # Running total of len() over _out_buffers[session_id].  Kept alongside
         # the list because the OOM guard needs the size on every append, and
         # re-summing the whole buffer each time is quadratic in chunk count.
-        self._out_buf_bytes: dict[str, int] = {}       # session_id -> buffered chars
+        self._out_buf_bytes: dict[str, int] = {}       # session_id -> buffered bytes
         self._out_handles: dict[str, asyncio.TimerHandle] = {}  # session_id -> timer
         # Per-session pending INPUT bytes not yet accepted by the non-blocking
         # PTY master (EAGAIN / partial write). Drained via add_writer.
         self._in_buffers: dict[str, bytearray] = {}    # session_id -> pending bytes
-        # Per-session incremental UTF-8 decoders. PTY reads are raw byte chunks
-        # that can split a multi-byte character (CJK is 3 bytes/char); decoding
-        # each chunk independently turns the halves into U+FFFD, which desyncs
-        # the CLI's cursor math from what xterm renders (layout corruption).
+        # Per-session incremental UTF-8 decoders — used ONLY to mirror output
+        # into output_log_fp (pipeline panes). The transport itself ships raw
+        # bytes; incremental decoding keeps a chunk-split multi-byte character
+        # from becoming U+FFFD in the log.
         self._decoders: dict[str, codecs.IncrementalDecoder] = {}
         # Per-session (monotonic loop time, byte count) of recent PTY chunks,
         # used to pick the interactive fast path vs. batched flush delay.
         # maxlen only bounds memory against pathological tiny reads; the
         # window itself is trimmed by time in _window_bytes.
         self._recent_chunks: dict[str, deque[tuple[float, int]]] = {}
-        # Temporary Phase B probe (plan residual-cli-latency-fix-plan_4b8e2f):
-        # per-session rolling counters for fast-path saturation reporting.
-        # Remove with _note_fastpath_stats once the measurement round is done.
-        self._fastpath_stats: dict[str, dict[str, float]] = {}
         # Latency probe state (see _ECHO_LAG_WARN_MS).  session_id -> loop time
         # of the keystroke whose echo is still outstanding.  Only the FIRST
         # keystroke of a burst is timed: a fast typist would otherwise keep
@@ -591,6 +615,23 @@ class TerminalService:
         """Ids of all live (not closed) sessions."""
         return [s.id for s in self._sessions.values() if not s.closed]
 
+    def memory_pid_groups(self) -> dict[str, tuple[str, list[int]]]:
+        """Per live session: its pane id and every pid in its process tree.
+
+        A pane's memory is the whole tree, not the PTY child: that child is a
+        login shell, and the CLI, the MCP servers it spawned and anything else
+        below it are where the hundreds of megabytes actually live. The
+        descendant snapshot the kill path already maintains is reused rather
+        than re-walked, so this stays a dictionary lookup.
+        """
+        groups: dict[str, tuple[str, list[int]]] = {}
+        for session in self._sessions.values():
+            if session.closed:
+                continue
+            pids = [session.proc.pid, *session.descendants.keys()]
+            groups[session.id] = (session.pane_id, pids)
+        return groups
+
     def find_live_by_resume_id(
         self,
         agent_key: str,
@@ -725,13 +766,9 @@ class TerminalService:
         session = self._sessions.get(session_id)
         if not session or session.closed:
             return
-        # 1. Slurp any kernel-buffered bytes the reader hasn't picked up yet,
-        #    reusing the incremental decoder so a split multi-byte char isn't
-        #    turned into U+FFFD.
-        decoder = self._decoders.get(session.id)
-        if decoder is None:
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-            self._decoders[session.id] = decoder
+        # 1. Slurp any kernel-buffered bytes the reader hasn't picked up yet.
+        #    Raw bytes — the frontend's streaming decoder handles any split
+        #    multi-byte character.
         while True:
             try:
                 chunk = os.read(session.master_fd, 4096)
@@ -739,12 +776,10 @@ class TerminalService:
                 break
             if not chunk:
                 break
-            decoded = decoder.decode(chunk)
-            if decoded:
-                self._out_buffers.setdefault(session.id, []).append(decoded)
-                self._out_buf_bytes[session.id] = (
-                    self._out_buf_bytes.get(session.id, 0) + len(decoded)
-                )
+            self._out_buffers.setdefault(session.id, []).append(chunk)
+            self._out_buf_bytes[session.id] = (
+                self._out_buf_bytes.get(session.id, 0) + len(chunk)
+            )
         # Discard any outstanding echo probe rather than let _flush_output
         # attribute this resize drain to the user's last keystroke.
         self._echo_probe.pop(session.id, None)
@@ -757,14 +792,10 @@ class TerminalService:
         chunks = self._out_buffers.pop(session.id, None)
         if not chunks:
             return
-        combined = "".join(chunks)
+        combined = b"".join(chunks)
         for piece in self._split_chunks(combined):
-            await self._emit(self._build_output_event(session, piece))
-        if session.output_log_fp:
-            try:
-                session.output_log_fp.write(_clean_for_log(combined))
-            except Exception as err:  # noqa: BLE001
-                log.warning("output log write failed: %s", err)
+            await self._emit(self._build_output_frame(session, piece))
+        self._mirror_to_log(session, combined)
 
     def interrupt(self, session_id: str) -> None:
         session = self._require(session_id)
@@ -1094,22 +1125,16 @@ class TerminalService:
     def _absorb_output(
         self, session: TerminalSession, chunk: bytes, nbytes: int
     ) -> None:
-        """Decode one drained batch, buffer it, and schedule (or force) a flush."""
+        """Buffer one drained batch of raw bytes and schedule (or force) a
+        flush. No decoding here — bytes ship verbatim in binary frames and the
+        frontend's streaming decoder handles chunk-split multi-byte chars."""
         _BUF_CAP = 5 * 1024 * 1024  # 5 MB — force an immediate flush if exceeded
-        decoder = self._decoders.get(session.id)
-        if decoder is None:
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-            self._decoders[session.id] = decoder
-        decoded = decoder.decode(chunk)
-        if not decoded:
-            return  # chunk ended mid-character; bytes held until the rest arrives
         buf = self._out_buffers.setdefault(session.id, [])
-        buf.append(decoded)
+        buf.append(chunk)
         window = self._recent_chunks.setdefault(session.id, deque(maxlen=512))
         now = self._loop.time()
         window.append((now, nbytes))
-        self._note_fastpath_stats(session, nbytes, now)
-        buf_size = self._out_buf_bytes.get(session.id, 0) + len(decoded)
+        buf_size = self._out_buf_bytes.get(session.id, 0) + len(chunk)
         self._out_buf_bytes[session.id] = buf_size
         if buf_size >= _BUF_CAP:
             # Cancel the pending debounce timer and flush now to avoid OOM.
@@ -1119,53 +1144,30 @@ class TerminalService:
             self._flush_output(session)
         elif session.id not in self._out_handles:
             handle = self._loop.call_later(
-                self._flush_delay(session.id),
+                self._flush_delay(session.id, now=now),
                 self._flush_output,
                 session,
             )
             self._out_handles[session.id] = handle
 
-    def _note_fastpath_stats(
-        self, session: TerminalSession, nbytes: int, now: float
-    ) -> None:
-        """Temporary Phase B probe (plan residual-cli-latency-fix-plan_4b8e2f):
-        once per ~5s per session, report how many PTY chunks arrived with the
-        fast-path window already saturated (i.e. would be flushed on the 50ms
-        batch delay), so laggy CLIs can be checked against the byte envelope.
-        Silent while nothing saturates. Remove after measurement."""
-        st = self._fastpath_stats.setdefault(
-            session.id, {"t0": now, "chunks": 0, "bytes": 0, "max": 0, "batched": 0}
-        )
-        st["chunks"] += 1
-        st["bytes"] += nbytes
-        st["max"] = max(st["max"], nbytes)
-        if self._window_bytes(session.id) > _FAST_PATH_MAX_BYTES:
-            st["batched"] += 1
-        if now - st["t0"] >= 5.0:
-            if st["batched"]:
-                log.info(
-                    "fastpath-stats session=%s agent=%s chunks=%d bytes=%d "
-                    "maxchunk=%d batched=%d window=%.1fs",
-                    session.id, session.agent_key, st["chunks"], st["bytes"],
-                    st["max"], st["batched"], now - st["t0"],
-                )
-            self._fastpath_stats.pop(session.id, None)
-
-    def _window_bytes(self, session_id: str) -> int:
+    def _window_bytes(self, session_id: str, *, now: float | None = None) -> int:
         """Bytes read from this PTY within the last _FAST_PATH_WINDOW_S,
-        dropping entries that fell out of the window."""
+        dropping entries that fell out of the window.  `now` lets the caller
+        reuse a loop time it already took instead of paying a second call."""
         window = self._recent_chunks.get(session_id)
         if not window:
             return 0
-        cutoff = self._loop.time() - _FAST_PATH_WINDOW_S
+        if now is None:
+            now = self._loop.time()
+        cutoff = now - _FAST_PATH_WINDOW_S
         while window and window[0][0] < cutoff:
             window.popleft()
         return sum(nbytes for _, nbytes in window)
 
-    def _flush_delay(self, session_id: str) -> float:
+    def _flush_delay(self, session_id: str, *, now: float | None = None) -> float:
         """Batch delay for the next flush: _COALESCE_MS while the output rate
         looks interactive, _OUTPUT_BATCH_MS once it looks like a stream."""
-        if self._window_bytes(session_id) > _FAST_PATH_MAX_BYTES:
+        if self._window_bytes(session_id, now=now) > _FAST_PATH_MAX_BYTES:
             return _OUTPUT_BATCH_MS / 1000
         return _COALESCE_MS / 1000
 
@@ -1181,7 +1183,7 @@ class TerminalService:
         chunks = self._out_buffers.pop(session.id, None)
         if not chunks:
             return
-        combined = "".join(chunks)
+        combined = b"".join(chunks)
 
         # Echo probe: this flush is the first output since the user's keystroke,
         # so the gap between them is the backend's share of the round-trip.
@@ -1207,7 +1209,7 @@ class TerminalService:
         async def _drain() -> None:
             try:
                 for piece in self._split_chunks(combined):
-                    await self._emit(self._build_output_event(session, piece))
+                    await self._emit(self._build_output_frame(session, piece))
             finally:
                 # Nothing is read from the PTY for this whole span, so a long
                 # one is the backpressure path reaching the CLI.
@@ -1226,51 +1228,58 @@ class TerminalService:
         self._loop.create_task(_drain())
 
         # Persist cleaned output to the conversation log (if one was opened).
-        if session.output_log_fp:
-            try:
-                session.output_log_fp.write(_clean_for_log(combined))
-            except Exception as err:  # noqa: BLE001
-                log.warning("output log write failed: %s", err)
+        self._mirror_to_log(session, combined)
+
+    def _mirror_to_log(self, session: TerminalSession, data: bytes) -> None:
+        """Decode a copy of the raw output and append it to output_log_fp.
+
+        Only sessions with an open log (pipeline panes) pay for decoding; the
+        per-session incremental decoder keeps chunk-split multi-byte chars from
+        becoming U+FFFD in the log.
+        """
+        if not session.output_log_fp:
+            return
+        decoder = self._decoders.get(session.id)
+        if decoder is None:
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            self._decoders[session.id] = decoder
+        try:
+            session.output_log_fp.write(_clean_for_log(decoder.decode(data)))
+        except Exception as err:  # noqa: BLE001
+            log.warning("output log write failed: %s", err)
 
     @staticmethod
-    def _split_chunks(combined: str) -> list[str]:
-        """Split a payload into <=64 KB pieces at valid UTF-8 boundaries.
+    def _split_chunks(combined: bytes) -> list[bytes]:
+        """Split a payload into <=64 KB pieces.
 
         Caps individual WS messages well below the point where the Electron
-        Network service becomes overwhelmed, never cutting a multi-byte
-        character (emoji, CJK, etc.) in half into U+FFFD.
+        Network service becomes overwhelmed. Any byte boundary is safe: the
+        frontend reassembles UTF-8 with a streaming decoder.
         """
         _MAX_BYTES = 64 * 1024
-        encoded = combined.encode("utf-8")
-        if len(encoded) <= _MAX_BYTES:
+        if len(combined) <= _MAX_BYTES:
             return [combined]
-        pieces: list[str] = []
-        pos = 0
-        while pos < len(encoded):
-            end = min(pos + _MAX_BYTES, len(encoded))
-            # Walk back to the start of a multi-byte sequence if we landed
-            # inside one (continuation bytes have the form 10xxxxxx).
-            while end > pos and end < len(encoded) and (encoded[end] & 0xC0) == 0x80:
-                end -= 1
-            pieces.append(encoded[pos:end].decode("utf-8"))
-            pos = end
-        return pieces
+        return [
+            combined[pos : pos + _MAX_BYTES]
+            for pos in range(0, len(combined), _MAX_BYTES)
+        ]
 
-    def _build_output_event(self, session: TerminalSession, data: str) -> dict[str, Any]:
+    def _build_output_frame(self, session: TerminalSession, data: bytes) -> bytes:
+        """Build one binary terminal-output WS frame (layout at module top)."""
         session.sequence += 1
-        return make_event(
-            "terminal.output",
-            {
-                "terminal_session_id": session.id,
-                "pane_id": session.pane_id,
-                "sequence": session.sequence,
-                "data": data,
-                "stream": "stdout",
-            },
+        sid = session.id.encode("utf-8")
+        pane = (session.pane_id or "").encode("utf-8")
+        return b"".join(
+            (
+                bytes((_OUTPUT_FRAME_TYPE,)),
+                (session.sequence & 0xFFFFFFFF).to_bytes(4, "little"),
+                bytes((len(sid),)),
+                sid,
+                bytes((len(pane),)),
+                pane,
+                data,
+            )
         )
-
-    def _send_chunk(self, session: TerminalSession, data: str) -> None:
-        self._loop.create_task(self._emit(self._build_output_event(session, data)))
 
     def _close(self, session: TerminalSession, *, reason: str) -> None:
         if session.closed:
@@ -1285,7 +1294,6 @@ class TerminalService:
         self._unwatch_writable(session)
         self._in_buffers.pop(session.id, None)
         self._recent_chunks.pop(session.id, None)
-        self._fastpath_stats.pop(session.id, None)
         self._echo_probe.pop(session.id, None)
         self._input_blocked.discard(session.id)
         try:
@@ -1297,17 +1305,18 @@ class TerminalService:
         handle = self._out_handles.pop(session.id, None)
         if handle:
             handle.cancel()
-        # Drain any bytes the incremental decoder is still holding (a final
-        # chunk that ended mid-character) so the tail isn't silently dropped.
+        self._flush_output(session)
+        # The transport ships raw bytes, so nothing is ever held back there —
+        # but the log-mirror decoder may still hold a final chunk that ended
+        # mid-character. Flush its tail into the log before the fp closes.
         decoder = self._decoders.pop(session.id, None)
-        if decoder:
+        if decoder and session.output_log_fp:
             tail = decoder.decode(b"", final=True)
             if tail:
-                self._out_buffers.setdefault(session.id, []).append(tail)
-                self._out_buf_bytes[session.id] = (
-                    self._out_buf_bytes.get(session.id, 0) + len(tail)
-                )
-        self._flush_output(session)
+                try:
+                    session.output_log_fp.write(_clean_for_log(tail))
+                except Exception as err:  # noqa: BLE001
+                    log.warning("output log write failed: %s", err)
         # Best-effort wait for child to avoid zombies
         try:
             session.proc.poll()

@@ -59,6 +59,7 @@ declare global {
       onBackendChanged: (cb: (info: BackendInfo) => void) => void
       onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void) => () => void
       onMenuAction: (cb: (action: string) => void) => void
+      onSystemResumed: (cb: () => void) => () => void
       setRecentWorkspaces: (list: { path: string; name: string; exists: boolean }[]) => void
       openMainWindow: (args?: { workspace_path?: string }) => Promise<{ ok: boolean }>
       pickWorkspace: (defaultPath?: string) => Promise<string | null>
@@ -66,6 +67,8 @@ declare global {
       getHomeDir: () => Promise<string>
       listOpenWorkspaces: () => Promise<string[]>
       focusWorkspaceWindow: (workspacePath: string) => Promise<boolean>
+      reportAdoptedWorkspaces: (paths: string[]) => void
+      takeRestoredAdoptedWorkspaces: () => Promise<string[]>
       onOpenWorkspacesChanged: (cb: () => void) => () => void
       openPath: (target: string) => Promise<{ ok: boolean; revealed?: boolean; error?: string }>
       revealPath: (target: string) => Promise<{ ok: boolean; error?: string }>
@@ -81,11 +84,24 @@ declare global {
       openTerminal: (command: string) => Promise<{ ok: boolean; error?: string }>
       openTempFile: (filename: string, content: string) => Promise<{ ok: boolean; path?: string; error?: string }>
       detachGroup: (args: { groupId: string; workspacePath: string; bounds?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean }>
+      detachWorkspace: (args: { workspacePath: string; bounds?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean }>
       getDetachedGroups: () => Promise<string[]>
+      reattachGroup: (args?: { groupId?: string }) => Promise<{ ok: boolean }>
       onGroupDetached: (cb: (groupId: string) => void) => void
       onGroupReattached: (cb: (groupId: string) => void) => void
       onOpenPipelineManager: (handler: (payload: { pipelineId?: string }) => void) => () => void
       openPlansWindow: (args: { workspace_path: string; rel_path?: string }) => Promise<{ ok: boolean }>
+      onOpenResourceManager: (handler: () => void) => () => void
+      requestPaneAction: (args: {
+        paneId: string
+        action: 'focus' | 'reclaim'
+      }) => Promise<{ ok?: boolean; error?: string }>
+      onPaneActionRequest: (
+        handler: (
+          paneId: string,
+          action: 'focus' | 'reclaim'
+        ) => Promise<{ ok?: boolean; error?: string }> | { ok?: boolean; error?: string }
+      ) => void
       openGitHistoryWindow: (args: { workspace_path: string }) => Promise<{ ok: boolean }>
       openGitWindow: (args: {
         workspace_path: string
@@ -234,6 +250,9 @@ declare global {
       ) => () => void
       showTerminalContextMenu: (selection: string) => void
       reportTerminalSelection?: (selection: string) => void
+      /** Edit > Copy produced an unchanged clipboard; `branch` is 'timeout' or
+       *  'no-selection'. Absent on an older preload and in plugin views. */
+      onTerminalCopyEmpty?: (cb: (branch: string) => void) => void
       setBadgeCount: (count: number) => void
       reportWorkspace: (workspacePath: string) => void
       setGitContributionState?: (state: {
@@ -250,6 +269,9 @@ declare global {
       }) => void) => () => void
       restore?: {
         getPending: () => Promise<string[] | null>
+        /** Workspaces the restore failure breaker refused to reopen this
+         *  launch. Not one-shot on the main side — see App.vue's notice. */
+        getSkipped: () => Promise<string[]>
         apply: () => Promise<{ ok: boolean; opened: number }>
         dismiss: () => Promise<{ ok: boolean }>
         getAutoRestore: () => Promise<boolean>

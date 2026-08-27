@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import threading
 import time
@@ -30,6 +31,7 @@ from . import (
     server_link,
     storage_service,
 )
+from .cli_vendors.codex import command_with_resume_id as codex_command_with_resume_id
 from .cli_vendors.registry import VENDORS as CLI_VENDORS
 from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
@@ -50,7 +52,13 @@ from .skills_store import (
     SkillValidationError,
     SkillsStoreError,
 )
-from .spawn_history import canonical_workspace_path, filter_foreign_entries
+from .spawn_history import (
+    canonical_workspace_path,
+    filter_foreign_entries,
+    read_pane_transcript,
+    TRANSCRIPT_MAX_BYTES,
+    TRANSCRIPT_CHUNK_CHARS,
+)
 
 if TYPE_CHECKING:
     from .app import Session
@@ -183,7 +191,11 @@ async def fs_list_dir(session: "Session", msg_id: str, msg_type: str, payload: d
 
     ws_path = payload.get("workspace_path") or ""
     rel = payload.get("rel_path", "") or ""
-    app._watch_plans_workspace(ws_path, rel)
+    # Registering a watch resolves the path and schedules a recursive observer —
+    # blocking syscalls that stall for minutes on a slow/network mount, so it
+    # goes to a worker thread too. Awaited, not fired off: the watch must be in
+    # place before the scan below reports the tree it is watching.
+    await asyncio.to_thread(app._watch_plans_workspace, ws_path, rel)
     show_hidden = bool(payload.get("show_hidden", False))
     result = await asyncio.to_thread(app.fs_service.list_dir, ws_path, rel, show_hidden=show_hidden)
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -268,7 +280,9 @@ async def fs_write_file(session: "Session", msg_id: str, msg_type: str, payload:
     from . import app
 
     ws_path = payload.get("workspace_path") or ""
-    app._watch_plans_workspace(ws_path, payload.get("rel_path", "") or "")
+    await asyncio.to_thread(
+        app._watch_plans_workspace, ws_path, payload.get("rel_path", "") or ""
+    )
     expected_mtime = payload.get("expected_mtime")
     result = await asyncio.to_thread(
         app.fs_service.write_file,
@@ -286,7 +300,9 @@ async def fs_read_file(session: "Session", msg_id: str, msg_type: str, payload: 
     from . import app
 
     ws_path = payload.get("workspace_path") or ""
-    app._watch_plans_workspace(ws_path, payload.get("rel_path", "") or "")
+    await asyncio.to_thread(
+        app._watch_plans_workspace, ws_path, payload.get("rel_path", "") or ""
+    )
     enc_override = payload.get("encoding_override") or None
     result = await asyncio.to_thread(
         app.fs_service.read_file, ws_path, payload.get("rel_path", "") or "", encoding_override=enc_override
@@ -350,7 +366,7 @@ async def plans_list_docs(session: "Session", msg_id: str, msg_type: str, payloa
     ws_path = await asyncio.to_thread(
         resolve_plan_root, str(payload.get("workspace_path") or "")
     )
-    app._watch_plans_workspace_now(ws_path)
+    await asyncio.to_thread(app._watch_plans_workspace_now, ws_path)
     result = await asyncio.to_thread(app.plan_index.list_docs, ws_path)
     if isinstance(result, dict) and result.get("ok"):
         result["root"] = ws_path
@@ -455,7 +471,7 @@ async def git_status(session: "Session", msg_id: str, msg_type: str, payload: di
     # The GitPane is now looking at this workspace — start (idempotently)
     # watching it on disk so external changes refresh near-instantly.
     if app._git_watcher is not None:
-        app._git_watcher.watch(ws_path)
+        await asyncio.to_thread(app._git_watcher.watch, ws_path)
     include_ignored = bool(payload.get("include_ignored", False))
     result = await app.git_service.get_status(ws_path, include_ignored=include_ignored)
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -468,7 +484,10 @@ async def git_discover_repositories(session: "Session", msg_id: str, msg_type: s
     ws_path = payload.get("workspace_path") or ""
     max_depth = min(int(payload.get("max_depth", 3)), 8)
     limit = min(int(payload.get("limit", 20)), 100)
-    result = await app.git_service.discover_repositories(ws_path, max_depth=max_depth, limit=limit)
+    force = bool(payload.get("force", False))
+    result = await app.git_service.discover_repositories(
+        ws_path, max_depth=max_depth, limit=limit, force=force
+    )
     await session.send_json(make_response(msg_id, msg_type, result))
 
 
@@ -2001,7 +2020,7 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
             # escape would send a second, contradictory frame for a message the
             # caller has resolved; the worst real cost is a badge that waits for
             # the next poll, which is where it was before this announcement.
-            log.exception("usage: failed to announce the claude account switch")
+            app.log.exception("usage: failed to announce the claude account switch")
     else:
         service.request_refresh()
 
@@ -2642,6 +2661,133 @@ async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, pay
         # Same reason as ui.settings.set: other windows cache ui_settings. The
         # sender is not excluded because it wrote through this handler rather
         # than through its own settings cache, so it needs the delta too.
+        await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
+
+
+# Account sign-in. Registering creates a tenant (a private network of this
+# user's own machines) and its first admin; logging in exchanges the password
+# for the long-lived device token. Both are the same write as p2p.link.configure
+# ends in — url to settings, token to the vault, then reconnect — so the user
+# never has to see or handle the token at all.
+#
+# The password is not stored anywhere and is not echoed back. It exists for the
+# duration of one request and is exchanged for a token, which is what a
+# previously hand-pasted credential already was.
+async def _account_call(
+    session: "Session", msg_id: str, msg_type: str, payload: dict, verb: str
+) -> None:
+    from . import app
+
+    url = payload.get("serverUrl")
+    email = payload.get("email")
+    password = payload.get("password")
+    for name, value in (("serverUrl", url), ("email", email), ("password", password)):
+        if not isinstance(value, str) or not value.strip():
+            await session.send_json(
+                make_error(msg_id, msg_type, "BAD_REQUEST", f"{name} is required")
+            )
+            return
+
+    request: dict = {"email": email.strip(), "password": password}
+    if verb == "auth.register":
+        for optional in ("displayName", "tenantName"):
+            value = payload.get(optional)
+            if isinstance(value, str) and value.strip():
+                request[optional] = value.strip()
+
+    try:
+        result = await server_link.account_request(url.strip(), verb, request)
+    except server_link.AccountError as err:
+        # Keep the server's own code (EMAIL_TAKEN, AUTH_REJECTED, BAD_REQUEST):
+        # the UI tells these apart to decide whether to offer "sign in instead"
+        # or just let the user retype the password.
+        await session.send_json(make_error(msg_id, msg_type, err.code, err.message))
+        return
+    except Exception as err:  # noqa: BLE001
+        # Anything that stopped the call reaching a server is a link problem,
+        # not a credential problem — saying "wrong password" for an unreachable
+        # host sends the user to change something that was already right.
+        await session.send_json(
+            make_error(msg_id, msg_type, "LINK_OFFLINE", str(err) or "server unreachable")
+        )
+        return
+
+    token = result.get("token")
+    if not isinstance(token, str) or not token:
+        await session.send_json(
+            make_error(msg_id, msg_type, "SERVER_ERROR", "server returned no token")
+        )
+        return
+
+    delta = app.ui_settings_store.set(
+        {
+            server_link.SERVER_URL_SETTING: url.strip(),
+            server_link.ACCOUNT_EMAIL_SETTING: str(result.get("email") or email).strip(),
+        }
+    )
+    try:
+        await vault_to_thread(server_link.set_access_token, token)
+    except Exception as err:  # noqa: BLE001
+        await session.send_json(
+            make_error(msg_id, msg_type, "P2P_TOKEN_WRITE_FAILED", str(err))
+        )
+        return
+
+    await server_link.reconfigure()
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "status": await server_link.status(),
+                "account": {
+                    "email": result.get("email"),
+                    "memberId": result.get("memberId"),
+                    "displayName": result.get("displayName"),
+                    "tenantId": result.get("tenantId"),
+                    "tenantName": result.get("tenantName"),
+                    "role": result.get("role"),
+                },
+            },
+        )
+    )
+    if delta:
+        await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
+
+
+@handler("p2p.account.register")
+async def p2p_account_register(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await _account_call(session, msg_id, msg_type, payload, "auth.register")
+
+
+@handler("p2p.account.login")
+async def p2p_account_login(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await _account_call(session, msg_id, msg_type, payload, "auth.login")
+
+
+@handler("p2p.account.logout")
+async def p2p_account_logout(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Forget this machine's credential. The server keeps the account.
+
+    The server URL is deliberately left in place: signing out is "not right
+    now", not "I will never use this server again", and making the user retype
+    the address every time is the kind of friction that gets a feature abandoned.
+    """
+    from . import app
+
+    try:
+        await vault_to_thread(server_link.set_access_token, None)
+    except Exception as err:  # noqa: BLE001
+        await session.send_json(
+            make_error(msg_id, msg_type, "P2P_TOKEN_WRITE_FAILED", str(err))
+        )
+        return
+    delta = app.ui_settings_store.set({server_link.ACCOUNT_EMAIL_SETTING: None})
+    await server_link.reconfigure()
+    await session.send_json(
+        make_response(msg_id, msg_type, {"status": await server_link.status()})
+    )
+    if delta:
         await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
 
 
@@ -3960,6 +4106,11 @@ async def _terminal_create_impl(
     metadata = payload.get("metadata") or {}
     agent_key = payload.get("agent_key") or ""
     env = dict(payload.get("env") or {})
+    vendor_spec = cli_vendor(agent_key)
+    if vendor_spec is not None:
+        for key, value in vendor_spec.spawn_env_defaults:
+            if key not in os.environ:
+                env.setdefault(key, value)
     await app._ensure_fresh_path_for_spawn(agent_key)
     payload["command"] = app._command_with_persisted_cli_binary(
         agent_key, payload.get("command")
@@ -4031,6 +4182,25 @@ async def _terminal_create_impl(
         # that recorded the session. Resume in whichever home owns it;
         # only unknown/fresh sessions get a (new) per-pane home.
         resume_id = app._resume_id_for_agent("codex", payload.get("command"))
+        if resume_id:
+            # Repair a pin that names a sub-agent thread. Builds shipped before
+            # sub-agent rollouts were recognised could pin one, and codex
+            # refuses direct input on such a thread — the pane comes back
+            # unusable until the id is pointed at the user thread it came from.
+            resolver = getattr(app.codex_home_manager, "resolve_user_thread_id", None)
+            if callable(resolver):
+                repaired = await asyncio.to_thread(resolver, resume_id)
+            else:
+                repaired = resume_id
+            if repaired != resume_id:
+                app.log.info(
+                    "codex resume id repaired: sub-agent %s → user thread %s",
+                    resume_id, repaired,
+                )
+                payload["command"] = codex_command_with_resume_id(
+                    payload.get("command"), resume_id, repaired
+                )
+                resume_id = repaired
         session_home = (
             await asyncio.to_thread(app.codex_home_manager.find_session_home, resume_id)
             if resume_id
@@ -4210,7 +4380,6 @@ async def _terminal_create_impl(
         # file); the elif chain below is the legacy fallback, deleted one
         # vendor at a time. Codex stays out of both paths here — its resume
         # id is claimed via the per-pane CODEX_HOME flow.
-        vendor_spec = cli_vendor(agent_key)
         if (not explicit_session_id and agent_key != "codex"
                 and vendor_spec is not None
                 and vendor_spec.resume_id_from_command is not None):
@@ -4323,6 +4492,129 @@ async def terminal_input(session: "Session", msg_id: str, msg_type: str, payload
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 
+@handler("terminal.memory_usage")
+async def terminal_memory_usage(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Per-pane memory footprint, measured on demand.
+
+    Answers the one question the memory panel exists for — which panes are
+    holding the machine's memory — with the number the kernel charges each
+    process, not `ps` RSS (which counts shared pages once per process and so
+    over-reports a fleet of identical CLIs).
+
+    On demand, never on a timer: the sweep shells out, and its cost scales with
+    the pane count. Off Darwin, or when footprint cannot run, `available` is
+    false and the panel says it cannot measure rather than showing a number
+    that means something else.
+    """
+    from . import process_memory
+
+    groups = session.terminals.memory_pid_groups()
+    pids = [pid for _, pids in groups.values() for pid in pids]
+    measured = await asyncio.to_thread(process_memory.footprints, pids)
+    totals = process_memory.sum_by_group(
+        {sid: pids for sid, (_, pids) in groups.items()}, measured
+    )
+    panes = [
+        {
+            "terminal_session_id": sid,
+            "pane_id": pane_id,
+            "bytes": totals.get(sid, 0),
+        }
+        for sid, (pane_id, _) in groups.items()
+    ]
+    await session.send_json(make_response(msg_id, msg_type, {
+        # measured being empty with live panes means the sweep failed, which is
+        # not the same as "no panes" — the panel has to tell those apart.
+        "available": process_memory.available() and bool(measured or not groups),
+        "panes": panes,
+        "total_bytes": sum(totals.values()),
+    }))
+
+
+#: One sweep serves every window that asks within this window of time.
+#:
+#: The panel it feeds is machine-wide, so N open windows all ask for the same
+#: numbers on their own timers — and the sweep shells out twice, on the shared
+#: executor, at a cost that scales with the pane count. Without this, three
+#: windows plus the Resource Manager mean three redundant `footprint` runs
+#: contending for the same thread pool (a failure this backend has hit before,
+#: from a different caller). The lock serialises them; the TTL means the ones
+#: that queued behind it get the reading that just completed instead of
+#: starting another.
+#:
+#: It does not blur anyone's CPU differencing: each caller subtracts against
+#: its OWN previous sample, and `sampled_at` travels with the reading, so a
+#: shared sample is simply a sample both callers took at the same instant.
+_RESOURCE_SWEEP_TTL_S = 1.0
+_resource_sweep_lock = asyncio.Lock()
+_resource_sweep_cache: dict[str, object] = {"at": 0.0, "payload": None}
+
+
+@handler("terminal.resource_usage")
+async def terminal_resource_usage(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Per-pane CPU and memory in one sweep, for the resource panel.
+
+    Memory is the footprint number `terminal.memory_usage` already returns.
+    CPU is the *accumulated* CPU seconds of the pane's process tree, not a
+    percentage: a percentage only exists between two readings, and two windows
+    sampling at different rates would each need their own interval. Returning
+    the raw counter with the clock it was read at lets every caller difference
+    against its own previous sample.
+
+    The two sweeps are independent subprocesses, so they run concurrently; the
+    whole call costs about as much as the slower one. Concurrent callers share
+    one sweep — see _RESOURCE_SWEEP_TTL_S.
+    """
+    async with _resource_sweep_lock:
+        now = time.monotonic()
+        cached = _resource_sweep_cache["payload"]
+        if cached is not None and now - float(_resource_sweep_cache["at"]) < _RESOURCE_SWEEP_TTL_S:
+            await session.send_json(make_response(msg_id, msg_type, cached))
+            return
+        result = await _collect_resource_usage(session)
+        _resource_sweep_cache["at"] = now
+        _resource_sweep_cache["payload"] = result
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
+async def _collect_resource_usage(session: "Session") -> dict:
+    """One CPU + memory sweep over every live PTY this backend owns."""
+    from . import process_cpu, process_memory
+
+    groups = session.terminals.memory_pid_groups()
+    pids = [pid for _, pids in groups.values() for pid in pids]
+    by_session = {sid: pids for sid, (_, pids) in groups.items()}
+    measured, (cpu_measured, sampled_at) = await asyncio.gather(
+        asyncio.to_thread(process_memory.footprints, pids),
+        asyncio.to_thread(process_cpu.cpu_times, pids),
+    )
+    totals = process_memory.sum_by_group(by_session, measured)
+    cpu_totals = process_cpu.sum_by_group(by_session, cpu_measured)
+    panes = [
+        {
+            "terminal_session_id": sid,
+            "pane_id": pane_id,
+            "bytes": totals.get(sid, 0),
+            "cpu_seconds": cpu_totals.get(sid, 0.0),
+        }
+        for sid, (pane_id, _) in groups.items()
+    ]
+    cpu_count, machine_memory = process_cpu.machine_capacity()
+    return {
+        # An empty sweep with live panes means it failed, which is not the same
+        # as "no panes" — the panel has to tell those apart, per metric.
+        "available": process_memory.available() and bool(measured or not groups),
+        "cpu_available": process_cpu.available() and bool(cpu_measured or not groups),
+        "sampled_at": sampled_at,
+        "panes": panes,
+        "total_bytes": sum(totals.values()),
+        # Denominators for "how much of this machine", which is the question the
+        # summary answers; the per-pane column stays relative to one core.
+        "cpu_count": cpu_count,
+        "machine_memory_bytes": machine_memory,
+    }
+
+
 @handler("terminal.log_sent")
 async def terminal_log_sent(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     # Fire-and-forget: log injected text to the session's output log file.
@@ -4357,6 +4649,58 @@ async def client_diagnostic(session: "Session", msg_id: str, msg_type: str, payl
         else:
             client_log.info("%s: %s", category, message)
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
+@handler("terminal.history")
+async def terminal_history(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Return a pane's recorded transcript so a restore can replay its history.
+
+    Exists because xterm keeps no scrollback for the alternate buffer and drops
+    lines that scroll off it, so a restored pane could show only what the CLI
+    repaints — the conversation above it was simply gone. The transcript on
+    disk is ANSI-stripped plain text (terminals.py `_clean_for_log`), which is
+    why replaying it is width-safe: there are no cursor coordinates to land in
+    the wrong cell. It restores the conversation, not the coloured screen.
+
+    The caller names a pane, never a path: the filename is derived from
+    agent_key + pane_id, so this cannot be pointed at an arbitrary file.
+    """
+    workspace_path = str(payload.get("workspace_path") or "")
+    agent_key = str(payload.get("agent_key") or "")
+    pane_id = str(payload.get("pane_id") or "")
+    if not (workspace_path and agent_key and pane_id):
+        await session.send_json(make_response(msg_id, msg_type, {"ok": False, "text": ""}))
+        return
+    max_bytes = int(payload.get("max_bytes") or TRANSCRIPT_MAX_BYTES)
+    # Plain file IO, but a long-lived pane's transcript can run to hundreds of
+    # KB across several days' files — off the event loop so a restore storm
+    # cannot stall it.
+    text, truncated = await asyncio.to_thread(
+        read_pane_transcript, workspace_path, agent_key, pane_id, max_bytes
+    )
+    # Answer ONE chunk per request. A whole transcript runs to hundreds of KB,
+    # and shipping that as a single frame would hold the session send lock for
+    # one serialize+write — long enough to sit in front of a heartbeat pong,
+    # which is the shape behind the spurious-disconnect reports. terminal.output
+    # slices at this size for the same reason; the caller loops for the rest.
+    chunks = [
+        text[i : i + TRANSCRIPT_CHUNK_CHARS]
+        for i in range(0, len(text), TRANSCRIPT_CHUNK_CHARS)
+    ] or [""]
+    index = max(0, int(payload.get("chunk") or 0))
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "ok": True,
+                "text": chunks[index] if index < len(chunks) else "",
+                "chunk": index,
+                "total_chunks": len(chunks),
+                "truncated": truncated,
+            },
+        )
+    )
 
 
 @handler("terminal.resize")
@@ -4575,6 +4919,37 @@ async def project_set_pane_stopped(session: "Session", msg_id: str, msg_type: st
                 "workspace_path": ws_raw, "pane_id": pane_id, "stopped": stopped,
             }))
         )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
+@handler("project.set_pane_minimized")
+async def project_set_pane_minimized(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Collapsed-to-sidebar state.
+
+    The renderer has been sending this since the feature shipped, but no
+    handler existed — backend.send is fire-and-forget, so nothing surfaced and
+    the state silently reset on every restart.
+    """
+    from . import app
+
+    ws_raw = payload.get("workspace_path", "") or ""
+    pane_id = payload.get("pane_id", "") or ""
+    is_minimized = bool(payload.get("is_minimized", False))
+    if ws_raw and pane_id:
+        app.project_store.set_pane_minimized(ws_raw, pane_id=pane_id, is_minimized=is_minimized)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
+@handler("project.set_pane_collapsed")
+async def project_set_pane_collapsed(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Whether this pane's lineage subtree is folded in the agent lists."""
+    from . import app
+
+    ws_raw = payload.get("workspace_path", "") or ""
+    pane_id = payload.get("pane_id", "") or ""
+    collapsed = bool(payload.get("collapsed", False))
+    if ws_raw and pane_id:
+        app.project_store.set_pane_collapsed(ws_raw, pane_id=pane_id, collapsed=collapsed)
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 
@@ -5414,6 +5789,8 @@ async def manual_pane_spawn(session: "Session", msg_id: str, msg_type: str, payl
         profile_id=_profile_pin_for_spawn(payload.get("agent", ""), payload.get("profile_id")),
         run_group_id=payload.get("run_group_id", ""),
         output_log_file=payload.get("output_log_file", ""),
+        origin=payload.get("origin", ""),
+        spawned_by=payload.get("spawned_by", ""),
     )
     await session.send_json(
         make_response(msg_id, msg_type, app._project_payload(project))

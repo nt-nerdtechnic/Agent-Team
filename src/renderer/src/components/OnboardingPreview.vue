@@ -122,7 +122,7 @@ defineProps<{
 }
 .op-crumb {
   margin-left: 8px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-secondary);
 }
@@ -133,7 +133,7 @@ defineProps<{
 .op-caption {
   margin: 0 0 14px;
   font-size: 11.5px;
-  line-height: 1.5;
+  line-height: var(--lh-base);
   color: var(--text-muted);
 }
 .op-list {
@@ -163,7 +163,7 @@ defineProps<{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 700;
   background: var(--accent-emphasis);
   color: var(--text-on-emphasis);
@@ -173,7 +173,7 @@ defineProps<{
 }
 .op-appname {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
 }
 .op-appname.ghost {
@@ -207,7 +207,7 @@ defineProps<{
   display: flex;
   gap: 10px;
   padding: 6px 4px 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
 }
 
@@ -252,8 +252,8 @@ defineProps<{
   margin: 0;
   max-width: 420px;
   text-align: center;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   color: var(--text-muted);
 }
 </style>

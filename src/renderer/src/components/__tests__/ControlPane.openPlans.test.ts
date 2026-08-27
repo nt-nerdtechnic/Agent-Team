@@ -51,14 +51,17 @@ describe('ControlPane – Plans sidebar tab', () => {
 
   it('renders the retained Plans tab in the sidebar icon rail', () => {
     const btns = wrapper.findAll('.sidebar-tabs .tab-btn')
-    // agents, pipeline, explorer, retained Plans
-    expect(btns).toHaveLength(4)
-    expect(btns[3].attributes('title')).toContain('Plans')
+    // agents, pipeline, explorer, factory-installed Git, retained Plans
+    expect(btns).toHaveLength(5)
+    expect(btns[4].attributes('title')).toContain('Plans')
   })
 
   it('mounts the retained PlanPane when the Plans tab is picked', async () => {
     expect(wrapper.findComponent({ name: 'PlanPane' }).exists()).toBe(false)
-    await wrapper.findAll('.sidebar-tabs .tab-btn')[3].trigger('click')
+    const plansButton = wrapper.findAll('.sidebar-tabs .tab-btn')
+      .find((button) => button.attributes('title')?.includes('Plans'))
+    expect(plansButton).toBeDefined()
+    await plansButton!.trigger('click')
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent({ name: 'PlanPane' }).exists()).toBe(true)
   })

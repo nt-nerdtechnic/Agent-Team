@@ -3,11 +3,22 @@ import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, provi
 import ViewPanel, { type LayoutMode } from './components/ViewPanel.vue'
 import TerminalPane from './components/TerminalPane.vue'
 import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
+import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups'
+import { buildPaneLineage } from './lib/paneLineage'
+import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
+import { buildStageTabs } from './lib/stageTabs'
+import { flattenSidebarOrder, resolveFocusedPane } from './lib/paneFocus'
+import { formatBytes } from './lib/formatBytes'
+import { formatCpuPercent, machineCpuShare, machineMemoryShare } from './lib/resourceSampling'
+import { useResourceUsage, type ResourceUsageWire } from './composables/useResourceUsage'
+import ResourceSummaryPanel, { type ResourceSummaryRow } from './components/ResourceSummaryPanel.vue'
+import ResourceManagerModal from './components/ResourceManagerModal.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
 import ControlPane, {
   type AgentSpec,
   type ActivePaneView,
+  type PaneLineageRow,
   type InjectionStatus,
   type KickoffStatus,
   type PreparationStatus,
@@ -20,14 +31,15 @@ import ControlPane, {
   type WorkspaceMode
 } from './components/ControlPane.vue'
 import PluginRegionHost, { type PluginRegionContribution } from './components/PluginRegionHost.vue'
-import type { AgentOverviewRow } from './components/AgentOverviewPanel.vue'
 import QuestionAlert from './components/QuestionAlert.vue'
 import TokenStatsPanel from './components/TokenStatsPanel.vue'
+import { asAgentPush, normalizePreviewTarget } from './preview/previewTarget'
+import { usePreview } from './preview/usePreview'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { agentUsesBracketedPaste } from '@navide/plugin-shell'
 import { useNotify, useTheme } from '@navide/plugin-ui/foundation'
-import { migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from '@navide/terminal'
+import { collapseHomePath, migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from '@navide/terminal'
 import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
 import type { PushOutcome, RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
@@ -41,6 +53,7 @@ import {
 } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
+import { paneStatusLabelKey } from './lib/paneStatusLabel'
 import { useBackend } from './composables/useBackend'
 import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
 import { useSettings } from './composables/useSettings'
@@ -83,12 +96,16 @@ import { i18n } from '@navide/plugin-ui/foundation'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from '@navide/terminal'
-import { reclaimBlockedBy, idleReclaimThresholdMs, type ReclaimCandidate } from './lib/idleReclaim'
+import { reclaimBlockedBy, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
 import { findConsecutiveQuestionBlocks, findSentinel } from '@navide/terminal'
 import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
   buildMentionInsert,
+  rankMentionCandidates,
+  recordMentionRecents,
+  MENTION_BROADCAST_ADDRESS,
+  type MentionCandidate,
   buildPaneContextPaste,
   shouldMentionOnDrop,
   buildPaneStatusReply,
@@ -100,8 +117,8 @@ import {
   CLI_PASTE_LINE_CAP
 } from '@navide/terminal'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
-import { allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
-import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
+import { activityMeansWorking, allSlotsFinished, applyLoopWait, applyTurnProgress, detailMeansToolUse, loopWaitBackoffMs, loopWaitHonoured, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal, type LoopWaitState } from './lib/completion'
+import { reorderByIds, reorderStrings, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
 import { resolveDragBatch, reorderBatchByIds } from './lib/paneBatchDrag'
 import { AGENT_SPECS, type PaneArgContext } from '@navide/plugin-shell'
@@ -167,12 +184,25 @@ import {
   restoreScopeTargetIds,
   runWithConcurrency,
   stripPinnedSessionId,
+  stripDeadOpencodeAutoFlag,
   type RestoreScope,
   type RestoreSessionDecision,
   type RestoreSessionTrigger,
   type WorkspaceRestoreSession,
 } from './lib/resumeBehavior'
 import { initSettingsBackend, settingsGet, settingsSet } from '@navide/plugin-ui/shared'
+import { useLayoutStore } from './layout/useLayoutStore'
+import { RAIL_SIZE } from './layout/slots'
+import SlotContainer from './layout/SlotContainer.vue'
+// Bodies for the horizontal slots. Async because a slot that holds none of them
+// — the shipped default — should not pay for their code.
+//
+// Only three, because only three views may live here: the rest are pinned to
+// the host that knows how to reveal them (see viewRegistry). A slot that
+// cannot be asked to draw a view needs no import for it.
+const SlotHistory = defineAsyncComponent(() => import('./components/HistoryPanel.vue'))
+const SlotTasker = defineAsyncComponent(() => import('./components/TaskerPanel.vue'))
+const SlotMessages = defineAsyncComponent(() => import('./components/AgentMessagesPanel.vue'))
 import { pickWhatsNew, type WhatsNewEntry } from './lib/whatsNew'
 import { initUsage } from './composables/useUsage'
 import {
@@ -182,6 +212,7 @@ import {
   DEFAULT_LOOP_RESUME,
   LOOP_ESTIMATE_WINDOW_MS,
   LOOP_DONE_MARKER,
+  LOOP_WAIT_MARKER,
   withLoopDoneInstruction,
   parseLimitReset,
   matchSessionLimit,
@@ -203,6 +234,7 @@ import { initKeybindingsPort, useKeybindings, registerCommand, setContext } from
 import { useUiActionBus } from './composables/useUiActionBus'
 import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
 import { useStatusBarPopover } from './composables/useStatusBarPopover'
+import navideMark from './assets/navide-mark.png'
 
 // Modals/wizard that only render behind a v-if (settings opened, run completed,
 // first-run onboarding) — defer them off the main shell's first-paint bundle.
@@ -217,7 +249,6 @@ const RestoreScopeModal = defineAsyncComponent(() => import('./components/Restor
 const PipelineManagerModal = defineAsyncComponent(() => import('./components/PipelineManagerModal.vue'))
 const AnnouncementsPanel = defineAsyncComponent(() => import('./components/AnnouncementsPanel.vue'))
 const ClockPanel = defineAsyncComponent(() => import('./components/ClockPanel.vue'))
-const AgentOverviewPanel = defineAsyncComponent(() => import('./components/AgentOverviewPanel.vue'))
 
 const backend = useBackend()
 const terminalPort = createHostTerminalDockPort(backend)
@@ -256,10 +287,27 @@ onMounted(() => {
   window.agentTeam?.onQuitConfirmDisabled?.(() => { confirmBeforeClose.value = false })
   // Clicking a system notification focuses the originating pane.
   window.agentTeam?.onFocusPane?.((paneId) => {
-    focusPaneFromNotification(paneId)
+    void focusPaneFromNotification(paneId)
   })
+  // Native application menu entry (menu:open-resource-manager).
+  window.agentTeam?.onOpenResourceManager?.(() => openResourceManager())
   // Plan window "execute" dispatch routed to this workspace's window.
   window.agentTeam?.onPlanExecutionDispatch?.((payload) => { void onPlanExecutionDispatch(payload) })
+  // Resource Manager row actions (jump / reclaim). That window is machine-wide
+  // and main asks every window, so a pane this one does not own is disowned
+  // with not-found rather than answered.
+  window.agentTeam?.onPaneActionRequest?.(async (paneId, action) => {
+    if (!panes.value.some((p) => p.id === paneId)) return { error: 'not-found' }
+    if (action === 'focus') {
+      onResourceJump(paneId)
+      // `focused` asks main to bring this window forward — a renderer cannot.
+      return { ok: true, focused: true }
+    }
+    // Reclaim runs the same guards the status-bar reclaim does, so a pane that
+    // is busy, focused or holding a draft refuses instead of dying.
+    const reclaimed = await reclaimPanesNow([paneId])
+    return reclaimed > 0 ? { ok: true } : { error: 'blocked' }
+  })
   // Editor-window AI Chat fetches a CLI pane's scrollback through the main
   // process (cli:get-pane-buffer); answer from this window's paneRefs.
   window.agentTeam?.onCliPaneBufferRequest?.((paneId) => {
@@ -490,6 +538,15 @@ const WS_PATH_KEY = 'agentTeam.currentWorkspace'
 const _bootWorkspace = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
 const _bootIsDuplicate = new URLSearchParams(window.location.search).get('duplicate') === '1'
 const legacyGitRecovery = ref(new URLSearchParams(window.location.search).get('legacy_git_recovery') === '1')
+// Set by main when this window is reopened from the saved session snapshot
+// (index.ts passes restore: '1'). Distinguishes "the app restored this
+// workspace for you" from "the user deliberately opened it" — an empty
+// workspace is a normal thing to open on purpose, but being restored INTO an
+// empty one leaves nothing to act on, so that case returns to the picker.
+const _bootIsRestore = new URLSearchParams(window.location.search).get('restore') === '1'
+// The check runs once, on the restore that opened this window. Later emptiness
+// is the user's own doing (they closed the last pane) and must not eject them.
+let restoreEmptyCheckPending = _bootIsRestore
 let suppressPaneRestoreOnce = _bootWorkspace !== '' && _bootIsDuplicate
 // Detached child window: shows only one run group of its workspace. When set,
 // this window renders just that group's tab/panes and never persists the shared
@@ -499,6 +556,11 @@ const isDetachedWindow = detachedGroupId !== ''
 // Groups that THIS (main) window has handed off to a detached child window —
 // filtered out of the tab bar and pane view until the child closes.
 const detachedGroupIds = ref<Set<string>>(new Set())
+/** Resolves once main has told this window which groups are currently
+ *  detached. An ordinary restore awaits it, so the filter that skips those
+ *  groups is never consulted before the answer has arrived — otherwise the
+ *  race decides whether the main window resurrects panes the child owns. */
+let detachedGroupsKnown: Promise<void> = Promise.resolve()
 if (_bootWorkspace) {
   try {
     sessionStorage.setItem(WS_PATH_KEY, _bootWorkspace)
@@ -621,6 +683,30 @@ void window.agentTeam?.restore?.getPending().then((list) => {
   const stop = watch(booting, (b) => { if (!b) { stop(); void show() } })
 })
 
+// Workspaces the restore failure breaker left closed this launch (issue #24).
+// Informational only — there is nothing to apply, so it's an alert, not a
+// confirm. Uses the same notify surface and the same boot-overlay wait as the
+// crash prompt above.
+//
+// Main claims the list on first read, so only one window ever receives it.
+// This guard covers a repeat ask inside THIS window.
+let skippedNoticeShown = false
+void window.agentTeam?.restore?.getSkipped?.().then((list) => {
+  if (!list?.length || skippedNoticeShown) return
+  skippedNoticeShown = true
+  const show = async (): Promise<void> => {
+    await notifyRestore.alert(
+      `${i18n.global.t('restore.skipped-message', { count: list.length })}\n\n${list.join('\n')}`,
+      {
+        title: i18n.global.t('restore.skipped-title'),
+        confirmText: i18n.global.t('restore.skipped-ack'),
+      }
+    )
+  }
+  if (!booting.value) { void show(); return }
+  const stop = watch(booting, (b) => { if (!b) { stop(); void show() } })
+})
+
 function onWorkspaceSelected(path: string): void {
   currentWorkspace.value = path
   workspaceSelected.value = true
@@ -695,7 +781,7 @@ const confirmBeforeClosePane = makeStickyBool('agentTeam.confirmClosePane', true
 // returns it to the same cold-restore placeholder a restart would show, so the
 // conversation is one click away rather than gone.
 const idleReclaimEnabled = makeStickyBool('agentTeam.idleReclaim', true)
-const idleReclaimMinutes = makeStickyStr('agentTeam.idleReclaimMinutes', '180')
+const idleReclaimMinutes = makeStickyStr('agentTeam.idleReclaimMinutes', '30')
 // Push the "confirm before quit" config to main so the native dialog stays in
 // sync with the shared setting and the current locale.
 function pushQuitConfirmConfig(): void {
@@ -711,25 +797,67 @@ function pushQuitConfirmConfig(): void {
 watch(confirmBeforeClose, pushQuitConfirmConfig)
 // Strict completion: when ON, idle/cap timeouts do NOT auto-advance — instead they
 // prompt the user (or, if Full auto is also on, an LLM-styled 5-sec auto-advance).
-// Drives the third grid column width on .app. TokenStatsPanel persists its
-// own expanded/collapsed sticky state to the settings store; this ref mirrors
-// the component state via v-model:expanded so the layout knows its width.
-const tokenPanelExpanded = ref<boolean>(
-  settingsGet<string | null>('agentTeam.tokenPanel.expanded', null) === '1'
-)
-// The panel is controlled now, so persisting belongs here with the value rather
-// than inside the component that merely renders it.
-watch(tokenPanelExpanded, (v) => { settingsSet('agentTeam.tokenPanel.expanded', v ? '1' : '0') })
-const rightPanelWidth = ref<number>(
-  parseInt(settingsGet('agentTeam.rightWidth', '300')) || 300
-)
-watch(rightPanelWidth, (v) => { settingsSet('agentTeam.rightWidth', String(v)) })
-const tokenPanelWidth = computed(() => (tokenPanelExpanded.value ? `${rightPanelWidth.value}px` : '36px'))
+// Shell geometry now lives in the layout store: one object, one write path, and
+// the same source Settings will edit later. These stay as computeds so the rest
+// of this file — handles, refits, the panel props — keeps reading what it always
+// read; only the storage underneath moved.
+//
+// The store also carries `up` and `down`. Both start empty, an empty slot
+// resolves to a 0px track, so the shell renders exactly as the three-column
+// version did until a view is put there.
+const { layout: shellLayout, slotTracks, setSlotSize, setSlotCollapsed, setActiveView, canCollapse } = useLayoutStore()
 
-const leftPanelWidth = ref<number>(
-  parseInt(settingsGet('agentTeam.leftWidth', '360')) || 360
+const leftPanelWidth = computed(() => shellLayout.value.slots.left.size)
+const rightPanelWidth = computed(() => shellLayout.value.slots.right.size)
+const leftPanelCollapsed = computed(() => shellLayout.value.slots.left.collapsed)
+/** Kept for the panel prop and every `v-if` that already reads it. */
+const tokenPanelExpanded = computed<boolean>({
+  get: () => !shellLayout.value.slots.right.collapsed,
+  set: (v) => { setSlotCollapsed('right', !v); refitAllTerminals() },
+})
+const tokenPanelWidth = computed(() => slotTracks.value.right)
+const leftTrackWidth = computed(() => slotTracks.value.left)
+
+// Collapsing either side slot resizes the main column by hundreds of pixels.
+// Per-pane ResizeObservers coalesce that away often enough to leave terminals
+// at a stale width, so drive the refit from the toggle itself.
+function setLeftCollapsed(v: boolean): void {
+  if (v && !canCollapse('left')) return
+  setSlotCollapsed('left', v)
+  refitAllTerminals()
+}
+
+// The horizontal slots take height off the stage rather than width, but the
+// terminals care either way, so they refit on the same terms as the side ones.
+function setSlotCollapsedAndRefit(id: 'up' | 'down', v: boolean): void {
+  if (v && !canCollapse(id)) return
+  setSlotCollapsed(id, v)
+  refitAllTerminals()
+}
+
+// A handle needs a track to drag. A collapsed slot is a 36px rail and an empty
+// one is 0px wide — in both cases the handle would sit against the window edge
+// writing a size nothing displays.
+const leftHandleVisible = computed(
+  () => !shellLayout.value.slots.left.collapsed && shellLayout.value.slots.left.views.length > 0
 )
-watch(leftPanelWidth, (v) => { settingsSet('agentTeam.leftWidth', String(v)) })
+const rightHandleVisible = computed(
+  () => !shellLayout.value.slots.right.collapsed && shellLayout.value.slots.right.views.length > 0
+)
+
+const upTrackHeight = computed(() => slotTracks.value.up)
+const downTrackHeight = computed(() => slotTracks.value.down)
+
+// Safety net for every other way the stage can change size: a view moved in
+// Settings, a size typed there, or another window editing the shared layout.
+// The toggles above refit immediately because a delayed one would show a
+// stale-width flash; this covers the paths that have no single call site.
+// Debounced because dragging a handle rewrites the track on every mousemove.
+let _slotTrackTimer: number | null = null
+watch(slotTracks, () => {
+  if (_slotTrackTimer !== null) clearTimeout(_slotTrackTimer)
+  _slotTrackTimer = window.setTimeout(() => { _slotTrackTimer = null; refitAllTerminals() }, 120)
+}, { deep: true })
 
 type DragTarget = 'left' | 'right'
 let _dragTarget: DragTarget | null = null
@@ -757,11 +885,9 @@ function onResizeStart(e: MouseEvent, target: DragTarget): void {
 function onResizeMove(e: MouseEvent): void {
   if (!_dragTarget) return
   const dx = e.clientX - _dragStartX
-  if (_dragTarget === 'left') {
-    leftPanelWidth.value = Math.max(240, Math.min(560, _dragStartW + dx))
-  } else {
-    rightPanelWidth.value = Math.max(180, Math.min(520, _dragStartW - dx))
-  }
+  // The store clamps to each slot's own range, so the limits live with the slot
+  // definition instead of being repeated at every call site that moves one.
+  setSlotSize(_dragTarget, _dragTarget === 'left' ? _dragStartW + dx : _dragStartW - dx)
 }
 
 function refitAllTerminals(): void {
@@ -914,16 +1040,16 @@ interface ActivePane {
    *  spawned with — which carries the id of that moment forever — still
    *  resolves to this pane. */
   formerPaneIds?: string[]
-  /** Pane id of the parent that spawned this pane via a SPAWN block. Runtime
-   *  only — deliberately NOT persisted: after a restart every pane counts as
-   *  root (spawn depth 0) again, accepted for the MVP. */
+  /** Pane id of the parent that spawned this pane via a SPAWN block.
+   *  Persisted (PaneRecord.spawned_by) and re-keyed by the backend whenever a
+   *  pane_id is regenerated, so lineage survives a restart. */
   spawnedBy?: string
   /** Messaging handle of the parent this pane owes a report to, and whether
    *  that report is still outstanding. Set together when a spawn kickoff lands
    *  and cleared by the first turn that ends — by the pane's own report if it
-   *  wrote one, by a fallback report if it did not. Runtime only, alongside
-   *  spawnedBy: a pane that outlives a restart is nobody's child any more, and
-   *  a report owed to a parent that no longer exists cannot be delivered. */
+   *  wrote one, by a fallback report if it did not. Runtime only — unlike
+   *  spawnedBy this is deliberately NOT persisted: the turn that owed the
+   *  report ended when the app closed, so a restored pane owes nothing. */
   spawnedByName?: string
   spawnReportPending?: boolean
   roleKey: RoleKey
@@ -933,7 +1059,7 @@ interface ActivePane {
   slotLabel: string
   command: string
   workspacePath: string
-  origin: 'manual' | 'pipeline'
+  origin: 'manual' | 'pipeline' | 'mcp'
   /** Which pipeline run group this pane belongs to. Undefined = unassigned (manual). */
   runGroupId?: string
   injectionStatus: InjectionStatus
@@ -1363,6 +1489,22 @@ const paneTurnCompleteAt = new Map<string, number>()
 // model that replaces buffer-guessing.
 const paneLastActiveAt = new Map<string, number>()
 
+// Per-pane count of background subagents the CLI is still waiting on, as last
+// reported by a hook event, with the wall-clock time of that report. The
+// unattended loop reads it to tell a turn that ended DONE from one that ended
+// to WAIT — the one distinction none of its other signals can make, because a
+// CLI parked on a background agent really does end its turn (see the backend's
+// subagent_tracker and loopWaitingOnSubagents). Vendors without hooks never
+// send the field, so their panes never gate on it.
+// The unattended loop's own activity clock. Same stamps as paneLastActiveAt
+// except for `subagent_stop`, which is a SUBAGENT acting, not this pane's
+// agent. Kept separate rather than narrowing paneLastActiveAt so the three
+// other readers of that clock — delivery gating, the done notification and the
+// pipeline's stage verdict — keep behaving exactly as before.
+const paneLastWorkingAt = new Map<string, number>()
+
+const panePendingSubagents = new Map<string, { pending: number; observedAt: number }>()
+
 // ── Inter-CLI messaging (name registry + delivery queue wiring) ─────────────
 const messaging = useAgentMessaging()
 
@@ -1693,7 +1835,19 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
         // `replyTo` is the correlation id this agent echoed back from the
         // envelope it is answering; absent for a message that starts a thread.
         if (isBroadcastTarget(msg.target)) {
-          messaging.sendBroadcast(senderName, msg.content, { replyTo: msg.replyTo })
+          // `all` means the sender's own workspace. The menu stops offering
+          // the keyword once a window holds more than one, but the bare-line
+          // protocol is typed by the agent and cannot be gated that way — so
+          // the scope is applied here, where the sender's workspace is known.
+          const from = panes.value.find((pn) => pn.id === paneId)?.workspacePath ?? ''
+          messaging.sendBroadcast(senderName, msg.content, {
+            replyTo: msg.replyTo,
+            only: (targetPaneId) => {
+              if (!from) return true
+              const to = panes.value.find((pn) => pn.id === targetPaneId)?.workspacePath ?? ''
+              return !to || normWs(to) === normWs(from)
+            },
+          })
         } else {
           messaging.sendMessage(senderName, msg.target, msg.content, { replyTo: msg.replyTo })
         }
@@ -1792,7 +1946,7 @@ async function createRequestedPane(
     customName: req.name,
     commandOverride: '',
     workspacePath: parent.workspacePath,
-    origin: 'manual',
+    origin: 'mcp',
     runGroupId: parent.runGroupId,
     preferredMessagingName: req.name,
     spawnedBy: parent.id,
@@ -1811,6 +1965,8 @@ async function createRequestedPane(
     session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
     run_group_id: parent.runGroupId ?? '',
     output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
+    origin: 'mcp',
+    spawned_by: parent.id,
   })
   void sendQuiet('project.rename_pane', {
     workspace_path: parent.workspacePath,
@@ -1864,7 +2020,7 @@ async function createStandaloneRequestedPane(
     customName: req.name,
     commandOverride: '',
     workspacePath,
-    origin: 'manual',
+    origin: 'mcp',
     runGroupId: runGroupId || undefined,
     preferredMessagingName: req.name,
   })
@@ -1879,6 +2035,7 @@ async function createStandaloneRequestedPane(
     session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
     run_group_id: runGroupId,
     output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
+    origin: 'mcp',
   })
   void sendQuiet('project.rename_pane', {
     workspace_path: workspacePath,
@@ -2019,7 +2176,11 @@ async function handleMcpSpawnRequest(ev: {
   let parent: ActivePane | undefined
   let parentName: string
   if (standalone) {
-    if (ev.target_workspace !== currentWorkspace.value) return // not our workspace — another window will answer
+    // Any workspace this window holds. Exactly one window holds a given
+    // workspace — findMainWindowForWorkspace covers adopted ones now, so a
+    // second window is sent to this one rather than opening it too — which is
+    // what keeps this from being answered twice.
+    if (!isLocalWorkspace(ev.target_workspace ?? '')) return // not ours — another window will answer
     parentName = ev.target_workspace as string
   } else {
     parent = panes.value.find((p) => p.id === ev.requester_pane_id)
@@ -2349,6 +2510,8 @@ function syncViews(): void {
       preparationStatus: p.preparationStatus,
       kickoffStatus: p.kickoffStatus,
       origin: p.origin,
+      spawnedBy: p.spawnedBy,
+      collapsed: collapsedPanes.value.has(p.id),
       isCommander: paneIsCommander(p),
       sessionId: p.pinnedSessionId,
       slotLabel: p.slotLabel,
@@ -2371,6 +2534,10 @@ function onPaneFirstOutput(paneId: string): void {
 
 let _syncViewsTimer: number | null = null
 onMounted(() => { _syncViewsTimer = window.setInterval(syncViews, 400) })
+
+// Cross-workspace roster: refresh on the events that can change it rather than
+// on a timer. Regaining focus is when another window's spawns become worth
+// showing; this window's own spawns and kills are handled where they happen.
 onUnmounted(() => {
   if (_syncViewsTimer !== null) clearInterval(_syncViewsTimer)
   window.removeEventListener('resize', onWindowResize)
@@ -2651,18 +2818,77 @@ async function remoteAddressOf(paneId: string): Promise<string | null> {
   return remoteTargetByPane.get(paneId) ?? null
 }
 
-// Messaging names offered by pane `paneId`'s @-mention autocomplete menu: every
-// OTHER pane that has a messaging name (self excluded), then the qualified
-// addresses of panes open in other workspace windows.
-function mentionCandidatesFor(paneId: string): string[] {
-  const others = panes.value
+// Addresses recently completed through the @-mention menu, newest first. Local
+// like the messagingNames map above and for the same reason it is not in
+// ui_settings: losing it costs an ordering, not a capability, so it is not
+// worth a SQLite write and a cross-window broadcast on every mention.
+const MENTION_RECENTS_KEY = 'agentTeam.mentionRecents'
+const MENTION_RECENTS_CAP = 12
+
+function loadMentionRecents(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MENTION_RECENTS_KEY) ?? '[]') as unknown
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function rememberMentionPick(addresses: string[]): void {
+  const next = recordMentionRecents(loadMentionRecents(), addresses, MENTION_RECENTS_CAP)
+  try { localStorage.setItem(MENTION_RECENTS_KEY, JSON.stringify(next)) } catch { /* ignore */ }
+}
+
+// Addresses offered by pane `paneId`'s @-mention autocomplete menu: every OTHER
+// pane that has a messaging name (self excluded), then the qualified addresses
+// of panes open in other workspace windows, with the recently used hoisted.
+//
+// The group and status words are resolved HERE because useTerminal owns no i18n
+// scope, and the ordering is decided here because recency is remembered here.
+function mentionCandidatesFor(paneId: string): MentionCandidate[] {
+  const localGroup = i18n.global.t('mention.group-local')
+  const others: MentionCandidate[] = panes.value
     .filter((x) => x.id !== paneId && x.messagingName)
-    .map((x) => x.messagingName as string)
+    .map((x) => {
+      // Only a realized pane in THIS window can report a status; a cold-restore
+      // placeholder has no terminal to ask yet, and the menu shows a hollow dot
+      // rather than guessing one.
+      const status = paneRefs[x.id]?.displayStatus
+      return {
+        address: x.messagingName as string,
+        group: localGroup,
+        status,
+        statusLabel: status ? i18n.global.t(paneStatusLabelKey(status)) : undefined,
+      }
+    })
   // Offer the broadcast keyword first once there are ≥2 recipients — picking it
   // sends to every other pane at once (see isBroadcastTarget / sendBroadcast).
   // `all` stays workspace-local; cross-workspace sends are always explicit.
-  const local = others.length >= 2 ? ['all', ...others] : others
-  return [...local, ...remoteMessagingTargets.value]
+  //
+  // sendBroadcast reaches every pane THIS WINDOW registers, which is one
+  // workspace's worth until the sidebar adopts another. Rather than reach into
+  // the messaging registry to teach it about workspaces, the menu simply stops
+  // offering `all` once the window holds more than one: a keyword that means
+  // "everyone here" is not worth keeping when "here" became ambiguous. Typing
+  // it by hand still broadcasts window-wide.
+  const canBroadcast = others.length >= 2 && extraWorkspaces.value.length === 0
+  const broadcast: MentionCandidate[] = canBroadcast
+    ? [{
+        address: MENTION_BROADCAST_ADDRESS,
+        group: localGroup,
+        statusLabel: i18n.global.t('mention.broadcast-hint'),
+      }]
+    : []
+  const remoteGroup = i18n.global.t('mention.group-remote')
+  const remote: MentionCandidate[] = remoteMessagingTargets.value.map((address) => ({
+    address,
+    group: remoteGroup,
+  }))
+  return rankMentionCandidates(
+    [...broadcast, ...others, ...remote],
+    loadMentionRecents(),
+    i18n.global.t('mention.group-recent')
+  )
 }
 
 /** Mention mode for a pane drop: an "@" typed immediately before the drop means
@@ -2992,14 +3218,55 @@ function noteLoopTurnProgress(paneId: string, text: string, timestamp: string): 
   if (!watcher) return
   const eventMs = timestamp ? Date.parse(timestamp) : NaN
   if (!Number.isNaN(eventMs) && eventMs < watcher.armedAt - TURN_TEXT_REPLAY_TOLERANCE_MS) return
-  const next = applyTurnProgress(watcher, text)
+  const next = applyTurnProgress(watcher, text, {
+    toolUsesThisTurn: watcher.toolUsesThisTurn,
+    toolSignalsSeen: watcher.toolSignalsSeen,
+  })
   if (next.stalledRuns > watcher.stalledRuns) {
     console.warn(
-      `[loop] pane ${paneId}: turn showed no progress (${next.stalledRuns}/${LOOP_STALL_LIMIT}) — next continue backs off ${loopBackoffMs(next.stalledRuns) / 1000}s`
+      `[loop] pane ${paneId}: turn showed no progress (${next.stalledRuns}/${LOOP_STALL_LIMIT}, ${watcher.toolUsesThisTurn} tool uses) — next continue backs off ${loopBackoffMs(next.stalledRuns) / 1000}s`
     )
   }
   watcher.stalledRuns = next.stalledRuns
   watcher.lastTurnText = next.lastTurnText
+  watcher.recentTurns = next.recentTurns ?? []
+}
+
+/** A completed turn ended with LOOP_WAIT_MARKER: the CLI says it did nothing
+ *  but wait on something the loop cannot see. Hold the next continue instead of
+ *  poking it again, and report whether the turn was handled as a wait.
+ *
+ *  Returns false — meaning "judge this turn normally" — when the turn carried no
+ *  marker, OR when the run has spent its whole waiting budget. That second case
+ *  is the fail-OPEN bound: an agent emitting the marker every turn would
+ *  otherwise park the loop for good, silently. Once the budget is gone the
+ *  marker stops being honoured, ordinary continues resume, and the stall
+ *  detector finally gets to see those turns and end the run. */
+function noteLoopWait(paneId: string, text: string, timestamp: string): boolean {
+  const watcher = loopLimitWatchers.get(paneId)
+  if (!watcher) return false
+  if (!text || !turnEndsWithSentinel(text, LOOP_WAIT_MARKER)) {
+    // Any other turn ends the streak; the spent budget deliberately stays.
+    const cleared = applyLoopWait(watcher, false)
+    watcher.consecutive = cleared.consecutive
+    watcher.totalWaitedMs = cleared.totalWaitedMs
+    return false
+  }
+  // Same replay guard as the done-marker path: a re-parsed historical turn
+  // must not schedule a wait for a loop that has since moved on.
+  const eventMs = timestamp ? Date.parse(timestamp) : NaN
+  if (!Number.isNaN(eventMs) && eventMs < watcher.armedAt - TURN_TEXT_REPLAY_TOLERANCE_MS) return false
+  if (!loopWaitHonoured(watcher)) {
+    console.warn(`[loop] pane ${paneId}: LOOP_WAIT budget spent — ignoring the marker from here on`)
+    return false
+  }
+  const next = applyLoopWait(watcher, true)
+  watcher.consecutive = next.consecutive
+  watcher.totalWaitedMs = next.totalWaitedMs
+  const holdMs = loopWaitBackoffMs(next.consecutive)
+  watcher.nextContinueAt = Date.now() + holdMs
+  console.info(`[loop] pane ${paneId}: agent reported it is waiting — holding ${holdMs / 1000}s (${next.consecutive} in a row)`)
+  return true
 }
 
 /** The loop is spinning without finishing — it repeated itself past the stall
@@ -3046,7 +3313,11 @@ function stopLoopComplete(paneId: string): void {
  *  watcher is gone). Only a turn_complete after this instant is judged. */
 function armLoopTurn(paneId: string): void {
   const watcher = loopLimitWatchers.get(paneId)
-  if (watcher) watcher.armedAt = Date.now()
+  if (!watcher) return
+  watcher.armedAt = Date.now()
+  // Per-TURN counter: what the next turn does with tools says nothing about
+  // what the last one did. toolSignalsSeen is per-PANE and deliberately kept.
+  watcher.toolUsesThisTurn = 0
 }
 
 /** turn_complete carried LOOP_DONE_MARKER as its final line: stop the loop if
@@ -3103,6 +3374,22 @@ interface LoopLimitWatcher {
   nextContinueAt: number
   /** Normalized text of the last completed turn, for the repeat comparison. */
   lastTurnText: string
+  /** Normalized text of the last LOOP_RECENT_TURNS turns, newest first, so a
+   *  CLI alternating between two phrasings of "still waiting" is not read as
+   *  progress on every turn. */
+  recentTurns: string[]
+  /** Tool-use signals attributed to this pane since the turn was armed. A turn
+   *  that ends having touched no tool did no work — see turnUsedNoTools. */
+  toolUsesThisTurn: number
+  /** This pane has reported tool use at least once, so a zero above means
+   *  "used none" rather than "this vendor never says". Self-calibrating: only
+   *  vendors whose reader or hook names tools ever set it. */
+  toolSignalsSeen: boolean
+  /** Consecutive turns that ended with LOOP_WAIT_MARKER (0 after any other). */
+  consecutive: number
+  /** Time this run has already granted to LOOP_WAIT holds, bounded by
+   *  LOOP_WAIT_TOTAL_MAX_MS so the marker can never park a loop for good. */
+  totalWaitedMs: number
 }
 const loopLimitWatchers = new Map<string, LoopLimitWatcher>()
 const LOOP_LIMIT_POLL_MS = 5000
@@ -3116,6 +3403,11 @@ function stopLoopLimitWatcher(paneId: string): void {
     clearInterval(watcher.timer)
     loopLimitWatchers.delete(paneId)
   }
+  // Drop the subagent count with the watcher that reads it. A count left above
+  // zero — the pane's CLI exited while a subagent was running, so its
+  // SubagentStop never arrived — would otherwise gate the NEXT loop started on
+  // this pane for the whole staleness window.
+  panePendingSubagents.delete(paneId)
 }
 
 function startLoopLimitWatcher(paneId: string): void {
@@ -3130,6 +3422,11 @@ function startLoopLimitWatcher(paneId: string): void {
     stalledRuns: 0,
     nextContinueAt: 0,
     lastTurnText: '',
+    recentTurns: [],
+    toolUsesThisTurn: 0,
+    toolSignalsSeen: false,
+    consecutive: 0,
+    totalWaitedMs: 0,
   }
   watcher.timer = window.setInterval(() => {
     const pane = panes.value.find((p) => p.id === paneId)
@@ -3219,12 +3516,28 @@ function startLoopLimitWatcher(paneId: string): void {
       stopLoopSpinning(paneId, 'stalled')
       return
     }
+    // Parked on background subagents: the turn ended to WAIT, not because the
+    // work is done. loopContinueReady cannot see this — every one of its
+    // conditions holds — so the hook-reported count is checked separately, and
+    // ahead of it. Holding here costs nothing: the count drops to zero the
+    // moment the last SubagentStop lands and the next poll continues normally.
+    const subagents = panePendingSubagents.get(paneId)
+    if (
+      subagents !== undefined &&
+      loopWaitingOnSubagents({
+        pending: subagents.pending,
+        observedAt: subagents.observedAt,
+        now: Date.now(),
+      })
+    ) {
+      return
+    }
     if (
       !watcher.continuing &&
       Date.now() >= watcher.nextContinueAt &&
       loopContinueReady({
         turnCompleteAt: paneTurnCompleteAt.get(paneId) ?? 0,
-        lastActiveAt: paneLastActiveAt.get(paneId) ?? 0,
+        lastActiveAt: paneLastWorkingAt.get(paneId) ?? 0,
         armedAt: watcher.armedAt,
         now: Date.now(),
         settleMs: TURN_COMPLETE_SETTLE_MS,
@@ -3757,7 +4070,7 @@ async function persistPaneSession(pane: ActivePane, sessionId: string): Promise<
   const key = `${pane.id}:${id}`
   if (persistedPaneSessions.has(key)) return
   let saved: unknown = null
-  if (pane.origin === 'manual') {
+  if (pane.origin !== 'pipeline') {
     const resp = await sendQuiet<ProjectPayload>('manual_pane.session', {
       workspace_path: pane.workspacePath,
       pane_id: pane.id,
@@ -3855,7 +4168,7 @@ function scheduleInjection(pane: ActivePane): void {
       setPrepStatus(pane, 'ready')
       syncViews()
       pipelineLog(`${tag} ⏸ no role selected — skipping role injection`)
-      if (pane.origin === 'manual' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
+      if (pane.origin !== 'pipeline' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
         void persistPaneSession(pane, pane.pinnedSessionId)
       }
       return
@@ -3922,7 +4235,7 @@ function scheduleInjection(pane: ActivePane): void {
     pane.injectionStatus = ok ? 'sent' : 'failed'
     setPrepStatus(pane, ok ? 'ready' : 'failed')
     syncViews()
-    if (ok && pane.origin === 'manual' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
+    if (ok && pane.origin !== 'pipeline' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
       void persistPaneSession(pane, pane.pinnedSessionId)
     }
     if (!ok) {
@@ -4013,7 +4326,7 @@ interface SpawnInternal {
   slotLabel?: string
   commandOverride: string
   workspacePath: string
-  origin: 'manual' | 'pipeline'
+  origin: 'manual' | 'pipeline' | 'mcp'
   runGroupId?: string
   previousPaneId?: string
   kickoffPrompt?: string
@@ -4365,7 +4678,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     if (loginCommandFor(opts.agentKey) != null) startLoginExpiredWatcher(id)
 
     if ((ref.status as unknown as string) === 'running') {
-      if (pane.origin === 'manual' && !pane.roleKey && !pane.kickoffPrompt) {
+      if (pane.origin !== 'pipeline' && !pane.roleKey && !pane.kickoffPrompt) {
         pane.injectionStatus = 'skipped'
         setPrepStatus(pane, 'ready')
         syncViews()
@@ -4894,8 +5207,12 @@ const rebuildablePaneCount = computed(
 )
 
 /** Rebuildable panes across all tabs — drives the sidebar's rebuild-all button. */
+// "All" means the workspace on screen. The button for it sits on that
+// workspace's heading, and restarting another project's CLIs from there would
+// be a surprise — those panes are not even visible. Identical to the old
+// behaviour whenever this window holds a single workspace.
 const rebuildableAllPaneCount = computed(
-  () => panes.value.filter((p) => p.realized && paneCanRebuild(p)).length
+  () => panesInView.value.filter((p) => p.realized && paneCanRebuild(p)).length
 )
 
 // Panes report a lost PTY one at a time, as each one's reattach probe answers.
@@ -5126,6 +5443,7 @@ async function rebuildPaneViaResume(
       slotLabel: pane.slotLabel,
       workspacePath: ws,
       origin: pane.origin,
+      spawnedBy: pane.spawnedBy,
       runGroupId: pane.runGroupId,
       sessionHomeId: pane.sessionHomeId,
       profileId: pane.profileId,
@@ -5145,6 +5463,7 @@ async function rebuildPaneViaResume(
       commandOverride: resumeCmd,
       workspacePath: snap.workspacePath,
       origin: snap.origin,
+      spawnedBy: snap.spawnedBy,
       runGroupId: snap.runGroupId || undefined,
       isResume: true,
       skipRoleInjection: true,
@@ -5155,11 +5474,15 @@ async function rebuildPaneViaResume(
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
+      // A rebuild retires the old pane id exactly like a restore does, so the
+      // in-memory lineage has to follow. The backend does its own re-key off
+      // previous_pane_id in the manual_pane.spawn below.
+      rekeyLineage(paneId, newId)
       if (opts?.offerContinue) {
         const revived = panes.value.find((p) => p.id === newId)
         if (revived) revived.resumeContinueAvailable = true
       }
-      if (snap.origin === 'manual') {
+      if (snap.origin !== 'pipeline') {
         await sendQuiet<ProjectPayload>('manual_pane.spawn', {
           workspace_path: snap.workspacePath,
           pane_id: newId,
@@ -5200,8 +5523,9 @@ async function rebuildPaneViaResume(
 
 /** Batch pre-scan: ask once before rebuilding over running CLIs. Returns
  *  whether running panes should be force-rebuilt (false = keep skipping them). */
-async function confirmBatchRebuildOverRunning(ids: string[]): Promise<boolean> {
-  const runningCount = ids.filter((id) => {
+/** Panes in a batch that are mid-turn, so a rebuild would interrupt them. */
+function countPanesBusyForRebuild(ids: string[]): number {
+  return ids.filter((id) => {
     const paneRef = paneRefs[id]
     return paneBusyForRebuild(
       paneRef?.displayStatus as string | undefined,
@@ -5209,11 +5533,28 @@ async function confirmBatchRebuildOverRunning(ids: string[]): Promise<boolean> {
       paneRef?.startingAgeMs as number | null | undefined,
     ) === 'running'
   }).length
+}
+
+async function confirmBatchRebuildOverRunning(ids: string[]): Promise<boolean> {
+  const runningCount = countPanesBusyForRebuild(ids)
   if (runningCount === 0) return false
   return notifyRestore.confirm(
     i18n.global.t('pane.terminal.rebuild-running-confirm-body-batch', { count: runningCount }),
     {
       title: i18n.global.t('pane.terminal.rebuild-running-confirm-title'),
+      confirmText: i18n.global.t('pane.terminal.rebuild-running-confirm-confirm'),
+      cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
+    }
+  )
+}
+
+/** Batch rebuild with nothing mid-turn: still destructive to what is on
+ *  screen, so the batch buttons ask before rebuilding several panes at once. */
+async function confirmBatchRebuild(count: number): Promise<boolean> {
+  return notifyRestore.confirm(
+    i18n.global.t('pane.terminal.rebuild-batch-confirm-body', { count }),
+    {
+      title: i18n.global.t('pane.terminal.rebuild-batch-confirm-title'),
       confirmText: i18n.global.t('pane.terminal.rebuild-running-confirm-confirm'),
       cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
     }
@@ -5293,11 +5634,21 @@ async function restartAgentPanes(agentKey: string): Promise<void> {
 async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
   if (rebuildingTabPanes.value) return
   // Rebuild replaces pane ids, so capture the batch up front.
-  const ids = panes.value
+  const ids = panesInView.value
     .filter((p) => p.realized && (scope === 'all' || tabFilteredPaneIds.value.has(p.id)) && paneCanRebuild(p))
     .map((pane) => pane.id)
   if (!ids.length) return
-  const forceWhenRunning = await confirmBatchRebuildOverRunning(ids)
+  // The rebuild-all buttons hit every pane at once, so they always confirm:
+  // the running-pane dialog when some are mid-turn (its cancel means "skip the
+  // busy ones", not "abort"), a plain one otherwise — even idle panes lose
+  // their rendered scrollback and get reprinted from the resumed session.
+  const runningCount = countPanesBusyForRebuild(ids)
+  let forceWhenRunning = false
+  if (runningCount > 0) {
+    forceWhenRunning = await confirmBatchRebuildOverRunning(ids)
+  } else if (!(await confirmBatchRebuild(ids.length))) {
+    return
+  }
 
   rebuildingTabPanes.value = true
   pipelineLog(
@@ -5345,6 +5696,7 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
     slotLabel: pane.slotLabel,
     workspacePath: pane.workspacePath,
     origin: pane.origin,
+    spawnedBy: pane.spawnedBy,
     runGroupId: pane.runGroupId,
   }
   for (const key of lockKeys) rebuildingPanes.add(key)
@@ -5361,12 +5713,15 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
       commandOverride: '',
       workspacePath: snap.workspacePath,
       origin: snap.origin,
+      spawnedBy: snap.spawnedBy,
       runGroupId: snap.runGroupId || undefined,
       isResume: false,
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
-      if (snap.origin === 'manual') {
+      // Same reason as the resume rebuild above: the old id is retired here.
+      rekeyLineage(paneId, newId)
+      if (snap.origin !== 'pipeline') {
         await sendQuiet<ProjectPayload>('manual_pane.spawn', {
           workspace_path: snap.workspacePath,
           pane_id: newId,
@@ -5421,8 +5776,18 @@ async function onInterrupt(paneId: string): Promise<void> {
   }
 }
 
-async function onKillAll(): Promise<void> {
-  for (const p of [...panes.value]) await onKill(p.id, { markRemoved: false })
+async function onKillAll(paneIds?: readonly string[]): Promise<void> {
+  // The workspace on screen only. Killing another project's agents from a
+  // button attached to this one's list would be unrecoverable and unasked for.
+  //
+  // `paneIds` exists for callers that must clear the workspace state BEFORE the
+  // teardown runs: panesInView is derived from extraWorkspaces ("every
+  // workspace this window holds except the current one"), so once
+  // currentWorkspace is blank every workspace counts as extra, the view empties
+  // and this kills nothing at all. Such a caller captures the list first and
+  // passes it in. See doCloseWorkspace.
+  const ids = paneIds ?? panesInView.value.map((p) => p.id)
+  for (const id of [...ids]) await onKill(id, { markRemoved: false })
 }
 
 // ── Batch actions on the multi-select set (right-click a selected pane) ───────
@@ -5555,7 +5920,7 @@ const restoreScopePrompt = ref<RestoreScopePrompt | null>(null)
 const showRestoreScopeModal = computed(() => restoreScopePrompt.value !== null)
 
 function askRestoreScope(workspacePath: string, count: number): Promise<RestoreScopeSelection> {
-  if (currentWorkspace.value !== workspacePath) return Promise.resolve(null)
+  if (!isLocalWorkspace(workspacePath)) return Promise.resolve(null)
   return new Promise((resolve) => {
     const current = restoreScopePrompt.value
     if (current?.workspacePath === workspacePath) {
@@ -5710,6 +6075,13 @@ const workspaceBaseName = computed(() => {
   return parts.filter(Boolean).at(-1) || 'Navide'
 })
 
+/** The workspace's path for the titlebar, home collapsed to ~. Empty until
+ *  the home directory arrives, which only means it renders in full a moment
+ *  later — never a bare path where a shortened one was expected. */
+const workspaceDisplayPath = computed(() =>
+  currentWorkspace.value ? collapseHomePath(currentWorkspace.value, homeDir.value) : ''
+)
+
 // Reflect the open workspace in the real window title (document.title) so each
 // main window is distinguishable in macOS Mission Control / the Dock. Without
 // this every main window shows the static index.html <title>. Follows the
@@ -5723,6 +6095,64 @@ watch(
   { immediate: true },
 )
 
+interface StatusBarGit {
+  branch: string
+  ahead: number
+  behind: number
+  dirty: boolean
+}
+const statusBarGit = ref<StatusBarGit>({ branch: '', ahead: 0, behind: 0, dirty: false })
+
+async function refreshStatusBarGit(): Promise<void> {
+  if (!currentWorkspace.value || !workspaceSelected.value) return
+  if (backend.status.value !== 'connected') return
+  const resp = await sendQuiet<{
+    branch: string; ahead: number; behind: number
+    staged: unknown[]; unstaged: unknown[]
+  }>('git.status', { workspace_path: currentWorkspace.value })
+  if (resp) {
+    statusBarGit.value = {
+      branch: resp.branch || '',
+      ahead: resp.ahead ?? 0,
+      behind: resp.behind ?? 0,
+      dirty: (resp.staged?.length ?? 0) + (resp.unstaged?.length ?? 0) > 0
+    }
+  }
+}
+
+let _gitPollTimer: number | null = null
+// Skip the poll while the window is hidden (minimized / other desktop) — each
+// tick spawns git subprocesses in the backend, and hidden windows kept polling
+// forever. Catch up once when the window becomes visible again.
+// Main reports this over IPC rather than the Page Visibility API: terminal panes
+// need backgroundThrottling disabled, which pins document.hidden to false.
+let _windowVisible = true
+const _offWindowVisibility = window.agentTeam?.onWindowVisibility?.((visible: boolean) => {
+  _windowVisible = visible
+  if (visible && _gitPollTimer !== null) void refreshStatusBarGit()
+})
+onUnmounted(() => _offWindowVisibility?.())
+watch(workspaceSelected, (v) => {
+  if (v) {
+    void refreshStatusBarGit()
+    _gitPollTimer = window.setInterval(() => {
+      if (_windowVisible) void refreshStatusBarGit()
+    }, 5000)
+  } else {
+    if (_gitPollTimer !== null) { clearInterval(_gitPollTimer); _gitPollTimer = null }
+    statusBarGit.value = { branch: '', ahead: 0, behind: 0, dirty: false }
+  }
+}, { immediate: true })
+
+// Switching between two workspaces this window holds never flips
+// workspaceSelected, so the watch above does not fire and the bar kept showing
+// the branch of the workspace being left until the 5s poll caught up. Wrong is
+// worse than absent here: a branch name next to a project you just switched to
+// reads as that project's branch. Cleared first, then refetched.
+watch(currentWorkspace, () => {
+  statusBarGit.value = { branch: '', ahead: 0, behind: 0, dirty: false }
+  void refreshStatusBarGit()
+})
 // ── Keybinding system ─────────────────────────────────────────────────────────
 useKeybindings()
 registerCommand('workbench.action.newWindow', async () => {
@@ -5878,19 +6308,23 @@ registerCommand('ui.pane.create', async (args) => {
   if (!injected) throw new Error(`ui.pane.create failed to inject task into pane "${paneId}"`)
   return paneId
 })
+// These actions key on the pane id and reject a pane name, which is the only
+// handle a caller reading the messaging roster starts with — so saying what is
+// missing is not enough, the message has to say where the id comes from.
+const PANE_ID_HINT = 'a pane id, not a pane name: cli_list_targets reports it as pane_id, and ui_snapshot lists panes[].id'
 registerCommand('ui.pane.close', async (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
-  if (!paneId) throw new Error('ui.pane.close requires paneId')
+  if (!paneId) throw new Error(`ui.pane.close requires ${PANE_ID_HINT}`)
   await onKill(paneId)
 })
 registerCommand('ui.pane.focus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
-  if (!paneId) throw new Error('ui.pane.focus requires paneId')
+  if (!paneId) throw new Error(`ui.pane.focus requires ${PANE_ID_HINT}`)
   onFocusPane(paneId)
 })
 registerCommand('ui.pane.getStatus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
-  if (!paneId) throw new Error('ui.pane.getStatus requires paneId')
+  if (!paneId) throw new Error(`ui.pane.getStatus requires ${PANE_ID_HINT}`)
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) throw new Error(`ui.pane.getStatus: pane "${paneId}" not found`)
   const ref = paneRefs[paneId]
@@ -5908,6 +6342,14 @@ registerCommand('ui.pane.getStatus', (args) => {
 // Diagnostics recorded by uiDiagnostics (e.g. injectText resends) — lets an
 // external MCP client see an in-window anomaly a "ok: true" reply hid. See
 // plan_mcp.ui_diagnostics for the MCP-facing tool that calls this action.
+const preview = usePreview()
+// A preview target names a workspace path. After switching project that path
+// may not even be open any more, and showing it against the new workspace
+// would be wrong rather than merely stale. Watching the ref covers all four
+// assignment sites at once (select / inspect / close / open).
+watch(currentWorkspace, (_next, prev) => {
+  if (prev) preview.clearWorkspace(prev)
+})
 registerCommand('ui.diagnostics.read', (args) => {
   const a = (args as { sinceSeq?: number; paneId?: string; limit?: number } | undefined) ?? {}
   const entries = readDiagnostics({ sinceSeq: a.sinceSeq, paneId: a.paneId || undefined, limit: a.limit })
@@ -5917,6 +6359,21 @@ registerCommand('ui.tab.switch', (args) => {
   const tabId = (args as { tabId?: string } | undefined)?.tabId
   if (!tabId) throw new Error('ui.tab.switch requires tabId')
   activeTab.value = tabId
+})
+// Push something into the right rail's preview panel. Reached by MCP
+// (ui_invoke), so the payload is untrusted and goes through
+// normalizePreviewTarget first. Plugins cannot reach this: their ui.* calls go
+// through the main process capability broker, whose host-action table does not
+// list preview.
+registerCommand('ui.preview.show', (args) => {
+  const target = normalizePreviewTarget(args)
+  if (!target) throw new Error('ui.preview.show requires a valid preview target')
+  // Attribution is applied at the boundary, not taken from the payload — see
+  // asAgentPush.
+  preview.show(asAgentPush(target))
+})
+registerCommand('workbench.action.focusPreview', () => {
+  preview.focus()
 })
 registerCommand('ui.window.openPlans', () => { openPlansWindow() })
 registerCommand('ui.window.openGit', async () => {
@@ -6010,7 +6467,11 @@ function onFocusPane(paneId: string): void {
   selectPane(paneId, { userInitiated: true, scrollIntoView: true })
 }
 
-function focusPaneFromNotification(paneId: string): void {
+async function focusPaneFromNotification(paneId: string): Promise<void> {
+  // A message from an agent in another of this window's workspaces is the
+  // ordinary case, not an edge one. revealPaneTab only knows how to change
+  // tabs, and a tab id never matches across workspaces.
+  if (!(await ensurePaneWorkspaceOnScreen(paneId))) return
   revealPaneTab(paneId)
   selectPane(paneId, { userInitiated: false, scrollIntoView: true })
 }
@@ -6042,7 +6503,7 @@ async function resolveHistoryLogPath(
   const ws = entry.workspacePath || currentWorkspace.value
   if (!ws) return undefined
   let logPath = entry.outputLogFile
-  if (!logPath && entry.origin === 'manual' && api?.findManualLog) {
+  if (!logPath && entry.origin !== 'pipeline' && api?.findManualLog) {
     const found = await api.findManualLog(ws, manualLogFileName(entry.agentKey, entry.paneId))
     logPath = found.ok ? found.path ?? undefined : undefined
   }
@@ -6129,7 +6590,7 @@ async function onPreviewHistoryAgent(entry: SpawnHistoryEntry): Promise<void> {
 /** Agent History → jump to the still-running pane behind an active entry.
  *  Mirrors cycleFocusedPane's placeholder handling: a cold-restored pane has no
  *  TerminalPane ref yet, so focus has to be re-claimed once it realizes. */
-function onFocusHistoryPane(entry: SpawnHistoryEntry): void {
+async function onFocusHistoryPane(entry: SpawnHistoryEntry): Promise<void> {
   // The record can outlive its pane (killed while the modal was open), and
   // reconciliation only stamps removedAt on hydrate — re-check against panes.
   const pane = panes.value.find((p) => p.id === entry.paneId)
@@ -6141,6 +6602,9 @@ function onFocusHistoryPane(entry: SpawnHistoryEntry): void {
     return
   }
   showHistory.value = false
+  // History follows the primary workspace and a switch reloads it, but the
+  // modal can outlive that.
+  if (!(await ensurePaneWorkspaceOnScreen(entry.paneId))) return
   // A minimized pane is skipped by effectiveFocusPaneId, so focusing it alone
   // would silently land on a different pane.
   if (minimizedPanes.value.has(entry.paneId)) restorePane(entry.paneId)
@@ -6249,7 +6713,8 @@ interface ProjectPane {
   profile_id?: string
   spawn_status: string   // 'pending' | 'spawned' | 'removed'
   run_group_id?: string
-  origin: 'pipeline' | 'manual'
+  origin: 'pipeline' | 'manual' | 'mcp'
+  spawned_by?: string
   stage_id?: string
   stage_index?: number
   slot_label?: string
@@ -6259,6 +6724,7 @@ interface ProjectPane {
   auto_name?: string
   auto_name_source?: string
   is_minimized?: boolean
+  collapsed?: boolean
   output_log_file?: string
   stopped?: boolean
 }
@@ -6344,6 +6810,21 @@ interface RestoredPaneSpawnResult {
 /** Spawn an already-decided restore and persist its new pane record. Restore
  * policy (probe, resume/fresh choice, reconnect, and stale checks) stays with
  * the eager/lazy callers; this only keeps their spawn metadata in sync. */
+/** Point every in-memory child of `oldId` at `newId`.
+ *
+ *  Mirrors the backend's _rekey_spawned_by. Any path that gives a pane a new
+ *  id — restore, rebuild — must call this, because a child still holding the
+ *  retired id is a dead pointer, and spawn-depth checks read the lineage.
+ *  Restore order is not guaranteed (a child can land before its parent), so
+ *  this runs per re-key rather than once at the end. A self-reference is
+ *  dropped: a pane that became its own parent would make the walk loop. */
+function rekeyLineage(oldId: string, newId: string): void {
+  if (!oldId || oldId === newId) return
+  for (const p of panes.value) {
+    if (p.spawnedBy === oldId) p.spawnedBy = p.id === newId ? undefined : newId
+  }
+}
+
 async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<RestoredPaneSpawnResult | null> {
   const { saved } = opts
   const paneId = await spawnPane({
@@ -6358,6 +6839,7 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     commandOverride: opts.commandOverride,
     workspacePath: opts.workspacePath,
     origin: saved.origin,
+    spawnedBy: saved.spawned_by || undefined,
     runGroupId: opts.runGroupId,
     isResume: opts.isResume,
     skipRoleInjection: opts.isResume,
@@ -6383,7 +6865,10 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     await onKill(paneId, { markRemoved: false })
     return null
   }
-  if (saved.pane_id !== paneId) dropPersistedMessagingName(saved.pane_id)
+  if (saved.pane_id !== paneId) {
+    dropPersistedMessagingName(saved.pane_id)
+    rekeyLineage(saved.pane_id, paneId)
+  }
 
   const pinnedSessionId = panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? ''
   if (saved.origin === 'pipeline') {
@@ -6480,19 +6965,26 @@ const controlPaneRef = ref<InstanceType<typeof ControlPane> | null>(null)
 //   otherwise         → spawn
 const currentMode = ref<WorkspaceMode>('spawn')
 let workspaceCheckSeq = 0
-// A session exists for one actual workspace open. Re-entrant checks reuse its
-// fixed settings snapshot and decision; switching workspaces replaces it.
-let activeRestoreSession: RestoreSession | null = null
+// One session per workspace this window holds. Re-entrant checks reuse a
+// workspace's fixed settings snapshot and decision.
+//
+// This was a single variable, which two workspaces restoring at once stole
+// from each other: realizing any pane reassigns the session to THAT pane's
+// workspace, so the other session's next await saw a different object and
+// abandoned its whole batch. Nothing failed loudly — the remaining panes just
+// stayed placeholders, and the workspace looked like it had lost its agents.
+const restoreSessions = new Map<string, RestoreSession>()
 
 function workspaceRestoreSession(workspacePath: string): RestoreSession {
-  if (activeRestoreSession?.workspacePath !== workspacePath) {
-    activeRestoreSession = createWorkspaceRestoreSession({
-      workspacePath,
-      behavior: settingsGet(RESUME_BEHAVIOR_SETTING_KEY, 'always'),
-      scope: settingsGet(RESTORE_SCOPE_SETTING_KEY, 'single'),
-    })
-  }
-  return activeRestoreSession
+  const existing = restoreSessions.get(workspacePath)
+  if (existing) return existing
+  const created = createWorkspaceRestoreSession({
+    workspacePath,
+    behavior: settingsGet(RESUME_BEHAVIOR_SETTING_KEY, 'always'),
+    scope: settingsGet(RESTORE_SCOPE_SETTING_KEY, 'single'),
+  })
+  restoreSessions.set(workspacePath, created)
+  return created
 }
 // Cold-boot race guard: a workspace window mounts (firing workspace-check ~400ms
 // in) seconds before the backend WS connects — and with several windows
@@ -6547,17 +7039,37 @@ function buildExistingProjectInfo(payload: ProjectPayload | null): ExistingProje
   }
 }
 
+/** Guards against the same workspace being checked twice in quick succession.
+ *
+ *  ControlPane reaches here through a 400ms debounce on its workspace field,
+ *  and a switch calls it directly so the window does not spend those 400ms
+ *  pairing the new workspace with the old run groups. Both fire for one
+ *  switch — and the second bumps workspaceCheckSeq, which is exactly the
+ *  condition the first one's restore bails on. It gave up midway and the
+ *  workspace came up with none of its panes. */
+let lastWorkspaceCheck = { path: '', at: 0 }
+const WORKSPACE_RECHECK_MS = 1500
+
 async function onWorkspaceCheck(path: string): Promise<void> {
   if (!path && currentWorkspace.value) return
+  if (path) {
+    const now = Date.now()
+    if (path === lastWorkspaceCheck.path && now - lastWorkspaceCheck.at < WORKSPACE_RECHECK_MS) return
+    lastWorkspaceCheck = { path, at: now }
+  }
   const seq = ++workspaceCheckSeq
   if (!path) {
     existingProject.value = null
     currentMode.value = 'spawn'
     pipeline.workspacePath = ''
-    activeRestoreSession = null
+    restoreSessions.clear()
     return
   }
-  if (activeRestoreSession?.workspacePath !== path) activeRestoreSession = null
+  // Only sessions for workspaces this window no longer holds. Dropping "every
+  // session but this one" is what made two workspaces cancel each other.
+  for (const key of [...restoreSessions.keys()]) {
+    if (key !== path && !isLocalWorkspace(key)) restoreSessions.delete(key)
+  }
   const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
   if (seq !== workspaceCheckSeq) return
   if (resp === null) {
@@ -6691,6 +7203,33 @@ async function onWorkspaceCheck(path: string): Promise<void> {
         if (firstFull) activeTab.value = firstFull.key
       }
     }
+    // A restore that produced nothing goes back to the workspace picker.
+    //
+    // The block above rescues an empty ACTIVE TAB by switching to a tab that
+    // has panes; this is the case it cannot rescue — no tab has any. That
+    // happens when the snapshot named a workspace whose project.json is gone,
+    // empty, or failed to load, and the result is a window with a sidebar
+    // reading "No agents running." and no way forward that looks like anything
+    // but a broken app. Welcome is the screen that offers a way forward, and it
+    // doubles as the switcher, so the restored workspace is still one click
+    // away rather than lost.
+    //
+    // Guarded to the restoring boot only: opening an empty workspace on purpose
+    // is legitimate, and so is closing your last pane.
+    if (restoreEmptyCheckPending) {
+      restoreEmptyCheckPending = false
+      if (panes.value.length === 0) {
+        workspaceSelected.value = false
+        // The boot wrote these when it took the workspace_path param; leaving
+        // them set would send the next reload straight back into the same empty
+        // workspace, past the picker. Mirrors doCloseWorkspace's cleanup.
+        try {
+          sessionStorage.removeItem(WS_SELECTED_KEY)
+          sessionStorage.removeItem(WS_PATH_KEY)
+        } catch { /* sessionStorage unavailable — non-fatal */ }
+        return
+      }
+    }
     // Let tab-derived visibility and Grid page state settle after the final
     // active-tab fallback before selecting focus or an automatic restore scope.
     await nextTick()
@@ -6748,7 +7287,7 @@ watch(
 async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: string, onlyGroupId?: string, isStale?: () => boolean): Promise<ColdRestoreBatch | null> {
   // Don't restore if pipeline is active or paused — panes are already alive.
   if (pipeline.state === 'running' || pipeline.state === 'aborted') return null
-  if (isStale?.() || currentWorkspace.value !== workspacePath) return null
+  if (isStale?.() || !isLocalWorkspace(workspacePath)) return null
 
   // Build unified pane list. Prefer project.panes[] (new format); fall back to
   // migrating stages[].slots[] + manual_panes[] for old project.json files that
@@ -6802,12 +7341,23 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
     }
   }
 
+  // An ordinary main-window restore must know which groups are detached before
+  // it decides what to resume; the answer arrives asynchronously from main.
+  if (!isDetachedWindow && onlyGroupId === undefined) await detachedGroupsKnown
+
   let toRestore = allProjectPanes.filter((p) => p.spawn_status === 'spawned')
   // Detached child window restores only the panes of its scoped run group; the
   // live PTYs are kept alive by the main window's hand-off, so these reattach.
   if (isDetachedWindow) toRestore = toRestore.filter((p) => (p.run_group_id ?? '') === detachedGroupId)
   // Main-window reattach after a child closes: restore just the returning group.
   else if (onlyGroupId !== undefined) toRestore = toRestore.filter((p) => (p.run_group_id ?? '') === onlyGroupId)
+  // Ordinary main-window restore: skip groups that are currently detached —
+  // the child window owns those panes and restores them itself. Without this
+  // both windows resume the same records: the main window shows panes it does
+  // not own, and closing the child adds a second copy of each.
+  else if (detachedGroupIds.value.size > 0) {
+    toRestore = toRestore.filter((p) => !detachedGroupIds.value.has(p.run_group_id ?? ''))
+  }
   // Collapse duplicate records that resume the SAME conversation: spawning
   // several `--resume <same id>` concurrently makes the CLI fork/conflict and
   // leak processes (a source of the leftover-agent pileup).
@@ -6924,9 +7474,12 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       if (saved.is_minimized) {
         minimizedPanes.value = new Set([...minimizedPanes.value, saved.pane_id])
       }
+      if (saved.collapsed) {
+        collapsedPanes.value = new Set([...collapsedPanes.value, saved.pane_id])
+      }
     }
     syncViews()
-    if (isStale?.() || currentWorkspace.value !== workspacePath) return null
+    if (isStale?.() || !isLocalWorkspace(workspacePath)) return null
   }
 
   // Detached/only-group restores keep the existing eager behaviour. Cold
@@ -6950,11 +7503,11 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         : (saved.origin === 'pipeline' ? ensureRestoreGroup() : '')
 
       const canResume = await canResumeSession(saved.agent, workspacePath, sessionId)
-      if (isStale?.() || currentWorkspace.value !== workspacePath) return
+      if (isStale?.() || !isLocalWorkspace(workspacePath)) return
       if (shouldPreserveMissingSessionOnRestore(saved.agent, sessionId, canResume === true)) return
       const attemptResume = shouldAttemptResume(canResume)
       const chatHistoryFile = await savedHistoryFile(saved.agent, workspacePath, saved.pane_id)
-      if (isStale?.() || currentWorkspace.value !== workspacePath) return
+      if (isStale?.() || !isLocalWorkspace(workspacePath)) return
       const resumeCmd = attemptResume
         ? commandWithSelectedBinary(
             saved.agent,
@@ -6964,7 +7517,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       const isResume = !!resumeCmd
       const effectiveResumeId = sessionId
       const savedFallbackCommand = saved.command && !looksLikeResumeCommand(saved.agent, saved.command)
-        ? saved.command : ''
+        ? stripDeadOpencodeAutoFlag(saved.agent, saved.command) : ''
       const fallbackCommand = savedFallbackCommand
       const commandOverride = resumeCmd || fallbackCommand || ''
       const restored = await spawnRestoredPane({
@@ -6989,6 +7542,9 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       if (saved.is_minimized) {
         minimizedPanes.value = new Set([...minimizedPanes.value, paneId])
       }
+      if (saved.collapsed) {
+        collapsedPanes.value = new Set([...collapsedPanes.value, paneId])
+      }
 
       // Reflect the persisted STOP badge onto the freshly-spawned pane. spawnPane
       // above already awaited ref.spawn() (which resets isStopped=false), so this
@@ -7006,7 +7562,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
 
   // Backfill removed manual panes into spawnHistory so Agent History shows past sessions.
   const removedManual = allProjectPanes.filter(
-    (p) => p.origin === 'manual' && p.spawn_status === 'removed'
+    (p) => p.origin !== 'pipeline' && p.spawn_status === 'removed'
   )
   const existingPaneIds = new Set(spawnHistory.value.map((e) => e.paneId))
   const fallbackTs = payload.project?.updated_at ?? new Date().toISOString()
@@ -7042,7 +7598,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       try {
         type HistSnap = { events: Array<{ ts: string; summary: string }> }
         const histResp = await sendQuiet<HistSnap>('history.snapshot', { workspace_path: workspacePath })
-        if (isStale?.() || currentWorkspace.value !== workspacePath) return
+        if (isStale?.() || !isLocalWorkspace(workspacePath)) return
         const events = histResp?.events
         if (Array.isArray(events)) {
           const paneRe = /\[pane ([a-f0-9]{8})\]/
@@ -7080,7 +7636,7 @@ function deferredPaneStillCurrent(
   deferred: DeferredRestoreMetadata,
 ): ActivePane | null {
   const { workspacePath } = deferred
-  if (currentWorkspace.value !== workspacePath) return null
+  if (!isLocalWorkspace(workspacePath)) return null
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane || pane.realized || pane.workspacePath !== workspacePath) return null
   return pane.deferredRestore === deferred ? pane : null
@@ -7113,33 +7669,60 @@ async function restoreSessionDecision(
 }
 
 function restoreSessionScopeTargets(session: RestoreSession, trigger: RestoreSessionTrigger): string[] {
+  // The active tab and the Grid page describe the workspace on screen. For any
+  // other workspace this window holds they list someone else's panes, which
+  // mixed two workspaces together: 'single'/'page'/'tab' intersected to nothing,
+  // while 'all' — the one scope that ignores visibility — added a background
+  // workspace's entire pending list on top of the foreground one, so the CLIs a
+  // window could start at once became the sum of every workspace it held.
+  const onScreen = normWs(session.workspacePath) === normWs(currentWorkspace.value)
   return restoreScopeTargetIds({
     scope: session.scope,
     pendingPaneIds: pendingRestorePaneIds(panes.value, session.workspacePath),
-    activeTabPaneIds: tabVisiblePanes.value.map((pane) => pane.id),
-    gridPagePaneIds: gridPagePanes.value.map((pane) => pane.id),
+    activeTabPaneIds: onScreen ? tabVisiblePanes.value.map((pane) => pane.id) : [],
+    gridPagePaneIds: onScreen ? gridPagePanes.value.map((pane) => pane.id) : [],
     minimizedPaneIds: minimizedPanes.value,
-    focusedPaneId: focusPaneId.value,
+    focusedPaneId: onScreen ? focusPaneId.value : null,
     trigger,
   })
 }
 
 async function advanceRestoreSession(trigger: RestoreSessionTrigger, coldBatch?: ColdRestoreBatch): Promise<void> {
-  const session = activeRestoreSession
-  if (!session || currentWorkspace.value !== session.workspacePath) return
+  // A UI trigger means the workspace on screen — an active tab and a Grid page
+  // are properties of what is being looked at. A cold trigger names its own.
+  const path = coldBatch?.workspacePath ?? currentWorkspace.value
+  const session = restoreSessions.get(path)
+  if (!session || !isLocalWorkspace(session.workspacePath)) return
   const batch = coldBatch ?? panes.value.find(
     (pane) => !pane.realized && pane.deferredRestore?.workspacePath === session.workspacePath,
   )?.deferredRestore?.batch
   if (!batch) return
   const decision = await restoreSessionDecision(session, batch)
-  if (decision === 'cancelled' || activeRestoreSession !== session || currentWorkspace.value !== session.workspacePath) return
+  if (
+    decision === 'cancelled' ||
+    restoreSessions.get(session.workspacePath) !== session ||
+    !isLocalWorkspace(session.workspacePath)
+  ) return
   const ids = decision === 'fresh'
     ? (trigger === 'cold'
       ? pendingRestorePaneIds(panes.value, session.workspacePath)
       : [])
     : restoreSessionScopeTargets(session, trigger)
   const reconnectStart = reconnectedCount.value
-  if (decision === 'resume' && session.scope === 'all') {
+  // Starting a workspace fresh is the one batch nothing caps. Fresh spawns are
+  // deliberately exempt from the resume semaphore — throttling them would stall
+  // a pipeline stage spawned into a background tab — but that reasoning is about
+  // ONE spawn. Starting a whole workspace fresh still costs the backend a
+  // login-shell PATH refresh, a CLI probe and a PTY fork per pane, serially on
+  // one event-loop thread, and isResume is false there, so the semaphore never
+  // sees it: a twenty-pane workspace sent twenty terminal.create at once and the
+  // later acks landed past the request deadline.
+  //
+  // Only this batch. A resume under 'single'/'page'/'tab' is already capped by
+  // the semaphore at whatever the user set (default 3), so adding a second
+  // ceiling of 2 would just make their own setting slower.
+  const unthrottledBatch = decision === 'fresh' && trigger === 'cold'
+  if (unthrottledBatch || (decision === 'resume' && session.scope === 'all')) {
     await runWithConcurrency(ids, ALL_SCOPE_RESTORE_CONCURRENCY, (paneId) => realizeRestoredPane(paneId, true))
   } else {
     await Promise.all(ids.map((paneId) => realizeRestoredPane(paneId, true)))
@@ -7174,7 +7757,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
 
   const saved = deferred.saved
   const batch = deferred.batch
-  if (currentWorkspace.value !== deferred.workspacePath) return
+  if (!isLocalWorkspace(deferred.workspacePath)) return
   const session = workspaceRestoreSession(batch.workspacePath)
   const sessionId = normalizeResumeSessionId(saved.agent, (saved.session_id ?? '').trim())
   placeholder.restoring = true
@@ -7246,7 +7829,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     const isResume = !!resumeCmd
     const effectiveResumeId = reconnectId || sessionId
     const savedFallbackCommand = saved.command && !looksLikeResumeCommand(saved.agent, saved.command)
-      ? saved.command
+      ? stripDeadOpencodeAutoFlag(saved.agent, saved.command)
       : ''
     const fallbackCommand = isResume ? savedFallbackCommand : stripPinnedSessionId(savedFallbackCommand)
     const commandOverride = resumeCmd || fallbackCommand || ''
@@ -7270,7 +7853,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
       replacePaneId: paneId,
       restoring: true,
       shouldPersist: (newPaneId) =>
-        currentWorkspace.value === batch.workspacePath && panes.value.some((p) => p.id === newPaneId),
+        isLocalWorkspace(batch.workspacePath) && panes.value.some((p) => p.id === newPaneId),
     })
     if (!restored) return
     const { paneId: newId } = restored
@@ -8159,7 +8742,7 @@ async function onPipelineAbort(): Promise<void> {
   if (pipeline.workspacePath) await onWorkspaceCheck(pipeline.workspacePath)
 }
 
-async function onPipelineReset(): Promise<void> {
+async function onPipelineReset(paneIds?: readonly string[]): Promise<void> {
   cancelAllWatchers()
   stageCompletions.clear()
   for (const k of Array.from(stageRouters.keys())) disposeStageRouter(k)
@@ -8170,7 +8753,7 @@ async function onPipelineReset(): Promise<void> {
   // Reset is the destructive action: tear down ALL panes (pipeline + manual) so
   // the workspace returns to a clean slate. onKill handles each pane's
   // watcher/timer/session teardown and removes it from the view.
-  await onKillAll()
+  await onKillAll(paneIds)
   pipeline.task = ''
   pipeline.stageIndex = -1
   pipeline.state = 'idle'
@@ -8205,6 +8788,22 @@ function onConfirmCloseWorkspace(): void {
 
 async function doCloseWorkspace(): Promise<void> {
   confirmCloseWorkspace.value = false
+  // Capture the panes BEFORE any state is cleared. panesInView is derived from
+  // extraWorkspaces, which is every workspace this window holds EXCEPT the
+  // current one — so the moment currentWorkspace goes blank below, every
+  // workspace becomes "extra", panesInView empties, and the onKillAll at the
+  // end of this function iterates nothing. The dialog says the workspace is
+  // being closed while its agents keep running in the background.
+  const paneIdsToKill = panesInView.value.map((p) => p.id)
+  // Let go of it. Clearing currentWorkspace alone left the workspace in
+  // workspaceOrder, so the window still claimed to hold it: main kept
+  // reporting it open — the Recent list showed the badge on a project that had
+  // just been closed — and the sidebar listed it as a workspace this window
+  // holds, alongside the panes that had just been killed.
+  const closing = currentWorkspace.value
+  const remaining = workspaceOrder.value.filter((w) => normWs(w) !== normWs(closing))
+  workspaceOrder.value = remaining
+  persistExtraWorkspaces()
   // Show Welcome screen immediately so the button feels responsive.
   // The async cleanup (abort / kill panes) runs after the gate is lifted.
   workspaceSelected.value = false
@@ -8230,7 +8829,12 @@ async function doCloseWorkspace(): Promise<void> {
     stopGlobalManagerRouter()
     await sendQuiet('pipeline.abort', { workspace_path: wsPathForAbort, reason: 'user' })
   }
-  await onPipelineReset()
+  await onPipelineReset(paneIdsToKill)
+  // Closing one of several is not "back to the picker": the others are still
+  // held and their agents are still running, so a Welcome screen over them
+  // says the window is empty when it is not. Land on one of them instead.
+  const next = remaining[0]
+  if (next) await switchToWorkspace(next)
 }
 
 // Titlebar 📁 button: open the current workspace folder in Finder.
@@ -8239,22 +8843,34 @@ async function titlebarRevealWorkspace(): Promise<void> {
   await window.agentTeam.openPath(currentWorkspace.value)
 }
 
-// Open the installed Plans contribution when it is available. There is no
-// built-in Host fallback: an empty catalog must leave this action inert.
+// Titlebar 📋 button: reveal the current workspace's plans. Plans now live in
+// the main-window left sidebar as their own tab (embedded PlanPane), not a
+// detached window — so this just switches ControlPane's sidebar tab to 'plans'
+// (ControlPane owns sidebarTab). The legacy openPlansWindow IPC bridge stays in
+// preload/main but is no longer wired here.
 function openPlansWindow(): void {
   if (!currentWorkspace.value) return
-  const plans = windowPluginContributions.value.find((entry) => entry.pluginId === 'navide.plans')
-  if (plans) void openPluginContributionWindow(plans)
+  controlPaneRef.value?.selectSidebarTab('plans')
 }
 
-async function onWorkspaceBrowse(path: string): Promise<void> {
+/** @param opts.keepPanes  Leave the panes of the workspace being left alone.
+ *
+ *  Browsing to a workspace has always meant LEAVING this one, so it resets the
+ *  pipeline — and onPipelineReset tears down every pane to return the
+ *  workspace to a clean slate. Switching between workspaces the window already
+ *  holds is not that: the sidebar goes on listing the one being left and its
+ *  agents go on running, so tearing them down would silently destroy the work
+ *  the switch was supposed to leave running. */
+async function onWorkspaceBrowse(path: string, opts?: { keepPanes?: boolean }): Promise<void> {
   if (path === currentWorkspace.value) return
   // Already open in another window → focus that window, keep this one as-is
   // (a duplicate open would run two sets of PTY/git operations on one folder).
   if (await window.agentTeam?.focusWorkspaceWindow?.(path)) return
+  // The pipeline still stops either way: it is one per window, so entering
+  // another workspace overwrites the state tracking this one's run.
   if (pipeline.state === 'running') await onPipelineAbort()
   pipeline.workspacePath = ''
-  await onPipelineReset()
+  if (!opts?.keepPanes) await onPipelineReset()
   existingProject.value = null
   currentMode.value = 'spawn'
   pipeline.workspacePath = path
@@ -8439,7 +9055,7 @@ const sessionGhostHealGate = createGhostHealGate(async (paneId, pinnedSessionId)
 // is working; turn_complete = its turn ended. We timestamp both per pane; the
 // completion logic reads these instead of guessing from the TUI buffer.
 backend.on('agent.activity', (raw) => {
-  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string; superseded?: boolean }
+  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string; superseded?: boolean; pending_subagents?: number }
   if (!ev?.pane_id) return
   // QUESTION badge: "the agent asked you something and is waiting". Decided in
   // one place for both event types because both carry a half of it — the turn
@@ -8447,6 +9063,16 @@ backend.on('agent.activity', (raw) => {
   // mid-flight and so produces no turn_complete at all) on agent_active. The
   // rules live in questionActionFor so they can be executed by the suite;
   // App.vue is an SFC the tests cannot mount.
+  // Background-subagent count, carried by every hook event that has one. Read
+  // before the event-type branches because both kinds carry it: the count goes
+  // UP on an agent_active (Task PreToolUse) and is read on the turn_complete
+  // that follows.
+  if (typeof ev.pending_subagents === 'number') {
+    panePendingSubagents.set(ev.pane_id, {
+      pending: ev.pending_subagents,
+      observedAt: Date.now(),
+    })
+  }
   const questionAction = questionActionFor(ev)
   if (questionAction === 'raise') paneRefs[ev.pane_id]?.markQuestion?.()
   else if (questionAction === 'clear') paneRefs[ev.pane_id]?.clearQuestion?.()
@@ -8488,7 +9114,13 @@ backend.on('agent.activity', (raw) => {
     // Unattended loop: judge whether this turn actually moved the task forward.
     // A CLI parked on something the loop can't observe (a background agent)
     // ends its turn for real every time, so only the TEXT reveals the spin.
-    noteLoopTurnProgress(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
+    // LOOP_WAIT: the CLI says this turn only waited. Hold the next continue and
+    // skip the stall judgement — an honest "still waiting" is not a spin, and
+    // the wait has its own budget (see noteLoopWait). A turn that is NOT a
+    // honoured wait falls through to the ordinary judgement unchanged.
+    if (!noteLoopWait(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')) {
+      noteLoopTurnProgress(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
+    }
     // Inter-CLI messaging: scan this turn's text for MSG blocks, then pump.
     // A marker reply is scanned as empty text — nothing in it was addressed to
     // anyone — but the pump still runs, since the pane is now idle.
@@ -8508,10 +9140,22 @@ backend.on('agent.activity', (raw) => {
     }
   } else if (ev.event_type === 'agent_active') {
     paneLastActiveAt.set(ev.pane_id, Date.now())
+    // The loop reads a stricter clock; see activityMeansWorking for why.
+    if (activityMeansWorking(ev.detail ?? '')) paneLastWorkingAt.set(ev.pane_id, Date.now())
     // The pane is working again, so it is no longer parked where a restore left
     // it — retire the continue affordance even if the user never clicked it.
     const activePane = panes.value.find((p) => p.id === ev.pane_id)
     if (activePane?.resumeContinueAvailable) activePane.resumeContinueAvailable = false
+    // Tool use is the sharpest "this turn did work" signal there is, and its
+    // absence is what a CLI parked on a background agent looks like: it talks,
+    // it never touches a tool. Counted per armed turn by the loop watcher.
+    if (detailMeansToolUse(ev.detail ?? '')) {
+      const toolWatcher = loopLimitWatchers.get(ev.pane_id)
+      if (toolWatcher) {
+        toolWatcher.toolUsesThisTurn += 1
+        toolWatcher.toolSignalsSeen = true
+      }
+    }
     // Auto-name from the user's own prompt (readers attach it as text on
     // user-record events; detail is 'user' for most vendors, 'prompt' for
     // kimi/aider, 'user_message' for codex). Arrives before the assistant's
@@ -8849,7 +9493,7 @@ backend.on('session.detected', (raw) => {
   syncViews()
   const histSd = spawnHistory.value.find((e) => e.paneId === ev.pane_id)
   if (histSd) histSd.sessionId = sessionId
-  if (pane.origin === 'manual') {
+  if (pane.origin !== 'pipeline') {
     pipelineLog(`Manual ${pane.agentKey} 🔖 session 已綁定`)
     void persistPaneSession(pane, sessionId)
     return
@@ -9406,6 +10050,7 @@ function cancelAllWatchers(): void {
   paneArmedAt.clear()
   paneTurnCompleteAt.clear()
   paneLastActiveAt.clear()
+  paneLastWorkingAt.clear()
 }
 
 // ── Manager-mode router: parsers + scan + route ─────────────────────────────
@@ -10237,6 +10882,11 @@ function truncate(s: string, n: number): string {
 const layoutMode = ref<LayoutMode>('grid')
 const focusPaneId = ref<string | null>(null)
 const minimizedPanes = ref(new Set<string>())
+/** Panes whose lineage subtree is folded in the agent lists. Persisted per
+ *  pane (PaneRecord.collapsed) rather than as a Project-level id set, because
+ *  pane_id is regenerated on every restart — such a set would silently empty
+ *  itself and the tree would always come back fully expanded. */
+const collapsedPanes = ref(new Set<string>())
 
 // ── Idle CLI reclaim ─────────────────────────────────────────────────────────
 // A CLI that has been idle for hours still holds every byte it ever allocated.
@@ -10374,11 +11024,51 @@ async function sweepIdlePanes(): Promise<void> {
     if (await reclaimIdlePane(paneId)) reclaimed++
   }
   if (reclaimed === 0) return
+  // Logged, not announced: the sweep runs on a timer the user did not ask for,
+  // so a toast interrupts work to report housekeeping. The reclaimed pane still
+  // shows as a placeholder they can click to resume.
   pipelineLog(`♻ reclaimed ${reclaimed} idle CLI pane(s) — click to resume`)
-  notifyRestore.toast(
-    i18n.global.t('pane.terminal.idle-reclaimed', { count: reclaimed }),
-    { type: 'info' }
-  )
+}
+
+/** Panes the user could reclaim right now, ignoring how long they have been
+ *  idle. Drives the count on every "reclaim now" control, so the button can
+ *  say what it is about to do before it is pressed. */
+const reclaimableNowIds = computed<string[]>(() => {
+  const now = Date.now()
+  return panes.value
+    .filter((p) => reclaimBlockedBy(reclaimCandidate(p), RECLAIM_NOW_THRESHOLD_MS, now) === null)
+    .map((p) => p.id)
+})
+
+/** Rough bytes a reclaim would return, for a control that has no measurement.
+ *
+ *  Deliberately a round per-CLI figure rather than a real reading: the settings
+ *  row has no reason to shell out for a sweep, and the honest presentation of
+ *  an estimate is "about", which is what its copy says. The memory panel, which
+ *  does measure, never uses this. */
+const RECLAIM_ESTIMATE_BYTES_PER_CLI = 250 * 1024 * 1024
+
+/** Reclaim now, by explicit request. Returns how many actually went. */
+async function reclaimPanesNow(paneIds?: string[]): Promise<number> {
+  const targets = paneIds ?? reclaimableNowIds.value
+  let reclaimed = 0
+  for (const paneId of targets) {
+    // Re-checked per pane for the same reason the sweep does it: this awaits a
+    // kill between candidates, and the user can focus or type into the next one
+    // while it runs.
+    const pane = panes.value.find((p) => p.id === paneId)
+    if (!pane) continue
+    if (reclaimBlockedBy(reclaimCandidate(pane), RECLAIM_NOW_THRESHOLD_MS, Date.now()) !== null) continue
+    if (await reclaimIdlePane(paneId)) reclaimed++
+  }
+  if (reclaimed > 0) {
+    pipelineLog(`♻ reclaimed ${reclaimed} CLI pane(s) on request — click to resume`)
+    notifyRestore.toast(
+      i18n.global.t('pane.terminal.idle-reclaimed', { count: reclaimed }),
+      { type: 'info' }
+    )
+  }
+  return reclaimed
 }
 
 onMounted(() => {
@@ -10574,6 +11264,17 @@ function onDetachGroup(groupId: string, x: number, y: number): void {
   void window.agentTeam?.detachGroup?.({ groupId, workspacePath: path, bounds })
 }
 
+/** Merge this detached window's group back into the window it came from.
+ *
+ *  Main closes this window, which runs the same 'closed' path a manual close
+ *  already used — so reattach has one implementation whichever way it starts.
+ *  The PTYs stay alive in the backend either way; the origin window restores
+ *  the group when it receives group:reattached. */
+function reattachThisWindow(): void {
+  if (!isDetachedWindow) return
+  void window.agentTeam?.reattachGroup?.({ groupId: detachedGroupId })
+}
+
 /** Hand a run group off to a detached child window: drop its panes from THIS
  *  window WITHOUT killing them — onScopeDispose keeps the backend PTYs alive so
  *  the child reattaches — and hide its tab. */
@@ -10600,11 +11301,28 @@ function handleGroupDetached(groupId: string): void {
  *  that group's panes here (they resume against the PTYs the child released). */
 async function handleGroupReattached(groupId: string): Promise<void> {
   if (isDetachedWindow || !groupId) return
+  const path = currentWorkspace.value
+  if (!path) return
+  // Drop any of this group's panes still listed here BEFORE restoring, or the
+  // restore adds a second copy of each and the list doubles on every cycle.
+  //
+  // They should not be here at all — the group is detached, so the child window
+  // owns those panes — but a main window that launched while the group was
+  // already detached restores them from the project record before it learns
+  // which groups are detached. Removing them costs nothing when the list is
+  // already clean, and it is the same non-killing removal the detach path uses:
+  // the backend PTYs stay alive and the restore below reattaches to them.
+  for (const p of panes.value) {
+    if ((p.runGroupId ?? '') === groupId) {
+      delete paneRefs[p.id]
+      unregisterPaneMessaging(p.id, { keepPersisted: true })
+    }
+  }
+  panes.value = panes.value.filter((p) => (p.runGroupId ?? '') !== groupId)
+
   const next = new Set(detachedGroupIds.value)
   next.delete(groupId)
   detachedGroupIds.value = next
-  const path = currentWorkspace.value
-  if (!path) return
   const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
   if (resp) await restoreWorkspacePanes(resp, path, groupId)
 }
@@ -10616,9 +11334,12 @@ onMounted(() => {
   // A main window that (re)loaded while a child is already open must hide the
   // groups that are currently detached. Best-effort: no-op if the main process
   // doesn't yet know this window's workspace.
-  void window.agentTeam?.getDetachedGroups?.().then((ids) => {
-    for (const gid of ids ?? []) handleGroupDetached(gid)
-  })
+  detachedGroupsKnown = (window.agentTeam?.getDetachedGroups?.() ?? Promise.resolve([]))
+    .then((ids) => {
+      for (const gid of ids ?? []) handleGroupDetached(gid)
+    })
+    // Best-effort: a failed lookup must not stall restore for ever.
+    .catch(() => {})
 })
 
 /** Fixed id for the always-present default tab. Using a constant id (rather than
@@ -10710,9 +11431,14 @@ async function persistPaneRunGroup(pane: ActivePane, runGroupId: string): Promis
 async function persistPaneOrder(): Promise<void> {
   const ws = currentWorkspace.value
   if (!ws) return
+  // This workspace's panes only. `panes` holds every workspace the window
+  // runs, so sending all of them would file another project's pane ids under
+  // this one — and leave that project's own order unwritten, since nothing
+  // else writes it. Identical to sending them all when the window holds one
+  // workspace.
   await sendQuiet('project.set_pane_order', {
     workspace_path: ws,
-    pane_ids: panes.value.map((p) => p.id),
+    pane_ids: panesInView.value.map((p) => p.id),
   })
 }
 
@@ -10828,46 +11554,33 @@ async function deleteRunGroup(id: string): Promise<void> {
  *  2.5 times a second. */
 type StageTabShape = Omit<TabItem, 'status'> & { paneIds: string[] }
 
-const stageTabShapes = computed<StageTabShape[]>(() => {
-  // Group panes by their persisted RunGroup; panes without runGroupId are
-  // surfaced through the synthetic "手動" tab, even when no real RunGroup
-  // remains.
-  const groupPaneIds = new Map<string, string[]>()
-  const unassignedPaneIds: string[] = []
-  for (const p of panes.value) {
-    if (p.runGroupId) {
-      const list = groupPaneIds.get(p.runGroupId)
-      if (list) list.push(p.id)
-      else groupPaneIds.set(p.runGroupId, [p.id])
-    } else {
-      unassignedPaneIds.push(p.id)
-    }
-  }
+/** The panes of the workspace currently on screen.
+ *
+ *  STRUCTURE LAYER — ids and paths only, never paneViews, so the 400ms status
+ *  sync does not rebuild it. Both the tab shapes and the grid filter read this:
+ *  counting a pane on a tab that will not show it is worse than either alone.
+ *
+ *  Only the OTHER adopted workspaces are held back. A pane whose workspace is
+ *  in neither list — a manual resume can pull a session in from any folder —
+ *  stays visible exactly as it did before workspaces were a layer. */
+const panesInView = computed<readonly ActivePane[]>(() =>
+  panesOfViewedWorkspace(panes.value, extraWorkspaces.value)
+)
 
-  const shapes: StageTabShape[] = []
-  for (const group of runGroups.value) {
-    // Detached child window shows ONLY its own group; a main window hides any
-    // group it has handed off to a detached child. Both filters are inert for a
-    // normal window (isDetachedWindow=false, empty detachedGroupIds).
-    if (isDetachedWindow) {
-      if (group.id !== detachedGroupId) continue
-    } else if (detachedGroupIds.value.has(group.id)) {
-      continue
-    }
-    const paneIds = groupPaneIds.get(group.id) ?? []
-    shapes.push({ key: group.id, label: group.name, count: paneIds.length, type: 'stage', paneIds })
-  }
-  if (!isDetachedWindow && unassignedPaneIds.length > 0) {
-    shapes.push({
-      key: 'manual',
-      label: '手動',
-      count: unassignedPaneIds.length,
-      type: 'manual',
-      paneIds: unassignedPaneIds
-    })
-  }
-  return shapes
-})
+const stageTabShapes = computed<StageTabShape[]>(() =>
+  // Structure, not stageTabs: no live status is read, so a status dot ticking
+  // does not rebuild the strip.
+  buildStageTabs({
+    panes: panesInView.value,
+    groups: runGroups.value,
+    isDetached: isDetachedWindow,
+    detachedGroupId,
+    detachedGroupIds: detachedGroupIds.value,
+    // Was hard-coded, so an English UI showed a Chinese tab. The key has
+    // existed all along.
+    manualLabel: i18n.global.t('label.manual'),
+  })
+)
 
 // Previous stageTabs result, returned unchanged when a status tick produced an
 // identical tab bar. See sameRenderedTabs.
@@ -10896,21 +11609,15 @@ const stageTabs = computed<TabItem[]>(() => {
   return next
 })
 
-const tabFilteredPaneIds = computed<Set<string>>(() => {
+const tabFilteredPaneIds = computed<Set<string>>(() =>
   // Structure, not stageTabs: this drives pane visibility and grid sizing, and
   // must not re-run when a status dot ticks.
-  if (stageTabShapes.value.length === 0) {
-    return new Set(panes.value.map((p) => p.id))
-  }
-  if (activeTab.value === 'manual') {
-    return new Set(panes.value.filter((p) => !p.runGroupId).map((p) => p.id))
-  }
-  if (activeTab.value && runGroups.value.some((g) => g.id === activeTab.value)) {
-    return new Set(panes.value.filter((p) => p.runGroupId === activeTab.value).map((p) => p.id))
-  }
-  // Fallback: show all
-  return new Set(panes.value.map((p) => p.id))
-})
+  panesOfActiveTab(panesInView.value, {
+    hasTabs: stageTabShapes.value.length > 0,
+    activeTab: activeTab.value,
+    groupIds: runGroups.value.map((g) => g.id),
+  })
+)
 
 // Panes visible under both tab filter and minimize filter — drives grid sizing
 const tabVisiblePanes = computed(() =>
@@ -11017,6 +11724,418 @@ const {
   },
 })
 
+/** One row of the lineage tree: which pane, how deep, and whether it folds.
+ *
+ *  STRUCTURE LAYER — deliberately derived from `panes` (id / spawnedBy /
+ *  collapsed only), never from `paneViews`. syncViews() rebuilds paneViews
+ *  every 400ms, so a structure computed reading it would rebuild the whole
+ *  tree at that rate; status and badges stay in paneViews and are looked up
+ *  per row by the consumer. Same split as StageTabBar's structure/status
+ *  computeds, and for the same reason. */
+/** Home directory, for shortening the paths shown under each workspace name.
+ *  Fetched once; an empty value just means paths render in full. */
+const homeDir = ref('')
+onMounted(async () => {
+  try {
+    homeDir.value = (await window.agentTeam?.getHomeDir?.()) || ''
+  } catch { /* paths stay absolute */ }
+})
+
+const paneLineage = computed<PaneLineageRow[]>(() =>
+  buildPaneLineage(panes.value, collapsedPanes.value)
+)
+
+/** Workspaces that have been folded shut in the sidebar. Per window and not
+ *  persisted: which projects you want out of the way is a property of the view
+ *  you are looking at, not of the project. */
+const collapsedWorkspaces = ref<Set<string>>(new Set())
+
+const EXTRA_WS_KEY = 'agentTeam.extraWorkspaces'
+
+/** Workspaces this window has taken on beyond the one it was opened with.
+ *
+ *  Picking one from the sidebar adds it here rather than opening a window for
+ *  it: the sidebar is a list of projects, so "open" means "also show me that
+ *  one". Panes can start in any of them — a pane carries its own
+ *  workspacePath — while the IDE surfaces (git, explorer, plans, the terminal
+ *  cwd) stay with currentWorkspace, which is this window's primary. */
+/** Every workspace this window holds, in the order it took them on — the
+ *  order the sidebar lists them in.
+ *
+ *  Which one is on screen is currentWorkspace and nothing more. Deriving the
+ *  order from it instead (viewed one first) made the list reshuffle on every
+ *  switch: two rows swapping places under the cursor, so the next click lands
+ *  on the wrong project. */
+const workspaceOrder = ref<string[]>(readExtraWorkspaces())
+
+/** The ones that are not on screen. Everything that holds panes back or asks
+ *  "is this ours?" reads this or workspaceOrder; nothing derives order. */
+const extraWorkspaces = computed<string[]>(() =>
+  workspaceOrder.value.filter((w) => normWs(w) !== normWs(currentWorkspace.value))
+)
+
+function readExtraWorkspaces(): string[] {
+  try {
+    const raw = sessionStorage.getItem(EXTRA_WS_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+const normWs = (p: string): string => p.replace(/\/+$/, '')
+
+/** Does this window run panes in that workspace? Its primary, or one it has
+ *  adopted. Restore and the other per-workspace operations ask this rather
+ *  than comparing against currentWorkspace alone. */
+function isLocalWorkspace(path: string): boolean {
+  if (!path) return false
+  const target = normWs(path)
+  return (
+    target === normWs(currentWorkspace.value) ||
+    workspaceOrder.value.some((w) => normWs(w) === target)
+  )
+}
+
+// The workspace the window was opened with belongs in the list too, and it was
+// there first — otherwise it sorts after everything adopted later, which reads
+// as the sidebar putting the newcomer above the project you started in. A
+// switch finds it already present and changes nothing.
+watch(
+  currentWorkspace,
+  (ws) => {
+    if (!ws || isDetachedWindow) return
+    if (workspaceOrder.value.some((w) => normWs(w) === normWs(ws))) return
+    workspaceOrder.value = [ws, ...workspaceOrder.value]
+    persistExtraWorkspaces()
+  },
+  { immediate: true },
+)
+
+function adoptWorkspace(path: string): void {
+  // A detached window is one run group's view of ONE workspace. Taking on
+  // another would give it a workspace its own registry entry does not name,
+  // and its report to main is suppressed, so nothing else would know.
+  if (isDetachedWindow) return
+  if (!path || isLocalWorkspace(path)) return
+  workspaceOrder.value = [...workspaceOrder.value, path]
+  persistExtraWorkspaces()
+}
+
+function persistExtraWorkspaces(): void {
+  try {
+    sessionStorage.setItem(EXTRA_WS_KEY, JSON.stringify(workspaceOrder.value))
+  } catch {
+    /* a lost list costs a re-pick, not work */
+  }
+  // Main answers "is this folder already open?" for every other window's
+  // picker; without this it would only know about primaries and a second
+  // window could open a folder this one is already running.
+  if (!isDetachedWindow) window.agentTeam?.reportAdoptedWorkspaces?.([...workspaceOrder.value])
+}
+
+onMounted(() => {
+  if (isDetachedWindow) return
+  // Two ways this window can already hold workspaces before anyone clicks:
+  //  · a reload — sessionStorage kept the list, but main has not heard it;
+  //  · a relaunch — sessionStorage is empty and the registry has the list.
+  // sessionStorage wins when both exist: it is this window's live state, while
+  // the registry's copy is from before the restart.
+  if (workspaceOrder.value.length) {
+    window.agentTeam?.reportAdoptedWorkspaces?.([...workspaceOrder.value])
+  } else {
+    void (async () => {
+      const restored = (await window.agentTeam?.takeRestoredAdoptedWorkspaces?.()) ?? []
+      for (const path of restored) adoptWorkspace(path)
+      // Their agents come back the same way a picked workspace's do.
+      for (const path of extraWorkspaces.value) {
+        const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
+        if (resp) await restoreWorkspacePanes(resp, path)
+      }
+    })()
+  }
+})
+
+/** The ＋ on the sidebar's Workspace heading: the Welcome picker, reopened
+ *  over a window that already has a workspace. */
+const workspacePickerOpen = ref(false)
+
+/** Open a workspace picked from that picker — in THIS window's sidebar.
+ *
+ *  A workspace already open in another window is focused there instead: two
+ *  windows on one folder would run two sets of PTY and git operations on it,
+ *  and its panes live in the window that owns them. */
+async function openWorkspaceFromPicker(path: string): Promise<void> {
+  workspacePickerOpen.value = false
+  if (!path) return
+  // Already one of ours: picking it from the list means "show me that one",
+  // which is the same thing clicking its heading does.
+  if (isLocalWorkspace(path)) {
+    await switchToWorkspace(path)
+    return
+  }
+  if (await window.agentTeam?.focusWorkspaceWindow?.(path)) return
+  adoptWorkspace(path)
+  // And look at it. Picking a project from a list that says "Open Workspace"
+  // means "show me that one" — adding a row to the sidebar and leaving the
+  // window on the previous project reads as nothing having happened. The
+  // switch also loads it, which brings its persisted agents back: a project
+  // with work in it must not come up empty.
+  await switchToWorkspace(path)
+}
+
+/** Look at another of this window's workspaces.
+ *
+ *  The one being left stays in the window — its agents keep running and its
+ *  heading stays in the sidebar — so this is a change of view, not a close.
+ *  Everything that follows currentWorkspace (the tab row, the grid, git,
+ *  explorer, plans, the terminal cwd) moves with it. */
+/** Bring the workspace that owns `paneId` on screen, if this window holds it.
+ *
+ *  Returns false only when a switch was needed and did not happen, so callers
+ *  stop instead of focusing a pane the grid filters out — sidebar and
+ *  spotlight render the focused pane and nothing else, so that draws an empty
+ *  main area next to a full agent list.
+ *
+ *  Four places jump to a pane by id (the sidebar list, the status-bar
+ *  overview, the history modal, a message notification) and every one of them
+ *  can name a pane in a workspace that is not on screen. */
+async function ensurePaneWorkspaceOnScreen(paneId: string): Promise<boolean> {
+  const target = panes.value.find((p) => p.id === paneId)?.workspacePath ?? ''
+  if (!target || !isLocalWorkspace(target)) return true
+  if (normWs(target) === normWs(currentWorkspace.value)) return true
+  await switchToWorkspace(target)
+  return normWs(currentWorkspace.value) === normWs(target)
+}
+
+/** True while a switch is in flight, with the name being entered.
+ *
+ *  Drives the stage's cover: see switchToWorkspace for why the area would
+ *  otherwise sit blank rather than empty. */
+const switchingWorkspace = ref(false)
+const switchingWorkspaceName = ref('')
+/** Which switch owns the cover. The sidebar stays clickable while one runs —
+ *  the cover is over the stage, not the list — so a second workspace can be
+ *  picked mid-switch. Without this the first run to finish uncovers a stage
+ *  the second is still rebuilding, and the blank it was added to fill is back. */
+let switchCoverSeq = 0
+/** How long a switch may run before the cover appears.
+ *
+ *  A switch with nothing to restore is a project.peek round trip and a tick.
+ *  Showing a spinner for that — and then fading it out — is a flash, which
+ *  reads as a glitch rather than as loading. Past this the stage would
+ *  otherwise sit blank, which is what the cover is for. */
+const SWITCH_COVER_DELAY_MS = 180
+
+async function switchToWorkspace(path: string): Promise<void> {
+  if (isDetachedWindow) return // see adoptWorkspace
+  if (!path || normWs(path) === normWs(currentWorkspace.value)) return
+  if (!isLocalWorkspace(path)) return
+  // Panes survive a switch; a pipeline cannot. `pipeline` is one per window,
+  // so entering another project overwrites the state tracking this one's run
+  // and onWorkspaceBrowse aborts it rather than lose track of it. That is the
+  // right call, but it must not happen silently — everything else about a
+  // switch keeps running, so nobody would expect this one thing to stop.
+  if (pipeline.state === 'running') {
+    const ok = await notifyRestore.confirm(i18n.global.t('switchWorkspace.confirm'), {
+      title: i18n.global.t('switchWorkspace.confirmTitle'),
+      confirmText: i18n.global.t('switchWorkspace.confirmBtn'),
+      cancelText: i18n.global.t('restore.dismiss'),
+    })
+    if (!ok) return
+  }
+  // The window holds the same set either way — only which one is on screen
+  // changes — so the list is untouched and the sidebar does not reshuffle.
+  // Both are already in it: the one being left through the watch above, the
+  // one being entered through adoptWorkspace.
+  // Cover the stage for the rest of this. Everything below is awaited, and the
+  // panes on screen belong to the workspace being left — a switch filters them
+  // out rather than tearing them down — so without this the area goes blank
+  // and stays blank while the entered workspace's panes are restored, one CLI
+  // probe each. Blank reads as "the click did nothing".
+  const coverSeq = ++switchCoverSeq
+  switchingWorkspaceName.value = path.split('/').filter(Boolean).pop() ?? path
+  const coverTimer = setTimeout(() => {
+    if (coverSeq === switchCoverSeq) switchingWorkspace.value = true
+  }, SWITCH_COVER_DELAY_MS)
+  try {
+    await onWorkspaceBrowse(path, { keepPanes: true })
+    // onWorkspaceBrowse has its own reasons to decline — chiefly finding the
+    // workspace open in some other window — and it declines by returning, which
+    // from here is indistinguishable from having worked. A switch that quietly
+    // does nothing is the worst outcome: the sidebar still says one thing and
+    // the screen another. Undo the list swap and say so.
+    if (normWs(currentWorkspace.value) !== normWs(path)) {
+      notifyRestore.toast(
+        i18n.global.t('switchWorkspace.failed', {
+          name: path.split('/').filter(Boolean).pop() ?? path,
+        }),
+        { type: 'error' },
+      )
+      return
+    }
+    // Load the entered workspace NOW. ControlPane reaches onWorkspaceCheck
+    // through a 400ms debounce on its workspace field — right for someone typing
+    // a path, wrong for a click: for those 400ms the window pairs the new
+    // workspace with the old run groups, so every tab filter misses and the list
+    // and grid blink empty on the way through. The debounced call still arrives
+    // and is a no-op by then.
+    await onWorkspaceCheck(path)
+    // The focused pane is very likely one this window just stopped showing. In
+    // grid mode that is harmless, but sidebar and spotlight render the focused
+    // pane and nothing else, so they would come up blank. Same landing as
+    // onUserSelectTab: keep the focus if it survived the filter, else take the
+    // first pane that did.
+    await nextTick()
+    const visible = tabVisiblePanes.value
+    if (!visible.some((p) => p.id === focusPaneId.value)) {
+      const first = visible[0]?.id
+      if (first) selectPane(first, { userInitiated: false })
+    }
+  } finally {
+    // finally, not after the last await: every path out of here — the decline
+    // above, a throw from restore — must uncover the stage, or the window is
+    // left showing a spinner over panes that are already there.
+    //
+    // Only if this is still the newest switch: an older one finishing must not
+    // uncover a stage a newer one is still rebuilding. Clearing the timer is
+    // unconditional though — an older switch's pending timer must never raise
+    // the cover after that switch is over.
+    clearTimeout(coverTimer)
+    if (coverSeq === switchCoverSeq) switchingWorkspace.value = false
+  }
+}
+
+/** Take an adopted workspace back out of this window.
+ *
+ *  Its panes go with it — they were started in it and belong to it, and
+ *  leaving them behind would put panes in the list with no heading to sit
+ *  under. The primary workspace cannot be closed this way: it is what the
+ *  window was opened with, so closing it would leave no root. */
+async function closeWorkspace(path: string): Promise<void> {
+  if (!path || normWs(path) === normWs(currentWorkspace.value)) return
+  if (!extraWorkspaces.value.some((w) => normWs(w) === normWs(path))) return
+  const doomed = panes.value.filter((p) => normWs(p.workspacePath) === normWs(path))
+  for (const pane of doomed) await onKill(pane.id)
+  workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
+  persistExtraWorkspaces()
+  const next = new Set(collapsedWorkspaces.value)
+  next.delete(path)
+  collapsedWorkspaces.value = next
+}
+
+/** Drag one workspace heading onto another → put it there in the list.
+ *
+ *  The order is the order the window took each workspace on, which is a fact
+ *  about history rather than a preference — this is what makes it a preference.
+ *  Persisted with the list itself, so a reload keeps it; per window, because
+ *  which project you want at the top is a property of the window you are
+ *  looking at, the same way the sidebar's collapse state is. */
+function reorderWorkspace(fromPath: string, toPath: string): void {
+  if (isDetachedWindow) return
+  const next = [...workspaceOrder.value]
+  if (!reorderStrings(next, fromPath, toPath)) return
+  workspaceOrder.value = next
+  persistExtraWorkspaces()
+}
+
+/** Drag a workspace heading out of the window → give it its own window.
+ *
+ *  The inverse of adopting one, and deliberately not closeWorkspace: that kills
+ *  the panes because closing says the user is finished with them, while this
+ *  hands them over. Panes are keyed by workspace in the backend and belong to
+ *  it rather than to a window, so dropping the workspace here and opening a
+ *  window on it lets the ordinary restore pick the same panes up — nothing is
+ *  killed and no PTY restarts.
+ */
+async function detachWorkspace(path: string, x: number, y: number): Promise<void> {
+  if (isDetachedWindow || !path) return
+  // Pulling out the only workspace would empty this window to fill a new one.
+  if (workspaceOrder.value.length < 2) return
+  // Detaching the one on screen would leave this window viewing a workspace it
+  // no longer holds, so step off it first — onto one it keeps.
+  if (normWs(path) === normWs(currentWorkspace.value)) {
+    const fallback = workspaceOrder.value.find((w) => normWs(w) !== normWs(path))
+    if (!fallback) return
+    await switchToWorkspace(fallback)
+    if (normWs(currentWorkspace.value) === normWs(path)) return
+  }
+  workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
+  const next = new Set(collapsedWorkspaces.value)
+  next.delete(path)
+  collapsedWorkspaces.value = next
+  // Also reports the shortened adopted list to main, which is how the new
+  // window avoids being answered with a focus of this one.
+  persistExtraWorkspaces()
+  const bounds = { x: Math.round(x), y: Math.round(y), width: 1200, height: 800 }
+  await window.agentTeam?.detachWorkspace?.({ workspacePath: path, bounds })
+}
+
+/** Reveal a workspace's folder — the titlebar button that used to do this is
+ *  gone, and a project row is where it belongs anyway. */
+function revealWorkspaceFolder(path: string): void {
+  if (path) void window.agentTeam?.openPath?.(path)
+}
+
+function toggleWorkspaceCollapsed(path: string): void {
+  const next = new Set(collapsedWorkspaces.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  collapsedWorkspaces.value = next
+}
+
+/** The sidebar's outer layer: one row per workspace, this window's first.
+ *
+ *  STRUCTURE LAYER, like paneLineage — it reads ids, paths and the roster, not
+ *  paneViews, so the 400ms status sync does not rebuild it. The list renders
+ *  these rows and looks each pane's status up separately.
+ *
+ *  Every row is a workspace this window holds, carrying lineage rows: it owns
+ *  those terminals and knows everything about them. What other windows are
+ *  running is theirs to show — a window is its own space. */
+interface WorkspaceGroupRow {
+  path: string
+  label: string
+  displayPath: string
+  isCurrent: boolean
+  collapsed: boolean
+  count: number
+  lineage: PaneLineageRow[]
+  groups: { id: string; name: string; rows: PaneLineageRow[] }[]
+}
+
+const workspaceGroups = computed<WorkspaceGroupRow[]>(() =>
+  buildWorkspaceGroups({
+    here: currentWorkspace.value,
+    order: workspaceOrder.value,
+    panes: panes.value,
+    lineage: paneLineage.value,
+    // Only the viewed workspace's groups exist here — they are persisted per
+    // workspace — so another workspace this window holds lists its panes
+    // ungrouped until you switch to it.
+    runGroups: runGroups.value,
+    collapsed: collapsedWorkspaces.value,
+    homeDir: homeDir.value,
+  })
+)
+
+function togglePaneCollapsed(id: string): void {
+  const next = new Set(collapsedPanes.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  collapsedPanes.value = next
+  const pane = panes.value.find((p) => p.id === id)
+  if (pane) {
+    backend.send('project.set_pane_collapsed', {
+      workspace_path: pane.workspacePath,
+      pane_id: id,
+      collapsed: next.has(id),
+    })
+  }
+  syncViews()
+}
+
 // Persist the pane's collapsed-to-sidebar state to project.json so it survives
 // a restart (mirrors project.rename_pane / custom_name).
 function persistPaneMinimized(id: string, isMinimized: boolean): void {
@@ -11117,29 +12236,83 @@ function rangeSelectPanes(toId: string, orderedIds?: string[]): void {
 // Sidebar agent-list clicks: a modifier click joins the same multi-select as
 // the pane surfaces (ranging over the sidebar's full list order); a plain
 // click keeps the original focus + scroll behavior.
-function onSidebarFocusPane(paneId: string, ev?: MouseEvent): void {
+/** The order the sidebar actually renders panes in: each workspace section in
+ *  turn, each one's lineage flattened depth-first. Shift-range selection walks
+ *  this, so it has to be what the eye sees — paneViews is the flat spawn order,
+ *  which stopped matching the moment the list gained indentation, and stopped
+ *  matching further once it gained workspace sections.
+ *
+ *  STRUCTURE LAYER: workspaceGroups and its lineages, never paneViews. */
+const sidebarOrderedPaneIds = computed<string[]>(() =>
+  flattenSidebarOrder(workspaceGroups.value)
+)
+
+async function onSidebarFocusPane(paneId: string, ev?: MouseEvent): Promise<void> {
   if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey)) {
-    onSetFocus(paneId, ev, paneViews.value.map((v) => v.id))
+    onSetFocus(paneId, ev, sidebarOrderedPaneIds.value)
     return
   }
   selectedPaneIds.value = new Set()
   lastClickPaneId.value = paneId
+  // The sidebar lists every workspace this window holds, so a click can land
+  // on a pane the grid is currently filtering out.
+  if (!(await ensurePaneWorkspaceOnScreen(paneId))) return
   onFocusPane(paneId)
 }
 
-// ── Agent overview popover (status-bar "N agents") ──────────────────────────
-// Rows for the status-bar agent list. Status comes from paneViews, which
-// syncViews refreshes every 400 ms from each pane's live displayStatus — the
-// only app-wide readable copy of that per-pane state (displayStatus itself
-// lives inside TerminalPane). A lost backend session is not visible there, so
-// disconnectedPaneIds wins over it.
-const agentOverviewRows = computed<AgentOverviewRow[]>(() => {
+// ── Resource popover + Resource Manager (status-bar CPU + memory) ───────────
+// One list where there used to be two popovers: the agent overview answered
+// "which panes exist and what are they doing", the memory panel answered "who
+// is holding the machine". You ask both at the same moment — when the fan
+// spins up — so they are one row now, and the status-bar pill carries the
+// headline figures instead of a bare count.
+//
+// Status comes from paneViews, which syncViews refreshes every 400 ms from each
+// pane's live displayStatus — the only app-wide readable copy of that per-pane
+// state (displayStatus itself lives inside TerminalPane). A lost backend
+// session is not visible there, so disconnectedPaneIds wins over it.
+const showResourceManager = ref(false)
+// Mount the modal only once it has been asked for, like the other heavy modals.
+const resourceManagerEverOpened = ref(false)
+/** Either surface being visible is what picks the fast sampling cadence. */
+const resourcePanelOpen = computed(
+  () => openPopover.value === 'resource' || showResourceManager.value
+)
+
+/** Panes with a live CLI. The pill counts these, not placeholders: a
+ *  placeholder holds no process, so no CPU and no memory. */
+const realizedPaneCount = computed(() => panes.value.filter((p) => p.realized).length)
+
+const resourceUsage = useResourceUsage({
+  request: () => sendQuiet<ResourceUsageWire>('terminal.resource_usage', {}),
+  paneCount: realizedPaneCount,
+  panelOpen: resourcePanelOpen,
+})
+
+const resourceRows = computed<ResourceSummaryRow[]>(() => {
   const statusById = new Map(paneViews.value.map((v) => [v.id, v.status]))
+  const reclaimable = new Set(reclaimableNowIds.value)
+  const bytesByKey = resourceUsage.bytesByKey.value
+  const cpuByKey = resourceUsage.cpuPercentByKey.value
+  const bytesByPane = resourceUsage.bytesByPaneId.value
+  const cpuByPane = resourceUsage.cpuPercentByPaneId.value
+  const paneIdByKey = resourceUsage.paneIdByKey.value
   return panes.value.map((p) => {
     const name = p.customName || p.autoName || p.agentLabel
     const vendor = agentSpecs.find((s) => s.agentKey === p.agentKey)?.label ?? p.agentKey
+    // Keyed by terminal session first: that id is the one this window holds for
+    // its own PTY, so it cannot drift the way a pane id can when a pane is
+    // rebuilt around a new one. The pane-id index is the fallback for a pane
+    // whose ref is not mounted at this moment — the session-keyed map never
+    // holds a bare pane id, so looking one up there would always miss.
+    const sessionKey = (paneRefs[p.id]?.sessionId as unknown as string) ?? ''
+    const known = bytesByKey.has(sessionKey) || cpuByKey.has(sessionKey)
     return {
       paneId: p.id,
+      // The id the measurement row itself carries, which after a rebuild is the
+      // pane id the PTY was created under — not this pane's current one. The
+      // Resource Manager needs it to know that row is already accounted for.
+      measuredKey: (known ? paneIdByKey.get(sessionKey) : undefined) ?? p.id,
       name,
       // An unnamed pane's display name already IS the vendor label (agentLabel is
       // assigned spec.label at creation), so emitting both would print it twice
@@ -11154,30 +12327,96 @@ const agentOverviewRows = computed<AgentOverviewRow[]>(() => {
         p.workspacePath && p.workspacePath !== currentWorkspace.value
           ? (p.workspacePath.split('/').filter(Boolean).pop() ?? p.workspacePath)
           : '',
+      bytes: (known ? bytesByKey.get(sessionKey) : bytesByPane.get(p.id)) ?? 0,
+      cpuPercent: (known ? cpuByKey.get(sessionKey) : cpuByPane.get(p.id)) ?? null,
+      reclaimable: reclaimable.has(p.id),
     }
   })
 })
 
-// The overview's status-bar trigger is hidden once the last pane exits, but the
-// popover is not — without this it would stay mounted with a full-viewport
-// backdrop swallowing every click on a status bar that no longer offers a way
-// to dismiss it.
+// The backend measures every PTY it owns, which is every window's — the right
+// scope for the Resource Manager, and the wrong one for a card that lists this
+// window's panes. Totalled from the rows so the headline and the list agree.
+const resourceTotals = computed(() => {
+  let bytes = 0
+  let cpu = 0
+  let cpuKnown = false
+  for (const row of resourceRows.value) {
+    bytes += row.bytes
+    if (row.cpuPercent !== null) {
+      cpu += row.cpuPercent
+      cpuKnown = true
+    }
+  }
+  return { bytes, cpu: cpuKnown ? cpu : null }
+})
+const resourceCpuShare = computed(() =>
+  machineCpuShare(resourceTotals.value.cpu, resourceUsage.cpuCount.value)
+)
+const resourceMemoryShare = computed(() =>
+  machineMemoryShare(resourceTotals.value.bytes, resourceUsage.machineMemoryBytes.value)
+)
+
+/** The pill's own text: pane count, this machine's share of CPU, total memory.
+ *  Each figure appears only once it is knowable — CPU needs two samples, and a
+ *  sweep that failed shows nothing rather than a zero that reads as "idle". */
+const resourcePillText = computed(() => {
+  // The pane count, not the realized subset: idle reclaim downgrades panes to
+  // placeholders rather than closing them, and a pill reading "▤ 0" beside a
+  // panel listing thirteen panes is a contradiction. The resource figures below
+  // still come only from the panes that actually hold a process.
+  const parts = [`▤ ${panes.value.length}`]
+  const share = resourceCpuShare.value
+  if (share !== null && resourceUsage.cpuAvailable.value) parts.push(formatCpuPercent(share))
+  if (resourceUsage.measured.value && resourceUsage.available.value && resourceTotals.value.bytes > 0) {
+    parts.push(formatBytes(resourceTotals.value.bytes))
+  }
+  return parts.join(' · ')
+})
+
+/** The hover text keeps what the merged pill has no room for — how many panes
+ *  "reclaim now" would take, which the old memory pill showed inline. */
+const resourcePillTitle = computed(() => {
+  const base = i18n.global.t('resource.statusbar-title')
+  const count = reclaimableNowIds.value.length
+  return count > 0
+    ? `${base} · ${i18n.global.t('resource.reclaimable-hint', { count })}`
+    : base
+})
+
+// The pill is hidden once the last pane exits, but the popover is not — without
+// this it would stay mounted with a full-viewport backdrop swallowing every
+// click on a status bar that no longer offers a way to dismiss it.
 watch(
   () => panes.value.length,
   (count) => {
-    if (count === 0 && openPopover.value === 'agents') closePopover()
+    if (count === 0 && openPopover.value === 'resource') closePopover()
   },
 )
 
-/** Jump from the overview to a pane. Mirrors the sidebar agent list's plain
+/** Jump from the panel to a pane. Mirrors the sidebar agent list's plain
  *  click: reveal the pane's tab, then select it as user-initiated so a
  *  cold-restore placeholder is realized instead of silently focusing nothing.
  *  A minimized pane is restored first — effectiveFocusPaneId skips minimized
  *  panes, so focusing one without restoring would show a different pane. */
-function onAgentOverviewJump(paneId: string): void {
+function onResourceJump(paneId: string): void {
   closePopover()
   if (minimizedPanes.value.has(paneId)) restorePane(paneId)
   onSidebarFocusPane(paneId)
+}
+
+async function onResourceReclaim(): Promise<void> {
+  const reclaimed = await reclaimPanesNow()
+  // Re-measured rather than closed: the point of the panel is to show the
+  // machine getting its resources back, and the rows that are left are the
+  // answer to "what is still holding them".
+  if (reclaimed > 0) void resourceUsage.refresh()
+}
+
+function openResourceManager(): void {
+  closePopover()
+  resourceManagerEverOpened.value = true
+  showResourceManager.value = true
 }
 
 // Pane right-click context menu, shared by the agent list, spotlight thumbnails,
@@ -11614,6 +12853,14 @@ const colWidths = ref<number[]>(
 const rowHeights = ref<number[]>(
   (() => { try { const v = JSON.parse(settingsGet('agentTeam.rowHeights', '')); if (Array.isArray(v)) return v as number[] } catch {} return [1] })()
 )
+/** The Active agents list's natural width in Sidebar mode, and the width below
+ *  which it stops being readable. `.auto-meeting-list`'s own `min-width` is the
+ *  same number — the track reserves the space so the item never has to overflow
+ *  to keep it. */
+const MEETING_LIST_WIDTH_PX = 220
+const MEETING_LIST_MIN_PX = 140
+const MEETING_LIST_TRACK = `minmax(${MEETING_LIST_MIN_PX}px, ${MEETING_LIST_WIDTH_PX}px)`
+
 // Sidebar left column width in pixels (0 = default: fill remaining space)
 const sidebarLeftPx = ref<number>(
   parseInt(settingsGet('agentTeam.sidebarLeftPx', '0')) || 0
@@ -11698,11 +12945,25 @@ const gridTemplateColumns = computed(() => {
       return '1fr'
     }
     case 'sidebar': {
+      // Every fixed track is a minmax with a zero floor, and the agents list
+      // carries its own.
+      //
+      // `sidebarLeftPx` is an absolute width the user dragged once, clamped
+      // against the stage width *at that moment* and never re-checked. Anything
+      // that later narrows the stage — expanding the right panel, opening the
+      // left one, resizing the window — leaves the pane column at its old px
+      // while the list is squeezed to its `min-width`, so the row is wider than
+      // the stage. `.stage` hides its overflow, so the list is not shrunk but
+      // *cut off* at the stage's right edge, which reads as the right panel
+      // covering it. minmax makes the pane column give ground instead, and the
+      // stored width is untouched so it comes back when there is room again.
       if (dualFocusActive.value) {
-        const l = dualFocusSplitPx.value > 0 ? `${dualFocusSplitPx.value}px` : '1fr'
-        return `${l} 1fr 220px`
+        const l = dualFocusSplitPx.value > 0 ? `minmax(0, ${dualFocusSplitPx.value}px)` : '1fr'
+        return `${l} minmax(0, 1fr) ${MEETING_LIST_TRACK}`
       }
-      return sidebarLeftPx.value > 0 ? `${sidebarLeftPx.value}px 1fr` : '1fr 220px'
+      return sidebarLeftPx.value > 0
+        ? `minmax(0, ${sidebarLeftPx.value}px) minmax(${MEETING_LIST_MIN_PX}px, 1fr)`
+        : `minmax(0, 1fr) ${MEETING_LIST_TRACK}`
     }
     default: {
       const ws = colWidths.value.length === numCols.value ? colWidths.value : Array(numCols.value).fill(1)
@@ -11749,7 +13010,13 @@ const rowHandlePositions = computed<string[]>(() => {
 
 // Sidebar handle: matches the grid template split exactly — no clientWidth needed.
 const sidebarHandlePos = computed(() => {
-  return sidebarLeftPx.value > 0 ? `${sidebarLeftPx.value}px` : 'calc(100% - 220px)'
+  // Mirrors the clamp in the track above. Without the min() the handle would be
+  // drawn at the stored width while the real boundary sat further left — the
+  // same "position duplicated from a track definition" hazard the shell's own
+  // handles used to have.
+  return sidebarLeftPx.value > 0
+    ? `min(${sidebarLeftPx.value}px, calc(100% - ${MEETING_LIST_MIN_PX}px))`
+    : `calc(100% - ${MEETING_LIST_WIDTH_PX}px)`
 })
 
 type GridHandleAxis = 'col' | 'row' | 'sidebar' | 'dual-focus'
@@ -11779,7 +13046,7 @@ function onGridHandleStart(e: MouseEvent, axis: GridHandleAxis, index: number): 
     _gA = sidebarLeftPx.value > 0 ? sidebarLeftPx.value : (el?.clientWidth ?? 800) - 220
     _gSize = el?.clientWidth ?? 800
   } else {
-    const meetingW = effectiveLayoutMode.value === 'sidebar' ? 220 : 0
+    const meetingW = effectiveLayoutMode.value === 'sidebar' ? MEETING_LIST_WIDTH_PX : 0
     _gSize = (el?.clientWidth ?? 800) - meetingW
     _gA = dualFocusSplitPx.value > 0 ? dualFocusSplitPx.value : _gSize / 2
     _gB = 0
@@ -11812,7 +13079,9 @@ function onGridHandleMove(e: MouseEvent): void {
     rowHeights.value = next
   } else if (_gAxis === 'sidebar') {
     const dx = e.clientX - _gStartX
-    sidebarLeftPx.value = Math.max(200, Math.min(_gSize - 140, _gA + dx))
+    // Same floor the track reserves, so the drag cannot write a width the
+    // rendered layout will then clamp away underneath it.
+    sidebarLeftPx.value = Math.max(200, Math.min(_gSize - MEETING_LIST_MIN_PX, _gA + dx))
   } else if (_gAxis === 'dual-focus') {
     const dx = e.clientX - _gStartX
     dualFocusSplitPx.value = Math.max(150, Math.min(_gSize - 150, _gA + dx))
@@ -11830,14 +13099,11 @@ function onGridHandleEnd(): void {
 }
 
 // Resolved focus pane: skips minimized panes, falls back to first visible
-const effectiveFocusPaneId = computed(() => {
-  if (focusPaneId.value
-    && panes.value.find((p) => p.id === focusPaneId.value)
-    && !minimizedPanes.value.has(focusPaneId.value)) {
-    return focusPaneId.value
-  }
-  return panes.value.find((p) => !minimizedPanes.value.has(p.id))?.id ?? null
-})
+const effectiveFocusPaneId = computed(() =>
+  // Of the workspace on screen — naming a pane from another one renders
+  // nothing at all, since sidebar and spotlight draw this pane and no other.
+  resolveFocusedPane(focusPaneId.value, panesInView.value, minimizedPanes.value)
+)
 
 // ── Dual-focus: show 2 running panes side-by-side in non-grid modes ───────────
 const runningPaneIds = computed(() => {
@@ -11896,11 +13162,19 @@ const onScreenPaneIds = computed<Set<string>>(() => {
 const stageSurfaceOrderedIds = computed<string[]>(() =>
   panes.value.filter((p) => onScreenPaneIds.value.has(p.id)).map((p) => p.id)
 )
-const auxiliaryListOrderedIds = computed<string[]>(() =>
-  paneViews.value
-    .filter((v) => !v.isMinimized && tabFilteredPaneIds.value.has(v.id))
-    .map((v) => v.id)
-)
+// Shift-range selection walks this list, so it has to be the order the user
+// actually sees: the lineage tree flattened depth-first, not the flat pane
+// order. It is also collapse-aware for free — a folded subtree's children are
+// absent from paneLineage, so a range spanning a collapsed parent skips the
+// children the user cannot see.
+const auxiliaryListOrderedIds = computed<string[]>(() => {
+  const visible = new Set(
+    paneViews.value
+      .filter((v) => !v.isMinimized && tabFilteredPaneIds.value.has(v.id))
+      .map((v) => v.id)
+  )
+  return paneLineage.value.filter((r) => visible.has(r.id)).map((r) => r.id)
+})
 
 function onUserChangeLayoutMode(mode: LayoutMode): void {
   layoutMode.value = mode
@@ -11951,7 +13225,7 @@ function cycleFocusedPane(direction: CycleDirection): void {
 
 const dualFocusHandlePos = computed(() => {
   if (dualFocusSplitPx.value > 0) return `${dualFocusSplitPx.value}px`
-  const meetingW = effectiveLayoutMode.value === 'sidebar' ? 220 : 0
+  const meetingW = effectiveLayoutMode.value === 'sidebar' ? MEETING_LIST_WIDTH_PX : 0
   return meetingW > 0 ? `calc((100% - ${meetingW}px) / 2)` : '50%'
 })
 watch(dualFocusActive, (active) => { if (!active) dualFocusSplitPx.value = 0 })
@@ -12173,40 +13447,81 @@ function paneIsCommander(p: ActivePane): boolean {
     @cancel="settleRestoreScope(null)"
   />
   <!-- First-boot loading overlay: covers the shell until the backend settles,
-       then fades out. Brand-only text so no i18n keys are needed. -->
+       then fades out. Brand mark only, so no i18n keys are needed. -->
   <Transition name="boot-fade">
     <div v-if="booting" class="boot-overlay">
       <div class="boot-card">
-        <div class="boot-wordmark">Agent-Team</div>
+        <img class="boot-logo" :src="navideMark" alt="Navide" />
         <template v-if="bootError">
           <div class="boot-status boot-status-error">{{ $t('error.backend-start-failed') }}</div>
           <button class="boot-retry" @click="retryBackend">{{ $t('action.retry') }}</button>
         </template>
         <template v-else>
           <div class="boot-spinner" aria-label="loading" />
-          <div class="boot-status">{{ $t(bootStatusKey) }} {{ $t('label.boot-countdown', { seconds: bootCountdown }) }}</div>
+          <div class="boot-status">
+            <span>{{ $t(bootStatusKey) }}</span>
+            <span class="boot-elapsed">{{ $t('label.boot-countdown', { seconds: bootCountdown }) }}</span>
+          </div>
         </template>
       </div>
     </div>
   </Transition>
-  <div class="app" :style="{ '--token-panel-width': tokenPanelWidth, '--left-width': leftPanelWidth + 'px' }" :class="{ 'is-resizing-shell': isShellDragging, 'is-resizing-grid': isGridDragging }">
+  <div class="app" :style="{ '--token-panel-width': tokenPanelWidth, '--left-width': leftTrackWidth, '--up-height': upTrackHeight, '--down-height': downTrackHeight, '--rail-size': RAIL_SIZE + 'px', '--chrome-bottom': shellLayout.chrome.statusbar ? '24px' : '0px' }" :class="{ 'is-resizing-shell': isShellDragging, 'is-resizing-grid': isGridDragging }">
     <!-- Custom titlebar: traffic lights on left (via hiddenInset), name centre, gear right -->
     <div class="titlebar">
+      <!-- The path and the workspace switcher both used to live here; the
+           sidebar's Workspace section carries them now (the path under each
+           project name, ＋ to open another one). Reveal-in-Finder went with
+           them — Welcome's recent list still has it on its context menu. -->
       <template v-if="workspaceSelected">
-        <div class="titlebar-workspace">
-          <input
-            :value="currentWorkspace"
-            type="text"
-            class="titlebar-ws-input"
-            spellcheck="false"
-            autocorrect="off"
-            @change="onWorkspaceBrowse(($event.target as HTMLInputElement).value)"
-          />
-          <button class="titlebar-ws-btn" @mousedown.stop @click="titlebarRevealWorkspace" :title="$t('action.open-in-finder')">📁</button>
-          <button class="titlebar-ws-btn" @mousedown.stop @click="onSwitchWorkspace" :title="$t('action.switch-workspace')">↺</button>
-        </div>
+        <span class="titlebar-spacer"></span>
+        <!-- Which project the window is looking at. document.title already
+             carries it for Mission Control, but the bar itself said nothing —
+             and with several workspaces in one window, switching between them
+             changed everything below and nothing up here. -->
+        <!-- Two projects can share a folder name, so the name alone does not
+             say which one this is — but the path is long and only wanted when
+             asked for, so hovering swaps one for the other rather than showing
+             both at once. Home is collapsed to ~, the same shortening the
+             sidebar's paths use. -->
+        <span class="titlebar-id">
+          <span class="titlebar-name titlebar-name--ws">{{ workspaceBaseName }}</span>
+          <span v-if="workspaceDisplayPath" class="titlebar-path">{{ workspaceDisplayPath }}</span>
+          <!-- Rides with the path rather than the name: it acts on the folder,
+               and the folder is what is on screen while hovering. -->
+          <button
+            v-if="workspaceDisplayPath"
+            class="titlebar-reveal"
+            :title="$t('action.open-in-finder')"
+            :aria-label="$t('action.open-in-finder')"
+            @click="revealWorkspaceFolder(currentWorkspace)"
+          >⤴</button>
+        </span>
+        <span class="titlebar-spacer"></span>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
+      <!-- Detached windows could only be merged back by closing them, which is
+           indistinguishable from "done with these panes". -->
+      <button
+        v-if="isDetachedWindow"
+        class="titlebar-ws-btn"
+        @mousedown.stop
+        @click="reattachThisWindow"
+        :title="$t('action.reattach-group')"
+      >⇲</button>
+      <!-- Back to the Welcome picker, which doubles as the workspace switcher.
+           Removed by accident in 2a53718c: only the button went, while
+           onSwitchWorkspace, the @switch-workspace binding and the i18n string
+           all stayed, leaving the feature reachable by nothing. Restored here
+           rather than in ControlPane's old spot because the workspace identity
+           now lives in the titlebar, next to the detach button it pairs with. -->
+      <button
+        v-if="!isDetachedWindow && workspaceSelected"
+        class="titlebar-ws-btn"
+        @mousedown.stop
+        @click="onSwitchWorkspace"
+        :title="$t('action.switch-workspace')"
+      >↺</button>
       <button class="titlebar-gear" @mousedown.stop @click="showSettings = true" title="Settings (⌘,)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -12250,6 +13565,8 @@ function paneIsCommander(p: ActivePane): boolean {
       :roles="rolesApi.roles.value"
       :stages="stagesApi.stages.value"
       :panes="paneViews"
+      :lineage="paneLineage"
+      :workspaces="workspaceGroups"
       :pipeline="pipelineView"
       :existing-project="existingProject"
       :workspace="currentWorkspace"
@@ -12269,13 +13586,21 @@ function paneIsCommander(p: ActivePane): boolean {
       :selected-pane-ids="selectedPaneIds"
       :can-rebuild-all="rebuildableAllPaneCount > 0"
       :rebuilding-all="rebuildingTabPanes"
+      :detached-window="isDetachedWindow"
       @spawn="onManualSpawn"
       @spawn-resume="onManualResume"
       @kill="onKill"
       @minimize="minimizePane"
+      @toggle-collapsed="togglePaneCollapsed"
+      @toggle-workspace="toggleWorkspaceCollapsed"
+      @open-workspace-picker="workspacePickerOpen = true"
+      @switch-to-workspace="switchToWorkspace"
+      @close-workspace="closeWorkspace"
+      @detach-workspace="detachWorkspace"
+      @reorder-workspace="reorderWorkspace"
+      @reveal-workspace-folder="revealWorkspaceFolder"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
-      @reinject="onReinject"
       @rebuild="rebuildPaneViaResume"
       @rebuild-all="rebuildPanesViaResume('all')"
       @restore="restorePane"
@@ -12302,6 +13627,9 @@ function paneIsCommander(p: ActivePane): boolean {
       @spawn-for-issue="onHandleIssue"
       @rename-pane="setPaneCustomName"
       @install-cli="(p) => promptCliInstall(p.agentKey, p.label)"
+      :collapsed="leftPanelCollapsed"
+      :views="shellLayout.slots.left.views"
+      @update:collapsed="setLeftCollapsed"
     />
     <QuestionAlert
       :visible="!!activeQuestion"
@@ -12368,9 +13696,22 @@ function paneIsCommander(p: ActivePane): boolean {
       v-model:confirm-before-close-pane="confirmBeforeClosePane"
       v-model:idle-reclaim-enabled="idleReclaimEnabled"
       v-model:idle-reclaim-minutes="idleReclaimMinutes"
+      :reclaimable-now-count="reclaimableNowIds.length"
+      :reclaimable-now-bytes="reclaimableNowIds.length * RECLAIM_ESTIMATE_BYTES_PER_CLI"
+      @reclaim-now="() => void reclaimPanesNow()"
       @close="showSettings = false; settingsInitialTab = 'general'"
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"
+    />
+    <ResourceManagerModal
+      v-if="resourceManagerEverOpened"
+      :open="showResourceManager"
+      :backend="backend"
+      :usage="resourceUsage"
+      :local-rows="resourceRows"
+      :auto-reclaim-on="idleReclaimEnabled"
+      :auto-reclaim-minutes="idleReclaimMinutes"
+      @close="showResourceManager = false"
     />
     <PipelineManagerModal
       v-if="pmEverOpened"
@@ -12425,6 +13766,26 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="reconnectPickerOpen = false"
       @select="onConfirmReconnect"
     />
+    <!-- Horizontal slots. Both ship empty; SlotContainer renders nothing and
+         the grid row resolves to 0px, so the default shell is unchanged. -->
+    <SlotContainer
+      slot-id="up"
+      :views="shellLayout.slots.up.views"
+      :active="shellLayout.slots.up.active"
+      :collapsed="shellLayout.slots.up.collapsed"
+      @update:active="(v) => setActiveView('up', v)"
+      @update:collapsed="(v) => setSlotCollapsedAndRefit('up', v)"
+    >
+      <template #default="{ viewId }">
+        <!-- pipeline.workspacePath, not currentWorkspace: that is what the
+             right panel hands HistoryPanel, and it stays pinned to the running
+             pipeline's workspace. A view must not change behaviour because it
+             was moved. -->
+        <SlotHistory v-if="viewId === 'history'" :backend="backend" :workspace-path="pipeline.workspacePath" :pipeline="pipelineView" />
+        <SlotTasker v-else-if="viewId === 'tasker'" :backend="backend" />
+        <SlotMessages v-else-if="viewId === 'messages'" />
+      </template>
+    </SlotContainer>
     <main
       ref="stageRef"
       class="stage"
@@ -12588,7 +13949,8 @@ function paneIsCommander(p: ActivePane): boolean {
           :terminal-port="terminalPort"
           :cli-profiles="cliProfilesApi"
           :workspace-path="p.workspacePath"
-          :mention-candidates="mentionCandidatesFor(p.id)"
+          :mention-candidates="mentionCandidatesFor"
+          @mention-pick="rememberMentionPick"
           :loop-active="p.loopActive"
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
@@ -12681,7 +14043,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
+            <span class="meeting-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
@@ -12741,7 +14103,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="spotlight-thumb-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="spotlight-thumb-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
+            <span class="spotlight-thumb-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
           </div>
         </div>
         <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="spotlight-strip-empty">
@@ -12814,7 +14176,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
+            <span class="meeting-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
@@ -12822,7 +14184,37 @@ function paneIsCommander(p: ActivePane): boolean {
         </div>
         <div v-if="floatPipExpanded" class="float-pip-resize" @mousedown="onPipResizeStart" />
       </div>
+      <!-- Covers the stage while a workspace switch runs. Last child of the
+           stage, so it paints over the grid without the grid having to know
+           about it, and absolute rather than replacing the grid: tearing the
+           panes out of the DOM would dispose their terminals. -->
+      <Transition name="ws-switch">
+        <div v-if="switchingWorkspace" class="stage-switching" role="status" aria-live="polite">
+          <div class="empty-card loading-card">
+            <div class="spinner"></div>
+            <h2>{{ $t('switchWorkspace.loading', { name: switchingWorkspaceName }) }}</h2>
+          </div>
+        </div>
+      </Transition>
     </main>
+    <SlotContainer
+      slot-id="down"
+      :views="shellLayout.slots.down.views"
+      :active="shellLayout.slots.down.active"
+      :collapsed="shellLayout.slots.down.collapsed"
+      @update:active="(v) => setActiveView('down', v)"
+      @update:collapsed="(v) => setSlotCollapsedAndRefit('down', v)"
+    >
+      <template #default="{ viewId }">
+        <!-- pipeline.workspacePath, not currentWorkspace: that is what the
+             right panel hands HistoryPanel, and it stays pinned to the running
+             pipeline's workspace. A view must not change behaviour because it
+             was moved. -->
+        <SlotHistory v-if="viewId === 'history'" :backend="backend" :workspace-path="pipeline.workspacePath" :pipeline="pipelineView" />
+        <SlotTasker v-else-if="viewId === 'tasker'" :backend="backend" />
+        <SlotMessages v-else-if="viewId === 'messages'" />
+      </template>
+    </SlotContainer>
     <TokenStatsPanel
       :backend="backend"
       :workspace-path="pipeline.workspacePath"
@@ -12830,6 +14222,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :panes="paneViews"
       :pipeline="pipelineView"
       :expanded="tokenPanelExpanded"
+      :views="shellLayout.slots.right.views"
       @update:expanded="tokenPanelExpanded = $event"
     />
     <Welcome
@@ -12837,6 +14230,15 @@ function paneIsCommander(p: ActivePane): boolean {
       :backend="backend"
       @select="onWorkspaceSelected"
       @open-settings="showSettings = true"
+    />
+    <!-- Same picker, reopened from the sidebar over a working window. -->
+    <Welcome
+      v-else-if="workspacePickerOpen"
+      :backend="backend"
+      dismissible
+      @select="openWorkspaceFromPicker"
+      @open-settings="showSettings = true"
+      @close="workspacePickerOpen = false"
     />
     <Teleport v-if="confirmCloseWorkspace" to="body">
       <div class="stall-overlay" @click.self="confirmCloseWorkspace = false">
@@ -12928,8 +14330,8 @@ function paneIsCommander(p: ActivePane): boolean {
         </div>
       </div>
     </Teleport>
-    <div class="resize-handle resize-handle-left" @mousedown="onResizeStart($event, 'left')" />
-    <div v-if="tokenPanelExpanded" class="resize-handle resize-handle-right" @mousedown="onResizeStart($event, 'right')" />
+    <div v-if="leftHandleVisible" class="resize-handle resize-handle-left" @mousedown="onResizeStart($event, 'left')" />
+    <div v-if="rightHandleVisible" class="resize-handle resize-handle-right" @mousedown="onResizeStart($event, 'right')" />
     <div
       v-if="pluginContributionsAt('right').length"
       class="plugin-region-layer plugin-region-layer--right"
@@ -12946,7 +14348,7 @@ function paneIsCommander(p: ActivePane): boolean {
     <NotificationHost />
     <WhatsNewModal v-if="whatsNewEntry" :entry="whatsNewEntry" @close="dismissWhatsNew" />
     <!-- Status bar -->
-    <div class="statusbar">
+    <div v-if="shellLayout.chrome.statusbar" class="statusbar">
       <div
         v-if="pluginContributionsAt('bottom').length"
         class="plugin-region-layer plugin-region-layer--bottom"
@@ -12961,6 +14363,19 @@ function paneIsCommander(p: ActivePane): boolean {
         />
       </div>
       <div class="statusbar-left">
+        <span v-if="statusBarGit.branch" class="sb-item sb-git">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="6" y1="3" x2="6" y2="15"/>
+            <circle cx="18" cy="6" r="3"/>
+            <circle cx="6" cy="18" r="3"/>
+            <path d="M18 9a9 9 0 0 1-9 9"/>
+          </svg>
+          {{ statusBarGit.branch }}{{ statusBarGit.dirty ? '*' : '' }}
+        </span>
+        <span v-if="statusBarGit.behind > 0 || statusBarGit.ahead > 0" class="sb-item sb-sync">
+          <span v-if="statusBarGit.behind > 0">{{ statusBarGit.behind }}↓</span>
+          <span v-if="statusBarGit.ahead > 0"> {{ statusBarGit.ahead }}↑</span>
+        </span>
         <span
           class="sb-item sb-backend sb-clickable"
           :class="'sb-' + backend.status.value"
@@ -13009,23 +14424,23 @@ function paneIsCommander(p: ActivePane): boolean {
           <span class="sb-dot" />
           {{ $t('updater.badge-check-failed') }}
         </span>
+        <span
+          v-if="panes.length > 0"
+          class="sb-item sb-resource sb-clickable"
+          role="button"
+          tabindex="0"
+          :title="resourcePillTitle"
+          @click="togglePopover('resource')"
+          @keydown.enter="togglePopover('resource')"
+        >
+          {{ resourcePillText }}
+        </span>
       </div>
       <div class="statusbar-right">
         <span v-if="pipeline.state !== 'idle'" class="sb-item sb-pipeline" :class="'sb-' + pipeline.state">
           {{ pipeline.state === 'running'
             ? `Stage ${pipeline.stageIndex + 1} / ${stagesApi.stages.value.length || '?'}`
             : pipeline.state }}
-        </span>
-        <span
-          v-if="panes.length > 0"
-          class="sb-item sb-agents sb-clickable"
-          role="button"
-          tabindex="0"
-          :title="$t('agentOverview.title')"
-          @click="togglePopover('agents')"
-          @keydown.enter="togglePopover('agents')"
-        >
-          {{ panes.length }} agent{{ panes.length !== 1 ? 's' : '' }}
         </span>
         <span
           v-if="backfill.active"
@@ -13123,12 +14538,21 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="closePopover()"
     />
 
-    <!-- Agent overview popover -->
-    <AgentOverviewPanel
-      v-if="openPopover === 'agents'"
-      :rows="agentOverviewRows"
+    <!-- Resource summary popover (CPU + memory + reclaim) -->
+    <ResourceSummaryPanel
+      v-if="openPopover === 'resource'"
+      :rows="resourceRows"
+      :measured="resourceUsage.measured.value"
+      :available="resourceUsage.available.value"
+      :cpu-available="resourceUsage.cpuAvailable.value"
+      :cpu-share="resourceCpuShare"
+      :memory-share="resourceMemoryShare"
+      :total-bytes="resourceTotals.bytes"
+      :total-cpu-percent="resourceTotals.cpu"
       @close="closePopover()"
-      @jump="onAgentOverviewJump"
+      @reclaim="() => void onResourceReclaim()"
+      @jump="onResourceJump"
+      @open-window="openResourceManager"
     />
   </div>
 </template>
@@ -13143,37 +14567,51 @@ function paneIsCommander(p: ActivePane): boolean {
   align-items: center;
   justify-content: center;
   background: var(--bg-base);
+  /* The shell's font-family lives on `.app`, and this overlay is its sibling,
+     not its child — without this the status line falls back to the browser
+     default and renders in a serif face. */
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
 }
 .boot-card {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 18px;
 }
-.boot-wordmark {
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--text-primary);
+.boot-logo {
+  width: 72px;
+  height: 72px;
+  display: block;
+  animation: boot-breathe 2.6s ease-in-out infinite;
 }
 .boot-spinner {
-  width: 26px;
-  height: 26px;
-  border: 3px solid var(--border-muted);
+  margin-top: 30px;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border-muted);
   border-top-color: var(--accent-bright);
   border-radius: 50%;
   animation: boot-spin 0.8s linear infinite;
 }
 .boot-status {
-  font-size: 12px;
+  margin-top: 18px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
   letter-spacing: 0.02em;
+}
+.boot-elapsed {
+  /* Ticks once a second, so keep the digits from shifting the line around. */
+  font-variant-numeric: tabular-nums;
+  opacity: 0.55;
 }
 .boot-status-error {
   color: var(--danger-fg);
 }
 .boot-retry {
-  font-size: 12px;
+  margin-top: 16px;
+  font-size: var(--font-xs);
   padding: 6px 16px;
   border-radius: 6px;
   border: 1px solid var(--border-default);
@@ -13187,15 +14625,51 @@ function paneIsCommander(p: ActivePane): boolean {
 @keyframes boot-spin {
   to { transform: rotate(360deg); }
 }
+@keyframes boot-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.78; transform: scale(0.965); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot-logo { animation: none; }
+  .boot-spinner { animation-duration: 2.4s; }
+}
 /* Fade the overlay out (no enter transition — it's there from first paint). */
 .boot-fade-leave-active { transition: opacity 0.3s ease; }
 .boot-fade-leave-to { opacity: 0; }
 
 .app {
   display: grid;
-  /* Three columns: controls · terminal grid · token stats panel
-     Both left and token-panel widths are driven by CSS vars set inline. */
-  grid-template-columns: var(--left-width, 360px) 1fr var(--token-panel-width, 36px);
+  /* Three columns: controls · terminal grid · token stats panel, with both
+     side widths driven by CSS vars set inline.
+
+     minmax, not bare lengths. A bare `360px` track keeps its full width even
+     when the window is narrower than the panels put together: the `1fr` stage
+     collapses to zero, the grid overflows, and `overflow: hidden` clips the
+     right column off-screen — along with the drag handle that would have let
+     the user shrink the panel again. With minmax the side panels give ground
+     instead, so nothing is ever pushed out of reach.
+
+     The stage keeps a floor so the terminal never disappears outright; the
+     side panels are what yield. Their stored widths are untouched — only what
+     is rendered shrinks, so the layout returns to normal when the window
+     widens again. */
+  grid-template-columns:
+    minmax(0, var(--left-width, 360px))
+    minmax(var(--stage-min-width, 220px), 1fr)
+    minmax(0, var(--token-panel-width, 36px));
+  /* Three rows: the up slot, the stage, the down slot. Both horizontal slots
+     ship empty, and an empty slot resolves to 0px — so the default shell is
+     the same single-row layout it has always been, to the pixel.
+
+     Every in-flow child must now declare its own grid-row. Auto-placement with
+     explicit rows would drop the sidebar into the `up` strip; with no explicit
+     rows it used to open an implicit second row instead, which is the failure
+     that put the handles off-screen. Both are silent, so the placements below
+     are load-bearing rather than tidy. */
+  grid-template-rows:
+    minmax(0, var(--up-height, 0px))
+    minmax(var(--stage-min-height, 140px), 1fr)
+    minmax(0, var(--down-height, 0px));
   position: relative;
   height: 100vh;
   background: var(--bg-inset);
@@ -13204,7 +14678,10 @@ function paneIsCommander(p: ActivePane): boolean {
   overflow: hidden;
   box-sizing: border-box;
   padding-top: 38px;
-  padding-bottom: 24px;
+  /* The status bar is an absolute overlay, so the shell reserves its height as
+     padding rather than as a grid row. Hiding it therefore means zeroing this,
+     not removing a track. */
+  padding-bottom: var(--chrome-bottom, 24px);
 }
 
 /* Native plugin views are positioned from these DOM anchors. Empty locations
@@ -13265,35 +14742,80 @@ function paneIsCommander(p: ActivePane): boolean {
 .titlebar-name {
   flex: 1;
   text-align: center;
-  font-size: 12px;
+  min-width: 0;
+  font-size: var(--font-xs);
   font-weight: 500;
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.titlebar-workspace {
-  flex: 1;
+/* Sized to its text, with the two spacers either side doing the centring —
+   `flex: 1` would let it take a third of the bar and drift as they change. */
+.titlebar-name--ws {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 8px;
+  color: var(--text-primary);
+}
+/* Name normally, path while the pointer is on it. The bar is a drag region,
+   and a drag region swallows hover — so this one patch of it opts out. The
+   spacers either side stay draggable, which is most of the bar. */
+.titlebar-id {
   display: flex;
   align-items: center;
-  gap: 4px;
-  -webkit-app-region: no-drag;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 70%;
+  -webkit-app-region: no-drag;
+}
+.titlebar-path {
+  display: none;
+  min-width: 0;
+  padding: 0 8px;
+  font-size: var(--font-2xs);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.titlebar-id:hover .titlebar-name--ws { display: none; }
+.titlebar-id:hover .titlebar-path { display: block; }
+/* Appears with the path and only with it: a button on a bar that otherwise
+   shows a project name would read as acting on the project, not the folder. */
+.titlebar-reveal {
+  display: none;
+  flex: none;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.titlebar-id:hover .titlebar-reveal { display: block; }
+.titlebar-reveal:hover { color: var(--text-bright); }
+/* Fills the bar between the traffic lights and the gear, and stays draggable
+   so the empty stretch still moves the window. */
+.titlebar-spacer {
+  flex: 1;
+  min-width: 0;
+  -webkit-app-region: drag;
 }
 .titlebar-ws-input {
   flex: 1;
   min-width: 0;
   height: 24px;
   padding: 0 8px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   background: var(--bg-inset);
   border: 1px solid var(--border-muted);
   border-radius: 5px;
   color: var(--text-primary);
   outline: none;
-}
-.titlebar-ws-input:focus {
-  border-color: var(--border-focus, #4a90d9);
+  cursor: default;
 }
 .titlebar-ws-btn {
   -webkit-app-region: no-drag;
@@ -13308,7 +14830,7 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-inset);
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 0;
 }
 .titlebar-ws-btn:hover {
@@ -13318,8 +14840,8 @@ function paneIsCommander(p: ActivePane): boolean {
 .titlebar-gear {
   -webkit-app-region: no-drag;
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -13371,7 +14893,7 @@ function paneIsCommander(p: ActivePane): boolean {
   z-index: 200;
   user-select: none;
   padding: 0 8px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .statusbar-left,
 .statusbar-right {
@@ -13395,6 +14917,7 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-hover);
   color: var(--text-bright);
 }
+.sb-git { gap: 5px; }
 .sb-dot {
   width: 6px;
   height: 6px;
@@ -13407,7 +14930,10 @@ function paneIsCommander(p: ActivePane): boolean {
 .sb-pipeline.sb-running { color: var(--accent-fg); }
 .sb-pipeline.sb-completed { color: var(--success-fg); }
 .sb-pipeline.sb-aborted { color: var(--danger-fg); }
-.sb-agents { color: var(--text-secondary); }
+
+/* Same weight as the agent count beside it — this is an ambient reading, not
+   an alert, even when it is offering something to reclaim. */
+.sb-resource { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .sb-backfill { color: var(--text-secondary); opacity: 0.85; }
 .sb-update-available .sb-dot { background: var(--accent-fg); }
 .sb-update-downloading .sb-dot { background: var(--attention-fg); }
@@ -13431,11 +14957,11 @@ function paneIsCommander(p: ActivePane): boolean {
   z-index: 1000;
   width: 280px;
   padding: 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-popover);
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
-  font-size: 12px;
+  box-shadow: var(--shadow-popover);
+  font-size: var(--font-xs);
   color: var(--text-secondary);
   user-select: none;
 }
@@ -13495,7 +15021,7 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-hover);
   color: var(--text-bright);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   transition: background 0.12s, opacity 0.12s;
 }
 .bp-btn:hover:not(:disabled) { background: var(--bg-active, var(--bg-hover)); }
@@ -13503,9 +15029,8 @@ function paneIsCommander(p: ActivePane): boolean {
 .bp-restart { border-color: var(--accent-focus); color: var(--accent-fg); }
 .bp-stop { border-color: var(--danger-fg); color: var(--danger-fg); }
 .resize-handle {
-  position: absolute;
-  top: 0;
-  bottom: 0;
+  position: relative;
+  align-self: stretch;
   width: 8px;
   cursor: col-resize;
   z-index: 50;
@@ -13528,15 +15053,57 @@ function paneIsCommander(p: ActivePane): boolean {
    drag correctly while being drawn in the old place — but it is the shipped
    behaviour, and Phase 0 is not the place to change behaviour. The slot shell
    replaces both together. */
-.resize-handle-left {
-  left: var(--left-width, 360px);
-  transform: translateX(-50%);
+/* The side panels live in ControlPane / TokenStatsPanel, but a child
+   component's root element carries the parent's scope id too, so the shell
+   places them from here rather than telling each component which cell it is
+   in — the arrangement is the shell's business, not theirs. */
+.sidebar {
+  grid-column: 1;
+  grid-row: 1 / 4;
 }
-.resize-handle-right {
-  right: var(--token-panel-width, 36px);
+.token-panel {
+  grid-column: 3;
+  grid-row: 1 / 4;
+}
+
+/* Grid items sharing their panel's cell and hugging the edge that faces the
+   stage. The previous form positioned them from --left-width /
+   --token-panel-width — the same vars grid-template-columns reads — so a track
+   definition and a handle position had to be kept in step by hand, and a slot
+   that collapses to a rail broke the arithmetic outright.
+
+   grid-row is mandatory. Without it auto-placement cannot fit a handle beside a
+   row whose columns are all taken, so it opens a second row: the shell stretches
+   past the window and the handles land off-screen. */
+.resize-handle-left {
+  grid-row: 1 / 4;
+  grid-column: 1;
+  justify-self: end;
   transform: translateX(50%);
 }
+.resize-handle-right {
+  grid-row: 1 / 4;
+  grid-column: 3;
+  justify-self: start;
+  transform: translateX(-50%);
+}
+/* Column 2, rows 1 and 3 — the horizontal slots. `spanMode: 'inner'` (the
+   shipped default) is what keeps them between the side panels rather than
+   spanning the window. */
+.slot--up {
+  grid-column: 2;
+  grid-row: 1;
+}
+.slot--down {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+/* Column 2, middle row. The side panels span all three rows so the horizontal
+   slots sit between them (`spanMode: 'inner'`, the shipped default). */
 .stage {
+  grid-column: 2;
+  grid-row: 2;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -13619,7 +15186,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
 }
@@ -13650,7 +15217,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   text-align: center;
   -moz-appearance: textfield;
   appearance: textfield;
@@ -13671,11 +15238,11 @@ function paneIsCommander(p: ActivePane): boolean {
   background: color-mix(in srgb, var(--accent-emphasis) 20%, transparent);
 }
 .grid-custom-x {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
 }
 .grid-page-label {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   padding: 0 2px;
 }
@@ -13772,7 +15339,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border: 1px solid var(--accent-emphasis);
   border-radius: 4px;
   color: var(--text-bright);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 1px 3px;
   min-width: 0;
 }
@@ -13781,7 +15348,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border-color: var(--accent-focus);
 }
 .spotlight-thumb-name {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-bright);
   white-space: nowrap;
@@ -13827,7 +15394,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .spotlight-strip-empty {
   color: var(--text-disabled);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 0 8px;
 }
 /* Sidebar (Auto): focus pane fills left column; meeting list in right column */
@@ -13845,6 +15412,8 @@ function paneIsCommander(p: ActivePane): boolean {
   overflow-y: auto;
   padding: 8px 6px;
   background: var(--bg-base);
+  /* Same number as MEETING_LIST_MIN_PX. The track reserves at least this much,
+     so this floor is a backstop rather than a source of overflow. */
   min-width: 140px;
 }
 .meeting-item {
@@ -13910,7 +15479,7 @@ function paneIsCommander(p: ActivePane): boolean {
   flex-shrink: 0;
 }
 .meeting-name {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-bright);
   white-space: nowrap;
   overflow: hidden;
@@ -13928,14 +15497,14 @@ function paneIsCommander(p: ActivePane): boolean {
   user-select: none;
 }
 .meeting-sub {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .meeting-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 2px 6px;
   border-radius: 3px;
   flex-shrink: 0;
@@ -13949,7 +15518,7 @@ function paneIsCommander(p: ActivePane): boolean {
 .meeting-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
 .meeting-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .meeting-loop {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 2px 6px;
   border-radius: 3px;
   flex-shrink: 0;
@@ -13963,7 +15532,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .meeting-empty {
   color: var(--text-disabled);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   text-align: center;
   padding: 16px 8px;
 }
@@ -14007,7 +15576,7 @@ function paneIsCommander(p: ActivePane): boolean {
   user-select: none;
 }
 .float-pip-title {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-secondary);
 }
@@ -14016,7 +15585,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 0 2px;
   line-height: 1;
 }
@@ -14049,13 +15618,13 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .empty-card p {
   margin: 8px 0;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-primary);
   text-align: left;
 }
 .empty-card .muted {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .empty-card.loading-card {
   border-style: solid;
@@ -14069,7 +15638,7 @@ function paneIsCommander(p: ActivePane): boolean {
 .empty-card .status {
   text-align: center;
   font-family: Menlo, Monaco, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--accent-bright);
   background: var(--accent-subtle);
   border: 1px solid var(--accent-muted);
@@ -14081,9 +15650,26 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .empty-card .small {
   text-align: center;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.7;
 }
+/* The stage keeps its panes through a switch, so this covers them rather than
+   replacing them. Opaque: a translucent wash over another project's terminals
+   reads as a glitch, not as loading. */
+.stage-switching {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-base);
+}
+/* Fades out only. A switch should feel immediate on the way in — a fade-in
+   would just add delay to the thing that is already making them wait. */
+.ws-switch-leave-active { transition: opacity 160ms ease-out; }
+.ws-switch-leave-to { opacity: 0; }
+
 .spinner {
   width: 38px;
   height: 38px;
@@ -14115,7 +15701,7 @@ function paneIsCommander(p: ActivePane): boolean {
   width: min(520px, 92vw);
   color: var(--text-bright);
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
+  font-size: var(--font-sm);
   box-shadow: 0 12px 48px var(--shadow-overlay);
   overflow: hidden;
 }
@@ -14136,7 +15722,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .stall-slot {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .stall-body {
   padding: 16px 18px;
@@ -14145,13 +15731,13 @@ function paneIsCommander(p: ActivePane): boolean {
   gap: 8px;
 }
 .stall-title {
-  font-size: 14px;
+  font-size: var(--font-md);
   font-weight: 600;
   color: var(--text-primary);
 }
 .stall-reason {
   font-family: Menlo, Monaco, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--warning-fg);
   background: var(--attention-subtle);
   border: 1px solid var(--attention-muted);
@@ -14160,18 +15746,18 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .stall-hint {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
   line-height: 1.6;
 }
 .stall-hint strong {
   color: var(--text-bright);
 }
-.check-row { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; user-select: none; }
+.check-row { display: flex; align-items: center; gap: 6px; font-size: var(--font-xs); cursor: pointer; user-select: none; }
 .check-row input[type='checkbox'] { width: 14px; height: 14px; accent-color: var(--accent-fg); }
 .confirm-dont-show { margin-top: 10px; }
 .stall-auto {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--accent-bright);
   font-weight: 500;
 }
@@ -14187,7 +15773,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 8px 16px;
   border-radius: 4px;
   cursor: pointer;
@@ -14209,7 +15795,7 @@ function paneIsCommander(p: ActivePane): boolean {
 .stall-btn.danger:hover {
   background: var(--danger-bright);
 }
-.sb-url { color: var(--text-muted); font-size: 10px; }
+.sb-url { color: var(--text-muted); font-size: var(--font-3xs); }
 .sb-clock { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .sb-version { color: var(--text-muted); margin-left: 4px; }
 .sb-announce-unread .sb-version { color: inherit; }
@@ -14238,7 +15824,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .pane-ctx-header {
   padding: 5px 14px 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-muted);
   white-space: nowrap;
@@ -14247,7 +15833,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .pane-ctx-item {
   padding: 6px 14px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
   cursor: pointer;
   white-space: nowrap;
@@ -14261,7 +15847,7 @@ function paneIsCommander(p: ActivePane): boolean {
   width: 100%;
   box-sizing: border-box;
   padding: 8px 10px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   background: var(--bg-muted);
   border: 1px solid var(--border-default);
   border-radius: 4px;

@@ -17,6 +17,8 @@ export type {
   TerminalStatus,
 } from './composables/useTerminal'
 
+export { collapseHomePath } from './lib/paths'
+
 export {
   DEFAULT_FONT_SIZE,
   installTerminalZoomShortcuts,
@@ -43,6 +45,9 @@ export {
   CLI_CONTEXT_MIME,
   CLI_PASTE_LINE_CAP,
   injectionChunks,
+  MENTION_BROADCAST_ADDRESS,
+  rankMentionCandidates,
+  recordMentionRecents,
   resolveCliDropSources,
   screenToClientPoint,
   shouldMentionOnDrop,
@@ -50,7 +55,7 @@ export {
   PANE_BATCH_MIME,
   PANE_ID_MIME,
 } from './lib/cliContext'
-export type { CliContextPayload, CliPaneBufferReply, CliSessionContext, PaneStatusReply } from './lib/cliContext'
+export type { CliContextPayload, CliPaneBufferReply, CliSessionContext, MentionCandidate, PaneStatusReply } from './lib/cliContext'
 
 export { diagLog } from './lib/diagLog'
 export type { DiagnosticPort } from './lib/diagLog'
@@ -82,6 +87,7 @@ export type {
   TerminalDockPort,
   TerminalExitEvent,
   TerminalFileListResult,
+  TerminalHistoryResult,
   TerminalOutputEvent,
   TerminalSpawnOptions,
   TerminalStatusSource,

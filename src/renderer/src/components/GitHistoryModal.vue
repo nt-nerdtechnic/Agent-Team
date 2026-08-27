@@ -250,8 +250,8 @@ watch(() => props.show, (visible) => {
 <template>
   <Teleport to="body" :disabled="inline">
     <template v-if="show">
-      <div v-if="!inline" class="tp-backdrop" @click="emit('close')" />
-      <div class="history-modal" :class="{ inline }" @click="closeCtxMenu()">
+      <div v-if="!inline" class="tp-backdrop nv-modal-overlay" @click="emit('close')" />
+      <div class="history-modal nv-modal-shell nv-modal-shell--wide" :class="{ inline }" @click="closeCtxMenu()">
         <!-- Header -->
         <div v-if="!inline" class="hm-hdr">
           <span class="hm-title">{{ $t('label.history') }}</span>
@@ -405,7 +405,7 @@ watch(() => props.show, (visible) => {
 
   <!-- ── Create branch / tag from a commit ────────────────────────────── -->
   <Teleport to="body">
-    <div v-if="commitRefModal" class="tp-backdrop" @click="commitRefModal = null" />
+    <div v-if="commitRefModal" class="tp-backdrop nv-modal-overlay" @click="commitRefModal = null" />
     <div v-if="commitRefModal" class="mini-modal" @click.stop>
       <div class="mini-modal-path">
         {{ commitRefModal.kind === 'branch' ? $t('label.create-branch-from') : $t('label.create-tag-at') }} {{ commitRefModal.hash.slice(0, 7) }}
@@ -414,15 +414,15 @@ watch(() => props.show, (visible) => {
       <input v-if="commitRefModal.kind === 'tag'" v-model="commitRefModal.message" class="git-input" :placeholder="$t('label.message-optional')" @keydown.enter="submitCommitRef" />
       <p v-if="commitRefModal.error" class="err-text">{{ commitRefModal.error }}</p>
       <div class="mini-modal-btns">
-        <button class="btn-ghost sm" @click="commitRefModal = null">{{ $t('action.cancel') }}</button>
-        <button class="btn-ghost sm" @click="submitCommitRef">{{ $t('action.create') }}</button>
+        <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="commitRefModal = null">{{ $t('action.cancel') }}</button>
+        <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="submitCommitRef">{{ $t('action.create') }}</button>
       </div>
     </div>
   </Teleport>
 
   <!-- ── Reset current branch dialog (soft / mixed / hard) ───────────────── -->
   <Teleport to="body">
-    <div v-if="resetDialog" class="tp-backdrop" @click="resetDialog = null" />
+    <div v-if="resetDialog" class="tp-backdrop nv-modal-overlay" @click="resetDialog = null" />
     <div v-if="resetDialog" class="mini-modal" @click.stop>
       <div class="mini-modal-path">
         {{ $t('label.reset-title') }} → {{ resetDialog.hash.slice(0, 7) }}
@@ -438,7 +438,7 @@ watch(() => props.show, (visible) => {
           <span class="rm-name">Hard</span><span class="rm-desc">{{ $t('label.reset-hard-desc') }}</span>
         </button>
         <div class="mini-modal-btns">
-          <button class="btn-ghost sm" @click="resetDialog = null">{{ $t('action.cancel') }}</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="resetDialog = null">{{ $t('action.cancel') }}</button>
         </div>
       </template>
       <template v-else>
@@ -446,8 +446,8 @@ watch(() => props.show, (visible) => {
           {{ resetDialog.mode === 'hard' ? $t('label.reset-hard-warning') : $t('label.reset-confirm') }}
         </p>
         <div class="mini-modal-btns">
-          <button class="btn-ghost sm" @click="resetDialog.mode = null">{{ $t('action.cancel') }}</button>
-          <button class="btn-ghost sm" :class="{ 'btn-danger': resetDialog.mode === 'hard' }" @click="confirmReset">
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" @click="resetDialog.mode = null">{{ $t('action.cancel') }}</button>
+          <button class="btn-ghost sm nv-btn nv-btn--ghost" :class="{ 'btn-danger': resetDialog.mode === 'hard' }" @click="confirmReset">
             {{ $t('action.reset') }} ({{ resetDialog.mode }})
           </button>
         </div>
@@ -457,30 +457,43 @@ watch(() => props.show, (visible) => {
 </template>
 
 <style scoped>
-.tp-backdrop { position: fixed; inset: 0; z-index: 9998; }
+.tp-backdrop {
+  position: fixed; inset: 0; z-index: 9998;
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
+}
 
 .history-modal {
   position: fixed; z-index: 9999; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  width: min(1100px, 94vw); height: 86vh;
-  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: 8px;
-  box-shadow: 0 12px 32px var(--shadow-scrim);
+  width: min(var(--modal-w-wide), 92vw); height: 86vh;
+  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
   display: flex; flex-direction: column; overflow: hidden;
+}
+/* Local entry animation: the shared .nv-modal-shell keyframes end on
+   `transform: none`, which would drop this dialog's translate centering while
+   they play. Same motion, centering preserved — and never in inline mode. */
+.history-modal:not(.inline) { animation: hm-modal-in var(--motion-base) var(--ease-out); }
+@keyframes hm-modal-in {
+  from { opacity: 0; transform: translate(-50%, -50%) translateY(6px) scale(0.985); }
+  to { opacity: 1; transform: translate(-50%, -50%); }
 }
 .history-modal.inline {
   position: relative; top: 0; left: 0; transform: none;
   width: 100%; height: 100%;
-  border: none; border-radius: 0; box-shadow: none;
+  border: none; border-radius: 0; box-shadow: none; animation: none;
 }
 .hm-hdr {
   display: flex; align-items: center; gap: 8px; padding: 8px 14px;
   border-bottom: 1px solid var(--border-muted); flex-shrink: 0;
 }
-.hm-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.hm-title { font-size: var(--font-sm); font-weight: 600; color: var(--text-primary); }
 .spacer { flex: 1; }
 .hm-close {
   background: transparent; border: none; color: var(--text-muted);
-  font-size: 13px; cursor: pointer; padding: 2px 6px; border-radius: 4px;
-  transition: background-color 0.1s ease, color 0.1s ease;
+  font-size: var(--font-sm); cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm);
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .hm-close:hover { background: var(--bg-active); color: var(--text-primary); }
 
@@ -490,18 +503,18 @@ watch(() => props.show, (visible) => {
   border-bottom: 1px solid var(--border-muted); flex-shrink: 0;
 }
 .hm-select {
-  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-primary); font-size: 11px; padding: 3px 6px; cursor: pointer;
-  transition: border-color 0.1s ease;
+  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 3px 6px; cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-out);
 }
 .hm-select:focus { outline: none; border-color: var(--accent-focus); }
 .hm-select:disabled { opacity: 0.5; cursor: default; }
-.hm-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); cursor: pointer; user-select: none; }
+.hm-toggle { display: flex; align-items: center; gap: 4px; font-size: var(--font-2xs); color: var(--text-secondary); cursor: pointer; user-select: none; }
 .hm-toggle input { margin: 0; cursor: pointer; }
 .hm-search { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 120px; margin-left: auto; }
 .search-input {
   flex: 1; background: transparent; border: none;
-  border-bottom: 1px solid var(--border-default); color: var(--text-primary); font-size: 11px; padding: 2px 0;
+  border-bottom: 1px solid var(--border-default); color: var(--text-primary); font-size: var(--font-2xs); padding: 2px 0;
 }
 .search-input:focus { outline: none; border-bottom-color: var(--accent-focus); }
 .search-input::placeholder { color: var(--text-muted); }
@@ -510,15 +523,15 @@ watch(() => props.show, (visible) => {
 .hm-table { flex: 1 1 55%; display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--border-default); }
 .tbl-head, .tbl-row {
   display: flex; align-items: center; gap: 0;
-  font-size: 12px; line-height: 1;
+  font-size: var(--font-xs); line-height: 1;
 }
 .tbl-head {
   flex-shrink: 0; height: 24px; padding: 0 14px;
   border-bottom: 1px solid var(--border-muted); background: var(--bg-subtle);
-  color: var(--text-muted); font-size: 11px; font-weight: 600; user-select: none;
+  color: var(--text-muted); font-size: var(--font-2xs); font-weight: 600; user-select: none;
 }
 .tbl-body { flex: 1; overflow-y: auto; }
-.tbl-row { height: 24px; padding: 0 14px; cursor: pointer; color: var(--text-primary); transition: background-color 0.1s ease, color 0.1s ease; }
+.tbl-row { height: 24px; padding: 0 14px; cursor: pointer; color: var(--text-primary); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 .tbl-row:hover { background: var(--bg-hover-faint); }
 .tbl-row.selected { background: var(--accent-emphasis); color: var(--text-on-emphasis); }
 .tbl-row.selected .chash,
@@ -547,7 +560,7 @@ watch(() => props.show, (visible) => {
 .graph-dot.head { box-shadow: 0 0 0 1px var(--success-fg), 0 0 4px var(--success-fg); }
 
 .desc-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
-.ref-pill { font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: 999px; line-height: 1.5; flex-shrink: 0; }
+.ref-pill { font-size: var(--font-3xs); font-weight: 600; padding: 0 5px; border-radius: 999px; line-height: var(--lh-base); flex-shrink: 0; }
 .ref-pill.local  { background: var(--accent-muted); color: var(--accent-bright); }
 .ref-pill.remote { background: var(--success-subtle); color: var(--success-bright); }
 .ref-pill.tag    { background: var(--attention-subtle); color: var(--attention-fg); }
@@ -555,13 +568,13 @@ watch(() => props.show, (visible) => {
 /* On the solid-accent selected row, tint pills with a translucent overlay so
    they stay legible instead of clashing with (or vanishing into) the fill. */
 .tbl-row.selected .ref-pill { background: var(--overlay-soft); color: var(--text-on-emphasis); }
-.chash { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: transparent; }
+.chash { font-size: var(--font-2xs); color: var(--text-muted); font-family: var(--font-mono); background: transparent; }
 
 .hm-loadmore { display: flex; justify-content: center; padding: 5px 0; flex-shrink: 0; }
 .load-more-btn {
-  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-primary); font-size: 11px; padding: 3px 14px; cursor: pointer;
-  transition: border-color 0.1s ease, color 0.1s ease;
+  background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 3px 14px; cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .load-more-btn:hover:not(:disabled) { border-color: var(--accent-focus); color: var(--text-bright); }
 .load-more-btn:disabled { opacity: 0.5; cursor: default; }
@@ -570,34 +583,34 @@ watch(() => props.show, (visible) => {
 .hm-detail { flex: 1 1 45%; display: flex; min-height: 0; }
 .detail-empty {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  color: var(--text-muted); font-size: 11px; font-style: italic; padding: 12px;
+  color: var(--text-muted); font-size: var(--font-2xs); font-style: italic; padding: 12px;
 }
 .detail-left {
   width: 42%; flex-shrink: 0; overflow-y: auto; padding: 8px 14px;
-  border-right: 1px solid var(--border-default); font-size: 11px;
+  border-right: 1px solid var(--border-default); font-size: var(--font-2xs);
 }
-.dl-msg { font-size: 12px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; white-space: pre-wrap; }
-.dl-body { color: var(--text-secondary); font-size: 11px; margin-bottom: 8px; white-space: pre-wrap; }
+.dl-msg { font-size: var(--font-xs); font-weight: 600; color: var(--text-primary); margin-bottom: 4px; white-space: pre-wrap; }
+.dl-body { color: var(--text-secondary); font-size: var(--font-2xs); margin-bottom: 8px; white-space: pre-wrap; }
 .dl-meta { margin-bottom: 8px; }
 .dl-row { display: flex; gap: 8px; margin-bottom: 3px; color: var(--text-primary); }
 .dl-key { color: var(--text-muted); min-width: 56px; flex-shrink: 0; }
-.dl-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: var(--text-secondary); background: transparent; word-break: break-all; }
+.dl-mono { font-family: var(--font-mono); font-size: var(--font-3xs); color: var(--text-secondary); background: transparent; word-break: break-all; }
 .dl-parent { margin-right: 6px; }
 .dl-files-hdr { color: var(--text-muted); font-weight: 600; margin-bottom: 3px; }
 .dl-files { display: flex; flex-direction: column; }
 .dl-file {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: var(--text-primary);
+  font-family: var(--font-mono); font-size: var(--font-3xs); color: var(--text-primary);
   padding: 2px 4px; border-radius: 3px; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  transition: background-color 0.1s ease, color 0.1s ease;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .dl-file:hover { background: var(--bg-hover-faint); }
 .dl-file.active { background: var(--accent-muted); color: var(--accent-bright); }
 
 .detail-right { flex: 1; min-width: 0; overflow: auto; padding: 4px 0; }
-.diff-view { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
-.db-hunk-head { color: var(--accent-bright); font-size: 10px; opacity: 0.8; padding: 2px 8px; white-space: pre; }
-.db-line { display: flex; align-items: baseline; line-height: 1.5; width: max-content; min-width: 100%; padding: 0 8px; }
+.diff-view { font-family: var(--font-mono); font-size: var(--font-2xs); }
+.db-hunk-head { color: var(--accent-bright); font-size: var(--font-3xs); opacity: 0.8; padding: 2px 8px; white-space: pre; }
+.db-line { display: flex; align-items: baseline; line-height: var(--lh-base); width: max-content; min-width: 100%; padding: 0 8px; }
 .db-no { color: var(--text-muted); min-width: 34px; text-align: right; padding-right: 8px; flex-shrink: 0; user-select: none; }
 .db-sign { width: 10px; flex-shrink: 0; text-align: center; user-select: none; }
 .db-code { white-space: pre; flex-shrink: 0; }
@@ -607,23 +620,23 @@ watch(() => props.show, (visible) => {
 .db-line.db-del .db-code, .db-line.db-del .db-sign { color: var(--danger-fg); }
 .db-line.db-ctx .db-code { color: var(--text-primary); }
 
-.empty-msg { color: var(--text-muted); font-size: 11px; font-style: italic; padding: 8px 14px; }
-.loading-text { color: var(--text-muted); font-size: 10px; padding: 6px 10px; }
-.err-text { color: var(--danger-fg); font-size: 11px; margin: 0; }
+.empty-msg { color: var(--text-muted); font-size: var(--font-2xs); font-style: italic; padding: 8px 14px; }
+.loading-text { color: var(--text-muted); font-size: var(--font-3xs); padding: 6px 10px; }
+.err-text { color: var(--danger-fg); font-size: var(--font-2xs); margin: 0; }
 
 /* ── commit context menu ────────────────────────────────────────────────── */
 .ctx-menu {
   position: fixed; z-index: 10001;
   background: var(--bg-subtle); border: 1px solid var(--border-default);
-  border-radius: 6px; padding: 4px; min-width: 220px;
+  border-radius: var(--radius-sm); padding: 4px; min-width: 220px;
   box-shadow: 0 8px 24px var(--shadow-scrim);
 }
 .ctx-menu .menu-item {
   display: flex; align-items: center; width: 100%;
   background: transparent; border: none; color: var(--text-primary);
-  font-size: 12px; padding: 5px 10px; border-radius: 4px; cursor: pointer;
-  text-align: left; font-family: inherit; gap: 6px;
-  transition: background-color 0.1s ease, color 0.1s ease;
+  font-size: var(--font-xs); padding: 5px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  text-align: left; font-family: var(--font-ui); gap: 6px;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .ctx-menu .menu-item:hover { background: var(--bg-active); }
 .ctx-menu .menu-item.danger { color: var(--danger-fg); }
@@ -634,42 +647,120 @@ watch(() => props.show, (visible) => {
 .mini-modal {
   position: fixed; z-index: 10000; top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(420px, 80vw); background: var(--bg-subtle); border: 1px solid var(--border-default);
-  border-radius: 8px; padding: 16px; box-shadow: 0 12px 32px var(--shadow-scrim);
+  border-radius: var(--radius-md); padding: 16px; box-shadow: var(--shadow-modal);
   display: flex; flex-direction: column; gap: 10px;
 }
 .mini-modal-path {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--accent-fg);
+  font-family: var(--font-mono); font-size: var(--font-2xs); color: var(--accent-fg);
   word-break: break-all;
 }
 .mini-modal-btns { display: flex; gap: 6px; justify-content: flex-end; }
 .git-input {
-  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-primary); font-size: 11px; padding: 3px 7px;
+  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  color: var(--text-primary); font-size: var(--font-2xs); padding: 3px 7px;
 }
 .git-input:focus { outline: none; border-color: var(--accent-focus); }
 
 .reset-mode-btn {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
-  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: 6px;
+  background: var(--bg-base); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   padding: 7px 10px; cursor: pointer; text-align: left;
-  transition: border-color 0.1s ease;
+  transition: border-color var(--motion-fast) var(--ease-out);
 }
 .reset-mode-btn:hover { border-color: var(--accent-focus); }
 .reset-mode-btn.danger:hover { border-color: var(--danger-fg); }
-.rm-name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.rm-name { font-size: var(--font-xs); font-weight: 600; color: var(--text-primary); }
 .reset-mode-btn.danger .rm-name { color: var(--danger-fg); }
-.rm-desc { font-size: 10px; color: var(--text-muted); }
-.reset-confirm-text { font-size: 12px; color: var(--text-secondary); margin: 0; }
+.rm-desc { font-size: var(--font-3xs); color: var(--text-muted); }
+.reset-confirm-text { font-size: var(--font-xs); color: var(--text-secondary); margin: 0; }
 .reset-confirm-text.danger { color: var(--danger-fg); font-weight: 600; }
 
-/* Mirrors GitPane.vue's .btn-ghost — scoped styles don't cross components. */
-.btn-ghost {
-  background: transparent; border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-secondary); font-size: 12px; padding: 4px 8px; cursor: pointer;
-  transition: background-color 0.1s ease, border-color 0.1s ease, color 0.1s ease;
+/* Canonical button spec — byte-identical in GitPane.vue,
+   GitCredentialModal.vue and GitHistoryModal.vue. Scoped styles don't cross
+   component boundaries, so the house spec is restated in each; keep the three
+   copies in sync. Colours preserve each variant's existing identity (Git's
+   primary action stays green); only the scale and the four states are new. */
+.btn-primary,
+.btn-ghost,
+.btn-danger {
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  line-height: var(--lh-tight);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
 }
-.btn-ghost:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.btn-ghost.sm { font-size: 11px; padding: 3px 7px; }
-.btn-ghost.btn-danger { border-color: var(--danger-fg); color: var(--danger-fg); }
-.btn-ghost.btn-danger:hover { background: var(--danger-subtle, var(--bg-active)); }
+.btn-primary {
+  background: var(--success-emphasis);
+  border-color: var(--success-strong);
+  color: var(--text-on-emphasis);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--success-strong);
+  border-color: var(--success-strong);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.btn-danger {
+  background: var(--danger-emphasis);
+  border-color: var(--danger-emphasis);
+  color: var(--text-on-emphasis);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-bright);
+  border-color: var(--danger-bright);
+}
+.btn-ghost.btn-danger {
+  background: transparent;
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
+}
+.btn-ghost.btn-danger:hover:not(:disabled) {
+  background: var(--danger-subtle);
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
+}
+.btn-primary.sm,
+.btn-ghost.sm,
+.btn-danger.sm {
+  padding: 3px 7px;
+  font-size: var(--font-2xs);
+}
+.btn-ghost.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+  flex: 0 0 auto;
+}
+.btn-primary:active:not(:disabled),
+.btn-ghost:active:not(:disabled),
+.btn-danger:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn-primary:focus-visible,
+.btn-ghost:focus-visible,
+.btn-danger:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+.btn-primary:disabled,
+.btn-ghost:disabled,
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 </style>

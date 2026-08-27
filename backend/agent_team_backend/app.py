@@ -28,8 +28,10 @@ from uvicorn.protocols.utils import ClientDisconnected
 from . import __version__
 from . import agent_messaging
 from . import hook_drain
+from . import loop_watchdog
 from . import mem_probe
 from . import push_delivery
+from . import subagent_tracker
 from .analyzer import DEFAULT_MODEL as ANALYZER_DEFAULT_MODEL
 from .analyzer import (
     classify as _llama_classify,
@@ -86,7 +88,7 @@ from .roles_store import RolesStore
 from .stages_store import StagesStore
 from .db import DB_FILENAME, Database, WorkspaceDatabases
 from .store_migrations import run_startup_migrations, version_change
-from .terminals import TerminalService
+from .terminals import TerminalService, output_frame_session_id
 from .tokens_store import TokensStore
 from .ui_settings import UiSettingsStore
 from .history_store import HistoryStore
@@ -290,6 +292,14 @@ async def unicast_any(event: dict[str, Any]) -> bool:
     return False
 
 
+# A send slower than this is worth attributing; see Session._note_send_timing.
+_SEND_SLOW_WARN_MS = 500.0
+# Floor between two slow-send lines. The probe fires hardest exactly when the
+# loop can least afford another write to the log pipe, so it must not be the
+# thing that makes a stall worse.
+_SEND_SLOW_LOG_INTERVAL_S = 10.0
+
+
 class Session:
     """Per-WebSocket-connection state."""
 
@@ -323,6 +333,11 @@ class Session:
         # Set once the peer is gone (send failed or ws() loop exited). All
         # further send_json calls become silent no-ops.
         self.dead = False
+        # Throttle state for the slow-send probe (see _note_send_timing).
+        # None rather than 0.0: the first slow send must always report, which a
+        # zero baseline would swallow whenever the clock starts near zero.
+        self._slow_send_last_log: float | None = None
+        self._slow_send_suppressed = 0
 
     async def send_json(self, data: dict[str, Any]) -> None:
         """Serialized websocket send — sole writer for this connection.
@@ -333,8 +348,10 @@ class Session:
         """
         if self.dead:
             return
+        started = time.monotonic()
         try:
             async with self._send_lock:
+                acquired = time.monotonic()
                 # Re-check under the lock: on disconnect, a swarm of producers
                 # (broadcast + PTY output pump) can all pass the pre-lock guard
                 # while dead is still False, then serialize here. Without this
@@ -345,6 +362,11 @@ class Session:
                 if self.dead:
                     return
                 await self.websocket.send_json(data)
+            # Outside the lock deliberately: this probe logs, and a log write
+            # blocks the event loop whenever the stderr pipe is full — holding
+            # the lock across that would worsen the very contention it exists
+            # to measure.
+            self._note_send_timing(started, acquired, time.monotonic())
         except (RuntimeError, WebSocketDisconnect, ClientDisconnected) as err:
             # RuntimeError: starlette's 'Cannot call "send" once a close
             # message has been sent'; ClientDisconnected: uvicorn transport
@@ -358,6 +380,63 @@ class Session:
             # because these carry no message and rendered as an empty tail that
             # read like a truncated error.
             log.debug("ws peer gone (%s); marking session %#x dead", type(err).__name__, id(self))
+
+    async def send_bytes(self, data: bytes) -> None:
+        """Serialized binary websocket send — shares send_json's lock (one
+        writer per connection) and its dead-peer semantics: never raises, the
+        first failure marks the session dead and later calls silently no-op.
+        Used for terminal-output frames (see terminals._build_output_frame).
+        """
+        if self.dead:
+            return
+        started = time.monotonic()
+        try:
+            async with self._send_lock:
+                acquired = time.monotonic()
+                # Re-check under the lock — same disconnect swarm as send_json.
+                if self.dead:
+                    return
+                await self.websocket.send_bytes(data)
+            self._note_send_timing(started, acquired, time.monotonic())
+        except (RuntimeError, WebSocketDisconnect, ClientDisconnected) as err:
+            self.dead = True
+            _SESSIONS.discard(self)
+            log.debug("ws peer gone (%s); marking session %#x dead", type(err).__name__, id(self))
+
+    def _note_send_timing(self, started: float, acquired: float, done: float) -> None:
+        """Split a slow send into lock contention vs transport backpressure.
+
+        `pty reader suspended ... held=N` reports that an outbound flush was
+        slow but not why, and the two causes want opposite fixes. Time spent
+        waiting for _send_lock means another producer was mid-flush, so a
+        heartbeat given its own path would skip the queue. Time spent inside
+        send_json means the peer is not draining, and no amount of reordering
+        helps — every writer is stuck behind the same TCP window. Measure
+        before rebuilding either one.
+
+        Takes `done` rather than reading the clock so it stays a pure function
+        of three timestamps; patching time.monotonic to test it would derange
+        the event loop that schedules on the same clock.
+        """
+        total_ms = (done - started) * 1000
+        if total_ms < _SEND_SLOW_WARN_MS:
+            return
+        if (
+            self._slow_send_last_log is not None
+            and done - self._slow_send_last_log < _SEND_SLOW_LOG_INTERVAL_S
+        ):
+            self._slow_send_suppressed += 1
+            return
+        tail = f" (+{self._slow_send_suppressed} suppressed)" if self._slow_send_suppressed else ""
+        self._slow_send_suppressed = 0
+        self._slow_send_last_log = done
+        log.warning(
+            "slow ws send: total=%.0fms lock_wait=%.0fms transport=%.0fms%s",
+            total_ms,
+            (acquired - started) * 1000,
+            (done - acquired) * 1000,
+            tail,
+        )
 
     async def _send_event(self, event: dict[str, Any]) -> None:
         try:
@@ -527,8 +606,24 @@ def _cancel_pane_unregister(pane_id: str) -> None:
         handle.cancel()
 
 
-async def _active_emit(event: dict[str, Any]) -> None:
-    """Output sink: route each PTY's output to its owning Session."""
+async def _active_emit(event: dict[str, Any] | bytes) -> None:
+    """Output sink: route each PTY's output to its owning Session.
+
+    Terminal output arrives as a pre-built binary frame (bytes); everything
+    else (e.g. terminal.exit) stays a JSON event dict. Routing and the
+    detached-pane drop behave identically for both.
+    """
+    if isinstance(event, (bytes, bytearray)):
+        frame = bytes(event)
+        session_id = output_frame_session_id(frame)
+        sess = _PTY_OWNERS.get(session_id) if session_id else None
+        if sess is None:
+            return  # detached: drop output, PTY keeps running, TUI redraws on reattach
+        try:
+            await sess.send_bytes(frame)
+        except Exception as err:  # noqa: BLE001
+            log.warning("terminal output send failed: %s", err)
+        return
     payload = event.get("payload", {})
     # Runs before the owner check: cleanup applies even when the pane is
     # detached.
@@ -536,6 +631,10 @@ async def _active_emit(event: dict[str, Any]) -> None:
         exit_pane_id = payload.get("pane_id")
         if exit_pane_id:
             _schedule_pane_unregister(exit_pane_id)
+            # A CLI that exits with subagents still running never reports their
+            # stops, so the count would stay above zero for a pane id that no
+            # longer has a CLI behind it.
+            subagent_tracker.reset(str(exit_pane_id))
     session_id = payload.get("terminal_session_id") if isinstance(payload, dict) else None
     if session_id and event.get("type") == "terminal.exit":
         sess = _PTY_OWNERS.pop(session_id, None)
@@ -1025,6 +1124,11 @@ async def _start_log_watcher() -> None:
     global _mem_probe_task
     _mem_probe_task = asyncio.create_task(mem_probe.probe_loop())
 
+    # Name a frozen backend the moment it freezes: a daemon thread logs the
+    # loop thread's stack when the loop stops turning (issue #24), instead of
+    # the freeze being reproducible only under sample(1).
+    loop_watchdog.start(asyncio.get_running_loop())
+
     global _log_watcher
     _log_watcher = LogWatcher(
         sink=_on_log_token_usage,
@@ -1103,6 +1207,7 @@ async def _stop_log_watcher() -> None:
         _ownerless_sweeper_task.cancel()
     if _mem_probe_task is not None:
         _mem_probe_task.cancel()
+    await loop_watchdog.stop()
     # PTY children are detached process groups (start_new_session=True); they
     # must be killed here or they outlive the app as CPU-spinning orphans.
     # Guarded so a sweep failure never skips the watcher/MCP teardown below.
@@ -1212,7 +1317,11 @@ def _serve_workspace_file(workspace: str, rel: str, *, allow_css: bool = False) 
 @app.get("/fs/raw")
 async def fs_raw(workspace: str, rel: str) -> FileResponse:
     """Serve a raw workspace file (query-addressed). See _serve_workspace_file."""
-    return _serve_workspace_file(workspace, rel)
+    # The helper is pure-sync and does real syscalls (_resolve_safe → resolve(),
+    # is_dir, is_file) that block for minutes on a stalled network/cloud mount.
+    # An `async def` route is not handed to FastAPI's threadpool, so it would
+    # block the event loop — offload it, same rule as the fs.* ws handlers.
+    return await asyncio.to_thread(_serve_workspace_file, workspace, rel)
 
 
 @app.get("/fs/page/{ws_b64}/{rel:path}")
@@ -1229,7 +1338,7 @@ async def fs_page(ws_b64: str, rel: str) -> FileResponse:
         workspace = base64.urlsafe_b64decode(padded).decode("utf-8")
     except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="invalid workspace encoding") from exc
-    return _serve_workspace_file(workspace, rel, allow_css=True)
+    return await asyncio.to_thread(_serve_workspace_file, workspace, rel, allow_css=True)
 
 
 @app.get("/mcp/servers")
@@ -1357,6 +1466,14 @@ _HOOK_VENDORS = frozenset(
     key for key, spec in _CLI_VENDORS.items() if spec.install_hooks is not None
 )
 
+# Vendors whose hooks report BOTH halves of a subagent's life — the Task going
+# in (PreToolUse) and its stop coming back out (SubagentStop). Counting on a
+# vendor that reports only the first would climb forever, and a count stuck
+# above zero holds the unattended loop back for its whole staleness window.
+# Listed rather than derived: what an installer writes is a fact about that
+# vendor's hook file, not something the vendor spec exposes.
+_SUBAGENT_COUNTING_VENDORS = frozenset({"claude"})
+
 
 @app.post("/hooks/{vendor}")
 async def cli_hook(vendor: str, request: Request) -> Any:
@@ -1364,7 +1481,8 @@ async def cli_hook(vendor: str, request: Request) -> Any:
 
     Hook commands installed by `claude_hooks` / `qwen_hooks` / `copilot_hooks`
     POST here with:
-      - Header X-Agent-Team-Event: pre_tool_use | stop | notification
+      - Header X-Agent-Team-Event: pre_tool_use | stop | notification |
+        subagent_stop
       - Body: the JSON payload the CLI pipes to the hook on stdin
 
     The three vendors disagree on where hooks are configured but agree on what
@@ -1388,10 +1506,15 @@ async def cli_hook(vendor: str, request: Request) -> Any:
     if not isinstance(payload, dict):
         payload = {}
 
-    # Map the CLI's lifecycle to our two event_type buckets.
+    # Map the CLI's lifecycle to our two event_type buckets. subagent_stop
+    # joins agent_active rather than earning a third bucket: a subagent
+    # finishing means the main agent is about to pick its work back up, which
+    # is what agent_active already says. Its own contribution — the pending
+    # count below — rides on the broadcast instead, so no consumer has to learn
+    # a new event_type to keep working.
     if event_kind == "stop":
         event_type = "turn_complete"
-    elif event_kind in ("pre_tool_use", "notification"):
+    elif event_kind in ("pre_tool_use", "notification", "subagent_stop"):
         event_type = "agent_active"
     else:
         return {"ok": False, "reason": f"unknown event kind: {event_kind!r}"}
@@ -1411,6 +1534,20 @@ async def cli_hook(vendor: str, request: Request) -> Any:
     # lookup bypasses it. Race (stop before JSONL claimed the session) → empty
     # pane_id, and the JSONL path's matching event supplies it shortly.
     pane_id, ws_path, stage_id = attribution.pane_for_session(session_id)
+    # Background-subagent bookkeeping: Task in on PreToolUse, out on
+    # SubagentStop. The frontend loop reads the resulting count to tell a turn
+    # that ended DONE from one that ended to WAIT — see subagent_tracker.
+    #
+    # Gated on the vendor because the two halves must come as a pair: a vendor
+    # that reports tool use but never reports a subagent finishing would count
+    # only upwards, and a count stuck above zero holds the loop back. Today
+    # claude is the only vendor installing both (qwen registers Notification
+    # alone), so this gate is also the reminder for whoever adds the next one.
+    if vendor in _SUBAGENT_COUNTING_VENDORS:
+        if event_kind == "pre_tool_use":
+            subagent_tracker.note_tool_use(pane_id, str(payload.get("tool_name") or ""))
+        elif event_kind == "subagent_stop":
+            subagent_tracker.note_subagent_stop(pane_id)
     # Stop-hook delivery: a claude pane with a message waiting is told to keep
     # going and act on it, instead of stopping and being typed at afterwards.
     # Only claude, because only its Stop hook can block — and only its hook
@@ -1447,6 +1584,11 @@ async def cli_hook(vendor: str, request: Request) -> Any:
         "timestamp": "",
         "detail": "hook:stop-blocked" if blocked_envelope else f"hook:{event_kind}",
         "notification_type": notification_type,
+        # Background subagents this pane is still waiting on. Always present so
+        # the frontend can trust a 0 as "none running" rather than "not
+        # reported"; vendors without these hooks never send the field at all
+        # and their panes simply never gate on it.
+        "pending_subagents": subagent_tracker.pending(pane_id),
     }))
     if vendor == "claude" and event_kind == "stop":
         # This body is read by Claude Code as the Stop hook's own output, so it
@@ -1618,8 +1760,15 @@ async def ws(websocket: WebSocket) -> None:
             task = asyncio.create_task(handle_message(session, msg))
             session._handler_tasks.add(task)
             task.add_done_callback(session._handler_tasks.discard)
-    except WebSocketDisconnect:
-        log.info("ws client disconnected")
+    except WebSocketDisconnect as exc:
+        # Record who hung up. Without the code these lines cannot distinguish
+        # uvicorn timing out its own ping (1006/1011) from a window simply
+        # closing (1001). The frontend no longer closes sockets on its own.
+        log.info(
+            "ws client disconnected code=%s reason=%s",
+            exc.code,
+            exc.reason or "-",
+        )
     finally:
         # Peer is gone: silence any in-flight sends before cancelling tasks.
         session.dead = True

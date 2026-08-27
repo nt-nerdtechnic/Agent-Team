@@ -203,7 +203,7 @@ onMounted(async () => {
 .nbp-status {
   padding: 8px 12px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   flex: none;
 }
 .nbp-card {
@@ -224,7 +224,7 @@ onMounted(async () => {
 }
 .nbp-card-error {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--danger-fg, #e5534b);
 }
 .nbp-scroll {
@@ -238,7 +238,7 @@ onMounted(async () => {
   max-width: 860px;
 }
 .nbp-md {
-  font-size: 13px;
+  font-size: var(--font-sm);
   line-height: 1.55;
 }
 .nbp-md :deep(code) {
@@ -246,7 +246,7 @@ onMounted(async () => {
   border-radius: 4px;
   padding: 1px 5px;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .nbp-md :deep(.pfv-link) {
   color: var(--accent-fg);
@@ -271,13 +271,13 @@ onMounted(async () => {
   font-size: 19px;
 }
 .nbp-line--h2 {
-  font-size: 16px;
+  font-size: var(--font-lg);
 }
 .nbp-line--h3 {
-  font-size: 14px;
+  font-size: var(--font-md);
 }
 .nbp-line--h4 {
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 .nbp-line--quote {
   border-left: 3px solid var(--border-strong, rgba(128, 128, 128, 0.45));
@@ -305,7 +305,7 @@ onMounted(async () => {
 .nbp-exec {
   color: var(--text-secondary);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin-bottom: 2px;
 }
 .nbp-code,
@@ -313,8 +313,8 @@ onMounted(async () => {
   background: var(--bg-inset, rgba(128, 128, 128, 0.08));
   border-radius: 6px;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   margin: 0;
   overflow-x: auto;
   padding: 8px 10px;
@@ -330,8 +330,8 @@ onMounted(async () => {
   margin: 0;
   padding: 6px 10px;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -339,8 +339,8 @@ onMounted(async () => {
   margin: 0;
   padding: 6px 10px;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--danger-fg, #e5534b);

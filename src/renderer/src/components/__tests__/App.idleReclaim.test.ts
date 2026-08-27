@@ -78,10 +78,60 @@ describe('idle reclaim wiring', () => {
     expect(sweep).toContain('if (!idleReclaimEnabled.value) return')
   })
 
-  // A pane silently turning into a placeholder reads as a crash unless the app
-  // says what it did.
-  it('tells the user what was reclaimed', () => {
-    const sweep = block('async function sweepIdlePanes(', 'onMounted(() => {')
-    expect(sweep).toContain('pane.terminal.idle-reclaimed')
+  // A manual reclaim must not become a way around the guards — the only thing
+  // pressing the button skips is the waiting.
+  it('runs manual reclaim through the same guards, minus the age check', () => {
+    const fn = block('async function reclaimPanesNow(', 'onMounted(() => {')
+    expect(fn).toContain('reclaimBlockedBy(reclaimCandidate(pane), RECLAIM_NOW_THRESHOLD_MS, Date.now()) !== null) continue')
+  })
+
+  it('offers the same candidate list to every reclaim-now control', () => {
+    expect(appSource).toContain('const reclaimableNowIds = computed<string[]>')
+    expect(appSource).toContain(':reclaimable-now-count="reclaimableNowIds.length"')
+  })
+
+  // The measurement shells out to footprint, whose cost scales with the pane
+  // count — on a timer it would be a tax paid forever for a panel nobody has
+  // open.
+  // The cadence itself is useResourceUsage's (and tested there); what has to be
+  // true here is that App.vue hands it the two inputs that pick the cadence —
+  // the realized pane count and whether the panel is open — rather than a
+  // constant that would leave the loop running over an empty machine.
+  it('drives the sampling loop from the pane count and the open panel', () => {
+    const fn = block('const resourceUsage = useResourceUsage({', 'const resourceRows = computed<')
+    expect(fn).toContain("sendQuiet<ResourceUsageWire>('terminal.resource_usage', {})")
+    expect(fn).toContain('paneCount: realizedPaneCount')
+    expect(fn).toContain('panelOpen: resourcePanelOpen')
+  })
+
+  // A pane rebuilt around a new PTY gets a new pane id, and the backend still
+  // reports the session it created the PTY under. The session id is the key
+  // this window holds itself, so it cannot drift the same way.
+  it('keys measurements by terminal session id, with pane id as the fallback', () => {
+    const fn = block('const resourceRows = computed<ResourceSummaryRow[]>', 'const resourcePillText = computed(')
+    expect(fn).toContain('const sessionKey = (paneRefs[p.id]?.sessionId as unknown as string) ?? \'\'')
+    // The session-keyed maps never hold a bare pane id, so the fallback has to
+    // read the pane-id index the composable keeps for exactly this — looking a
+    // pane id up in the session map would always miss and report zero.
+    expect(fn).toContain('known ? bytesByKey.get(sessionKey) : bytesByPane.get(p.id)')
+    expect(fn).toContain('known ? cpuByKey.get(sessionKey) : cpuByPane.get(p.id)')
+  })
+
+  // Reclaiming from the panel re-measures rather than closing it: the point is
+  // to watch the machine get its resources back.
+  it('re-measures after an explicit reclaim from the panel', () => {
+    const fn = block('async function onResourceReclaim(', 'function openResourceManager(')
+    expect(fn).toContain('await reclaimPanesNow()')
+    expect(fn).toContain('void resourceUsage.refresh()')
+  })
+
+  // The timed sweep is housekeeping the user did not ask for, so it logs rather
+  // than interrupting with a toast. A reclaim the user pressed for still says so.
+  it('logs the timed sweep without a toast, and reports an explicit reclaim', () => {
+    const sweep = block('async function sweepIdlePanes(', '/** Panes the user could reclaim')
+    expect(sweep).toContain('pipelineLog(')
+    expect(sweep).not.toContain('notifyRestore.toast(')
+    const onRequest = block('async function reclaimPanesNow(', 'onMounted(() => {')
+    expect(onRequest).toContain('pane.terminal.idle-reclaimed')
   })
 })

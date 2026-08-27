@@ -102,7 +102,7 @@ defineEmits<{ (e: 'toggle'): void }>()
 }
 
 .oc-tag {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--text-muted);
@@ -138,8 +138,8 @@ defineEmits<{ (e: 'toggle'): void }>()
 }
 .oc-warn {
   margin: -6px 0 14px;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   color: var(--attention-fg);
 }
 .oc-actions {

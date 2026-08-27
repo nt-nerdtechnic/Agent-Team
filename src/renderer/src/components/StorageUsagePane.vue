@@ -14,6 +14,7 @@ import type { useBackend } from '../composables/useBackend'
 import SettingsSection from './settings/SettingsSection.vue'
 import SettingsCard from './settings/SettingsCard.vue'
 import SettingRow from './settings/SettingRow.vue'
+import { formatBytes } from '../lib/formatBytes'
 
 type StorageRisk = 'safe' | 'caution' | 'danger'
 type StorageGroupId = 'appData' | 'electron' | 'cliHomes' | 'workspaces'
@@ -100,17 +101,6 @@ const confirmHasDanger = computed(() =>
   (pendingConfirm.value ?? []).some((i) => i.risk === 'danger')
 )
 
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = n
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
-  }
-  return `${unit === 0 || value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
-}
 
 function collapseHome(p: string): string {
   const h = homeDir.value.replace(/\/+$/, '')
@@ -639,7 +629,7 @@ onMounted(async () => {
 }
 .su-risk,
 .su-locked {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   padding: 1px 6px;
   border-radius: var(--radius-pill);
@@ -665,7 +655,7 @@ onMounted(async () => {
   padding: 0;
   list-style: none;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
   word-break: break-all;
 }
@@ -743,5 +733,11 @@ onMounted(async () => {
   border-color: var(--danger-muted);
   background: var(--danger-deep);
   color: var(--text-on-emphasis);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .su-skeleton-row {
+    animation: none;
+  }
 }
 </style>

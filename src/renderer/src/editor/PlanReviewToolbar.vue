@@ -1230,7 +1230,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
             class="prt-anchor-clear"
             :title="t('pane.plans.note-anchor-clear')"
             @click="pendingAnchor = ''"
-          >×</button>
+          >✕</button>
         </span>
         <input
           ref="noteInput"
@@ -1253,7 +1253,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
   font-family: var(--font-ui, system-ui, sans-serif);
-  font-size: 12px;
+  font-size: var(--font-xs);
   /* Anchor for the ⋯ menu. */
   position: relative;
 }
@@ -1278,7 +1278,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   cursor: pointer;
   display: flex;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   gap: 3px;
   height: 22px;
   justify-content: center;
@@ -1318,7 +1318,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 }
 
 .prt-icon-count {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 700;
 }
 
@@ -1368,7 +1368,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 
 .prt-menu-item--child {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding-left: 20px;
 }
 
@@ -1394,7 +1394,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 .prt-stage {
   border-radius: 10px;
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   padding: 2px 8px;
@@ -1433,7 +1433,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 
 .prt-progress {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 
 .prt-progress-bar {
@@ -1482,7 +1482,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   border-radius: 999px;
   color: var(--accent-fg);
   display: inline-block;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   margin-right: 6px;
   max-width: 180px;
@@ -1504,7 +1504,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   border: none;
   color: var(--accent-fg);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 0 0 0 4px;
 }
 
@@ -1520,7 +1520,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   border-radius: 6px;
   color: var(--text-primary);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 10px;
 }
 
@@ -1529,7 +1529,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   border-radius: 10px;
   color: var(--text-muted);
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   padding: 2px 8px;
@@ -1567,7 +1567,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   background: var(--bg-muted);
   color: var(--text-secondary);
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   padding: 1px 8px;
   text-transform: uppercase;
@@ -1576,7 +1576,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 .prt-history-diff {
   border-left: 2px solid var(--border-strong);
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: var(--lh-base);
   margin: 2px 0 6px;
   padding-left: 8px;
 }
@@ -1600,7 +1600,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   color: var(--text-secondary);
   cursor: pointer;
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 2px 8px;
 }
 
@@ -1631,7 +1631,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   cursor: pointer;
   display: flex;
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-xs);
   gap: 8px;
   min-width: 0;
   padding: 5px 0;
@@ -1650,7 +1650,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 .prt-todo-status {
   border-radius: 999px;
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   min-width: 74px;
   padding: 1px 8px;
@@ -1704,7 +1704,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   color: var(--text-primary);
   cursor: pointer;
   display: flex;
-  font-size: 12px;
+  font-size: var(--font-xs);
   gap: 8px;
   padding: 5px 0;
   text-align: left;
@@ -1730,7 +1730,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 
 .prt-execute-agent-hint {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 
 .prt-note-resolve:disabled,
@@ -1766,7 +1766,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 .prt-note-author {
   color: var(--text-secondary);
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   min-width: 30px;
@@ -1796,7 +1796,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 .prt-note-done {
   color: var(--success-fg);
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   text-transform: uppercase;
 }
@@ -1813,7 +1813,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   border-radius: 6px;
   color: var(--text-primary);
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 4px 8px;
 }
 

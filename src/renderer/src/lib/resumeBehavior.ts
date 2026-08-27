@@ -157,6 +157,22 @@ export function stripPinnedSessionId(command: string): string {
   return command.replace(/\s*--session-id[=\s]+\S+/g, '').trim()
 }
 
+/** Drop `--auto` from a saved opencode command.
+ *
+ *  Navide declared `--auto` as opencode's YOLO flag for a while, so panes
+ *  created in that window persisted `opencode --auto …`. The opencode root
+ *  command has no such flag and rejects it — it prints its help banner and
+ *  exits 1 — so those saved commands make the pane die the moment it spawns,
+ *  every restore, until the command is rewritten. Spawning rebuilds the flag
+ *  from the vendor spec, so removing it here is safe and only ever removes a
+ *  flag that could not have run. Scoped to opencode: its fork `kilo` really
+ *  does take `--auto` on the root command.
+ */
+export function stripDeadOpencodeAutoFlag(agentKey: string, command: string): string {
+  if (agentKey !== 'opencode' || !command) return command
+  return command.replace(/\s+--auto(?=\s|$)/g, '').trim()
+}
+
 /** Resolve and persist the one decision for a workspace cold-open session.
  * A cancelled automatic restore stays cancelled until an explicit pane click
  * asks again. */

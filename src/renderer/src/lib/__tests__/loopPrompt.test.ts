@@ -6,6 +6,7 @@ import {
   matchSessionLimit,
   unseenTail,
   LOOP_DONE_MARKER,
+  LOOP_WAIT_MARKER,
   LOOP_DONE_INSTRUCTION,
   withLoopDoneInstruction,
   DEFAULT_LOOP_PROMPT,
@@ -167,5 +168,24 @@ describe('lib/loopPrompt withLoopDoneInstruction', () => {
   it('does NOT stop when the marker is only mentioned mid-text (keeps looping)', () => {
     const turnText = `完成後我會輸出 ${LOOP_DONE_MARKER}。\n目前還在進行第 2 階段。`
     expect(turnEndsWithSentinel(turnText, LOOP_DONE_MARKER)).toBe(false)
+  })
+})
+
+describe('the injected marker instruction', () => {
+  it('describes both markers in ONE paragraph', () => {
+    // This text rides on every single continue, so a second paragraph is paid
+    // for on every turn of every loop for the life of the run.
+    expect(LOOP_DONE_INSTRUCTION).toContain(LOOP_DONE_MARKER)
+    expect(LOOP_DONE_INSTRUCTION).toContain(LOOP_WAIT_MARKER)
+    expect(LOOP_DONE_INSTRUCTION.split('\n\n').filter(Boolean)).toHaveLength(1)
+  })
+
+  it('tells the agent when each marker applies', () => {
+    expect(LOOP_DONE_INSTRUCTION).toContain('全部完成')
+    expect(LOOP_DONE_INSTRUCTION).toContain('等待外部事件')
+  })
+
+  it('keeps the two markers distinct strings', () => {
+    expect(LOOP_WAIT_MARKER).not.toBe(LOOP_DONE_MARKER)
   })
 })

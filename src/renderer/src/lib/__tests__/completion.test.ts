@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, normalizeTurnText, turnMadeProgress, loopBackoffMs, applyTurnProgress, loopStallVerdict, LOOP_STALL_BACKOFF_MS, LOOP_MIN_PROGRESS_CHARS, LOOP_STALL_LIMIT, LOOP_MAX_CONTINUES, type SlotSignal, type LoopStallState } from '../completion'
+import { activityMeansWorking, applyLoopWait, detailMeansToolUse, loopWaitBackoffMs, loopWaitHonoured, LOOP_WAIT_BACKOFF_MS, LOOP_WAIT_TOTAL_MAX_MS, slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, normalizeTurnText, turnMadeProgress, loopBackoffMs, applyTurnProgress, loopStallVerdict, loopWaitingOnSubagents, turnUsedNoTools, LOOP_STALL_BACKOFF_MS, LOOP_MIN_PROGRESS_CHARS, LOOP_STALL_LIMIT, LOOP_MAX_CONTINUES, LOOP_SUBAGENT_WAIT_MAX_MS, LOOP_RECENT_TURNS, type SlotSignal, type LoopStallState } from '../completion'
 
 // Fixed reference time for the watcher arming. turn_complete only counts when
 // its timestamp is strictly AFTER this.
@@ -205,7 +205,7 @@ describe('applyTurnProgress', () => {
   const WORK = 'Implemented the parser, added three tests, and ran the suite — all green.'
 
   it('records a productive turn and keeps the counter at zero', () => {
-    expect(applyTurnProgress(FRESH, WORK)).toEqual({ stalledRuns: 0, lastTurnText: WORK })
+    expect(applyTurnProgress(FRESH, WORK)).toEqual({ stalledRuns: 0, lastTurnText: WORK, recentTurns: [WORK] })
   })
 
   it('clears the counter as soon as the loop gets moving again', () => {
@@ -326,5 +326,408 @@ describe('turnEndsWithSentinel', () => {
     // Ordering (question wins) is the caller's job; this fn only judges the tail.
     const text = `---QUESTION-START---\ntype: choice\nprompt: MVP 核心？\n---QUESTION-END---\n${S}`
     expect(turnEndsWithSentinel(text, S)).toBe(true)
+  })
+})
+
+// ── The reported spin (2026-08-26) ─────────────────────────────────────────
+//
+// A loop resent "繼續" every 5s for hours while the CLI sat waiting on two
+// background agents. Every guard passed: the turn really had ended (Claude's
+// Stop hook fires when the main agent stops to wait), the continue really had
+// woken it, and each turn's TEXT really was different — the agent restated
+// "still waiting" in fresh words every single time.
+//
+// These are the four turns from the report, verbatim.
+const SPIN_TURNS = [
+  '回歸 agent 已被喚回去收結果（背景 phpunit 應已跑完，遺失就重跑）。瀏覽器實測 agent 仍在進行中。兩者回報後收尾。尚未完成，不輸出標記。',
+  '回歸 agent 正在收取/重跑結果、瀏覽器實測 agent 仍在操作中，兩份回報一到即產出報告書收尾。尚未完成，不輸出標記。',
+  '兩個驗收 agent 都在收尾階段，等待回報中。尚未完成，不輸出標記。',
+  '驗收回報尚未到達，持續等待中（回歸 agent 收結果、瀏覽器 agent 實測）。尚未完成，不輸出標記。',
+]
+
+describe('loopWaitingOnSubagents', () => {
+  const NOW = 10_000_000
+
+  it('holds the loop while a fresh count says subagents are running', () => {
+    expect(loopWaitingOnSubagents({ pending: 2, observedAt: NOW - 5_000, now: NOW })).toBe(true)
+  })
+
+  it('does not hold when nothing is pending', () => {
+    expect(loopWaitingOnSubagents({ pending: 0, observedAt: NOW - 5_000, now: NOW })).toBe(false)
+  })
+
+  it('does not hold on a pane that never reported a count', () => {
+    expect(loopWaitingOnSubagents({ pending: 0, observedAt: 0, now: NOW })).toBe(false)
+    // A count with no report time is unusable even if non-zero.
+    expect(loopWaitingOnSubagents({ pending: 3, observedAt: 0, now: NOW })).toBe(false)
+  })
+
+  it('fails OPEN once the count is stale — a drifted count only ever delays', () => {
+    const stale = NOW - LOOP_SUBAGENT_WAIT_MAX_MS - 1
+    expect(loopWaitingOnSubagents({ pending: 2, observedAt: stale, now: NOW })).toBe(false)
+  })
+
+  it('still holds right up to the staleness boundary', () => {
+    const edge = NOW - LOOP_SUBAGENT_WAIT_MAX_MS + 1
+    expect(loopWaitingOnSubagents({ pending: 1, observedAt: edge, now: NOW })).toBe(true)
+  })
+
+  it('never holds on a negative count (a stop with no matching start)', () => {
+    expect(loopWaitingOnSubagents({ pending: -1, observedAt: NOW, now: NOW })).toBe(false)
+  })
+})
+
+describe('normalizeTurnText CJK wrapping', () => {
+  it('drops the space a TUI wrap inserts between two Chinese characters', () => {
+    // Chinese has no space to collapse back down to, so a wrap ADDS one.
+    // Without this, every wrapped repeat reads as a brand-new turn.
+    expect(normalizeTurnText('尚未完成，不輸出標記。')).toBe(
+      normalizeTurnText('尚未完成，\n  不輸出標記。')
+    )
+  })
+
+  it('makes a wrapped Chinese repeat compare equal', () => {
+    const wrapped = SPIN_TURNS[0].replace('。瀏覽器', '。\n  瀏覽器')
+    expect(turnMadeProgress(wrapped, SPIN_TURNS[0])).toBe(false)
+  })
+
+  it('leaves English word spacing alone', () => {
+    expect(normalizeTurnText('ran the suite')).toBe('ran the suite')
+    // A space with CJK on only one side is real spacing, not a wrap artefact.
+    expect(normalizeTurnText('執行 pytest 完成')).toBe('執行 pytest 完成')
+  })
+})
+
+describe('text comparison stays exact', () => {
+  it('calls a verbatim repeat a stall, ignoring only re-wrapping', () => {
+    expect(turnMadeProgress(SPIN_TURNS[0], SPIN_TURNS[0])).toBe(false)
+    expect(turnMadeProgress(SPIN_TURNS[0].replace('。瀏覽器', '。\n  瀏覽器'), SPIN_TURNS[0])).toBe(false)
+  })
+
+  it('does NOT catch the reported spin — the reworded turns read as progress', () => {
+    // Pinned deliberately. A fuzzy (trigram-similarity) judgement was tried
+    // here and dropped: the threshold that caught these four turns also called
+    // "Completed step 1…" a repeat of "Completed step 0…", which differs by one
+    // character and is real progress. Text cannot tell the two apart, so the
+    // spin is caught by turnUsedNoTools and loopWaitingOnSubagents instead.
+    expect(turnMadeProgress(SPIN_TURNS[1], SPIN_TURNS[0])).toBe(true)
+    expect(turnMadeProgress(SPIN_TURNS[3], SPIN_TURNS[2])).toBe(true)
+    // The third turn IS caught, but only by the length floor — it happens to be
+    // under LOOP_MIN_PROGRESS_CHARS. One stall in four never reaches
+    // LOOP_STALL_LIMIT, and the next turn resets the counter to zero, which is
+    // why the run span hours on the old judgement.
+    expect(SPIN_TURNS[2].length).toBeLessThan(LOOP_MIN_PROGRESS_CHARS)
+    expect(turnMadeProgress(SPIN_TURNS[2], SPIN_TURNS[1])).toBe(false)
+  })
+
+  it('keeps near-identical but genuinely stepwise turns as progress', () => {
+    const step0 = 'Completed step 0 of the migration and verified its output.'
+    const step1 = 'Completed step 1 of the migration and verified its output.'
+    expect(turnMadeProgress(step1, step0)).toBe(true)
+  })
+})
+
+describe('turnUsedNoTools', () => {
+  it('is true when a reporting pane ended a turn without touching a tool', () => {
+    expect(turnUsedNoTools({ toolUsesThisTurn: 0, toolSignalsSeen: true })).toBe(true)
+  })
+
+  it('is false when the turn used tools', () => {
+    expect(turnUsedNoTools({ toolUsesThisTurn: 3, toolSignalsSeen: true })).toBe(false)
+  })
+
+  it('is false for a vendor that never reports tool use — the whole safety net', () => {
+    // Without this, every turn of every non-hook CLI would look stalled and
+    // stop a perfectly healthy loop after LOOP_STALL_LIMIT turns.
+    expect(turnUsedNoTools({ toolUsesThisTurn: 0, toolSignalsSeen: false })).toBe(false)
+  })
+})
+
+describe('the reported spin is now caught', () => {
+  const NO_TOOLS = { toolUsesThisTurn: 0, toolSignalsSeen: true }
+  const WORKED = { toolUsesThisTurn: 4, toolSignalsSeen: true }
+
+  it('stops the loop after LOOP_STALL_LIMIT waiting turns', () => {
+    let state: LoopStallState = { stalledRuns: 0, lastTurnText: '' }
+    for (const turn of SPIN_TURNS) state = applyTurnProgress(state, turn, NO_TOOLS)
+    expect(state.stalledRuns).toBe(SPIN_TURNS.length)
+    expect(loopStallVerdict({ continues: 4, stalledRuns: state.stalledRuns })).toBe('stop-stalled')
+  })
+
+  it('used to look like progress on every turn — the old verbatim judgement', () => {
+    // Same four turns, judged the way they were before: each differs from the
+    // one before it, so the counter never left zero and only the 200-continue
+    // cap could end the run.
+    let state: LoopStallState = { stalledRuns: 0, lastTurnText: '' }
+    for (const turn of SPIN_TURNS) state = applyTurnProgress(state, turn)
+    expect(state.stalledRuns).toBe(0)
+  })
+
+  it('leaves a genuinely working loop alone', () => {
+    let state: LoopStallState = { stalledRuns: 0, lastTurnText: '' }
+    for (const turn of SPIN_TURNS) state = applyTurnProgress(state, turn, WORKED)
+    expect(state.stalledRuns).toBe(0)
+    expect(loopStallVerdict({ continues: 4, stalledRuns: state.stalledRuns })).toBe('ok')
+  })
+
+  it('counts an empty-text turn that touched no tool', () => {
+    // Claude's Stop hook carries no text. Before, that was UNKNOWN and the
+    // turn was ignored entirely; now the tool signal can still speak for it.
+    let state: LoopStallState = { stalledRuns: 0, lastTurnText: '' }
+    for (let i = 0; i < LOOP_STALL_LIMIT; i++) state = applyTurnProgress(state, '', NO_TOOLS)
+    expect(loopStallVerdict({ continues: 0, stalledRuns: state.stalledRuns })).toBe('stop-stalled')
+  })
+
+  it('still ignores an empty-text turn from a vendor with no tool signals', () => {
+    let state: LoopStallState = { stalledRuns: 0, lastTurnText: '' }
+    for (let i = 0; i < 50; i++) {
+      state = applyTurnProgress(state, '', { toolUsesThisTurn: 0, toolSignalsSeen: false })
+    }
+    expect(loopStallVerdict({ continues: 0, stalledRuns: state.stalledRuns })).toBe('ok')
+  })
+})
+
+describe('applyTurnProgress recent-turn history', () => {
+  const A = 'Ran the migration on the staging database and verified the row counts matched.'
+  const B = 'Rebuilt the search index from scratch and confirmed the query latency dropped.'
+
+  it('catches a two-phrase alternation that verbatim comparison called progress', () => {
+    let state: LoopStallState = { stalledRuns: 0, lastTurnText: '' }
+    for (const turn of [A, B, A, B]) state = applyTurnProgress(state, turn)
+    // A and B each repeat a turn inside the retained window.
+    expect(state.stalledRuns).toBeGreaterThan(0)
+  })
+
+  it('keeps at most LOOP_RECENT_TURNS turns of history', () => {
+    let state: LoopStallState = { stalledRuns: 0, lastTurnText: '' }
+    for (let i = 0; i < LOOP_RECENT_TURNS + 3; i++) {
+      state = applyTurnProgress(state, `Completed step ${i} of the migration and verified its output.`)
+    }
+    expect(state.recentTurns?.length).toBe(LOOP_RECENT_TURNS)
+  })
+
+  it('does not call a turn stalled just because it fell out of the window', () => {
+    let state: LoopStallState = { stalledRuns: 0, lastTurnText: '' }
+    for (let i = 0; i < LOOP_RECENT_TURNS + 1; i++) {
+      state = applyTurnProgress(state, `Completed step ${i} of the migration and verified its output.`)
+    }
+    expect(state.stalledRuns).toBe(0)
+  })
+})
+
+describe('activityMeansWorking', () => {
+  it('treats ordinary activity as the pane working', () => {
+    expect(activityMeansWorking('hook:pre_tool_use')).toBe(true)
+    expect(activityMeansWorking('hook:notification')).toBe(true)
+    expect(activityMeansWorking('user')).toBe(true)
+    expect(activityMeansWorking('')).toBe(true)
+  })
+
+  it('does not count a subagent finishing as the pane working', () => {
+    // Both spellings, because both jam the loop the same way. claude reports it
+    // through its hook; opencode and kilo through their reader. Missing the
+    // second one is how the fix for claude failed to reach the vendors the
+    // tool-signal work had just brought into range.
+    expect(activityMeansWorking('hook:subagent_stop')).toBe(false)
+    expect(activityMeansWorking('subagent:done')).toBe(false)
+  })
+
+  it('still counts a subagent STARTING, and ordinary tool use', () => {
+    // Only the finishing event is a borrowed timestamp. A tool call — including
+    // the one that dispatches a subagent — really is this pane working.
+    expect(activityMeansWorking('tool:task')).toBe(true)
+    expect(activityMeansWorking('tool:read')).toBe(true)
+    expect(activityMeansWorking('hook:pre_tool_use')).toBe(true)
+  })
+
+  it('the two subagent spellings are also kept out of the tool count', () => {
+    // Same events, second judgement: neither may be counted as tool use either,
+    // since neither has a pairable "started" event.
+    expect(detailMeansToolUse('hook:subagent_stop')).toBe(false)
+    expect(detailMeansToolUse('subagent:done')).toBe(false)
+  })
+})
+
+describe('the full wait-then-resume sequence', () => {
+  // Walks one real exchange through the actual predicates, which is where the
+  // pieces meet: the unit tests above each pass while the SEQUENCE still jams.
+  const SETTLE = 1500
+  const ARMED = 1000
+  const TASK_STARTED = 1100 // PreToolUse(Task) → agent_active
+  const TURN_ENDED = 1200 // "still waiting" → Stop hook → turn_complete
+  const SUBAGENT_DONE = 5000 // SubagentStop
+
+  it('holds the loop while the subagent runs', () => {
+    expect(loopWaitingOnSubagents({ pending: 1, observedAt: TURN_ENDED, now: 1300 })).toBe(true)
+  })
+
+  it('lets the loop continue once the subagent is done', () => {
+    // The gate opens (count back to zero) AND the continue verdict must agree.
+    expect(loopWaitingOnSubagents({ pending: 0, observedAt: SUBAGENT_DONE, now: 9000 })).toBe(false)
+    expect(
+      loopContinueReady({
+        turnCompleteAt: TURN_ENDED,
+        // SubagentStop did NOT advance the clock — activityMeansWorking said no.
+        lastActiveAt: TASK_STARTED,
+        armedAt: ARMED,
+        now: 9000,
+        settleMs: SETTLE,
+      })
+    ).toBe(true)
+  })
+
+  it('would jam forever if SubagentStop advanced the activity clock', () => {
+    // The regression this pins: turnCompleteDone requires the turn end to be
+    // the LATEST signal, so an activity stamp landing after it can never be
+    // overtaken by anything except a NEW turn — and a main agent that stays
+    // idle never produces one. Silent, and fails CLOSED.
+    expect(
+      loopContinueReady({
+        turnCompleteAt: TURN_ENDED,
+        lastActiveAt: SUBAGENT_DONE,
+        armedAt: ARMED,
+        now: 9000,
+        settleMs: SETTLE,
+      })
+    ).toBe(false)
+  })
+})
+
+describe('detailMeansToolUse', () => {
+  it('accepts both sources that report tool use today', () => {
+    expect(detailMeansToolUse('hook:pre_tool_use')).toBe(true) // claude, via hook
+    expect(detailMeansToolUse('tool:read')).toBe(true) // opencode, via its reader
+    expect(detailMeansToolUse('tool:unknown')).toBe(true)
+  })
+
+  it('rejects the coarse details every other vendor reports', () => {
+    // These are all a vendor says today. Counting them as tool use would make
+    // turnUsedNoTools fire on ordinary talking turns.
+    for (const d of ['assistant', 'assistant:thinking', 'user', 'prompt', 'usage', 'token_count', '']) {
+      expect(detailMeansToolUse(d)).toBe(false)
+    }
+  })
+
+  it('does not mistake a subagent event for tool use', () => {
+    // opencode reports subagent:done with no matching "started", so it can
+    // never be paired into a count — and it is not the pane using a tool.
+    expect(detailMeansToolUse('subagent:done')).toBe(false)
+    expect(detailMeansToolUse('hook:subagent_stop')).toBe(false)
+  })
+})
+
+describe('LOOP_WAIT backoff and budget', () => {
+  const FRESH = { consecutive: 0, totalWaitedMs: 0 }
+
+  it('holds longer each consecutive wait, then clamps', () => {
+    expect(loopWaitBackoffMs(0)).toBe(0)
+    expect(loopWaitBackoffMs(1)).toBe(LOOP_WAIT_BACKOFF_MS[0])
+    expect(loopWaitBackoffMs(2)).toBe(LOOP_WAIT_BACKOFF_MS[1])
+    expect(loopWaitBackoffMs(3)).toBe(LOOP_WAIT_BACKOFF_MS[2])
+    expect(loopWaitBackoffMs(99)).toBe(LOOP_WAIT_BACKOFF_MS[LOOP_WAIT_BACKOFF_MS.length - 1])
+  })
+
+  it('counts a wait and charges its hold against the budget', () => {
+    const after = applyLoopWait(FRESH, true)
+    expect(after.consecutive).toBe(1)
+    expect(after.totalWaitedMs).toBe(LOOP_WAIT_BACKOFF_MS[0])
+  })
+
+  it('any other turn ends the streak but keeps the spent budget', () => {
+    // The streak resets so the next wait starts its backoff from the bottom;
+    // the budget does not, because it bounds the whole RUN.
+    const waited = applyLoopWait(applyLoopWait(FRESH, true), true)
+    const worked = applyLoopWait(waited, false)
+    expect(worked.consecutive).toBe(0)
+    expect(worked.totalWaitedMs).toBe(waited.totalWaitedMs)
+  })
+
+  it('stops honouring the marker once the budget is spent — the fail-OPEN bound', () => {
+    // Without this an agent emitting LOOP_WAIT every turn parks the loop for
+    // good, silently: the same fail-CLOSED shape the subagent gate is bounded
+    // against. Past the budget, ordinary continues resume and the stall
+    // detector gets to see those turns.
+    expect(loopWaitHonoured(FRESH)).toBe(true)
+    expect(loopWaitHonoured({ consecutive: 9, totalWaitedMs: LOOP_WAIT_TOTAL_MAX_MS - 1 })).toBe(true)
+    expect(loopWaitHonoured({ consecutive: 9, totalWaitedMs: LOOP_WAIT_TOTAL_MAX_MS })).toBe(false)
+  })
+
+  it('a marker-every-turn run exhausts its budget in bounded time', () => {
+    let st = FRESH
+    let turns = 0
+    while (loopWaitHonoured(st) && turns < 1000) {
+      st = applyLoopWait(st, true)
+      turns++
+    }
+    expect(turns).toBeLessThan(1000) // it terminates at all
+    expect(st.totalWaitedMs).toBeGreaterThanOrEqual(LOOP_WAIT_TOTAL_MAX_MS)
+  })
+})
+
+describe('the two loop markers stay distinct', () => {
+  it('a waiting turn is not read as a finished one, and vice versa', () => {
+    const waiting = '仍在等背景測試回報。\n\n<<LOOP_WAIT>>'
+    const finished = '全部完成。\n\n<<LOOP_DONE>>'
+    expect(turnEndsWithSentinel(waiting, '<<LOOP_WAIT>>')).toBe(true)
+    expect(turnEndsWithSentinel(waiting, '<<LOOP_DONE>>')).toBe(false)
+    expect(turnEndsWithSentinel(finished, '<<LOOP_DONE>>')).toBe(true)
+    expect(turnEndsWithSentinel(finished, '<<LOOP_WAIT>>')).toBe(false)
+  })
+
+  it('mentioning a marker mid-text never counts', () => {
+    const mention = `完成時我會輸出 <<LOOP_WAIT>>。\n目前還在跑第 2 階段。`
+    expect(turnEndsWithSentinel(mention, '<<LOOP_WAIT>>')).toBe(false)
+  })
+})
+
+describe('the opencode / kilo wait-then-resume sequence', () => {
+  // The same sequence that jammed for claude, in the spelling opencode and kilo
+  // use. Their reader names a subagent finishing `subagent:done` rather than
+  // `hook:subagent_stop`, so the fix for claude did not reach them until both
+  // spellings were listed — and the tool-signal work had just brought these two
+  // vendors into range of exactly this judgement.
+  const SETTLE = 1500
+  const ARMED = 1000
+  const TOOL_CALL = 1100 // tool:task → agent_active
+  const TURN_ENDED = 1200 // "still waiting" → turn_complete
+  const SUBAGENT_DONE = 5000 // subagent:done
+
+  it('a tool call advances the loop clock', () => {
+    expect(activityMeansWorking('tool:task')).toBe(true)
+  })
+
+  it('the subagent finishing does NOT advance it', () => {
+    expect(activityMeansWorking('subagent:done')).toBe(false)
+  })
+
+  it('so the loop can still continue once the subagent is done', () => {
+    expect(
+      loopContinueReady({
+        turnCompleteAt: TURN_ENDED,
+        lastActiveAt: TOOL_CALL, // subagent:done was not allowed to stamp this
+        armedAt: ARMED,
+        now: 9000,
+        settleMs: SETTLE,
+      })
+    ).toBe(true)
+  })
+
+  it('and would jam forever if subagent:done were treated as work', () => {
+    expect(
+      loopContinueReady({
+        turnCompleteAt: TURN_ENDED,
+        lastActiveAt: SUBAGENT_DONE,
+        armedAt: ARMED,
+        now: 9000,
+        settleMs: SETTLE,
+      })
+    ).toBe(false)
+  })
+
+  it('counts the tool call as work, so the turn is not judged a stall', () => {
+    const worked = { toolUsesThisTurn: 1, toolSignalsSeen: true }
+    expect(turnUsedNoTools(worked)).toBe(false)
+    // …while a turn that only talked, on the same vendor, still is.
+    expect(turnUsedNoTools({ toolUsesThisTurn: 0, toolSignalsSeen: true })).toBe(true)
   })
 })

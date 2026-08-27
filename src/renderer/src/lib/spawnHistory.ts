@@ -20,7 +20,7 @@ export interface SpawnHistoryEntry extends HistoryTitleEntry {
   roleLabel: string
   command: string
   sessionId?: string
-  origin: 'manual' | 'pipeline'
+  origin: 'manual' | 'pipeline' | 'mcp'
   stageId: StageId
   workspacePath: string
   spawnedAt: string
@@ -111,7 +111,7 @@ export interface HistoryEntryFilter {
  *  paneId is in `filter.contentMatchedIds`. */
 export function filterHistoryEntries<T extends HistoryTitleEntry & {
   removedAt?: string
-  origin?: 'manual' | 'pipeline'
+  origin?: 'manual' | 'pipeline' | 'mcp'
   roleKey?: string
   roleLabel?: string
   starred?: boolean
@@ -119,7 +119,9 @@ export function filterHistoryEntries<T extends HistoryTitleEntry & {
   return entries.filter((entry) => {
     if (filter.status === 'active' && entry.removedAt) return false
     if (filter.status === 'removed' && !entry.removedAt) return false
-    if (filter.origin !== 'all' && entry.origin !== filter.origin) return false
+    if (filter.origin === 'pipeline' && entry.origin !== 'pipeline') return false
+    // The 'manual' filter means "not a pipeline pane" — mcp-spawned panes belong here too.
+    if (filter.origin === 'manual' && entry.origin === 'pipeline') return false
     if (filter.starredOnly && !entry.starred) return false
     if (matchesHistorySearch(entry, filter.query)) return true
     return !!filter.contentMatchedIds?.has(entry.paneId)
@@ -257,7 +259,7 @@ export function updateHistoryCustomName(
 
 export interface LegacyHistoryLogPathEntry {
   spawnedAt: string
-  origin: 'manual' | 'pipeline'
+  origin: 'manual' | 'pipeline' | 'mcp'
   stageId: string
   paneId: string
   agentKey: string

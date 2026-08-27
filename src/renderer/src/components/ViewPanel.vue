@@ -42,7 +42,7 @@ const modes: [LayoutMode, string, string][] = [
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--font-sm);
   cursor: pointer;
   display: flex;
   align-items: center;

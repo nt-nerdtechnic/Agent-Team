@@ -81,12 +81,14 @@ import CliMessagingHelp from './CliMessagingHelp.vue'
 import McpHelp from './McpHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
 import StorageUsagePane from './StorageUsagePane.vue'
+import LayoutSettingsPane from '../layout/LayoutSettingsPane.vue'
 import SkillsPane from './SkillsPane.vue'
 import SettingsNavItem from './settings/SettingsNavItem.vue'
 import SettingsSection from './settings/SettingsSection.vue'
 import SettingsCard from './settings/SettingsCard.vue'
 import SettingRow from './settings/SettingRow.vue'
 import ToggleSwitch from './settings/ToggleSwitch.vue'
+import { formatBytes } from '../lib/formatBytes'
 import {
   isSecretSettingKey,
   nextRecordKey,
@@ -117,6 +119,10 @@ const props = defineProps<{
   confirmBeforeClosePane?: boolean
   idleReclaimEnabled?: boolean
   idleReclaimMinutes?: string
+  /** Panes that could be reclaimed right now, ignoring the idle threshold. */
+  reclaimableNowCount?: number
+  /** Rough bytes those panes are holding. Estimated, not measured. */
+  reclaimableNowBytes?: number
 }>()
 const emit = defineEmits<{
   (e: 'close'): void
@@ -126,6 +132,7 @@ const emit = defineEmits<{
   (e: 'update:confirmBeforeClosePane', v: boolean): void
   (e: 'update:idleReclaimEnabled', v: boolean): void
   (e: 'update:idleReclaimMinutes', v: string): void
+  (e: 'reclaim-now'): void
 }>()
 const confirmBeforeCloseModel = computed({
   get: () => props.confirmBeforeClose ?? true,
@@ -144,13 +151,19 @@ const idleReclaimEnabledModel = computed({
   get: () => props.idleReclaimEnabled ?? true,
   set: (v: boolean) => emit('update:idleReclaimEnabled', v),
 })
-const idleReclaimMinutesModel = computed(() => props.idleReclaimMinutes ?? '180')
+const idleReclaimMinutesModel = computed(() => props.idleReclaimMinutes ?? '30')
 function onIdleReclaimMinutesChange(v: string): void {
   emit('update:idleReclaimMinutes', v)
 }
+// The button says what it is about to do — a count and a size — because
+// "reclaim" alone does not tell you whether pressing it costs you one pane or
+// a dozen. Zero disables it and the row says so rather than hiding, so the
+// control does not appear and disappear as panes go idle.
+const reclaimNowCount = computed(() => props.reclaimableNowCount ?? 0)
+const reclaimNowSize = computed(() => formatBytes(props.reclaimableNowBytes ?? 0))
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
+type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
 type HelpTopic = 'messaging' | 'mcp'
@@ -767,6 +780,8 @@ const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof Se
   general: { scope: 'User', storage: 'localStorage' },
   updates: { scope: 'User', storage: 'mainProcess' },
   appearance: { scope: 'User', storage: 'localStorage' },
+  // One arrangement for every workspace, shared live across windows.
+  layout: { scope: 'User', storage: 'localStorage' },
   accounts: { scope: 'User / Workspace bindings', storage: 'safeStorage' },
   extensions: { scope: 'User', storage: 'mainProcess' },
   storage: { scope: 'User', storage: 'app_data_dir' },
@@ -926,6 +941,13 @@ interface P2pLinkStatus {
   detail: string
   deviceId: string
   memberId: string
+  /** Which account this machine is signed in as. Empty when the credential was
+   *  pasted in by hand rather than obtained by signing in — both are valid, so
+   *  this decides which face the card shows, not whether it works. */
+  accountEmail?: string
+  tenantId?: string
+  displayName?: string
+  role?: string
 }
 /** "Connecting" has to resolve on its own, so the section re-asks while it is
  *  on screen rather than freezing on whatever the save call answered. */
@@ -937,6 +959,75 @@ const p2pTokenInput = ref('')
 const p2pStatus = ref<P2pLinkStatus | null>(null)
 const p2pBusy = ref(false)
 const p2pError = ref('')
+
+// Sign-in. Registering creates this user's own tenant (a private network of
+// their machines) plus its first admin; signing in exchanges the password for
+// the long-lived device token. The password is sent once and never stored:
+// what lands in the vault is the token, which is exactly what a hand-pasted
+// credential already was — so the "token" tab stays as a peer, not a fallback,
+// for machines with no account (CI, servers) and for everyone already using one.
+type P2pMode = 'login' | 'register' | 'token'
+const p2pMode = ref<P2pMode>('login')
+const p2pEmail = ref('')
+const p2pPassword = ref('')
+const p2pDisplayName = ref('')
+const p2pTenantName = ref('')
+
+/** Signed in *as an account*, as opposed to holding a hand-pasted token. */
+const p2pSignedIn = computed(() => Boolean(p2pStatus.value?.accountEmail))
+
+function resetP2pAccountForm(): void {
+  p2pPassword.value = ''
+  p2pDisplayName.value = ''
+  p2pTenantName.value = ''
+}
+
+async function submitP2pAccount(verb: 'login' | 'register'): Promise<void> {
+  p2pBusy.value = true
+  p2pError.value = ''
+  try {
+    const payload: Record<string, unknown> = {
+      serverUrl: p2pServerUrl.value,
+      email: p2pEmail.value,
+      password: p2pPassword.value,
+    }
+    if (verb === 'register') {
+      if (p2pDisplayName.value.trim()) payload.displayName = p2pDisplayName.value
+      if (p2pTenantName.value.trim()) payload.tenantName = p2pTenantName.value
+    }
+    const resp = await props.backend.send<{ status: P2pLinkStatus }>(`p2p.account.${verb}`, payload)
+    if (!resp.ok) {
+      p2pError.value = resp.error?.message ?? 'Sign-in failed'
+      return
+    }
+    // The password has served its purpose the moment a token comes back.
+    resetP2pAccountForm()
+    if (resp.payload?.status) p2pStatus.value = resp.payload.status
+  } catch (err) {
+    p2pError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    p2pBusy.value = false
+  }
+}
+
+async function p2pLogout(): Promise<void> {
+  p2pBusy.value = true
+  p2pError.value = ''
+  try {
+    const resp = await props.backend.send<{ status: P2pLinkStatus }>('p2p.account.logout', {})
+    if (!resp.ok) {
+      p2pError.value = resp.error?.message ?? 'Sign-out failed'
+      return
+    }
+    resetP2pAccountForm()
+    p2pMode.value = 'login'
+    if (resp.payload?.status) p2pStatus.value = resp.payload.status
+  } catch (err) {
+    p2pError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    p2pBusy.value = false
+  }
+}
 let p2pUrlSeeded = false
 let p2pTimer: ReturnType<typeof setInterval> | null = null
 
@@ -1740,8 +1831,8 @@ watch(activeTab, (tab) => {
 <template>
   <Teleport to="body">
     <!-- Overlay -->
-    <div class="s-overlay" @click.self="emit('close')">
-      <div class="s-modal">
+    <div class="s-overlay nv-modal-overlay" @click.self="emit('close')">
+      <div class="s-modal nv-modal-shell nv-modal-shell--wide">
 
         <!-- ── Sidebar (title + search + grouped nav) ────────────────────── -->
         <aside class="s-sidebar">
@@ -1793,6 +1884,11 @@ watch(activeTab, (tab) => {
               <SettingsNavItem :label="$t('settings.nav.appearance')" :active="activeTab === 'appearance'" @select="activeTab = 'appearance'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.5 13.5 5.5 6.5 12.5 3.5 12.5 3.5 9.5 10.5 2.5Z"/><path d="M9 4l3 3"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.layout')" :active="activeTab === 'layout'" @select="activeTab = 'layout'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M5.5 2.5v11M14.5 6h-9"/></svg>
                 </template>
               </SettingsNavItem>
             </div>
@@ -1902,7 +1998,7 @@ watch(activeTab, (tab) => {
                   <span class="mcp-server-name">{{ srv.name }}</span>
                   <span class="mcp-transport-badge">{{ srv.transport }}</span>
                   <span class="mcp-spacer"></span>
-                  <button class="mcp-delete-btn" @click="mRemoveServer(idx)" title="Remove">🗑</button>
+                  <button class="mcp-delete-btn nv-btn nv-btn--danger" @click="mRemoveServer(idx)" title="Remove">🗑</button>
                   <!-- Toggle switch -->
                   <ToggleSwitch
                     :model-value="srv.enabled"
@@ -2093,7 +2189,7 @@ watch(activeTab, (tab) => {
           <!-- ── CATALOG VIEW ────────────────────────────────────────────── -->
           <template v-else-if="mView === 'catalog'">
             <div class="mcp-topbar" data-settings-section="mcp-catalog">
-              <button class="mcp-back-btn" @click="mView = 'list'">← Back</button>
+              <button class="mcp-back-btn nv-btn" @click="mView = 'list'">← Back</button>
               <span class="mcp-page-title">Add MCP Servers</span>
             </div>
 
@@ -2116,7 +2212,7 @@ watch(activeTab, (tab) => {
                   </div>
                 </div>
                 <button v-if="mIsInstalled(item.name)" class="mcp-installed-badge" disabled>Installed</button>
-                <button v-else class="mcp-add-btn" @click="mAddFromCatalog(item)" :disabled="mSaving">+ Add</button>
+                <button v-else class="mcp-add-btn nv-btn nv-btn--primary" @click="mAddFromCatalog(item)" :disabled="mSaving">+ Add</button>
               </div>
               <div v-if="mFilteredCatalog.length === 0" class="mcp-empty">No matching MCP servers found</div>
             </div>
@@ -2124,7 +2220,7 @@ watch(activeTab, (tab) => {
 
           <template v-else>
             <div class="mcp-topbar" data-settings-section="mcp-custom">
-              <button class="mcp-back-btn" @click="mView = 'list'">← {{ $t('action.back') }}</button>
+              <button class="mcp-back-btn nv-btn" @click="mView = 'list'">← {{ $t('action.back') }}</button>
               <span class="mcp-page-title">{{ $t('settings.mcp.custom-title') }}</span>
             </div>
             <form class="mcp-custom-form" @submit.prevent="mCreateCustom">
@@ -2153,7 +2249,7 @@ watch(activeTab, (tab) => {
                 <button type="button" class="mcp-action-btn" @click="mView = 'list'">{{ $t('action.cancel') }}</button>
                 <button
                   type="submit"
-                  class="mcp-add-btn"
+                  class="mcp-add-btn nv-btn nv-btn--primary"
                   :disabled="mSaving || !mCustomName.trim() || (mCustomTransport === 'stdio' ? !mCustomCommand.trim() : !mCustomUrl.trim())"
                 >{{ $t('settings.mcp.create-server') }}</button>
               </div>
@@ -2243,7 +2339,7 @@ watch(activeTab, (tab) => {
                     @change="props.analyzerApi.saveSettings({ gguf_path: ($event.target as HTMLInputElement).value })"
                   />
                   <button
-                    class="az-recheck-btn"
+                    class="az-recheck-btn nv-btn"
                     :disabled="azRechecking"
                     @click="azRecheck"
                     :title="$t('action.recheck-file-exists')"
@@ -2279,7 +2375,7 @@ watch(activeTab, (tab) => {
                     @change="props.analyzerApi.saveSettings({ ollama_base_url: ($event.target as HTMLInputElement).value })"
                   />
                   <button
-                    class="az-recheck-btn"
+                    class="az-recheck-btn nv-btn"
                     :disabled="azRechecking"
                     @click="azRecheck"
                     :title="$t('settings.analyzer.recheck-title')"
@@ -2315,7 +2411,7 @@ watch(activeTab, (tab) => {
                 @keydown.enter="azDoPull"
               />
               <button
-                class="az-run-btn"
+                class="az-run-btn nv-btn nv-btn--primary"
                 :disabled="props.analyzerApi.pulling.value || !azPullName.trim()"
                 @click="azDoPull"
               >
@@ -2366,7 +2462,7 @@ watch(activeTab, (tab) => {
                     <template v-if="m.size > 0"> · {{ (m.size / 1e9).toFixed(1) }} GB</template>
                   </span>
                 </div>
-                <button class="az-del-btn" @click="azDoDelete(m.name)" :title="$t('settings.analyzer.delete-local-title')">✕</button>
+                <button class="az-del-btn nv-btn nv-btn--danger" @click="azDoDelete(m.name)" :title="$t('settings.analyzer.delete-local-title')">✕</button>
               </div>
             </div>
           </div>
@@ -2376,7 +2472,7 @@ watch(activeTab, (tab) => {
             <div class="az-section-header">
               <div class="az-section-title">{{ $t('settings.analyzer.model-benchmark') }}</div>
               <button
-                class="az-run-btn"
+                class="az-run-btn nv-btn nv-btn--primary"
                 :disabled="props.analyzerApi.benchmarking.value || !props.analyzerApi.health.value?.ok"
                 @click="props.analyzerApi.benchmark()"
               >
@@ -2559,11 +2655,33 @@ watch(activeTab, (tab) => {
                     :value="idleReclaimMinutesModel"
                     @change="onIdleReclaimMinutesChange(($event.target as HTMLSelectElement).value)"
                   >
+                    <option value="15">{{ $t('settings.general.idle-reclaim-15m') }}</option>
                     <option value="30">{{ $t('settings.general.idle-reclaim-30m') }}</option>
                     <option value="60">{{ $t('settings.general.idle-reclaim-1h') }}</option>
                     <option value="180">{{ $t('settings.general.idle-reclaim-3h') }}</option>
                     <option value="480">{{ $t('settings.general.idle-reclaim-8h') }}</option>
                   </select>
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                v-if="idleReclaimEnabledModel"
+                data-settings-section="general-idle-reclaim-now"
+                :title="$t('settings.general.idle-reclaim-now')"
+                :description="reclaimNowCount > 0
+                  ? $t('settings.general.idle-reclaim-now-hint', { count: reclaimNowCount, size: reclaimNowSize })
+                  : $t('settings.general.idle-reclaim-now-empty')"
+              >
+                <template #control>
+                  <button
+                    class="reclaim-now-btn"
+                    :disabled="reclaimNowCount === 0"
+                    @click="emit('reclaim-now')"
+                  >
+                    {{ reclaimNowCount > 0
+                      ? $t('settings.general.idle-reclaim-now-action', { count: reclaimNowCount })
+                      : $t('settings.general.idle-reclaim-now-action-empty') }}
+                  </button>
                 </template>
               </SettingRow>
 
@@ -2809,27 +2927,142 @@ watch(activeTab, (tab) => {
                     type="text"
                     spellcheck="false"
                     autocomplete="off"
-                    :disabled="p2pBusy"
+                    :disabled="p2pBusy || p2pSignedIn"
                     :placeholder="$t('settings.p2p.server-url-placeholder')"
                   />
                 </div>
-                <div class="field p2p-field">
-                  <label class="lbl" for="p2p-token">{{ $t('settings.p2p.token') }}</label>
-                  <input
-                    id="p2p-token"
-                    v-model="p2pTokenInput"
-                    type="password"
-                    spellcheck="false"
-                    autocomplete="off"
-                    :disabled="p2pBusy"
-                    :placeholder="p2pStatus?.hasToken ? $t('settings.p2p.token-stored') : $t('settings.p2p.token-placeholder')"
-                  />
-                  <p class="ap-hint">{{ $t('settings.p2p.token-hint') }}</p>
+
+                <!-- Signed in as an account: the credential is the server's to
+                     revoke, so this side only shows who it belongs to. -->
+                <div v-if="p2pSignedIn" class="p2p-account">
+                  <div class="p2p-account-row">
+                    <span class="lbl">{{ $t('settings.p2p.account.email') }}</span>
+                    <span>{{ p2pStatus?.accountEmail }}</span>
+                  </div>
+                  <div v-if="p2pStatus?.displayName" class="p2p-account-row">
+                    <span class="lbl">{{ $t('settings.p2p.account.display-name') }}</span>
+                    <span>{{ p2pStatus.displayName }}</span>
+                  </div>
+                  <div v-if="p2pStatus?.role" class="p2p-account-row">
+                    <span class="lbl">{{ $t('settings.p2p.account.role') }}</span>
+                    <span>{{ p2pStatus.role }}</span>
+                  </div>
+                  <div class="row-g gap p2p-actions">
+                    <button class="ap-reset" :disabled="p2pBusy" @click="p2pLogout">
+                      {{ $t('settings.p2p.account.sign-out') }}
+                    </button>
+                  </div>
                 </div>
-                <div class="row-g gap p2p-actions">
-                  <button class="ap-reset" :disabled="p2pBusy" @click="saveP2pLink">{{ $t('settings.p2p.save') }}</button>
-                  <button class="ap-reset" :disabled="p2pBusy" @click="clearP2pLink">{{ $t('settings.p2p.clear') }}</button>
-                </div>
+
+                <template v-else>
+                  <div class="p2p-tabs" role="tablist">
+                    <button
+                      v-for="mode in (['login', 'register', 'token'] as const)"
+                      :key="mode"
+                      type="button"
+                      role="tab"
+                      class="p2p-tab"
+                      :class="{ on: p2pMode === mode }"
+                      :aria-selected="p2pMode === mode"
+                      :disabled="p2pBusy"
+                      @click="p2pMode = mode"
+                    >
+                      {{ $t('settings.p2p.account.tab-' + mode) }}
+                    </button>
+                  </div>
+
+                  <!-- Sign in / register. Both take the same two fields; only
+                       registering asks for the names it will label the new
+                       tenant with. -->
+                  <template v-if="p2pMode !== 'token'">
+                    <div class="field">
+                      <label class="lbl" for="p2p-email">{{ $t('settings.p2p.account.email') }}</label>
+                      <input
+                        id="p2p-email"
+                        v-model="p2pEmail"
+                        type="email"
+                        spellcheck="false"
+                        autocomplete="username"
+                        :disabled="p2pBusy"
+                        placeholder="you@example.com"
+                      />
+                    </div>
+                    <div class="field">
+                      <label class="lbl" for="p2p-password">{{ $t('settings.p2p.account.password') }}</label>
+                      <input
+                        id="p2p-password"
+                        v-model="p2pPassword"
+                        type="password"
+                        spellcheck="false"
+                        :autocomplete="p2pMode === 'register' ? 'new-password' : 'current-password'"
+                        :disabled="p2pBusy"
+                        :placeholder="$t('settings.p2p.account.password-placeholder')"
+                        @keyup.enter="submitP2pAccount(p2pMode === 'register' ? 'register' : 'login')"
+                      />
+                    </div>
+                    <template v-if="p2pMode === 'register'">
+                      <div class="field">
+                        <label class="lbl" for="p2p-display-name">
+                          {{ $t('settings.p2p.account.display-name') }}
+                        </label>
+                        <input
+                          id="p2p-display-name"
+                          v-model="p2pDisplayName"
+                          type="text"
+                          autocomplete="off"
+                          :disabled="p2pBusy"
+                          :placeholder="$t('settings.p2p.account.optional')"
+                        />
+                      </div>
+                      <div class="field">
+                        <label class="lbl" for="p2p-tenant-name">
+                          {{ $t('settings.p2p.account.tenant-name') }}
+                        </label>
+                        <input
+                          id="p2p-tenant-name"
+                          v-model="p2pTenantName"
+                          type="text"
+                          autocomplete="off"
+                          :disabled="p2pBusy"
+                          :placeholder="$t('settings.p2p.account.optional')"
+                        />
+                        <p class="ap-hint">{{ $t('settings.p2p.account.tenant-hint') }}</p>
+                      </div>
+                    </template>
+                    <div class="row-g gap p2p-actions">
+                      <button
+                        class="ap-reset"
+                        :disabled="p2pBusy"
+                        @click="submitP2pAccount(p2pMode === 'register' ? 'register' : 'login')"
+                      >
+                        {{ $t('settings.p2p.account.' + (p2pMode === 'register' ? 'submit-register' : 'submit-login')) }}
+                      </button>
+                    </div>
+                  </template>
+
+                  <!-- Pasting a token directly: unchanged, and deliberately kept
+                       for machines that have no account to sign in with. -->
+                  <template v-else>
+                    <div class="field p2p-field">
+                      <label class="lbl" for="p2p-token">{{ $t('settings.p2p.token') }}</label>
+                      <input
+                        id="p2p-token"
+                        v-model="p2pTokenInput"
+                        type="password"
+                        spellcheck="false"
+                        autocomplete="off"
+                        :disabled="p2pBusy"
+                        :placeholder="p2pStatus?.hasToken ? $t('settings.p2p.token-stored') : $t('settings.p2p.token-placeholder')"
+                      />
+                      <p class="ap-hint">{{ $t('settings.p2p.token-hint') }}</p>
+                    </div>
+                    <div class="row-g gap p2p-actions">
+                      <button class="ap-reset" :disabled="p2pBusy" @click="saveP2pLink">{{ $t('settings.p2p.save') }}</button>
+                      <button class="ap-reset" :disabled="p2pBusy" @click="clearP2pLink">{{ $t('settings.p2p.clear') }}</button>
+                    </div>
+                  </template>
+                </template>
+
                 <p class="p2p-status">
                   <span class="p2p-dot" :class="p2pDotClass"></span>
                   <span>{{ $t('settings.p2p.state-' + p2pState) }}</span>
@@ -3431,6 +3664,12 @@ watch(activeTab, (tab) => {
           <ExtensionsPane />
         </div>
 
+        <!-- ── LAYOUT TAB ────────────────────────────────────────────────── -->
+        <div v-show="activeTab === 'layout'" class="s-body layout-body" data-settings-section="layout">
+          <h1 class="s-page-title">{{ $t('settings.nav.layout') }}</h1>
+          <LayoutSettingsPane />
+        </div>
+
         <!-- ── STORAGE TAB ───────────────────────────────────────────────── -->
         <div v-show="activeTab === 'storage'" class="s-body storage-body" data-settings-section="storage">
           <h1 class="s-page-title">{{ $t('settings.nav.storage') }}</h1>
@@ -3460,7 +3699,9 @@ watch(activeTab, (tab) => {
 .s-overlay {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   z-index: 8000;
   display: flex;
   align-items: center;
@@ -3473,14 +3714,14 @@ watch(activeTab, (tab) => {
   background: var(--bg-base);
   color: var(--text-bright);
   border: 1px solid var(--border-muted);
-  border-radius: 12px;
-  width: 92vw;
+  border-radius: var(--radius-lg);
+  width: min(var(--modal-w-wide), 92vw);
   max-width: 1100px;
   height: 88vh;
   display: grid;
   grid-template-columns: 232px minmax(0, 1fr);
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0,0,0,0.7);
+  box-shadow: var(--shadow-modal);
 }
 
 /* ── Sidebar ─────────────────────────────────────────────────────────────────  */
@@ -3519,7 +3760,7 @@ watch(activeTab, (tab) => {
   line-height: 1.25;
 }
 .s-ws-name {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--text-bright);
   overflow: hidden;
@@ -3590,9 +3831,9 @@ watch(activeTab, (tab) => {
   height: 30px;
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 0 10px;
 }
 .s-search-input:focus {
@@ -3610,7 +3851,7 @@ watch(activeTab, (tab) => {
   overflow-y: auto;
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: 0 16px 36px rgba(0,0,0,0.45);
   padding: 6px;
 }
@@ -3620,7 +3861,7 @@ watch(activeTab, (tab) => {
   background: transparent;
   color: var(--text-primary);
   text-align: left;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 8px 9px;
   cursor: pointer;
 }
@@ -3628,6 +3869,12 @@ watch(activeTab, (tab) => {
 .s-search-result:focus-visible {
   background: var(--bg-muted);
   outline: none;
+}
+/* The background above is the same one hover paints, so keyboard focus was
+   indistinguishable from a mouse-over. Inset so the list's overflow cannot
+   clip it. */
+.s-search-result:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
 }
 .s-search-result-main {
   display: flex;
@@ -3637,7 +3884,7 @@ watch(activeTab, (tab) => {
   min-width: 0;
 }
 .s-search-result-title {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   color: var(--text-bright);
   overflow: hidden;
@@ -3652,7 +3899,7 @@ watch(activeTab, (tab) => {
 .s-search-result-summary {
   display: block;
   margin-top: 3px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.35;
   color: var(--text-secondary);
 }
@@ -3666,7 +3913,7 @@ watch(activeTab, (tab) => {
 .appearance-body { overflow-y: auto; padding: 18px 22px; }
 .ap-section { margin-bottom: 26px; }
 .ap-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.ap-title { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text-bright); }
+.ap-title { margin: 0 0 4px; font-size: var(--font-sm); font-weight: 600; color: var(--text-bright); }
 .ap-hint { margin: 0 0 14px; font-size: 11.5px; color: var(--text-secondary); }
 .ap-hint-warn { color: var(--danger-fg); }
 
@@ -3694,15 +3941,15 @@ watch(activeTab, (tab) => {
 .cli-agent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .cli-agent-row {
   display: flex; align-items: center; gap: 10px;
-  padding: 8px 12px; border: 1px solid var(--border-default); border-radius: 8px;
+  padding: 8px 12px; border: 1px solid var(--border-default); border-radius: var(--radius-md);
   background: var(--bg-elevated);
 }
 .cli-agent-row.drag-over { box-shadow: inset 0 0 0 2px var(--accent-focus); background: var(--accent-subtle); }
 .cli-agent-row.is-disabled { opacity: 0.55; }
-.cli-agent-grip { color: var(--text-secondary); cursor: grab; user-select: none; font-size: 14px; }
+.cli-agent-grip { color: var(--text-secondary); cursor: grab; user-select: none; font-size: var(--font-md); }
 .cli-agent-toggle { display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer; margin: 0; }
-.cli-agent-label { font-size: 13px; font-weight: 600; }
-.cli-agent-hint { font-size: 11px; color: var(--text-secondary); }
+.cli-agent-label { font-size: var(--font-sm); font-weight: 600; }
+.cli-agent-hint { font-size: var(--font-2xs); color: var(--text-secondary); }
 .ap-theme-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -3715,40 +3962,40 @@ watch(activeTab, (tab) => {
   gap: 9px;
   padding: 12px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-subtle);
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
+  transition: border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
   text-align: left;
 }
 .ap-theme-card:hover { border-color: var(--border-strong); background: var(--bg-muted); }
 .ap-theme-card.active { border-color: var(--accent-emphasis); box-shadow: 0 0 0 1px var(--accent-emphasis); }
 .ap-swatches { display: flex; gap: 4px; }
-.ap-swatch { width: 24px; height: 24px; border-radius: 5px; border: 1px solid var(--border-muted); }
-.ap-theme-label { font-size: 12px; font-weight: 500; color: var(--text-primary); }
-.ap-check { position: absolute; top: 10px; right: 11px; font-size: 12px; color: var(--accent-fg); }
+.ap-swatch { width: 24px; height: 24px; border-radius: var(--radius-sm); border: 1px solid var(--border-muted); }
+.ap-theme-label { font-size: var(--font-xs); font-weight: 500; color: var(--text-primary); }
+.ap-check { position: absolute; top: 10px; right: 11px; font-size: var(--font-xs); color: var(--accent-fg); }
 .ap-lang-row { display: flex; gap: 10px; flex-wrap: wrap; }
-.ap-toggle-row { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text-primary); font-size: 13px; }
+.ap-toggle-row { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text-primary); font-size: var(--font-sm); }
 .ap-toggle-row input { cursor: pointer; }
 .ap-lang-btn {
   position: relative;
   padding: 8px 20px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-subtle);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--font-sm);
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
+  transition: border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .ap-lang-btn:hover { border-color: var(--border-strong); background: var(--bg-muted); }
 .ap-lang-btn.active { border-color: var(--accent-emphasis); box-shadow: 0 0 0 1px var(--accent-emphasis); }
 .ap-timeout-field { max-width: 140px; }
 .ap-reset {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 10px;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -3761,7 +4008,7 @@ watch(activeTab, (tab) => {
   gap: 12px;
   padding: 7px 10px;
   border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-subtle);
 }
 .ap-color-input {
@@ -3769,22 +4016,22 @@ watch(activeTab, (tab) => {
   height: 26px;
   padding: 0;
   border: 1px solid var(--border-default);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   cursor: pointer;
   flex-shrink: 0;
 }
-.ap-color-name { font-size: 12px; color: var(--text-primary); min-width: 92px; }
-.ap-color-token { font-size: 10.5px; color: var(--text-muted); font-family: ui-monospace, monospace; flex: 1; }
+.ap-color-name { font-size: var(--font-xs); color: var(--text-primary); min-width: 92px; }
+.ap-color-token { font-size: 10.5px; color: var(--text-muted); font-family: var(--font-mono); flex: 1; }
 .ap-color-clear {
   width: 20px;
   height: 20px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .ap-color-clear:hover { color: var(--danger-fg); background: var(--bg-muted); }
 .s-close {
@@ -3795,7 +4042,7 @@ watch(activeTab, (tab) => {
   border: none;
   background: var(--bg-base);
   color: var(--text-secondary);
-  font-size: 16px;
+  font-size: var(--font-lg);
   cursor: pointer;
   padding: 4px 8px;
   border-radius: var(--radius-control);
@@ -3819,6 +4066,9 @@ watch(activeTab, (tab) => {
 /* Storage tab is a two-column settings page like appearance/general: the bare
    .s-body clips instead of scrolling, so it needs its own scroll + padding. */
 .storage-body { overflow-y: auto; padding: 18px 22px; }
+/* Same reason as storage: a stack of region cards needs the gutter and its own
+   scroll, which the bare .s-body (overflow:hidden, no padding) does not give. */
+.layout-body { overflow-y: auto; padding: 18px 22px; }
 /* Same as the other padded tabs: without a modifier the bare .s-body is
    overflow:hidden with no gutter, which clips the shortcut list instead of
    scrolling it. */
@@ -3836,14 +4086,14 @@ watch(activeTab, (tab) => {
   border-bottom: 1px solid var(--border-muted);
   background: var(--bg-inset);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   min-width: 0;
   flex-shrink: 0;
 }
 .settings-meta-row.inline {
   padding: 7px 9px;
   border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   margin-top: 10px;
 }
 .scope-badge {
@@ -3860,7 +4110,7 @@ watch(activeTab, (tab) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 .settings-path-divider { color: var(--text-muted); }
 .settings-path-btn {
@@ -3868,7 +4118,7 @@ watch(activeTab, (tab) => {
   border: 1px solid var(--border-default);
   background: transparent;
   color: var(--text-secondary);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   padding: 3px 7px;
   font-size: 10.5px;
   cursor: pointer;
@@ -3884,7 +4134,7 @@ button.tiny {
   font-size: 10.5px;
   line-height: 1.2;
 }
-.summary-ok { font-size: 11px; color: var(--success-fg); margin-left: 6px; }
+.summary-ok { font-size: var(--font-2xs); color: var(--success-fg); margin-left: 6px; }
 
 /* Update pipeline rail: check → download → install. The connector is drawn on
    each step except the first, so the row stays a plain flex list. */
@@ -3918,7 +4168,7 @@ button.tiny {
   height: 18px;
   border: 1px solid var(--border-default);
   border-radius: 50%;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   line-height: 1;
 }
 .upd-stage.active { color: var(--text-bright); }
@@ -3942,41 +4192,46 @@ button.tiny {
   font-size: 11.5px;
   font-family: inherit;
   background: var(--bg-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 /* ── Fields ───────────────────────────────────────────────────────────────── */
 .field { display: flex; flex-direction: column; gap: 4px; }
-.lbl { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); }
+.lbl { font-size: var(--font-3xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); }
 input[type='text'], input[type='email'], input[type='number'], input[type='password'], textarea, select {
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
   color: var(--text-bright);
   padding: 7px 9px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--font-xs);
   box-sizing: border-box;
   width: 100%;
 }
-textarea { font-family: Menlo, Monaco, monospace; resize: vertical; line-height: 1.5; }
+textarea { font-family: var(--font-mono); resize: vertical; line-height: var(--lh-base); }
 input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent-emphasis); }
 input:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ── List items ───────────────────────────────────────────────────────────── */
 .row-g { display: flex; align-items: center; gap: 6px; }
 .row-g.gap { gap: 8px; }
-.badge { background: var(--bg-muted); color: var(--text-secondary); font-size: 9px; padding: 1px 5px; border-radius: 3px; }
+.badge { background: var(--bg-muted); color: var(--text-secondary); font-size: 9px; padding: 1px 5px; border-radius: var(--radius-xs); }
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 6px 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
 }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.primary { background: var(--success-emphasis); border-color: var(--success-strong); color: var(--text-on-emphasis); font-weight: 600; }
@@ -3985,11 +4240,40 @@ button.danger { background: var(--danger-deep); border-color: var(--danger-muted
 button.danger:hover { background: var(--danger-muted); }
 button.ghost { background: transparent; }
 button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
+/* The label carries a count, which must not wrap inside the row's control slot. */
+.reclaim-now-btn { white-space: nowrap; }
+/* The only button in this panel with no feedback of its own: the base rule
+   above supplies its box, this supplies hover and press. */
+.reclaim-now-btn:hover:not(:disabled) {
+  background: var(--bg-hover-strong);
+  border-color: var(--border-strong);
+}
+.reclaim-now-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
 
 /* ── Messages ─────────────────────────────────────────────────────────────── */
-.err-msg { color: var(--danger-fg); font-size: 11px; margin: 0; }
+.err-msg { color: var(--danger-fg); font-size: var(--font-2xs); margin: 0; }
 
 /* Cross-device link */
+/* Sign-in tabs. No width/box-sizing here on purpose: these panels have no
+   border-box, so a width:100% would push the card past its grid track. */
+.p2p-tabs { display: flex; gap: 2px; margin: 14px 0 4px; border-bottom: 1px solid var(--border-default); }
+.p2p-tab {
+  appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
+  padding: 6px 12px; font-size: var(--font-xs); color: var(--text-secondary); cursor: pointer;
+}
+.p2p-tab:hover:not(:disabled) { color: var(--text-bright); }
+.p2p-tab.on { color: var(--text-bright); border-bottom-color: var(--accent-focus); font-weight: 500; }
+.p2p-tab:disabled { opacity: 0.5; cursor: default; }
+.p2p-account { margin-top: 12px; }
+.p2p-account-row {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 5px 0; font-size: var(--font-xs); border-bottom: 1px solid var(--border-muted);
+}
+.p2p-account-row:last-of-type { border-bottom: 0; }
+.p2p-account-row .lbl { color: var(--text-secondary); }
 .p2p-field { margin-top: 10px; }
 .p2p-field .ap-hint { margin: 4px 0 0; }
 .p2p-actions { margin-top: 12px; }
@@ -3999,36 +4283,36 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .p2p-dot.err { background: var(--danger-fg); }
 .p2p-dot.warn { background: var(--attention-fg); }
 .p2p-dot.idle { background: var(--text-secondary); }
-.p2p-detail { margin: 4px 0 0; font-size: 11px; color: var(--text-secondary); word-break: break-all; }
+.p2p-detail { margin: 4px 0 0; font-size: var(--font-2xs); color: var(--text-secondary); word-break: break-all; }
 
 /* Cross-device authorization (pane policy) */
 .policy-title { margin: 0 0 6px; font-size: 12.5px; color: var(--text-bright); }
-.policy-deny { margin: 8px 0 0; font-size: 11px; color: var(--attention-fg); }
-.policy-readonly { margin: 6px 0 0; font-size: 11px; color: var(--text-secondary); }
+.policy-deny { margin: 8px 0 0; font-size: var(--font-2xs); color: var(--attention-fg); }
+.policy-readonly { margin: 6px 0 0; font-size: var(--font-2xs); color: var(--text-secondary); }
 .policy-switch { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; cursor: pointer; }
 .policy-switch input { margin-top: 2px; flex-shrink: 0; }
-.policy-switch-label { display: block; font-size: 12px; color: var(--text-bright); }
+.policy-switch-label { display: block; font-size: var(--font-xs); color: var(--text-bright); }
 .policy-switch .ap-hint { margin: 2px 0 0; }
-.policy-section-label { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
+.policy-section-label { margin: 14px 0 6px; font-size: var(--font-2xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
 .policy-empty { margin: 0; font-size: 11.5px; color: var(--text-secondary); }
 .policy-rules { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.policy-rule { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: 5px; background: var(--bg-muted); }
+.policy-rule { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-muted); }
 .policy-rule-text { font-size: 11.5px; color: var(--text-bright); word-break: break-all; }
 .policy-add { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .member-row { flex-direction: column; align-items: stretch; gap: 6px; }
 .member-main { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .member-main .policy-rule-text { flex: 1; min-width: 0; }
-.member-tag { margin-left: 6px; padding: 1px 5px; border-radius: 3px; font-size: 10px; background: var(--bg-default); color: var(--text-secondary); }
+.member-tag { margin-left: 6px; padding: 1px 5px; border-radius: var(--radius-xs); font-size: var(--font-3xs); background: var(--bg-default); color: var(--text-secondary); }
 .member-tag.off { color: var(--attention-fg); }
 .member-role-static { font-size: 11.5px; color: var(--text-secondary); flex-shrink: 0; }
 .member-role { flex-shrink: 0; }
 .member-confirm { border-top: 1px solid var(--border-default); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
 .member-confirm-text { margin: 0; font-size: 11.5px; color: var(--attention-fg); }
-.member-token { margin: 12px 0 0; padding: 10px; border: 1px solid var(--attention-fg); border-radius: 5px; background: var(--bg-muted); display: flex; flex-direction: column; gap: 8px; }
+.member-token { margin: 12px 0 0; padding: 10px; border: 1px solid var(--attention-fg); border-radius: var(--radius-sm); background: var(--bg-muted); display: flex; flex-direction: column; gap: 8px; }
 .member-token-title { margin: 0; font-size: 12.5px; color: var(--text-bright); }
 .member-token-warn { margin: 0; font-size: 11.5px; color: var(--attention-fg); }
-.member-token-value { display: block; padding: 8px; border-radius: 4px; background: var(--bg-default); font-size: 12px; color: var(--text-bright); word-break: break-all; user-select: all; }
-.hint-msg { color: var(--text-secondary); font-size: 11px; margin: 0; }
+.member-token-value { display: block; padding: 8px; border-radius: var(--radius-xs); background: var(--bg-default); font-size: var(--font-xs); color: var(--text-bright); word-break: break-all; user-select: all; }
+.hint-msg { color: var(--text-secondary); font-size: var(--font-2xs); margin: 0; }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */
 .appearance-body { overflow-y: auto; }
@@ -4039,7 +4323,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   margin-bottom: 18px;
   padding: 3px;
   border: 1px solid var(--border-muted);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-inset);
   align-self: flex-start;
 }
@@ -4050,7 +4334,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   font-size: 12.5px;
   font-weight: 600;
   padding: 5px 14px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 .help-topic:hover { color: var(--text-primary); }
@@ -4069,35 +4353,35 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   padding: 12px 22px; border-bottom: 1px solid var(--border-muted);
   flex-shrink: 0; background: var(--bg-inset);
 }
-.mcp-page-title { font-size: 13px; font-weight: 700; color: var(--text-bright); flex: 1; min-width: 0; }
+.mcp-page-title { font-size: var(--font-sm); font-weight: 700; color: var(--text-bright); flex: 1; min-width: 0; }
 .mcp-topbar-actions { display: flex; gap: 8px; }
 .mcp-action-btn {
-  font-size: 11px; padding: 5px 11px; border-radius: 6px;
+  font-size: var(--font-2xs); padding: 5px 11px; border-radius: var(--radius-sm);
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-bright); cursor: pointer;
 }
 .mcp-action-btn:hover:not(:disabled) { background: var(--border-default); }
 .mcp-action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .mcp-back-btn {
-  font-size: 12px; padding: 4px 10px; border-radius: 5px;
+  font-size: var(--font-xs); padding: 4px 10px; border-radius: var(--radius-sm);
   background: transparent; border: 1px solid var(--border-default); color: var(--text-secondary); cursor: pointer;
 }
 .mcp-back-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
-.mcp-summary-ok { font-size: 11px; color: var(--success-fg); padding: 4px 22px; }
+.mcp-summary-ok { font-size: var(--font-2xs); color: var(--success-fg); padding: 4px 22px; }
 .mcp-conflict {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   margin: 8px 22px 0; padding: 7px 9px; border-left: 3px solid var(--attention-fg);
   background: color-mix(in srgb, var(--attention-fg) 8%, var(--bg-subtle));
-  color: var(--attention-fg); font-size: 11px;
+  color: var(--attention-fg); font-size: var(--font-2xs);
 }
 
 /* Server list */
 .mcp-server-list { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; flex: 1; min-height: 0; }
-.mcp-loading { color: var(--text-secondary); font-size: 12px; padding: 8px 0; }
-.mcp-empty { color: var(--text-muted); font-size: 12px; padding: 24px 0; text-align: center; }
+.mcp-loading { color: var(--text-secondary); font-size: var(--font-xs); padding: 8px 0; }
+.mcp-empty { color: var(--text-muted); font-size: var(--font-xs); padding: 24px 0; text-align: center; }
 
 /* Server card */
 .mcp-server-card {
-  background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: 10px;
+  background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: var(--radius-md);
   display: flex; flex-direction: column; overflow: hidden;
 }
 
@@ -4107,10 +4391,10 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   padding: 12px 14px; min-height: 44px;
 }
 .mcp-spacer { flex: 1; }
-.mcp-server-name { font-weight: 700; font-size: 13px; color: var(--text-bright); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-server-name { font-weight: 700; font-size: var(--font-sm); color: var(--text-bright); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mcp-transport-badge {
   padding: 2px 6px; border: 1px solid var(--border-default); border-radius: var(--radius-pill);
-  color: var(--text-secondary); background: var(--bg-muted); font-family: Menlo, Monaco, monospace;
+  color: var(--text-secondary); background: var(--bg-muted); font-family: var(--font-mono);
   font-size: 9px; text-transform: uppercase;
 }
 
@@ -4126,39 +4410,39 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 /* Delete button */
 .mcp-delete-btn {
   border: none; background: transparent; color: var(--text-disabled);
-  font-size: 14px; cursor: pointer; padding: 2px 4px; border-radius: 4px; line-height: 1;
+  font-size: var(--font-md); cursor: pointer; padding: 2px 4px; border-radius: var(--radius-xs); line-height: 1;
 }
 .mcp-delete-btn:hover { color: var(--danger-fg); background: color-mix(in srgb, var(--danger-fg) 10%, transparent); }
-.mcp-delete-btn.small { font-size: 10px; color: var(--text-muted); }
+.mcp-delete-btn.small { font-size: var(--font-3xs); color: var(--text-muted); }
 .mcp-delete-btn.small:hover { color: var(--danger-fg); }
 
 /* Tools row */
 .mcp-tools-row {
   display: flex; align-items: center; gap: 6px;
   padding: 6px 14px; border-top: 1px solid var(--border-muted);
-  font-size: 11px; color: var(--text-secondary); cursor: pointer; user-select: none;
+  font-size: var(--font-2xs); color: var(--text-secondary); cursor: pointer; user-select: none;
 }
 .mcp-tools-row:hover { background: var(--bg-elevated); }
 .mcp-tools-error { color: var(--danger-fg); cursor: default; }
 .mcp-tools-disabled { color: var(--text-disabled); cursor: default; }
-.mcp-chevron { font-size: 12px; transition: transform 0.15s; display: inline-block; }
+.mcp-chevron { font-size: var(--font-xs); transition: transform var(--motion-fast) var(--ease-out); display: inline-block; }
 .mcp-chevron.open { transform: rotate(90deg); }
-.mcp-tool-count { font-size: 11px; }
+.mcp-tool-count { font-size: var(--font-2xs); }
 
 /* Tool list */
 .mcp-tool-list {
   list-style: none; margin: 0; padding: 6px 14px 10px 28px;
   border-top: 1px solid var(--bg-subtle); display: flex; flex-direction: column; gap: 3px;
 }
-.mcp-tool-list li { font-size: 11px; color: var(--text-secondary); }
-.mcp-tool-name { color: var(--accent-bright); font-family: Menlo, Monaco, monospace; }
+.mcp-tool-list li { font-size: var(--font-2xs); color: var(--text-secondary); }
+.mcp-tool-name { color: var(--accent-bright); font-family: var(--font-mono); }
 .mcp-tool-desc { color: var(--text-muted); }
 
 /* Config form toggle */
 .mcp-config-toggle {
   display: flex; align-items: center; gap: 6px;
   padding: 5px 14px; border-top: 1px solid var(--border-muted);
-  font-size: 11px; color: var(--text-muted); cursor: pointer; user-select: none;
+  font-size: var(--font-2xs); color: var(--text-muted); cursor: pointer; user-select: none;
 }
 .mcp-config-toggle:hover { background: var(--bg-elevated); color: var(--text-secondary); }
 .mcp-config-form {
@@ -4167,23 +4451,23 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 .mcp-config-form select,
 .mcp-custom-form select {
-  padding: 6px 8px; border: 1px solid var(--border-default); border-radius: 5px;
+  padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   background: var(--bg-base); color: var(--text-primary);
 }
 .mcp-transport-field { max-width: 220px; }
 
 /* Env vars editor */
 .mcp-env-row { display: flex; align-items: center; gap: 6px; }
-.mcp-env-key { width: 140px; flex-shrink: 0; font-family: Menlo, Monaco, monospace; font-size: 11px; }
-.mcp-env-val { flex: 1; min-width: 0; font-family: Menlo, Monaco, monospace; font-size: 11px; }
-.mcp-arg-index { width: 18px; color: var(--text-muted); font-family: Menlo, Monaco, monospace; font-size: 10px; text-align: right; }
+.mcp-env-key { width: 140px; flex-shrink: 0; font-family: var(--font-mono); font-size: var(--font-2xs); }
+.mcp-env-val { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--font-2xs); }
+.mcp-arg-index { width: 18px; color: var(--text-muted); font-family: var(--font-mono); font-size: var(--font-3xs); text-align: right; }
 .mcp-add-env-btn {
-  font-size: 10px; padding: 2px 7px; border-radius: 4px;
+  font-size: var(--font-3xs); padding: 2px 7px; border-radius: var(--radius-xs);
   background: transparent; border: 1px solid var(--border-default); color: var(--text-secondary); cursor: pointer; margin-left: 6px;
 }
 .mcp-add-env-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
 .mcp-reveal-btn {
-  border: 1px solid var(--border-default); border-radius: 4px; background: transparent;
+  border: 1px solid var(--border-default); border-radius: var(--radius-xs); background: transparent;
   color: var(--text-secondary); padding: 3px 6px; font-size: 9px; cursor: pointer;
 }
 .mcp-reveal-btn:hover { color: var(--text-bright); background: var(--bg-muted); }
@@ -4193,18 +4477,18 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   position: relative; padding: 12px 16px; border-bottom: 1px solid var(--border-muted); flex-shrink: 0;
 }
 .mcp-search {
-  width: 100%; padding: 8px 36px 8px 12px; border-radius: 8px;
+  width: 100%; padding: 8px 36px 8px 12px; border-radius: var(--radius-md);
   background: var(--bg-subtle); border: 1px solid var(--border-default); color: var(--text-bright);
-  font-size: 12px; box-sizing: border-box;
+  font-size: var(--font-xs); box-sizing: border-box;
 }
 .mcp-search:focus { outline: none; border-color: var(--accent-emphasis); }
 .mcp-search-icon {
   position: absolute; right: 28px; top: 50%; transform: translateY(-50%);
-  font-size: 13px; color: var(--text-muted); pointer-events: none;
+  font-size: var(--font-sm); color: var(--text-muted); pointer-events: none;
 }
 
 .mcp-catalog-hint {
-  padding: 8px 16px; font-size: 11px; color: var(--text-secondary); line-height: 1.6;
+  padding: 8px 16px; font-size: var(--font-2xs); color: var(--text-secondary); line-height: 1.6;
   background: var(--bg-base); border-bottom: 1px solid var(--border-muted); flex-shrink: 0;
 }
 .mcp-catalog-hint strong { color: var(--text-bright); }
@@ -4217,17 +4501,17 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 .mcp-catalog-card:last-child { border-bottom: none; }
 .mcp-catalog-info { flex: 1; display: flex; flex-direction: column; gap: 3px; }
-.mcp-catalog-name { font-size: 13px; font-weight: 700; color: var(--text-bright); }
-.mcp-catalog-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
-.mcp-catalog-note { font-size: 10px; color: var(--attention-fg); margin-top: 2px; }
+.mcp-catalog-name { font-size: var(--font-sm); font-weight: 700; color: var(--text-bright); }
+.mcp-catalog-desc { font-size: var(--font-2xs); color: var(--text-secondary); line-height: var(--lh-base); }
+.mcp-catalog-note { font-size: var(--font-3xs); color: var(--attention-fg); margin-top: 2px; }
 .mcp-add-btn {
-  font-size: 11px; padding: 6px 14px; border-radius: 6px; white-space: nowrap; flex-shrink: 0;
+  font-size: var(--font-2xs); padding: 6px 14px; border-radius: var(--radius-sm); white-space: nowrap; flex-shrink: 0;
   background: var(--accent-emphasis); border: 1px solid var(--accent-focus); color: var(--text-on-emphasis); font-weight: 600; cursor: pointer;
 }
 .mcp-add-btn:hover:not(:disabled) { background: var(--accent-focus); }
 .mcp-add-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .mcp-installed-badge {
-  font-size: 11px; padding: 6px 14px; border-radius: 6px; white-space: nowrap; flex-shrink: 0;
+  font-size: var(--font-2xs); padding: 6px 14px; border-radius: var(--radius-sm); white-space: nowrap; flex-shrink: 0;
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-muted); cursor: not-allowed;
 }
 .mcp-custom-form {
@@ -4235,15 +4519,15 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   display: flex; flex-direction: column; gap: 12px;
   border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-subtle);
 }
-.mcp-custom-form > p { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
+.mcp-custom-form > p { margin: 0; color: var(--text-secondary); font-size: var(--font-2xs); line-height: var(--lh-base); }
 .mcp-custom-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* External access / CDP debug section */
 .ea-section-wrap { flex-shrink: 0; padding: 0 22px 18px; }
-.ea-warning { margin: 0; padding: 0 var(--space-row-x) 10px; font-size: 11px; color: var(--attention-fg); }
+.ea-warning { margin: 0; padding: 0 var(--space-row-x) 10px; font-size: var(--font-2xs); color: var(--attention-fg); }
 .ea-section-wrap .err-msg { padding: 0 var(--space-row-x) 10px; }
 .ea-connection { padding: 0 var(--space-row-x) 12px; }
-.ea-connection input[readonly] { width: 100%; font-size: 11px; }
+.ea-connection input[readonly] { width: 100%; font-size: var(--font-2xs); }
 
 /* ── Analyzer tab ─────────────────────────────────────────────────────────── */
 .analyzer-body { display: flex; flex-direction: column; gap: 0; overflow-y: auto; padding: 0; }
@@ -4253,101 +4537,101 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   border-bottom: 1px solid var(--border-muted);
   flex-shrink: 0;
 }
-.az-section-title { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+.az-section-title { font-size: var(--font-2xs); font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
 .az-section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .az-section-header .az-section-title { margin-bottom: 0; }
-.az-section-note { font-size: 10px; color: var(--text-muted); }
+.az-section-note { font-size: var(--font-3xs); color: var(--text-muted); }
 .az-subsection { margin-top: 12px; }
 .az-status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
 .az-status-dot.ok { background: var(--success-fg); }
 .az-status-dot.err { background: var(--danger-fg); }
 .az-pct { font-weight: 600; color: var(--text-bright); margin-left: 6px; }
-.az-size-info { color: var(--text-muted); font-size: 11px; margin-left: 4px; }
-.az-gguf-hint { font-size: 11px; color: var(--text-muted); margin-top: 6px; line-height: 1.5; }
-.az-gguf-hint code { background: var(--bg-subtle); padding: 1px 4px; border-radius: 3px; color: var(--text-bright); }
+.az-size-info { color: var(--text-muted); font-size: var(--font-2xs); margin-left: 4px; }
+.az-gguf-hint { font-size: var(--font-2xs); color: var(--text-muted); margin-top: 6px; line-height: var(--lh-base); }
+.az-gguf-hint code { background: var(--bg-subtle); padding: 1px 4px; border-radius: var(--radius-xs); color: var(--text-bright); }
 .az-link { color: var(--accent-fg); text-decoration: none; }
 .az-link:hover { text-decoration: underline; }
-.az-code { background: var(--bg-subtle); padding: 1px 5px; border-radius: 3px; font-size: 11px; color: var(--text-bright); font-family: monospace; }
+.az-code { background: var(--bg-subtle); padding: 1px 5px; border-radius: var(--radius-xs); font-size: var(--font-2xs); color: var(--text-bright); font-family: var(--font-mono); }
 .az-url-row { display: flex; gap: 6px; align-items: center; }
 .az-url-row .az-input { flex: 1; }
 .az-recheck-btn {
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-secondary);
-  font-size: 14px; padding: 6px 10px; border-radius: 6px; cursor: pointer;
-  flex-shrink: 0; transition: color 0.15s, background 0.15s;
+  font-size: var(--font-md); padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  flex-shrink: 0; transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .az-recheck-btn:hover:not(:disabled) { background: var(--border-default); color: var(--text-bright); }
 .az-recheck-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .az-detect-btn {
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-secondary);
-  font-size: 11px; font-weight: 500; padding: 6px 10px; border-radius: 6px; cursor: pointer;
-  flex-shrink: 0; white-space: nowrap; transition: color 0.15s, background 0.15s;
+  font-size: var(--font-2xs); font-weight: 500; padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  flex-shrink: 0; white-space: nowrap; transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .az-detect-btn:hover:not(:disabled) { background: var(--border-default); color: var(--text-bright); }
 .az-detect-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .az-browse-btn {
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-secondary);
-  font-size: 13px; padding: 6px 10px; border-radius: 6px; cursor: pointer;
-  flex-shrink: 0; transition: color 0.15s, background 0.15s;
+  font-size: var(--font-sm); padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  flex-shrink: 0; transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .az-browse-btn:hover { background: var(--border-default); color: var(--text-bright); }
 
-.az-backend-toggle { display: flex; gap: 0; border: 1px solid var(--border-default); border-radius: 6px; overflow: hidden; width: fit-content; }
+.az-backend-toggle { display: flex; gap: 0; border: 1px solid var(--border-default); border-radius: var(--radius-sm); overflow: hidden; width: fit-content; }
 .az-backend-btn {
-  background: var(--bg-subtle); border: none; color: var(--text-secondary); font-size: 12px;
-  padding: 6px 16px; cursor: pointer; transition: background 0.15s, color 0.15s;
+  background: var(--bg-subtle); border: none; color: var(--text-secondary); font-size: var(--font-xs);
+  padding: 6px 16px; cursor: pointer; transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .az-backend-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
 .az-backend-btn.active { background: var(--accent-emphasis); color: var(--text-on-emphasis); font-weight: 600; }
 
-.az-label { display: block; font-size: 11px; color: var(--text-secondary); margin-bottom: 5px; }
+.az-label { display: block; font-size: var(--font-2xs); color: var(--text-secondary); margin-bottom: 5px; }
 .az-hint-inline { color: var(--text-muted); font-style: italic; }
 .az-input {
   width: 100%; box-sizing: border-box;
   background: var(--bg-base); border: 1px solid var(--border-default); color: var(--text-bright);
-  font-size: 12px; padding: 7px 10px; border-radius: 6px;
-  outline: none; transition: border-color 0.15s;
+  font-size: var(--font-xs); padding: 7px 10px; border-radius: var(--radius-sm);
+  outline: none; transition: border-color var(--motion-fast) var(--ease-out);
 }
 .az-input:focus { border-color: var(--accent-focus); }
 .az-status-row { margin-top: 8px; }
 
 .az-pull-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 .az-pull-input { flex: 1; margin-bottom: 0; }
-.az-pull-error { font-size: 11px; color: var(--danger-fg); margin-top: 6px; }
+.az-pull-error { font-size: var(--font-2xs); color: var(--danger-fg); margin-top: 6px; }
 
 .az-progress-bar-wrap {
-  height: 4px; background: var(--bg-muted); border-radius: 2px; margin-top: 6px; overflow: hidden;
+  height: 4px; background: var(--bg-muted); border-radius: var(--radius-xs); margin-top: 6px; overflow: hidden;
 }
-.az-progress-bar { height: 100%; background: var(--accent-emphasis); border-radius: 2px; transition: width 0.3s; }
+.az-progress-bar { height: 100%; background: var(--accent-emphasis); border-radius: var(--radius-xs); transition: width var(--motion-base) var(--ease-out); }
 
 .az-model-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
-.az-no-models { font-size: 12px; color: var(--text-muted); padding: 8px 0; }
+.az-no-models { font-size: var(--font-xs); color: var(--text-muted); padding: 8px 0; }
 .az-model-row {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 7px 10px; background: var(--bg-base); border: 1px solid var(--border-muted); border-radius: 6px;
+  padding: 7px 10px; background: var(--bg-base); border: 1px solid var(--border-muted); border-radius: var(--radius-sm);
 }
 .az-model-info { display: flex; flex-direction: column; gap: 2px; }
-.az-model-name { font-size: 12px; color: var(--text-bright); font-family: monospace; }
-.az-model-meta { font-size: 10px; color: var(--text-secondary); }
+.az-model-name { font-size: var(--font-xs); color: var(--text-bright); font-family: var(--font-mono); }
+.az-model-meta { font-size: var(--font-3xs); color: var(--text-secondary); }
 .az-del-btn {
-  background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 12px;
-  padding: 2px 6px; border-radius: 4px; transition: color 0.15s, background 0.15s;
+  background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: var(--font-xs);
+  padding: 2px 6px; border-radius: var(--radius-xs); transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .az-del-btn:hover { color: var(--danger-fg); background: var(--bg-muted); }
 
 .az-benchmark-section { flex-shrink: 0; display: flex; flex-direction: column; gap: 0; }
 
-.az-version { font-size: 11px; color: var(--text-secondary); }
+.az-version { font-size: var(--font-2xs); color: var(--text-secondary); }
 .az-version.offline { color: var(--danger-fg); }
 .az-run-btn {
   background: var(--accent-emphasis);
   border: 1px solid var(--accent-focus);
   color: var(--text-on-emphasis);
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   padding: 7px 16px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--motion-fast) var(--ease-out);
 }
 .az-run-btn:hover:not(:disabled) { background: var(--accent-focus); }
 .az-run-btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -4358,31 +4642,31 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   background: var(--bg-base);
   flex-shrink: 0;
 }
-.az-progress-label { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 8px; }
+.az-progress-label { font-size: var(--font-xs); color: var(--text-secondary); display: flex; align-items: center; gap: 8px; }
 .az-spin { animation: spin 1s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .az-hint {
   padding: 20px 24px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   line-height: 1.7;
 }
 .az-hint p { margin: 0 0 10px; }
 .az-hint ul { margin: 0 0 10px; padding-left: 18px; }
 .az-hint li { margin-bottom: 4px; }
-.az-hint code { background: var(--bg-subtle); padding: 1px 5px; border-radius: 3px; font-size: 11px; color: var(--text-bright); }
-.az-pass-rule { color: var(--accent-fg); font-size: 11px; }
+.az-hint code { background: var(--bg-subtle); padding: 1px 5px; border-radius: var(--radius-xs); font-size: var(--font-2xs); color: var(--text-bright); }
+.az-pass-rule { color: var(--accent-fg); font-size: var(--font-2xs); }
 
 .az-results { padding: 16px 20px; flex: 1; overflow-y: auto; min-height: 0; }
 .az-results-summary {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
   margin-bottom: 12px;
 }
 .az-results-summary strong { color: var(--success-fg); }
 
-.az-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.az-table { width: 100%; border-collapse: collapse; font-size: var(--font-xs); }
 .az-table th {
   text-align: left;
   padding: 6px 10px;
@@ -4393,11 +4677,11 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 .az-th-task, .az-th-score, .az-th-verdict { text-align: center; }
 .az-table td { padding: 8px 10px; border-bottom: 1px solid var(--bg-subtle); vertical-align: middle; }
-.az-td-model { font-family: monospace; font-size: 11px; color: var(--text-bright); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.az-td-model { font-family: var(--font-mono); font-size: var(--font-2xs); color: var(--text-bright); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .az-td-task { text-align: center; white-space: nowrap; }
 .az-td-score { text-align: center; color: var(--text-secondary); }
 .az-td-verdict { text-align: center; }
-.az-elapsed { font-size: 10px; color: var(--text-secondary); margin-left: 3px; }
+.az-elapsed { font-size: var(--font-3xs); color: var(--text-secondary); margin-left: 3px; }
 .az-na { color: var(--text-disabled); }
 .az-row-fail td { color: var(--text-disabled); }
 .az-row-fail .az-td-model { color: var(--text-muted); }
@@ -4406,8 +4690,8 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   color: var(--success-fg);
   border: 1px solid color-mix(in srgb, var(--success-fg) 30%, transparent);
   padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 11px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-2xs);
   font-weight: 600;
 }
 .az-badge-fail {
@@ -4415,8 +4699,77 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   color: var(--text-muted);
   border: 1px solid var(--border-muted);
   padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 11px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-2xs);
 }
 
+/* ── Convergence layer ──────────────────────────────────────────────────────
+   Appended last on purpose: these rules carry the same specificity as the
+   individual declarations above, so source order decides the tie in their
+   favour. Only colour / type / border are unified here — every rule above
+   keeps its own margins, padding and layout. */
+
+/* Helper text under a control: one spec, many legacy names. */
+.ap-hint,
+.az-hint,
+.az-hint-inline,
+.az-gguf-hint,
+.az-section-note,
+.cli-agent-hint,
+.help-topic,
+.hint-msg,
+.mcp-catalog-desc,
+.mcp-catalog-hint,
+.mcp-catalog-note,
+.mcp-tool-desc,
+.upd-notes {
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
+}
+
+/* Native form controls inside the settings body get the house skin. Scoped to
+   .s-body so the sidebar search field and anything outside the tab bodies is
+   untouched; more specific existing rules still win on width/padding. */
+.s-body input[type='text'],
+.s-body input[type='number'],
+.s-body input[type='password'],
+.s-body input[type='search'],
+.s-body select {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: var(--lh-base);
+  padding: 5px 8px;
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+.s-body input[type='text']:hover:not(:disabled),
+.s-body input[type='number']:hover:not(:disabled),
+.s-body input[type='password']:hover:not(:disabled),
+.s-body input[type='search']:hover:not(:disabled),
+.s-body select:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+.s-body input[type='text']:focus,
+.s-body input[type='number']:focus,
+.s-body input[type='password']:focus,
+.s-body input[type='search']:focus,
+.s-body select:focus {
+  outline: none;
+  border-color: var(--accent-focus);
+}
+.s-body input[type='text']:disabled,
+.s-body input[type='number']:disabled,
+.s-body input[type='password']:disabled,
+.s-body input[type='search']:disabled,
+.s-body select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.s-body select {
+  cursor: pointer;
+}
 </style>

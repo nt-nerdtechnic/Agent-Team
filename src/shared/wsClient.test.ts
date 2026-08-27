@@ -29,10 +29,20 @@ class FakeWebSocket {
 
   send(data: string): void { this.sent.push(data) }
 
-  close(): void {
+  closeCode?: number
+  closeReason?: string
+
+  close(code?: number, reason?: string): void {
     this.closed = true
+    this.closeCode = code
+    this.closeReason = reason
     this.readyState = FakeWebSocket.CLOSED
     this.fire('close', {})
+  }
+
+  /** A server-pushed event, as `terminal.output` arrives. */
+  push(type: string): void {
+    this.fire('message', { data: JSON.stringify({ id: '', type, payload: {}, timestamp: '' }) })
   }
 
   fire(type: string, ev: unknown): void {
@@ -164,18 +174,44 @@ describe('createWsClient', () => {
     expect(c.isHealthyFor(URL)).toBe(false)
   })
 
-  it('force-closes the socket after three consecutive ping failures', async () => {
+  it('never probes an idle socket and never closes one from this side', async () => {
     const c = makeClient()
     c.connect(URL)
     const sock = FakeWebSocket.instances[0]
     sock.open()
-    // Each ping interval fires a ping; with no reply it times out after
-    // pingTimeoutMs. Drive three full failure cycles (async advance flushes the
-    // ping promise's rejection handler between cycles).
-    for (let i = 0; i < 3; i++) {
-      await vi.advanceTimersByTimeAsync(15_000) // ping interval → sends a ping
-      await vi.advanceTimersByTimeAsync(8_000) // ping timeout → failure
-    }
-    expect(sock.closed).toBe(true)
+    // A backend saturated by terminal output answers late or not at all. That
+    // is not this client's call to make: it sends nothing unprompted, and the
+    // socket is only ever closed by the peer (or by reset/dispose).
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(sock.sent).toEqual([])
+    expect(sock.closed).toBe(false)
+    expect(statuses).toEqual(['connecting', 'connected'])
+  })
+
+  it('reconnects immediately on reconnectNow, without waiting out the backoff', async () => {
+    const c = makeClient()
+    c.connect(URL)
+    const first = FakeWebSocket.instances[0]
+    first.open()
+
+    c.reconnectNow('system resumed')
+
+    // A new socket exists right away — no timer had to fire.
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect(first.closed).toBe(true)
+    expect(statuses).toEqual(['connecting', 'connected', 'disconnected', 'connecting'])
+
+    // The discarded socket's close must not schedule a competing reconnect.
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+  })
+
+  it('ignores reconnectNow after dispose', () => {
+    const c = makeClient()
+    c.connect(URL)
+    FakeWebSocket.instances[0].open()
+    c.dispose('shutting down')
+    c.reconnectNow('system resumed')
+    expect(FakeWebSocket.instances).toHaveLength(1)
   })
 })

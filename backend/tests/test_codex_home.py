@@ -304,3 +304,103 @@ def test_prepare_adopts_stranded_login_for_new_pane(tmp_path: Path) -> None:
     assert (real / "auth.json").is_file()
     assert (home / "auth.json").is_symlink()
     assert stranded.is_symlink()
+
+
+# ── sub-agent pin repair ────────────────────────────────────────────────────
+
+def _meta(sid: str, *, parent: str = "", ancestors: tuple[str, ...] = ()) -> str:
+    """A rollout head: this thread's session_meta, then the ancestor records a
+    forked thread replays after its own (codex 0.149 shape)."""
+    if parent:
+        head = {
+            "type": "session_meta",
+            "payload": {
+                "id": sid, "session_id": parent, "parent_thread_id": parent,
+                "forked_from_id": parent, "thread_source": "subagent", "cwd": "/ws",
+                "source": {"subagent": {"thread_spawn": {
+                    "parent_thread_id": parent, "depth": 1,
+                    "agent_path": "/root/explore",
+                }}},
+            },
+        }
+    else:
+        head = {"type": "session_meta", "payload": {
+            "id": sid, "thread_source": "user", "source": "cli", "cwd": "/ws"}}
+    lines = [json.dumps(head)]
+    for anc in ancestors:
+        lines.append(json.dumps({"type": "session_meta", "payload": {
+            "id": anc, "thread_source": "user", "source": "cli", "cwd": "/ws"}}))
+    return "\n".join(lines) + "\n"
+
+
+def _rollout(day_dir: Path, sid: str, body: str) -> None:
+    day_dir.mkdir(parents=True, exist_ok=True)
+    (day_dir / f"rollout-2026-08-24T15-00-00-{sid}.jsonl").write_text(body, encoding="utf-8")
+
+
+def test_resolve_user_thread_id_repairs_pin_from_replayed_ancestor(tmp_path: Path) -> None:
+    """The common shape: the sub-agent's own rollout replays the user thread's
+    session_meta, so the repair needs no second file."""
+    real = tmp_path / "real-codex"
+    day = tmp_path / "panes" / "pane-A" / "sessions" / "2026" / "08" / "24"
+    _rollout(day, "parent-id", _meta("parent-id"))
+    _rollout(day, "child-id", _meta("child-id", parent="parent-id", ancestors=("parent-id",)))
+    manager = CodexHomeManager(real_home=real, panes_root=tmp_path / "panes")
+
+    assert manager.resolve_user_thread_id("child-id") == "parent-id"
+
+
+def test_resolve_user_thread_id_walks_parent_chain_when_ancestor_absent(
+    tmp_path: Path,
+) -> None:
+    """Deeper nesting truncates the replayed ancestors out of the read budget;
+    the repair then hops parent_thread_id until it reaches the user thread."""
+    real = tmp_path / "real-codex"
+    day = tmp_path / "panes" / "pane-A" / "sessions" / "2026" / "08" / "24"
+    _rollout(day, "root-id", _meta("root-id"))
+    _rollout(day, "mid-id", _meta("mid-id", parent="root-id"))
+    _rollout(day, "leaf-id", _meta("leaf-id", parent="mid-id"))
+    manager = CodexHomeManager(real_home=real, panes_root=tmp_path / "panes")
+
+    assert manager.resolve_user_thread_id("leaf-id") == "root-id"
+
+
+def test_resolve_user_thread_id_leaves_ordinary_and_unknown_ids_alone(
+    tmp_path: Path,
+) -> None:
+    """A user thread, an id no rollout records, and unusable input all resume
+    exactly what the caller was given."""
+    real = tmp_path / "real-codex"
+    day = tmp_path / "panes" / "pane-A" / "sessions" / "2026" / "08" / "24"
+    _rollout(day, "plain-id", _meta("plain-id"))
+    manager = CodexHomeManager(real_home=real, panes_root=tmp_path / "panes")
+
+    assert manager.resolve_user_thread_id("plain-id") == "plain-id"
+    assert manager.resolve_user_thread_id("never-recorded") == "never-recorded"
+    assert manager.resolve_user_thread_id("") == ""
+    assert manager.resolve_user_thread_id("../../etc/passwd") == "../../etc/passwd"
+
+
+def test_resolve_user_thread_id_survives_a_cyclic_parent_chain(tmp_path: Path) -> None:
+    """A corrupted chain that points at itself must terminate, not spin."""
+    real = tmp_path / "real-codex"
+    day = tmp_path / "panes" / "pane-A" / "sessions" / "2026" / "08" / "24"
+    _rollout(day, "a-id", _meta("a-id", parent="b-id"))
+    _rollout(day, "b-id", _meta("b-id", parent="a-id"))
+    manager = CodexHomeManager(real_home=real, panes_root=tmp_path / "panes")
+
+    assert manager.resolve_user_thread_id("a-id") == "a-id"
+
+
+def test_command_with_resume_id_rewrites_inside_the_shell_wrapper() -> None:
+    from agent_team_backend.cli_vendors.codex import command_with_resume_id
+
+    assert command_with_resume_id(
+        ["/bin/zsh", "-ilc", "codex resume child-id"], "child-id", "parent-id"
+    ) == ["/bin/zsh", "-ilc", "codex resume parent-id"]
+    assert command_with_resume_id(
+        "codex resume child-id", "child-id", "parent-id"
+    ) == "codex resume parent-id"
+    # Nothing to swap, and degenerate shapes, pass through untouched.
+    assert command_with_resume_id("codex", "child-id", "parent-id") == "codex"
+    assert command_with_resume_id([], "child-id", "parent-id") == []

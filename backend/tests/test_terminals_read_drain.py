@@ -59,7 +59,7 @@ async def test_one_callback_drains_a_whole_repaint(monkeypatch):
 
         svc._on_readable(session)  # exactly one callback
 
-        assert "".join(svc._out_buffers["t-drain"]) == "x" * 20480
+        assert b"".join(svc._out_buffers["t-drain"]) == b"x" * 20480
         # It took many reads (1 KB cap) but only the one callback above.
         assert len(reads) >= 20
     finally:
@@ -83,7 +83,7 @@ async def test_drain_is_bounded_so_a_flood_yields_to_the_loop(monkeypatch):
 
         svc._on_readable(session)
 
-        taken = len("".join(svc._out_buffers["t-flood"]))
+        taken = len(b"".join(svc._out_buffers["t-flood"]))
         assert taken == 4096, "one callback must stop at the drain bound"
     finally:
         _cancel_pending_flush(svc, "t-flood")
@@ -107,7 +107,7 @@ async def test_bytes_read_before_eof_are_not_lost(monkeypatch):
 
         svc._on_readable(session)
 
-        assert "".join(svc._out_buffers["t-eof"]) == "final output"
+        assert b"".join(svc._out_buffers["t-eof"]) == b"final output"
         assert closed == ["exit"]
     finally:
         _cancel_pending_flush(svc, "t-eof")

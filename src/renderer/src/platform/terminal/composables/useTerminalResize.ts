@@ -28,6 +28,9 @@ export function createResizeController(
   sendRedrawRequest: ResizeRequest,
   getPendingSpawn: () => boolean,
   onCreateWhenMeasurable: () => void,
+  // Give the CLI a blank canvas at the new width. Called once per settled
+  // WIDTH change, right before the SIGWINCH nudge. See armResizeRedraw.
+  onWidthSettled?: () => Promise<void>,
 ): ResizeController {
   // How long the container must be quiet before we fit + send resize.
   // Also the quiet-gap gate in armResizeRedraw.
@@ -154,7 +157,7 @@ export function createResizeController(
   // can't postpone the redraw indefinitely.
   function armResizeRedraw(): void {
     if (resizeRedrawTimer) clearTimeout(resizeRedrawTimer)
-    resizeRedrawTimer = setTimeout(() => {
+    resizeRedrawTimer = setTimeout(async () => {
       resizeRedrawTimer = null
       if (!active || !sessionId.value) return
       // Not fully settled yet (xterm still differs from the backend-acked size):
@@ -177,11 +180,31 @@ export function createResizeController(
       const quiet = altBuffer || Date.now() - lastRawActivityAt.value >= RESIZE_QUIET_MS
       if (!quiet && Date.now() < resizeRedrawDeadline) { armResizeRedraw(); return }
       lastRedrawCols = term.cols
-      // NOTE: we deliberately do NOT term.clear() on a width shrink. Wiping the
-      // scrollback drops the user's conversation history (and, on a rebuild/
-      // resume, the freshly reprinted transcript). Per user decision
-      // (2026-06-23): never clear history — accept any reflow residue, repaint
-      // the current frame via the SIGWINCH redraw below instead.
+      // Blank the alternate screen BEFORE the SIGWINCH below — PuTTY's order.
+      //
+      // term_size() there discards the whole alternate screen and rebuilds it
+      // empty at the new width (terminal.c:1927-1940), then marks disptext
+      // ATTR_INVALID so the next paint is a full one. The application wakes to
+      // a blank canvas of the right size and draws itself correctly; that is
+      // why a TUI never looks stale in PuTTY after a resize.
+      //
+      // xterm.js instead carries the old alternate-buffer frame across the
+      // resize and cannot reflow it (it reflows the normal buffer only), so a
+      // TUI that does not repaint by itself leaves the previous width's frame
+      // on screen. Clearing first turns the SIGWINCH into a real repaint.
+      if (onWidthSettled) {
+        try { await onWidthSettled() } catch { /* keep the redraw regardless */ }
+        if (!active || !sessionId.value) return
+      }
+      // NOTE: nothing below clears the buffer. Wiping the scrollback drops the
+      // user's conversation history (and, on a rebuild/resume, the freshly
+      // reprinted transcript). Per user decision (2026-06-23): never clear
+      // history — repaint the current frame via the SIGWINCH redraw instead.
+      //
+      // The onWidthSettled path above is not an exception: it clears only the
+      // ALTERNATE screen, which xterm keeps no scrollback for, so there is no
+      // history behind it to lose. A pane in the normal buffer — where a
+      // line-mode CLI's conversation lives — is left untouched.
       void sendRedrawRequest(sessionId.value, term.cols, term.rows)
     }, RESIZE_REDRAW_SETTLE_MS)
   }

@@ -94,8 +94,8 @@ const queueBadge = computed(() =>
 
 <template>
   <Teleport to="body">
-    <div v-if="visible && questions.length > 0" class="modal" @keydown.esc="emit('cancel')">
-      <div class="card">
+    <div v-if="visible && questions.length > 0" class="modal nv-modal-overlay" @keydown.esc="emit('cancel')">
+      <div class="card nv-modal-shell nv-modal-shell--standard">
         <header>
           <div class="who">
             <span class="dot"></span>
@@ -173,8 +173,8 @@ const queueBadge = computed(() =>
           <span v-else-if="!allAnswered" class="hint">Answer all {{ questions.length }} question(s) to send.</span>
           <span v-else class="hint ok">⌘+Enter to send</span>
           <div class="actions">
-            <button class="ghost" @click="emit('cancel')" :disabled="autoMode">Cancel</button>
-            <button class="primary" :disabled="autoMode || !allAnswered" @click="submit">
+            <button class="ghost nv-btn" @click="emit('cancel')" :disabled="autoMode">Cancel</button>
+            <button class="primary nv-btn nv-btn--primary" :disabled="autoMode || !allAnswered" @click="submit">
               {{ questions.length > 1 ? `Send all ${questions.length} answers` : 'Send answer' }}
             </button>
           </div>
@@ -188,7 +188,9 @@ const queueBadge = computed(() =>
 .modal {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -199,15 +201,15 @@ const queueBadge = computed(() =>
   background: var(--bg-base);
   border: 1px solid var(--border-default);
   border-left: 4px solid var(--attention-fg);
-  border-radius: 8px;
-  width: min(620px, 92vw);
+  border-radius: var(--radius-lg);
+  width: min(var(--modal-w-standard), 92vw);
   max-height: 88vh;
   display: flex;
   flex-direction: column;
   color: var(--text-bright);
-  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
-  box-shadow: 0 12px 48px var(--shadow-overlay);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 header {
@@ -241,12 +243,12 @@ header {
   margin-left: 4px;
 }
 .stage {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   margin-left: 4px;
 }
 .queue-badge {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--warning-fg);
   background: color-mix(in srgb, var(--warning-fg) 15%, transparent);
   border: 1px solid color-mix(in srgb, var(--warning-fg) 35%, transparent);
@@ -260,9 +262,9 @@ header {
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--font-md);
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 .x:hover {
   background: var(--bg-muted);
@@ -292,7 +294,7 @@ header {
 }
 .qnum {
   font-family: Menlo, Monaco, monospace;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--accent-bright);
   background: var(--accent-muted);
   padding: 2px 6px;
@@ -300,9 +302,9 @@ header {
   flex-shrink: 0;
 }
 .qprompt {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 500;
-  line-height: 1.5;
+  line-height: var(--lh-base);
   color: var(--text-bright);
 }
 .choices {
@@ -318,11 +320,11 @@ header {
   border: 1px solid var(--border-default);
   color: var(--text-bright);
   padding: 10px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   text-align: left;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: var(--font-sm);
+  line-height: var(--lh-base);
   font-family: inherit;
 }
 .choice:hover:not(:disabled) {
@@ -335,7 +337,7 @@ header {
 }
 .choice .check {
   color: var(--accent-fg);
-  font-size: 12px;
+  font-size: var(--font-xs);
   margin-top: 1px;
 }
 .choice.picked .check {
@@ -352,7 +354,7 @@ textarea {
   padding: 8px 10px;
   border-radius: 6px;
   font-family: Menlo, Monaco, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   resize: vertical;
   min-height: 60px;
 }
@@ -364,7 +366,7 @@ textarea:focus {
   padding: 10px 18px;
   background: var(--bg-inset);
   border-top: 1px solid var(--accent-muted);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .auto-spinner {
   color: var(--accent-bright);
@@ -388,7 +390,7 @@ footer {
 }
 .hint {
   flex: 1;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 .hint.ok {
@@ -402,9 +404,9 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 7px 14px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 button:disabled {
@@ -425,5 +427,11 @@ button.ghost {
 }
 button.ghost:hover:not(:disabled) {
   background: var(--bg-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auto-spinner {
+    animation: none;
+  }
 }
 </style>

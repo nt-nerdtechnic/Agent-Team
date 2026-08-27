@@ -1,6 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, powerMonitor, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron'
 import { join, dirname } from 'node:path'
-import { writeFile, readFile } from 'node:fs/promises'
+import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
@@ -37,11 +37,12 @@ import { lockPageZoom } from './web-contents-zoom'
 import { installContextMenu, registerTerminalContextMenu } from './context-menu'
 import { initUpdater } from './updater'
 import { withDeadline } from './deadline'
-import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
+import { MAX_RESTORE_ATTEMPTS, WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
 import { registeredGitLeftWorkspace, trustedGitLeftWindow } from './gitLeftIpc'
 import { setWindowDockTileBadge } from './dock-tile-badge'
 import { writeTempTextArtifact } from './temp-text-artifact'
 import { BackendBroadcastTracker } from './backend-broadcast'
+import { createResumeGate } from './resume-gate'
 import { stabilizeDroppedPaths, pruneDroppedFiles, saveClipboardImage } from './dropped-file-store'
 import { watchBackendExit } from './backend-crash'
 import { createBackendAutoRestart } from './backend-autorestart'
@@ -50,6 +51,12 @@ import {
   CLI_BUFFER_REPLY_CHANNEL,
   type CliPaneBufferResult
 } from './cli-buffer-relay'
+import {
+  PaneActionRelay,
+  PANE_ACTION_REPLY_CHANNEL,
+  type PaneActionKind,
+  type PaneActionResult
+} from './pane-action-relay'
 import {
   hitTestWindows,
   selectDropCandidates,
@@ -153,6 +160,16 @@ const mainWindowWorkspaces = new Map<BrowserWindow, string>()
 const detachedGroups = new Map<string, BrowserWindow>()          // groupId → child window
 const detachedGroupWorkspace = new Map<string, string>()         // groupId → workspace_path
 const detachedWindowIds = new Set<number>()                      // child window ids
+// Workspaces a window has taken on from its sidebar, beyond the one it was
+// opened with. Kept apart from mainWindowWorkspaces so everything that means
+// "this window's own workspace" — the registry, run-group hand-offs, the
+// titlebar — keeps meaning exactly that. Only the two "is this folder already
+// open somewhere?" answers below consult it, which is the whole point: a
+// second window must not open a folder this one is already running.
+const adoptedWorkspaces = new Map<BrowserWindow, string[]>()
+// Adopted lists waiting to be claimed by the window being restored for them.
+// Keyed by window id because the renderer asks for its own after mounting.
+const pendingAdoptedWorkspaces = new Map<number, string[]>()
 
 // Send an event to every non-detached main window bound to a workspace (used to
 // hand a run group off to / back from a detached child window).
@@ -179,8 +196,14 @@ function normalizeWorkspacePath(p: string): string {
 function findMainWindowForWorkspace(workspacePath: string): BrowserWindow | null {
   const target = normalizeWorkspacePath(workspacePath)
   if (!target) return null
+  // A window whose primary it is wins: that is where its tabs, git and
+  // explorer already point.
   for (const [win, wp] of mainWindowWorkspaces) {
     if (!win.isDestroyed() && normalizeWorkspacePath(wp) === target) return win
+  }
+  for (const [win, list] of adoptedWorkspaces) {
+    if (win.isDestroyed()) continue
+    if (list.some((wp) => normalizeWorkspacePath(wp) === target)) return win
   }
   return null
 }
@@ -264,6 +287,10 @@ frontendPluginManager.setGitAccountHandlers({
 // renderer that asks via restore:getPending; cleared on apply/dismiss.
 let pendingRestore: WindowEntry[] | null = null
 let pendingRestoreClaimed = false
+// Workspaces the restore failure breaker refused to reopen this launch (see
+// window-registry.ts). Unlike the crash banner above this is not one-shot: it
+// describes this whole run, so any window may ask for it at any time.
+let skippedRestores: string[] = []
 
 function loadWindow(win: BrowserWindow, params: Record<string, string>): void {
   const qs = new URLSearchParams(params).toString()
@@ -281,6 +308,12 @@ async function createWindow(
   const win = new BrowserWindow({
     width: opts?.bounds?.width ?? 1280,
     height: opts?.bounds?.height ?? 800,
+    // Second line of defence for the shell layout. The side panels can be
+    // dragged to 560 + 520 px between them; below this the stage would be down
+    // to its floor with the panels squeezed, which is usable but not pleasant,
+    // and there is no reason to let the window go narrower than that.
+    minWidth: 640,
+    minHeight: 420,
     ...(opts?.bounds ? { x: opts.bounds.x, y: opts.bounds.y } : {}),
     title: 'Navide',
     titleBarStyle: 'hidden',
@@ -310,6 +343,14 @@ async function createWindow(
   // never track it as a standalone workspace window (no dedup focus, no restore).
   if (params.detached_group) {
     detachedWindowIds.add(winId)
+    // Tracked, but as a detached view of one group rather than as a standalone
+    // workspace window: no dedup focus, and restore reopens it detached. Before
+    // this the detached state lived only in main's memory, so every relaunch
+    // silently folded these groups back into the main window.
+    if (params.workspace_path) {
+      windowRegistry.setWorkspace(winId, params.workspace_path)
+      windowRegistry.setDetachedGroup(winId, params.detached_group)
+    }
   } else if (params.workspace_path) {
     mainWindowWorkspaces.set(win, params.workspace_path)
     windowRegistry.setWorkspace(winId, params.workspace_path)
@@ -342,6 +383,7 @@ async function createWindow(
   win.on('closed', () => {
     mainWindows.delete(win)
     mainWindowWorkspaces.delete(win)
+    adoptedWorkspaces.delete(win)
     windowRegistry.remove(winId)
     detachedWindowIds.delete(winId)
     if (mainWindow === win) {
@@ -379,13 +421,14 @@ function focusOrCreateMainWindow(): void {
   })
 }
 
-// The Pipeline Manager is a modal inside a workspace window: reveal one and let
-// its renderer open the modal. Target selection mirrors sendMenuAction (detached
-// run-group children never host it), and a window is created when none is left —
-// on macOS the app outlives its last window, where a silent no-op would make the
-// menu item look broken. The send waits for the first paint so it can never race
-// the renderer's listener registration.
-function requestPipelineManager(): void {
+// The Pipeline Manager and the Resource Manager are modals inside a workspace
+// window: reveal one and let its renderer open the modal. Target selection
+// mirrors sendMenuAction (detached run-group children never host them), and a
+// window is created when none is left — on macOS the app outlives its last
+// window, where a silent no-op would make the menu item look broken. The send
+// waits for the first paint so it can never race the renderer's listener
+// registration.
+function requestMainWindowModal(channel: string): void {
   const focused = BrowserWindow.getFocusedWindow()
   const target =
     focused && !focused.isDestroyed() && mainWindows.has(focused) && !detachedWindowIds.has(focused.id)
@@ -393,7 +436,7 @@ function requestPipelineManager(): void {
       : [...mainWindows].reverse().find((w) => !w.isDestroyed() && !detachedWindowIds.has(w.id))
 
   const send = (win: BrowserWindow): void => {
-    if (!win.isDestroyed()) win.webContents.send('menu:open-pipeline-manager', {})
+    if (!win.isDestroyed()) win.webContents.send(channel, {})
   }
   const revealAndSend = (win: BrowserWindow): void => {
     if (win.isVisible()) {
@@ -409,6 +452,14 @@ function requestPipelineManager(): void {
 
   if (target) revealAndSend(target)
   else void createWindow().then(revealAndSend)
+}
+
+function requestPipelineManager(): void {
+  requestMainWindowModal('menu:open-pipeline-manager')
+}
+
+function requestResourceManager(): void {
+  requestMainWindowModal('menu:open-resource-manager')
 }
 
 function backendInfoPayload() {
@@ -473,6 +524,34 @@ app.on('browser-window-created', (_event, win) => {
     if (payload !== undefined && !win.isDestroyed()) win.webContents.send('backend:changed', payload)
   })
   win.on('closed', () => backendBroadcastTracker.forget(win.id))
+})
+
+// Rebuild every WebSocket the moment the machine wakes.
+//
+// Sleep kills the TCP connections underneath, but nothing tells the sockets:
+// readyState still reads OPEN and isHealthyFor() still agrees, so the loss is
+// only discovered when the frontend's ping watchdog has timed out three times
+// — some 40 seconds of a UI that looks connected and is not. Waking is the one
+// moment the staleness is certain, so reconnect then instead of waiting to be
+// told.
+//
+// Only a full wake fires this; macOS maintenance/dark wakes do not. That is
+// the case worth covering anyway — it is when the user comes back to the
+// machine.
+const resumeGate = createResumeGate()
+app.whenReady().then(() => {
+  powerMonitor.on('resume', () => {
+    if (!resumeGate.admit(Date.now())) return
+    // Main holds its own backend socket for the plugin broker; it went stale
+    // with the rest.
+    frontendPluginManager.reconnectAfterResume()
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue
+      // Deliberately not focus-gated, unlike backend:changed: a backgrounded
+      // window would otherwise sit on a dead socket until someone clicks it.
+      win.webContents.send('system:resumed')
+    }
+  })
 })
 
 // Extensions view: install/update/remove third-party plugins. Verified packages
@@ -792,6 +871,9 @@ const backendAutoRestart = createBackendAutoRestart({
   onGiveUp: (attempts) => {
     console.error(`[main] backend auto-restart gave up after ${attempts} attempts`)
   },
+  // A backend that survived the stability window vindicates whatever
+  // workspaces this launch restored — pay back their attempt charges.
+  onStable: () => { windowRegistry.clearRestoreFailures() },
 })
 
 /** One scheduled respawn attempt. A deliberate restart/stop already in flight
@@ -951,10 +1033,10 @@ ipcMain.handle('workspace:pick', async (_event, defaultPath?: string) => {
 
 ipcMain.handle('workspace:new', async () => {
   const opts: Electron.OpenDialogOptions = {
-    title: 'New workspace folder',
+    title: 'Choose where to create the workspace',
     defaultPath: app.getPath('home'),
     properties: ['openDirectory', 'createDirectory'],
-    buttonLabel: 'Use this folder'
+    buttonLabel: 'Create here'
   }
 
   const result = mainWindow
@@ -962,7 +1044,25 @@ ipcMain.handle('workspace:new', async () => {
     : await dialog.showOpenDialog(opts)
 
   if (result.canceled || result.filePaths.length === 0) return null
-  return result.filePaths[0]
+
+  // Create a fresh empty folder inside the chosen location. mkdir without
+  // `recursive` fails with EEXIST on a taken name, so bumping the suffix never
+  // adopts a folder that already holds someone else's files.
+  const parent = result.filePaths[0]
+  const base = 'navide-workspace'
+  for (let n = 1; n <= 100; n++) {
+    const dir = join(parent, n === 1 ? base : `${base}-${n}`)
+    try {
+      await mkdir(dir)
+      return dir
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue
+      console.error('[workspace:new] failed to create', dir, err)
+      return null
+    }
+  }
+  console.error('[workspace:new] no free workspace folder name under', parent)
+  return null
 })
 
 ipcMain.handle('app:home-dir', () => app.getPath('home'))
@@ -1373,6 +1473,33 @@ ipcMain.on('git:contribution-state-clear', (event) => {
   }
 })
 
+// The sidebar can take on workspaces beyond the one the window was opened
+// with. Main needs the list so a second window does not open the same folder —
+// two sets of PTY and git operations on one checkout is what this prevents.
+ipcMain.on('window:reportAdoptedWorkspaces', (event, paths: string[]) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || !mainWindows.has(win)) return
+  if (detachedWindowIds.has(win.id)) return // detached child — never registry-tracked
+  const list = (Array.isArray(paths) ? paths : [])
+    .map((p) => String(p ?? '').trim())
+    .filter(Boolean)
+  if (list.length) adoptedWorkspaces.set(win, list)
+  else adoptedWorkspaces.delete(win)
+  windowRegistry.setAdoptedWorkspaces(win.id, list)
+  broadcastOpenWorkspacesChanged()
+})
+
+// A restored window asks once, on mount, for the list it had when the app was
+// last running. Taken rather than read: a reload must not resurrect a list the
+// user has since emptied.
+ipcMain.handle('window:takeRestoredAdopted', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win) return []
+  const list = pendingAdoptedWorkspaces.get(win.id) ?? []
+  pendingAdoptedWorkspaces.delete(win.id)
+  return list
+})
+
 // Renderers push the latest recent-workspaces list so the native File > Open
 // Recent submenu stays in sync. Every window pushes on each change, so skip the
 // rebuild when the list is unchanged.
@@ -1392,6 +1519,9 @@ ipcMain.handle('workspace:listOpen', () => {
   const open: string[] = []
   for (const [win, wp] of mainWindowWorkspaces) {
     if (!win.isDestroyed()) open.push(wp)
+  }
+  for (const [win, list] of adoptedWorkspaces) {
+    if (!win.isDestroyed()) open.push(...list)
   }
   return open
 })
@@ -1415,7 +1545,19 @@ ipcMain.handle('restore:getPending', () => {
 ipcMain.handle('restore:apply', () => {
   const entries = pendingRestore ?? []
   pendingRestore = null
-  for (const entry of entries) {
+  // An explicit Apply is consent: it overrides the failure breaker and resets
+  // the tally of every workspace it names, so a workspace that once wedged the
+  // backend can never become permanently unopenable. The attempt is still
+  // charged, so an unattended relaunch afterwards is protected again.
+  const plan = windowRegistry.beginRestore(entries, { userInitiated: true })
+  for (const entry of plan.restore) {
+    // A detached group comes back detached. Its window is not a workspace
+    // window, so the dedup lookup below would wrongly match the main window
+    // for the same workspace and skip reopening it entirely.
+    if (entry.detached_group) {
+      void reopenDetachedGroup(entry.workspace_path, entry.detached_group, entry.bounds)
+      continue
+    }
     // Already reopened manually → focus, don't duplicate.
     const existing = findMainWindowForWorkspace(entry.workspace_path)
     if (existing) {
@@ -1426,15 +1568,28 @@ ipcMain.handle('restore:apply', () => {
       void createWindow(
         { workspace_path: entry.workspace_path, restore: '1' },
         entry.bounds ? { bounds: entry.bounds } : undefined
-      )
+      ).then((win) => {
+        if (entry.adopted_workspaces?.length) {
+          pendingAdoptedWorkspaces.set(win.id, entry.adopted_workspaces)
+        }
+      })
     }
   }
-  return { ok: true, opened: entries.length }
+  return { ok: true, opened: plan.restore.length }
 })
 
 ipcMain.handle('restore:dismiss', () => {
   pendingRestore = null
   return { ok: true }
+})
+
+// Workspaces left unrestored by the failure breaker, for a renderer notice.
+// Claimed by the first window to ask, like restore:getPending above — every
+// restored window boots and asks, and the notice must appear only once.
+ipcMain.handle('restore:getSkipped', () => {
+  const claimed = skippedRestores
+  skippedRestores = []
+  return claimed
 })
 
 ipcMain.handle('restore:getAutoRestore', () => windowRegistry.getRestoreOnLaunch())
@@ -1475,6 +1630,87 @@ ipcMain.handle(
     return { ok: true }
   }
 )
+
+// Pull a workspace out of the window that adopted it and give it its own main
+// window. Its panes are alive in the backend and belong to the workspace, not
+// to the window, so the new window restores them the ordinary way — which is
+// why this does NOT set `duplicate`, the flag window:openMain uses to skip
+// restore for a cloned window whose sessions are still shown elsewhere.
+ipcMain.handle(
+  'window:detachWorkspace',
+  async (e, arg: { workspacePath?: string; bounds?: WindowBounds }) => {
+    const workspacePath = String(arg?.workspacePath ?? '').trim()
+    if (!workspacePath) return { ok: false }
+    // The caller drops it from its adopted list before invoking this, but that
+    // report travels on a send rather than this invoke, so skip the caller
+    // outright: adopted workspaces count as held, and finding the source window
+    // here would turn the drag into a focus of the window it came from.
+    const source = BrowserWindow.fromWebContents(e.sender)
+    const found = findMainWindowForWorkspace(workspacePath)
+    const existing = found && found !== source ? found : null
+    if (existing) {
+      revealMainWindow(existing)
+      return { ok: true }
+    }
+    await createWindow(
+      { window: 'main', workspace_path: workspacePath },
+      arg.bounds ? { bounds: arg.bounds } : undefined
+    )
+    return { ok: true }
+  }
+)
+
+/** Merge a detached group back into the window it came from.
+ *
+ *  Until now the only way back was closing the child window, which meant the
+ *  reattach was indistinguishable from "I am done with these panes". Closing
+ *  the window here reuses that exact path — the 'closed' handler above already
+ *  broadcasts group:reattached and the origin window restores the group — so
+ *  there is one reattach implementation, not two.
+ */
+/** Reopen a detached group's window on launch, wiring up the same bookkeeping
+ *  window:detachGroup does — including the 'closed' handler that broadcasts
+ *  group:reattached, so a restored detached window can still be merged back. */
+async function reopenDetachedGroup(
+  workspacePath: string,
+  groupId: string,
+  bounds?: WindowBounds
+): Promise<void> {
+  const already = detachedGroups.get(groupId)
+  if (already && !already.isDestroyed()) return
+  const child = await createWindow(
+    { window: 'main', workspace_path: workspacePath, detached_group: groupId, restore: '1' },
+    bounds ? { bounds } : undefined
+  )
+  detachedGroups.set(groupId, child)
+  detachedGroupWorkspace.set(groupId, workspacePath)
+  child.on('closed', () => {
+    detachedGroups.delete(groupId)
+    detachedGroupWorkspace.delete(groupId)
+    broadcastToWorkspace(workspacePath, 'group:reattached', { groupId })
+  })
+}
+
+ipcMain.handle('window:reattachGroup', (event, arg: { groupId?: string } | undefined) => {
+  const requested = String(arg?.groupId ?? '')
+  // A child window knows which group it is without being told; asking the
+  // sender keeps the caller honest when the id is omitted.
+  const sender = BrowserWindow.fromWebContents(event.sender)
+  let groupId = requested
+  if (!groupId && sender) {
+    for (const [id, win] of detachedGroups) {
+      if (win === sender) {
+        groupId = id
+        break
+      }
+    }
+  }
+  if (!groupId) return { ok: false }
+  const child = detachedGroups.get(groupId)
+  if (!child || child.isDestroyed()) return { ok: false }
+  child.close()
+  return { ok: true }
+})
 
 ipcMain.handle('window:getDetachedGroups', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
@@ -1989,6 +2225,36 @@ ipcMain.handle('cli:get-pane-buffer', (_event, paneId: string): Promise<CliPaneB
   const targets = [...mainWindows].filter((w) => !w.isDestroyed()).map((w) => w.webContents)
   return cliBufferRelay.request(targets, String(paneId ?? ''))
 })
+
+// Resource Manager row actions. The window is machine-wide, so the pane it
+// names may belong to any main window; the relay asks them all and takes the
+// answer from whichever one owns it (see pane-action-relay.ts).
+const paneActionRelay = new PaneActionRelay()
+
+ipcMain.on(PANE_ACTION_REPLY_CHANNEL, (event, requestId: string, result: PaneActionResult) => {
+  // A jump only reveals the pane inside its window; bringing that window to the
+  // front is main's job, and the sender is the window that claimed the pane.
+  if (result?.focused) {
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    if (owner && !owner.isDestroyed()) {
+      if (owner.isMinimized()) owner.restore()
+      owner.show()
+      owner.focus()
+    }
+  }
+  paneActionRelay.handleReply(requestId, result)
+})
+
+ipcMain.handle(
+  'pane:action',
+  (_event, args: { paneId?: string; action?: PaneActionKind }): Promise<PaneActionResult> => {
+    const paneId = String(args?.paneId ?? '')
+    if (!paneId) return Promise.resolve({ error: 'not-found' })
+    const action: PaneActionKind = args?.action === 'reclaim' ? 'reclaim' : 'focus'
+    const targets = [...mainWindows].filter((w) => !w.isDestroyed()).map((w) => w.webContents)
+    return paneActionRelay.request(targets, paneId, action)
+  }
+)
 
 // Cross-window pane drop fallback. Same-app cross-window drops that land on
 // an accepting drop target are delivered directly by Chromium and handled
@@ -2575,6 +2841,10 @@ ipcMain.handle('git-accounts:getCredential', (event, workspacePath: string) => {
 // Caveat on that evidence: the quits were driven by SIGTERM, not a user Cmd+Q.
 // NAVIDE_DISABLE_GPU=1 restores the old behaviour if the shutdown crash ever
 // resurfaces.
+// Verified 2026-08-24 (Apple M4, Electron from this tree): under this default
+// configuration an offscreen probe created a hardware webgl2 context (ANGLE
+// Metal, gpu_compositing enabled), so terminals get the WebGL renderer unless
+// NAVIDE_DISABLE_GPU=1 is set.
 const gpuDisabled = process.env.NAVIDE_DISABLE_GPU === '1'
 if (gpuDisabled) {
   app.disableHardwareAcceleration()
@@ -2781,6 +3051,7 @@ app.whenReady().then(async () => {
     onOpenRecent: (path: string) => sendMenuAction('open-recent:' + path),
     onNewWindow: () => void createWindow(),
     onOpenPipelineManager: () => requestPipelineManager(),
+    onOpenResourceManager: () => requestResourceManager(),
     onOpenRepo: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide'),
     onReportIssue: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide/issues'),
     onShowShortcuts: () => sendMenuAction('show-shortcuts'),
@@ -2879,6 +3150,9 @@ app.whenReady().then(async () => {
       backend = b
       backendLastError = null
       watchBackendCrash(b)
+      // Starts the stability window whose completion clears the restore
+      // failure ledger (onStable, above); a no-op for the restart budget here.
+      backendAutoRestart.onHealthy()
       console.log(`[main] backend ready at ${b.host}:${b.port}`)
       broadcastBackendChanged()
     })
@@ -2907,14 +3181,42 @@ app.whenReady().then(async () => {
   if (!openedAny) {
     const autoRestore = windowRegistry.cleanExitRestore()
     if (autoRestore.length) {
-      console.log('[main] clean-exit restore;', autoRestore.length, 'workspace window(s)')
-      for (const entry of autoRestore) {
-        await createWindow(
+      // Charge each workspace an attempt before opening anything, and drop the
+      // ones that already spent their budget: a workspace whose filesystem
+      // wedges the backend must not be restored into the same wedge forever
+      // (issue #24). The charge is paid back once the backend proves stable.
+      const plan = windowRegistry.beginRestore(autoRestore)
+      skippedRestores = plan.skipped.map((w) => w.workspace_path)
+      for (const path of skippedRestores) {
+        console.warn(`[main] restore skipped: ${path} failed to restore ${MAX_RESTORE_ATTEMPTS} times in a row`)
+      }
+      if (plan.restore.length) {
+        console.log('[main] clean-exit restore;', plan.restore.length, 'workspace window(s)')
+      }
+      // Main windows first: a detached child broadcasts to its origin window,
+      // which has to exist by then for the hand-off bookkeeping to land.
+      const [detachedEntries, mainEntries] = [
+        plan.restore.filter((e) => e.detached_group),
+        plan.restore.filter((e) => !e.detached_group)
+      ]
+      for (const entry of [...mainEntries, ...detachedEntries]) {
+        if (entry.detached_group) {
+          await reopenDetachedGroup(entry.workspace_path, entry.detached_group, entry.bounds)
+          openedAny = true
+          continue
+        }
+        const restored = await createWindow(
           { workspace_path: entry.workspace_path, restore: '1' },
           entry.bounds ? { bounds: entry.bounds } : undefined
         )
+        if (entry.adopted_workspaces?.length) {
+          pendingAdoptedWorkspaces.set(restored.id, entry.adopted_workspaces)
+        }
+        // Only a window that actually opened counts — when every workspace is
+        // skipped this stays false and the empty Welcome window below runs, so
+        // the app is never left with no window at all.
+        openedAny = true
       }
-      openedAny = true
     }
   }
   if (!openedAny) await createWindow()

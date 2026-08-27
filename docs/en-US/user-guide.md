@@ -42,6 +42,8 @@ Use manual spawn for exploration, maintenance, or an Evolution task that does no
 
 Supported built-in agent keys cover 13 coding CLIs: Aider, Antigravity CLI, Claude Code, Codex, Copilot CLI, Cursor CLI, Grok CLI, Kilo Code, Kimi Code, Muse Code, OpenCode, Pi, Qwen Code. The exact CLI behavior and provider billing remain controlled by each external tool.
 
+For Kimi Code panes, Navide gives the CLI a 100 ms escape-sequence reassembly window so arrow-key navigation remains reliable through the embedded terminal. An existing `PI_TUI_ESC_TIMEOUT` environment value still takes precedence.
+
 ## Pipelines
 
 The included pipeline covers requirements, planning, design, implementation, security review, and testing. Stages, slots, roles, kickoff prompts, questions, and completion sentinels are configurable in Settings.
@@ -87,7 +89,7 @@ Token Stats parses compatible local CLI logs and attributes usage to workspaces,
 
 ## Git and review
 
-Navide includes a removable factory installation of the official Git package until Marketplace installation is available. Its active package version supplies both the embedded left view and the dedicated Git window. Removing Bundled Git in Extensions persists across restarts; use **Restore** there to install the factory copy again. A verified Marketplace version takes precedence when present. The view supports repository discovery, working-tree inspection, staging, commits, branches, remotes, issues, and related workflows; multi-repository workspaces can switch between discovered repositories. Repository operations stay local to Navide's Host/backend boundary, and GitHub/GitLab issue detection uses the configured `gh` or `glab` CLI when available. If the selected v2 package cannot load, mount, or report ready, Navide labels and uses the retained legacy Git renderer for that process. Security, trust, or permission denials do not trigger fallback.
+Navide includes a removable factory installation of the official Git package until Marketplace installation is available. Its active package version supplies both the embedded left view and the dedicated Git window. Removing Bundled Git in Extensions persists across restarts; use **Restore** there to install the factory copy again. A verified Marketplace version takes precedence when present. The view supports repository discovery, working-tree inspection, staging, commits, branches, remotes, issues, and related workflows; multi-repository workspaces can switch between discovered repositories. Discovery scans run without blocking the backend and return partial results after a bounded scan period on slow filesystems. Repository operations stay local to Navide's Host/backend boundary, and GitHub/GitLab issue detection uses the configured `gh` or `glab` CLI when available. If the selected v2 package cannot load, mount, or report ready, Navide labels and uses the retained legacy Git renderer for that process. Security, trust, or permission denials do not trigger fallback.
 
 Review changes before committing, especially after automated or parallel runs. Navide does not make an agent-generated change safe merely because it appears in the Git panel.
 

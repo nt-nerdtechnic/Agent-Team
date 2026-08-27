@@ -29,7 +29,7 @@ FRONTEND_AGENTS_DIR = (
 
 EXPECTED_KEYS = {
     "aider", "antigravity", "claude", "codex", "copilot", "cursor",
-    "grok", "kilo", "kimi", "muse", "opencode", "pi", "qwen",
+    "droid", "grok", "kilo", "kimi", "muse", "opencode", "pi", "qwen",
 }
 
 # DEPS entries that are infrastructure, not CLI vendors.

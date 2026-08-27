@@ -421,9 +421,9 @@ const troubleshooting: TroubleRow[] = [
 
 .cmh-intro {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-secondary);
-  line-height: 1.65;
+  line-height: var(--lh-loose);
 }
 
 .cmh-callout {
@@ -436,14 +436,14 @@ const troubleshooting: TroubleRow[] = [
   gap: 6px;
 }
 .cmh-callout-title {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   color: var(--accent-fg);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 .cmh-callout-text {
-  font-size: 13px;
+  font-size: var(--font-sm);
   line-height: 1.6;
 }
 
@@ -454,14 +454,14 @@ const troubleshooting: TroubleRow[] = [
 }
 .cmh-h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--font-md);
   font-weight: 700;
   color: var(--text-bright);
 }
 .cmh-p {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: var(--font-sm);
+  line-height: var(--lh-loose);
 }
 .cmh-note {
   margin: 0;
@@ -472,8 +472,8 @@ const troubleshooting: TroubleRow[] = [
 .cmh-list {
   margin: 0;
   padding-left: 1.3em;
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: var(--font-sm);
+  line-height: var(--lh-loose);
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -488,7 +488,7 @@ const troubleshooting: TroubleRow[] = [
   border: 1px solid var(--border-muted);
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
   font-size: 11.5px;
-  line-height: 1.65;
+  line-height: var(--lh-loose);
   overflow-x: auto;
   white-space: pre;
   color: var(--text-primary);
@@ -509,12 +509,12 @@ const troubleshooting: TroubleRow[] = [
   flex-wrap: wrap;
 }
 .cmh-card-title {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 700;
   color: var(--text-bright);
 }
 .cmh-tag {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   border-radius: 99px;
   padding: 1px 8px;

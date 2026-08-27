@@ -107,7 +107,7 @@ watch(dialog, async (d) => {
   border-radius: 6px;
   color: var(--text-bright);
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
+  font-size: var(--font-sm);
   line-height: 1.45;
   box-shadow: 0 8px 24px var(--shadow-overlay);
   cursor: pointer;
@@ -173,7 +173,7 @@ watch(dialog, async (d) => {
   flex-direction: column;
   color: var(--text-bright);
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
+  font-size: var(--font-sm);
   box-shadow: 0 12px 48px var(--shadow-overlay);
   overflow: hidden;
 }
@@ -212,8 +212,8 @@ header strong {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: Menlo, Monaco, monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   color: var(--text-bright);
 }
 .prompt-input {
@@ -225,7 +225,7 @@ header strong {
   border-radius: 5px;
   color: var(--text-bright);
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 .prompt-input:focus {
   outline: none;
@@ -237,7 +237,7 @@ header strong {
   gap: 8px;
   margin-top: 14px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   cursor: pointer;
 }
 .dialog-check input {
@@ -255,7 +255,7 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 7px 14px;
   border-radius: 4px;
   cursor: pointer;

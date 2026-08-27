@@ -1638,6 +1638,15 @@ export class FrontendPluginManager {
     }
   }
 
+  /** Rebuild the backend transport after the machine wakes. Not expressible as
+   *  setBackendWsUrl: the url has not changed, so it would short-circuit on
+   *  isHealthyFor — which reports healthy for a socket whose TCP connection
+   *  died during sleep. No-op when no plugin has needed the backend yet;
+   *  ensureBackend() still connects lazily on the first call. */
+  reconnectAfterResume(): void {
+    this.wsClient?.reconnectNow('system resumed')
+  }
+
   /** Main-registered handler for the `ui.open_in_editor` host capability
    *  (index.ts wires it to the default-editor router, which sends the file to
    *  the mini-IDE, the OS default app, or the user's external editor). */

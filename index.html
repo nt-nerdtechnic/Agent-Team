@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark-github">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Navide</title>
+    <!-- Pre-mount splash: paints the instant the window appears, before the JS
+         bundle parses and Vue mounts. Hardcoded dark-github colors because the
+         token CSS only loads with the module bundle. Vue clears #app on mount,
+         so this is auto-removed and the Vue boot overlay takes over seamlessly. -->
+    <style>
+      /* Shared reset for every `?window=` app. Without it body keeps the UA
+         default 8px margin and a transparent background, so the BrowserWindow
+         backgroundColor (#0d1117) bleeds through as a dark frame around any
+         window app that only ships scoped styles. The body background uses the
+         theme token so gaps stay theme-colored even if a root container ever
+         fails to fill the viewport. */
+      html,
+      body,
+      #app {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        background: var(--bg-inset, #0d1117);
+      }
+      #pre-splash {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0d1117;
+      }
+      #pre-splash .ps-card {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 18px;
+      }
+      #pre-splash .ps-wordmark {
+        font: 600 20px/1 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+        letter-spacing: 0.04em;
+        color: #e6edf3;
+      }
+      #pre-splash .ps-spinner {
+        width: 26px;
+        height: 26px;
+        border: 3px solid #30363d;
+        border-top-color: #58a6ff;
+        border-radius: 50%;
+        animation: ps-spin 0.8s linear infinite;
+      }
+      @keyframes ps-spin { to { transform: rotate(360deg); } }
+    </style>
+    <script type="module" crossorigin src="./assets/index-BIok_v23.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-Dx-DtL-K.css">
+  </head>
+  <body>
+    <div id="app">
+      <div id="pre-splash">
+        <div class="ps-card">
+          <div class="ps-wordmark">Agent-Team</div>
+          <div class="ps-spinner"></div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

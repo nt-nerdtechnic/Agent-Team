@@ -202,9 +202,17 @@ async def test_quiet_period_restores_fast_path():
     assert svc._flush_delay("t-busy") == _OUTPUT_BATCH_MS / 1000
 
 
+def _frame_data(frame: bytes) -> bytes:
+    """Raw PTY bytes of a binary terminal-output frame (skip the header)."""
+    assert frame[0] == 0x01
+    off = 6 + frame[5]          # past sessionId
+    off += 1 + frame[off]       # past paneId
+    return frame[off:]
+
+
 @pytest.mark.asyncio
 async def test_fast_path_emits_within_a_tick():
-    emitted: list[dict] = []
+    emitted: list[bytes] = []
 
     async def collect(event):
         emitted.append(event)
@@ -220,7 +228,8 @@ async def test_fast_path_emits_within_a_tick():
         # A couple of loop ticks — far less than the 50ms batch window.
         await asyncio.sleep(0.01)
         assert len(emitted) == 1
-        assert emitted[0]["payload"]["data"] == "中"
+        assert isinstance(emitted[0], bytes)
+        assert _frame_data(emitted[0]) == "中".encode("utf-8")
     finally:
         _cancel_pending_flush(svc, "t-emit")
         try:
@@ -229,3 +238,42 @@ async def test_fast_path_emits_within_a_tick():
             pass
         os.close(r)
         os.close(w)
+
+
+@pytest.mark.asyncio
+async def test_flush_delay_with_explicit_now_matches_implicit_clock():
+    """_absorb_output passes the loop time it already took into _flush_delay
+    so the hot path pays one clock read per drained batch.  The threshold
+    decision must be identical to the implicit-clock form for the same byte
+    and time sequence: inside the window, at the window edge, and past it."""
+    from collections import deque
+
+    svc = TerminalService(_emit)
+    now = svc._loop.time()
+    edge = now - _FAST_PATH_WINDOW_S  # oldest timestamp still inside the window
+    stale = edge - 1e-6
+    cases = {
+        "fresh-busy": deque([(now, _FAST_PATH_MAX_BYTES + 1)]),
+        "fresh-quiet": deque([(now, _FAST_PATH_MAX_BYTES)]),
+        "edge-busy": deque([(edge, _FAST_PATH_MAX_BYTES + 1)]),
+        "stale-drop": deque([(stale, _FAST_PATH_MAX_BYTES * 2), (now, 50)]),
+        "split-sum": deque([(edge, _FAST_PATH_MAX_BYTES), (now, 1)]),
+    }
+    expected = {
+        "fresh-busy": _OUTPUT_BATCH_MS / 1000,
+        "fresh-quiet": _COALESCE_MS / 1000,
+        "edge-busy": _OUTPUT_BATCH_MS / 1000,
+        "stale-drop": _COALESCE_MS / 1000,
+        "split-sum": _OUTPUT_BATCH_MS / 1000,
+    }
+    for name, window in cases.items():
+        svc._recent_chunks[name] = deque(window)
+        assert svc._flush_delay(name, now=now) == expected[name], name
+        if name == "stale-drop":
+            # The time-trim also happened on the explicit-now path.
+            assert svc._window_bytes(name, now=now) == 50
+    # Same sequences through the implicit clock (taken a moment later) agree,
+    # as long as no entry sits within that moment of the window edge.
+    for name in ("fresh-busy", "fresh-quiet", "stale-drop"):
+        svc._recent_chunks[name] = deque(cases[name])
+        assert svc._flush_delay(name) == expected[name], name

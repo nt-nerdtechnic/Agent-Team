@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import asyncio
 import base64
@@ -23,6 +24,7 @@ import os
 import tempfile
 import re
 import shutil
+import threading
 import time
 
 from .base import Dep, McpWiring, SkillsWiring, VendorSpec, command_text
@@ -96,6 +98,36 @@ def _write_cumulative(seen_keys: set[str], input_total: int, output_total: int) 
 class CodexLogReader(LogReader):
     vendor: str = "codex"
 
+    #: One filesystem sweep serves every workspace in a rescan cycle. The
+    #: watcher calls session_files_for_workspace once per open workspace, so
+    #: without this the sessions trees are re-walked N times per cycle — on a
+    #: cold page cache that stalls the event loop for seconds per walk. Kept
+    #: well under the watcher's rescan interval; a rollout created inside the
+    #: window is picked up by the fs watcher, not this backfill enumeration.
+    _SESSION_FILES_TTL_S = 5.0
+
+    #: A rollout's session_meta is its FIRST record, written at creation. A
+    #: file this much older than its last write and still headerless will
+    #: never grow one (rollouts only append), so the miss is cached instead
+    #: of re-opening the file on every rescan of every workspace forever.
+    #: Fresh files stay uncached: their header may simply not have landed.
+    _HEADER_GRACE_S = 60.0
+
+    def __init__(self) -> None:
+        # path -> cwd from the rollout's session_meta header. The header is
+        # immutable once written, so each file is opened at most once — an
+        # entry is stored once the meta record was read, or as "" once the
+        # file aged past _HEADER_GRACE_S without one; a rollout whose header
+        # has not landed yet is retried next pass.
+        self._cwd_cache: dict[str, str] = {}
+        self._files_cache: list[Path] = []
+        self._files_cached_at: float = float("-inf")
+        # Discovery runs concurrently from the rescan worker thread and the
+        # executor threads behind register_pane/force_rescan. The lock keeps
+        # the TTL coherent so overlapping callers share one tree walk instead
+        # of each paying a cold rglob.
+        self._discovery_lock = threading.Lock()
+
     def project_dirs(self) -> list[Path]:
         roots: list[Path] = []
         default_root = Path.home() / ".codex" / "sessions"
@@ -124,15 +156,26 @@ class CodexLogReader(LogReader):
         return roots
 
     def session_files(self) -> list[Path]:
-        out: list[Path] = []
-        for root in self.project_dirs():
-            try:
-                for f in root.rglob("rollout-*.jsonl"):
-                    if f.is_file():
-                        out.append(f)
-            except OSError as err:
-                log.debug("rglob %s failed: %s", root, err)
-        return out
+        with self._discovery_lock:
+            now = time.monotonic()
+            if now - self._files_cached_at <= self._SESSION_FILES_TTL_S:
+                return list(self._files_cache)
+            out: list[Path] = []
+            for root in self.project_dirs():
+                try:
+                    for f in root.rglob("rollout-*.jsonl"):
+                        if f.is_file():
+                            out.append(f)
+                except OSError as err:
+                    log.debug("rglob %s failed: %s", root, err)
+            self._files_cache = out
+            self._files_cached_at = now
+            # Deleted/archived rollouts must not pin their header entries forever.
+            existing = {str(p) for p in out}
+            for k in list(self._cwd_cache):
+                if k not in existing:
+                    del self._cwd_cache[k]
+            return list(out)
 
     def _cwd_from_meta(self, path: Path) -> str:
         """Read just the session_meta header for this rollout's cwd.
@@ -141,23 +184,38 @@ class CodexLogReader(LogReader):
         `session_meta` record carrying payload.cwd. We read only the first few
         lines (not the whole rollout) so per-workspace scoping stays cheap.
         """
-        try:
-            with path.open("r", encoding="utf-8", errors="replace") as fh:
-                for _ in range(5):  # session_meta is the first record
-                    line = fh.readline()
-                    if not line:
-                        break
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("type") == "session_meta":
-                        payload = rec.get("payload") or {}
-                        if isinstance(payload, dict):
-                            return str(payload.get("cwd") or "")
-        except OSError:
+        key = str(path)
+        with self._discovery_lock:
+            cached = self._cwd_cache.get(key)
+            if cached is not None:
+                return cached
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as fh:
+                    for _ in range(5):  # session_meta is the first record
+                        line = fh.readline()
+                        if not line:
+                            break
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if rec.get("type") == "session_meta":
+                            payload = rec.get("payload") or {}
+                            cwd = str(payload.get("cwd") or "") if isinstance(payload, dict) else ""
+                            self._cwd_cache[key] = cwd
+                            return cwd
+            except OSError:
+                return ""
+            # No header in the first records. Once the file is old enough
+            # that the header must have landed if it ever will, cache the
+            # miss — otherwise this rollout is re-opened by every rescan of
+            # every workspace for as long as it exists.
+            try:
+                if time.time() - path.stat().st_mtime >= self._HEADER_GRACE_S:
+                    self._cwd_cache[key] = ""
+            except OSError:
+                pass
             return ""
-        return ""
 
     def session_files_for_workspace(self, workspace_path: str) -> list[Path]:
         """Only rollouts whose session_meta.cwd matches this workspace.
@@ -371,18 +429,31 @@ class CodexLogReader(LogReader):
 
         try:
             with fh:
-                for line_no, raw in enumerate(fh, 1):
-                    raw = raw.strip()
+                for line_no, raw_line in enumerate(fh, 1):
+                    raw = raw_line.strip()
                     if not raw:
                         continue
                     if line_no <= high_water:
                         continue
-                    last_line = line_no
                     key = f"act:{line_no}"
                     try:
                         rec = json.loads(raw)
                     except json.JSONDecodeError:
+                        # An unterminated final line is still being written.
+                        # Leave the mark behind it so the completed line is
+                        # read on the next poll: advancing past it dropped
+                        # that line's events for good, and when the lost line
+                        # was the turn's end record the pane stayed
+                        # "mid-turn" forever (GitHub #21).
+                        if not raw_line.endswith("\n"):
+                            break
+                        # A terminated line that will not parse is genuinely
+                        # corrupt. Step over it for good rather than
+                        # re-reading — and re-emitting — the rest of the file
+                        # on every poll.
+                        last_line = line_no
                         continue
+                    last_line = line_no
 
                     rtype = rec.get("type")
                     if rtype == "session_meta":
@@ -461,6 +532,12 @@ _SAFE_HOME_ID = re.compile(r"^[A-Za-z0-9_.:-]+$")
 # so an archived path would silently attribute to no pane (empty pane id).
 # Resumability is a separate question: see `find_resumable_session_home`.
 _SESSION_SUBDIRS = ("sessions", "archived_sessions")
+# Sub-agent nesting seen in the wild is depth 3; the cap only stops a
+# corrupted parent chain from looping.
+_MAX_THREAD_HOPS = 8
+# Same budget the attribution layer reads session files with.
+_META_READ_BYTES = 524_288
+
 
 class CodexHomeManager:
     """Create isolated CODEX_HOME dirs while sharing stable user config."""
@@ -695,6 +772,71 @@ class CodexHomeManager:
                 pass
         return None
 
+    def resolve_user_thread_id(self, resume_id: str) -> str:
+        """Repair a resume id that names a SUB-AGENT thread.
+
+        Builds shipped before sub-agent rollouts were recognised pinned
+        whichever thread wrote last to a pane's CODEX_HOME, which is the
+        sub-agent whenever codex spawned one. Resuming that id lands on a
+        thread the parent owns and codex refuses the pane's input outright.
+        The id the pane meant is the user thread the sub-agent descends from:
+        take the ancestor session_meta the fork replayed into its own rollout,
+        else hop to `parent_thread_id` and ask again (nesting is allowed).
+
+        Returns `resume_id` unchanged for a normal thread, an unknown id, or a
+        chain that cannot be resolved — the caller then resumes exactly what it
+        was given, as it did before.
+        """
+        rid = resume_id.strip()
+        seen: set[str] = set()
+        for _ in range(_MAX_THREAD_HOPS):
+            if not rid or rid in seen or not _SAFE_HOME_ID.match(rid):
+                return resume_id
+            seen.add(rid)
+            rollout = self._rollout_path(rid)
+            if rollout is None:
+                return resume_id
+            try:
+                text = rollout.read_text(encoding="utf-8", errors="ignore")[:_META_READ_BYTES]
+            except OSError:
+                return resume_id
+            metas = _session_meta_payloads(text)
+            if not metas or metas[0].get("thread_source") != "subagent":
+                return rid  # already a user thread
+            ancestor = next(
+                (str(m["id"]) for m in metas
+                 if m.get("thread_source") != "subagent" and m.get("id")),
+                "",
+            )
+            if ancestor:
+                return ancestor
+            rid = str(metas[0].get("parent_thread_id") or "")
+        return resume_id
+
+    def _rollout_path(self, resume_id: str) -> Path | None:
+        """The rollout file recording this session, in whichever home holds it.
+        Same search order as `_locate_session_home`, without its skills-view
+        side effect — this runs while repairing an id, not while routing one."""
+        pattern = f"rollout-*{resume_id}.jsonl"
+        roots = [self.real_home]
+        if self.panes_root.is_dir():
+            try:
+                roots.extend(sorted(self.panes_root.iterdir()))
+            except OSError:
+                pass
+        for home in roots:
+            for name in _SESSION_SUBDIRS:
+                subdir = home / name
+                if not subdir.is_dir():
+                    continue
+                try:
+                    found = next(subdir.rglob(pattern), None)
+                except OSError:
+                    continue
+                if found is not None:
+                    return found
+        return None
+
     def cleanup(self, home_id: str) -> bool:
         safe_id = self._safe_home_id(home_id)
         pane_home = (self.panes_root / safe_id).resolve()
@@ -728,7 +870,33 @@ _CODEX_PANES_ROOT_NAME = ".codex-panes"
 def _session_meta_resume_id(text: str) -> str:
     """The session_meta record's payload.id — the id `codex resume` actually
     needs (the filename stem includes a timestamp prefix and is NOT accepted).
-    '' when the expected shape isn't found."""
+    '' when the expected shape isn't found.
+
+    A sub-agent thread is never that id. Codex writes each sub-agent it spawns
+    as its own rollout inside the SAME per-pane CODEX_HOME, marked
+    `thread_source: "subagent"`; resuming one lands on a thread whose input the
+    parent owns, and codex refuses it outright ("This sub-agent is controlled
+    by its parent. Direct input is disabled."). The pane is driving the thread
+    that spawned the sub-agent, and that thread's own rollout always sits in
+    the same home — so a sub-agent file announces nothing and the parent's file
+    keeps the binding.
+    """
+    for payload in _session_meta_payloads(text):
+        if payload.get("thread_source") == "subagent":
+            return ""
+        if payload.get("id"):
+            return str(payload["id"])
+    return ""
+
+
+def _session_meta_payloads(text: str) -> list[dict]:
+    """Every session_meta payload in `text`, in file order.
+
+    A rollout normally opens with exactly one. A thread codex forked — a
+    sub-agent — replays its ancestors' session_meta records after its own, so
+    later entries describe the thread it was spawned from.
+    """
+    out: list[dict] = []
     for line in text.splitlines():
         line = line.strip()
         if not line or '"session_meta"' not in line:
@@ -739,9 +907,20 @@ def _session_meta_resume_id(text: str) -> str:
             continue
         if rec.get("type") == "session_meta":
             payload = rec.get("payload") or {}
-            if isinstance(payload, dict) and payload.get("id"):
-                return str(payload["id"])
-    return ""
+            if isinstance(payload, dict):
+                out.append(payload)
+    return out
+
+
+def command_with_resume_id(command: Any, old_id: str, new_id: str) -> Any:
+    """The launch command with `old_id` swapped for `new_id`, preserving the
+    ``[shell, '-ilc', '<cmd>']`` wrapper the frontend sends (see
+    ``command_text``)."""
+    if isinstance(command, list):
+        if not command:
+            return command
+        return [*command[:-1], str(command[-1]).replace(old_id, new_id)]
+    return str(command or "").replace(old_id, new_id)
 
 
 def _pane_id_from_home_path(file_path: str) -> str:

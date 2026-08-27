@@ -599,7 +599,7 @@ function badgeClass(status: TodoStatus): string {
   height: 100%;
   overflow-y: auto;
   padding: 20px 24px 32px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-primary);
   background: var(--bg-base);
   font-family: var(--font-ui, system-ui, sans-serif);
@@ -630,7 +630,7 @@ function badgeClass(status: TodoStatus): string {
 
 .pfv-title {
   flex: 1;
-  font-size: 16px;
+  font-size: var(--font-lg);
   font-weight: 600;
   margin-bottom: 4px;
 }
@@ -638,7 +638,7 @@ function badgeClass(status: TodoStatus): string {
 .pfv-total-progress {
   flex-shrink: 0;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -646,8 +646,8 @@ function badgeClass(status: TodoStatus): string {
 
 .pfv-overview {
   color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
 }
 
 .pfv-card {
@@ -677,7 +677,7 @@ function badgeClass(status: TodoStatus): string {
   border-radius: 4px;
   padding: 1px 5px;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 
 .pfv-line {
@@ -707,17 +707,17 @@ function badgeClass(status: TodoStatus): string {
 }
 
 .pfv-line--h2 {
-  font-size: 16px;
+  font-size: var(--font-lg);
   margin-top: 16px;
 }
 
 .pfv-line--h3 {
-  font-size: 14px;
+  font-size: var(--font-md);
   margin-top: 12px;
 }
 
 .pfv-line--h4 {
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 
 .pfv-line--quote {
@@ -781,7 +781,7 @@ function badgeClass(status: TodoStatus): string {
   border-radius: 6px;
   color: var(--text-primary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 3px 10px;
 }
 
@@ -801,7 +801,7 @@ function badgeClass(status: TodoStatus): string {
   border-radius: 6px;
   color: var(--text-primary);
   flex: 1;
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 5px 8px;
 }
 
@@ -817,7 +817,7 @@ function badgeClass(status: TodoStatus): string {
   color: var(--text-muted);
   cursor: pointer;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   opacity: 0;
   padding: 2px 4px;
 }
@@ -844,7 +844,7 @@ function badgeClass(status: TodoStatus): string {
   color: var(--text-primary);
   cursor: pointer;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 9px;
 }
 
@@ -873,8 +873,8 @@ function badgeClass(status: TodoStatus): string {
   border-radius: 6px;
   color: var(--text-primary);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
   min-height: 120px;
   padding: 8px;
   resize: vertical;
@@ -898,7 +898,7 @@ function badgeClass(status: TodoStatus): string {
   border-radius: 6px;
   color: var(--text-primary);
   flex: 1;
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 3px 7px;
 }
 
@@ -914,7 +914,7 @@ function badgeClass(status: TodoStatus): string {
   color: var(--text-muted);
   cursor: pointer;
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   opacity: 0;
   padding: 2px 4px;
 }
@@ -952,7 +952,7 @@ function badgeClass(status: TodoStatus): string {
 
 .pfv-mermaid--loading {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-style: italic;
 }
 
@@ -967,7 +967,7 @@ function badgeClass(status: TodoStatus): string {
   margin-bottom: 6px;
   padding: 4px 0;
   font-weight: 600;
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-secondary);
@@ -975,7 +975,7 @@ function badgeClass(status: TodoStatus): string {
 
 .pfv-group-dot {
   color: var(--accent-fg);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 
 .pfv-group-title {
@@ -984,7 +984,7 @@ function badgeClass(status: TodoStatus): string {
 }
 
 .pfv-group-progress {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   font-weight: 400;
 }
@@ -1017,12 +1017,12 @@ function badgeClass(status: TodoStatus): string {
 
 .pfv-todo-content {
   flex: 1;
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 
 .pfv-badge {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 10px;

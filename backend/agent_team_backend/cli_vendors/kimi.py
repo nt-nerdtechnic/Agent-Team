@@ -343,18 +343,31 @@ class KimiLogReader(LogReader):
 
         try:
             with fh:
-                for line_no, raw in enumerate(fh, 1):
-                    raw = raw.strip()
+                for line_no, raw_line in enumerate(fh, 1):
+                    raw = raw_line.strip()
                     if not raw:
                         continue
                     if line_no <= high_water:
                         continue
-                    last_line = line_no
                     key = f"act:{line_no}"
                     try:
                         rec = json.loads(raw)
                     except json.JSONDecodeError:
+                        # An unterminated final line is still being written.
+                        # Leave the mark behind it so the completed line is
+                        # read on the next poll: advancing past it dropped
+                        # that line's events for good, and when the lost line
+                        # was the turn's end record the pane stayed
+                        # "mid-turn" forever (GitHub #21).
+                        if not raw_line.endswith("\n"):
+                            break
+                        # A terminated line that will not parse is genuinely
+                        # corrupt. Step over it for good rather than
+                        # re-reading — and re-emitting — the rest of the file
+                        # on every poll.
+                        last_line = line_no
                         continue
+                    last_line = line_no
 
                     rtype = rec.get("type")
                     ts = _ts(rec.get("time"))
@@ -599,6 +612,10 @@ SPEC = VendorSpec(
     fetch_usage=lambda home: fetch_kimi(home),
     resume_id_from_command=_resume_id_from_command,
     session_exists=_session_exists,
+    # pi-tui otherwise treats a split ESC prefix as Escape after 10ms. Pane
+    # input crosses the renderer/WebSocket/PTY boundary, so give Kimi the same
+    # reassembly window pi-tui already uses for remote terminals.
+    spawn_env_defaults=(("PI_TUI_ESC_TIMEOUT", "100"),),
     home_env_vars=("KIMI_CODE_HOME",),
     make_log_reader=KimiLogReader,
     # Kimi Code ships `kimi doctor` and `kimi upgrade` (aliased `update`);

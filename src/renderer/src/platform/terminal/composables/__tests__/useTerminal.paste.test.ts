@@ -289,7 +289,7 @@ describe('useTerminal — manual paste', () => {
       expect(pastedData(mock)).toBe('')
       const lines = clipboardDiags(mock)
       expect(lines).toHaveLength(1)
-      expect(lines[0].message).toContain('neither text nor an image')
+      expect(lines[0].message).toContain('the clipboard is empty')
       expect(lines[0].level).toBe('warning')
       scope.stop()
     })

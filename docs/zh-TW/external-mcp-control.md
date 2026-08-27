@@ -84,7 +84,7 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 
 | Tool | 參數 | 功能 |
 |---|---|---|
-| `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
+| `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`pane_id`（每個 `ui.pane.*` action 都吃這個鍵）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
 | `cli_send` | `to`、`text`、`wait_for_delivery_s=0`（上限 120） | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
 | `cli_check_message` | `msg_key` | 某次 `cli_send` 的結果：`{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 你自己送出、目前卡住或失敗的訊息：`{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
@@ -216,7 +216,7 @@ Append-only 擷取檔案中的位元組偏移量，因此一旦該檔案被截�
 
 **能力邊界 —— Idle／完成偵測。** 大多數 CLI 的 Log Reader 會發出帶有已完成回合
 文字的 `turn_complete` 事件：**aider、antigravity、claude、codex、copilot、
-cursor、grok、kilo、kimi、muse、opencode、pi、qwen**。對這些而言，
+cursor、droid、grok、kilo、kimi、muse、opencode、pi、qwen**。對這些而言，
 `cli_wait_idle` 與 `cli_get_status` 的 `last_activity.type` 是依據精確的
 turn-complete 訊號解析出來的 —— 但有一項但書：**grok、kimi、pi、qwen** 沒有自己的
 回合結束記錄，而是從 Log 中 8 秒的靜默合成出 `turn_complete`，因此對這四者而言
@@ -229,7 +229,7 @@ Terminal Pane，則完全沒有這種訊號 ——
 
 這也是為什麼 `source` 是 `cli_send_and_wait` 結果中該讀的欄位：不論由哪個 CLI
 產生，形狀都一模一樣，但可信度並不相同。來自 aider/antigravity/claude/codex/
-copilot/cursor/kilo/muse/opencode 的 `turn_complete` 是 CLI 自己說回合結束了；
+copilot/cursor/droid/kilo/muse/opencode 的 `turn_complete` 是 CLI 自己說回合結束了；
 同樣的值若來自 grok/kimi/pi/qwen，則是上述的 8 秒靜默推論；而 `quiet_period` ——
 一般 Terminal Pane 唯一可得的結果 —— 代表根本沒有任何東西回報回合結束，因此請
 檢查內容，而不要信任訊號。`target_lost` 是第四個值，也是唯一一個不是對回合下
@@ -265,6 +265,7 @@ copilot/cursor/kilo/muse/opencode 的 `turn_complete` 是 CLI 自己說回合結
 | `ui.pane.focus` | `{paneId}` | 顯示並聚焦一個 Pane（必要時切換分頁） |
 | `ui.pane.getStatus` | `{paneId}` | 回傳該 Pane 的 `{status, buffer, logPath?}` |
 | `ui.tab.switch` | `{tabId}` | 切換作用中的 Stage／Run-group 分頁 |
+| `ui.preview.show` | `{kind, …}` | 在右側 rail 的預覽面板顯示檔案、diff 或內嵌片段 |
 | `ui.window.openPlans` | — | 開啟 Plan 視窗 |
 | `ui.window.openGit` | — | 為目前 Workspace 開啟 Git 視窗 |
 | `ui.window.openPipeline` | `{pipelineId?}` | 開啟 Pipeline Manager 視窗 |

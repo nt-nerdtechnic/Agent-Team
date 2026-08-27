@@ -29,7 +29,7 @@ import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { CLI_AGENT_SPECS } from '../agents'
 import { bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
-import type { TerminalDockPort } from '@navide/terminal'
+import type { MentionCandidate, TerminalDockPort } from '@navide/terminal'
 import AiCliTerminal from './AiCliTerminal.vue'
 
 const props = withDefaults(
@@ -185,18 +185,25 @@ watch(
 // autocomplete, so a stale snapshot costs nothing; routing always re-resolves
 // in the backend. This panel is not itself registered in the roster, so the
 // mentions go one way: from here out to the main window's panes.
-const mentionTargets = ref<string[]>([])
+const mentionTargets = ref<MentionCandidate[]>([])
 async function refreshMentionTargets(): Promise<void> {
   if (props.terminalPort.status.value !== 'connected') return
   try {
     const resp = await props.terminalPort.listAgentPanes()
+    // Every address here lives in another window, so none of them carries a
+    // status this panel could read — the menu draws hollow dots and says so by
+    // omission rather than inventing one.
+    const group = t('mention.group-remote')
     mentionTargets.value = (resp.payload?.panes ?? [])
       .filter((p) => p.qualified_name && p.pane_id !== props.paneId)
-      .map((p) => p.qualified_name as string)
+      .map((p) => ({ address: p.qualified_name as string, group }))
   } catch {
     mentionTargets.value = []
   }
 }
+// Stable identity so the terminal's prop does not churn on every render; the
+// polled list is read through it when the menu opens.
+const mentionCandidateGetter = (): MentionCandidate[] => mentionTargets.value
 watch(() => props.terminalPort.status.value, () => void refreshMentionTargets(), { immediate: true })
 const mentionPollTimer = setInterval(() => void refreshMentionTargets(), 10_000)
 onUnmounted(() => clearInterval(mentionPollTimer))
@@ -362,7 +369,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
       :pane-id="paneId"
       :terminal-port="terminalPort"
       :workspace-path="workspacePath"
-      :mention-candidates="mentionTargets"
+      :mention-candidates="mentionCandidateGetter"
       class="ai-cli-term"
     />
   </div>
@@ -431,13 +438,13 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
 }
 
 .ai-cli-title {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
 }
 
 .ai-cli-ws {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin-left: auto;
   min-width: 0;
   overflow: hidden;
@@ -456,7 +463,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
 
 .ai-cli-agent-select {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-xs);
   min-width: 0;
   padding: 5px 8px;
 }
@@ -470,7 +477,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
   color: var(--text-bright);
   cursor: pointer;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 5px 10px;
 }
 
@@ -510,7 +517,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
 
 .ai-cli-running-label {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   min-width: 0;
   overflow: hidden;
@@ -521,7 +528,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
 .ai-cli-empty {
   color: var(--text-muted);
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   margin: 0;
   padding: 12px;
 }

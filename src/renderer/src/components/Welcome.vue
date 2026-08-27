@@ -4,8 +4,29 @@ import type { useBackend } from '../composables/useBackend'
 import { useEditorTargets } from '../composables/useEditorTargets'
 import { useRecentWorkspaces, type RecentWorkspace } from '../composables/useRecentWorkspaces'
 
-const props = defineProps<{ backend: ReturnType<typeof useBackend> }>()
-const emit = defineEmits<{ (e: 'select', path: string): void; (e: 'open-settings'): void }>()
+const props = defineProps<{
+  backend: ReturnType<typeof useBackend>
+  /** Opened from the sidebar rather than shown at startup: gets a close
+   *  button, Escape and a backdrop click. Off by default — there is nothing
+   *  behind the startup screen to dismiss it to. */
+  dismissible?: boolean
+}>()
+const emit = defineEmits<{
+  (e: 'select', path: string): void
+  (e: 'open-settings'): void
+  (e: 'close'): void
+}>()
+
+function dismiss(): void {
+  if (props.dismissible) emit('close')
+}
+function onDismissKey(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') dismiss()
+}
+onMounted(() => {
+  if (props.dismissible) document.addEventListener('keydown', onDismissKey)
+})
+onBeforeUnmount(() => document.removeEventListener('keydown', onDismissKey))
 
 const { recent, loaded, error, touch, pin, unpin, remove } = useRecentWorkspaces(props.backend)
 
@@ -192,9 +213,10 @@ function ctxCopyPath(): void {
 </script>
 
 <template>
-  <div class="welcome-overlay">
+  <div class="welcome-overlay" :class="{ 'welcome-overlay--modal': dismissible }" @click.self="dismiss">
     <div class="welcome-card">
       <header class="w-head">
+        <button v-if="dismissible" class="w-close" :aria-label="$t('action.close')" @click="dismiss">✕</button>
         <h1>Navide</h1>
         <p class="tagline">{{ $t('label.tagline') }}</p>
       </header>
@@ -303,6 +325,23 @@ function ctxCopyPath(): void {
   justify-content: center;
   z-index: 5000;
 }
+/* Opened over a working window, so the app stays visible behind it — the
+   startup screen's opaque inset would read as "the workspace closed". */
+.welcome-overlay--modal { background: rgb(0 0 0 / 45%); }
+.w-head { position: relative; }
+.w-close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  border: none;
+  background: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  font-size: var(--font-sm);
+  line-height: 1;
+  color: var(--text-muted);
+}
+.w-close:hover { color: var(--text-bright); }
 .welcome-card {
   width: 560px;
   max-height: 86vh;
@@ -322,7 +361,7 @@ function ctxCopyPath(): void {
 .tagline {
   margin: 4px 0 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .w-open,
 .w-recent {
@@ -330,7 +369,7 @@ function ctxCopyPath(): void {
 }
 .w-open h2,
 .w-recent h2 {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-secondary);
   font-weight: 600;
   margin: 0 0 10px;
@@ -346,7 +385,7 @@ button.primary {
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 button.primary:hover:not(:disabled) {
   background: var(--success-strong);
@@ -358,7 +397,7 @@ button.ghost {
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 button.ghost:hover:not(:disabled) {
   background: var(--bg-subtle);
@@ -415,10 +454,10 @@ button:disabled {
 }
 .r-name {
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 .r-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 1px 6px;
   border-radius: 10px;
   background: var(--bg-muted);
@@ -437,11 +476,11 @@ button:disabled {
   background: var(--attention-subtle);
 }
 .r-missing {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--danger-fg);
 }
 .r-open {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   padding: 1px 6px;
   border-radius: 10px;
   color: var(--success-fg);
@@ -449,11 +488,11 @@ button:disabled {
 }
 .r-time {
   margin-left: auto;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
 }
 .r-path {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: nowrap;
@@ -461,7 +500,7 @@ button:disabled {
   text-overflow: ellipsis;
 }
 .r-task {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
   margin-top: 2px;
 }
@@ -470,7 +509,7 @@ button:disabled {
   border: none;
   color: transparent;
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 2px 4px;
   border-radius: 4px;
   flex-shrink: 0;
@@ -485,12 +524,12 @@ button:disabled {
 }
 .w-empty {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   line-height: 1.6;
 }
 .w-error {
   color: var(--danger-fg);
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .w-foot {
   margin-top: 24px;
@@ -502,7 +541,7 @@ button.link {
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 0;
 }
 button.link:hover {
@@ -533,7 +572,7 @@ button.link:hover {
   background: transparent;
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-align: left;
   cursor: pointer;
 }
@@ -553,7 +592,7 @@ button.link:hover {
 }
 .ctx-menu .sub-caret {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .ctx-menu .ctx-submenu {
   position: absolute;

@@ -1,5 +1,5 @@
 import { ref, watch, onScopeDispose } from 'vue'
-import type { DiscoveredRepo, GitStatus } from './useGit'
+import type { DiscoveredRepo, DiscoverReposResponse, GitStatus } from './useGit'
 import type { GitTransport } from '#git-feature'
 
 export interface RepoBadge {
@@ -17,22 +17,29 @@ export function useRepoDiscovery(
 ) {
   const { send, on } = transport
   const repositories = ref<DiscoveredRepoWithBadge[]>([])
+  const discoverySkipped = ref(false)
+  let forcedWorkspace = ''
 
-  async function refresh(): Promise<void> {
+  async function refresh(force = false): Promise<void> {
     const ws = workspacePath()
     if (!ws) {
       repositories.value = []
+      discoverySkipped.value = false
+      forcedWorkspace = ''
       return
     }
 
     let discovered: DiscoveredRepo[] = []
     try {
-      const resp = await send<{ ok: boolean; repositories: DiscoveredRepo[] }>(
+      const resp = await send<DiscoverReposResponse>(
         'git.discover_repositories',
-        { workspace_path: ws },
+        { workspace_path: ws, force },
       )
       if (!resp.ok || !resp.payload?.ok || workspacePath() !== ws) return
+      const skipped = resp.payload.skipped === 'cloud_storage'
+      if (skipped && forcedWorkspace === ws) return
       discovered = resp.payload.repositories ?? []
+      discoverySkipped.value = skipped
     } catch {
       return
     }
@@ -60,9 +67,37 @@ export function useRepoDiscovery(
       }),
     )
 
+    if (force) forcedWorkspace = ws
     if (workspacePath() === ws) {
       repositories.value = withBadges
     }
+  }
+
+  async function adopt(discovered: DiscoveredRepo[]): Promise<void> {
+    const ws = workspacePath()
+    if (!ws) return
+    forcedWorkspace = ws
+    discoverySkipped.value = false
+    const withAdoptedBadges = await Promise.all(
+      discovered.map(async (repo) => {
+        let badge: RepoBadge = { branch: repo.branch, dirtyCount: 0 }
+        try {
+          const sr = await send<GitStatus>('git.status', {
+            workspace_path: repo.abs_path,
+            include_ignored: false,
+          })
+          if (sr.ok && sr.payload) {
+            const s = sr.payload
+            badge = {
+              branch: s.branch || repo.branch,
+              dirtyCount: s.staged.length + s.unstaged.length + s.untracked.length,
+            }
+          }
+        } catch { /* leave default badge */ }
+        return { ...repo, badge }
+      }),
+    )
+    if (workspacePath() === ws) repositories.value = withAdoptedBadges
   }
 
   // Re-discover when workspace changes.
@@ -92,5 +127,5 @@ export function useRepoDiscovery(
     if (_timer !== null) clearTimeout(_timer)
   })
 
-  return { repositories, refresh }
+  return { repositories, discoverySkipped, refresh, adopt }
 }

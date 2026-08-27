@@ -113,7 +113,7 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 6px 10px;
   border-radius: 4px;
   cursor: pointer;
@@ -144,7 +144,7 @@ button.link {
   background: transparent;
   border: none;
   color: var(--accent-fg);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 4px;
   text-align: left;
 }
@@ -155,7 +155,7 @@ select {
   padding: 6px 8px;
   border-radius: 4px;
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--font-xs);
   box-sizing: border-box;
   width: 100%;
 }
@@ -170,7 +170,7 @@ input {
   padding: 6px 8px;
   border-radius: 4px;
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--font-xs);
   box-sizing: border-box;
   width: 100%;
 }
@@ -194,16 +194,16 @@ input:focus {
 }
 .hint {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   margin: 0;
-  line-height: 1.5;
+  line-height: var(--lh-base);
 }
 .hint.warn {
   color: var(--attention-fg);
 }
 .muted-inline {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 
 /* ── Spawn card ── */
@@ -227,7 +227,7 @@ input:focus {
 .resume-input {
   flex: 1;
   min-width: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 6px;
   background: var(--bg-muted);
   color: var(--text-bright);
@@ -252,7 +252,7 @@ input:focus {
   background: var(--bg-subtle);
   cursor: pointer;
   user-select: none;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -282,15 +282,15 @@ input:focus {
 .role-line {
   margin: 4px 0 0;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .prompt-preview {
   margin: 6px 0 0;
   padding: 6px 8px;
   background: var(--bg-inset);
   border-radius: 4px;
-  font-size: 10px;
-  line-height: 1.5;
+  font-size: var(--font-3xs);
+  line-height: var(--lh-base);
   max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
@@ -303,7 +303,7 @@ input:focus {
 }
 .prompt-head .tiny {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .warn-block {
   display: flex;

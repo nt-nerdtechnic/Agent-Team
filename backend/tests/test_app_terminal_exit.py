@@ -108,3 +108,23 @@ async def test_active_emit_terminal_exit_without_pane_id_is_safe(
 
     await asyncio.sleep(0.05)
     assert fake_attr.unregistered == []
+
+
+@pytest.mark.asyncio
+async def test_active_emit_terminal_exit_clears_the_subagent_count() -> None:
+    """A CLI that exits with subagents running never reports their stops.
+
+    Left behind, the count would gate the NEXT loop started on this pane id for
+    the whole staleness window — a loop that silently refuses to continue, on a
+    pane whose CLI is long gone.
+    """
+    from agent_team_backend import subagent_tracker
+
+    subagent_tracker.reset("p1")
+    subagent_tracker.note_tool_use("p1", "Task")
+    subagent_tracker.note_tool_use("p1", "Task")
+    assert subagent_tracker.pending("p1") == 2
+
+    await app._active_emit(_exit_event("p1"))
+
+    assert subagent_tracker.pending("p1") == 0

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import ViewPanel, { type LayoutMode } from './ViewPanel.vue'
+import HistoryIcon from './HistoryIcon.vue'
 import type { ActivePaneView } from './ControlPane.vue'
+import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 
 defineProps<{
   panes: ActivePaneView[]
@@ -17,7 +19,6 @@ const emit = defineEmits<{
   (e: 'context-menu', paneId: string, ev: MouseEvent): void
   (e: 'kill', paneId: string): void
   (e: 'interrupt', paneId: string): void
-  (e: 'reinject', paneId: string): void
   (e: 'restore', paneId: string): void
 }>()
 
@@ -63,7 +64,7 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
           :model-value="layoutMode"
           @update:model-value="emit('update:layoutMode', $event)"
         />
-        <button class="history-btn" :title="$t('label.history')" @click="emit('open-history')">📋</button>
+        <button class="history-btn" :title="$t('label.history')" @click="emit('open-history')"><HistoryIcon /></button>
       </div>
     </div>
     <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
@@ -85,7 +86,7 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
           <span class="badge">{{ p.agentLabel }}</span>
           <span v-if="p.isCommander" class="manager-inline" title="Stage manager — controls flow and decides ---STAGE-DONE---">🎯 Mgr</span>
           <span v-if="p.isMinimized" class="minimized-tag">▪ sidebar</span>
-          <span v-else class="state" :data-state="p.status">{{ p.status }}</span>
+          <span v-else class="state" :data-state="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
           <span
             v-if="p.loopActive"
             class="loop-tag"
@@ -114,9 +115,6 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
             <button class="ghost" @click="emit('interrupt', p.id)" :disabled="p.status !== 'running'">
               {{ $t('action.interrupt') }}
             </button>
-            <button class="ghost" @click="emit('reinject', p.id)" :disabled="p.status !== 'running' || !p.roleKey">
-              {{ $t('action.reapply-role') }}
-            </button>
             <button class="danger" @click="emit('kill', p.id)">{{ $t('action.remove') }}</button>
           </template>
         </div>
@@ -140,7 +138,7 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
   border-top: 1px solid var(--border-muted);
 }
 .lbl {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   letter-spacing: 0.2px;
   color: var(--text-secondary);
@@ -163,7 +161,7 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 6px 10px;
   border-radius: 4px;
   cursor: pointer;
@@ -206,16 +204,17 @@ button.history-btn {
   background: transparent;
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--font-md);
   padding: 0;
-  width: 32px;
-  height: 32px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   border-radius: 4px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
+button.history-btn :deep(svg) { width: 15px; height: 15px; }
 button.history-btn:hover {
   color: var(--text-bright);
   border-color: var(--accent-fg);
@@ -225,7 +224,7 @@ button.icon-btn {
   background: transparent;
   border: none;
   padding: 2px 4px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   line-height: 1;
   cursor: pointer;
   border-radius: 4px;
@@ -294,12 +293,12 @@ button.icon-btn:hover {
 .agent-close-btn {
   margin-left: 4px;
   padding: 0 4px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 18px;
-  width: 18px;
+  height: var(--icon-btn-sm);
+  width: var(--icon-btn-sm);
 }
 .agent-close-btn:hover {
   color: var(--danger-fg);
@@ -316,7 +315,7 @@ button.icon-btn:hover {
 }
 .stage-line {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   margin-bottom: 4px;
 }
 .agent-cmd {
@@ -331,10 +330,10 @@ button.icon-btn:hover {
   background: var(--bg-subtle);
   padding: 1px 5px;
   border-radius: 3px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .agent-session {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   margin-bottom: 4px;
   word-break: break-all;
@@ -344,11 +343,11 @@ button.icon-btn:hover {
   background: var(--bg-subtle);
   padding: 1px 5px;
   border-radius: 3px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .err {
   color: var(--danger-fg);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   margin: 4px 0;
 }
 .pipe-tag {
@@ -361,7 +360,7 @@ button.icon-btn:hover {
 }
 .badge {
   font-weight: 600;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   background: var(--bg-muted);
   padding: 2px 6px;
   border-radius: 4px;
@@ -421,7 +420,7 @@ button.icon-btn:hover {
 }
 .minimized-tag {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--accent-fg);
   background: var(--accent-subtle);
   border: 1px solid color-mix(in srgb, var(--accent-emphasis) 33%, transparent);

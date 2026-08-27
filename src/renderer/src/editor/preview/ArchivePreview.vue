@@ -103,7 +103,7 @@ onMounted(async () => {
 .arcp-status {
   padding: 8px 12px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   flex: none;
 }
 .arcp-card {
@@ -124,7 +124,7 @@ onMounted(async () => {
 }
 .arcp-card-error {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--danger-fg, #e5534b);
 }
 .arcp-scroll {
@@ -135,7 +135,7 @@ onMounted(async () => {
 .arcp-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--font-xs);
 }
 .arcp-th {
   position: sticky;

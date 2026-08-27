@@ -31,7 +31,7 @@ export type WsClientStatus = 'connecting' | 'connected' | 'disconnected' | 'erro
 interface WsLike {
   readyState: number
   send(data: string): void
-  close(): void
+  close(code?: number, reason?: string): void
   addEventListener(type: string, cb: (ev: unknown) => void): void
 }
 /** Constructor shape the client needs. Exported so a caller injecting a
@@ -50,12 +50,6 @@ export interface WsClientOptions {
   onError?: (message: string) => void
   /** WebSocket constructor override; defaults to `globalThis.WebSocket`. */
   WebSocketImpl?: WsCtor
-  /** Liveness ping interval; 0 disables the probe. Default 15000. */
-  pingIntervalMs?: number
-  /** Per-ping timeout. Default 8000. */
-  pingTimeoutMs?: number
-  /** Consecutive ping failures before the socket is force-closed. Default 3. */
-  pingFailureThreshold?: number
   /** Bound on the reconnect send queue. Default 200. */
   maxSendQueue?: number
   /** Reconnect backoff base / cap (ms). Defaults 1500 / 30000. */
@@ -75,6 +69,10 @@ export interface WsClient {
    *  `reason`, WITHOUT scheduling a reconnect or emitting a status. The caller
    *  decides the next state (see `useBackend.applyBackendChanged`). */
   reset(reason: string): void
+  /** Tear down and reconnect immediately, skipping the backoff. For when the
+   *  socket is known-dead but hasn't reported it yet — after a system resume,
+   *  the old TCP connection is gone while `readyState` still reads OPEN. */
+  reconnectNow(reason: string): void
   /** Put the client into fail-fast mode: subsequent sends reject instead of
    *  queueing (used when the backend has errored for good). */
   markErrored(): void
@@ -83,6 +81,43 @@ export interface WsClient {
   currentUrl(): string
   /** Permanent teardown. */
   dispose(reason: string): void
+}
+
+/** Parsed form of a binary terminal-output frame (see below). */
+export interface TerminalOutputFrame {
+  terminal_session_id: string
+  pane_id: string
+  sequence: number
+  /** Raw PTY bytes — xterm.js accepts Uint8Array directly and runs its own
+   *  streaming UTF-8 decoder, so no string round-trip happens on this path. */
+  data: Uint8Array
+}
+
+// Non-streaming decoder for the short id fields only; payload bytes are
+// handed to consumers undecoded.
+const frameIdDecoder = new TextDecoder('utf-8')
+
+/**
+ * Parse a binary `terminal.output` WS frame (little-endian):
+ *   u8 frameType=0x01 | u32 sequence | u8 sidLen | sid utf8 |
+ *   u8 paneIdLen | paneId utf8 | rest = raw PTY bytes.
+ * Returns null for anything that is not a well-formed output frame.
+ */
+export function parseTerminalOutputFrame(raw: ArrayBuffer | Uint8Array): TerminalOutputFrame | null {
+  const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw)
+  if (bytes.length < 7 || bytes[0] !== 0x01) return null
+  const sequence = (bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)) >>> 0
+  const sidLen = bytes[5]
+  let off = 6
+  if (bytes.length < off + sidLen + 1) return null
+  const terminal_session_id = frameIdDecoder.decode(bytes.subarray(off, off + sidLen))
+  off += sidLen
+  const paneLen = bytes[off]
+  off += 1
+  if (bytes.length < off + paneLen) return null
+  const pane_id = paneLen ? frameIdDecoder.decode(bytes.subarray(off, off + paneLen)) : ''
+  off += paneLen
+  return { terminal_session_id, pane_id, sequence, data: bytes.subarray(off) }
 }
 
 function nowIso(): string {
@@ -94,9 +129,6 @@ function uuid(): string {
 }
 
 export function createWsClient(opts: WsClientOptions = {}): WsClient {
-  const pingIntervalMs = opts.pingIntervalMs ?? 15_000
-  const pingTimeoutMs = opts.pingTimeoutMs ?? 8_000
-  const pingFailureThreshold = opts.pingFailureThreshold ?? 3
   const maxSendQueue = opts.maxSendQueue ?? 200
   const reconnectBaseMs = opts.reconnectBaseMs ?? 1_500
   const reconnectMaxMs = opts.reconnectMaxMs ?? 30_000
@@ -106,7 +138,6 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   let activeCtor: WsCtor | null = null
   let disposed = false
   let errored = false
-  let pingTimer: ReturnType<typeof setInterval> | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectAttempts = 0
 
@@ -169,14 +200,10 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     return sock !== null && ctor !== null && sock.readyState === ctor.OPEN
   }
 
-  // Low-level send used by both the public `send` and the internal ping probe.
-  // `allowQueue` is false for the ping probe (a wedged socket must observe a
-  // closed connection as failure, never park behind a reconnect).
   function rawSend<T>(
     type: string,
     payload: Record<string, unknown>,
-    timeoutMs: number,
-    allowQueue: boolean
+    timeoutMs: number
   ): Promise<WsResponse<T>> {
     return new Promise((resolve, reject) => {
       const req: WsRequest = { id: uuid(), type, payload, timestamp: nowIso() }
@@ -187,9 +214,8 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
       }
       const canSend = isOpen(socket, activeCtor)
 
-      // Fail fast when there is no reconnect to wait for (disposed / errored) or
-      // when queueing is disallowed (the ping probe).
-      if (!canSend && (!allowQueue || disposed || errored)) {
+      // Fail fast when there is no reconnect to wait for (disposed / errored).
+      if (!canSend && (disposed || errored)) {
         reject(new Error('ws not open'))
         return
       }
@@ -219,34 +245,22 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     payload: Record<string, unknown> = {},
     timeoutMs = 10_000
   ): Promise<WsResponse<T>> {
-    return rawSend<T>(type, payload, timeoutMs, true)
+    return rawSend<T>(type, payload, timeoutMs)
   }
 
   function clearTimers(): void {
-    if (pingTimer !== null) { clearInterval(pingTimer); pingTimer = null }
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null }
   }
 
-  function startPing(sock: WsLike): void {
-    if (pingIntervalMs <= 0) return
-    if (pingTimer !== null) clearInterval(pingTimer)
-    // A wedged connection can stay TCP-open for minutes while every frame
-    // fails. Three consecutive ping failures force a close so the reconnect
-    // path takes over immediately. The threshold stays above 2 so a
-    // busy-but-alive connection with late pongs isn't misread as wedged.
-    let pingFailures = 0
-    pingTimer = setInterval(() => {
-      rawSend('ping', { t: Date.now() }, pingTimeoutMs, false)
-        .then(() => { pingFailures = 0 })
-        .catch((err) => {
-          console.warn('[wsClient] ping failed', err)
-          if (++pingFailures >= pingFailureThreshold) {
-            pingFailures = 0
-            try { sock.close() } catch { /* close handler reconnects */ }
-          }
-        })
-    }, pingIntervalMs)
-  }
+  // There is deliberately no client-side liveness probe. One cannot tell a
+  // saturated backend from a dead one: every send on a session serialises
+  // behind one lock, so a pong queues behind whatever 64 KB terminal chunk is
+  // in flight and a few busy panes hold it past any timeout. Force-closing
+  // there costs a full reattach (PTY, git status, settings reconcile, pane
+  // re-registration) and makes the stall worse. Detecting a genuinely dead
+  // connection is the backend's job -- uvicorn runs its own protocol-level
+  // heartbeat (ws_ping_interval / ws_ping_timeout in __main__.py) and closes
+  // the socket, which lands in the close handler below and reconnects.
 
   function connect(url_?: string): void {
     if (url_ !== undefined) url = url_
@@ -255,6 +269,10 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     const ctor = resolveCtor()
     setStatus('connecting')
     const sock = new ctor(url)
+    // Binary frames carry raw terminal output. 'arraybuffer' is supported by
+    // both browser WebSocket and the `ws` package (main process); the test
+    // Fake simply ignores the assignment.
+    ;(sock as { binaryType?: string }).binaryType = 'arraybuffer'
     socket = sock
     activeCtor = ctor
 
@@ -263,11 +281,17 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
       setStatus('connected')
       reconnectAttempts = 0
       flushSendQueue(sock)
-      startPing(sock)
     })
 
     sock.addEventListener('message', (ev) => {
       const data = (ev as { data?: unknown }).data
+      // Binary frame: raw terminal output, bypassing JSON entirely.
+      if (data instanceof ArrayBuffer || data instanceof Uint8Array) {
+        const frame = parseTerminalOutputFrame(data)
+        if (frame) emit('terminal.output', frame)
+        else console.error('[wsClient] unrecognized binary frame')
+        return
+      }
       let msg: WsResponse
       try {
         msg = JSON.parse(typeof data === 'string' ? data : '') as WsResponse
@@ -290,7 +314,6 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
       // schedule a competing reconnect.
       if (socket !== sock) return
       socket = null
-      if (pingTimer !== null) { clearInterval(pingTimer); pingTimer = null }
       for (const [, entry] of pending) entry.reject(new Error('WebSocket closed'))
       pending.clear()
       if (disposed) return
@@ -319,6 +342,15 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     for (const [, entry] of pending) entry.reject(new Error(reason))
     pending.clear()
     rejectSendQueue(new Error(reason))
+  }
+
+  function reconnectNow(reason: string): void {
+    if (disposed || !url) return
+    // reset() nulls `socket` first, so the old socket's close handler is a
+    // no-op and cannot schedule a competing backoff reconnect.
+    reset(reason)
+    setStatus('disconnected')
+    connect()
   }
 
   function markErrored(): void {
@@ -350,6 +382,7 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     on,
     connect: (u: string) => connect(u),
     reset,
+    reconnectNow,
     markErrored,
     isHealthyFor,
     currentUrl: () => url,

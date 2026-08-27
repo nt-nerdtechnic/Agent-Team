@@ -6,7 +6,7 @@ import type { DisplayStatus } from '@navide/terminal'
 
 // Every surface that paints a pane status does it with a `[data-status='x']` /
 // `[data-state='x']` CSS rule, and a status with no rule silently falls back to
-// the neutral default. That is not a hypothetical: AgentOverviewPanel had no
+// the neutral default. That is not a hypothetical: the agent overview had no
 // rule for idle, awaiting or stopped, so all three rendered the same grey dot —
 // "finished" and "waiting on you" were indistinguishable. Component tests do
 // not catch it because scoped <style> is stripped before mounting and the
@@ -74,9 +74,9 @@ const SURFACES: Surface[] = [
     selector: (s) => `.spotlight-thumb-badge[data-status="${s}"]`,
   },
   {
-    name: 'AgentOverviewPanel row',
-    file: 'src/renderer/src/components/AgentOverviewPanel.vue',
-    selector: (s) => `.ao-row[data-status='${s}']`,
+    name: 'ResourceSummaryPanel row',
+    file: 'src/renderer/src/components/ResourceSummaryPanel.vue',
+    selector: (s) => `.rs-row[data-status='${s}']`,
   },
 ]
 

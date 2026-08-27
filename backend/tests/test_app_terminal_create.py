@@ -53,13 +53,21 @@ class FakeCodexHomeManager:
         self.real_home = root / "real-codex"
         self.prepared: list[str] = []
         self.session_homes = session_homes or {}
+        # sub-agent id -> the user thread it descends from; anything absent
+        # resolves to itself, which is what a normal session does.
+        self.repairs: dict[str, str] = {}
+        self.looked_up: list[str] = []
 
     def prepare(self, home_id: str) -> Path:
         self.prepared.append(home_id)
         return self.root / home_id
 
     def find_session_home(self, resume_id: str) -> Path | None:
+        self.looked_up.append(resume_id)
         return self.session_homes.get(resume_id)
+
+    def resolve_user_thread_id(self, resume_id: str) -> str:
+        return self.repairs.get(resume_id, resume_id)
 
 
 def _session() -> app.Session:
@@ -283,6 +291,78 @@ async def test_terminal_create_codex_resume_uses_owning_pane_home(
     assert fake_home.prepared == []
     assert created["env"]["CODEX_HOME"] == str(owning_home)
     assert created["metadata"]["session_home_id"] == "old-pane-home"
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_codex_repairs_a_subagent_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pane pinned to a sub-agent thread (what builds before the fix could
+    persist) must resume the user thread instead: codex refuses direct input on
+    a sub-agent, so resuming the stored id hands back an unusable pane. The
+    repaired id has to reach BOTH the launch command and the home lookup."""
+    fake_attr = FakeAttribution()
+    fake_home = FakeCodexHomeManager(tmp_path / "codex-panes")
+    fake_home.repairs["child-id"] = "parent-id"
+    owning_home = tmp_path / "codex-panes" / "owning-home"
+    fake_home.session_homes["parent-id"] = owning_home
+    monkeypatch.setattr(app, "attribution", fake_attr)
+    monkeypatch.setattr(app, "codex_home_manager", fake_home)
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "m6",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "pane-4",
+            "agent_key": "codex",
+            "command": ["/bin/zsh", "-ilc", "codex resume child-id"],
+            "cwd": "/ws",
+            "metadata": {
+                "workspace_path": "/ws",
+                "session_home_id": "stable-home",
+            },
+        },
+    })
+
+    created = session.terminals.created[0]  # type: ignore[attr-defined]
+    assert created["command"][-1] == "codex resume parent-id"
+    # The home is the one recording the USER thread, not the sub-agent's pin.
+    assert fake_home.looked_up == ["parent-id"]
+    assert created["env"]["CODEX_HOME"] == str(owning_home)
+    assert fake_home.prepared == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_codex_leaves_an_ordinary_pin_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No repair to make: the command and the home lookup are untouched."""
+    fake_attr = FakeAttribution()
+    fake_home = FakeCodexHomeManager(tmp_path / "codex-panes")
+    monkeypatch.setattr(app, "attribution", fake_attr)
+    monkeypatch.setattr(app, "codex_home_manager", fake_home)
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "m7",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "pane-5",
+            "agent_key": "codex",
+            "command": ["/bin/zsh", "-ilc", "codex resume plain-id"],
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws", "session_home_id": "stable-home"},
+        },
+    })
+
+    created = session.terminals.created[0]  # type: ignore[attr-defined]
+    assert created["command"][-1] == "codex resume plain-id"
+    assert fake_home.looked_up == ["plain-id"]
 
 
 def test_codex_resume_id_parses_resume_commands() -> None:
@@ -533,6 +613,86 @@ async def test_terminal_create_kimi_resume_claims_resume_id(
     })
 
     assert fake_attr.registered[0]["explicit_session_id"] == "session_resumed-uuid"
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_kimi_sets_escape_timeout_without_affecting_other_clis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PI_TUI_ESC_TIMEOUT", raising=False)
+    monkeypatch.setattr(app, "attribution", FakeAttribution())
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+
+    kimi_session = _session()
+    await app.handle_message(kimi_session, {
+        "id": "kimi-default",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "kimi-pane",
+            "agent_key": "kimi",
+            "command": "kimi --yolo",
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+    kimi_created = kimi_session.terminals.created[0]  # type: ignore[attr-defined]
+    assert kimi_created["env"]["PI_TUI_ESC_TIMEOUT"] == "100"
+
+    qwen_session = _session()
+    await app.handle_message(qwen_session, {
+        "id": "qwen-default",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "qwen-pane",
+            "agent_key": "qwen",
+            "command": "qwen --yolo",
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+    qwen_created = qwen_session.terminals.created[0]  # type: ignore[attr-defined]
+    assert qwen_created["env"] is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_kimi_preserves_explicit_escape_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PI_TUI_ESC_TIMEOUT", "300")
+    monkeypatch.setattr(app, "attribution", FakeAttribution())
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "kimi-explicit",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "kimi-pane",
+            "agent_key": "kimi",
+            "command": "kimi --yolo",
+            "cwd": "/ws",
+            "env": {"PI_TUI_ESC_TIMEOUT": "250"},
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+
+    created = session.terminals.created[0]  # type: ignore[attr-defined]
+    assert created["env"]["PI_TUI_ESC_TIMEOUT"] == "250"
+
+    inherited_session = _session()
+    await app.handle_message(inherited_session, {
+        "id": "kimi-inherited",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "kimi-inherited-pane",
+            "agent_key": "kimi",
+            "command": "kimi --yolo",
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+    inherited_created = inherited_session.terminals.created[0]  # type: ignore[attr-defined]
+    assert inherited_created["env"] is None
 
 
 @pytest.mark.asyncio

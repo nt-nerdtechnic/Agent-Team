@@ -5,7 +5,11 @@ import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
 import { PANE_BATCH_MIME } from '@navide/terminal'
 import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
+import { paneStatusLabelKey } from '../lib/paneStatusLabel'
+import { rollupTabStatus } from '../lib/tabStatus'
 import RebuildIcon from './RebuildIcon.vue'
+import HistoryIcon from './HistoryIcon.vue'
+import FolderIcon from './FolderIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
 import GitPluginHostSlot from './GitPluginHostSlot.vue'
 import PluginRegionHost, { type PluginRegionContribution } from './PluginRegionHost.vue'
@@ -55,6 +59,41 @@ export type PreparationStatus =
   | 'ready'
   | 'failed'
 
+/** One row of the lineage tree, in display order.
+ *
+ *  Built in App (paneLineage) from pane ids alone so it does not rebuild with
+ *  every 400ms status sync. The list renders these rows and looks the matching
+ *  ActivePaneView up for status — structure and status stay separate. */
+export interface PaneLineageRow {
+  id: string
+  depth: number
+  hasChildren: boolean
+  collapsed: boolean
+}
+
+/** One workspace section of the sidebar — one this window holds, with real
+ *  panes, live status, lineage and every per-pane control.
+ *
+ *  `isCurrent` is true for all of them now. It used to separate these from
+ *  read-only rows describing what OTHER windows were running; those are gone,
+ *  because a window is its own space. The field stays as the answer to "does
+ *  this window have terminals for these panes", which is what the consumers
+ *  actually ask. */
+export interface WorkspaceGroupRow {
+  path: string
+  label: string
+  /** Same path with the home directory collapsed to `~`. Shown under the name
+   *  because two projects can share a folder name — the path is what tells
+   *  them apart. */
+  displayPath: string
+  isCurrent: boolean
+  collapsed: boolean
+  count: number
+  lineage: PaneLineageRow[]
+  /** The same rows, split into run groups. */
+  groups: { id: string; name: string; rows: PaneLineageRow[] }[]
+}
+
 export interface ActivePaneView {
   id: string
   agentKey: string
@@ -76,7 +115,13 @@ export interface ActivePaneView {
   injectionStatus: InjectionStatus
   preparationStatus?: PreparationStatus
   kickoffStatus?: KickoffStatus
-  origin: 'manual' | 'pipeline'
+  origin: 'manual' | 'pipeline' | 'mcp'
+  /** Pane id of the parent that spawned this pane; absent for roots. Copied
+   *  verbatim — the tree itself is built in App's paneLineage, which is the
+   *  structure layer this view model must not duplicate. */
+  spawnedBy?: string
+  /** True when this pane's lineage subtree is folded in the lists. */
+  collapsed?: boolean
   /** True when this pane corresponds to a slot marked is_commander=true in
    *  the stage config — shown as 🎯 指揮官 badge in the active-agents list
    *  and the pane header. */
@@ -240,9 +285,110 @@ interface Props {
   legacyGitRecovery?: boolean
   /** Change count published by the legacy Git recovery contribution. */
   gitChangesCount?: number
+  /** Left slot collapsed — swaps the panel body for a narrow icon rail.
+   *  Unrelated to a pane's own collapsed flag (see `lineage`). */
+  collapsed?: boolean
+  /** Lineage rows in display order, from App's structure-layer computed.
+   *  Omitted or empty renders the flat list unchanged, so every other consumer
+   *  of this component keeps working. */
+  lineage?: PaneLineageRow[]
+  /** Workspace sections, this window's first. Omitted renders the flat list —
+   *  which is what every other mount of this component gets. */
+  workspaces?: WorkspaceGroupRow[]
+  /** True in a detached window: it is one run group's view of ONE workspace,
+   *  so it neither opens others nor switches between them — the controls are
+   *  hidden rather than left to do nothing.
+   *
+   *  Phrased as the exception because Vue casts an absent boolean prop to
+   *  false, which would have made the permissive spelling deny by default. */
+  detachedWindow?: boolean
+  /** View ids assigned to this slot, in tab order. Omitted means "all of
+   *  them" — the layout store supplies the real list. A view moved to another
+   *  slot disappears from here, which is what keeps it a singleton. */
+  views?: string[]
 }
 
 const props = defineProps<Props>()
+
+/** Panes in tree order, each paired with its depth.
+ *
+ *  Joins the structure layer (`lineage`, rebuilt only when the tree actually
+ *  changes) with the status layer (`panes`, replaced every 400ms). Without a
+ *  `lineage` prop this degrades to the previous flat list, so the other
+ *  mounts of this component are unaffected.
+ *
+ *  Rows whose pane is missing are skipped rather than rendered blank: the two
+ *  props are updated in the same tick but arrive as separate reactive writes,
+ *  so a frame can see one before the other. */
+const orderedPanes = computed(() => {
+  const rows = props.lineage
+  if (!rows?.length) {
+    return props.panes.map((pane) => ({ pane, depth: 0, hasChildren: false, collapsed: false }))
+  }
+  const byId = new Map(props.panes.map((p) => [p.id, p]))
+  const out: { pane: ActivePaneView; depth: number; hasChildren: boolean; collapsed: boolean }[] = []
+  for (const r of rows) {
+    const pane = byId.get(r.id)
+    if (pane) out.push({ pane, depth: r.depth, hasChildren: r.hasChildren, collapsed: r.collapsed })
+  }
+  return out
+})
+
+/** The workspaces this window runs panes in — the one it was opened with plus
+ *  any adopted from the picker. A single `null` entry stands for the ungrouped
+ *  list: no heading, every pane under it, which is what this looked like
+ *  before workspaces were a layer at all. */
+const localWorkspaceRows = computed<(WorkspaceGroupRow | null)[]>(() => {
+  const rows = props.workspaces?.filter((w) => w.isCurrent) ?? []
+  return rows.length ? rows : [null]
+})
+
+/** A group's spine state: the same signal its tab already shows.
+ *
+ *  An identity palette was the first attempt — a colour per group, hashed from
+ *  its id. It told you WHICH group a row belonged to, which the heading right
+ *  above it already says. Rolling up the run state instead makes the colour
+ *  carry what the heading does not: whether anything in that group is moving.
+ *  Reusing rollupTabStatus rather than restating its rule also means the
+ *  sidebar cannot drift from the tab bar — one definition of "active", not two.
+ */
+function groupState(rows: readonly { pane: ActivePaneView }[]): string {
+  return rollupTabStatus(rows.map((r) => r.pane.status))
+}
+
+/** One workspace's rows, split into run groups and resolved to panes.
+ *
+ *  A single ungrouped section renders WITHOUT a heading: a workspace where
+ *  nobody has made a group should look exactly as it does today, and a lone
+ *  "manual" heading over everything is a label that distinguishes nothing. */
+function groupSectionsOf(
+  ws: WorkspaceGroupRow | null
+): { id: string; name: string; state: string; bare: boolean; rows: ReturnType<typeof panesOf> }[] {
+  if (!ws) return [{ id: '', name: '', state: 'empty', bare: true, rows: orderedPanes.value }]
+  const byId = new Map(props.panes.map((pane) => [pane.id, pane]))
+  const bare = ws.groups.length <= 1 && (ws.groups[0]?.id ?? '') === ''
+  return ws.groups.map((g) => {
+    const rows = g.rows.flatMap((r) => {
+      const pane = byId.get(r.id)
+      return pane ? [{ pane, depth: r.depth, hasChildren: r.hasChildren, collapsed: r.collapsed }] : []
+    })
+    return { id: g.id, name: g.name, state: groupState(rows), bare, rows }
+  })
+}
+
+/** The panes belonging to one section, in lineage order. */
+function panesOf(
+  ws: WorkspaceGroupRow | null
+): { pane: ActivePaneView; depth: number; hasChildren: boolean; collapsed: boolean }[] {
+  if (!ws) return orderedPanes.value
+  const byId = new Map(props.panes.map((pane) => [pane.id, pane]))
+  const out: { pane: ActivePaneView; depth: number; hasChildren: boolean; collapsed: boolean }[] = []
+  for (const r of ws.lineage) {
+    const pane = byId.get(r.id)
+    if (pane) out.push({ pane, depth: r.depth, hasChildren: r.hasChildren, collapsed: r.collapsed })
+  }
+  return out
+}
 
 // Build tag injected at build time (electron.vite.config.ts) so the header
 // shows exactly which build is running — avoids confusion over which version
@@ -294,8 +440,21 @@ const emit = defineEmits<{
   (e: 'kill', paneId: string): void
   (e: 'kill-all'): void
   (e: 'minimize', paneId: string): void
+  /** Fold/unfold this pane's lineage subtree. App owns the state so every
+   *  list stays in step and the choice can be persisted. */
+  (e: 'toggle-collapsed', paneId: string): void
+  /** Fold/unfold a whole workspace section. */
+  (e: 'toggle-workspace', path: string): void
+  /** Bring a workspace to the front — focus its window if one has it open,
+   *  otherwise open it. */
+  /** Open a new agent in a workspace that is not this window's. */
+  (e: 'open-workspace-picker'): void
+  (e: 'switch-to-workspace', path: string): void
+  (e: 'close-workspace', path: string): void
+  (e: 'detach-workspace', path: string, x: number, y: number): void
+  (e: 'reorder-workspace', fromPath: string, toPath: string): void
+  (e: 'reveal-workspace-folder', path: string): void
   (e: 'interrupt', paneId: string): void
-  (e: 'reinject', paneId: string): void
   (e: 'rebuild', paneId: string): void
   (e: 'rebuild-all'): void
   (e: 'restore', paneId: string): void
@@ -324,6 +483,7 @@ const emit = defineEmits<{
   (e: 'changes-count', count: number): void
   (e: 'rename-pane', paneId: string, name: string): void
   (e: 'install-cli', payload: { agentKey: string; label: string }): void
+  (e: 'update:collapsed', v: boolean): void
 }>()
 
 const renamingPaneId = ref<string | null>(null)
@@ -665,12 +825,8 @@ function backToList(): void {
 // Switch the left sidebar tab. Entering the Pipeline tab always lands on the
 // list view (never a stale detail) — openPipelineDetail is the only path into
 // the detail view, so the panel can't render blank after the opened pipeline
-// goes away. Used by the tab buttons and Cmd+Shift+E/R/G.
-function selectSidebarTab(tab: SidebarTab): void {
-  if (tab === 'git' && !legacyGitRecovery.value) {
-    if (gitPluginTab.value) sidebarTab.value = gitPluginTab.value.tabId
-    return
-  }
+// goes away. Used by the tab buttons, Cmd+1..5, and Cmd+Shift+E/R/G.
+function showSidebarTab(tab: SidebarTab): void {
   sidebarTab.value = tab
   if (tab === 'pipeline') sidebarView.value = 'list'
 }
@@ -682,6 +838,61 @@ const activePluginContribution = computed(() =>
 )
 
 const gitChangesCount = computed(() => props.gitChangesCount ?? 0)
+
+function selectSidebarTab(tab: SidebarTab): void {
+  const target = tab === 'git' && !legacyGitRecovery.value
+    ? gitPluginTab.value?.tabId
+    : tab
+  if (!target) return
+  showSidebarTab(target)
+  // Surfacing a tab while the slot is collapsed has to reopen it, or Cmd+1..5
+  // and the programmatic entry points would only move a highlight on the rail.
+  // Collapsing is the parent's state, so ask rather than set — the same one-way
+  // contract as TokenStatsPanel's `update:expanded`.
+  //
+  // Only this path expands, never showSidebarTab: repairing an active tab that
+  // was moved out from under us is not a request to see the panel, and a
+  // collapsed sidebar must not pop open because Settings moved a view.
+  if (props.collapsed) emit('update:collapsed', false)
+}
+
+// Rail entries mirror the tab strip. Emoji icons rather than the strip's inline
+// SVGs: the rail is 36px wide, and copying five <path> blobs to render them at
+// half size buys nothing over the icon convention TokenStatsPanel's rail set.
+// `title` keeps its shortcut hint: Cmd+1..5 are bound to SIDEBAR_TABS by
+// position in that list, not by position in the strip, so reordering the strip
+// leaves the hints correct.
+const RAIL_TABS: { id: SidebarTab; icon?: string; label: string; title: string; path: string }[] = [
+  { id: 'agents', icon: '\u{1F916}', label: 'label.agents', title: 'Agents (\u23181)', path: 'M2 3.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm0 4.5a1.25 1.25 0 1 1 2.5 0A1.25 1.25 0 0 1 2 8Zm0 4.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0ZM6.5 2.75A.75.75 0 0 1 7.25 2h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5A.75.75 0 0 1 7.25 6.5h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Z' },
+  { id: 'pipeline', icon: '\u{1F500}', label: 'label.pipeline', title: 'Pipeline (\u23182)', path: 'M0 1.75C0 .784.784 0 1.75 0h3.5C6.216 0 7 .784 7 1.75v3.5A1.75 1.75 0 0 1 5.25 7H4v4a1 1 0 0 0 1 1h4v-1.25C9 9.784 9.784 9 10.75 9h3.5c.966 0 1.75.784 1.75 1.75v3.5A1.75 1.75 0 0 1 14.25 16h-3.5A1.75 1.75 0 0 1 9 14.25v-.75H5A2.5 2.5 0 0 1 2.5 11V7h-.75A1.75 1.75 0 0 1 0 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Zm9 9a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Z' },
+  { id: 'explorer', icon: '\u{1F4C1}', label: 'label.explorer', title: 'Explorer (\u23183)', path: 'M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5L6.2 1.7A1.75 1.75 0 0 0 4.96 1H1.75Z' },
+  { id: 'git', label: 'label.git', title: 'Git (\u23184)', path: 'M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25z' },
+  { id: 'plans', icon: '\u{1F4CB}', label: 'label.plans', title: 'Plans (\u23185)', path: 'M5 2a1 1 0 0 0-1 1H2.75A1.75 1.75 0 0 0 1 4.75v9.5c0 .966.784 1.75 1.75 1.75h10.5A1.75 1.75 0 0 0 15 14.25v-9.5A1.75 1.75 0 0 0 13.25 3H12a1 1 0 0 0-1-1H5Zm0 2h6v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4Zm-2.25.5H4a2.5 2.5 0 0 0 2 1h4a2.5 2.5 0 0 0 2-1h1.25a.25.25 0 0 1 .25.25v9.5a.25.25 0 0 1-.25.25H2.75a.25.25 0 0 1-.25-.25v-9.5a.25.25 0 0 1 .25-.25Z' },
+]
+
+// Ordered by the slot, not by the table above: moving a view also reorders it.
+const visibleTabs = computed(() => {
+  const assigned = props.views
+  if (!assigned) return RAIL_TABS
+  return assigned
+    .map((id) => RAIL_TABS.find((t) => t.id === id))
+    .filter((t): t is typeof RAIL_TABS[number] => !!t)
+})
+
+// Membership as a set, for the panels that stay mounted regardless of which
+// tab is showing. Those must also disappear when their view moves to another
+// slot, or the app runs two live copies: two backend subscriptions, and a Git
+// badge fed by a panel the user can no longer see.
+const visibleTabIds = computed(() => new Set(visibleTabs.value.map((t) => t.id)))
+
+// The active tab can be moved out from under us — by this window's own
+// Settings, or by another window, since the layout is shared. Falling back to
+// the first remaining tab keeps the panel showing something; without this the
+// body renders nothing and the sidebar looks broken rather than empty.
+watch(visibleTabs, (tabs) => {
+  if (!tabs.length || tabs.some((t) => t.id === sidebarTab.value) || isPluginTab(sidebarTab.value)) return
+  showSidebarTab(tabs[0].id)
+}, { immediate: true })
 
 function isPipelineRunning(pipelineId: string): boolean {
   return pipelineId === (props.activePipelineId ?? '') && props.pipeline.state === 'running'
@@ -702,16 +913,10 @@ watch(() => props.pipelines?.length, () => { pipelinePage.value = 0 })
 const previewOpen = ref<boolean>(false)
 const manualSpawnOpen = ref<boolean>(false)
 const pipelineOpen = ref<boolean>(true)
-// Mode-driven default: spawn workspaces lead with manual spawn expanded;
-// pipeline / completed workspaces collapse it so the pipeline controls lead.
-// Only sets the default on mode changes — the user can toggle freely after.
-watch(
-  () => props.mode,
-  (m) => {
-    if (m) manualSpawnOpen.value = m === 'spawn'
-  },
-  { immediate: true }
-)
+// Manual spawn used to be a card, and a spawn-mode workspace opened with it
+// already expanded. As a dialog that same default means it appears over the
+// app at startup, unasked. It now opens only when something asks it to: the
+// ＋ menu, Ctrl+<n>, a resume error, or another window's request.
 
 const currentRole = computed<Role | undefined>(() =>
   props.roles.find((r) => r.key === pickedRole.value)
@@ -729,12 +934,6 @@ watch(
 
 function openPipelineManager(pipelineId?: string): void {
   emit('open-pipeline-manager', pipelineId)
-}
-
-function reapplyRoleTooltip(p: ActivePaneView): string {
-  if (!p.roleKey) return i18n.global.t('action.reapply-role-no-role')
-  if (p.status !== 'running') return i18n.global.t('action.reapply-role-not-running')
-  return i18n.global.t('action.reapply-role')
 }
 
 function interruptTooltip(p: ActivePaneView): string {
@@ -824,14 +1023,286 @@ const canRunPipeline = computed(
     effectiveStageCount.value > 0
 )
 
+/** Set while a spawn is on its way from a workspace heading other than this
+ *  window's primary. Cleared once the request is out — the card's own button
+ *  always means "here". */
+const spawnWorkspaceOverride = ref<string>('')
+
 function emitSpawn(): void {
   emit('spawn', {
     agentKey: pickedAgent.value,
     roleKey: pickedRole.value,
     stageId: '',
-    workspacePath: workspacePath.value
+    workspacePath: spawnWorkspaceOverride.value || workspacePath.value
   })
+  spawnWorkspaceOverride.value = ''
 }
+
+/** What the heading's ＋ will open. The spawn card can be folded shut, so the
+ *  button has to say which agent it is about to run. */
+const pickedAgentLabel = computed(
+  () => manualAgentSpecs.value.find((s) => s.agentKey === pickedAgent.value)?.label ?? pickedAgent.value
+)
+
+// ── The ＋ menu on this window's workspace heading ────────────────────────────
+// A second way into the spawn card's CLI and role, for when the card is folded
+// shut. It reads and writes pickedAgent/pickedRole directly rather than keeping
+// its own copy — two stores would let the card say Codex while ＋ opens Claude.
+const addMenuOpen = ref<boolean>(false)
+/** Which workspace heading opened the menu, so a pick starts there. */
+const addMenuWorkspace = ref<string>('')
+
+// ── Right-click on a workspace heading ───────────────────────────────────
+const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | null>(null)
+
+/** `canClose` is the answer to "would closing this do anything?".
+ *
+ *  Only a workspace that is NOT the one on screen: closing what you are looking
+ *  at would leave the window showing a project it no longer holds. Offering it
+ *  there produced a menu item that silently did nothing.
+ *
+ *  Note it is the one on screen, not the one the window was opened with — the
+ *  primary can be closed from here once you have switched away from it. */
+// Drag-out: dragging a workspace heading and releasing OUTSIDE this window
+// gives that workspace its own window. Deliberately the same gesture as a stage
+// tab in StageTabBar — both mean "pull this out of here", so both are a drag to
+// nowhere rather than one drag and one menu item.
+//
+// Only when this window holds more than one: dragging out the only workspace
+// would empty this window to fill a new one, which is a no-op the long way
+// round. A detached window is already one group of one workspace.
+/** Whether a workspace heading can be dragged at all.
+ *
+ *  One gesture, two outcomes — the same split the stage tabs make: released on
+ *  another heading it reorders, released outside the window it detaches. Both
+ *  need a second workspace to be meaningful: there is nothing to reorder
+ *  against, and pulling out the only one empties this window to fill a new. */
+const canDragWorkspace = computed(
+  () => !props.detachedWindow && localWorkspaceRows.value.length > 1
+)
+
+/** Groups folded shut in the sidebar.
+ *
+ *  Keyed by workspace AND group: run groups are per-workspace, and the
+ *  ungrouped section's id is empty in every one of them, so the id alone would
+ *  fold two workspaces' loose panes together.
+ *
+ *  Per window and not persisted, the same judgement the workspace collapse
+ *  makes: which groups you want out of the way is a property of the view you
+ *  are looking at, not of the project. */
+const collapsedGroups = ref<Set<string>>(new Set())
+const groupKey = (wsPath: string, id: string): string => `${wsPath}\u0000${id}`
+function isGroupCollapsed(wsPath: string, id: string): boolean {
+  return collapsedGroups.value.has(groupKey(wsPath, id))
+}
+function toggleGroup(wsPath: string, id: string): void {
+  const key = groupKey(wsPath, id)
+  const next = new Set(collapsedGroups.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsedGroups.value = next
+}
+
+/** The heading a workspace drag is hovering, for the drop line. */
+const wsDragOverPath = ref<string>('')
+let draggingWorkspacePath = ''
+
+function onWsDragOver(e: DragEvent, path: string): void {
+  // Values are unreadable during dragover (protected mode); the type is not.
+  if (!e.dataTransfer?.types.includes('application/x-workspace-path')) return
+  if (path === draggingWorkspacePath) return
+  e.preventDefault()
+  wsDragOverPath.value = path
+}
+
+function onWsDragLeave(path: string): void {
+  if (wsDragOverPath.value === path) wsDragOverPath.value = ''
+}
+
+function onWsDrop(e: DragEvent, path: string): void {
+  wsDragOverPath.value = ''
+  const from = e.dataTransfer?.getData('application/x-workspace-path') ?? ''
+  if (!from || from === path) return
+  emit('reorder-workspace', from, path)
+}
+/** What the row does, for its tooltip.
+ *
+ *  Dragging a heading out is invisible otherwise — nothing about the row says
+ *  it can be dragged, and when the window holds only one workspace it silently
+ *  cannot be, which reads as broken rather than as deliberate.
+ */
+function wsHeadTitle(path: string): string {
+  const parts: string[] = []
+  if (!props.detachedWindow && path !== workspacePath.value) {
+    parts.push(i18n.global.t('label.workspace-switch-hint'))
+  }
+  if (canDragWorkspace.value) parts.push(i18n.global.t('label.workspace-detach-hint'))
+  return parts.join(' · ')
+}
+
+function onWsDragStart(e: DragEvent, path: string): void {
+  if (!canDragWorkspace.value) {
+    e.preventDefault()
+    return
+  }
+  // Its own data type, so this never reads as a pane drag to the drop targets
+  // in this list (which check application/x-pane-id).
+  e.dataTransfer?.setData('application/x-workspace-path', path)
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+  draggingWorkspacePath = path
+}
+function onWsDragEnd(e: DragEvent, path: string): void {
+  wsDragOverPath.value = ''
+  draggingWorkspacePath = ''
+  if (!canDragWorkspace.value) return
+  const outside =
+    e.clientX < 0 || e.clientY < 0 || e.clientX > window.innerWidth || e.clientY > window.innerHeight
+  if (outside) emit('detach-workspace', path, e.screenX, e.screenY)
+}
+
+function openWsMenu(ev: MouseEvent, path: string, canClose: boolean): void {
+  ev.preventDefault()
+  addMenuOpen.value = false
+  wsMenu.value = { path, canClose, x: ev.clientX, y: ev.clientY }
+}
+function closeWsMenu(): void {
+  wsMenu.value = null
+}
+function onWsMenuKeydown(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') closeWsMenu()
+}
+watch(wsMenu, (open) => {
+  if (open) {
+    document.addEventListener('click', closeWsMenu)
+    document.addEventListener('keydown', onWsMenuKeydown)
+    document.addEventListener('scroll', closeWsMenu, true)
+  } else {
+    document.removeEventListener('click', closeWsMenu)
+    document.removeEventListener('keydown', onWsMenuKeydown)
+    document.removeEventListener('scroll', closeWsMenu, true)
+  }
+})
+onUnmounted(() => {
+  document.removeEventListener('click', closeWsMenu)
+  document.removeEventListener('keydown', onWsMenuKeydown)
+  document.removeEventListener('scroll', closeWsMenu, true)
+})
+
+function wsMenuAction(kind: 'reveal' | 'copy' | 'close'): void {
+  const m = wsMenu.value
+  if (!m) return
+  closeWsMenu()
+  if (kind === 'reveal') emit('reveal-workspace-folder', m.path)
+  else if (kind === 'copy') void navigator.clipboard?.writeText(m.path)
+  else emit('close-workspace', m.path)
+}
+// Fixed, not absolute: the pane list scrolls under `overflow-y: auto`, which
+// would clip a menu positioned inside it.
+const addMenuAnchor = ref<{ top: number; bottom: number; right: number } | null>(null)
+/** Tallest the ＋ menu gets: the roster scroller's cap (`.ws-add-scroll`,
+ *  360px) plus the fixed furniture around it — role picker, two dividers,
+ *  the Terminal and Manual-spawn buttons, and the menu's own padding. Only
+ *  used to decide whether the menu opens downwards or flips up, so it has to
+ *  track that CSS cap; leaving it at the old 300 would have let a menu open
+ *  downwards into a gap it no longer fits in. */
+const ADD_MENU_MAX_H = 450
+
+const addMenuStyle = computed(() => {
+  const a = addMenuAnchor.value
+  if (!a) return {}
+  // Flip upwards when there is not enough room below the button.
+  const below = window.innerHeight - a.bottom
+  return below < ADD_MENU_MAX_H && a.top > below
+    ? { bottom: `${window.innerHeight - a.top + 4}px`, right: `${a.right}px` }
+    : { top: `${a.bottom + 4}px`, right: `${a.right}px` }
+})
+
+function toggleAddMenu(ev: MouseEvent, wsPath = ''): void {
+  if (!canSpawn.value) return
+  if (addMenuOpen.value && addMenuWorkspace.value === wsPath) {
+    addMenuOpen.value = false
+    return
+  }
+  const r = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  addMenuAnchor.value = { top: r.top, bottom: r.bottom, right: window.innerWidth - r.right }
+  addMenuWorkspace.value = wsPath
+  addMenuOpen.value = true
+}
+
+/** Pick a CLI from the menu and open it. Writing pickedAgent first means the
+ *  card agrees with what just happened, and that spawn() takes its usual path —
+ *  including the guided install for a CLI that is not there. */
+function spawnAs(agentKey: string): void {
+  pickedAgent.value = agentKey
+  spawnWorkspaceOverride.value = addMenuWorkspace.value
+  addMenuOpen.value = false
+  spawn()
+}
+
+/** The plain-shell spec, kept out of manualAgentSpecs because the agent
+ *  dropdown and "Handle Issue As…" are both about CLIs. */
+const terminalSpec = computed(() => props.agentSpecs.find((s) => s.agentKey === 'terminal'))
+
+/** The ＋ menu's plain shell.
+ *
+ *  Mirrors openTerminal, but into the workspace whose heading opened the menu.
+ *  Never with a role: role text is injected into a CLI's prompt, and a shell
+ *  would simply print it — which is why openTerminal sends an empty roleKey too,
+ *  and why this sits with the actions rather than among the agents, where the
+ *  role select above would look like it applied.
+ */
+function openTerminalFromMenu(): void {
+  // Menu first, like spawnAs: a click that turns out to be a no-op still
+  // dismisses the menu, rather than leaving it open with nothing happening.
+  const ws = addMenuWorkspace.value || workspacePath.value
+  addMenuOpen.value = false
+  if (!canSpawn.value) return
+  emit('spawn', { agentKey: 'terminal', roleKey: '', stageId: '', workspacePath: ws })
+}
+
+function openSpawnCardFromMenu(): void {
+  addMenuOpen.value = false
+  manualSpawnOpen.value = true
+}
+
+function onAddMenuKeydown(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') addMenuOpen.value = false
+}
+
+function onSpawnModalKeydown(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') manualSpawnOpen.value = false
+}
+watch(manualSpawnOpen, (open) => {
+  if (open) document.addEventListener('keydown', onSpawnModalKeydown)
+  else document.removeEventListener('keydown', onSpawnModalKeydown)
+})
+onUnmounted(() => document.removeEventListener('keydown', onSpawnModalKeydown))
+function closeAddMenu(): void {
+  addMenuOpen.value = false
+}
+
+watch(addMenuOpen, (open) => {
+  if (open) {
+    // The badge on a missing CLI is only as fresh as the last check, and the
+    // card refreshes on its dropdown's focus — this menu has no dropdown.
+    void refreshCliStatus()
+    document.addEventListener('click', closeAddMenu)
+    document.addEventListener('keydown', onAddMenuKeydown)
+    // Capture: the pane list is the element that scrolls, and its scroll
+    // events do not bubble. Without this the menu would hang in mid-air over
+    // whatever scrolled into the button's old place.
+    document.addEventListener('scroll', closeAddMenu, true)
+  } else {
+    document.removeEventListener('click', closeAddMenu)
+    document.removeEventListener('keydown', onAddMenuKeydown)
+    document.removeEventListener('scroll', closeAddMenu, true)
+  }
+})
+onUnmounted(() => {
+  document.removeEventListener('click', closeAddMenu)
+  document.removeEventListener('keydown', onAddMenuKeydown)
+  document.removeEventListener('scroll', closeAddMenu, true)
+})
 
 function spawn(): void {
   if (!canSpawn.value) return
@@ -853,6 +1324,7 @@ async function spawnOrOfferInstall(): Promise<void> {
     return
   }
   const spec = manualAgentSpecs.value.find((s) => s.agentKey === pickedAgent.value)
+  spawnWorkspaceOverride.value = ''
   emit('install-cli', { agentKey: pickedAgent.value, label: spec?.label ?? pickedAgent.value })
 }
 
@@ -1083,38 +1555,19 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 </script>
 
 <template>
-  <aside class="sidebar">
-    <!-- ── Top-level tab nav (icon style, Cursor-like) ────────────────────── -->
-    <div class="sidebar-tabs">
-      <button :class="['tab-btn', { active: sidebarTab === 'agents' }]" title="Agents (⌘1)" @click="selectSidebarTab('agents')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm0 4.5a1.25 1.25 0 1 1 2.5 0A1.25 1.25 0 0 1 2 8Zm0 4.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0ZM6.5 2.75A.75.75 0 0 1 7.25 2h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5A.75.75 0 0 1 7.25 6.5h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Z"/></svg>
-      </button>
-
-      <button :class="['tab-btn', { active: sidebarTab === 'pipeline' }]" title="Pipeline (⌘2)" @click="selectSidebarTab('pipeline')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M0 1.75C0 .784.784 0 1.75 0h3.5C6.216 0 7 .784 7 1.75v3.5A1.75 1.75 0 0 1 5.25 7H4v4a1 1 0 0 0 1 1h4v-1.25C9 9.784 9.784 9 10.75 9h3.5c.966 0 1.75.784 1.75 1.75v3.5A1.75 1.75 0 0 1 14.25 16h-3.5A1.75 1.75 0 0 1 9 14.25v-.75H5A2.5 2.5 0 0 1 2.5 11V7h-.75A1.75 1.75 0 0 1 0 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Zm9 9a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Z"/></svg>
-      </button>
-      <button :class="['tab-btn', { active: sidebarTab === 'explorer' }]" title="Explorer (⌘3)" @click="selectSidebarTab('explorer')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5L6.2 1.7A1.75 1.75 0 0 0 4.96 1H1.75Z"/></svg>
-      </button>
+  <aside class="sidebar" :class="{ 'is-collapsed': collapsed }">
+    <!-- Collapsed rail: one icon per tab — click expands and switches tab. -->
+    <div v-if="collapsed" class="rail">
       <button
-        v-if="legacyGitRecovery"
-        :class="['tab-btn', { active: sidebarTab === 'git' }]"
-        data-legacy-git-tab
-        title="Git (⌘4)"
-        @click="selectSidebarTab('git')"
-      >
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 1 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25z"/></svg>
-        <span v-if="gitChangesCount > 0" class="git-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
-      </button>
-      <button
-        v-else-if="gitPluginTab"
-        :class="['tab-btn', 'plugin-tab-btn', { active: sidebarTab === gitPluginTab.tabId }]"
-        :data-plugin-contribution="gitPluginTab.contributionKey"
-        :title="`${gitPluginTab.title} (⌘4)`"
-        @click="selectSidebarTab(gitPluginTab.tabId)"
+        v-for="t in visibleTabs"
+        :key="t.id"
+        class="rail-btn"
+        :class="{ active: sidebarTab === t.id || (t.id === 'git' && gitPluginTab?.tabId === sidebarTab) }"
+        :title="$t('layout.expand')"
+        @click="selectSidebarTab(t.id)"
       >
         <img
-          v-if="hasPluginIcon(gitPluginTab)"
+          v-if="t.id === 'git' && gitPluginTab && hasPluginIcon(gitPluginTab)"
           class="plugin-tab-icon"
           :src="gitPluginTab.icon ?? ''"
           width="18"
@@ -1122,11 +1575,63 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           alt=""
           @error="markPluginIconFailed(gitPluginTab)"
         />
-        <span v-else class="plugin-tab-fallback" aria-hidden="true">◇</span>
-        <span v-if="gitChangesCount > 0" class="git-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
+        <svg v-else-if="!t.icon" class="rail-icon rail-icon-git" width="18" height="18"
+             viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path :d="t.path"/></svg>
+        <span v-else class="rail-icon">{{ t.icon }}</span>
+        <span class="rail-label">{{ $t(t.label) }}</span>
+        <span v-if="t.id === 'git' && gitChangesCount > 0" class="rail-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
       </button>
-      <button :class="['tab-btn', { active: sidebarTab === 'plans' }]" title="Plans (⌘5)" @click="selectSidebarTab('plans')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2a1 1 0 0 0-1 1H2.75A1.75 1.75 0 0 0 1 4.75v9.5c0 .966.784 1.75 1.75 1.75h10.5A1.75 1.75 0 0 0 15 14.25v-9.5A1.75 1.75 0 0 0 13.25 3H12a1 1 0 0 0-1-1H5Zm0 2h6v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4Zm-2.25.5H4a2.5 2.5 0 0 0 2 1h4a2.5 2.5 0 0 0 2-1h1.25a.25.25 0 0 1 .25.25v9.5a.25.25 0 0 1-.25.25H2.75a.25.25 0 0 1-.25-.25v-9.5a.25.25 0 0 1 .25-.25Z"/></svg>
+      <button
+        v-for="pluginTab in genericPluginTabs"
+        :key="pluginTab.tabId"
+        class="rail-btn"
+        :class="{ active: sidebarTab === pluginTab.tabId }"
+        :title="pluginTab.title"
+        @click="selectSidebarTab(pluginTab.tabId)"
+      >
+        <img
+          v-if="hasPluginIcon(pluginTab)"
+          class="plugin-tab-icon"
+          :src="pluginTab.icon ?? ''"
+          width="18"
+          height="18"
+          alt=""
+          @error="markPluginIconFailed(pluginTab)"
+        />
+        <span v-else class="plugin-tab-fallback" aria-hidden="true">◇</span>
+        <span class="rail-label">{{ pluginTab.title }}</span>
+      </button>
+    </div>
+
+    <!-- ── Top-level tab nav (icon style, Cursor-like) ────────────────────── -->
+    <div class="sidebar-tabs">
+      <button
+        v-for="t in visibleTabs"
+        :key="t.id"
+        :class="[
+          'tab-btn',
+          { 'plugin-tab-btn': t.id === 'git' && !legacyGitRecovery && gitPluginTab },
+          { active: sidebarTab === t.id || (t.id === 'git' && gitPluginTab?.tabId === sidebarTab) }
+        ]"
+        :data-legacy-git-tab="t.id === 'git' && legacyGitRecovery ? '' : undefined"
+        :data-plugin-contribution="t.id === 'git' && !legacyGitRecovery ? gitPluginTab?.contributionKey : undefined"
+        :title="t.id === 'git' && gitPluginTab ? `${gitPluginTab.title} (⌘4)` : t.title"
+        @click="selectSidebarTab(t.id)"
+      >
+        <template v-if="t.id === 'git' && !legacyGitRecovery && gitPluginTab">
+          <img
+            v-if="hasPluginIcon(gitPluginTab)"
+            class="plugin-tab-icon"
+            :src="gitPluginTab.icon ?? ''"
+            width="18"
+            height="18"
+            alt=""
+            @error="markPluginIconFailed(gitPluginTab)"
+          />
+          <span v-else class="plugin-tab-fallback" aria-hidden="true">◇</span>
+        </template>
+        <svg v-else width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path :d="t.path"/></svg>
+        <span v-if="t.id === 'git' && gitChangesCount > 0" class="git-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
       </button>
       <button
         v-for="pluginTab in genericPluginTabs"
@@ -1147,13 +1652,15 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         />
         <span v-else class="plugin-tab-fallback" aria-hidden="true">◇</span>
       </button>
+      <span class="tab-spacer"></span>
+      <button class="tab-collapse" :title="$t('layout.collapse')" @click="emit('update:collapsed', true)">‹</button>
     </div>
 
     <!-- ── Explorer / plugin regions (shared split: panel on top, agent dock pinned at bottom) ── -->
     <div v-show="sidebarTab === 'explorer' || sidebarTab === 'git' || isPluginTab(sidebarTab)" class="pane-split">
       <div class="part-top" style="flex: 1">
         <ExplorerPane
-          v-if="backend"
+          v-if="backend && visibleTabIds.has('explorer')"
           v-show="sidebarTab === 'explorer'"
           :workspace-path="workspace ?? ''"
           :backend="backend"
@@ -1188,7 +1695,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
     </div>
 
     <!-- ── Pipeline tab · list view (full-height scroll) ─────────────────── -->
-    <div v-if="sidebarTab === 'pipeline' && sidebarView === 'list'" class="pipeline-split">
+    <div v-if="visibleTabIds.has('pipeline') && sidebarTab === 'pipeline' && sidebarView === 'list'" class="pipeline-split">
     <div class="part-top">
 
     <section class="block panel-section">
@@ -1308,14 +1815,29 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
     </div><!-- end pipeline tab · list view -->
 
     <!-- ── Agents tab ────────────────────────────────────────────────────── -->
-    <div v-if="sidebarTab === 'agents'" class="agents-split">
+    <div v-if="visibleTabIds.has('agents') && sidebarTab === 'agents'" class="agents-split">
     <div class="part-bottom">
 
     <!-- ── Active agents ──────────────────────────────────────────────────── -->
     <section class="block panel-section">
       <div class="row between agent-list-hdr">
-        <label class="lbl">{{ $t('label.active-agents', { running: runningCount, total: panes.length }) }}</label>
-        <div class="agent-header-actions">
+        <!-- Each workspace row carries its own count now, so the header is a
+             plain section title rather than a running/total tally. -->
+        <label class="lbl">{{ workspaces?.length ? $t('label.workspace') : $t('label.active-agents', { running: runningCount, total: panes.length }) }}</label>
+        <!-- Adds a WORKSPACE, not an agent: the per-workspace ＋ below opens
+             an agent inside one. Always present — the section is a list of
+             projects whether or not any is grouped yet. -->
+        <button
+          v-if="!detachedWindow"
+          class="hdr-add-ws"
+          :title="$t('action.open-workspace-picker')"
+          :aria-label="$t('action.open-workspace-picker')"
+          @click="emit('open-workspace-picker')"
+        >＋</button>
+        <!-- Both of these act on one workspace's panes, so once the list is
+             grouped they belong on that workspace's own row. This is the
+             ungrouped fallback. -->
+        <div v-if="!workspaces?.length" class="agent-header-actions">
           <button
             class="agent-rebuild-all-btn"
             :class="{ busy: rebuildingAll }"
@@ -1326,15 +1848,96 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           >
             <RebuildIcon />
           </button>
-          <button class="history-btn" :title="$t('label.history')" @click="emit('open-history')">📋</button>
+          <button class="history-btn" :title="$t('label.history')" @click="emit('open-history')"><HistoryIcon /></button>
         </div>
       </div>
       <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
       <ul v-else class="agent-list">
+        <template v-for="ws in localWorkspaceRows" :key="ws?.path ?? '\u0000ungrouped'">
+        <!-- The row is the switch. It was the name alone, which is a few
+             characters wide with nothing to say it does anything — the caret,
+             the two actions and ＋ all stop propagation, so they keep working. -->
         <li
-          v-for="p in panes"
+          v-if="ws"
+          class="ws-head ws-head--current"
+          :class="{
+            'ws-head--viewing': ws.path === workspacePath,
+            'ws-head--switchable': !detachedWindow && ws.path !== workspacePath,
+            'ws-head--drop': wsDragOverPath === ws.path,
+          }"
+          :title="wsHeadTitle(ws.path)"
+          :draggable="canDragWorkspace"
+          @dragstart="onWsDragStart($event, ws.path)"
+          @dragend="onWsDragEnd($event, ws.path)"
+          @dragover="onWsDragOver($event, ws.path)"
+          @dragenter="onWsDragOver($event, ws.path)"
+          @dragleave="onWsDragLeave(ws.path)"
+          @drop.prevent="onWsDrop($event, ws.path)"
+          @click="!detachedWindow && ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
+          @contextmenu="openWsMenu($event, ws.path, ws.path !== workspacePath)"
+        >
+          <button
+            class="ws-caret"
+            :title="ws.collapsed ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
+            @click.stop="emit('toggle-workspace', ws.path)"
+          >{{ ws.collapsed ? '›' : '⌄' }}</button>
+          <span class="ws-icon"><FolderIcon /></span>
+          <span class="ws-text" :title="ws.path">
+            <span class="ws-line">
+              <span class="ws-name">{{ ws.label }}</span>
+              <span class="ws-count">{{ ws.count }}</span>
+            </span>
+            <span class="ws-path">{{ ws.displayPath }}</span>
+          </span>
+          <button
+            class="ws-act"
+            :class="{ busy: rebuildingAll }"
+            :disabled="!canRebuildAll || rebuildingAll"
+            :title="$t('action.rebuild-all-cli-panes')"
+            :aria-label="$t('action.rebuild-all-cli-panes')"
+            @click.stop="emit('rebuild-all')"
+          >
+            <RebuildIcon />
+          </button>
+          <button class="ws-act" :title="$t('label.history')" @click.stop="emit('open-history')"><HistoryIcon /></button>
+          <!-- Opens the same CLI and role the spawn card holds, in THIS
+               workspace — the menu remembers which heading opened it. -->
+          <button
+            class="ws-add"
+            :disabled="!canSpawn"
+            :aria-expanded="addMenuOpen && addMenuWorkspace === ws.path"
+            :title="canSpawn ? `${$t('action.add-to-grid')} · ${pickedAgentLabel}` : $t('label.set-workspace-first')"
+            @click.stop="toggleAddMenu($event, ws.path)"
+          >＋</button>
+        </li>
+        <template v-for="g in groupSectionsOf(ws)" :key="`${ws?.path ?? ''}/${g.id}`">
+        <!-- The group layer sits BESIDE the lineage rather than above it: a
+             spine on the left edge, not another step of indentation. Indentation
+             is already spent on parent/child panes, and a third level would push
+             an MCP child's name past the width it has. -->
+        <li
+          v-if="!g.bare"
+          v-show="!ws?.collapsed"
+          class="ws-grp"
+          :data-state="g.state"
+        >
+          <button
+            class="ws-grp-caret"
+            :title="isGroupCollapsed(ws?.path ?? '', g.id)
+              ? $t('action.expand-subtree')
+              : $t('action.collapse-subtree')"
+            @click.stop="toggleGroup(ws?.path ?? '', g.id)"
+          >{{ isGroupCollapsed(ws?.path ?? '', g.id) ? '›' : '⌄' }}</button>
+          <span class="ws-grp-key"></span>
+          <span class="ws-grp-name">{{ g.name || $t('label.manual-spawn') }}</span>
+          <span class="ws-count">{{ g.rows.length }}</span>
+        </li>
+        <li
+          v-for="{ pane: p, depth, hasChildren, collapsed: folded } in g.rows"
+          v-show="!ws?.collapsed && !isGroupCollapsed(ws?.path ?? '', g.id)"
           :key="p.id"
           class="agent-item"
+          :style="depth ? { marginLeft: depth * 13 + 'px' } : undefined"
           :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'agent-item--selected': props.selectedPaneIds?.has(p.id), 'agent-item--dragging': draggingBatchIds.includes(p.id), 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
           @dragover="onAgentDragOver($event, p.id)"
           @dragenter="onAgentDragOver($event, p.id)"
@@ -1342,8 +1945,16 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           @drop.prevent="onAgentDrop($event, p.id)"
         >
           <div class="agent-line" role="button" title="Focus pane" draggable="true" @dragstart="onAgentDragStart($event, p.id)" @dragend="onAgentDragEnd" @click="onAgentLineClick(p.id, $event)" @contextmenu.prevent="emit('context-menu', p.id, $event)">
-            <span class="status-dot" :data-state="p.status" :title="p.status"></span>
+            <button
+              v-if="hasChildren"
+              class="lineage-caret"
+              :title="folded ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
+              @click.stop="emit('toggle-collapsed', p.id)"
+            >{{ folded ? '▸' : '▾' }}</button>
+            <span v-else-if="depth" class="lineage-spacer"></span>
+            <span class="status-dot" :data-state="p.status" :title="$t(paneStatusLabelKey(p.status))"></span>
             <span v-if="p.origin === 'pipeline'" class="pipe-tag">P{{ p.stageId }}</span>
+            <span v-else-if="p.origin === 'mcp'" class="mcp-tag" :title="$t('label.spawned-by-agent')">MCP</span>
             <input
               v-if="renamingPaneId === p.id"
               v-focus
@@ -1388,8 +1999,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           </div>
           <template v-if="expandedPaneId === p.id || props.focusPaneId === p.id">
             <div class="agent-role-line">
-              <span>{{ agentTypeLabel(p.agentKey) }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span></span>
-              <span class="state" :data-state="p.status">{{ p.status }}</span>
+              <span class="agent-role-main">{{ agentTypeLabel(p.agentKey) }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span></span>
+              <span class="state" :data-state="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
             </div>
             <div v-if="!p.isMinimized && p.origin === 'pipeline'" class="stage-line">
               stage {{ p.stageId }} · {{ preparationLabel(p.preparationStatus) }} · {{ injectionLabel(p.injectionStatus) }} {{ kickoffLabel(p.kickoffStatus) }}
@@ -1399,7 +2010,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             </div>
             <div v-if="!p.isMinimized" class="agent-cmd"><code>{{ p.command }}</code></div>
             <div v-if="!p.isMinimized && p.sessionId" class="agent-session" title="CLI session id — used to resume this agent's memory on restart">
-              🔖 session: <code>{{ p.sessionId }}</code>
+              <span class="agent-session-k">session</span><code>{{ p.sessionId }}</code>
             </div>
             <div v-if="p.error" class="err">{{ p.error }}</div>
             <div class="row tight">
@@ -1411,22 +2022,85 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
                 <button class="ghost" @click="emit('interrupt', p.id)" :disabled="p.status !== 'running'" :title="interruptTooltip(p)">
                   {{ $t('action.interrupt') }}
                 </button>
-                <button class="ghost" @click="emit('reinject', p.id)" :disabled="p.status !== 'running' || !p.roleKey" :title="reapplyRoleTooltip(p)">
-                  {{ $t('action.reapply-role') }}
-                </button>
                 <button class="danger" @click="emit('kill', p.id)">{{ $t('action.remove') }}</button>
               </template>
             </div>
           </template>
         </li>
+        </template>
+        </template>
+        <!-- Workspaces open in another window. The registry knows their name,
+             agent and busy flag; everything else needs the window that owns
+             them, which is what clicking a row goes to. -->
       </ul>
 
-      <div class="spawn-card">
-        <div class="spawn-card-hdr" @click="manualSpawnOpen = !manualSpawnOpen">
-          <span class="spawn-caret">{{ manualSpawnOpen ? '▾' : '▸' }}</span>
-          <span>{{ $t('label.manual-spawn') }}</span>
+      <div
+        v-if="wsMenu"
+        class="ws-ctx-menu"
+        :style="{ top: `${wsMenu.y}px`, left: `${wsMenu.x}px` }"
+        @click.stop
+      >
+        <button class="ws-ctx-opt" @click="wsMenuAction('reveal')">{{ $t('action.open-in-finder') }}</button>
+        <button class="ws-ctx-opt" @click="wsMenuAction('copy')">{{ $t('action.copy-path') }}</button>
+        <!-- The primary workspace is what this window was opened with; closing
+             it would leave the window with no root. Switch or close the window
+             instead. -->
+        <template v-if="wsMenu.canClose">
+          <div class="ws-add-div"></div>
+          <button class="ws-ctx-opt danger" @click="wsMenuAction('close')">
+            {{ $t('action.close-workspace') }}
+          </button>
+        </template>
+      </div>
+
+      <div v-if="addMenuOpen" class="ws-add-menu" :style="addMenuStyle" @click.stop>
+        <select v-model="pickedRole" class="ws-add-role">
+          <option value="">{{ $t('label.select-role') }}</option>
+          <option v-for="r in roles" :key="r.key" :value="r.key">{{ r.label }}</option>
+        </select>
+        <div class="ws-add-div"></div>
+        <div class="ws-add-scroll">
+          <button
+            v-for="spec in manualAgentSpecs"
+            :key="spec.agentKey"
+            class="ws-add-opt"
+            :class="{ on: spec.agentKey === pickedAgent }"
+            @click="spawnAs(spec.agentKey)"
+          >
+            <span class="ws-add-ck">{{ spec.agentKey === pickedAgent ? '✓' : '' }}</span>
+            <span class="ws-add-lb">
+              {{ missingClis.has(spec.agentKey) ? $t('label.agent-not-installed', { label: spec.label }) : spec.label }}
+            </span>
+          </button>
         </div>
-        <div v-if="manualSpawnOpen" class="spawn-card-body">
+        <div class="ws-add-div"></div>
+        <!-- A plain shell. Not in the list above: that list scrolls once there
+             are more CLIs than fit, and an eleventh entry sat below the fold
+             where it read as missing. Down here it is always in view, which is
+             also how the Manual spawn dialog treats it — a button beside the
+             agent dropdown rather than an entry in it.
+             Its own handler rather than spawnAs: the role picked above is
+             injected into a CLI's prompt, and a shell would print it. -->
+        <button
+          v-if="terminalSpec"
+          class="ws-add-opt ws-add-more ws-add-term"
+          @click="openTerminalFromMenu"
+        >{{ terminalSpec.label }}</button>
+        <button class="ws-add-opt ws-add-more ws-add-card" @click="openSpawnCardFromMenu">
+          {{ $t('label.manual-spawn') }}…
+        </button>
+      </div>
+
+      <!-- A dialog rather than a permanent card: the sidebar is a list of what
+           is running, and a form for starting something new sat in it all day
+           whether or not it was wanted. Every control inside is unchanged. -->
+      <div v-if="manualSpawnOpen" class="spawn-modal-backdrop nv-modal-overlay" @click.self="manualSpawnOpen = false">
+        <div class="spawn-card spawn-card--modal nv-modal-shell" role="dialog" aria-modal="true">
+        <div class="spawn-card-hdr">
+          <span>{{ $t('label.manual-spawn') }}</span>
+          <button class="spawn-modal-close" :aria-label="$t('action.close')" @click="manualSpawnOpen = false">✕</button>
+        </div>
+        <div class="spawn-card-body">
           <div class="row two-col">
             <select v-model="pickedAgent" @focus="refreshCliStatus">
               <option v-for="spec in manualAgentSpecs" :key="spec.agentKey" :value="spec.agentKey">
@@ -1485,6 +2159,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             </div>
           </div>
         </div>
+        </div>
       </div>
     </section>
 
@@ -1492,7 +2167,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
     </div><!-- end agents tab -->
 
     <!-- ── Pipeline tab · detail view (no split, full-height scroll) ──────── -->
-    <div v-if="sidebarTab === 'pipeline' && sidebarView === 'pipeline'" class="pipeline-split">
+    <div v-if="visibleTabIds.has('pipeline') && sidebarTab === 'pipeline' && sidebarView === 'pipeline'" class="pipeline-split">
     <div class="pipeline-detail-scroll">
       <section class="block pipeline-detail-header">
         <div class="pipeline-detail-nav">
@@ -1646,7 +2321,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 
     <!-- Plans remains Host-owned until the B6 package migration. -->
     <PlanPane
-      v-if="backend && sidebarTab === 'plans'"
+      v-if="backend && visibleTabIds.has('plans') && sidebarTab === 'plans'"
       class="plans-split"
       :workspace-path="workspace ?? ''"
       :backend="backend"
@@ -1684,7 +2359,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   background: var(--bg-base);
   border-right: 1px solid var(--border-muted);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   overflow: hidden;
 }
 
@@ -1705,10 +2380,10 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   height: 30px;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .tab-btn:hover { color: var(--text-primary); background: var(--bg-elevated); }
 .tab-btn.active {
@@ -1720,6 +2395,89 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   width: 18px;
   height: 18px;
   object-fit: contain;
+}
+.tab-spacer { flex: 1; }
+/* Not a .tab-btn: that class means "a sidebar tab", and both the shortcut
+   handling and its tests index the strip by position. */
+.tab-collapse {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 30px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+}
+.tab-collapse:hover { color: var(--text-primary); background: var(--bg-elevated); }
+
+/* ── Collapsed rail ──────────────────────────────────────────────────
+   The panel body is hidden, not unmounted: ExplorerPane and GitPane hold
+   scroll position, expanded folders and in-flight backend requests that a
+   v-if would throw away every time the slot is collapsed. */
+.sidebar.is-collapsed {
+  padding: 0;
+  gap: 0;
+}
+.sidebar.is-collapsed > :not(.rail) { display: none; }
+.rail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  /* Five vertical labels overflow a short window; the sidebar hides its own
+     overflow, so without this the last tab becomes unreachable. */
+  overflow-y: auto;
+}
+.rail-btn {
+  position: relative;
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 4px;
+  width: 100%;
+}
+.rail-btn:hover { background: var(--bg-subtle); color: var(--text-bright); }
+.rail-btn.active { color: var(--accent-fg); }
+.rail-icon { font-size: var(--font-lg); }
+/* No emoji reads as a branch, so git uses its own glyph — kept in Git's
+   brand orange so the rail stays as colourful as the emoji beside it. */
+.rail-icon-git { color: #f05033; }
+.rail-label {
+  /* No rotate(180deg): the bottom-up "book spine" trick flips CJK glyphs
+     upside down. Plain vertical-rl keeps CJK upright and rotates Latin 90°. */
+  writing-mode: vertical-rl;
+  letter-spacing: 1px;
+  font-size: var(--font-3xs);
+  text-transform: uppercase;
+}
+.rail-badge {
+  position: absolute;
+  top: 6px;
+  right: 2px;
+  min-width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  background: var(--attention-fg);
+  color: var(--text-on-emphasis);
+  border-radius: 999px;
+  padding: 0 3px;
 }
 .git-badge {
   position: absolute;
@@ -1782,7 +2540,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 
 /* Section header label (matches GitPane sec-label) */
 .lbl {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   letter-spacing: 0.2px;
   text-transform: none;
@@ -1791,7 +2549,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   display: block;
 }
 .lbl.tiny {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   padding: 0;
 }
@@ -1823,14 +2581,14 @@ textarea {
   border: 1px solid var(--border-default);
   color: var(--text-bright);
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--font-xs);
   box-sizing: border-box;
   width: 100%;
 }
 textarea {
-  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-family: var(--font-mono);
   resize: vertical;
 }
 input[type='text']:focus,
@@ -1869,12 +2627,12 @@ textarea.drag-over {
 .row.workspace-row .browse {
   flex-shrink: 0;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 6px 10px;
 }
 .row.workspace-row .switch-ws {
   flex-shrink: 0;
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 6px 9px;
   line-height: 1;
 }
@@ -1883,7 +2641,7 @@ textarea.drag-over {
   align-items: flex-start;
   gap: 8px;
   margin-top: 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-primary);
   cursor: pointer;
   user-select: none;
@@ -1910,21 +2668,21 @@ textarea.drag-over {
 }
 .analyzer-row select {
   flex: 1;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 6px;
 }
 .analyzer-row .refresh {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 8px;
   flex-shrink: 0;
 }
 .muted-inline {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .muted-inline {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .pipeline-row {
   margin-top: 4px;
@@ -1937,7 +2695,7 @@ textarea.drag-over {
 .terminal-btn {
   opacity: 0.6;
   border-style: dashed;
-  transition: opacity 0.2s, background 0.2s;
+  transition: opacity var(--motion-base) var(--ease-out), background var(--motion-base) var(--ease-out);
 }
 .terminal-btn:hover:not(:disabled) {
   opacity: 1;
@@ -1949,12 +2707,12 @@ textarea.drag-over {
 .resume-input {
   flex: 1;
   min-width: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 6px;
   background: var(--bg-muted);
   color: var(--text-bright);
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .resume-btn {
   flex-shrink: 0;
@@ -1964,9 +2722,9 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 6px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
 }
 button:disabled {
@@ -2003,10 +2761,13 @@ button.link {
   background: transparent;
   border: none;
   color: var(--accent-fg);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 4px;
   text-align: left;
 }
+/* Title left, controls right: the row is space-between, and without this the
+   ＋ lands in the middle of it. */
+.agent-list-hdr > .lbl { margin-right: auto; }
 .agent-list-hdr {
   position: sticky;
   top: 0;
@@ -2021,23 +2782,36 @@ button.link {
   gap: 2px;
   align-items: center;
 }
+/* Sized to the header's text, not to the 32px action buttons beside it: once
+   the list is grouped this is the only control left up here. */
+.hdr-add-ws {
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  cursor: pointer;
+  font-size: var(--font-sm);
+  line-height: 1;
+  color: var(--text-muted);
+}
+.hdr-add-ws:hover { color: var(--text-bright); }
 button.history-btn {
   background: transparent;
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--font-md);
   padding: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: 4px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
+  border-radius: var(--radius-xs);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 button.agent-rebuild-all-btn {
-  width: 32px;
-  height: 32px;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -2065,6 +2839,7 @@ button.agent-rebuild-all-btn.busy svg {
 @keyframes agent-rebuild-spin {
   to { transform: rotate(360deg); }
 }
+button.history-btn :deep(svg) { width: 15px; height: 15px; }
 button.history-btn:hover {
   color: var(--text-bright);
   border-color: var(--accent-fg);
@@ -2074,10 +2849,10 @@ button.icon-btn {
   background: transparent;
   border: none;
   padding: 2px 4px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   line-height: 1;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   opacity: 0.5;
 }
 button.icon-btn:hover {
@@ -2092,9 +2867,9 @@ button.icon-btn.muted:hover {
 }
 .hint {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   margin: 0;
-  line-height: 1.5;
+  line-height: var(--lh-base);
 }
 .hint.warn {
   color: var(--attention-fg);
@@ -2112,7 +2887,7 @@ button.icon-btn.muted:hover {
 }
 .pg-btn {
   padding: 2px 8px;
-  font-size: 14px;
+  font-size: var(--font-md);
   line-height: 1;
   min-width: 28px;
 }
@@ -2121,7 +2896,7 @@ button.icon-btn.muted:hover {
   cursor: default;
 }
 .pg-info {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   min-width: 36px;
   text-align: center;
@@ -2139,11 +2914,11 @@ button.icon-btn.muted:hover {
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--motion-fast) var(--ease-out);
 }
 .pipeline-item:hover {
   background: var(--bg-elevated);
@@ -2155,7 +2930,7 @@ button.icon-btn.muted:hover {
 }
 .pipeline-item-name {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-bright);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2165,12 +2940,12 @@ button.icon-btn.muted:hover {
   color: var(--accent-bright);
 }
 .pipeline-item-meta {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   white-space: nowrap;
 }
 .pipeline-item-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   white-space: nowrap;
 }
 .pipeline-item-badge.running {
@@ -2190,9 +2965,9 @@ button.icon-btn.muted:hover {
   flex: 1;
   background: var(--bg-inset);
   border: 1px solid var(--accent-emphasis);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 4px 6px;
 }
 /* ── Pipeline detail header ────────────────────────────────────────────────── */
@@ -2207,7 +2982,7 @@ button.icon-btn.muted:hover {
   flex-wrap: wrap;
 }
 .back-btn {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 6px;
   color: var(--text-secondary);
 }
@@ -2215,7 +2990,7 @@ button.icon-btn.muted:hover {
   color: var(--text-bright);
 }
 .manage-btn {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 6px;
   color: var(--text-secondary);
 }
@@ -2223,7 +2998,7 @@ button.icon-btn.muted:hover {
   color: var(--text-bright);
 }
 .pipeline-detail-name {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--accent-bright);
   flex: 1;
@@ -2238,11 +3013,11 @@ button.icon-btn.muted:hover {
   margin-top: 2px;
 }
 .active-tag {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--success-fg);
   background: var(--success-subtle);
   border: 1px solid color-mix(in srgb, var(--success-strong) 33%, transparent);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   padding: 1px 5px;
   white-space: nowrap;
 }
@@ -2250,23 +3025,23 @@ button.icon-btn.muted:hover {
   flex: 1;
   background: var(--bg-inset);
   border: 1px solid var(--accent-emphasis);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 3px 6px;
 }
 .hint code,
 .agent-cmd code {
   background: var(--bg-subtle);
   padding: 1px 5px;
-  border-radius: 3px;
-  font-size: 10px;
+  border-radius: var(--radius-xs);
+  font-size: var(--font-3xs);
 }
 .pipeline {
   background: var(--bg-inset);
   border: 1px solid var(--accent-muted);
   padding: 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .pipeline-detail-scroll .pipeline {
   flex: 1;
@@ -2280,13 +3055,13 @@ button.icon-btn.muted:hover {
   background: var(--bg-inset);
   border: 1px solid var(--accent-muted);
   padding: 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .resume-card {
   background: var(--bg-elevated);
   border: 1px solid var(--accent-muted);
   border-left: 3px solid var(--accent-fg);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 8px 10px;
   margin-bottom: 8px;
   display: flex;
@@ -2305,7 +3080,7 @@ button.icon-btn.muted:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
 }
 .resume-state {
@@ -2329,18 +3104,18 @@ button.icon-btn.muted:hover {
   color: var(--accent-bright);
 }
 .resume-meta {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
 }
 .resume-meta .dot {
   margin: 0 4px;
 }
 .resume-task {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-primary);
   background: var(--bg-inset);
   padding: 6px 8px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   white-space: pre-wrap;
   max-height: 80px;
   overflow-y: auto;
@@ -2358,12 +3133,12 @@ button.icon-btn.muted:hover {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
   border-left: 4px solid var(--danger-fg);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 20px 22px;
   width: min(480px, 90vw);
   color: var(--text-bright);
-  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 .restart-card h3 {
@@ -2377,15 +3152,15 @@ button.icon-btn.muted:hover {
 }
 .restart-card .restart-warn {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .restart-task {
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 8px 10px;
-  font-family: Menlo, Monaco, monospace;
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: var(--font-2xs);
   margin: 8px 0;
   max-height: 120px;
   overflow-y: auto;
@@ -2408,13 +3183,13 @@ button.icon-btn.muted:hover {
   margin-bottom: 8px;
 }
 .prn-title {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--success-fg);
   letter-spacing: 0.02em;
 }
 .prn-task {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-bright);
   line-height: 1.4;
   display: -webkit-box;
@@ -2423,7 +3198,7 @@ button.icon-btn.muted:hover {
   overflow: hidden;
 }
 .prn-meta {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
 }
 .prn-auto {
@@ -2448,7 +3223,7 @@ button.icon-btn.muted:hover {
   height: 100%;
   background: linear-gradient(90deg, var(--accent-emphasis) 0%, var(--accent-focus) 40%, var(--success-fg) 100%);
   background-size: 200% 100%;
-  transition: width 300ms ease;
+  transition: width var(--motion-base) var(--ease-out);
   animation: bar-flow 2.5s linear infinite, bar-pulse 2s ease-in-out infinite;
 }
 .progress .bar::after {
@@ -2476,7 +3251,7 @@ button.icon-btn.muted:hover {
   50%       { opacity: 0.82; }
 }
 .pipeline-line {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
 }
 .pipeline-line .muted {
@@ -2494,16 +3269,327 @@ button.icon-btn.muted:hover {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  /* This list is the sidebar's main content and repeats per agent, so the gap
+     is paid once per row. 1px still separates the hover backgrounds. */
+  gap: 1px;
 }
 /* Collapsed rows are borderless one-liners; the card chrome only appears on
  * the single expanded item so a long list scans as compact rows. */
+/* Workspace section heading. The sidebar's outer layer: one per project, this
+   window's first. */
+.ws-head {
+  display: flex;
+  /* Everything lines up with the NAME, not with the two-line block: a control
+     centred against both rows would sit against the path instead. */
+  align-items: flex-start;
+  gap: 5px;
+  padding: 3px 4px 2px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-bright);
+  user-select: none;
+}
+.ws-head:first-child { padding-top: 1px; }
+/* Height of the name's line box — every control matches it so they centre on
+   that row rather than on the block. */
+.ws-head > .ws-caret,
+.ws-head > .ws-icon,
+.ws-head > .ws-act,
+.ws-head > .ws-add { height: 16px; align-self: flex-start; }
+.ws-caret {
+  flex: none;
+  width: 14px;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: var(--font-3xs);
+  line-height: 1;
+  color: var(--text-secondary);
+}
+.ws-caret:hover { color: var(--text-bright); }
+.ws-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.7;
+}
+.ws-icon svg { display: block; }
+/* Name over path. Both line-heights are set tight — this row repeats down the
+   sidebar, so every pixel of leading is paid for many times over. */
+.ws-text {
+  min-width: 0;
+  margin-right: auto;
+  display: flex;
+  flex-direction: column;
+}
+/* The name's own line, so the count sits against the name however long the
+   path below it happens to be. */
+.ws-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.ws-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 16px;
+}
+/* The path disambiguates two projects that share a folder name. It is the
+   part that gets dropped when the row runs out of width; the full path is on
+   the row's tooltip either way. */
+.ws-path {
+  min-width: 0;
+  font-weight: 400;
+  font-size: 9.5px;
+  line-height: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The workspace on screen. The others in this window keep running; their
+   headings read as links to switch to. */
+.ws-head--viewing .ws-name { color: var(--accent-bright, var(--text-bright)); }
+/* Where a dragged workspace would land. A line above the row rather than a
+   filled background: the heading already uses background for hover, and a drop
+   marker that looks like hover says the wrong thing about what is about to
+   happen. */
+.ws-head--drop { box-shadow: inset 0 2px 0 0 var(--accent-fg); }
+
+/* The row being viewed has no click action, so the cursor is free to say the
+   one thing it can do. A switchable row keeps `pointer`: clicking to switch is
+   its primary action, and the tooltip carries the drag. */
+.ws-head--viewing[draggable='true'] { cursor: grab; }
+.ws-head--viewing[draggable='true']:active { cursor: grabbing; }
+.ws-head--switchable { cursor: pointer; border-radius: var(--radius-xs); }
+.ws-head--switchable:hover { background: var(--bg-hover); }
+.ws-head--switchable:hover .ws-name { text-decoration: underline; }
+.ws-text--switchable:hover .ws-name { text-decoration: underline; }
+/* Only another window's name is a link — this window's own is where you are. */
+.ws-head:not(.ws-head--current) .ws-text { cursor: pointer; }
+.ws-head:not(.ws-head--current) .ws-text:hover .ws-name { text-decoration: underline; }
+/* Same pill as StageTabBar's tab-count: a pane tally means the same thing in
+   both places, so it should not look like two different things. */
+.ws-count {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: var(--radius-md);
+  background: var(--bg-muted);
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: var(--font-3xs);
+  font-variant-numeric: tabular-nums;
+}
+.ws-add {
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  cursor: pointer;
+  font-size: var(--font-xs);
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0.65;
+}
+.ws-head:hover .ws-add { opacity: 1; }
+.ws-add:hover { color: var(--text-bright); }
+
+/* Rebuild-all and history, moved off the section header: both act on one
+   workspace's panes. Sized to the row rather than the 32px header button. */
+.ws-act {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-btn-sm);
+  height: var(--icon-btn-sm);
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: var(--font-3xs);
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0.65;
+}
+.ws-head:hover .ws-act { opacity: 1; }
+.ws-act:hover:not(:disabled) { color: var(--text-bright); }
+.ws-act:disabled { opacity: 0.3; cursor: default; }
+.ws-act :deep(svg) { width: 11px; height: 11px; }
+.ws-act.busy :deep(svg) { animation: agent-rebuild-spin 0.8s linear infinite; }
+/* Kept visible while its menu is open, so the menu has a visible origin. */
+.ws-add[aria-expanded='true'] { opacity: 1; color: var(--text-bright); }
+
+/* The ＋ menu. Fixed rather than absolute: the pane list scrolls, and an
+   absolute menu inside it would be clipped by that scroll container. */
+.ws-add-menu {
+  position: fixed;
+  z-index: 60;
+  width: 200px;
+  max-width: calc(100vw - 24px);
+  padding: 5px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated, var(--bg-secondary));
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  font-size: var(--font-xs);
+}
+.ws-add-role {
+  width: calc(100% - 12px);
+  margin: 2px 6px 4px;
+  font-size: 11.5px;
+}
+.ws-add-div { height: 1px; margin: 4px 0; background: var(--border-muted); }
+/* Tall enough for the whole roster, capped against the viewport so a short
+ * window still gets a menu that fits. 200px was set when ten vendors was the
+ * whole list; at fourteen it cut the last four off with nothing on screen
+ * saying so, and they read as unsupported. Each row is ~24px (12px text +
+ * 3px padding either side), so 360px carries fifteen. */
+.ws-add-scroll {
+  max-height: min(360px, 45vh);
+  overflow-y: auto;
+  /* Scroll affordance. The two fades are painted in the scroller's own
+   * coordinate space (`local`), so each one is visible only while content is
+   * hidden in that direction; the two shadows stay pinned to the box
+   * (`scroll`) and are covered by a fade once that end is reached. Pure CSS —
+   * no scroll listener. The list must never again look complete when it is
+   * not: that mistake has now been made twice here (see the Terminal entry's
+   * comment in the template). */
+  background:
+    linear-gradient(var(--bg-elevated, var(--bg-secondary)) 30%, transparent) top / 100% 14px no-repeat local,
+    linear-gradient(transparent, var(--bg-elevated, var(--bg-secondary)) 70%) bottom / 100% 14px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, rgb(0 0 0 / 22%), transparent) top / 100% 5px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, rgb(0 0 0 / 22%), transparent) bottom / 100% 5px no-repeat scroll;
+}
+.ws-add-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 10px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: var(--font-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.ws-add-opt:hover { background: var(--bg-hover, rgb(255 255 255 / 7%)); }
+.ws-add-opt.on { color: var(--text-bright); font-weight: 600; }
+.ws-add-ck { flex: none; width: 10px; font-size: var(--font-3xs); }
+.ws-add-lb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-add-more { color: var(--text-secondary); padding-left: 26px; }
+
+/* Right-click menu on a workspace heading. Fixed at the pointer, same reason
+   the ＋ menu is fixed: the pane list scrolls. */
+.ws-ctx-menu {
+  position: fixed;
+  z-index: 61;
+  min-width: 150px;
+  padding: 4px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated, var(--bg-secondary));
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  font-size: var(--font-xs);
+}
+.ws-ctx-opt {
+  display: block;
+  width: 100%;
+  padding: 3px 12px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: var(--font-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.ws-ctx-opt:hover { background: var(--bg-hover, rgb(255 255 255 / 7%)); }
+/* A menu row, not a button. `button.danger` elsewhere paints a filled red
+   background with light text; this selector is more specific and was only
+   overriding the colour, leaving red on red — the label vanished. */
+.ws-ctx-opt.danger {
+  background: none;
+  color: var(--danger-bright, #e05252);
+}
+.ws-ctx-opt.danger:hover { background: var(--danger-subtle, rgb(224 82 82 / 12%)); }
+/* ── Run group layer ────────────────────────────────────────────────────────
+   A spine down the left edge, not another step of indentation: indentation is
+   already spent on parent/child panes, and a third level would push an MCP
+   child's name past the width it has. The spine also survives scrolling — the
+   heading leaves the viewport, the colour does not. */
+.ws-grp {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 2px 18px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  user-select: none;
+}
+/* Sits where the workspace caret sits one level up, so the two read as the
+   same control at two depths. */
+.ws-grp-caret {
+  flex: none;
+  width: 12px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+}
+.ws-grp-caret:hover { color: var(--text-bright); }
+/* Same three states, same tokens, as StageTabBar's tab dot — the sidebar must
+   not be able to say "active" where the tab says otherwise. */
+.ws-grp-key {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--border-default);
+}
+.ws-grp[data-state='active'] .ws-grp-key { background: var(--success-fg); }
+.ws-grp[data-state='idle'] .ws-grp-key { background: var(--attention-emphasis); }
+.ws-grp-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The spine is a border rather than a pseudo-element so it composes with the
+   lineage margin: an indented child keeps its own left edge, and the spine
+   stays where the group starts. */
+/* No spine down the rows. One was tried: a colour running beside a group so
+   that scrolling past its heading still told you which group you were in.
+   Then the colour became the group's RUN STATE rather than its identity —
+   which is the more useful signal, and the tab bar's own — and at that point
+   the stripe could no longer answer the question it existed for: two groups
+   that are both running are both green. The heading says which group; the dot
+   says whether it is moving. A stripe repeating the dot down every row adds
+   ink, not information. */
+
 .agent-item {
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 0 4px;
 }
+/* Panes sit under the workspace that owns them. The sibling selector is what
+   scopes this: an ungrouped list has no .ws-head, so nothing indents and that
+   layout is untouched. Lineage children add their own margin on top of it. */
+.ws-head ~ .agent-item { padding-left: 22px; }
 .agent-item.expanded {
   background: var(--bg-subtle);
   border-color: var(--border-muted);
@@ -2545,9 +3631,12 @@ button.icon-btn.muted:hover {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 26px;
+  /* The tallest thing in the row is the agent badge at 10px + 2px padding,
+     so ~16px of content. 22 keeps a comfortable margin without the row
+     reading as a paragraph. */
+  min-height: 22px;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 1px 2px;
   overflow: hidden;
 }
@@ -2611,7 +3700,7 @@ button.icon-btn.muted:hover {
   flex-shrink: 0;
   font-size: 8px;
   color: var(--text-muted);
-  transition: transform 0.15s;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 .agent-item.expanded .expand-caret {
   transform: rotate(90deg);
@@ -2619,9 +3708,11 @@ button.icon-btn.muted:hover {
 @media (prefers-reduced-motion: reduce) {
   .status-dot { animation: none !important; }
   .expand-caret { transition: none; }
+  .progress .bar,
+  .progress .bar::after { animation: none; }
 }
 .agent-line-sub {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -2656,9 +3747,39 @@ button.icon-btn.muted:hover {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  font-size: 10px;
-  color: var(--accent-bright);
-  margin: 2px 0 4px;
+  font-size: var(--font-2xs);
+  color: var(--text-secondary);
+  margin: 4px 0 5px;
+}
+/* The agent's own name is the one thing worth reading at a glance; the rest of
+   the card is deliberately quieter so the eye lands here first. */
+.agent-role-main {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-bright);
+  font-weight: 500;
+}
+/* Actions read as one quiet pair: Remove only fills in on hover, so a card at
+   rest is not dominated by a red block. */
+.agent-item.expanded > .row.tight {
+  margin-top: 8px;
+}
+.agent-item.expanded > .row.tight button {
+  font-size: var(--font-2xs);
+  padding: 4px 10px;
+  border-radius: 4px;
+}
+.agent-item.expanded > .row.tight button.danger {
+  background: transparent;
+  color: var(--danger-fg);
+  border: 1px solid color-mix(in srgb, var(--danger-fg) 40%, transparent);
+}
+.agent-item.expanded > .row.tight button.danger:hover {
+  background: var(--danger-emphasis);
+  border-color: transparent;
+  color: var(--text-on-emphasis);
 }
 .agent-item.expanded > .agent-role-line,
 .agent-item.expanded > .stage-line,
@@ -2673,12 +3794,12 @@ button.icon-btn.muted:hover {
 .agent-close-btn {
   margin-left: 4px;
   padding: 0 4px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 18px;
-  width: 18px;
+  height: var(--icon-btn-sm);
+  width: var(--icon-btn-sm);
 }
 .agent-minimize-btn:hover {
   color: var(--text-primary);
@@ -2686,8 +3807,8 @@ button.icon-btn.muted:hover {
 }
 .agent-rebuild-btn {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: var(--icon-btn-sm);
+  height: var(--icon-btn-sm);
   padding: 2px;
   color: var(--text-secondary);
   display: inline-flex;
@@ -2711,9 +3832,9 @@ button.icon-btn.muted:hover {
   background: var(--danger-deep);
 }
 .stage-line {
-  color: var(--text-secondary);
-  font-size: 10px;
-  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: var(--font-3xs);
+  margin-bottom: 6px;
 }
 .pipe-tag {
   font-size: 9px;
@@ -2721,14 +3842,43 @@ button.icon-btn.muted:hover {
   background: var(--accent-muted);
   color: var(--accent-bright);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
+}
+/* Agent-spawned pane. Distinct hue from .pipe-tag so the two provenance marks
+   are never confused; both sit in the same slot before the name. */
+.mcp-tag {
+  font-size: 9px;
+  font-weight: 700;
+  background: var(--done-muted, var(--bg-muted));
+  color: var(--done-fg, var(--text-secondary));
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  flex: none;
+}
+/* Fold control for a pane that has children. Sized to match .lineage-spacer so
+   a childless row at the same depth still lines up with its siblings. */
+.lineage-caret {
+  flex: none;
+  width: 12px;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+.lineage-caret:hover { color: var(--text-bright); }
+.lineage-spacer {
+  flex: none;
+  width: 12px;
 }
 .badge {
   font-weight: 600;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   background: var(--bg-muted);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-primary);
 }
 .badge.role {
@@ -2738,7 +3888,7 @@ button.icon-btn.muted:hover {
 /* Auto-name marker — same treatment as the pane header's. */
 .auto-name-mark {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   line-height: 1;
   opacity: 0.45;
   margin-left: -4px; /* pulls back .agent-line's 6px gap */
@@ -2746,7 +3896,7 @@ button.icon-btn.muted:hover {
 }
 .minimized-tag {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   white-space: nowrap;
   flex-shrink: 0;
@@ -2820,17 +3970,40 @@ button.icon-btn.muted:hover {
   text-overflow: ellipsis;
 }
 .agent-session {
-  font-size: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   margin-bottom: 4px;
-  word-break: break-all;
 }
-.agent-session code {
-  color: var(--accent-fg);
+.agent-session-k {
+  flex: none;
+  font-size: 9px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+/* Command and session id are both machine strings: same chip, one line each,
+   truncated rather than wrapped. The full value is in the row's title. */
+.agent-item.expanded > .agent-cmd code,
+.agent-item.expanded > .agent-session code {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-muted);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: var(--font-3xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .err {
   color: var(--danger-fg);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   margin: 4px 0;
 }
 .prompt-block {
@@ -2838,20 +4011,20 @@ button.icon-btn.muted:hover {
   padding: 6px 8px;
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .role-line {
   margin: 4px 0 0;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .prompt-preview {
   margin: 6px 0 0;
   padding: 6px 8px;
   background: var(--bg-inset);
-  border-radius: 4px;
-  font-size: 10px;
-  line-height: 1.5;
+  border-radius: var(--radius-xs);
+  font-size: var(--font-3xs);
+  line-height: var(--lh-base);
   max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
@@ -2864,7 +4037,7 @@ button.icon-btn.muted:hover {
 }
 .prompt-head .tiny {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 .warn-block {
   display: flex;
@@ -2879,7 +4052,7 @@ button.icon-btn.muted:hover {
 /* ── Manual spawn card (matches GitPane git-card / History style) ─────────── */
 .spawn-card {
   border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   margin-top: 6px;
 }
@@ -2892,17 +4065,51 @@ button.icon-btn.muted:hover {
   background: var(--bg-subtle);
   cursor: pointer;
   user-select: none;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--text-primary);
 }
-.spawn-card-hdr:hover { background: var(--bg-elevated); }
-.spawn-caret {
-  font-size: 9px;
-  color: var(--text-muted);
-  width: 10px;
-  flex-shrink: 0;
+/* The header is a dialog title now, not a fold toggle. */
+.spawn-card-hdr { cursor: default; }
+.spawn-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
 }
+.spawn-card--modal {
+  /* Keeps its own 320px: it is a compact spawn card, not a dialog tier. */
+  width: min(320px, 92vw);
+  max-width: 100%;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated, var(--bg-secondary));
+  box-shadow: var(--shadow-modal);
+}
+.spawn-card--modal .spawn-card-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: default;
+}
+.spawn-modal-close {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  cursor: pointer;
+  font-size: var(--font-xs);
+  line-height: 1;
+  color: var(--text-muted);
+}
+.spawn-modal-close:hover { color: var(--text-bright); }
 .spawn-card-body {
   padding: 10px;
   display: flex;
@@ -2956,7 +4163,7 @@ button.icon-btn.muted:hover {
   background: var(--bg-base);
   border-top: 1px solid var(--border-muted);
   border-bottom: 1px solid var(--border-muted);
-  transition: background 0.1s;
+  transition: background var(--motion-fast) var(--ease-out);
 }
 .pane-split .part-resize:hover {
   background: var(--bg-elevated);
@@ -2965,9 +4172,9 @@ button.icon-btn.muted:hover {
   margin: 0 auto;
   width: 44px;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   background: var(--text-muted);
-  transition: height 0.1s, width 0.1s, background 0.1s;
+  transition: height var(--motion-fast) var(--ease-out), width var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 .pane-split .part-resize:hover .part-resize-grip,
 .pane-split .part-resize:active .part-resize-grip {

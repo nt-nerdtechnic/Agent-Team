@@ -583,8 +583,8 @@ function buildAiContext(): string {
 
 <template>
   <Teleport to="body">
-    <div v-show="open" class="pm-overlay" @click.self="emit('close')">
-      <div class="pm-modal">
+    <div v-show="open" class="pm-overlay nv-modal-overlay" @click.self="emit('close')">
+      <div class="pm-modal nv-modal-shell nv-modal-shell--wide">
   <div class="app">
     <header class="top">
       <div class="title">Pipeline Manager</div>
@@ -637,13 +637,13 @@ function buildAiContext(): string {
             <span class="pl-enter">›</span>
           </li>
         </ul>
-        <p v-else class="hint">No pipelines loaded yet…</p>
+        <p v-else class="hint nv-empty nv-empty--inline">No pipelines loaded yet…</p>
       </template>
 
       <!-- Detail view: pipeline header + stage editor -->
       <template v-else>
         <div class="pl-detail-header">
-          <button class="ghost back-btn" @click="plBackToList">← Back</button>
+          <button class="ghost back-btn nv-btn" @click="plBackToList">← Back</button>
           <template v-if="plRenamingId === plEditingId">
             <input
               v-model="plRenameText" class="pl-input pl-rename" spellcheck="false"
@@ -682,7 +682,7 @@ function buildAiContext(): string {
           </div>
           <div class="split">
             <aside class="split-list">
-              <button class="primary new-btn" @click="sStartNew">{{ $t('action.add-stage') }}</button>
+              <button class="primary new-btn nv-btn nv-btn--primary" @click="sStartNew">{{ $t('action.add-stage') }}</button>
               <ul>
                 <li
                   v-for="(s, idx) in sActiveStages" :key="s.id"
@@ -709,8 +709,8 @@ function buildAiContext(): string {
               <div class="detail-head">
                 <h3>{{ sIsNew ? $t('label.new-stage') : $t('label.edit-stage') }}</h3>
                 <div class="row-g gap">
-                  <button v-if="!sIsNew" class="danger" @click="sConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
-                  <button class="primary" :disabled="!sCanSave || sSaving" @click="sSave">{{ sSaving ? $t('label.saving') : sIsNew ? $t('action.create') : $t('settings.roles.save') }}</button>
+                  <button v-if="!sIsNew" class="danger nv-btn nv-btn--danger" @click="sConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
+                  <button class="primary nv-btn nv-btn--primary" :disabled="!sCanSave || sSaving" @click="sSave">{{ sSaving ? $t('label.saving') : sIsNew ? $t('action.create') : $t('settings.roles.save') }}</button>
                 </div>
               </div>
               <p v-if="sError" class="err-msg">{{ sError }}</p>
@@ -776,7 +776,7 @@ function buildAiContext(): string {
                     <div class="field"><label class="lbl">{{ $t('label.kickoff-body') }}</label><textarea v-model="sSlotDraft.kickoffBody" rows="4" spellcheck="false" class="mono"></textarea></div>
                     <div class="row-g gap">
                       <button class="ghost" @click="sCancelAddSlot">{{ $t('action.cancel') }}</button>
-                      <button class="primary" :disabled="!sSlotDraft.label.trim()" @click="sSaveEditSlot">Save slot</button>
+                      <button class="primary nv-btn nv-btn--primary" :disabled="!sSlotDraft.label.trim()" @click="sSaveEditSlot">Save slot</button>
                     </div>
                   </div>
                 </template>
@@ -799,7 +799,7 @@ function buildAiContext(): string {
                   <div class="field"><label class="lbl">{{ $t('label.kickoff-body') }}</label><textarea v-model="sSlotDraft.kickoffBody" rows="4" spellcheck="false" class="mono"></textarea></div>
                   <div class="row-g gap">
                     <button class="ghost" @click="sCancelAddSlot">{{ $t('action.cancel') }}</button>
-                    <button class="primary" :disabled="!sSlotDraft.label.trim()" @click="sConfirmAddSlot">{{ $t('action.add') }}</button>
+                    <button class="primary nv-btn nv-btn--primary" :disabled="!sSlotDraft.label.trim()" @click="sConfirmAddSlot">{{ $t('action.add') }}</button>
                   </div>
                 </div>
               </div>
@@ -822,7 +822,7 @@ function buildAiContext(): string {
       </div>
       <div class="split">
         <aside class="split-list">
-          <button class="primary new-btn" @click="rStartNew">{{ $t('settings.roles.new-role') }}</button>
+          <button class="primary new-btn nv-btn nv-btn--primary" @click="rStartNew">{{ $t('settings.roles.new-role') }}</button>
           <ul>
             <li
               v-for="r in rSorted" :key="r.key"
@@ -838,8 +838,8 @@ function buildAiContext(): string {
           <div class="detail-head">
             <h3>{{ rDraft.isNew ? $t('label.new-role') : $t('label.edit-role') }}</h3>
             <div class="row-g gap">
-              <button v-if="!rDraft.isNew" class="danger" @click="rConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
-              <button class="primary" :disabled="!rCanSave || rSaving" @click="rSave">{{ rSaving ? $t('label.saving') : rDraft.isNew ? $t('action.create') : $t('settings.roles.save') }}</button>
+              <button v-if="!rDraft.isNew" class="danger nv-btn nv-btn--danger" @click="rConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
+              <button class="primary nv-btn nv-btn--primary" :disabled="!rCanSave || rSaving" @click="rSave">{{ rSaving ? $t('label.saving') : rDraft.isNew ? $t('action.create') : $t('settings.roles.save') }}</button>
             </div>
           </div>
           <p v-if="rError" class="err-msg">{{ rError }}</p>
@@ -891,7 +891,7 @@ function buildAiContext(): string {
         <p>{{ $t('hint.delete-stage-warning') }}</p>
         <div class="modal-actions">
           <button class="ghost" @click="sConfirmDelete = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" @click="sDoDelete">{{ $t('action.delete') }}</button>
+          <button class="danger nv-btn nv-btn--danger" @click="sDoDelete">{{ $t('action.delete') }}</button>
         </div>
       </div>
     </div>
@@ -901,7 +901,7 @@ function buildAiContext(): string {
         <p>{{ $t('hint.reset-stages-warning') }}</p>
         <div class="modal-actions">
           <button class="ghost" @click="sConfirmReset = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" @click="sDoReset">{{ $t('action.reset') }}</button>
+          <button class="danger nv-btn nv-btn--danger" @click="sDoReset">{{ $t('action.reset') }}</button>
         </div>
       </div>
     </div>
@@ -911,7 +911,7 @@ function buildAiContext(): string {
         <p>{{ $t('settings.roles.cannot-undo') }}</p>
         <div class="modal-actions">
           <button class="ghost" @click="rConfirmDelete = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" @click="rDoDelete">{{ $t('action.delete') }}</button>
+          <button class="danger nv-btn nv-btn--danger" @click="rDoDelete">{{ $t('action.delete') }}</button>
         </div>
       </div>
     </div>
@@ -921,7 +921,7 @@ function buildAiContext(): string {
         <p>{{ $t('settings.roles.reset-confirm-body') }}</p>
         <div class="modal-actions">
           <button class="ghost" @click="rConfirmReset = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" @click="rDoReset">{{ $t('action.reset-defaults') }}</button>
+          <button class="danger nv-btn nv-btn--danger" @click="rDoReset">{{ $t('action.reset-defaults') }}</button>
         </div>
       </div>
     </div>
@@ -935,7 +935,9 @@ function buildAiContext(): string {
 .pm-overlay {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   z-index: 8000;
   display: flex;
   align-items: center;
@@ -943,19 +945,18 @@ function buildAiContext(): string {
   -webkit-app-region: no-drag;
 }
 .pm-modal {
-  width: 92vw;
-  max-width: 1100px;
+  width: min(var(--modal-w-wide), 92vw);
   height: 88vh;
   border: 1px solid var(--border-muted);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--shadow-modal);
 }
 .pm-close {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 16px;
+  font-size: var(--font-lg);
   cursor: pointer;
   padding: 4px 8px;
   border-radius: var(--radius-control);
@@ -971,8 +972,8 @@ function buildAiContext(): string {
   height: 100%;
   background: var(--bg-inset);
   color: var(--text-bright);
-  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
   overflow: hidden;
 }
 .top {
@@ -985,7 +986,7 @@ function buildAiContext(): string {
   flex-shrink: 0;
 }
 .title {
-  font-size: 14px;
+  font-size: var(--font-md);
   font-weight: 600;
 }
 .tabs {
@@ -996,9 +997,9 @@ function buildAiContext(): string {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 5px 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 .tabs button:hover {
@@ -1015,7 +1016,7 @@ function buildAiContext(): string {
   align-items: center;
   gap: 6px;
   margin-left: auto;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
 }
 .dot {
@@ -1057,11 +1058,11 @@ function buildAiContext(): string {
   flex-shrink: 0;
 }
 .toolbar button {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 5px 10px;
 }
 .summary-ok {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--success-fg);
 }
 
@@ -1108,12 +1109,12 @@ function buildAiContext(): string {
   white-space: nowrap;
 }
 .pl-meta {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   flex-shrink: 0;
 }
 .pl-badge {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--success-fg);
   background: var(--success-subtle);
   border: 1px solid color-mix(in srgb, var(--success-strong) 33%, transparent);
@@ -1123,7 +1124,7 @@ function buildAiContext(): string {
 }
 .pl-enter {
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--font-md);
 }
 
 /* ── Pipeline detail header ───────────────────────────────────────────────── */
@@ -1135,7 +1136,7 @@ function buildAiContext(): string {
   flex-shrink: 0;
 }
 .back-btn {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 8px;
   color: var(--text-secondary);
 }
@@ -1167,7 +1168,7 @@ function buildAiContext(): string {
   flex-shrink: 0;
 }
 .tiny {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 3px 7px;
 }
 .pad {
@@ -1248,7 +1249,7 @@ function buildAiContext(): string {
 }
 .mono-key {
   font-family: Menlo, Monaco, monospace;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--accent-bright);
   background: var(--bg-muted);
   padding: 1px 6px;
@@ -1267,7 +1268,7 @@ function buildAiContext(): string {
 }
 .item-sub {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1275,7 +1276,7 @@ function buildAiContext(): string {
 }
 .manager-badge {
   margin-left: 4px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
 }
 
 /* ── Fields ───────────────────────────────────────────────────────────────── */
@@ -1285,7 +1286,7 @@ function buildAiContext(): string {
   gap: 4px;
 }
 .lbl {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1305,17 +1306,17 @@ textarea {
   padding: 8px 10px;
   border-radius: 4px;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--font-sm);
   box-sizing: border-box;
   width: 100%;
 }
 textarea {
   resize: vertical;
-  line-height: 1.5;
+  line-height: var(--lh-base);
 }
 textarea.mono {
   font-family: Menlo, Monaco, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   min-height: 100px;
 }
 input:focus,
@@ -1332,7 +1333,7 @@ input:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   cursor: pointer;
 }
 .check-row input[type='checkbox'] {
@@ -1342,7 +1343,7 @@ input:disabled {
 }
 .manager-toggle {
   align-items: flex-start;
-  line-height: 1.5;
+  line-height: var(--lh-base);
 }
 .manager-toggle input[type='checkbox'] {
   margin-top: 2px;
@@ -1354,9 +1355,9 @@ button {
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: var(--font-xs);
   padding: 7px 14px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 button:disabled {
@@ -1387,14 +1388,14 @@ button.ghost:hover:not(:disabled) {
   background: var(--bg-muted);
 }
 button.small {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 4px 10px;
 }
 .icon-btn {
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 4px;
   cursor: pointer;
   border-radius: 3px;
@@ -1453,17 +1454,17 @@ button.small {
 /* ── Messages ─────────────────────────────────────────────────────────────── */
 .hint {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin: 0;
 }
 .warn-msg {
   color: var(--attention-fg);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   margin: 4px 0 0;
 }
 .err-msg {
   color: var(--danger-fg);
-  font-size: 12px;
+  font-size: var(--font-xs);
   margin: 0;
 }
 
@@ -1491,7 +1492,7 @@ button.small {
   font-size: 15px;
 }
 .modal-card p {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
   margin: 0 0 14px;
   line-height: 1.6;

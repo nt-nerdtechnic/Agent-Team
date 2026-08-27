@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -692,3 +693,104 @@ class SpawnHistoryStore:
             limit = max(0, limit)
             newest_first = list(reversed(stored))
             return newest_first[offset : offset + limit], len(stored)
+
+
+# Cap on how much transcript one restore replays. The renderer writes it into
+# xterm as plain text, so this is bounded by what a user can usefully scroll
+# back through, not by what the file holds.
+TRANSCRIPT_MAX_BYTES = 256 * 1024
+
+# One WS frame's worth of transcript. Matches terminals.py's output slice size,
+# and for the same reason: a frame this size cannot monopolise the session send
+# lock, so a heartbeat still gets through between chunks.
+TRANSCRIPT_CHUNK_CHARS = 64 * 1024
+
+
+def read_pane_transcript(
+    workspace_path: str,
+    agent_key: str,
+    pane_id: str,
+    max_bytes: int = TRANSCRIPT_MAX_BYTES,
+) -> tuple[str, bool]:
+    """Tail a pane's manual transcript logs, oldest first.
+
+    What this returns is NOT raw PTY bytes: ``_clean_for_log`` (terminals.py)
+    strips every ANSI/VT escape before a byte reaches the file, so the text
+    carries no cursor positioning and no SGR. That is exactly what makes it
+    safe to replay — there are no absolute coordinates to land in the wrong
+    cell when the terminal is a different width than the one that recorded it.
+    The cost is that colour and TUI chrome are gone; this restores the
+    conversation, not the screen.
+
+    A pane's history is spread over one file per day (see MANUAL_LOGS_DIRNAME),
+    and the date folder is not a usable key — ``manual_log_file_name`` is. Days
+    are read newest-first until ``max_bytes`` is reached, then reversed so the
+    result reads forwards.
+
+    Returns ``(text, truncated)``; ``truncated`` means older content was left
+    out to fit the cap.
+    """
+    base = Path(workspace_path) / PROJECT_DIR_NAME / MANUAL_LOGS_DIRNAME
+    name = manual_log_file_name(agent_key, pane_id)
+    try:
+        days = sorted((d for d in base.iterdir() if d.is_dir()), reverse=True)
+    except OSError:
+        return "", False
+
+    chunks: list[str] = []
+    remaining = max(0, max_bytes)
+    truncated = False
+    for day in days:
+        if remaining <= 0:
+            truncated = True
+            break
+        path = day / name
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        try:
+            with path.open("rb") as fh:
+                if size > remaining:
+                    fh.seek(size - remaining)
+                    truncated = True
+                raw = fh.read()
+        except OSError:
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        # A mid-file seek can land inside a line (and, before the decode above,
+        # inside a multi-byte character). Drop the partial head so the replay
+        # starts on a line boundary instead of a fragment.
+        if size > remaining:
+            nl = text.find("\n")
+            text = text[nl + 1 :] if nl >= 0 else ""
+        if text:
+            chunks.append(text)
+            remaining -= len(raw)
+
+    if not chunks:
+        return "", False
+    chunks.reverse()
+    return _drop_repaint_stubs("".join(chunks)), truncated
+
+
+# A line that is nothing but box-drawing horizontals, this short or shorter, is
+# a repaint fragment rather than content. `_clean_for_log` turns a lone \r into
+# a newline (terminals.py), so a TUI redrawing its input frame in place leaves
+# one line per repaint — measured on a real transcript: 14 lines at the full 92
+# columns, but also 10 lines of 3 characters and one of 7. Replayed verbatim
+# those short stubs appear as stray rules floating above the prompt.
+#
+# The threshold is deliberately well below any real divider (the genuine ones
+# measured 88-92) so a rule the user actually typed survives.
+_STUB_RULE_MAX = 8
+_RULE_LINE = re.compile(r"^[\u2500-\u257f\-—_]{3,}$")
+
+
+def _drop_repaint_stubs(text: str) -> str:
+    """Remove in-place-repaint leftovers from a transcript before it is replayed."""
+    return "\n".join(
+        line
+        for line in text.split("\n")
+        if not (len(line.strip()) <= _STUB_RULE_MAX and _RULE_LINE.match(line.strip()))
+    )

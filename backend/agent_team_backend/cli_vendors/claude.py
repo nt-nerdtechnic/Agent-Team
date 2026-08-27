@@ -25,7 +25,6 @@ import asyncio
 import base64
 import hashlib
 import os
-import pty as _pty_unused  # noqa: F401  (real import happens in read_usage_panel)
 import re
 import signal
 import sys
@@ -378,18 +377,31 @@ class ClaudeLogReader(LogReader):
 
         try:
             with fh:
-                for line_no, raw in enumerate(fh, 1):
-                    raw = raw.strip()
+                for line_no, raw_line in enumerate(fh, 1):
+                    raw = raw_line.strip()
                     if not raw:
                         continue
                     if line_no <= high_water:
                         continue
-                    last_line = line_no
                     key = f"act:{line_no}"
                     try:
                         rec = json.loads(raw)
                     except json.JSONDecodeError:
+                        # An unterminated final line is still being written.
+                        # Leave the mark behind it so the completed line is
+                        # read on the next poll: advancing past it dropped
+                        # that line's events for good, and when the lost line
+                        # was the turn's end record the pane stayed
+                        # "mid-turn" forever (GitHub #21).
+                        if not raw_line.endswith("\n"):
+                            break
+                        # A terminated line that will not parse is genuinely
+                        # corrupt. Step over it for good rather than
+                        # re-reading — and re-emitting — the rest of the file
+                        # on every poll.
+                        last_line = line_no
                         continue
+                    last_line = line_no
 
                     rtype = rec.get("type")
                     ts = str(rec.get("timestamp") or "")
@@ -551,111 +563,34 @@ async def read_claude_credentials(home: Path) -> dict | None:
 
 
 
-# ---- usage quota: the CLI's own /usage panel -------------------------------
-# (merged from claude_cli_usage.py — nothing here talks to Anthropic; Claude
-# Code makes the request under its own identity and prints the answer.)
+# ---- usage quota: the CLI's own /usage report --------------------------------
+# (nothing here talks to Anthropic; Claude Code makes the request under its own
+# identity and prints the answer.)
 
-PROBE_ARGS = ("--ax-screen-reader",)
-# Typed first without the enter; the \r only goes in after the CLI echoes the
-# text back (see read_usage_panel). On the screens where typing does not echo —
-# the folder-trust dialog, the login wizard, the first-run theme picker — a
-# blind \r would answer someone else's question with its default button.
-SLASH_COMMAND_TEXT = b"/usage"
-ENTER = b"\r"
-
-# Boot, then the panel itself, both bounded. The panel repaints several times as
-# it loads ("Scanning local sessions…" → final), so it is read until the output
-# goes quiet rather than until any one marker appears.
-BOOT_TIMEOUT_S = 25.0
-PANEL_TIMEOUT_S = 25.0
-QUIET_S = 1.5
-ECHO_TIMEOUT_S = 5.0
+# ``claude -p /usage`` prints the quota report to stdout and exits — no pty, no
+# prompt to wait for, no keystrokes to time. The MCP flags keep the probe from
+# starting the user's MCP servers; ``--no-session-persistence`` keeps it out of
+# the session list. It does not consume quota and needs no trust record for the
+# cwd. Older CLIs that lack the print form fail here with a clear error; there
+# is deliberately no fallback to driving the interactive UI.
+USAGE_ARGS = (
+    "--strict-mcp-config",
+    "--mcp-config", '{"mcpServers":{}}',
+    "--no-session-persistence",
+    "-p", "/usage",
+)
+# ~2s idle; observed up to ~40s on a heavily loaded machine.
+USAGE_TIMEOUT_S = 90.0
 
 _ENV_DROP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CONFIG_DIR")
 
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Z0-9]|\r")
-_CSI = re.compile(r"\x1b\[([0-9;?]*)([a-zA-Z])")
-# "4% 4% used" — the label is rendered twice (once for the bar, once as text).
-_PERCENT = re.compile(r"(\d+(?:\.\d+)?)%\s+(?:\d+(?:\.\d+)?%\s+)?used", re.I)
-_RESETS = re.compile(r"^Resets\s+(.+?)\s*$", re.I)
-_SESSION_HEAD = re.compile(r"^Current session\s*$", re.I)
-_WEEK_HEAD = re.compile(r"^Current week\s*\((.+?)\)\s*$", re.I)
-
-
-def strip_ansi(text: str) -> str:
-    return _ANSI.sub("", text)
-
-
-def render_screen(raw: str) -> str:
-    """Replay the output into a line buffer and return what is on screen.
-
-    Reading the byte stream directly does not work: while the panel loads it
-    repaints by moving the cursor up and erasing lines in place, so a corrected
-    number arrives with no header attached to it — a stream reader keeps the
-    first, already-superseded value. Applying the cursor movements is what makes
-    the settled screen, and only the settled screen, readable.
-
-    Deliberately partial: it handles the sequences this panel actually emits
-    (cursor up/down, column moves, line erase) and drops the rest, which are
-    colour and mode changes with no effect on layout."""
-    lines: list[str] = [""]
-    row = col = 0
-
-    def put(text: str) -> None:
-        nonlocal col
-        while len(lines) <= row:
-            lines.append("")
-        line = lines[row].ljust(col)
-        lines[row] = line[:col] + text + line[col + len(text):]
-        col += len(text)
-
-    i = 0
-    while i < len(raw):
-        ch = raw[i]
-        if ch == "\x1b":
-            match = _CSI.match(raw, i)
-            if not match:
-                nxt = raw[i + 1] if i + 1 < len(raw) else ""
-                if nxt in "()":
-                    i += 3  # charset select is ESC ( B — the B is not text
-                elif nxt == "]":
-                    # OSC (window title and friends): payload runs to BEL or ST
-                    bel = raw.find("\x07", i)
-                    st = raw.find("\x1b\\", i + 2)
-                    ends = [e for e in (bel, st) if e != -1]
-                    if not ends:
-                        break  # unterminated OSC swallows the rest
-                    stop = min(ends)
-                    i = stop + (1 if raw[stop] == "\x07" else 2)
-                else:
-                    i += 2  # other two-byte escapes
-                continue
-            params, final = match.group(1), match.group(2)
-            first = params.split(";")[0]
-            count = int(first) if first.isdigit() else (0 if final == "K" else 1)
-            if final == "A":
-                row = max(0, row - max(1, count))
-            elif final == "B":
-                row += max(1, count)
-            elif final == "G":
-                col = max(0, count - 1)
-            elif final == "K":
-                while len(lines) <= row:
-                    lines.append("")
-                lines[row] = "" if count == 2 else lines[row][:col]
-            i = match.end()
-            continue
-        if ch == "\n":
-            row += 1
-            col = 0
-            while len(lines) <= row:
-                lines.append("")
-        elif ch == "\r":
-            col = 0
-        else:
-            put(ch)
-        i += 1
-    return "\n".join(lines)
+# "Current session: 61% used · resets Aug 26 at 5:29am (Asia/Taipei)"
+# "Current week (all models): 63% used · resets Aug 26 at 4:59am (Asia/Taipei)"
+# "Current week (Fable): 35% used · resets Aug 26 at 4:59am (Asia/Taipei)"
+_SESSION_LINE = re.compile(r"^Current session\s*:\s*(.*)$", re.I)
+_WEEK_LINE = re.compile(r"^Current week\s*\((.+?)\)\s*:\s*(.*)$", re.I)
+_PERCENT = re.compile(r"(\d+(?:\.\d+)?)%\s+used", re.I)
+_RESETS = re.compile(r"\bresets\s+(.+?)\s*$", re.I)
 
 
 def _parse_reset(phrase: str, now: datetime) -> str | None:
@@ -710,49 +645,35 @@ def _parse_reset(phrase: str, now: datetime) -> str | None:
     return when.astimezone(ZoneInfo("UTC")).isoformat().replace("+00:00", "Z")
 
 
-def parse_usage_panel(raw: str, *, now: datetime | None = None) -> list[dict]:
-    """Windows in the shape ``usage_service._window`` produces.
-
-    The raw stream is replayed through ``render_screen`` first: the panel
-    corrects itself in place while loading, and only the rendered screen shows
-    the values it settled on."""
+def parse_usage_panel(text: str, *, now: datetime | None = None) -> list[dict]:
+    """Windows in the shape ``usage_service._window`` produces, read from the
+    plain text ``claude -p /usage`` prints — one line per window."""
     from ..usage_common import _window
 
     now = now or datetime.now().astimezone()
-    lines = [line.strip() for line in render_screen(raw).splitlines()]
     found: dict[str, dict] = {}
 
-    for idx, line in enumerate(lines):
-        if _SESSION_HEAD.match(line):
-            key, kind, label = "session", "session", "Session (5h)"
+    for line in text.splitlines():
+        line = line.strip()
+        session = _SESSION_LINE.match(line)
+        if session:
+            key, kind, label, rest = "session", "session", "Session (5h)", session.group(1)
         else:
-            week = _WEEK_HEAD.match(line)
+            week = _WEEK_LINE.match(line)
             if not week:
                 continue
             scope = week.group(1).strip()
+            rest = week.group(2)
             if scope.lower() == "all models":
                 key, kind, label = "weekly", "weekly", "Weekly (all models)"
             else:
                 key, kind, label = f"weekly:{scope}", "weekly-model", f"Weekly ({scope})"
-
-        # The percent and the reset line follow the header within a few lines;
-        # stop at the next header so blocks never borrow each other's numbers.
-        pct: float | None = None
-        resets: str | None = None
-        for follow in lines[idx + 1: idx + 6]:
-            if _SESSION_HEAD.match(follow) or _WEEK_HEAD.match(follow):
-                break
-            if pct is None:
-                hit = _PERCENT.search(follow)
-                if hit:
-                    pct = float(hit.group(1))
-                    continue
-            reset_hit = _RESETS.match(follow)
-            if reset_hit:
-                resets = _parse_reset(reset_hit.group(1), now)
-                break
-        if pct is not None:
-            found[key] = _window(kind, label, pct, resets)
+        pct_hit = _PERCENT.search(rest)
+        if not pct_hit:
+            continue  # a window with no figure is dropped, never guessed
+        reset_hit = _RESETS.search(rest)
+        resets = _parse_reset(reset_hit.group(1), now) if reset_hit else None
+        found[key] = _window(kind, label, float(pct_hit.group(1)), resets)
 
     order = {"session": 0, "weekly": 1}
     return [found[k] for k in sorted(found, key=lambda k: (order.get(k, 2), k))]
@@ -777,125 +698,51 @@ async def _kill_group(pid: int) -> None:
         await asyncio.sleep(0.2)
 
 
+def _first_line(*streams: str) -> str:
+    for stream in streams:
+        for line in stream.splitlines():
+            if line.strip():
+                return line.strip()
+    return ""
+
+
 async def read_usage_panel(binary: str) -> str:
-    """Drive the CLI to its ``/usage`` panel and return the raw screen text.
+    """Run ``claude -p /usage`` and return what it printed.
 
-    Runs in a pty because the panel only renders for an interactive terminal.
-    The process group is always taken down before returning."""
-    import pty
-
-    master, slave = pty.openpty()
+    Raises ``RuntimeError`` with a message fit for the badge's ``error`` field:
+    a timeout, a non-zero exit with the CLI's first stderr line, or — when the
+    exit carried no usage line at all — a note that the CLI needs updating."""
     proc = await asyncio.create_subprocess_exec(
-        binary, *PROBE_ARGS,
-        stdin=slave, stdout=slave, stderr=slave,
+        binary, *USAGE_ARGS,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
         env=_panel_probe_env(), start_new_session=True,
     )
-    os.close(slave)
-    loop = asyncio.get_running_loop()
-    chunks: list[bytes] = []
-    reader_ready = asyncio.Event()
-    eof = False
-
-    def _on_readable() -> None:
-        nonlocal eof
-        try:
-            data = os.read(master, 65536)
-        except OSError:
-            data = b""
-        if data:
-            chunks.append(data)
-        else:
-            # After EOF the fd stays readable forever; leaving the reader in
-            # place turns the event loop into a busy spin until the deadline.
-            eof = True
-            loop.remove_reader(master)
-        reader_ready.set()
-
-    def _closed() -> bool:
-        return eof
-
-    loop.add_reader(master, _on_readable)
     try:
-        await _wait_settled(reader_ready, chunks, BOOT_TIMEOUT_S, closed=_closed)
-        chunks.clear()
-        # Type the command, then require the CLI to echo it back before the
-        # enter goes in. A select-style dialog (folder trust, login wizard,
-        # theme picker) swallows typed text without echoing it, and a blind \r
-        # there presses its default button — for the trust dialog that means
-        # silently marking the cwd as trusted. No echo, no enter.
-        await loop.run_in_executor(None, os.write, master, SLASH_COMMAND_TEXT)
-
-        def _echoed() -> bool:
-            return "/usage" in render_screen(b"".join(chunks).decode("utf-8", "replace"))
-
-        end = time.monotonic() + ECHO_TIMEOUT_S
-        while not _echoed() and not eof and time.monotonic() < end:
-            reader_ready.clear()
-            try:
-                await asyncio.wait_for(reader_ready.wait(), timeout=0.3)
-            except asyncio.TimeoutError:
-                continue
-        if not _echoed():
-            raise RuntimeError(
-                "the screen did not echo /usage back (dialog, login wizard, or "
-                "unrecognized UI); refusing to press enter on it"
-            )
-        await loop.run_in_executor(None, os.write, master, ENTER)
-
-        def _has_numbers() -> bool:
-            return bool(parse_usage_panel(b"".join(chunks).decode("utf-8", "replace")))
-
-        await _wait_settled(
-            reader_ready, chunks, PANEL_TIMEOUT_S, ready=_has_numbers, closed=_closed,
-        )
-        return b"".join(chunks).decode("utf-8", "replace")
-    finally:
-        loop.remove_reader(master)  # no-op when the EOF path already removed it
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=USAGE_TIMEOUT_S)
+    except asyncio.TimeoutError:
         await _kill_group(proc.pid)
         try:
             await asyncio.wait_for(proc.wait(), timeout=3)
         except (asyncio.TimeoutError, ProcessLookupError):
             pass
-        os.close(master)
-
-
-async def _wait_settled(
-    flag: asyncio.Event,
-    chunks: list[bytes],
-    deadline_s: float,
-    ready=None,
-    closed=None,
-) -> None:
-    """Wait for output to start, then for it to stop — and, when ``ready`` is
-    given, for it to actually contain what the caller came for.
-
-    Two failure modes make the obvious version wrong. A cold Claude Code takes
-    seconds before its first byte, so silence-so-far would read as "finished"
-    and the panel command would go to a CLI that has not drawn a prompt yet.
-    And the panel pauses mid-render while it scans local sessions, so a pause
-    longer than ``QUIET_S`` would end the read on a half-drawn screen with no
-    numbers on it. ``ready`` turns quiet into a question rather than a verdict.
-    Both phases share one deadline, so a panel that never fills still ends.
-    ``closed`` reports the pty gone (the CLI exited); nothing further can
-    arrive, so the wait ends instead of running out its deadline."""
-    end = time.monotonic() + deadline_s
-    while not chunks and time.monotonic() < end:
-        if closed is not None and closed():
-            return
-        flag.clear()
-        try:
-            await asyncio.wait_for(flag.wait(), timeout=0.5)
-        except asyncio.TimeoutError:
-            continue
-    while time.monotonic() < end:
-        if closed is not None and closed():
-            return
-        flag.clear()
-        try:
-            await asyncio.wait_for(flag.wait(), timeout=QUIET_S)
-        except asyncio.TimeoutError:
-            if ready is None or ready():
-                return
+        raise RuntimeError(f"claude -p /usage timed out after {USAGE_TIMEOUT_S:.0f}s")
+    text = out.decode("utf-8", "replace")
+    stderr = err.decode("utf-8", "replace")
+    if proc.returncode != 0:
+        detail = _first_line(stderr, text)
+        if not any(_SESSION_LINE.match(l.strip()) or _WEEK_LINE.match(l.strip())
+                   for l in text.splitlines()):
+            raise RuntimeError(
+                f"claude exited {proc.returncode} without a usage report — "
+                f"the CLI needs updating to one that understands `-p /usage`"
+                + (f": {detail}" if detail else "")
+            )
+        raise RuntimeError(
+            f"claude exited {proc.returncode}" + (f": {detail}" if detail else "")
+        )
+    return text
 
 
 async def fetch_claude_usage_via_cli(home: Path) -> dict[str, Any] | None:
@@ -908,8 +755,8 @@ async def fetch_claude_usage_via_cli(home: Path) -> dict[str, Any] | None:
     from ..ai_chat_cli_engine import resolve_cli_binary
     from ..usage_common import _snapshot
 
-    def _costly() -> dict[str, Any]:
-        snap = _snapshot("claude", "unavailable")
+    def _costly(error: str) -> dict[str, Any]:
+        snap = _snapshot("claude", "unavailable", error=error)
         snap["costlyRead"] = True
         return snap
 
@@ -937,11 +784,11 @@ async def fetch_claude_usage_via_cli(home: Path) -> dict[str, Any] | None:
         raw = await read_usage_panel(binary)
     except Exception as err:  # noqa: BLE001 — a failed read is just "no data"
         log.warning("claude /usage read failed: %s", err)
-        return _costly()
+        return _costly(str(err) or type(err).__name__)
     windows = parse_usage_panel(raw)
     if not windows:
         log.info("claude /usage produced no readable windows")
-        return _costly()
+        return _costly("claude -p /usage printed no usage windows")
     return _snapshot("claude", "ok", windows=windows)
 
 

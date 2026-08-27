@@ -16,10 +16,20 @@ import pytest
 from agent_team_backend.terminals import TerminalService
 
 
+def _frame_data(frame: bytes) -> bytes:
+    """Raw PTY bytes of a binary terminal-output frame (skip the header)."""
+    assert frame[0] == 0x01
+    off = 6 + frame[5]          # past sessionId
+    off += 1 + frame[off]       # past paneId
+    return frame[off:]
+
+
 def _collect(received: list[str]):
     async def emit(event):
-        if event.get("type") == "terminal.output":
-            received.append(event["payload"]["data"])
+        # Terminal output arrives as binary frames; JSON dicts (e.g.
+        # terminal.exit) are not output and are ignored here.
+        if isinstance(event, (bytes, bytearray)):
+            received.append(_frame_data(bytes(event)).decode("utf-8", "replace"))
     return emit
 
 

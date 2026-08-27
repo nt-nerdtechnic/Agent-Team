@@ -91,7 +91,7 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 
 | Tool | パラメータ | 動作 |
 |---|---|---|
-| `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
+| `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`pane_id`（すべての `ui.pane.*` アクションが取るキー）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
 | `cli_send` | `to`, `text`, `wait_for_delivery_s=0`（上限 120） | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返し、待機を指定した場合はその結末も返す |
 | `cli_check_message` | `msg_key` | 一つの `cli_send` の結末: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 自分の送信のうち滞留中または失敗しているもの: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
@@ -246,7 +246,7 @@ Probe が届いた場合にのみ存在します。Timeout 時、`reason` は似
 
 **Capability の境界 — Idle/完了の検出。** ほとんどの CLI の Log Reader は、完了した
 Turn のテキストを載せた `turn_complete` Event を発行します。**aider、antigravity、
-claude、codex、copilot、cursor、grok、kilo、kimi、muse、opencode、pi、qwen** です。
+claude、codex、copilot、cursor、droid、grok、kilo、kimi、muse、opencode、pi、qwen** です。
 これらでは `cli_wait_idle` と `cli_get_status` の `last_activity.type` が正確な
 Turn 完了 Signal で解決します — ただし一点だけ但し書きがあります。**grok、kimi、
 pi、qwen** は自前の Turn 終了記録を持たず、Log の 8 秒の沈黙から `turn_complete`
@@ -261,7 +261,7 @@ pi、qwen** は自前の Turn 終了記録を持たず、Log の 8 秒の沈黙�
 
 これは、`cli_send_and_wait` の結果で読むべきフィールドが `source` である理由でも
 あります。どの CLI が生み出したものでも形は同じですが、確度は同じではありません。
-aider/antigravity/claude/codex/copilot/cursor/kilo/muse/opencode からの
+aider/antigravity/claude/codex/copilot/cursor/droid/kilo/muse/opencode からの
 `turn_complete` は Turn が終わったという CLI 自身の言明であり、grok/kimi/pi/qwen
 からの同じ値は上記の 8 秒沈黙による推測です。そして `quiet_period` — 素の
 Terminal Pane で唯一得られる結果 — は、Turn の終了を何も報告しなかったという
@@ -301,6 +301,7 @@ Turn に対する判定ではない唯一のものです。待機が判定に至
 | `ui.pane.focus` | `{paneId}` | Pane を表示して Focus（必要ならタブを切り替え） |
 | `ui.pane.getStatus` | `{paneId}` | その Pane の `{status, buffer, logPath?}` を返す |
 | `ui.tab.switch` | `{tabId}` | Active な Stage/Run-group タブを切り替え |
+| `ui.preview.show` | `{kind, …}` | 右レールのプレビューパネルにファイル・diff・インラインスニペットを表示 |
 | `ui.window.openPlans` | — | Plan ウィンドウを開く |
 | `ui.window.openGit` | — | 現在の Workspace の Git ウィンドウを開く |
 | `ui.window.openPipeline` | `{pipelineId?}` | Pipeline Manager ウィンドウを開く |

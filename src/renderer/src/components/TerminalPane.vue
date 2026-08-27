@@ -7,8 +7,10 @@ import type { TerminalDockPort } from '@navide/terminal'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import { extractDropPaths, escapeDraggedPath, stabilizeDroppedPaths } from '../lib/drop'
 import { CLI_CONTEXT_MIME, PANE_BATCH_MIME, PANE_ID_MIME, resolveCliDropSources, writeCliPaneDragPayload } from '@navide/terminal'
+import type { MentionCandidate } from '@navide/terminal'
 import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
+import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import { i18n } from '@navide/plugin-ui/foundation'
 import { isMacPlatform } from '@navide/plugin-ui/shared'
@@ -71,9 +73,14 @@ interface Props {
   terminalPort: TerminalDockPort
   cliProfiles: ReturnType<typeof useCliProfiles>
   workspacePath?: string
-  /** Messaging names of the OTHER CLI panes (self excluded), for the
-   *  @-mention autocomplete menu inside this pane's terminal. */
-  mentionCandidates?: string[]
+  /** Resolves the addresses offered by this pane's @-mention menu (self
+   *  excluded), with the group and status words already translated by the host.
+   *
+   *  A getter rather than a ready-made array: building the list reads every
+   *  pane's live status, and a plain prop would rebuild it on every render —
+   *  once a second, for every pane, to feed a menu that is almost never open.
+   *  Passing the resolver keeps the cost on the `@` keystroke that needs it. */
+  mentionCandidates?: (paneId: string) => MentionCandidate[]
   /** Whether the layout currently shows this pane. Paged-out panes stay mounted
    *  (their terminals must survive), so the terminal uses this to skip
    *  display-only upkeep instead of running it for an invisible pane. */
@@ -110,6 +117,9 @@ const emit = defineEmits<{
   /** The user typed into a STOPped pane (Enter/printable), taking over — App.vue
    *  clears + un-persists the STOP badge. */
   (e: 'user-resume'): void
+  /** An @-mention was completed in this pane's terminal — App.vue records the
+   *  chosen addresses so the menu can offer them first next time. */
+  (e: 'mention-pick', addresses: string[]): void
   (e: 'first-output'): void
   /** This pane's PTY did not survive a backend outage — App.vue resumes the
    *  CLI session so the conversation continues instead of leaving a dead pane. */
@@ -160,6 +170,8 @@ const CLIPBOARD_TOAST_TYPE: Record<ClipboardFailureReason, 'info' | 'error'> = {
   'copy-failed': 'error',
   'send-failed': 'error',
   'send-failed-all': 'error',
+  'copy-mouse-captured': 'info',
+  'copy-no-selection': 'info',
 }
 // These repeat easily — ⌘V a few times while a pane starts and every press
 // reports — and useNotify has no dedupe of its own, so identical toasts would
@@ -183,7 +195,8 @@ const terminal = useTerminal(props.paneId, props.terminalPort, {
   workspacePath: props.workspacePath,
   onClear: () => emit('rebuild-clean'),
   onUserResume: () => emit('user-resume'),
-  mentionCandidates: () => props.mentionCandidates ?? [],
+  mentionCandidates: () => props.mentionCandidates?.(props.paneId) ?? [],
+  onMentionPick: (addresses) => emit('mention-pick', addresses),
   onScreen: () => props.onScreen ?? true,
   onFirstOutput: () => emit('first-output'),
   onClipboardFailure,
@@ -249,13 +262,11 @@ const displayStatus = terminal.displayStatus
 // names which one it is: the distinction is not worth a second badge, and is
 // worth a sentence once someone stops to ask. The rest are self-evident from
 // the badge text.
-// The badge otherwise prints the raw status word, which reads fine for every
-// state that describes the AGENT ('running', 'idle', 'exited'). 'awaiting'
-// describes the READER instead — it is the one badge that is an instruction —
-// so it gets a translated label, the same exception 'stopped' already makes.
-const statusBadgeKey = computed<string>(() =>
-  displayStatus.value === 'awaiting' ? 'pane.terminal.awaiting-status-badge' : ''
-)
+// The badge text itself comes from paneStatusLabel, shared with the sidebar and
+// the agent overview. It used to print the raw status word with 'awaiting' and
+// 'stopped' as hand-made exceptions, which is how one pane ended up reading
+// "RUNNING" here and "執行中" in the overview at the same moment.
+const statusBadgeKey = computed<string>(() => paneStatusLabelKey(displayStatus.value))
 
 const statusTooltipKey = computed<string>(() => {
   if (displayStatus.value === 'idle') return 'pane.terminal.idle-status-tooltip'
@@ -312,6 +323,7 @@ defineExpose({
   clearQuestion: terminal.clearQuestion,
   markBufferPosition: terminal.markBufferPosition,
   recleanBuffer: terminal.recleanBuffer,
+  flushPendingClean: terminal.flushPendingClean,
   readRenderedText: terminal.readRenderedText,
   readScreenTail: terminal.readScreenTail,
   readLineBeforeCursor: terminal.readLineBeforeCursor,
@@ -586,7 +598,7 @@ onMounted(() => {
           class="status"
           :data-status="displayStatus"
           :title="statusTooltipKey ? $t(statusTooltipKey) : ''"
-        >{{ statusBadgeKey ? $t(statusBadgeKey) : displayStatus === 'stopped' ? 'STOP' : displayStatus }}</span>
+        >{{ $t(statusBadgeKey) }}</span>
         <UsageBadge v-if="agentKey" :agent-key="agentKey" :cli-profiles="cliProfiles" />
       </div>
       <div v-if="subtitle" class="header-sub">{{ subtitle }}</div>
@@ -699,7 +711,7 @@ onMounted(() => {
   background: none;
   border: none;
   color: var(--text-disabled);
-  font-size: 14px;
+  font-size: var(--font-md);
   cursor: pointer;
   padding: 0 3px;
   line-height: 1;
@@ -734,7 +746,7 @@ onMounted(() => {
   padding: 5px 52px 5px 12px;
   background: var(--bg-subtle);
   border-bottom: 1px solid var(--border-muted);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
 }
 /* Reorder drop target feedback, matching .tab-btn.drag-over in StageTabBar.vue. */
@@ -748,7 +760,7 @@ onMounted(() => {
   gap: 8px;
 }
 .header-sub {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -852,7 +864,7 @@ onMounted(() => {
 }
 .status {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   text-transform: uppercase;
   padding: 2px 8px;
   border-radius: 999px;
@@ -911,7 +923,7 @@ onMounted(() => {
   justify-content: center;
   background: var(--accent-subtle);
   color: var(--accent-bright);
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-family: inherit;
   pointer-events: none;
 }
@@ -929,7 +941,7 @@ onMounted(() => {
   border-radius: 6px;
   background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   pointer-events: none;
 }
 /* Both live in the bottom-right corner; the hint steps up when the button is out. */
@@ -952,7 +964,7 @@ onMounted(() => {
   background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
   color: var(--accent-bright);
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   cursor: pointer;
   transition: background-color 0.15s, border-color 0.15s;
 }
@@ -1041,7 +1053,7 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   color: var(--text-secondary);
 }

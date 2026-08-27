@@ -49,7 +49,9 @@ const { t } = useI18n()
 
 const gitTransport = props.surfacePorts.gitTransport
 const surfacePorts = props.surfacePorts
-const repositories = props.repositorySource ?? useRepoDiscovery(() => props.workspacePath, gitTransport).repositories
+const discovery = useRepoDiscovery(() => props.workspacePath, gitTransport)
+const repositories = props.repositorySource ?? discovery.repositories
+const { adopt } = discovery
 
 // When root is not a git repo, inject it as the first tab so init/connect features remain accessible.
 const allTabs = computed(() => {
@@ -214,6 +216,7 @@ function repoLabel(relPath: string): string {
     @spawn-for-issue="$emit('spawn-for-issue', $event)"
     @focus-pane="$emit('focus-pane', $event)"
     @open-git-accounts="$emit('open-git-accounts')"
+    @force-discovered="void adopt($event)"
   />
 
 
@@ -331,7 +334,7 @@ function repoLabel(relPath: string): string {
 }
 
 .repo-tab-name {
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 600;
   letter-spacing: 0.01em;
   line-height: 1.2;
@@ -349,7 +352,7 @@ function repoLabel(relPath: string): string {
   display: flex;
   align-items: center;
   gap: 3px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
   opacity: 0.85;
   line-height: 1;

@@ -89,6 +89,37 @@ The backend owns long-running local services and persistence:
 
 The backend listens on loopback and is supervised by Electron. It is not intended to be exposed as a network service.
 
+### Windows and workspaces
+
+A window holds one or more workspaces and displays one of them at a time. The
+distinction matters because the three processes answer different questions
+about them:
+
+- **Electron main** knows which window holds which workspaces, and is the
+  authority on "is this folder already open?". A folder open in two windows
+  would run two sets of PTY and Git operations against one checkout, so a
+  second request to open one is redirected to the window that already has it.
+- **The renderer** owns the order they are listed in and which one is on
+  screen. Switching changes only the latter: the panes of the others keep
+  running, keep their entries in the sidebar, and are simply not drawn.
+- **The backend** is per workspace throughout — project state, run groups,
+  history and pane records are all keyed by workspace path, and a pane records
+  the workspace it was started in. Nothing there changed to support several per
+  window.
+
+Two consequences worth stating, because both have been implemented the wrong
+way at least once:
+
+- Anything acting on *one pane* must use that pane's workspace, not the one on
+  screen. Anything acting on *the workspace* — rebuild-all, close-all, pane
+  order — is scoped to the one on screen, since its control sits on that
+  workspace's row.
+- Leaving a workspace and switching away from it are different operations.
+  Leaving returns it to a clean slate; switching must not disturb it at all.
+
+A detached window is one run group's view of a single workspace and does
+neither of these.
+
 ## Runtime workflow
 
 ### Evolution session

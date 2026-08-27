@@ -90,7 +90,7 @@ documents the addresses, the idle gate and the guard rails they share.
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
+| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `pane_id` (the key every `ui.pane.*` action takes), `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
 | `cli_send` | `to`, `text`, `wait_for_delivery_s=0` (capped at 120) | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
 | `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | Your own sends that are stuck or failed: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
@@ -252,7 +252,7 @@ current).
 
 **Capability boundary — idle/completion detection.** Most CLIs' log readers
 emit a `turn_complete` event carrying the finished turn's text: **aider,
-antigravity, claude, codex, copilot, cursor, grok, kilo, kimi, muse,
+antigravity, claude, codex, copilot, cursor, droid, grok, kilo, kimi, muse,
 opencode, pi, qwen**. For those, `cli_wait_idle` and `cli_get_status`'s
 `last_activity.type` resolve on the precise turn-complete signal — with one
 qualification: **grok, kimi, pi, qwen** have no end-of-turn record of their
@@ -268,7 +268,7 @@ CLI has actually finished.
 
 This is also why `source` is the field to read on a `cli_send_and_wait`
 result: the shape is identical whichever CLI produced it, but the confidence
-is not. `turn_complete` from aider/antigravity/claude/codex/copilot/cursor/
+is not. `turn_complete` from aider/antigravity/claude/codex/copilot/cursor/droid/
 kilo/muse/opencode is the CLI's own word that the turn ended; the same value
 from grok/kimi/pi/qwen is the 8-second-silence inference above; and
 `quiet_period` — the only outcome available for a plain terminal pane —
@@ -309,6 +309,7 @@ documented argument shapes.
 | `ui.pane.focus` | `{paneId}` | Reveal and focus a pane (switches tab if needed) |
 | `ui.pane.getStatus` | `{paneId}` | Returns `{status, buffer, logPath?}` for that pane |
 | `ui.tab.switch` | `{tabId}` | Switch the active stage/run-group tab |
+| `ui.preview.show` | `{kind, …}` | Show a file, diff or inline snippet in the right rail's preview panel |
 | `ui.window.openPlans` | — | Open the Plan window |
 | `ui.window.openGit` | — | Open the Git window for the current workspace |
 | `ui.window.openPipeline` | `{pipelineId?}` | Open the Pipeline Manager window |

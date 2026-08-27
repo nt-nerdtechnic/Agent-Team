@@ -551,13 +551,13 @@ const visibleReference = computed(() => {
 .kse-intro,
 .kse-footnote {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-secondary);
   max-width: 74ch;
   line-height: 1.55;
 }
 .kse-footnote {
-  font-size: 12px;
+  font-size: var(--font-xs);
   border-top: 1px solid var(--border-muted);
   padding-top: 12px;
 }
@@ -584,7 +584,7 @@ const visibleReference = computed(() => {
   flex: 1 1 220px;
   min-width: 180px;
   padding: 6px 10px;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-primary);
   background: var(--bg-inset);
   border: 1px solid var(--border-default);
@@ -601,7 +601,7 @@ const visibleReference = computed(() => {
 .kse-filter,
 .kse-reset-all {
   padding: 5px 10px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
   background: var(--bg-inset);
   border: 1px solid var(--border-muted);
@@ -620,14 +620,14 @@ const visibleReference = computed(() => {
 
 .kse-status {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--accent-fg);
 }
 .kse-rejected {
   border: 1px solid var(--danger-fg, #f85149);
   border-radius: 6px;
   padding: 8px 12px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-secondary);
 }
 .kse-rejected p {
@@ -639,12 +639,12 @@ const visibleReference = computed(() => {
   margin: 0;
   padding-left: 1.2em;
   font-family: monospace;
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 
 .kse-error {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--danger-fg, #f85149);
 }
 
@@ -656,7 +656,7 @@ const visibleReference = computed(() => {
 }
 .kse-group-title {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -681,11 +681,11 @@ const visibleReference = computed(() => {
      — fixed layout plus the explicit widths below keeps one grid throughout. */
   table-layout: fixed;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--font-sm);
 }
 .kse-table th {
   text-align: left;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-muted);
@@ -714,7 +714,7 @@ const visibleReference = computed(() => {
 /* ── source badge ── */
 .kse-source {
   display: inline-block;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   padding: 1px 7px;
   border-radius: 999px;
@@ -760,13 +760,13 @@ const visibleReference = computed(() => {
   display: inline-block;
   max-width: 100%;
   font-family: monospace;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.45;
   color: var(--text-secondary);
   overflow-wrap: anywhere;
 }
 .kse-when-any {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
 }
 
@@ -807,7 +807,7 @@ const visibleReference = computed(() => {
 .kse-add,
 .kse-mini {
   padding: 2px 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   line-height: 1.4;
   color: var(--text-muted);
   background: none;
@@ -845,7 +845,7 @@ const visibleReference = computed(() => {
 }
 .kse-chord-sep {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 0 2px;
 }
 
@@ -866,13 +866,13 @@ const visibleReference = computed(() => {
 }
 .kse-recorder-preview em {
   font-style: normal;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--accent-fg);
 }
 
 .kse-locked {
   padding: 2px 6px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   cursor: help;
   opacity: 0.7;
 }
@@ -881,20 +881,20 @@ const visibleReference = computed(() => {
    editable, it just cannot be cleared by unbinding it here. */
 .kse-menu-owned {
   padding: 2px 4px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   cursor: help;
   color: var(--warn, #d29922);
 }
 
 .kse-unbound {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
   font-style: italic;
   order: -1;
 }
 
 .kse-conflict {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 999px;
@@ -909,7 +909,7 @@ const visibleReference = computed(() => {
 
 .kse-empty {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-muted);
 }
 </style>

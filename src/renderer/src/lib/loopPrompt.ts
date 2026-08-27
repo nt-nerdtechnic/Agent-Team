@@ -15,11 +15,26 @@ export const DEFAULT_LOOP_RESUME = '繼續'
  *  prompt forever — the app-level analogue of a pipeline stage sentinel. */
 export const LOOP_DONE_MARKER = '<<LOOP_DONE>>'
 
-/** Suffix appended to every loop injection (start + resume) so the CLI knows to
- *  emit LOOP_DONE_MARKER on its own line when finished. Kept out of the stored
- *  loop-prompt setting so the user's editable text stays clean. */
+/** End-of-turn marker the CLI prints when this turn did nothing but WAIT on
+ *  something the loop cannot observe — a background task, another pane's
+ *  reply, a long-running command it has already started.
+ *
+ *  This is the vendor-agnostic half of the background-wait fix. Only claude
+ *  and opencode report tool use at a granularity the loop can read; for the
+ *  other eleven the CLI itself is the only thing that knows it is parked, so
+ *  the loop asks it to say so instead of guessing from the wording (which was
+ *  tried and does not work — see turnMadeProgress). */
+export const LOOP_WAIT_MARKER = '<<LOOP_WAIT>>'
+
+/** Suffix appended to every loop injection (start + resume) so the CLI knows
+ *  which marker to emit. Kept out of the stored loop-prompt setting so the
+ *  user's editable text stays clean.
+ *
+ *  Both markers are described in ONE paragraph on purpose: this text rides on
+ *  every single continue, so a second paragraph would be paid for on every
+ *  turn of every loop for the life of the run. */
 export const LOOP_DONE_INSTRUCTION =
-  `\n\n（重要：當你判定整個任務已全部完成、確認功能正常且無需再繼續時，請在回覆的最後獨立一行「只」輸出 ${LOOP_DONE_MARKER} 這個標記，前後不要有任何其他文字；只要還需要繼續，就絕對不要輸出這個標記。）`
+  `\n\n（重要：當你判定整個任務已全部完成、確認功能正常且無需再繼續時，請在回覆的最後獨立一行「只」輸出 ${LOOP_DONE_MARKER} 這個標記，前後不要有任何其他文字；只要還需要繼續，就絕對不要輸出這個標記。若你這一輪只是在等待外部事件（背景任務、他人回覆、已啟動的長時間指令），無事可做也無法推進，請改在最後獨立一行「只」輸出 ${LOOP_WAIT_MARKER}。）`
 
 /** Append the done-marker instruction to a loop prompt at injection time. */
 export function withLoopDoneInstruction(prompt: string): string {

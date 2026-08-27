@@ -573,8 +573,8 @@ async function copyLogText(): Promise<void> {
 
 <template>
   <Teleport v-if="show" to="body">
-    <div class="history-overlay" @click.self="emit('close')">
-      <div class="history-modal" @keydown="onBrowseKeydown">
+    <div class="history-overlay nv-modal-overlay" @click.self="emit('close')">
+      <div class="history-modal nv-modal-shell" @keydown="onBrowseKeydown">
         <div class="history-modal-header">
           <div class="history-header-left">
             <span>{{ $t('label.agent-history') }}</span>
@@ -845,8 +845,8 @@ async function copyLogText(): Promise<void> {
     </div>
   </Teleport>
   <Teleport v-if="confirmKillAll" to="body">
-    <div class="history-overlay" @click.self="confirmKillAll = false">
-      <div class="history-modal" style="height: auto; max-width: 400px;">
+    <div class="history-overlay nv-modal-overlay" @click.self="confirmKillAll = false">
+      <div class="history-modal nv-modal-shell" style="height: auto; max-width: 400px;">
         <div class="history-modal-header">
           <span>{{ $t('label.kill-all-confirm-title') }}</span>
           <button class="history-close" @click="confirmKillAll = false">✕</button>
@@ -855,8 +855,8 @@ async function copyLogText(): Promise<void> {
           {{ $t('label.kill-all-confirm-prefix') }}<strong>{{ $t('label.kill-all-confirm-count', { count: paneCount }) }}</strong>{{ $t('label.kill-all-confirm-suffix') }}
         </div>
         <div style="display: flex; gap: 8px; padding: 0 14px 14px; justify-content: flex-end;">
-          <button class="history-close" style="border: 1px solid var(--border-default); padding: 4px 12px; border-radius: 6px;" @click="confirmKillAll = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" style="padding: 4px 14px; border-radius: 6px; font-size: 12px;" @click="() => { emit('kill-all'); confirmKillAll = false }">{{ $t('action.kill-all') }}</button>
+          <button class="history-close nv-btn" style="border: 1px solid var(--border-default); padding: 4px 12px; border-radius: 6px;" @click="confirmKillAll = false">{{ $t('action.cancel') }}</button>
+          <button class="danger nv-btn nv-btn--danger" style="padding: 4px 14px; border-radius: 6px; font-size: 12px;" @click="() => { emit('kill-all'); confirmKillAll = false }">{{ $t('action.kill-all') }}</button>
         </div>
       </div>
     </div>
@@ -864,8 +864,8 @@ async function copyLogText(): Promise<void> {
   <!-- `show &&` guards: a destructive confirmation must never outlive the
        modal it was opened from. -->
   <Teleport v-if="show && confirmDeleteEntry" to="body">
-    <div class="history-overlay" @click.self="confirmDeleteEntry = null">
-      <div class="history-modal" style="height: auto; max-width: 400px;">
+    <div class="history-overlay nv-modal-overlay" @click.self="confirmDeleteEntry = null">
+      <div class="history-modal nv-modal-shell" style="height: auto; max-width: 400px;">
         <div class="history-modal-header">
           <span>{{ $t('action.delete') }}</span>
           <button class="history-close" @click="confirmDeleteEntry = null">✕</button>
@@ -881,15 +881,15 @@ async function copyLogText(): Promise<void> {
           </div>
         </div>
         <div style="display: flex; gap: 8px; padding: 0 14px 14px; justify-content: flex-end;">
-          <button class="history-close" style="border: 1px solid var(--border-default); padding: 4px 12px; border-radius: 6px;" @click="confirmDeleteEntry = null">{{ $t('action.cancel') }}</button>
-          <button class="danger" style="padding: 4px 14px; border-radius: 6px; font-size: 12px;" @click="onDeleteConfirmed">{{ $t('action.delete') }}</button>
+          <button class="history-close nv-btn" style="border: 1px solid var(--border-default); padding: 4px 12px; border-radius: 6px;" @click="confirmDeleteEntry = null">{{ $t('action.cancel') }}</button>
+          <button class="danger nv-btn nv-btn--danger" style="padding: 4px 14px; border-radius: 6px; font-size: 12px;" @click="onDeleteConfirmed">{{ $t('action.delete') }}</button>
         </div>
       </div>
     </div>
   </Teleport>
   <Teleport v-if="show && confirmCleanup" to="body">
-    <div class="history-overlay" @click.self="confirmCleanup = null">
-      <div class="history-modal" style="height: auto; max-width: 400px;">
+    <div class="history-overlay nv-modal-overlay" @click.self="confirmCleanup = null">
+      <div class="history-modal nv-modal-shell" style="height: auto; max-width: 400px;">
         <div class="history-modal-header">
           <span>🧹 {{ $t('action.cleanup') }}</span>
           <button class="history-close" @click="confirmCleanup = null">✕</button>
@@ -908,16 +908,16 @@ async function copyLogText(): Promise<void> {
           </div>
         </div>
         <div style="display: flex; gap: 8px; padding: 0 14px 14px; justify-content: flex-end;">
-          <button class="history-close" style="border: 1px solid var(--border-default); padding: 4px 12px; border-radius: 6px;" @click="confirmCleanup = null">{{ $t('action.cancel') }}</button>
-          <button class="danger" style="padding: 4px 14px; border-radius: 6px; font-size: 12px;" @click="onCleanupConfirmed">{{ $t('action.delete') }}</button>
+          <button class="history-close nv-btn" style="border: 1px solid var(--border-default); padding: 4px 12px; border-radius: 6px;" @click="confirmCleanup = null">{{ $t('action.cancel') }}</button>
+          <button class="danger nv-btn nv-btn--danger" style="padding: 4px 14px; border-radius: 6px; font-size: 12px;" @click="onCleanupConfirmed">{{ $t('action.delete') }}</button>
         </div>
       </div>
     </div>
   </Teleport>
 
   <!-- Log Preview Modal -->
-  <div v-if="previewOpen" class="log-preview-overlay" @click.self="emit('close-preview')">
-    <div class="log-preview-modal">
+  <div v-if="previewOpen" class="log-preview-overlay nv-modal-overlay" @click.self="emit('close-preview')">
+    <div class="log-preview-modal nv-modal-shell">
       <div class="log-preview-header">
         <h3>{{ previewTitle }}</h3>
         <button class="log-preview-close" @click="emit('close-preview')">✕</button>
@@ -933,7 +933,9 @@ async function copyLogText(): Promise<void> {
 .history-overlay {
   position: fixed;
   inset: 0;
-  background: var(--shadow-overlay);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -943,14 +945,14 @@ async function copyLogText(): Promise<void> {
 .history-modal {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   width: min(880px, 92vw);
   height: 72vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 12px 48px var(--shadow-overlay);
-  animation: ah-modal-in 0.14s ease-out;
+  box-shadow: var(--shadow-modal);
+  animation: ah-modal-in var(--motion-base) var(--ease-out);
 }
 @keyframes ah-modal-in {
   from { opacity: 0; transform: scale(0.985); }
@@ -983,7 +985,7 @@ async function copyLogText(): Promise<void> {
   justify-content: space-between;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-muted);
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--text-bright);
 }
@@ -996,12 +998,12 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: 1px solid var(--danger-muted);
   color: var(--danger-fg);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   opacity: 0.7;
-  transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+  transition: background-color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
 }
 .history-killall:hover {
   background: var(--danger-subtle);
@@ -1039,7 +1041,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: 4px;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 4px;
   outline: none;
 }
@@ -1056,7 +1058,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: 4px;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 400;
   padding: 3px 20px 3px 8px;
   width: 100%;
@@ -1071,16 +1073,16 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   cursor: pointer;
   padding: 1px 4px;
-  transition: color 0.12s ease;
+  transition: color var(--motion-fast) var(--ease-out);
 }
 .agent-history-search-clear:hover {
   color: var(--text-bright);
 }
 .agent-history-search-status {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   padding: 0 2px;
 }
@@ -1088,11 +1090,11 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--font-md);
   cursor: pointer;
   padding: 2px 6px;
-  border-radius: 4px;
-  transition: background-color 0.12s ease, color 0.12s ease;
+  border-radius: var(--radius-sm);
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .history-close:hover {
   color: var(--text-bright);
@@ -1106,7 +1108,7 @@ async function copyLogText(): Promise<void> {
 }
 .agent-history-empty {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   text-align: center;
   padding: 24px;
 }
@@ -1115,7 +1117,7 @@ async function copyLogText(): Promise<void> {
   top: 0;
   background: var(--bg-base);
   padding: 6px 12px 4px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.4px;
@@ -1131,7 +1133,7 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   cursor: pointer;
   text-align: left;
-  font-size: 12px;
+  font-size: var(--font-xs);
   transition: background-color 0.12s ease;
 }
 .agent-history-row:hover {
@@ -1139,7 +1141,7 @@ async function copyLogText(): Promise<void> {
 }
 .agent-history-row.selected {
   background: var(--bg-selected);
-  box-shadow: inset 2px 0 0 var(--accent-fg);
+  box-shadow: inset 2px 0 0 var(--accent-focus);
 }
 .ah-dot {
   flex-shrink: 0;
@@ -1157,7 +1159,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: 4px;
   padding: 1px 6px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-bright);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1169,17 +1171,17 @@ async function copyLogText(): Promise<void> {
 }
 .ah-time {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
 }
 .ah-row-star {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   color: var(--text-secondary);
   opacity: 0;
   padding: 0 2px;
   border-radius: 3px;
-  transition: color 0.12s ease, opacity 0.12s ease;
+  transition: color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
 }
 .agent-history-row:hover .ah-row-star,
 .agent-history-row.selected .ah-row-star,
@@ -1198,12 +1200,12 @@ async function copyLogText(): Promise<void> {
   flex-shrink: 0;
   background: var(--bg-muted);
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 6px;
   cursor: pointer;
-  transition: color 0.12s ease, border-color 0.12s ease;
+  transition: color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
 }
 .ah-star-filter:hover {
   color: var(--text-bright);
@@ -1219,13 +1221,13 @@ async function copyLogText(): Promise<void> {
   display: block;
   margin: 8px auto 4px;
   padding: 3px 14px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   border-radius: 20px;
   border: 1px solid var(--border-default);
   background: var(--bg-subtle);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: color 0.12s ease, border-color 0.12s ease;
+  transition: color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
 }
 .ah-load-more:hover:not(:disabled) {
   color: var(--text-bright);
@@ -1256,7 +1258,7 @@ async function copyLogText(): Promise<void> {
   gap: 8px;
 }
 .detail-name {
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 2px 8px;
 }
 /* Status pill mirrors the list's ah-dot colors so both columns read the
@@ -1265,7 +1267,7 @@ async function copyLogText(): Promise<void> {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   padding: 1px 8px;
   border-radius: 10px;
@@ -1294,12 +1296,12 @@ async function copyLogText(): Promise<void> {
   display: grid;
   grid-template-columns: max-content 1fr;
   gap: 6px 14px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   align-items: baseline;
 }
 .detail-label {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   white-space: nowrap;
 }
 .detail-value {
@@ -1308,7 +1310,7 @@ async function copyLogText(): Promise<void> {
 }
 .detail-session {
   font-family: monospace;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   word-break: break-all;
 }
 .detail-path {
@@ -1317,7 +1319,7 @@ async function copyLogText(): Promise<void> {
 .ah-restore-badge {
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 10px;
@@ -1343,13 +1345,13 @@ async function copyLogText(): Promise<void> {
 .ah-session-unavailable {
   width: 100%;
   color: var(--warning-fg);
-  font-size: 11px;
+  font-size: var(--font-2xs);
 }
 .ah-revive {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 500;
   padding: 3px 10px;
   border-radius: 20px;
@@ -1357,7 +1359,7 @@ async function copyLogText(): Promise<void> {
   background: var(--accent-subtle);
   color: var(--accent-bright);
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
 }
 .ah-revive:hover {
   background: var(--bg-selected);
@@ -1384,19 +1386,19 @@ async function copyLogText(): Promise<void> {
 }
 .ah-delete-logs {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--danger-fg);
 }
 .ah-icon-btn {
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-xs);
   cursor: pointer;
   padding: 1px 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   flex-shrink: 0;
-  transition: background-color 0.12s ease, color 0.12s ease;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .ah-icon-btn:hover {
   color: var(--text-bright);
@@ -1407,7 +1409,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--accent-muted);
   border-radius: 4px;
   color: var(--text-bright);
-  font-size: 13px;
+  font-size: var(--font-sm);
   padding: 2px 8px;
   min-width: 0;
   flex: 1;
@@ -1415,7 +1417,7 @@ async function copyLogText(): Promise<void> {
 }
 .ah-copied {
   color: var(--success-fg);
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
 }
 .ah-cleanup-wrap {
@@ -1425,11 +1427,11 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: color 0.12s ease, border-color 0.12s ease;
+  transition: color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
 }
 .ah-cleanup-btn:hover {
   color: var(--text-bright);
@@ -1459,14 +1461,14 @@ async function copyLogText(): Promise<void> {
   background: transparent;
   border: none;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   font-weight: 400;
   text-align: left;
   padding: 5px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color 0.12s ease, color 0.12s ease;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .ah-cleanup-item:hover:not(:disabled) {
   background: var(--bg-subtle);
@@ -1504,7 +1506,7 @@ async function copyLogText(): Promise<void> {
   border: 1px solid var(--border-default);
   border-radius: 4px;
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 2px 8px;
   width: 160px;
   min-width: 0;
@@ -1514,14 +1516,14 @@ async function copyLogText(): Promise<void> {
   border-color: var(--accent-focus);
 }
 .ah-log-search-count {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-secondary);
   white-space: nowrap;
 }
 .ah-log-copy {
-  font-size: 11px;
+  font-size: var(--font-2xs);
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 8px;
   white-space: nowrap;
 }
@@ -1534,7 +1536,7 @@ async function copyLogText(): Promise<void> {
   background: transparent;
 }
 .ah-log-truncated {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--warning-fg);
 }
 .ah-log-body {
@@ -1548,7 +1550,7 @@ async function copyLogText(): Promise<void> {
 }
 .ah-log-empty {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--font-2xs);
   padding: 12px;
   text-align: center;
 }
@@ -1559,8 +1561,8 @@ async function copyLogText(): Promise<void> {
 .ah-log-pre {
   margin: 0;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: var(--font-2xs);
+  line-height: var(--lh-base);
   color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1612,8 +1614,9 @@ async function copyLogText(): Promise<void> {
 .log-preview-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(2px);
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(var(--modal-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1622,12 +1625,12 @@ async function copyLogText(): Promise<void> {
 .log-preview-modal {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   width: 80vw;
   height: 80vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 .log-preview-header {
@@ -1640,7 +1643,7 @@ async function copyLogText(): Promise<void> {
 }
 .log-preview-header h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--font-md);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -1649,7 +1652,7 @@ async function copyLogText(): Promise<void> {
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 16px;
+  font-size: var(--font-lg);
   padding: 4px;
 }
 .log-preview-close:hover {
@@ -1664,7 +1667,7 @@ async function copyLogText(): Promise<void> {
 .log-preview-body pre {
   margin: 0;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: var(--text-primary);
   white-space: pre-wrap;
   word-wrap: break-word;

@@ -53,7 +53,7 @@ function fmtTime(ts: number): string {
 
 <template>
   <div class="an-backdrop" @click="emit('close')" />
-  <div class="an-pop" @click.stop>
+  <div class="an-pop nv-popover" @click.stop>
     <div class="an-head">
       <span class="an-head-title">{{ $t('announce.title') }}</span>
       <button class="an-btn" data-act="mark-all" @click="emit('mark-all-read')">
@@ -128,11 +128,11 @@ function fmtTime(ts: number): string {
   max-height: 60vh;
   display: flex;
   flex-direction: column;
-  border-radius: 8px;
+  border-radius: var(--radius-popover);
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
-  font-size: 12px;
+  box-shadow: var(--shadow-popover);
+  font-size: var(--font-xs);
   color: var(--text-secondary);
 }
 .an-head {
@@ -157,9 +157,9 @@ function fmtTime(ts: number): string {
   background: var(--bg-hover);
   color: var(--text-secondary);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 7px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   cursor: pointer;
 }
 .an-btn:hover { color: var(--text-bright); }
@@ -205,7 +205,7 @@ function fmtTime(ts: number): string {
 .an-row.unread .an-title { font-weight: 600; color: var(--text-bright); }
 .an-ver {
   flex: none;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   border-radius: 99px;
   padding: 0 6px;
   background: var(--bg-hover);
@@ -220,7 +220,7 @@ function fmtTime(ts: number): string {
 }
 .an-time {
   margin-top: 2px;
-  font-size: 10px;
+  font-size: var(--font-3xs);
   color: var(--text-muted);
 }
 .an-acts {
@@ -230,7 +230,7 @@ function fmtTime(ts: number): string {
 }
 .an-detail { padding: 6px 0 2px; }
 .an-sub {
-  font-size: 10px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   color: var(--text-muted);
   margin-bottom: 3px;
