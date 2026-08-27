@@ -198,6 +198,71 @@ describe('ControlPane – workspace sections', () => {
     expect(heads[1].attributes('data-state')).toBe('idle')
   })
 
+  it('folds a group shut without touching the others', async () => {
+    wrapper = mountWith({
+      panes: [
+        { id: 'p1', agentLabel: 'A', status: 'idle', command: 'c', origin: 'manual', isMinimized: false, isCommander: false },
+        { id: 'p2', agentLabel: 'B', status: 'idle', command: 'c', origin: 'manual', isMinimized: false, isCommander: false },
+      ],
+      workspaces: [current({
+        count: 2,
+        lineage: [
+          { id: 'p1', depth: 0, hasChildren: false, collapsed: false },
+          { id: 'p2', depth: 0, hasChildren: false, collapsed: false },
+        ],
+        groups: [
+          { id: 'g1', name: '主要開發', rows: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }] },
+          { id: 'g2', name: '需求整理', rows: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }] },
+        ],
+      })],
+    })
+    const hidden = () => wrapper.findAll('.agent-item')
+      .filter((r) => r.attributes('style')?.includes('display: none')).length
+    expect(hidden()).toBe(0)
+    await wrapper.findAll('.ws-grp-caret')[0].trigger('click')
+    // v-show, so the row is present but not displayed — and only that group's.
+    expect(hidden()).toBe(1)
+    // The heading stays, so there is something left to click to unfold.
+    expect(wrapper.findAll('.ws-grp')).toHaveLength(2)
+  })
+
+  it('keeps two workspaces ungrouped sections apart', async () => {
+    // Both have an empty group id, so keying the fold on the id alone would
+    // fold one workspace's loose panes when you fold the other's.
+    const a = current({
+      count: 1,
+      lineage: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }],
+      groups: [
+        { id: 'g1', name: 'one', rows: [] },
+        { id: '', name: '', rows: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }] },
+      ],
+    })
+    const b = current({
+      path: '/Users/me/Desktop/Other', label: 'Other', count: 1,
+      lineage: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }],
+      groups: [
+        { id: 'g1', name: 'one', rows: [] },
+        { id: '', name: '', rows: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }] },
+      ],
+    })
+    wrapper = mountWith({
+      panes: [
+        { id: 'p1', agentLabel: 'A', status: 'idle', command: 'c', origin: 'manual', isMinimized: false, isCommander: false },
+        { id: 'p2', agentLabel: 'B', status: 'idle', command: 'c', origin: 'manual', isMinimized: false, isCommander: false },
+      ],
+      workspaces: [a, b],
+    })
+    // Order is A/g1, A/ungrouped, B/g1, B/ungrouped — fold the FIRST
+    // workspace's ungrouped section and only its pane may disappear.
+    const carets = wrapper.findAll('.ws-grp-caret')
+    expect(carets).toHaveLength(4)
+    await carets[1].trigger('click')
+    const hidden = wrapper.findAll('.agent-item')
+      .filter((r) => r.attributes('style')?.includes('display: none'))
+    expect(hidden).toHaveLength(1)
+    expect(hidden[0].text()).toContain('A')
+  })
+
   it('asks to reorder when a heading is dropped on another', async () => {
     const second = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
     wrapper = mountWith({ workspaces: [current(), second] })

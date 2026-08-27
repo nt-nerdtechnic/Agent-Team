@@ -1025,6 +1025,28 @@ const canDragWorkspace = computed(
   () => !props.detachedWindow && localWorkspaceRows.value.length > 1
 )
 
+/** Groups folded shut in the sidebar.
+ *
+ *  Keyed by workspace AND group: run groups are per-workspace, and the
+ *  ungrouped section's id is empty in every one of them, so the id alone would
+ *  fold two workspaces' loose panes together.
+ *
+ *  Per window and not persisted, the same judgement the workspace collapse
+ *  makes: which groups you want out of the way is a property of the view you
+ *  are looking at, not of the project. */
+const collapsedGroups = ref<Set<string>>(new Set())
+const groupKey = (wsPath: string, id: string): string => `${wsPath}\u0000${id}`
+function isGroupCollapsed(wsPath: string, id: string): boolean {
+  return collapsedGroups.value.has(groupKey(wsPath, id))
+}
+function toggleGroup(wsPath: string, id: string): void {
+  const key = groupKey(wsPath, id)
+  const next = new Set(collapsedGroups.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsedGroups.value = next
+}
+
 /** The heading a workspace drag is hovering, for the drop line. */
 const wsDragOverPath = ref<string>('')
 let draggingWorkspacePath = ''
@@ -1743,13 +1765,20 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           class="ws-grp"
           :data-state="g.state"
         >
+          <button
+            class="ws-grp-caret"
+            :title="isGroupCollapsed(ws?.path ?? '', g.id)
+              ? $t('action.expand-subtree')
+              : $t('action.collapse-subtree')"
+            @click.stop="toggleGroup(ws?.path ?? '', g.id)"
+          >{{ isGroupCollapsed(ws?.path ?? '', g.id) ? '›' : '⌄' }}</button>
           <span class="ws-grp-key"></span>
           <span class="ws-grp-name">{{ g.name || $t('label.manual-spawn') }}</span>
           <span class="ws-count">{{ g.rows.length }}</span>
         </li>
         <li
           v-for="{ pane: p, depth, hasChildren, collapsed: folded } in g.rows"
-          v-show="!ws?.collapsed"
+          v-show="!ws?.collapsed && !isGroupCollapsed(ws?.path ?? '', g.id)"
           :key="p.id"
           class="agent-item"
           :style="depth ? { marginLeft: depth * 13 + 'px' } : undefined"
@@ -3319,6 +3348,20 @@ button.icon-btn.muted:hover {
   color: var(--text-secondary);
   user-select: none;
 }
+/* Sits where the workspace caret sits one level up, so the two read as the
+   same control at two depths. */
+.ws-grp-caret {
+  flex: none;
+  width: 12px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+}
+.ws-grp-caret:hover { color: var(--text-bright); }
 /* Same three states, same tokens, as StageTabBar's tab dot — the sidebar must
    not be able to say "active" where the tab says otherwise. */
 .ws-grp-key {
