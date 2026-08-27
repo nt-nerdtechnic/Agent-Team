@@ -233,7 +233,7 @@ describe('ControlPane – workspace sections', () => {
   })
 
   it('offers nothing to fold when the list is ungrouped', async () => {
-    wrapper = mountWith()
+    wrapper = mountWith({})
     expect(wrapper.find('.hdr-fold-ws').exists()).toBe(false)
   })
 

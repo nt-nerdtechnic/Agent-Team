@@ -252,6 +252,34 @@ describe('several workspaces in one window', () => {
     )
   })
 
+  it('realizes a child against its live parent, not the snapshot', () => {
+    // `saved` is a snapshot taken when the workspace loaded. Realizing the
+    // PARENT gives it a new id and rekeyLineage repoints its children in
+    // memory — but the snapshot still names the retired id. Writing that back
+    // over the live value makes the child parentless, and a child with no
+    // resolvable parent is a root: it leaves the subtree and sorts to the end.
+    const at = appSource.indexOf('async function spawnRestoredPane')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('spawnedBy: opts.spawnedBy || saved.spawned_by || undefined')
+  })
+
+  it('hands realize the placeholder live parent', () => {
+    const at = appSource.indexOf('async function performRealizeRestoredPane')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('spawnedBy: placeholder.spawnedBy')
+  })
+
+  it('keeps rekeyLineage as the thing that maintains it', () => {
+    // The live value is only worth preferring because something keeps it
+    // current. Every path that gives a pane a new id calls this.
+    const at = appSource.indexOf('function rekeyLineage(')
+    expect(at).toBeGreaterThan(-1)
+    const fn = appSource.slice(at, appSource.indexOf('\n}', at))
+    expect(fn).toContain('if (p.spawnedBy === oldId)')
+  })
+
   it('gives a restore placeholder its parent', () => {
     // Without it buildPaneLineage cannot link the pane: an agent-spawned pane
     // came back flat and in spawn order until it was realized, which is when

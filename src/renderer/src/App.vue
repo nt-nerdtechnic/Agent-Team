@@ -6637,6 +6637,15 @@ interface DeferredRestoreMetadata {
 
 interface RestoredPaneSpawnOptions {
   saved: ProjectPane
+  /** The placeholder's live parent, when realizing one.
+   *
+   *  `saved` is a snapshot taken when the workspace loaded. Realizing the
+   *  PARENT gives it a new id and rekeyLineage repoints its children in
+   *  memory — but the snapshot still names the retired id. Realizing a child
+   *  from `saved` alone would write that dead pointer back over the live one,
+   *  and a child with no resolvable parent is a root: it leaves the subtree
+   *  and sorts to the end of the list. */
+  spawnedBy?: string
   workspacePath: string
   runGroupId?: string
   sessionHomeId?: string
@@ -6693,7 +6702,8 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     commandOverride: opts.commandOverride,
     workspacePath: opts.workspacePath,
     origin: saved.origin,
-    spawnedBy: saved.spawned_by || undefined,
+    // Live value first — see RestoredPaneSpawnOptions.spawnedBy.
+    spawnedBy: opts.spawnedBy || saved.spawned_by || undefined,
     runGroupId: opts.runGroupId,
     isResume: opts.isResume,
     skipRoleInjection: opts.isResume,
@@ -7701,6 +7711,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
       saved,
       workspacePath: batch.workspacePath,
       runGroupId: placeholder.runGroupId || undefined,
+      spawnedBy: placeholder.spawnedBy,
       sessionHomeId: placeholder.sessionHomeId,
       profileId: saved.profile_id,
       commandOverride,
