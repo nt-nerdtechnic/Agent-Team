@@ -55,4 +55,27 @@ describe('public Vue plugin UI controllers', () => {
     expect(disposeOutput).toHaveBeenCalledOnce()
     expect(disposeExit).toHaveBeenCalledOnce()
   })
+
+  it('reports an owned session exit without exposing foreign sessions', async () => {
+    const eventListeners = new Map<string, (payload: never) => void>()
+    const context = {
+      capabilities: { invoke: vi.fn().mockResolvedValue({ sessionId: 'session-1' }) },
+      events: {
+        subscribe: (event: string, listener: (payload: never) => void) => {
+          eventListeners.set(event, listener)
+          return { dispose: vi.fn() }
+        },
+      },
+    } as unknown as PluginContext
+    const controller = createAiCliSessionController(context)
+    const exited = vi.fn()
+    controller.onExit(exited)
+    await controller.start('codex', 80, 24)
+
+    eventListeners.get('aiCli.exited')?.({ sessionId: 'foreign' } as never)
+    eventListeners.get('aiCli.exited')?.({ sessionId: 'session-1', exitCode: 0 } as never)
+
+    expect(exited).toHaveBeenCalledOnce()
+    expect(controller.sessionId).toBeNull()
+  })
 })

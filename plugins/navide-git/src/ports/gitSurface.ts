@@ -78,6 +78,7 @@ export interface PickedWorkspace {
 export interface GitWorkspaceGrantPort {
   pickWorkspace(defaultPath?: string): Promise<PickedWorkspace | null>
   openWorkspace(selection: PickedWorkspace): Promise<void>
+  openKnownWorktree(path: string): Promise<void>
 }
 
 /** Read-only compatibility seed owned by the plugin composition root.
@@ -85,7 +86,7 @@ export interface GitWorkspaceGrantPort {
  * Domain components only know that a legacy repository selection may exist;
  * request names and backend transport details stay in the adapter. */
 export interface LegacyRepoSelectionPort {
-  readLegacyRepoSelection(workspacePath: string): Promise<string | null>
+  readLegacyRepoSelection(): Promise<string | null>
 }
 
 export interface GitBranchDiffPort {

@@ -9,6 +9,7 @@ import type { PortResponse } from '@navide/plugin-ui/shared'
 import {
   createPluginGitSettingsPort,
   createPluginGitWorkspaceGrantPort,
+  createPluginLegacyRepoSelectionPort,
   type PluginCapabilitySdk,
 } from '../pluginSurfacePorts'
 
@@ -126,10 +127,26 @@ describe('navide.git workspace grant port', () => {
 
     await expect(port.pickWorkspace('/default')).resolves.toEqual({ path: '/picked', grant: 'opaque-grant' })
     await port.openWorkspace({ path: '/cloned/repo', grant: 'derived-grant' })
+    await port.openKnownWorktree('/workspace/worktrees/topic')
 
     expect(hostRequests).toEqual([
       { action: 'git.contribution', payload: { operation: 'pick_workspace', payload: { default_path: '/default' } } },
       { action: 'git.contribution', payload: { operation: 'open_workspace', payload: { path: '/cloned/repo', grant: 'derived-grant' } } },
+      { action: 'git.contribution', payload: { operation: 'open_worktree', payload: { path: '/workspace/worktrees/topic' } } },
     ])
+  })
+})
+
+describe('navide.git legacy repository selection port', () => {
+  it('reads only the selected repository through the narrow Host action', async () => {
+    const { sdk } = makeSdk()
+    sdk.hostRequest = vi.fn(async (action, payload) => {
+      expect(action).toBe('git.legacyRepoSelection')
+      expect(payload).toEqual({})
+      return { ok: true, payload: { selection: '/workspace/nested' }, error: null }
+    }) as PluginCapabilitySdk['hostRequest']
+
+    await expect(createPluginLegacyRepoSelectionPort(sdk).readLegacyRepoSelection())
+      .resolves.toBe('/workspace/nested')
   })
 })

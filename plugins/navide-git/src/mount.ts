@@ -20,6 +20,7 @@ import {
   createPluginGitContributionHostPort,
   createPluginGitWorkspaceGrantPort,
   createPluginGitSettingsPort,
+  createPluginLegacyRepoSelectionPort,
 } from './pluginSurfacePorts'
 import {
   GIT_ACCOUNTS_KEY,
@@ -71,19 +72,7 @@ const gitTransport = createPluginGitTransport(gitSdk)
 const surfacePorts = createPluginGitSurfacePorts(capabilitySdk, gitTransport)
 const contributionHostPort = createPluginGitContributionHostPort(capabilitySdk)
 const workspaceGrantPort = createPluginGitWorkspaceGrantPort(capabilitySdk)
-const legacyRepoSelection = {
-  async readLegacyRepoSelection(workspacePath: string): Promise<string | null> {
-    try {
-      const response = await backend.send<{ project?: { ui_git_tab_repo?: string } | null }>(
-        'project.peek', { workspace_path: workspacePath },
-      )
-      const selection = response.payload?.project?.ui_git_tab_repo
-      return typeof selection === 'string' ? selection : null
-    } catch {
-      return null
-    }
-  },
-}
+const legacyRepoSelection = createPluginLegacyRepoSelectionPort(capabilitySdk)
 const settingsPort = createPluginGitSettingsPort(capabilitySdk)
 const isLeftContribution = query.get('contribution') === 'left'
 

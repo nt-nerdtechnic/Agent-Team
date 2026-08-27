@@ -186,7 +186,7 @@ describe('MultiRepoGit – workspace Plugin Storage selection', () => {
     await flushPromises()
     await wrapper.findAll('.repo-tab')[1].trigger('click')
     expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
-    expect(read).toHaveBeenCalledWith('/ws')
+    expect(read).toHaveBeenCalledWith()
   })
 
   it('uses the legacy project field as a read-only seed', async () => {
@@ -198,7 +198,7 @@ describe('MultiRepoGit – workspace Plugin Storage selection', () => {
     await flushPromises()
     expect(wrapper.findAll('.repo-tab')[1].classes()).toContain('active')
     expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
-    expect(read).toHaveBeenCalledWith('/ws')
+    expect(read).toHaveBeenCalledWith()
   })
 
   it('uses a legacy localStorage seed without deleting or rewriting it', async () => {
@@ -211,7 +211,7 @@ describe('MultiRepoGit – workspace Plugin Storage selection', () => {
     await flushPromises()
     expect(settingsGet('agentTeam.gitTabRepo', null)).toBe('/ws/sub')
     expect(localStorage.getItem('agentTeam.gitTabRepo./ws')).toBe('/ws/sub')
-    expect(read).toHaveBeenCalledWith('/ws')
+    expect(read).toHaveBeenCalledWith()
   })
 
   it('keeps the legacy seed frozen after a later Plugin Storage selection', async () => {

@@ -61,6 +61,16 @@ function mountPane(
 }
 
 describe('GitPane menu ownership', () => {
+  it('opens the Host-owned account surface instead of presenting editable credentials', async () => {
+    const wrapper = mountPane('/workspace/account')
+    await flushPromises()
+
+    await wrapper.get('.account-pill').trigger('click')
+
+    expect(wrapper.emitted('open-git-accounts')).toHaveLength(1)
+    expect(wrapper.find('.account-menu').exists()).toBe(false)
+  })
+
   it('gives mounted panes distinct owners and keeps a sibling menu open on Escape', async () => {
     const first = mountPane('/workspace/a')
     const second = mountPane('/workspace/b')
@@ -68,7 +78,7 @@ describe('GitPane menu ownership', () => {
 
     expect(first.attributes('data-git-pane-owner')).not.toBe(second.attributes('data-git-pane-owner'))
 
-    await second.find('.remote-btn').trigger('click')
+    await second.findAll('.remote-btn').at(-1)!.trigger('click')
     const secondMenu = `[data-git-pane-menu-owner="${second.attributes('data-git-pane-owner')}"]`
     expect(document.querySelector(`${secondMenu}.tp-dropdown`)).not.toBeNull()
     first.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))

@@ -26,6 +26,14 @@ export interface AiCliSessionController {
   stop(): Promise<void>
   dispose(): void
   onOutput(listener: (data: string) => void): () => void
+  onExit(listener: () => void): () => void
+}
+
+export interface SafeAiCliPanelHandle {
+  start(): Promise<void>
+  focus(): void
+  submitPrompt(prompt: string): Promise<boolean>
+  stop(): Promise<void>
 }
 
 export type AiCliPluginContext = Pick<PluginContext, 'capabilities' | 'events'>
@@ -33,12 +41,15 @@ export type AiCliPluginContext = Pick<PluginContext, 'capabilities' | 'events'>
 export function createAiCliSessionController(context: AiCliPluginContext): AiCliSessionController {
   let sessionId: string | null = null
   const outputListeners = new Set<(data: string) => void>()
+  const exitListeners = new Set<() => void>()
   const outputSubscription = context.events.subscribe('aiCli.output', (event) => {
     if (event.sessionId !== sessionId) return
     for (const listener of outputListeners) listener(event.data)
   })
   const exitSubscription = context.events.subscribe('aiCli.exited', (event) => {
-    if (event.sessionId === sessionId) sessionId = null
+    if (event.sessionId !== sessionId) return
+    sessionId = null
+    for (const listener of exitListeners) listener()
   })
 
   const requireSession = (): string => {
@@ -81,12 +92,17 @@ export function createAiCliSessionController(context: AiCliPluginContext): AiCli
     },
     dispose() {
       outputListeners.clear()
+      exitListeners.clear()
       outputSubscription.dispose()
       exitSubscription.dispose()
     },
     onOutput(listener) {
       outputListeners.add(listener)
       return () => outputListeners.delete(listener)
+    },
+    onExit(listener) {
+      exitListeners.add(listener)
+      return () => exitListeners.delete(listener)
     },
   }
 }

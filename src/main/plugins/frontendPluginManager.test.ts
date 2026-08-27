@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { generateKeyPairSync, sign as edSign } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -3594,6 +3594,47 @@ describe('first-party Git private bridge', () => {
     })
   })
 
+  it('projects only the bound workspace legacy repository selection', async () => {
+    const { mgr, view } = await openGitView('/workspace')
+    mgr.setBackendWsUrl('ws://git-legacy-selection-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+
+    const selection = call(view, 'git.legacyRepoSelection', {
+      workspace_path: '/renderer-forged',
+      packageVersion: 'renderer-forged',
+    }, 'git-legacy-selection')
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+    const request = JSON.parse(socket.sent[0]!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(request).toMatchObject({
+      type: 'project.peek',
+      payload: { workspace_path: '/workspace' },
+    })
+    socket.receive({
+      id: request.id,
+      type: request.type,
+      ok: true,
+      payload: {
+        project: {
+          ui_git_tab_repo: '/workspace/nested',
+          task_description: 'must not cross the private projection',
+        },
+      },
+      error: null,
+      timestamp: '',
+    })
+
+    await expect(selection).resolves.toEqual({
+      reqId: 'git-legacy-selection',
+      ok: true,
+      result: { selection: '/workspace/nested' },
+    })
+  })
+
   it('requires nested Git actions to carry the bound workspace', async () => {
     const { view, sent } = await openGitView()
 
@@ -3724,6 +3765,106 @@ describe('first-party Git private bridge', () => {
       ok: false,
       error: { code: 'CAPABILITY_DENIED' },
     })
+  })
+
+  it('opens only an authoritative worktree from the bound git-window workspace', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-worktree-root-'))
+    const worktreePath = mkdtempSync(join(tmpdir(), 'navide-git-worktree-known-'))
+    const unknownPath = mkdtempSync(join(tmpdir(), 'navide-git-worktree-unknown-'))
+    try {
+      const { mgr, view } = await openGitView(workspacePath, 'git-window')
+      mgr.setBackendWsUrl('ws://git-worktree-open-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+      const openWorkspace = vi.fn(() => ({ ok: true }))
+      mgr.setHostShellHandlers({
+        openExternal: async () => ({ ok: true }),
+        revealPath: () => ({ ok: true }),
+        openWorkspace,
+        pickFolder: async () => null,
+      })
+
+      const openKnown = call(view, 'git.contribution', {
+        operation: 'open_worktree',
+        payload: { path: worktreePath },
+      }, 'open-known-worktree')
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+      const knownRequest = JSON.parse(socket.sent[0]!)
+      expect(knownRequest).toMatchObject({
+        type: 'git.worktrees',
+        payload: { workspace_path: workspacePath },
+      })
+      socket.receive({
+        id: knownRequest.id,
+        type: knownRequest.type,
+        ok: true,
+        payload: { worktrees: [{ path: worktreePath }] },
+        error: null,
+        timestamp: '',
+      })
+      await expect(openKnown).resolves.toEqual({
+        reqId: 'open-known-worktree',
+        ok: true,
+        result: { accepted: true },
+      })
+      expect(openWorkspace).toHaveBeenCalledWith(realpathSync(worktreePath))
+
+      const openUnknown = call(view, 'git.contribution', {
+        operation: 'open_worktree',
+        payload: { path: unknownPath },
+      }, 'open-unknown-worktree')
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(2))
+      const unknownRequest = JSON.parse(socket.sent[1]!)
+      socket.receive({
+        id: unknownRequest.id,
+        type: unknownRequest.type,
+        ok: true,
+        payload: { worktrees: [{ path: worktreePath }] },
+        error: null,
+        timestamp: '',
+      })
+      await expect(openUnknown).resolves.toMatchObject({
+        reqId: 'open-unknown-worktree',
+        ok: false,
+        error: { code: 'CAPABILITY_DENIED' },
+      })
+      expect(openWorkspace).toHaveBeenCalledTimes(1)
+
+      const rejectedLookup = call(view, 'git.contribution', {
+        operation: 'open_worktree',
+        payload: { path: worktreePath },
+      }, 'rejected-worktree-lookup')
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(3))
+      const rejectedRequest = JSON.parse(socket.sent[2]!)
+      socket.receive({
+        id: rejectedRequest.id,
+        type: rejectedRequest.type,
+        ok: false,
+        payload: null,
+        error: { code: 'GIT_ERROR', message: 'worktrees unavailable' },
+        timestamp: '',
+      })
+      await expect(rejectedLookup).resolves.toMatchObject({
+        reqId: 'rejected-worktree-lookup',
+        ok: false,
+        error: { code: 'BACKEND_ERROR', message: 'worktrees unavailable' },
+      })
+      expect(openWorkspace).toHaveBeenCalledTimes(1)
+
+      const leftView = await openGitView(workspacePath, 'git-left')
+      await expect(call(leftView.view, 'git.contribution', {
+        operation: 'open_worktree',
+        payload: { path: worktreePath },
+      }, 'left-open-worktree')).resolves.toMatchObject({
+        reqId: 'left-open-worktree',
+        ok: false,
+        error: { code: 'CAPABILITY_DENIED' },
+      })
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+      rmSync(worktreePath, { recursive: true, force: true })
+      rmSync(unknownPath, { recursive: true, force: true })
+    }
   })
 
   it('denies the generic UI route so an arbitrary path cannot become a workspace root', async () => {
@@ -4189,7 +4330,7 @@ describe('first-party Git private bridge', () => {
     expect(socket.sent.map((raw) => JSON.parse(raw).payload.credential?.token)).not.toContain('plugin-supplied')
   })
 
-  it('fails closed before backend dispatch when a remote Git credential is unavailable', async () => {
+  it('preserves Git-native authentication when no Host credential is bound', async () => {
     const { mgr, view } = await openGitView()
     mgr.setBackendWsUrl('ws://git-credential-required-test')
     const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
@@ -4207,16 +4348,27 @@ describe('first-party Git private bridge', () => {
       getCredential,
     })
 
-    await expect(call(view, 'git.request', {
+    const operation = call(view, 'git.request', {
       type: 'git.push',
       payload: { workspace_path: '/workspace', remote: 'origin', branch: 'main' },
-    }, 'git-credential-required')).resolves.toMatchObject({
-      reqId: 'git-credential-required',
-      ok: false,
-      error: { code: 'CREDENTIAL_REQUIRED' },
+    }, 'git-with-native-auth')
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+    const request = JSON.parse(socket.sent[0]!)
+    expect(request.payload).toEqual({
+      workspace_path: '/workspace',
+      remote: 'origin',
+      branch: 'main',
     })
+    socket.receive({
+      id: request.id,
+      type: request.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(operation).resolves.toMatchObject({ ok: true })
     expect(getCredential).toHaveBeenCalledWith('/workspace')
-    expect(socket.sent).toEqual([])
   })
 
   it('injects a bound credential for a matching HTTPS clone host only', async () => {

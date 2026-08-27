@@ -59,6 +59,7 @@ const aiCliController: AiCliSessionController = {
   stop: vi.fn(async () => undefined),
   dispose: vi.fn(),
   onOutput: vi.fn(() => () => undefined),
+  onExit: vi.fn(() => () => undefined),
 }
 
 describe('production navide.git window composition', () => {
@@ -78,6 +79,7 @@ describe('production navide.git window composition', () => {
         workspaceGrantPort: {
           pickWorkspace: vi.fn(async () => null),
           openWorkspace: vi.fn(async () => undefined),
+          openKnownWorktree: vi.fn(async () => undefined),
         },
         aiCliController,
       },

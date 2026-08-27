@@ -1,4 +1,16 @@
 {
+  "ai-cli": {
+    "label": "AI CLI",
+    "title": "AI CLI",
+    "start": "啟動",
+    "stop": "停止",
+    "interrupt": "中斷",
+    "start-failed": "無法啟動 AI CLI session",
+    "stop-failed": "無法停止 AI CLI session",
+    "interrupt-failed": "無法中斷 AI CLI session",
+    "send-failed": "無法傳送輸入至 AI CLI session",
+    "resize-failed": "無法調整 AI CLI session 大小"
+  },
   "msg": {
     "panel-title": "CLI 互傳訊息",
     "pause": "暫停投遞",

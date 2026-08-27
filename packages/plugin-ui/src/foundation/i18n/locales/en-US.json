@@ -1,4 +1,16 @@
 {
+  "ai-cli": {
+    "label": "AI CLI",
+    "title": "AI CLI",
+    "start": "Start",
+    "stop": "Stop",
+    "interrupt": "Interrupt",
+    "start-failed": "Unable to start the AI CLI session",
+    "stop-failed": "Unable to stop the AI CLI session",
+    "interrupt-failed": "Unable to interrupt the AI CLI session",
+    "send-failed": "Unable to send input to the AI CLI session",
+    "resize-failed": "Unable to resize the AI CLI session"
+  },
   "msg": {
     "panel-title": "Inter-CLI Messages",
     "pause": "Pause delivery",

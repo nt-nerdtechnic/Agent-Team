@@ -264,7 +264,11 @@ const TERMINAL_OWNED_WS_TYPES = new Set([
  *  narrower than a generic Host RPC: package identity, sender identity, and
  *  workspace binding are all checked before any action reaches the backend. */
 const GIT_HOST_ACTIONS = new Set(['git.request', 'issues.request', 'fs.request'])
-const GIT_PRIVATE_ACTIONS = new Set(['git.contribution', 'git.account'])
+const GIT_PRIVATE_ACTIONS = new Set([
+  'git.contribution',
+  'git.account',
+  'git.legacyRepoSelection',
+])
 const GIT_CONTRIBUTION_OPERATIONS = new Set([
   'get_state',
   'open_path',
@@ -284,6 +288,7 @@ const GIT_CONTRIBUTION_OPERATIONS = new Set([
   'spawn_for_issue',
   'focus_pane',
   'open_git_accounts',
+  'open_worktree',
 ])
 const GIT_ACCOUNT_OPERATIONS = new Set([
   'list',
@@ -1064,6 +1069,7 @@ export class FrontendPluginManager {
         (record.compare === undefined || typeof record.compare === 'string')
     }
     if (operation === 'open_workspace') return stringField('path') && stringField('grant')
+    if (operation === 'open_worktree') return stringField('path')
     if (operation === 'focus_pane') return stringField('paneId')
     if (operation === 'open_file' || operation === 'open_conflict') {
       return stringField('workspace_path') && stringField('filepath') && stringField('name')
@@ -1105,7 +1111,10 @@ export class FrontendPluginManager {
     }
     const audience = plugin.capabilityContext?.runtimeBinding?.audience
     const isWindowPickerAction = audience === 'git-window' &&
-      (operation === 'pick_workspace' || operation === 'open_workspace')
+      (operation === 'pick_workspace' || operation === 'open_workspace' || operation === 'open_worktree')
+    if (operation === 'open_worktree' && audience !== 'git-window') {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'worktree opening is only available to the Git window')
+    }
     if (audience !== 'git-left' && !isWindowPickerAction) {
       return buildError(reqId, 'CAPABILITY_DENIED', 'Git contribution is only available to the left view')
     }
@@ -1166,6 +1175,50 @@ export class FrontendPluginManager {
         payload: { path: grantedPath },
       })
       return buildSuccess(reqId, { accepted: true })
+    }
+    if (operation === 'open_worktree') {
+      if (!plugin.workspacePath) {
+        return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git view is not workspace-bound')
+      }
+      if (!this.hostShellHandlers) {
+        return buildError(reqId, 'BACKEND_ERROR', 'host shell handlers not registered')
+      }
+      const requestedPath = resolvePathForContainment(String(payload.path))
+      if (!requestedPath || !isAbsolute(String(payload.path))) {
+        return buildError(reqId, 'BAD_REQUEST', 'worktree path must be an existing absolute path')
+      }
+      const client = this.ensureBackend()
+      if (!client) return buildError(reqId, 'BACKEND_ERROR', 'backend not connected')
+      try {
+        const response = await client.send<{ worktrees?: unknown }>('git.worktrees', {
+          workspace_path: resolve(plugin.workspacePath),
+        })
+        if (!response.ok) {
+          return buildError(reqId, 'BACKEND_ERROR', response.error?.message ?? 'worktrees lookup failed')
+        }
+        const worktrees = typeof response.payload === 'object' && response.payload !== null &&
+          Array.isArray(response.payload.worktrees)
+          ? response.payload.worktrees
+          : []
+        const authorized = worktrees.some((entry) => {
+          if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false
+          const path = (entry as { path?: unknown }).path
+          return typeof path === 'string' && resolvePathForContainment(path) === requestedPath
+        })
+        if (!authorized) {
+          return buildError(reqId, 'CAPABILITY_DENIED', 'worktree path is not registered for this workspace')
+        }
+        const opened = this.hostShellHandlers.openWorkspace(requestedPath)
+        return opened.ok
+          ? buildSuccess(reqId, { accepted: true })
+          : buildError(reqId, 'BACKEND_ERROR', 'workspace could not be opened')
+      } catch (error) {
+        return buildError(
+          reqId,
+          'BACKEND_ERROR',
+          error instanceof Error ? error.message : 'worktrees lookup failed',
+        )
+      }
     }
     if (plugin.hostWindow.isDestroyed()) return buildError(reqId, 'CAPABILITY_DENIED', 'Git host window is closed')
     plugin.hostWindow.webContents.send('git:contribution-action', { operation, payload })
@@ -1246,7 +1299,31 @@ export class FrontendPluginManager {
         return buildError(reqId, 'CAPABILITY_DENIED', 'Git Host action is not available')
       }
       if (action === 'git.contribution') return this.runGitContributionAction(reqId, args, plugin)
-      return this.runGitAccountAction(reqId, args, plugin)
+      if (action === 'git.account') return this.runGitAccountAction(reqId, args, plugin)
+      if (plugin.capabilityContext?.runtimeBinding?.audience !== 'git-left' || !plugin.workspacePath) {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'legacy Git selection is unavailable')
+      }
+      const client = this.ensureBackend()
+      if (!client) return buildError(reqId, 'BACKEND_ERROR', 'backend not connected')
+      try {
+        const response = await client.send<{ project?: { ui_git_tab_repo?: unknown } | null }>(
+          'project.peek',
+          { workspace_path: resolve(plugin.workspacePath) },
+        )
+        if (!response.ok) {
+          return buildError(reqId, 'BACKEND_ERROR', response.error?.message ?? 'legacy Git selection lookup failed')
+        }
+        const selection = response.payload?.project?.ui_git_tab_repo
+        return buildSuccess(reqId, {
+          selection: typeof selection === 'string' && selection ? selection : null,
+        })
+      } catch (error) {
+        return buildError(
+          reqId,
+          'BACKEND_ERROR',
+          error instanceof Error ? error.message : 'legacy Git selection lookup failed',
+        )
+      }
     }
 
     if (GIT_HOST_ACTIONS.has(action)) {
@@ -1281,26 +1358,35 @@ export class FrontendPluginManager {
       }
       if (action === 'git.request' && GIT_REMOTE_REQUEST_TYPES.has(type)) {
         const workspacePath = plugin.workspacePath
-        if (!workspacePath || !this.gitAccountHandlers) {
-          return buildError(reqId, 'BACKEND_ERROR', 'Git account service is unavailable')
+        if (!workspacePath) {
+          return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git view is not bound to a workspace')
         }
-        let credential: { username: string; token: string; expectedHost: string } | null
-        try {
-          credential = this.gitAccountHandlers.getCredential(resolve(workspacePath))
-        } catch (error) {
-          return buildError(
-            reqId,
-            'BACKEND_ERROR',
-            error instanceof Error ? error.message : 'Git credential lookup failed'
-          )
+        let credential: { username: string; token: string; expectedHost: string } | null = null
+        if (this.gitAccountHandlers) {
+          try {
+            credential = this.gitAccountHandlers.getCredential(resolve(workspacePath))
+          } catch (error) {
+            return buildError(
+              reqId,
+              'BACKEND_ERROR',
+              error instanceof Error ? error.message : 'Git credential lookup failed'
+            )
+          }
         }
-        if (!credential) {
-          return buildError(reqId, 'CREDENTIAL_REQUIRED', 'No workspace-bound Git credential is available')
+        if (credential && type === 'git.clone') {
+          let isHttps = false
+          try {
+            isHttps = typeof wsPayload.url === 'string' && new URL(wsPayload.url).protocol === 'https:'
+          } catch {
+            // Invalid and non-URL Git forms stay credential-free; the backend
+            // owns clone URL validation and normal SSH authentication.
+          }
+          if (isHttps && !isExpectedHttpsRemote(wsPayload.url, credential.expectedHost)) {
+            return buildError(reqId, 'CREDENTIAL_REQUIRED', 'No workspace-bound Git credential is available for this HTTPS remote')
+          }
+          if (!isHttps) credential = null
         }
-        if (type === 'git.clone' && !isExpectedHttpsRemote(wsPayload.url, credential.expectedHost)) {
-          return buildError(reqId, 'CREDENTIAL_REQUIRED', 'No workspace-bound Git credential is available for this HTTPS remote')
-        }
-        wsPayload.credential = credential
+        if (credential) wsPayload.credential = credential
       }
       if (action === 'git.request' && type === 'git.clone') {
         cloneTarget = this.consumeGitCloneTargetGrant(plugin, wsPayload.target_grant, wsPayload.target_dir)

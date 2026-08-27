@@ -56,6 +56,16 @@ describe('navide.git production package boundary', () => {
     expect(existsSync(join(repositoryRoot, 'packages/internal'))).toBe(false)
   })
 
+  it('keeps the pure Git history presentation aligned with the recovery surface', () => {
+    expect(readFileSync(join(packageRoot, 'src/components/GitHistoryModal.vue'), 'utf8')).toBe(
+      readFileSync(join(repositoryRoot, 'src/renderer/src/components/GitHistoryModal.vue'), 'utf8')
+    )
+  })
+
+  it('does not concatenate numeric suffixes onto CSS custom-property values', () => {
+    expect(sourceText(join(packageRoot, 'src'))).not.toMatch(/var\([^)]*\)\d/)
+  })
+
   it('uses public UI and capability seams without raw terminal or credential messages', () => {
     const source = sourceText(join(packageRoot, 'src'))
     const rendererSource = [

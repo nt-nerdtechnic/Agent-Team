@@ -98,7 +98,7 @@ async function restoreSavedRepo(ws: string): Promise<void> {
 
   let legacyLocal: string | null = null
   try { legacyLocal = localStorage.getItem(`${GIT_LEGACY_WORKSPACE_REPOSITORY_PREFIX}${ws}`) } catch { legacyLocal = null }
-  const backendSaved = await props.legacyRepoSelection.readLegacyRepoSelection(ws).catch(() => null)
+  const backendSaved = await props.legacyRepoSelection.readLegacyRepoSelection().catch(() => null)
   if (ws !== props.workspacePath || userSelected) return // workspace/user changed mid-flight
   const storedAfterLegacyRead = settingsGet<string | null>(GIT_WORKSPACE_REPOSITORY_KEY, null)
   if (storedAfterLegacyRead) {

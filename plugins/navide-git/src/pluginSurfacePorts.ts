@@ -15,6 +15,7 @@ import type {
   GitWindowUiPort,
   GitPaneUiPort,
   IssuePort,
+  LegacyRepoSelectionPort,
 } from './ports/gitSurface'
 import type { PortResponse } from '@navide/plugin-ui/shared'
 import type { KeybindingsPort } from '@navide/plugin-ui/shared'
@@ -265,6 +266,24 @@ export function createPluginGitWorkspaceGrantPort(sdk: PluginCapabilitySdk): Git
     },
     async openWorkspace(selection) {
       await request('open_workspace', { path: selection.path, grant: selection.grant })
+    },
+    async openKnownWorktree(path) {
+      await request('open_worktree', { path })
+    },
+  }
+}
+
+export function createPluginLegacyRepoSelectionPort(sdk: PluginCapabilitySdk): LegacyRepoSelectionPort {
+  return {
+    async readLegacyRepoSelection() {
+      try {
+        const payload = await requireOk<{ selection?: string | null }>(
+          sdk.hostRequest('git.legacyRepoSelection', {}),
+        )
+        return typeof payload?.selection === 'string' ? payload.selection : null
+      } catch {
+        return null
+      }
     },
   }
 }
