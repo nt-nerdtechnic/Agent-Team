@@ -50,7 +50,23 @@ describe('the branch pill follows the workspace', () => {
     const at = appSource.indexOf('.titlebar-reveal {')
     expect(at).toBeGreaterThan(-1)
     expect(appSource.slice(at, at + 120)).toContain('display: none')
-    expect(appSource).toContain('.titlebar-id:hover .titlebar-reveal { display: block; }')
+    expect(appSource).toContain('.titlebar-id:hover .titlebar-reveal { display: flex; }')
+  })
+
+  it('gives the hover zone a fixed share of the bar, without taking its drag handles', () => {
+    // Hovering swaps the short name for the longer path; a zone sized to the
+    // name would slide out from under the pointer the moment it did. The
+    // spacers either side must stay draggable or the window loses the only
+    // part of its titlebar it can be moved by.
+    const at = appSource.indexOf('.titlebar-id {')
+    expect(at).toBeGreaterThan(-1)
+    const zone = appSource.slice(at, appSource.indexOf('}', at))
+    expect(zone).toContain('flex: 0 0 70%')
+    expect(zone).toContain('align-self: stretch')
+    expect(zone).toContain('-webkit-app-region: no-drag')
+    const sp = appSource.indexOf('.titlebar-spacer {')
+    expect(sp).toBeGreaterThan(-1)
+    expect(appSource.slice(sp, appSource.indexOf('}', sp))).toContain('-webkit-app-region: drag')
   })
 
   it('opens the real path, not the shortened one', () => {

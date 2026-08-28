@@ -598,8 +598,21 @@ describe('several workspaces in one window', () => {
     // Panes started in it would otherwise sit in the list with no heading.
     expect(body).toContain('onKill')
     expect(body).toContain('persistExtraWorkspaces')
-    // The primary is what the window was opened with — closing it leaves no root.
-    expect(body).toContain('normWs(currentWorkspace.value)')
+  })
+
+  it('lands somewhere before closing the workspace on screen', () => {
+    const start = appSource.indexOf('async function closeWorkspace')
+    const body = appSource.slice(start, appSource.indexOf('\n}', start))
+    // Switch first, let go after. The other order leaves the window on a
+    // project it no longer holds for the duration of the switch — and the
+    // switch is what puts the focus on the next project's first CLI.
+    expect(body).toContain('await switchToWorkspace(land)')
+    expect(body.indexOf('await switchToWorkspace(land)')).toBeLessThan(body.indexOf('onKill'))
+    // A switch can decline — the target turned out to be open in another
+    // window. Closing anyway would strand this one with nothing on screen.
+    expect(body).toContain("if (normWs(currentWorkspace.value) !== normWs(land)) return")
+    // Nothing to land on: leave it alone rather than emptying the window.
+    expect(body).toContain('if (!land) return')
   })
 
 })
