@@ -37,6 +37,18 @@ export function growthNeededFor(normalizedLength: number): number {
   return Math.min(READY_GROWTH_MIN, Math.max(8, Math.floor(normalizedLength / 2)))
 }
 
+/** A TUI that decides a paste is too big to show collapses it to a summary —
+ *  "[Pasted text #1 +40 lines]" and its variants — and the payload itself is
+ *  never drawn. Recognising that summary is how we tell "the paste landed"
+ *  apart from "nothing happened" in the one case where neither of the other
+ *  two signals can fire. */
+export const PASTE_PLACEHOLDER_RE = /\[pasted?\s+text\b[^\]]*\]/i
+
+/** Chars either side of the grown region to search for the placeholder. The
+ *  summary can straddle the boundary when the TUI redraws the composer rather
+ *  than appending to it. */
+const PLACEHOLDER_MARGIN = 120
+
 /** Has our text landed in the input box? `tail` is the normalized tail of the
  *  payload; `buffer` the pane's current clean scrollback. */
 export function echoLanded(
@@ -46,7 +58,21 @@ export function echoLanded(
   normalizedLength: number,
 ): boolean {
   if (tail && normalizeForMatch(buffer).includes(tail)) return true
-  return grownBy >= growthNeededFor(normalizedLength)
+  if (grownBy >= growthNeededFor(normalizedLength)) return true
+  // The collapsed-paste case. Both signals above measure the payload: one
+  // looks for it verbatim, the other for enough bytes to account for it — and
+  // a collapsed paste produces neither, because the summary is short and
+  // fixed-size no matter how long the payload was. So a long message read as
+  // "never arrived", was sent again, and again: three copies of one message
+  // sat in antigravity's composer while the send reported failure, Enter never
+  // pressed. Short messages were unaffected, which is why this looked like a
+  // length limit rather than a verification fault.
+  //
+  // Only a summary inside the region that just grew counts. One left over from
+  // an earlier paste would otherwise say "landed" while nothing of ours had,
+  // and the Enter that follows would submit whatever the composer was holding.
+  if (grownBy <= 0) return false
+  return PASTE_PLACEHOLDER_RE.test(buffer.slice(-(grownBy + PLACEHOLDER_MARGIN)))
 }
 
 /** Lines at the bottom of the visible screen that hold the input box. Small
