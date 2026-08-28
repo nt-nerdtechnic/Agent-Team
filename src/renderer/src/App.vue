@@ -14455,6 +14455,17 @@ function paneIsCommander(p: ActivePane): boolean {
           <span v-if="backendUrl" class="sb-url">· {{ backendUrl }}</span>
         </span>
         <span
+          v-if="panes.length > 0"
+          class="sb-item sb-resource sb-clickable"
+          role="button"
+          tabindex="0"
+          :title="resourcePillTitle"
+          @click="togglePopover('resource')"
+          @keydown.enter="togglePopover('resource')"
+        >
+          {{ resourcePillText }}
+        </span>
+        <span
           v-if="['available', 'downloading', 'downloaded', 'error'].includes(updateState.status)"
           class="sb-item sb-update sb-clickable"
           :class="'sb-update-' + updateState.status"
@@ -14489,17 +14500,6 @@ function paneIsCommander(p: ActivePane): boolean {
         >
           <span class="sb-dot" />
           {{ $t('updater.badge-check-failed') }}
-        </span>
-        <span
-          v-if="panes.length > 0"
-          class="sb-item sb-resource sb-clickable"
-          role="button"
-          tabindex="0"
-          :title="resourcePillTitle"
-          @click="togglePopover('resource')"
-          @keydown.enter="togglePopover('resource')"
-        >
-          {{ resourcePillText }}
         </span>
       </div>
       <div class="statusbar-right">

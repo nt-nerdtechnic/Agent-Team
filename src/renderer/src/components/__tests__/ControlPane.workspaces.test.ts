@@ -510,6 +510,24 @@ describe('ControlPane – workspace sections', () => {
     expect(heads[1].classes()).not.toContain('ws-head--viewing')
   })
 
+  // Emptying the sidebar used to swap the whole list — workspace rows and all —
+  // for the empty message, and the ＋ that opens an agent lives on those rows.
+  // Closing the last pane therefore left no way to open another one.
+  it('keeps the workspace row and its add button when no panes are left', () => {
+    wrapper = mountWith({ panes: [], workspaces: [current({ count: 0 })] })
+    const head = wrapper.find('.ws-head')
+    expect(head.exists()).toBe(true)
+    expect(head.find('.ws-name').text()).toBe('Agent-Team')
+    expect(head.find('.ws-add').exists()).toBe(true)
+    expect(wrapper.find('.ws-empty').text()).toBe('label.no-agents-running')
+  })
+
+  it('still swaps the ungrouped list for the empty message', () => {
+    wrapper = mountWith({ panes: [] })
+    expect(wrapper.findAll('.ws-head')).toHaveLength(0)
+    expect(wrapper.find('.empty').text()).toBe('label.no-agents-running')
+  })
+
   it('titles the section Workspace once workspaces are grouped', () => {
     wrapper = mountWith({ workspaces: [current()] })
     expect(wrapper.find('.agent-list-hdr .lbl').text()).toBe('label.workspace')

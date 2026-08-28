@@ -341,6 +341,12 @@ const localWorkspaceRows = computed<(WorkspaceGroupRow | null)[]>(() => {
   return rows.length ? rows : [null]
 })
 
+/** Whether the list has real workspace headings to draw. When it does the list
+ *  must render even with no panes at all: the headings carry the only ＋ that
+ *  opens an agent, so replacing them with an empty message leaves the sidebar
+ *  with no way back in. */
+const hasWorkspaceRows = computed(() => localWorkspaceRows.value.some((w) => w))
+
 /** A group's spine state: the same signal its tab already shows.
  *
  *  An identity palette was the first attempt — a colour per group, hashed from
@@ -1762,7 +1768,11 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <button class="history-btn" :title="$t('label.history')" @click="emit('open-history')"><HistoryIcon /></button>
         </div>
       </div>
-      <div v-if="panes.length === 0" class="empty">{{ $t('label.no-agents-running') }}</div>
+      <!-- Only the ungrouped list swaps itself out for the empty message. A
+           grouped one keeps its workspace rows and puts the message under the
+           one that is empty, because those rows hold the ＋ that opens an
+           agent — the sidebar must never lose its own entry point. -->
+      <div v-if="panes.length === 0 && !hasWorkspaceRows" class="empty">{{ $t('label.no-agents-running') }}</div>
       <ul v-else class="agent-list">
         <template v-for="ws in localWorkspaceRows" :key="ws?.path ?? '\u0000ungrouped'">
         <!-- The row is the switch. It was the name alone, which is a few
@@ -1943,6 +1953,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           </template>
         </li>
         </template>
+        <li v-if="ws && !panesOf(ws).length" v-show="!ws.collapsed" class="ws-empty">{{ $t('label.no-agents-running') }}</li>
         </template>
         <!-- Workspaces open in another window. The registry knows their name,
              agent and busy flag; everything else needs the window that owns
@@ -3447,6 +3458,12 @@ button.icon-btn.muted:hover {
    already spent on parent/child panes, and a third level would push an MCP
    child's name past the width it has. The spine also survives scrolling — the
    heading leaves the viewport, the colour does not. */
+.ws-empty {
+  padding: 4px 8px 6px 18px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 .ws-grp {
   display: flex;
   align-items: center;
