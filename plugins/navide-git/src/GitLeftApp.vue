@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import MultiRepoGit from './components/MultiRepoGit.vue'
 import SettingsReadinessNotice from './components/SettingsReadinessNotice.vue'
 import { onSettingsChanged, settingsGet, useKeybindings } from '@navide/plugin-ui/shared'
+import { useTheme } from '@navide/plugin-ui/foundation'
 import type { GitSurfacePorts, LegacyRepoSelectionPort } from './ports/gitSurface'
 import { HOST_GIT_COMMAND_IDS, type GitContributionState } from './ports/gitContribution'
 import type { PluginGitContributionHostPort } from './pluginSurfacePorts'
@@ -36,11 +37,21 @@ function applyState(next: GitContributionState): void {
   if (next.workspacePath === workspacePath) state.value = next
 }
 
+const { loadTheme } = useTheme()
+
 onMounted(async () => {
+  // mount.ts stamps data-theme once from the entry query so the first paint is
+  // not a flash of the wrong theme. That snapshot goes stale the moment the
+  // user switches theme, so adopt the store's value here and follow it after —
+  // the same contract GitWindowApp keeps.
+  loadTheme()
   const initial = await props.hostPort.getState().catch(() => null)
   if (initial) applyState(initial)
   stopState = props.hostPort.onStateChanged(applyState)
   stopSettings = onSettingsChanged((keys) => {
+    if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {
+      loadTheme()
+    }
     if (keys.includes('agentTeam.analyzerModel')) {
       analyzerModel.value = settingsGet('agentTeam.analyzerModel', '')
     }

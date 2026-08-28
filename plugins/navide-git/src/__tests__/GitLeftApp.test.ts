@@ -1,12 +1,22 @@
 // @vitest-environment happy-dom
-import { shallowMount } from '@vue/test-utils'
+import { flushPromises, shallowMount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import GitLeftApp from '../GitLeftApp.vue'
 
+const settingsListeners: ((keys: string[]) => void)[] = []
+const loadTheme = vi.fn()
+
 vi.mock('@navide/plugin-ui/shared', () => ({
-  onSettingsChanged: vi.fn(() => () => undefined),
+  onSettingsChanged: vi.fn((cb: (keys: string[]) => void) => {
+    settingsListeners.push(cb)
+    return () => undefined
+  }),
   settingsGet: vi.fn(() => ''),
   useKeybindings: vi.fn(() => ({ registerCommand: vi.fn() })),
+}))
+
+vi.mock('@navide/plugin-ui/foundation', () => ({
+  useTheme: () => ({ loadTheme }),
 }))
 
 vi.mock('../components/MultiRepoGit.vue', () => ({
@@ -32,5 +42,36 @@ describe('GitLeftApp', () => {
 
     expect(wrapper.element.classList.contains('git-left-root')).toBe(true)
     expect(wrapper.findComponent({ name: 'MultiRepoGit' }).exists()).toBe(true)
+  })
+
+  it('adopts the stored theme and follows later switches', async () => {
+    settingsListeners.length = 0
+    loadTheme.mockClear()
+    const wrapper = shallowMount(GitLeftApp, {
+      props: {
+        surfacePorts: {} as never,
+        hostPort: {
+          getState: vi.fn(async () => null),
+          onStateChanged: vi.fn(() => () => undefined),
+          dispatch: vi.fn(async () => undefined),
+        } as never,
+        legacyRepoSelection: {} as never,
+      },
+    })
+    await flushPromises()
+
+    // mount.ts only stamps data-theme once from the entry query; that snapshot
+    // is stale as soon as the user switches theme.
+    expect(loadTheme).toHaveBeenCalledTimes(1)
+
+    settingsListeners.forEach((cb) => cb(['agent-team:theme']))
+    expect(loadTheme).toHaveBeenCalledTimes(2)
+
+    settingsListeners.forEach((cb) => cb(['agent-team:theme-custom']))
+    expect(loadTheme).toHaveBeenCalledTimes(3)
+
+    settingsListeners.forEach((cb) => cb(['agentTeam.somethingElse']))
+    expect(loadTheme).toHaveBeenCalledTimes(3)
+    wrapper.unmount()
   })
 })
