@@ -335,16 +335,6 @@ const orderedPanes = computed(() => {
   return out
 })
 
-/** Whether any row in this list can show a fold caret.
- *
- *  The caret sits in a 12px slot before the status dot, so a row that has one
- *  starts 18px further right than a row that does not — which is why a pane
- *  that happened to spawn a child stopped lining up with its childless
- *  siblings at the same depth. Reserving the slot on every row puts them back
- *  on one left edge. A list with no lineage at all reserves nothing, so a flat
- *  sidebar keeps the left edge it has always had. */
-const lineageRail = computed(() => (props.lineage ?? []).some((r) => r.hasChildren))
-
 /** The workspaces this window runs panes in — the one it was opened with plus
  *  any adopted from the picker. A single `null` entry stands for the ungrouped
  *  list: no heading, every pane under it, which is what this looked like
@@ -359,6 +349,27 @@ const localWorkspaceRows = computed<(WorkspaceGroupRow | null)[]>(() => {
  *  opens an agent, so replacing them with an empty message leaves the sidebar
  *  with no way back in. */
 const hasWorkspaceRows = computed(() => localWorkspaceRows.value.some((w) => w))
+
+/** Whether any row the sidebar draws can show a fold caret.
+ *
+ *  The caret sits in a 12px slot before the status dot, so a row that has one
+ *  starts 18px further right than a row that does not — which is why a pane
+ *  that happened to spawn a child stopped lining up with its childless
+ *  siblings at the same depth. Reserving the slot on every row puts them back
+ *  on one left edge. A list with no lineage at all reserves nothing, so a flat
+ *  sidebar keeps the left edge it has always had.
+ *
+ *  Read from the same rows the template renders, not from `lineage`: with
+ *  workspace headings on, the rows come from `workspaces` instead and `lineage`
+ *  is empty, so keying off it reserved nothing on exactly the list that has
+ *  the carets. */
+const lineageRail = computed(() =>
+  localWorkspaceRows.value.some((ws) =>
+    ws
+      ? ws.groups.some((g) => g.rows.some((r) => r.hasChildren))
+      : orderedPanes.value.some((r) => r.hasChildren)
+  )
+)
 
 /** A group's spine state: the same signal its tab already shows.
  *
