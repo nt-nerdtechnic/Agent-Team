@@ -1002,12 +1002,18 @@ const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | n
 
 /** `canClose` is the answer to "would closing this do anything?".
  *
- *  Only a workspace that is NOT the one on screen: closing what you are looking
- *  at would leave the window showing a project it no longer holds. Offering it
- *  there produced a menu item that silently did nothing.
+ *  A workspace that is not the one on screen: always — closing it changes the
+ *  list and nothing else.
  *
- *  Note it is the one on screen, not the one the window was opened with — the
- *  primary can be closed from here once you have switched away from it. */
+ *  The one on screen: only when this window holds another to land on. Closing
+ *  it switches to the next workspace first and lets go of this one after, so
+ *  with nothing to switch to there is nowhere to go and the item would do
+ *  nothing. Back to the Welcome picker is the titlebar's ↺ button, which asks
+ *  first — deliberately not folded in here, where a menu item would discard a
+ *  window's last project without a word.
+ *
+ *  Not in a detached window either: switchToWorkspace declines there, so the
+ *  landing this depends on never happens. */
 // Drag-out: dragging a workspace heading and releasing OUTSIDE this window
 // gives that workspace its own window. Deliberately the same gesture as a stage
 // tab in StageTabBar — both mean "pull this out of here", so both are a drag to
@@ -1023,6 +1029,14 @@ const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | n
  *  need a second workspace to be meaningful: there is nothing to reorder
  *  against, and pulling out the only one empties this window to fill a new. */
 const canDragWorkspace = computed(
+  () => !props.detachedWindow && localWorkspaceRows.value.length > 1
+)
+
+/** Whether the workspace on screen has somewhere to land if it is closed.
+ *  Same shape as canDragWorkspace and for the same reason — both need a second
+ *  workspace to be meaningful — but kept apart: they answer different questions
+ *  and one of them changing should not silently change the other. */
+const canCloseCurrent = computed(
   () => !props.detachedWindow && localWorkspaceRows.value.length > 1
 )
 
@@ -1771,7 +1785,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           @dragleave="onWsDragLeave(ws.path)"
           @drop.prevent="onWsDrop($event, ws.path)"
           @click="!detachedWindow && ws.path !== workspacePath && emit('switch-to-workspace', ws.path)"
-          @contextmenu="openWsMenu($event, ws.path, ws.path !== workspacePath)"
+          @contextmenu="openWsMenu($event, ws.path, ws.path !== workspacePath || canCloseCurrent)"
         >
           <button
             class="ws-caret"

@@ -415,10 +415,36 @@ describe('ControlPane – workspace sections', () => {
     expect(menu.findAll('.ws-ctx-opt').length).toBeGreaterThanOrEqual(2)
   })
 
-  it('will not offer to close the workspace the window was opened with', async () => {
-    // Closing the primary would leave the window with no root.
+  it('will not offer to close the only workspace the window holds', async () => {
+    // Closing it would have nowhere to land: the window would be left showing a
+    // project it no longer holds. Back to the Welcome picker is the titlebar's
+    // ↺ button, which asks first.
     wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current()] })
     await wrapper.find('.ws-head--current').trigger('contextmenu')
+    expect(wrapper.find('.ws-ctx-opt.danger').exists()).toBe(false)
+  })
+
+  it('closes the workspace on screen once there is another to land on', async () => {
+    // Being unable to close the project you are looking at only made you switch
+    // away first to do the same thing.
+    const adopted = current({ path: '/Users/me/Desktop/Other', label: 'Other' })
+    wrapper = mountWith({ workspace: '/Users/me/Desktop/Agent-Team', workspaces: [current(), adopted] })
+    await wrapper.findAll('.ws-head--current')[0].trigger('contextmenu')
+    const close = wrapper.find('.ws-ctx-opt.danger')
+    expect(close.exists()).toBe(true)
+    await close.trigger('click')
+    expect(wrapper.emitted('close-workspace')?.[0]).toEqual(['/Users/me/Desktop/Agent-Team'])
+  })
+
+  it('never offers it in a detached window', async () => {
+    // switchToWorkspace declines there, so the landing this depends on never
+    // happens and the item would do nothing.
+    wrapper = mountWith({
+      workspace: '/Users/me/Desktop/Agent-Team',
+      detachedWindow: true,
+      workspaces: [current(), current({ path: '/Users/me/Desktop/Other', label: 'Other' })],
+    })
+    await wrapper.findAll('.ws-head--current')[0].trigger('contextmenu')
     expect(wrapper.find('.ws-ctx-opt.danger').exists()).toBe(false)
   })
 

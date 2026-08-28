@@ -4483,6 +4483,15 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
 
   if (opts.replacePaneId) {
     const wasFocused = focusPaneId.value === opts.replacePaneId
+    // A replacement takes over the pane's identity, messaging handle included,
+    // and gets a fresh runtime id to do it. Release the old id's registration
+    // first: leave it and the handle is still taken when the new pane asks for
+    // it, so it comes back suffixed (`name-2`) and a pane the user addresses by
+    // name is silently renamed under them. The persisted name stays — it is
+    // exactly what the replacement is about to claim.
+    if (opts.replacePaneId !== id) {
+      unregisterPaneMessaging(opts.replacePaneId, { keepPersisted: true })
+    }
     const idx = panes.value.findIndex(p => p.id === opts.replacePaneId)
     if (idx >= 0) panes.value.splice(idx, 1, pane)
     else panes.value.push(pane)
@@ -7465,6 +7474,15 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         sessionHomeId: sessionHomeId || undefined,
         deferredRestore: { saved, workspacePath, batch: coldBatch! },
       }
+      // Register the handle now rather than on realize. `messagingName` is what
+      // the @-mention menu filters on and what mirrors the pane into the
+      // cross-workspace registry, so a restored-but-not-yet-opened pane was
+      // addressable by neither: it did not exist to the messaging system until
+      // it was clicked. The menu already expects placeholders — it draws a
+      // hollow dot for a pane whose status it cannot read — so only the
+      // registration was ever missing. Delivery is unaffected: injectPane still
+      // refuses an unrealized pane, which is what makes listing one safe.
+      registerPaneMessaging(placeholder, persistedMessagingName(saved.pane_id))
       panes.value.push(placeholder)
       if (saved.is_minimized) {
         minimizedPanes.value = new Set([...minimizedPanes.value, saved.pane_id])
@@ -12085,15 +12103,33 @@ async function switchToWorkspace(path: string): Promise<void> {
   }
 }
 
-/** Take an adopted workspace back out of this window.
+/** Take a workspace back out of this window.
  *
  *  Its panes go with it — they were started in it and belong to it, and
  *  leaving them behind would put panes in the list with no heading to sit
- *  under. The primary workspace cannot be closed this way: it is what the
- *  window was opened with, so closing it would leave no root. */
+ *  under. Any workspace this window holds, including the one on screen: what
+ *  a window is opened with stops mattering once it holds several, and being
+ *  unable to close the project you are looking at only leaves you switching
+ *  away first to do the same thing. The one thing it needs is somewhere to
+ *  land — see below. */
 async function closeWorkspace(path: string): Promise<void> {
-  if (!path || normWs(path) === normWs(currentWorkspace.value)) return
-  if (!extraWorkspaces.value.some((w) => normWs(w) === normWs(path))) return
+  if (!path) return
+  if (!workspaceOrder.value.some((w) => normWs(w) === normWs(path))) return
+  // Closing the one on screen means landing somewhere first. Switching before
+  // letting go — rather than after — is what puts the panes and the focus
+  // somewhere valid: switchToWorkspace already keeps the focused pane if it
+  // survives the filter and otherwise takes the first that did, which is the
+  // next project's first CLI. It can also decline (the target turned out to be
+  // open in another window), and then nothing is closed, rather than leaving
+  // this window on a project it no longer holds.
+  if (normWs(path) === normWs(currentWorkspace.value)) {
+    const land = workspaceOrder.value.find((w) => normWs(w) !== normWs(path))
+    // Nothing to land on. Going back to the Welcome picker is the titlebar's
+    // ↺ button — a different thing to want, and it asks first.
+    if (!land) return
+    await switchToWorkspace(land)
+    if (normWs(currentWorkspace.value) !== normWs(land)) return
+  }
   const doomed = panes.value.filter((p) => normWs(p.workspacePath) === normWs(path))
   for (const pane of doomed) await onKill(pane.id)
   workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
@@ -13579,7 +13615,23 @@ function paneIsCommander(p: ActivePane): boolean {
             :title="$t('action.open-in-finder')"
             :aria-label="$t('action.open-in-finder')"
             @click="revealWorkspaceFolder(currentWorkspace)"
-          >⤴</button>
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 19a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v3" />
+              <path d="M2 13h10" />
+              <path d="m9 16 3-3-3-3" />
+            </svg>
+          </button>
         </span>
         <span class="titlebar-spacer"></span>
       </template>
@@ -14738,14 +14790,19 @@ function paneIsCommander(p: ActivePane): boolean {
   color: var(--text-primary);
 }
 /* Name normally, path while the pointer is on it. The bar is a drag region,
-   and a drag region swallows hover — so this one patch of it opts out. The
-   spacers either side stay draggable, which is most of the bar. */
+   and a drag region swallows hover — so this one patch of it opts out. Sized
+   to a fixed share of the bar rather than to its text, and stretched to the
+   full bar height: hovering it swaps the name for a longer path, and a hot
+   zone that hugged the short name would slip out from under the pointer the
+   moment it did. The spacers either side keep their drag region so the window
+   can still be moved by its titlebar. */
 .titlebar-id {
   display: flex;
   align-items: center;
-  flex: 0 1 auto;
+  justify-content: center;
+  align-self: stretch;
+  flex: 0 0 70%;
   min-width: 0;
-  max-width: 70%;
   -webkit-app-region: no-drag;
 }
 .titlebar-path {
@@ -14764,16 +14821,15 @@ function paneIsCommander(p: ActivePane): boolean {
    shows a project name would read as acting on the project, not the folder. */
 .titlebar-reveal {
   display: none;
+  align-items: center;
   flex: none;
   padding: 0 4px;
   border: none;
   background: none;
   color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1;
   cursor: pointer;
 }
-.titlebar-id:hover .titlebar-reveal { display: block; }
+.titlebar-id:hover .titlebar-reveal { display: flex; }
 .titlebar-reveal:hover { color: var(--text-bright); }
 /* Fills the bar between the traffic lights and the gear, and stays draggable
    so the empty stretch still moves the window. */
