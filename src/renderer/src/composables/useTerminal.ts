@@ -3233,58 +3233,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       return ''
     }
   }
-  // Fetch the pane's recorded transcript from the backend so a restore can show
-  // the conversation, not just the last screenful.
-  //
-  // Why this exists alongside the localStorage snapshot: xterm keeps NO
-  // scrollback for the alternate buffer and discards lines that scroll off it,
-  // so for a full-screen TUI the snapshot can only ever capture the current
-  // screen (see serializeSnapshot's Ceiling note). The transcript on disk has
-  // no such ceiling — the backend appended every chunk as it arrived.
-  //
-  // It is safe to write straight into a terminal of any width because the
-  // backend already stripped every escape sequence before the bytes reached
-  // the file (terminals.py `_clean_for_log`): no cursor positioning means
-  // nothing can land in the wrong cell. The tradeoff is that colour and TUI
-  // chrome are gone — this restores what was said, not how it looked.
-  // Ceiling on the chunk loop below. TRANSCRIPT_MAX_BYTES / chunk size gives 4;
-  // this leaves room without letting a wrong total_chunks spin forever.
-  const TRANSCRIPT_CHUNK_LIMIT = 16
-
-  async function fetchTranscript(): Promise<string> {
-    const workspacePath = opts?.workspacePath ?? ''
-    if (!workspacePath || !activeAgentKey) return ''
-    // One request per chunk: the backend caps a frame at 64KB so a transcript
-    // cannot hold the session send lock in front of a heartbeat. Loop until it
-    // says we have them all, with a hard stop so a bad total_chunks cannot spin.
-    let out = ''
-    try {
-      for (let chunk = 0; chunk < TRANSCRIPT_CHUNK_LIMIT; chunk++) {
-        const r = await backend.send<{ text: string; total_chunks: number }>(
-          'terminal.history',
-          {
-            workspace_path: workspacePath,
-            agent_key: activeAgentKey,
-            pane_id: paneId,
-            chunk,
-          },
-          5000,
-        )
-        if (!r.ok || !r.payload) break
-        out += r.payload.text ?? ''
-        if (chunk + 1 >= (r.payload.total_chunks ?? 1)) break
-      }
-    } catch { return '' }
-    return out
-  }
-
-  // Plain text -> terminal bytes: the file has bare \n line endings, which a
-  // terminal renders as "down one row, same column" — every line would start
-  // where the previous one ended. Only \r\n returns to column 0.
-  function transcriptToTerm(text: string): string {
-    return text.replace(/\r?\n/g, '\r\n')
-  }
-
   function saveScrollSnapshot(): void {
     const key = scrollSnapKey()
     let lines = SCROLL_SNAP_LINES
@@ -3746,16 +3694,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // it captured, mouse tracking and bracketed paste among them) and before
     // bindSessionHandlers, so live output can never interleave into it.
     if (!snapshotReplayed) {
-      // Same preference as the resume path: the transcript has no
-      // alternate-buffer ceiling, and being plain text it re-wraps to whatever
-      // width this pane has now. It also arms the width reflow — a pane
-      // restored from the snapshot alone has nothing to rebuild itself from, so
-      // it would keep the old width's line breaks for the rest of its life.
-      const transcript = await fetchTranscript()
-      const snap = transcript ? '' : loadScrollSnapshot()
-      if (transcript || snap) {
+      const snap = loadScrollSnapshot()
+      if (snap) {
         snapshotReplayed = true
-        term.write(transcript ? transcriptToTerm(transcript) : snap)
+        term.write(snap)
       }
     }
     // Reset mouse tracking modes so no stale xterm mouse state forwards events
@@ -3967,15 +3909,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // The snapshot is a serialized buffer — glyphs and colours, no cursor
       // positioning — so it renders correctly whatever width this pane now has.
       // It re-wraps; it cannot land in the wrong cell.
-      // Prefer the backend transcript: it has no alternate-buffer ceiling, so
-      // for a full-screen TUI this is the difference between the whole
-      // conversation and the last screenful. The serialized snapshot is the
-      // fallback — it keeps colour, but only holds what xterm still had.
-      const transcript = await fetchTranscript()
-      const snap = transcript ? '' : loadScrollSnapshot()
-      if (transcript || snap) {
+      const snap = loadScrollSnapshot()
+      if (snap) {
         snapshotReplayed = true
-        term.write(transcript ? transcriptToTerm(transcript) : snap)
+        term.write(snap)
         // Reset any mouse tracking modes the previous session may have enabled.
         // Bracketed paste goes too, and only here: the snapshot just replayed
         // the OLD session's `?2004h`, but the process about to start is a new

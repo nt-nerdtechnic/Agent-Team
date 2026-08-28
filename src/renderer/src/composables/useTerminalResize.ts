@@ -157,7 +157,7 @@ export function createResizeController(
   // can't postpone the redraw indefinitely.
   function armResizeRedraw(): void {
     if (resizeRedrawTimer) clearTimeout(resizeRedrawTimer)
-    resizeRedrawTimer = setTimeout(async () => {
+    resizeRedrawTimer = setTimeout(() => {
       resizeRedrawTimer = null
       if (!active || !sessionId.value) return
       // Not fully settled yet (xterm still differs from the backend-acked size):
@@ -180,11 +180,11 @@ export function createResizeController(
       const quiet = altBuffer || Date.now() - lastRawActivityAt.value >= RESIZE_QUIET_MS
       if (!quiet && Date.now() < resizeRedrawDeadline) { armResizeRedraw(); return }
       lastRedrawCols = term.cols
-      // NOTE: nothing below clears the buffer. Wiping the scrollback drops the
-      // user's conversation history (and, on a rebuild/resume, the freshly
-      // reprinted transcript). Per user decision (2026-06-23): never clear
-      // history — repaint the current frame via the SIGWINCH redraw instead.
-
+      // NOTE: we deliberately do NOT term.clear() on a width shrink. Wiping the
+      // scrollback drops the user's conversation history (and, on a rebuild/
+      // resume, the freshly reprinted transcript). Per user decision
+      // (2026-06-23): never clear history — accept any reflow residue, repaint
+      // the current frame via the SIGWINCH redraw below instead.
       void send('terminal.redraw', {
         terminal_session_id: sessionId.value,
         cols: term.cols,
