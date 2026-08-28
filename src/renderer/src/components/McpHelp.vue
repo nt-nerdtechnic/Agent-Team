@@ -278,7 +278,8 @@ const comparison: CompareRow[] = [
             <tr>
               <td>設定 → MCP 加了 server，但 agent 用不到</td>
               <td>那是方向二，只給流程讀文件用。要讓 agent 自己能呼叫，得設定在那個 CLI 自己的
-                  MCP 設定裡。</td>
+                  MCP 設定裡。設定 → MCP 下半部的「各 CLI 的 MCP」會唯讀列出每家 CLI 自己
+                  設了哪些 server，可以直接對照確認。</td>
             </tr>
             <tr>
               <td>agent 說計畫載入失敗</td>
