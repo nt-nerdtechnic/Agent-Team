@@ -163,4 +163,71 @@ describe('ControlPane – lineage tree', () => {
     })
     expect(wrapper.findAll('.agent-item')).toHaveLength(1)
   })
+
+  it('reserves the caret slot when the rows come from a workspace heading', () => {
+    // With workspace headings on, the rows are read off `workspaces`, and
+    // `lineage` is left empty. Keying the reserved slot off `lineage` reserved
+    // nothing on exactly the list that draws the carets, so a childless pane
+    // still sat 18px left of the sibling that had spawned a child.
+    wrapper = mountWith({
+      lineage: [],
+      workspaces: [
+        {
+          path: '/ws',
+          label: 'ws',
+          displayPath: '~/ws',
+          isCurrent: true,
+          collapsed: false,
+          count: 3,
+          lineage: [],
+          groups: [
+            {
+              id: '',
+              name: '',
+              rows: [
+                { id: 'kid-2', depth: 0, hasChildren: false, collapsed: false },
+                { id: 'root', depth: 0, hasChildren: true, collapsed: false },
+                { id: 'kid-1', depth: 1, hasChildren: false, collapsed: false }
+              ]
+            }
+          ]
+        }
+      ]
+    })
+    const lines = wrapper.findAll('.agent-line')
+    expect(lines).toHaveLength(3)
+    // The childless pane at depth 0 lines up with its parent sibling.
+    expect(lines[0].find('.lineage-spacer').exists()).toBe(true)
+    expect(lines[1].find('.lineage-caret').exists()).toBe(true)
+    expect(lines[2].find('.lineage-spacer').exists()).toBe(true)
+  })
+
+  it('reserves nothing in a workspace whose rows have no children', () => {
+    wrapper = mountWith({
+      lineage: [],
+      workspaces: [
+        {
+          path: '/ws',
+          label: 'ws',
+          displayPath: '~/ws',
+          isCurrent: true,
+          collapsed: false,
+          count: 3,
+          lineage: [],
+          groups: [
+            {
+              id: '',
+              name: '',
+              rows: [
+                { id: 'root', depth: 0, hasChildren: false, collapsed: false },
+                { id: 'kid-1', depth: 0, hasChildren: false, collapsed: false },
+                { id: 'kid-2', depth: 0, hasChildren: false, collapsed: false }
+              ]
+            }
+          ]
+        }
+      ]
+    })
+    expect(wrapper.findAll('.lineage-spacer')).toHaveLength(0)
+  })
 })
