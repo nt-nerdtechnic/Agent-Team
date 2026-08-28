@@ -739,12 +739,6 @@ class TerminalService:
         session = self._require(session_id)
         if session.closed:
             return
-        # TEMP DIAGNOSTIC (2026-08-28): a pane reportedly stopped reflowing at
-        # all. Everything on the renderer path checks out by inspection, so this
-        # records what the PTY is actually told — if cols never moves here, the
-        # fault is upstream of the socket; if it does, the fault is in xterm or
-        # the CLI's repaint.
-        log.info("terminal.resize %s -> cols=%d rows=%d", session_id[:8], cols, rows)
         self._set_winsize(session.master_fd, rows, cols)
 
     def force_redraw(self, session_id: str, cols: int, rows: int) -> None:

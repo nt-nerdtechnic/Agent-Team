@@ -75,6 +75,15 @@ export function createResizeController(
     void sendResize(term.cols, term.rows)
   }
 
+  // The half of FitAddon.fit() that touches xterm: drop the renderer's cached
+  // dimensions so it re-measures, then resize. Split out from proposeDimensions()
+  // so applyFit can put the backend's ack between the two (see below).
+  function resizeTermTo(cols: number, rows: number): void {
+    if (term.cols === cols && term.rows === rows) return
+    try { (term as any)._core?._renderService?.clear() } catch { /* renderer not up yet */ }
+    term.resize(cols, rows)
+  }
+
   // Run `cb` on the next animation frame, but fall back to a timer if rAF
   // doesn't fire in time — rAF is paused for occluded/background windows and
   // during fullscreen transitions, which would otherwise strand a pending fit.
@@ -115,22 +124,50 @@ export function createResizeController(
         return
       }
       try {
-        // VSCode-aligned ordering: resize xterm to the container FIRST, then
-        // tell the PTY. The PTY resize raises SIGWINCH, so the CLI repaints its
-        // cursor line (the live footer) directly into an already-correctly-sized
-        // xterm — nothing reflows that fresh frame afterward. xterm does not
-        // reflow the cursor line itself (reflowCursorLine defaults to false), so
-        // the CLI owns that repaint; we just give it the right width first.
+        // Resize xterm only once the backend has ACKED the new size — the ack
+        // is an ordering barrier, not a receipt.
         //
-        // This replaces the old shrink-grace dance (push PTY narrow first, wait
-        // PTY_REPAINT_GRACE_MS, then fit xterm). That ordering left the CLI's
-        // narrow repaint sitting in a still-wide xterm, which the subsequent
-        // narrowing reflowed into the garbled-footer residue. The backend still
-        // drains output around its resize ack, so ordering is preserved server
-        // side; the brief client window where xterm is narrower than the PTY is
-        // the same tradeoff VSCode's integrated terminal accepts.
-        fit.fit()
-        sendResizeNow()
+        // Both naive orderings have shipped here, and both stranded residue
+        // from opposite directions:
+        //   PTY first  → the CLI's new-width repaint lands in a still-old-width
+        //                xterm (the old shrink-grace dance; garbled footer).
+        //   xterm first → a frame the CLI drew for the OLD width lands in an
+        //                already-resized xterm (what this replaces).
+        // Either way xterm soft-wraps the overhang, the wrapped remainder
+        // scrolls out of the viewport, and the CLI can never repaint over it:
+        // its redraw is ESC[H + ESC[2K per row (or ESC[2J), which address the
+        // viewport only. Fragments that reach the scrollback are permanent —
+        // the "one long line, one short line" divider. So the fix is not to
+        // pick the other naive order; it is to leave no window at all.
+        //
+        // terminals.drain_output() flushes every buffered old-width byte and
+        // AWAITS each emit before the ioctl, and terminal.output frames share
+        // Session._send_lock with this ack — so on the wire it is strictly
+        // old-width output < ack < new-width output. Resizing on the ack puts
+        // xterm on the same side of that boundary as the bytes it renders.
+        //
+        // Pinned by useTerminalResize.widthRace.test.ts, which replays recorded
+        // claude output through a real xterm buffer.
+        const dims = fit.proposeDimensions()
+        const cols = dims && Number.isFinite(dims.cols) ? dims.cols : term.cols
+        const rows = dims && Number.isFinite(dims.rows) ? dims.rows : term.rows
+        // No PTY yet (parked spawn, teardown): nothing is in flight, so there is
+        // no barrier to wait for — and xterm must still fit its container.
+        if (!sessionId.value) { resizeTermTo(cols, rows); return }
+        // Already the right size: still tell the backend, exactly as before, so
+        // a pane whose first fit is a no-op does not leave the PTY unsized.
+        if (cols === term.cols && rows === term.rows) { sendResizeNow(); return }
+        void sendResize(cols, rows).then((ok) => {
+          // A lost or failed ack deliberately leaves xterm at its old size.
+          // useBackend rejects in-flight requests when the socket goes down, so
+          // this resolves false rather than hanging, and it self-heals from two
+          // directions: the 2s reconciler compares proposeDimensions() against
+          // term and calls applyFit again, and reattachAfterReconnect fits on
+          // reconnect. The cost is that a pane stays visually unfitted while the
+          // backend is unreachable — which is also when nothing can arrive to
+          // reflow, so refitting blindly would buy nothing.
+          if (ok) resizeTermTo(cols, rows)
+        })
       } catch { /* ignore transient fit errors during teardown */ }
     }
     scheduleFrame(run)
@@ -170,12 +207,18 @@ export function createResizeController(
       // Width unchanged since the last clean repaint (rows-only / no-op): skip.
       if (term.cols === lastRedrawCols) return
       // Prefer a quiet gap, but don't wait past the deadline for a busy agent.
-      // Exception: an alt-buffer TUI (Claude Code, vim, …) streams footer/spinner
-      // bytes continuously so it never goes quiet, and xterm cannot reflow the
-      // alternate buffer — the reflow residue (garbled footer on drag-resize)
-      // stays visible until the CLI itself repaints. A SIGWINCH repaint is a full
-      // ESC[2J + absolute redraw (safe mid-output), so for alt-buffer panes we
-      // skip the quiet wait and fire at settle instead of stalling to the deadline.
+      // Exception: an alt-buffer TUI (vim, less, …) streams continuously so it
+      // never goes quiet, and xterm cannot reflow the alternate buffer — residue
+      // there stays until the CLI itself repaints. A SIGWINCH repaint is safe
+      // mid-output, so for alt-buffer panes we fire at settle rather than stall
+      // to the deadline.
+      //
+      // NOTE: Claude Code is NOT one of them, despite what this comment and
+      // agents/claude.ts's `fullScreenTui: true` used to claim. Measured against
+      // a real PTY (claude 2.1.250): ESC[?1049h, ESC[?1047h and ESC[?47h all
+      // occur zero times — it lives in the normal buffer and repaints with
+      // ESC[H + ESC[2K per row. The runtime check below is what actually
+      // decides, so this branch simply never applies to a claude pane.
       const altBuffer = term.buffer?.active?.type === 'alternate'
       const quiet = altBuffer || Date.now() - lastRawActivityAt.value >= RESIZE_QUIET_MS
       if (!quiet && Date.now() < resizeRedrawDeadline) { armResizeRedraw(); return }
