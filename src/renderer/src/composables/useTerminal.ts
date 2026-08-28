@@ -1771,14 +1771,24 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     })
 
     const card = document.createElement('div')
+    // This menu floats over the terminal, and the terminal is black in every
+    // app theme — so it follows the terminal, not the app chrome. Dressing it
+    // in the chrome's popover surface put a white card on a black screen when
+    // the app theme was light, which is the mismatch this fixes.
+    //
+    // The colours are the --gray-*/--blue-* primitives, which base.css keeps
+    // constant across themes; the semantic roles (--bg-overlay, --text-primary)
+    // deliberately do not, so they are the wrong vocabulary here. This is the
+    // same palette showTerminalFilePicker uses for the same reason — it spells
+    // the hex literals out, these name them.
     card.className = 'term-mention-card'
     card.tabIndex = 0
     Object.assign(card.style, {
       position: 'fixed', left: `${cellLeft}px`, top: `${cellBottom}px`,
       width: '248px', maxHeight: '260px', overflowY: 'auto',
-      background: 'var(--bg-overlay)', border: '1px solid var(--border-default)',
-      borderRadius: '6px', boxShadow: 'var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.6))',
-      outline: 'none', padding: '4px 0', boxSizing: 'border-box',
+      background: 'var(--gray-11)', border: '1px solid var(--gray-8)',
+      borderRadius: 'var(--radius-md)', boxShadow: '0 8px 28px rgba(0, 0, 0, 0.6)',
+      outline: 'none', padding: '4px', boxSizing: 'border-box',
     })
 
     // The query line only appears once there is something to report, so an
@@ -1786,12 +1796,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     const queryEl = document.createElement('div')
     queryEl.className = 'term-mention-query'
     Object.assign(queryEl.style, {
-      display: 'none', gap: '8px', alignItems: 'center', padding: '4px 12px 6px',
-      margin: '0 0 4px', borderBottom: '1px solid var(--border-default)',
-      color: 'var(--text-muted)', fontSize: '12px',
+      display: 'none', gap: '8px', alignItems: 'center', padding: '4px 8px 6px',
+      margin: '0 0 4px', borderBottom: '1px solid var(--gray-9)',
+      color: 'var(--gray-4)', fontSize: '12px',
     })
     const queryTextEl = document.createElement('span')
-    Object.assign(queryTextEl.style, { flex: '1', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
+    Object.assign(queryTextEl.style, { flex: '1', color: 'var(--gray-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
     const queryCountEl = document.createElement('span')
     queryEl.append(queryTextEl, queryCountEl)
 
@@ -1808,7 +1818,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     function renderSelection(): void {
       rows.forEach((row, i) => {
         const on = i === selectedIdx
-        row.style.background = on ? 'var(--bg-selected)' : ''
+        row.style.background = on ? 'var(--gray-9)' : ''
         row.classList.toggle('is-selected', on)
       })
       rows[selectedIdx]?.scrollIntoView({ block: 'nearest' })
@@ -1823,7 +1833,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       const hit = document.createElement('span')
       hit.className = 'term-mention-hit'
       hit.textContent = address.slice(at, at + query.length)
-      Object.assign(hit.style, { color: 'var(--accent-fg)', fontWeight: '700' })
+      Object.assign(hit.style, { color: 'var(--blue-2)', fontWeight: '700' })
       el.append(
         document.createTextNode(address.slice(0, at)),
         hit,
@@ -1846,7 +1856,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           hdr.className = 'term-mention-group'
           hdr.textContent = cand.group
           Object.assign(hdr.style, {
-            padding: '5px 12px 2px', color: 'var(--text-muted)', fontSize: '10.5px',
+            padding: '6px 8px 3px', color: 'var(--gray-4)', fontSize: '10.5px',
             letterSpacing: '0.06em', textTransform: 'uppercase',
           })
           listEl.appendChild(hdr)
@@ -1856,8 +1866,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         row.dataset.address = cand.address
         Object.assign(row.style, {
           display: 'flex', alignItems: 'center', gap: '8px',
-          padding: '5px 12px', cursor: 'pointer', color: 'var(--text-primary)',
+          padding: '5px 8px', cursor: 'pointer', color: 'var(--gray-3)',
           fontSize: '13px', whiteSpace: 'nowrap',
+          // Inset and rounded, so the selection reads as one item rather than a
+          // band running edge to edge across the card.
+          borderRadius: 'var(--radius-xs)',
         })
 
         const isChecked = checked.includes(cand.address)
@@ -1866,8 +1879,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         row.classList.toggle('is-checked', isChecked)
         Object.assign(box.style, {
           flex: 'none', width: '11px', height: '11px', borderRadius: '3px',
-          border: `1px solid ${isChecked ? 'var(--accent-fg)' : 'var(--text-disabled)'}`,
-          background: isChecked ? 'var(--accent-fg)' : 'transparent',
+          border: `1px solid ${isChecked ? 'var(--blue-2)' : 'var(--gray-4)'}`,
+          background: isChecked ? 'var(--blue-2)' : 'transparent',
         })
 
         const dot = document.createElement('span')
@@ -1877,7 +1890,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         Object.assign(dot.style, {
           flex: 'none', width: '7px', height: '7px', borderRadius: '50%',
           background: fill || 'transparent',
-          border: fill ? 'none' : '1px solid var(--text-disabled)',
+          border: fill ? 'none' : '1px solid var(--gray-4)',
         })
 
         const name = document.createElement('span')
@@ -1890,7 +1903,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           const tag = document.createElement('span')
           tag.className = 'term-mention-status'
           tag.textContent = cand.statusLabel
-          Object.assign(tag.style, { flex: 'none', color: 'var(--text-muted)', fontSize: '11px' })
+          Object.assign(tag.style, { flex: 'none', color: 'var(--gray-4)', fontSize: '11px' })
           row.appendChild(tag)
         }
 
