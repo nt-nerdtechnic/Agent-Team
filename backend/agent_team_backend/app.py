@@ -810,15 +810,13 @@ async def _maybe_announce_session(usage: TokenUsage) -> None:
     bound = await asyncio.to_thread(attribution.maybe_announce_session, usage)
     if not bound:
         return
-    # Second backfill hook, for the vendors that cannot pin a session id at
+    # Second tracking hook, for the vendors that cannot pin a session id at
     # spawn (they bind here, at first match) and for a pane that switches to
     # another session mid-life. terminal.create's hook covers the pinned-id
-    # case; seed_live's one-shot guard makes the overlap harmless.
-    ws_for_seed = bound.workspace_path or usage.cwd
-    schedule_live_token_backfill(
-        workspace_path=ws_for_seed,
+    # case; tracking the same session twice is a no-op.
+    track_live_session(
+        workspace_path=bound.workspace_path or usage.cwd,
         pane_id=bound.pane_id,
-        bucket_pane_key=attribution.slot_key_for(bound.pane_id) or bound.pane_id,
         vendor=usage.vendor,
         # The live bucket is keyed by the id the token sink passes through
         # (usage.session_id), which is not always the resume id announced here.
@@ -907,7 +905,7 @@ def forget_pane_activity(pane_id: str) -> None:
     _pane_activity.pop(pane_id, None)
     hook_drain.forget_pane(pane_id)
     push_delivery.forget_pane(pane_id)
-    tokens_store.forget_pane(pane_id)
+    forget_pane_live_sessions(pane_id)
 
 
 async def _on_log_activity(event: ActivityEvent) -> None:
@@ -991,90 +989,224 @@ def _schedule_tokens_broadcast(workspace_path: str) -> None:
     asyncio.create_task(_fire())
 
 
-# ── live per-session token backfill ───────────────────────────────────────
+# ── live per-session token tally (read from the session log) ──────────────
 #
-# The live "THIS SESSION" tally only ever sees events the watcher ingests
-# during this process's lifetime, so after a backend restart a long-running
-# CLI session reads 0 while the CLI's own footer shows its full total. When a
-# pane binds to a known session id we re-derive that total straight from the
-# vendor log and fold it into the live bucket (tokens_store.seed_live — never
-# through record(), which would double-count into cumulative/global).
+# "THIS SESSION" used to be accumulated from the token events the watcher
+# ingested during this process's lifetime, which made it wrong in three ways:
+# a missed or deduped event was lost forever, a backend restart zeroed it, and
+# a one-shot backfill patch had to argue with the accumulator. It is now
+# derived instead: the vendor's session log IS the number. We keep, per
+# tracked session, the last scan result plus the file identity it was taken
+# from and the reader cursor to resume from, and refresh it when the file
+# changes. Nothing survives a restart — nothing needs to, because the first
+# scan re-derives the whole total straight from the file.
 #
 # Dedicated single-worker pool, NOT the shared default executor: a session
 # file can be tens of MB and enumerating a vendor's session tree stats
 # thousands of paths. Concurrent heavy work on the shared pool has starved
 # backend startup three separate times (list_recent, onboarding, plugin
 # activation) — max_workers=1 also serializes bursts of pane spawns.
-_live_backfill_pool = ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="tokens-backfill"
+_live_scan_pool = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="tokens-live-scan"
 )
 
+# (workspace_path, session_key) -> {vendor, session_id, session_file,
+#   identity, size, mtime, cursor, totals, panes}. `panes` is the set of pane
+# ids currently bound to the session; the entry (and its bucket) goes when the
+# last one closes. Keyed on the SESSION, not the pane: a restored or respawned
+# pane carries a new ephemeral id for the same session, and keying on the pane
+# split one session into several buckets.
+_live_scans: dict[tuple[str, str], dict[str, Any]] = {}
+# Keys with a scan in flight — a burst of token events for one session must
+# not queue one parse per event behind the single worker.
+_live_scan_inflight: set[tuple[str, str]] = set()
 
-def _scan_session_total(
-    vendor: str, workspace_path: str, session_id: str, session_file: str
-) -> dict[str, int] | None:
-    """Locate this session's log and sum it. Runs on the backfill pool."""
-    reader = next((r for r in _readers if r.vendor == vendor), None)
+
+def _empty_totals() -> dict[str, int]:
+    return {"input": 0, "output": 0, "calls": 0}
+
+
+def _resolve_session_log(
+    reader, workspace_path: str, session_id: str, session_file: str
+) -> Path | None:
+    """The session's log file, or None when it does not exist yet."""
+    path = Path(session_file) if session_file else None
+    if path is not None and path.exists():
+        return path
+    if not session_id:
+        return None
+    # No usable hint from the caller (Claude pins its id at spawn, before any
+    # file exists): find the file whose id matches, scoped to this workspace's
+    # folder when the vendor's layout allows it.
+    scoped = reader.session_files_for_workspace(workspace_path)
+    candidates = scoped if scoped is not None else reader.session_files()
+    path = next(
+        (p for p in candidates if reader.session_id_from_path(p) == session_id),
+        None,
+    )
+    return path if path is not None and path.exists() else None
+
+
+def _scan_live_session(
+    workspace_path: str, state: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Re-derive one session's total from its log. Runs on the scan pool.
+
+    Reads only the bytes/rows appended since the last scan when the file is
+    the same one that merely grew; falls back to reading the whole source when
+    there is no cursor yet, or when the file shrank or was replaced (rotation).
+    Returns the new scan state, or None when there is nothing to read.
+    """
+    reader = next((r for r in _readers if r.vendor == state["vendor"]), None)
     if reader is None:
         return None
-    path = Path(session_file) if session_file else None
-    if path is None or not path.exists():
-        # No hint from the caller (Claude pins its id at spawn, before any
-        # file exists): find the file whose id matches, scoped to this
-        # workspace's folder when the vendor's layout allows it.
-        scoped = reader.session_files_for_workspace(workspace_path)
-        candidates = scoped if scoped is not None else reader.session_files()
-        path = next(
-            (p for p in candidates if reader.session_id_from_path(p) == session_id),
-            None,
+    session_id = state["session_id"]
+    path = _resolve_session_log(
+        reader, workspace_path, session_id, state["session_file"]
+    )
+    if path is None:
+        return None  # brand-new session — its log does not exist yet
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    identity = f"{st.st_dev}:{st.st_ino}"
+    # Size is captured BEFORE the parse on purpose: a file that grows while we
+    # read it then looks changed on the next cheap check, so the next scan
+    # picks the remainder up instead of skipping it.
+    grew_in_place = bool(
+        state["cursor"]
+        and state["identity"] == identity
+        and st.st_size >= state["size"]
+    )
+    if grew_in_place:
+        delta, cursor = reader.usage_since_for_session(
+            path, session_id, state["cursor"]
         )
-    if path is None or not path.exists():
-        return None  # brand-new session — nothing to backfill yet
-    return reader.total_usage_for_session(path, session_id)
+        totals = {
+            field: state["totals"][field] + delta[field]
+            for field in ("input", "output", "calls")
+        }
+    else:
+        totals, cursor = reader.usage_since_for_session(path, session_id, {})
+    return {
+        **state,
+        "session_file": str(path),
+        "identity": identity,
+        "size": st.st_size,
+        "mtime": st.st_mtime,
+        "cursor": cursor,
+        "totals": totals,
+    }
 
 
-def schedule_live_token_backfill(
+def _live_log_changed(state: dict[str, Any]) -> bool:
+    """Cheap on-loop test: is a rescan worth a thread? One os.stat, no parse."""
+    if not state["session_file"] or not state["cursor"]:
+        return True  # never scanned, or the log still has to be located
+    try:
+        st = os.stat(state["session_file"])
+    except OSError:
+        return True  # let the scan decide (rotated, moved, or gone)
+    return (
+        f"{st.st_dev}:{st.st_ino}" != state["identity"]
+        or st.st_size != state["size"]
+        or st.st_mtime != state["mtime"]
+    )
+
+
+def _schedule_live_scan(key: tuple[str, str], *, only_if_changed: bool = False) -> None:
+    """Fire-and-forget rescan. Never awaited: `terminal.create` must ack
+    without waiting for a multi-MB parse, and the panel just updates when the
+    broadcast lands."""
+    state = _live_scans.get(key)
+    if state is None or key in _live_scan_inflight:
+        return
+    if only_if_changed and not _live_log_changed(state):
+        return
+    _live_scan_inflight.add(key)
+    workspace_path, session_key = key
+
+    async def _run() -> None:
+        try:
+            scanned = await asyncio.get_running_loop().run_in_executor(
+                _live_scan_pool, _scan_live_session, workspace_path, dict(state)
+            )
+            if scanned is None:
+                return
+            current = _live_scans.get(key)
+            if current is None:
+                return  # the last pane closed while we were reading
+            current.update(scanned)
+            if tokens_store.set_live_total(
+                workspace_path, session_key, scanned["totals"]
+            ):
+                _schedule_tokens_broadcast(workspace_path)
+        except Exception as err:  # noqa: BLE001 — cosmetic tally, never fatal
+            log.warning("live token scan failed for session=%s: %s", session_key, err)
+        finally:
+            _live_scan_inflight.discard(key)
+
+    asyncio.create_task(_run())
+
+
+def track_live_session(
     *,
     workspace_path: str,
     pane_id: str,
-    bucket_pane_key: str,
     vendor: str,
     session_id: str,
     session_file: str = "",
 ) -> None:
-    """Fire-and-forget: bring a bound pane's live tally up to the session's
-    real total. Never awaited by the caller — `terminal.create` must ack
-    without waiting for a multi-MB parse, and the pane works fine meanwhile;
-    the panel just updates when the broadcast lands."""
-    if not (workspace_path and bucket_pane_key and session_id):
-        return  # no session pinned yet — nothing to backfill (total would be 0)
-    # Cheap pre-check on the loop: skips already-seeded panes without paying
-    # for a thread, and captures the baseline the scan is diffed against.
-    already = tokens_store.live_seed_state(workspace_path, bucket_pane_key, session_id)
-    if already is None:
+    """Track a pane's session log as the source of its live tally, and refresh
+    it now. Safe to call repeatedly — every bind and every ingested token event
+    for the session goes through here."""
+    session_key = tokens_store.live_session_key(session_id, session_file)
+    if not (workspace_path and pane_id and vendor and session_key):
         return
+    key = (workspace_path, session_key)
+    state = _live_scans.get(key)
+    if state is None:
+        state = _live_scans[key] = {
+            "vendor": vendor,
+            "session_id": session_id,
+            "session_file": session_file,
+            "identity": "",
+            "size": -1,
+            "mtime": -1.0,
+            "cursor": {},
+            "totals": _empty_totals(),
+            "panes": set(),
+        }
+    elif session_file and not state["session_file"]:
+        state["session_file"] = session_file
+    state["panes"].add(pane_id)
+    _schedule_live_scan(key)
 
-    async def _run() -> None:
-        try:
-            total = await asyncio.get_running_loop().run_in_executor(
-                _live_backfill_pool,
-                _scan_session_total,
-                vendor, workspace_path, session_id, session_file,
-            )
-            if not total or not (total["input"] or total["output"]):
-                return
-            if tokens_store.seed_live(
-                workspace_path, bucket_pane_key, session_id, total, already
-            ):
-                _schedule_tokens_broadcast(workspace_path)
-                log.info(
-                    "live token backfill pane=%s vendor=%s session=%s in=%d out=%d",
-                    pane_id, vendor, session_id, total["input"], total["output"],
-                )
-        except Exception as err:  # noqa: BLE001 — cosmetic tally, never fatal
-            log.warning("live token backfill failed for pane=%s: %s", pane_id, err)
 
-    asyncio.create_task(_run())
+def refresh_live_scans(workspace_path: str) -> None:
+    """os.stat sweep over a workspace's tracked sessions, rescanning only the
+    logs that changed. Called from `tokens.snapshot` so the panel is
+    self-correcting even when a watcher event never arrived."""
+    if not workspace_path:
+        return
+    for key in [k for k in _live_scans if k[0] == workspace_path]:
+        _schedule_live_scan(key, only_if_changed=True)
+
+
+def forget_pane_live_sessions(pane_id: str) -> None:
+    """Release a closed pane's claim on its sessions. The tally survives while
+    another pane still holds the session — a restored pane resumes the same
+    log under a new id, and dropping the numbers per pane is what made one
+    session read as several."""
+    if not pane_id:
+        return
+    for key in list(_live_scans):
+        state = _live_scans[key]
+        state["panes"].discard(pane_id)
+        if not state["panes"]:
+            _live_scans.pop(key, None)
+            tokens_store.drop_live_session(*key)
 
 
 # Historic-log backfill can enqueue hundreds of files; coalesce the per-file
@@ -1151,6 +1283,18 @@ async def _on_log_token_usage(usage: TokenUsage) -> TokenSinkResult:
             replay_workspace=usage.replay_workspace,
             legacy_dedup_key=usage.dedup_key,
         )
+        # The watcher just told us this session's log grew — the cheapest and
+        # most timely rescan trigger there is, since it already carries the
+        # vendor, the session id and the attributed workspace/pane. Skipped for
+        # a replay pass, which walks historic files nobody has a pane on.
+        if not usage.replay_workspace and attributed.pane_id:
+            track_live_session(
+                workspace_path=workspace_path,
+                pane_id=attributed.pane_id,
+                vendor=usage.vendor,
+                session_id=usage.session_id,
+                session_file=usage.file_path,
+            )
         _schedule_tokens_broadcast(workspace_path)
         return TokenSinkResult(handled, workspace_path)
     except Exception as err:  # noqa: BLE001
