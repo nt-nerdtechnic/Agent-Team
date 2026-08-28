@@ -50,6 +50,9 @@ export function createResizeController(
   // dropped resize message is retried instead of desyncing forever.
   let _ackedCols = 0
   let _ackedRows = 0
+  // Bumped by every applyFit that starts an ack round-trip, so a resize whose
+  // ack comes back late can tell that it has been superseded. See applyFit.
+  let resizeGeneration = 0
   let resizeRedrawTimer: ReturnType<typeof setTimeout> | null = null
   let resizeRedrawDeadline = 0
   let lastRedrawCols = 0
@@ -171,7 +174,23 @@ export function createResizeController(
         // Already the right size: still tell the backend, exactly as before, so
         // a pane whose first fit is a no-op does not leave the PTY unsized.
         if (cols === term.cols && rows === term.rows) { sendResizeNow(); return }
+        // Dragging is not a sequence of discrete resizes. The container changes
+        // width dozens of times, applyFit re-enters long before the previous ack
+        // returns, and several round-trips are in flight at once — each closing
+        // over the size IT asked for. Without this guard a straggling ack puts
+        // xterm back to a width the user has already dragged past, and it stays
+        // there until the 2s reconciler notices: the PTY is at the new width, the
+        // CLI lays its frame out for the new width, and that frame renders into
+        // a terminal set to the old one. That is how two dividers of different
+        // lengths (both full, neither wrapped) end up on screen at once, and why
+        // a word like "tokens" gets its tail pushed onto its own line. Only
+        // reachable from a real drag, which is why discrete-resize replays never
+        // showed it — confirmed by CDP drag A/B against v0.
+        const generation = ++resizeGeneration
         void sendResize(cols, rows).then((ok) => {
+          // Superseded by a newer resize while this one was in flight: that one
+          // owns xterm's size now, and the backend already has its width too.
+          if (generation !== resizeGeneration) return
           // A lost or failed ack deliberately leaves xterm at its old size.
           // useBackend rejects in-flight requests when the socket goes down, so
           // this resolves false rather than hanging, and it self-heals from two

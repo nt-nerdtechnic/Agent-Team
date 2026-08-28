@@ -253,4 +253,36 @@ describe('width resize ordering (real xterm, recorded claude output)', () => {
 
     ctrl.dispose()
   })
+  it('ignores a stale ack when resizes overlap', async () => {
+    // Dragging produces overlapping resizes: applyFit runs again long before the
+    // previous ack returns. Each in-flight request carries the size it asked
+    // for, so an ack that arrives late must not be allowed to put xterm back to
+    // a width the user has already dragged past.
+    const pending: Array<{ cols: number; resolve: (v: { ok: boolean }) => void }> = []
+    const send = vi.fn((_op: string, payload: any) =>
+      new Promise<{ ok: boolean }>((resolve) => pending.push({ cols: payload.cols, resolve })),
+    )
+    const ctrl = makeController(send as never)
+
+    await write(term, BOOT_120)
+
+    measuredCols = 104
+    ctrl.applyFit()
+    await frame()
+    measuredCols = 88
+    ctrl.applyFit()
+    await frame()
+
+    expect(pending.map((p) => p.cols)).toEqual([104, 88])
+
+    // The newer ack lands first, then the older one straggles in.
+    pending[1].resolve({ ok: true })
+    await macrotask()
+    pending[0].resolve({ ok: true })
+    await macrotask()
+
+    expect(term.cols).toBe(88)
+
+    ctrl.dispose()
+  })
 })
