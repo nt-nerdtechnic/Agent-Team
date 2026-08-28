@@ -381,22 +381,37 @@ async def test_a_pane_callers_request_goes_to_its_own_window(
 
 
 @pytest.mark.asyncio
-async def test_addressing_does_not_depend_on_the_workspace_path_matching(
+async def test_a_pane_naming_another_workspace_still_broadcasts(
     addressed: list[tuple[Any, dict[str, Any]]], broadcasts: list[dict[str, Any]]
 ) -> None:
-    """The path is carried through for the action to read, but it no longer
-    decides who answers — that was the whole failure."""
+    """Asking about someone else's window is a deliberate cross-window call —
+    it must reach that window, not be quietly redirected home."""
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=_Window())
+
+    task = asyncio.create_task(_answer("cross"))
+    result = await plan_mcp.ui_invoke("/ws/somewhere-else", "editor.save", _pane_ctx(), None)
+    await task
+
+    assert result["ok"] is True
+    assert addressed == []
+    assert len(broadcasts) == 1
+    assert broadcasts[0]["payload"]["addressed"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_trailing_slash_does_not_cost_a_pane_its_own_window(
+    addressed: list[tuple[Any, dict[str, Any]]], broadcasts: list[dict[str, Any]]
+) -> None:
     window = _Window()
     agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=window)
 
-    task = asyncio.create_task(_answer("mismatch"))
-    result = await plan_mcp.ui_invoke("/ws/somewhere-else", "editor.save", _pane_ctx(), None)
+    task = asyncio.create_task(_answer("slash"))
+    result = await plan_mcp.ui_invoke("/ws/alpha/", "editor.save", _pane_ctx(), None)
     await task
 
     assert result["ok"] is True
     assert broadcasts == []
     assert addressed[0][0] is window
-    assert addressed[0][1]["payload"]["workspace_path"] == "/ws/somewhere-else"
 
 
 @pytest.mark.asyncio
@@ -440,7 +455,9 @@ async def test_a_global_action_is_never_addressed_to_the_callers_window(
 ) -> None:
     """ui.workspace.open has no owner by definition — the workspace may have no
     window yet — so a pane caller must not pin it to its own."""
-    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=_Window())
+    # Registered under the very workspace being opened, so only the global rule
+    # can keep this off the caller's own window.
+    agent_messaging.register("pa", "worker", "/ws/beta", agent_key="claude", owner=_Window())
 
     task = asyncio.create_task(_answer("global"))
     result = await plan_mcp.ui_invoke("/ws/beta", "ui.workspace.open", _pane_ctx(), {"path": "/ws/beta"})

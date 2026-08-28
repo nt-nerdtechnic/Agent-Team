@@ -1913,10 +1913,10 @@ def resolve_ui_invoke(request_id: str, result: dict[str, Any]) -> bool:
     return _ui_invoke_pending.resolve(request_id, result)
 
 
-def _caller_window(caller: "_Caller | None") -> Any | None:
+def _caller_window(caller: "_Caller | None", workspace_path: str) -> Any | None:
     """The WS connection of the window that mirrors the calling pane.
 
-    A UI request from a pane can only sensibly mean "in my own window", and
+    A pane asking about its own workspace can only mean "in my own window", and
     that window is known: agent_messaging records which connection mirrors each
     pane. Addressing it directly is what lets a pane drive its own UI while its
     window sits in the background, or after that window switched to another
@@ -1924,6 +1924,10 @@ def _caller_window(caller: "_Caller | None") -> Any | None:
     window self-selects by comparing workspace_path against the workspace it
     *currently* has open, and a window that no longer matches simply says
     nothing (indistinguishable from a hang, at the cost of a full timeout).
+
+    A workspace_path naming a *different* project is a deliberate call on
+    someone else's window ("what does that window have registered?"), so it
+    keeps the broadcast path rather than being quietly redirected home.
 
     Returns None for a host or external caller (no pane, so no window to
     address) and for a pane whose window is gone — both fall back to broadcast.
@@ -1934,6 +1938,11 @@ def _caller_window(caller: "_Caller | None") -> Any | None:
 
     # caller.pane_id is already the live id: _resolve_caller followed any alias
     # a re-attach left behind before handing it over.
+    pane = agent_messaging.get(caller.pane_id)
+    if pane is None:
+        return None
+    if workspace_path and _norm_workspace(workspace_path) != _norm_workspace(pane.workspace_path):
+        return None
     session = agent_messaging.owner(caller.pane_id)
     return None if session is None or getattr(session, "dead", False) else session
 
@@ -2021,7 +2030,7 @@ async def _ui_request(
     # goes to any one window; a pane caller's own window is known and is asked
     # directly ("addressed", so it answers without checking workspace_path);
     # anything else is broadcast for the windows to filter, as before.
-    owner = None if is_global else _caller_window(caller)
+    owner = None if is_global else _caller_window(caller, workspace_path)
     fut = _ui_invoke_pending.register(request_id)
     payload: dict[str, Any] = {
         "request_id": request_id,
