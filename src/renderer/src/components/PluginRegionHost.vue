@@ -11,7 +11,7 @@
 // a one-time token, and main overrides the guest's webPreferences on attach.
 // Measured, not assumed: `display: none` keeps a guest's webContents alive and
 // running, which is what lets a hidden Git tab keep its changes badge current.
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 export interface PluginRegionContribution {
   pluginId: string
@@ -36,6 +36,11 @@ const props = defineProps<{
 const src = ref<string | null>(null)
 const error = ref<string | null>(null)
 let generation = 0
+let themeObserver: MutationObserver | null = null
+
+function currentTheme(): string {
+  return document.documentElement.getAttribute('data-theme') ?? ''
+}
 
 async function prepare(): Promise<void> {
   const mine = ++generation
@@ -46,6 +51,12 @@ async function prepare(): Promise<void> {
     const result = await window.agentTeam?.plugins?.prepareContribution({
       contributionKey: props.contribution.contributionKey,
       workspace_path: props.workspacePath,
+      // A guest is its own document, so it cannot inherit our CSS variables and
+      // has to be told the theme. Read it off the element we are actually
+      // rendering with rather than letting main resolve it from the settings
+      // mirror, which can lag this window. Theme is cosmetic metadata, not an
+      // authority the Host derives anything from.
+      theme: currentTheme(),
     })
     // A workspace change or unmount may have overtaken this request.
     if (mine !== generation) return
@@ -54,11 +65,31 @@ async function prepare(): Promise<void> {
       return
     }
     src.value = result.url
+    // The entry query is only a first-paint hint: this window adopts its stored
+    // theme during boot, and adopting is not a change, so nothing would ever
+    // correct a guest that mounted mid-adoption. Re-assert once the guest has
+    // a document of its own.
+    pushTheme()
   } catch (cause) {
     if (mine !== generation) return
     error.value = cause instanceof Error ? cause.message : String(cause)
   }
 }
+
+function pushTheme(): void {
+  const theme = currentTheme()
+  if (theme) window.agentTeam?.plugins?.hostThemeChanged?.(theme)
+}
+
+onMounted(() => {
+  // Follow the theme instead of sampling it: the guest is its own document and
+  // cannot inherit our CSS variables, so every switch has to be forwarded.
+  themeObserver = new MutationObserver(() => pushTheme())
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  })
+})
 
 watch(
   () => [props.workspacePath, props.contribution.contributionKey] as const,
@@ -67,6 +98,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  themeObserver?.disconnect()
+  themeObserver = null
   // Removing the element destroys the guest; this only clears the Host-side
   // registry entry so the next mount starts clean.
   generation += 1

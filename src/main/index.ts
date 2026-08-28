@@ -1830,12 +1830,17 @@ function catalogContributionQuery(
   contributionKey: string,
   workspacePath: string,
   extraParams: Record<string, string> = {},
+  // The requesting window's rendered theme, when it has one. It beats
+  // currentUiTheme() because the settings mirror can lag the window that is
+  // actually painting, which left an in-window contribution booting on the
+  // wrong theme until the next theme change.
+  renderedTheme = '',
 ): string {
   const isGit = contributionKey.startsWith('navide.git.')
   return composePluginContributionQuery({
     contributionKey,
     workspacePath,
-    theme: currentUiTheme(),
+    theme: renderedTheme || currentUiTheme(),
     ...(isGit && backend ? { httpUrl: `http://${backend.host}:${backend.port}` } : {}),
     ...(isGit ? { gitReadOnly: currentGitReadOnlyQuery() } : {}),
     extraParams,
@@ -1934,6 +1939,17 @@ function trustedPluginRegionHost(event: IpcMainInvokeEvent): BrowserWindow | nul
 /** Generic Manifest view-region lifecycle. The renderer supplies only the
  * stable contribution key and layout geometry; FrontendPluginManager keeps
  * the opaque instance handle in main. */
+// The window that is painting is the only reliable source for its own theme:
+// the settings mirror can lag it, and adopting a stored theme at boot is not a
+// change, so it produces no backend broadcast. Let the host re-assert it.
+ipcMain.on('plugins:hostThemeChanged', (event, theme: unknown) => {
+  if (!trustedPluginRegionHost(event)) return
+  if (typeof theme !== 'string' || !theme) return
+  frontendPluginManager.dispatchHostSettingsChanged({
+    settings: { 'agent-team:theme': JSON.stringify(theme) },
+  })
+})
+
 ipcMain.handle('plugins:prepareContribution', async (event, args: Record<string, unknown>) => {
   const hostWindow = trustedPluginRegionHost(event)
   const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
@@ -1947,9 +1963,10 @@ ipcMain.handle('plugins:prepareContribution', async (event, args: Record<string,
     : null
   if (!hostWindow || !contributionKey || !workspacePath) return { ok: false }
   await prepareCatalogContribution(contributionKey)
+  const renderedTheme = typeof args?.theme === 'string' ? args.theme : ''
   return frontendPluginManager.prepareGuestContribution(hostWindow, contributionKey, {
     workspacePath,
-    query: catalogContributionQuery(contributionKey, workspacePath),
+    query: catalogContributionQuery(contributionKey, workspacePath, {}, renderedTheme),
   })
 })
 

@@ -320,9 +320,11 @@ declare global {
           location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
           manifestOrder: number
         }>>
+        hostThemeChanged: (theme: string) => void
         prepareContribution: (args: {
           contributionKey: string
           workspace_path: string
+          theme?: string
         }) => Promise<{ ok: boolean; url?: string; error?: string }>
         openContribution: (args: {
           contributionKey: string

@@ -21,10 +21,17 @@ function stubPlugins(prepare: ReturnType<typeof vi.fn>) {
   const closeContribution = vi.fn(async () => ({ ok: true }))
   const openContribution = vi.fn(async () => ({ ok: true }))
   const updateContribution = vi.fn(async () => ({ ok: true }))
+  const hostThemeChanged = vi.fn()
   window.agentTeam = {
-    plugins: { prepareContribution: prepare, closeContribution, openContribution, updateContribution },
+    plugins: {
+      prepareContribution: prepare,
+      closeContribution,
+      openContribution,
+      updateContribution,
+      hostThemeChanged,
+    },
   } as unknown as typeof window.agentTeam
-  return { closeContribution, openContribution, updateContribution }
+  return { closeContribution, openContribution, updateContribution, hostThemeChanged }
 }
 
 describe('PluginRegionHost', () => {
@@ -32,6 +39,7 @@ describe('PluginRegionHost', () => {
 
   beforeEach(() => {
     originalAgentTeam = window.agentTeam
+    document.documentElement.setAttribute('data-theme', 'dark-github')
   })
 
   afterEach(() => {
@@ -50,6 +58,9 @@ describe('PluginRegionHost', () => {
     expect(prepare).toHaveBeenCalledWith({
       contributionKey: 'acme.files.left',
       workspace_path: '/ws',
+      // A guest is its own document: it cannot inherit our CSS variables, so the
+      // theme we are actually rendering with travels with the request.
+      theme: 'dark-github',
     })
     // The renderer receives a URL with an opaque token — never an instance id.
     const view = wrapper.find('webview')
@@ -109,6 +120,7 @@ describe('PluginRegionHost', () => {
     expect(prepare).toHaveBeenLastCalledWith({
       contributionKey: 'acme.files.left',
       workspace_path: '/other',
+      theme: 'dark-github',
     })
     expect(wrapper.find('webview').attributes('src')).toBe(URL_B)
     wrapper.unmount()
@@ -160,5 +172,31 @@ describe('PluginRegionHost', () => {
     await flushPromises()
 
     expect(closeContribution).toHaveBeenCalledWith({ contributionKey: 'acme.files.left' })
+  })
+
+  it('re-asserts the theme once the guest exists, then follows every switch', async () => {
+    const prepare = vi.fn(async () => ({ ok: true, url: URL_A }))
+    const { hostThemeChanged } = stubPlugins(prepare)
+    const wrapper = mount(PluginRegionHost, {
+      props: { contribution, workspacePath: '/ws', visible: true },
+    })
+    await flushPromises()
+
+    // The entry query is only a first-paint hint; this window adopts its stored
+    // theme during boot and adopting is not a change, so a guest that mounted
+    // mid-adoption would otherwise keep the wrong theme forever.
+    expect(hostThemeChanged).toHaveBeenCalledWith('dark-github')
+
+    hostThemeChanged.mockClear()
+    document.documentElement.setAttribute('data-theme', 'light')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(hostThemeChanged).toHaveBeenCalledWith('light')
+
+    wrapper.unmount()
+    hostThemeChanged.mockClear()
+    document.documentElement.setAttribute('data-theme', 'dark-github')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // The observer is disconnected with the component.
+    expect(hostThemeChanged).not.toHaveBeenCalled()
   })
 })
