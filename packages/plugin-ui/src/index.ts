@@ -19,7 +19,10 @@ export function usePluginContext(): PluginContext {
 
 export interface AiCliSessionController {
   readonly sessionId: string | null
-  start(profileId: string, cols: number, rows: number): Promise<string>
+  readonly profileId: string | null
+  listProfiles(): Promise<AiCliProfile[]>
+  resume(cols: number, rows: number): Promise<AiCliResumeResult | null>
+  start(profileId: string, cols: number, rows: number, options?: { yolo?: boolean }): Promise<string>
   send(data: string): Promise<void>
   resize(cols: number, rows: number): Promise<void>
   interrupt(): Promise<void>
@@ -27,6 +30,16 @@ export interface AiCliSessionController {
   dispose(): void
   onOutput(listener: (data: string) => void): () => void
   onExit(listener: () => void): () => void
+}
+
+export interface AiCliProfile {
+  id: string
+  label: string
+}
+
+export interface AiCliResumeResult {
+  sessionId: string
+  profileId: string
 }
 
 export interface SafeAiCliPanelHandle {
@@ -40,6 +53,9 @@ export type AiCliPluginContext = Pick<PluginContext, 'capabilities' | 'events'>
 
 export function createAiCliSessionController(context: AiCliPluginContext): AiCliSessionController {
   let sessionId: string | null = null
+  let profileId: string | null = null
+  let pendingStart: Promise<string> | null = null
+  let pendingResume: Promise<AiCliResumeResult | null> | null = null
   const outputListeners = new Set<(data: string) => void>()
   const exitListeners = new Set<() => void>()
   const outputSubscription = context.events.subscribe('aiCli.output', (event) => {
@@ -49,6 +65,7 @@ export function createAiCliSessionController(context: AiCliPluginContext): AiCli
   const exitSubscription = context.events.subscribe('aiCli.exited', (event) => {
     if (event.sessionId !== sessionId) return
     sessionId = null
+    profileId = null
     for (const listener of exitListeners) listener()
   })
 
@@ -61,16 +78,41 @@ export function createAiCliSessionController(context: AiCliPluginContext): AiCli
     get sessionId() {
       return sessionId
     },
-    async start(profileId, cols, rows) {
+    get profileId() {
+      return profileId
+    },
+    async listProfiles() {
+      const result = await context.capabilities.invoke('aiCli.listProfiles', {})
+      return result.profiles
+    },
+    async resume(cols, rows) {
+      if (sessionId && profileId) return { sessionId, profileId }
+      if (pendingResume) return pendingResume
+      pendingResume = context.capabilities.invoke('aiCli.resumeSession', { cols, rows })
+        .then((result) => {
+          if (result) {
+            sessionId = result.sessionId
+            profileId = result.profileId
+          }
+          return result
+        })
+        .finally(() => { pendingResume = null })
+      return pendingResume
+    },
+    async start(nextProfileId, cols, rows, options = {}) {
       if (sessionId) return sessionId
-      const result = await context.capabilities.invoke('aiCli.startSession', {
-        profileId,
+      if (pendingStart) return pendingStart
+      pendingStart = context.capabilities.invoke('aiCli.startSession', {
+        profileId: nextProfileId,
         cols,
         rows,
-      })
-      const startedSessionId = result.sessionId
-      sessionId = startedSessionId
-      return startedSessionId
+        ...(options.yolo === undefined ? {} : { yolo: options.yolo }),
+      }).then((result) => {
+        sessionId = result.sessionId
+        profileId = nextProfileId
+        return result.sessionId
+      }).finally(() => { pendingStart = null })
+      return pendingStart
     },
     async send(data) {
       await context.capabilities.invoke('aiCli.sendInput', { sessionId: requireSession(), data })
@@ -88,7 +130,10 @@ export function createAiCliSessionController(context: AiCliPluginContext): AiCli
     async stop() {
       const active = requireSession()
       await context.capabilities.invoke('aiCli.stopSession', { sessionId: active })
-      if (sessionId === active) sessionId = null
+      if (sessionId === active) {
+        sessionId = null
+        profileId = null
+      }
     },
     dispose() {
       outputListeners.clear()

@@ -19,6 +19,7 @@ import stat
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, asdict
@@ -1431,6 +1432,8 @@ def _canonical_https_prompt_host(prompt: str) -> str | None:
         parsed = urlparse(match.group(0))
         if parsed.scheme.lower() != "https" or not parsed.hostname:
             return None
+        if unicodedata.normalize("NFKC", parsed.hostname) != parsed.hostname:
+            return None
         return parsed.hostname.encode("idna").decode("ascii").lower()
     except (UnicodeError, ValueError):
         return None
@@ -1441,6 +1444,8 @@ def _canonical_credential_host(host: str | None) -> str | None:
     if raw.startswith("[") and raw.endswith("]"):
         raw = raw[1:-1]
     if not raw:
+        return None
+    if unicodedata.normalize("NFKC", raw) != raw:
         return None
     try:
         return raw.encode("idna").decode("ascii").lower()

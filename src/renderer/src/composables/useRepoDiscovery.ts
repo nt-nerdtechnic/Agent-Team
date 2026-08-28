@@ -72,6 +72,7 @@ export function useRepoDiscovery(
         { workspace_path: ws, force },
       )
       if (!resp.ok || !resp.payload?.ok || workspacePath() !== ws) return
+      if (force) forcedWorkspace = ws
       const skipped = resp.payload.skipped === 'cloud_storage'
       // Don't throw away a result the user already paid a tree walk for.
       if (skipped && forcedWorkspace === ws) return
@@ -81,7 +82,6 @@ export function useRepoDiscovery(
       return
     }
 
-    if (force) forcedWorkspace = ws
     const badged = await withBadges(discovered)
 
     if (workspacePath() === ws) {

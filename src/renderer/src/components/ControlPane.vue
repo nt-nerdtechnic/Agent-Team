@@ -832,12 +832,6 @@ function showSidebarTab(tab: SidebarTab): void {
   if (tab === 'pipeline') sidebarView.value = 'list'
 }
 
-const activePluginContribution = computed(() =>
-  isPluginTab(sidebarTab.value)
-    ? pluginTabs.value.find((entry) => entry.tabId === sidebarTab.value) ?? null
-    : null
-)
-
 const gitChangesCount = computed(() => props.gitChangesCount ?? 0)
 
 function selectSidebarTab(tab: SidebarTab): void {
@@ -1708,10 +1702,11 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <!-- Generic plugin views are mounted by contribution key; the renderer
              never receives the Host-generated instance id. -->
         <PluginRegionHost
-          v-if="activePluginContribution"
-          :contribution="activePluginContribution"
+          v-for="pluginTab in pluginTabs"
+          :key="pluginTab.contributionKey"
+          :contribution="pluginTab"
           :workspace-path="workspace ?? ''"
-          :visible="true"
+          :visible="!collapsed && sidebarTab === pluginTab.tabId"
         />
         <template v-if="legacyGitRecovery && backend && sidebarTab === 'git'">
           <div class="legacy-recovery-label" data-legacy-recovery-label>Legacy recovery</div>

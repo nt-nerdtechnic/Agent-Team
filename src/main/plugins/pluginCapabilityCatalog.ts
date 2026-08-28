@@ -147,6 +147,15 @@ function validateStartRequest(value: unknown): value is Record<string, unknown> 
   )
 }
 
+function validateEmptyRequest(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && hasOnlyKeys(value, [])
+}
+
+function validateResumeRequest(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && hasOnlyKeys(value, ['cols', 'rows']) &&
+    positiveInteger(value.cols) && positiveInteger(value.rows)
+}
+
 function validateWriteFileRequest(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && hasOnlyKeys(value, ['path', 'content']) &&
     nonEmptyString(value.path) && typeof value.content === 'string'
@@ -240,7 +249,9 @@ export const PUBLIC_CAPABILITY_CATALOG: Readonly<Record<string, PublicCapability
   'storage.get': storageMethod('storage.get'),
   'storage.set': storageMethod('storage.set'),
   'storage.delete': storageMethod('storage.delete'),
+  'aiCli.listProfiles': aiCliMethod('aiCli.listProfiles', validateEmptyRequest),
   'aiCli.startSession': aiCliMethod('aiCli.startSession', validateStartRequest),
+  'aiCli.resumeSession': aiCliMethod('aiCli.resumeSession', validateResumeRequest),
   'aiCli.cancelStart': aiCliMethod('aiCli.cancelStart', (value) => requestWithString('requestId', value)),
   'aiCli.reattachSession': aiCliMethod('aiCli.reattachSession', validateReattachRequest),
   'aiCli.sendInput': aiCliMethod('aiCli.sendInput', validateInputRequest),

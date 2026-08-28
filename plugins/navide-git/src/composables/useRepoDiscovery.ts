@@ -36,6 +36,7 @@ export function useRepoDiscovery(
         { workspace_path: ws, force },
       )
       if (!resp.ok || !resp.payload?.ok || workspacePath() !== ws) return
+      if (force) forcedWorkspace = ws
       const skipped = resp.payload.skipped === 'cloud_storage'
       if (skipped && forcedWorkspace === ws) return
       discovered = resp.payload.repositories ?? []
@@ -67,7 +68,6 @@ export function useRepoDiscovery(
       }),
     )
 
-    if (force) forcedWorkspace = ws
     if (workspacePath() === ws) {
       repositories.value = withBadges
     }

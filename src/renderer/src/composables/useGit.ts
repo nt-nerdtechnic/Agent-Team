@@ -211,6 +211,9 @@ export function useGit(
   // on a cloud-synced folder (walking it can block for minutes). Only a user
   // triggered forced scan clears it — nothing retries automatically.
   const discoverySkipped = ref(false)
+  let discoveryForceSequence = 0
+  let pendingForce: { sequence: number; workspace: string } | null = null
+  let acceptedForce: { sequence: number; workspace: string } | null = null
   const showIgnored = ref(false)
   const gitLog = ref<GitCommit[]>([])
   // History view scope (SourceTree-style): 'all' shows every branch's commits as
@@ -314,17 +317,36 @@ export function useGit(
       discoverySkipped.value = false
       return
     }
+    const forceSequenceAtStart = discoveryForceSequence
+    const pendingForceAtStart = !force && pendingForce?.workspace === ws
+      ? pendingForce.sequence
+      : 0
+    const ownForceSequence = force ? ++discoveryForceSequence : 0
+    if (force) pendingForce = { sequence: ownForceSequence, workspace: ws }
     try {
       const resp = await send<DiscoverReposResponse>(
         'git.discover_repositories',
         { workspace_path: ws, force },
       )
       if (resp.ok && resp.payload?.ok && workspacePath() === ws) {
+        if (force) {
+          acceptedForce = { sequence: ownForceSequence, workspace: ws }
+        } else if (
+          acceptedForce?.workspace === ws
+          && (
+            acceptedForce.sequence > forceSequenceAtStart
+            || (pendingForceAtStart > 0 && acceptedForce.sequence >= pendingForceAtStart)
+          )
+        ) {
+          return
+        }
         discoveredRepos.value = resp.payload.repositories ?? []
         discoverySkipped.value = resp.payload.skipped === 'cloud_storage'
       }
     } catch {
       // transient WS error — leave previous list untouched
+    } finally {
+      if (force && pendingForce?.sequence === ownForceSequence) pendingForce = null
     }
   }
 

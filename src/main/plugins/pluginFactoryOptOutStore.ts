@@ -61,7 +61,11 @@ export class PluginFactoryOptOutStore {
 
   has(pluginId: string): boolean {
     const parsed = parseState(this.file)
-    return !parsed.valid || parsed.state.pluginIds.includes(pluginId)
+    if (!parsed.valid) {
+      console.warn(`[plugins] invalid factory opt-out state at ${this.file}; ignoring it`)
+      return false
+    }
+    return parsed.state.pluginIds.includes(pluginId)
   }
 
   add(pluginId: string): void {

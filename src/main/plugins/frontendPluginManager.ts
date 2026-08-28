@@ -8,7 +8,7 @@
 // shared WebSocket transport below.
 
 import { BrowserWindow, WebContentsView, ipcMain, type WebContents } from 'electron'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { URL } from 'node:url'
@@ -178,6 +178,8 @@ interface RunningPlugin {
    *  queued in {@link pendingTargets} (mirrors the legacy editor window's
    *  pendingEditorOpenFiles flush on did-finish-load). */
   ready: boolean
+  /** True once the renderer sent the authenticated readiness handshake. */
+  pluginReady: boolean
   pendingTargets: Record<string, string>[]
 }
 
@@ -199,6 +201,17 @@ interface GitAccountHandlers {
   unbind(workspacePath: string): void
   getBinding(workspacePath: string): string | null
   getCredential(workspacePath: string): { username: string; token: string; expectedHost: string } | null
+}
+
+interface GitCredentialOwner {
+  nonce: string
+  instanceId: string
+  pluginId: string
+  packageVersion: string
+  workspaceId: string | null
+  audience: string | null
+  workspacePath: string
+  requestIds: Set<string>
 }
 
 type GitPathGrantOperation = 'clone_target' | 'open_workspace'
@@ -241,6 +254,24 @@ interface PendingAiStart {
   paneId: string
   requestId: string
   client: WsClient
+}
+
+interface AiSessionLedgerEntry {
+  sessionId: string
+  profileId: string
+  pluginId: string
+  packageVersion: string
+  workspaceId: string | null
+  audience: string | null
+  attachedInstanceId: string | null
+  client: WsClient
+  createdAt: number
+}
+
+interface EarlyAiEventBuffer {
+  instanceId: string
+  expiresAt: number
+  events: Array<{ type: 'terminal.output' | 'terminal.exit'; payload: unknown }>
 }
 
 const IPC_CALL = 'plugin:cap:call'
@@ -289,10 +320,23 @@ const GIT_CONTRIBUTION_OPERATIONS = new Set([
   'focus_pane',
   'open_git_accounts',
   'open_worktree',
+  'execute_host_command',
+])
+const GIT_HOST_COMMANDS = new Set([
+  'controlPane.selectSidebarTab1',
+  'controlPane.selectSidebarTab2',
+  'controlPane.selectSidebarTab3',
+  'controlPane.selectSidebarTab4',
+  'controlPane.selectSidebarTab5',
+  'workbench.action.focusSourceControl',
+  'workbench.action.openGitWindow',
 ])
 const GIT_ACCOUNT_OPERATIONS = new Set([
   'list',
+  'add',
   'get_binding',
+  'bind',
+  'unbind',
 ])
 const GIT_REMOTE_REQUEST_TYPES = new Set([
   'git.clone',
@@ -560,10 +604,6 @@ function validateV2CapabilityContext(
 export class FrontendPluginManager {
   /** Host-generated instance id → running view. */
   private readonly running = new Map<string, RunningPlugin>()
-  /** Host-generated workspace id → normalized workspace path. Paths are never
-   *  exposed to the plugin; they only make storage and event routing stable
-   *  across the left/window instances of one workspace. */
-  private readonly workspaceIds = new Map<string, string>()
   /** Plugin id → instances opened through the legacy adapter; a v2 descriptor may still be here. */
   private readonly legacyInstances = new Map<string, string>()
   /** webContents.id → opaque instance id, so a call's origin can be trusted,
@@ -609,9 +649,17 @@ export class FrontendPluginManager {
   private activationFailureHandler:
     | ((failure: { pluginId: string; packageVersion: string; reason: string }) => void)
     | null = null
-  private readonly pendingActivations = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly pendingActivations = new Map<
+    string,
+    ReturnType<typeof setTimeout> | null
+  >()
   /** Opaque picker provenance for the private first-party Git bridge. */
   private readonly gitPathGrants = new Map<string, GitPathGrant>()
+  /** One unbound remote operation owns each interactive askpass exchange.
+   *  The nonce crosses the backend transport but is never exposed to plugin
+   *  code; request ids are accepted only from the exact originating view. */
+  private readonly gitCredentialOwners = new Map<string, GitCredentialOwner>()
+  private readonly gitCredentialRequests = new Map<string, GitCredentialOwner>()
   /** `terminal_session_id` → authenticated route ownership. v2 teardown
    *  clears the live instance id but retains the stable tuple as a tombstone;
    *  legacy routes retain their plugin-id adapter semantics. */
@@ -632,12 +680,31 @@ export class FrontendPluginManager {
   /** Host-owned public aiCli start transactions. The package only receives an
    *  opaque session id; pane ids and backend payloads stay in this map. */
   private readonly pendingAiStarts = new Map<string, PendingAiStart>()
+  /** Detached AI sessions survive a view close and may be resumed only by a
+   *  new instance with the same Host-authenticated stable tuple. */
+  private readonly aiSessions = new Map<string, AiSessionLedgerEntry>()
+  /** PTY output can beat terminal.create's response. Buffer a small, short-
+   *  lived ordered prefix until the pending start establishes its route. */
+  private readonly earlyAiEvents = new Map<string, EarlyAiEventBuffer>()
   /** Per-session micro-batcher for terminal.output (see the broker module):
    *  coalesces the dense PTY stream into one IPC send per ~12 ms per session. */
   private readonly terminalOutputBatcher: TerminalOutputBatcher = createTerminalOutputBatcher(
     (sessionId, payload) => {
       const owner = this.pendingTerminalOwners.get(sessionId)
       this.pendingTerminalOwners.delete(sessionId)
+      const route = this.terminalRoutes.get(sessionId)
+      const plugin = route ? this.runningPluginForTerminalRoute(route) : undefined
+      if (plugin?.hasV2DescriptorIdentity && plugin.id === GIT_PLUGIN_ID) {
+        const binding = plugin.capabilityContext?.runtimeBinding
+        const data = toPayload(payload).data
+        if (
+          binding &&
+          this.isPublicEventAllowedForInstance(plugin, 'aiCli.output', { sessionId, data }, binding)
+        ) {
+          this.emitToInstance(plugin.instanceId, 'aiCli.output', { sessionId, data })
+        }
+        return
+      }
       this.deliverTerminalEvent('terminal.output', sessionId, payload, owner)
     }
   )
@@ -662,11 +729,75 @@ export class FrontendPluginManager {
   private workspaceIdForPath(workspacePath: string): string | null {
     if (!nonEmptyString(workspacePath)) return null
     const normalized = resolve(workspacePath)
-    const existing = [...this.workspaceIds].find(([, path]) => path === normalized)?.[0]
-    if (existing) return existing
-    const id = randomUUID()
-    this.workspaceIds.set(id, normalized)
-    return id
+    return createHash('sha256').update(normalized).digest('hex')
+  }
+
+  private issueGitCredentialOwner(plugin: RunningPlugin): GitCredentialOwner | null {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    if (
+      !plugin.workspacePath ||
+      !binding ||
+      binding.instanceId !== plugin.instanceId ||
+      binding.pluginId !== plugin.id
+    ) return null
+    const owner: GitCredentialOwner = {
+      nonce: randomUUID(),
+      instanceId: plugin.instanceId,
+      pluginId: plugin.id,
+      packageVersion: binding.packageVersion,
+      workspaceId: binding.workspaceId,
+      audience: binding.audience,
+      workspacePath: resolve(plugin.workspacePath),
+      requestIds: new Set(),
+    }
+    this.gitCredentialOwners.set(owner.nonce, owner)
+    return owner
+  }
+
+  private ownsGitCredentialRequest(plugin: RunningPlugin, owner: GitCredentialOwner): boolean {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    return (
+      this.gitCredentialOwners.get(owner.nonce) === owner &&
+      this.running.get(owner.instanceId) === plugin &&
+      binding?.instanceId === owner.instanceId &&
+      binding.pluginId === owner.pluginId &&
+      binding.packageVersion === owner.packageVersion &&
+      binding.workspaceId === owner.workspaceId &&
+      binding.audience === owner.audience &&
+      plugin.workspacePath !== null &&
+      resolve(plugin.workspacePath) === owner.workspacePath
+    )
+  }
+
+  private releaseGitCredentialOwner(owner: GitCredentialOwner): void {
+    if (this.gitCredentialOwners.get(owner.nonce) !== owner) return
+    const plugin = this.running.get(owner.instanceId)
+    const canNotify = plugin ? this.ownsGitCredentialRequest(plugin, owner) : false
+    this.gitCredentialOwners.delete(owner.nonce)
+    for (const requestId of owner.requestIds) {
+      if (this.gitCredentialRequests.get(requestId) === owner) {
+        this.gitCredentialRequests.delete(requestId)
+      }
+      if (plugin && canNotify) {
+        this.emitToInstance(plugin.instanceId, 'git.credential_cancelled', { request_id: requestId })
+      }
+    }
+    owner.requestIds.clear()
+  }
+
+  private releaseGitCredentialOwnersForInstance(instanceId: string): void {
+    for (const owner of [...this.gitCredentialOwners.values()]) {
+      if (owner.instanceId === instanceId) this.releaseGitCredentialOwner(owner)
+    }
+  }
+
+  private gitCredentialRequestOwner(
+    plugin: RunningPlugin,
+    requestId: unknown,
+  ): GitCredentialOwner | null {
+    if (!nonEmptyString(requestId)) return null
+    const owner = this.gitCredentialRequests.get(requestId)
+    return owner && this.ownsGitCredentialRequest(plugin, owner) ? owner : null
   }
 
   /** Host-selected grant used only by the official bundled Git package. The
@@ -991,6 +1122,9 @@ export class FrontendPluginManager {
     if (Object.prototype.hasOwnProperty.call(record, 'credential')) {
       return buildError('', 'BAD_REQUEST', 'credentials are Host-owned')
     }
+    if (Object.prototype.hasOwnProperty.call(record, 'credential_owner_nonce')) {
+      return buildError('', 'BAD_REQUEST', 'credential ownership is Host-owned')
+    }
     if (
       record.workspace_path !== undefined &&
       (typeof record.workspace_path !== 'string' ||
@@ -1087,6 +1221,9 @@ export class FrontendPluginManager {
         typeof record.provider === 'string'
     }
     if (operation === 'changes_count') return typeof record.count === 'number' && Number.isInteger(record.count) && record.count >= 0
+    if (operation === 'execute_host_command') {
+      return typeof record.command === 'string' && GIT_HOST_COMMANDS.has(record.command)
+    }
     return operation === 'open_git_accounts'
   }
 
@@ -1231,6 +1368,10 @@ export class FrontendPluginManager {
     plugin: RunningPlugin,
   ): Promise<CapabilityResponse> {
     const operation = typeof args.operation === 'string' ? args.operation : ''
+    const audience = plugin.capabilityContext?.runtimeBinding?.audience
+    if (audience !== 'git-left' && audience !== 'git-window') {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'Git account actions are unavailable to this view')
+    }
     const handlers = this.gitAccountHandlers
     if (!handlers || !GIT_ACCOUNT_OPERATIONS.has(operation)) {
       return buildError(reqId, 'CAPABILITY_DENIED', 'Git account service is unavailable')
@@ -1239,20 +1380,56 @@ export class FrontendPluginManager {
     const payload = typeof rawPayload === 'object' && rawPayload !== null && !Array.isArray(rawPayload)
       ? rawPayload as Record<string, unknown>
       : {}
-    const workspace = (key = 'workspace_path'): string | null => {
-      const value = payload[key]
-      if (typeof value !== 'string' || !value) return null
-      if (!plugin.workspacePath || resolve(value) !== resolve(plugin.workspacePath)) return null
-      return resolve(plugin.workspacePath)
-    }
     try {
       if (operation === 'list') {
-        const accounts = handlers.list().map(({ id, label, host, username }) => ({ id, label, host, username }))
+        if (Object.keys(payload).length > 0) {
+          return buildError(reqId, 'BAD_REQUEST', 'Git account list takes no payload')
+        }
+        const accounts = handlers.list().map(({ id, label, host, username, tokenLast4 }) => ({
+          id, label, host, username, tokenLast4,
+        }))
         return buildSuccess(reqId, { available: handlers.available(), accounts })
       }
-      const ws = workspace()
-      if (!ws) return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'workspace path does not match the Host binding')
-      return buildSuccess(reqId, { accountId: handlers.getBinding(ws) })
+      if (!plugin.workspacePath) {
+        return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git view is not workspace-bound')
+      }
+      const workspacePath = resolve(plugin.workspacePath)
+      if (operation === 'get_binding') {
+        if (Object.keys(payload).length > 0) {
+          return buildError(reqId, 'BAD_REQUEST', 'Git account binding lookup takes no payload')
+        }
+        return buildSuccess(reqId, { accountId: handlers.getBinding(workspacePath) })
+      }
+      if (operation === 'add') {
+        if (
+          Object.keys(payload).some((key) => !['label', 'host', 'username', 'token'].includes(key)) ||
+          !nonEmptyString(payload.label) ||
+          !nonEmptyString(payload.host) ||
+          !nonEmptyString(payload.username) ||
+          !nonEmptyString(payload.token)
+        ) {
+          return buildError(reqId, 'BAD_REQUEST', 'Git account details are invalid')
+        }
+        const { id, label, host, username, tokenLast4 } = handlers.add({
+          label: payload.label,
+          host: payload.host,
+          username: payload.username,
+          token: payload.token,
+        })
+        return buildSuccess(reqId, { account: { id, label, host, username, tokenLast4 } })
+      }
+      if (operation === 'bind') {
+        if (Object.keys(payload).some((key) => key !== 'accountId') || !nonEmptyString(payload.accountId)) {
+          return buildError(reqId, 'BAD_REQUEST', 'Git account binding payload is invalid')
+        }
+        handlers.bind(workspacePath, payload.accountId)
+        return buildSuccess(reqId, { accountId: payload.accountId })
+      }
+      if (Object.keys(payload).length > 0) {
+        return buildError(reqId, 'BAD_REQUEST', 'Git account unbind takes no payload')
+      }
+      handlers.unbind(workspacePath)
+      return buildSuccess(reqId, { accountId: null })
     } catch (error) {
       return buildError(reqId, 'BACKEND_ERROR', error instanceof Error ? error.message : 'Git account operation failed')
     }
@@ -1349,6 +1526,8 @@ export class FrontendPluginManager {
       }
       const wsPayload = payload as Record<string, unknown>
       let cloneTarget: string | null = null
+      let credentialOwner: GitCredentialOwner | null = null
+      let credentialReplyOwner: GitCredentialOwner | null = null
       if (action === 'fs.request' && type === 'fs.stat_path') {
         const candidate = typeof wsPayload.path === 'string' ? wsPayload.path : ''
         if (!plugin.workspacePath || !isWorkspaceContainedPath(plugin.workspacePath, candidate)) {
@@ -1386,7 +1565,25 @@ export class FrontendPluginManager {
           }
           if (!isHttps) credential = null
         }
-        if (credential) wsPayload.credential = credential
+        if (credential) {
+          wsPayload.credential = credential
+        } else {
+          credentialOwner = this.issueGitCredentialOwner(plugin)
+          if (!credentialOwner) {
+            return buildError(reqId, 'CAPABILITY_DENIED', 'interactive Git credential owner is unavailable')
+          }
+          wsPayload.credential_owner_nonce = credentialOwner.nonce
+        }
+      }
+      if (
+        action === 'git.request' &&
+        (type === 'git.credential_submit' || type === 'git.credential_cancel')
+      ) {
+        credentialReplyOwner = this.gitCredentialRequestOwner(plugin, wsPayload.request_id)
+        if (!credentialReplyOwner) {
+          return buildError(reqId, 'CAPABILITY_DENIED', 'Git credential request is not owned by this view')
+        }
+        wsPayload.credential_owner_nonce = credentialReplyOwner.nonce
       }
       if (action === 'git.request' && type === 'git.clone') {
         cloneTarget = this.consumeGitCloneTargetGrant(plugin, wsPayload.target_grant, wsPayload.target_dir)
@@ -1397,7 +1594,10 @@ export class FrontendPluginManager {
         delete wsPayload.target_grant
       }
       const client = this.ensureBackend()
-      if (!client) return buildError(reqId, 'BACKEND_ERROR', 'backend not connected')
+      if (!client) {
+        if (credentialOwner) this.releaseGitCredentialOwner(credentialOwner)
+        return buildError(reqId, 'BACKEND_ERROR', 'backend not connected')
+      }
       try {
         const response = backendResponseToCapability(reqId, await client.send(type, wsPayload))
         if (
@@ -1420,6 +1620,14 @@ export class FrontendPluginManager {
           'BACKEND_ERROR',
           error instanceof Error ? error.message : 'backend request failed'
         )
+      } finally {
+        if (credentialOwner) this.releaseGitCredentialOwner(credentialOwner)
+        if (credentialReplyOwner && nonEmptyString(wsPayload.request_id)) {
+          credentialReplyOwner.requestIds.delete(wsPayload.request_id)
+          if (this.gitCredentialRequests.get(wsPayload.request_id) === credentialReplyOwner) {
+            this.gitCredentialRequests.delete(wsPayload.request_id)
+          }
+        }
       }
     }
 
@@ -1674,6 +1882,7 @@ export class FrontendPluginManager {
     ipcMain.on(IPC_READY, (event) => {
       const plugin = this.instanceForSender(event.sender.id)
       if (plugin) {
+        plugin.pluginReady = true
         this.settleActivation(plugin.instanceId)
         console.log(`[plugin] ${plugin.id} ready`)
       }
@@ -1866,9 +2075,67 @@ export class FrontendPluginManager {
     }
   }
 
+  private aiSessionMatchesPlugin(entry: AiSessionLedgerEntry, plugin: RunningPlugin): boolean {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    return Boolean(
+      binding &&
+      entry.pluginId === plugin.id &&
+      entry.packageVersion === binding.packageVersion &&
+      entry.workspaceId === binding.workspaceId &&
+      entry.audience === binding.audience
+    )
+  }
+
+  private bufferEarlyAiEvent(
+    type: 'terminal.output' | 'terminal.exit',
+    payload: unknown,
+  ): boolean {
+    const record = toPayload(payload)
+    const paneId = typeof record.pane_id === 'string' ? record.pane_id : ''
+    if (!paneId) return false
+    const now = Date.now()
+    for (const [key, buffer] of this.earlyAiEvents) {
+      if (buffer.expiresAt <= now) this.earlyAiEvents.delete(key)
+    }
+    const pendingEntry = [...this.pendingAiStarts.entries()].find(([, pending]) => pending.paneId === paneId)
+    if (!pendingEntry) return false
+    const [key, pending] = pendingEntry
+    const buffer = this.earlyAiEvents.get(key) ?? {
+      instanceId: pending.pluginInstanceId,
+      expiresAt: now + 5_000,
+      events: [],
+    }
+    if (buffer.events.length >= 128) buffer.events.shift()
+    buffer.events.push({ type, payload })
+    this.earlyAiEvents.set(key, buffer)
+    return true
+  }
+
+  private flushEarlyAiEvents(key: string): void {
+    const buffer = this.earlyAiEvents.get(key)
+    this.earlyAiEvents.delete(key)
+    if (!buffer || buffer.expiresAt <= Date.now()) return
+    for (const event of buffer.events) this.dispatchEvent(event.type, event.payload)
+  }
+
+  private cancelPendingAiStarts(plugin: RunningPlugin): void {
+    for (const [key, pending] of this.pendingAiStarts) {
+      if (pending.pluginInstanceId !== plugin.instanceId) continue
+      this.pendingAiStarts.delete(key)
+      this.earlyAiEvents.delete(key)
+      void pending.client.send('terminal.create.cancel', {
+        pane_id: pending.paneId,
+        create_generation: pending.requestId,
+      }).catch(() => {
+        // Teardown still owns cancellation even when the backend is gone.
+      })
+    }
+  }
+
   private removeAiSession(plugin: RunningPlugin, sessionId: string): void {
     const sessions = new Map(plugin.capabilityContext?.sessionBindings ?? [])
     sessions.delete(sessionId)
+    this.aiSessions.delete(sessionId)
     this.setAiBindings(plugin, sessions, plugin.capabilityContext?.pendingStartBindings ?? new Map())
   }
 
@@ -1877,9 +2144,46 @@ export class FrontendPluginManager {
     plugin: RunningPlugin,
     workspacePath: string
   ): Promise<unknown> {
+    if (plan.address === 'aiCli.listProfiles') {
+      const allowedProfileIds = new Set(plugin.capabilityContext?.aiCliProfiles ?? [])
+      return {
+        profiles: Object.entries(AI_CLI_PROFILES)
+          .filter(([id]) => allowedProfileIds.has(id))
+          .map(([id, profile]) => ({
+            id,
+            label: 'label' in profile && typeof profile.label === 'string' ? profile.label : id,
+          })),
+      }
+    }
     const client = this.ensureBackend()
     if (!client) throw new Error('backend not connected')
     const args = plan.args
+    if (plan.address === 'aiCli.resumeSession') {
+      const candidate = [...this.aiSessions.values()]
+        .filter((entry) => entry.attachedInstanceId === null && this.aiSessionMatchesPlugin(entry, plugin))
+        .sort((a, b) => b.createdAt - a.createdAt)[0]
+      if (!candidate) return null
+      const response = await client.send('terminal.reattach', {
+        terminal_session_ids: [candidate.sessionId],
+        cols: Number(args.cols),
+        rows: Number(args.rows),
+      })
+      if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI resume failed')
+      const alive = toPayload(response.payload).alive
+      if (!Array.isArray(alive) || !alive.includes(candidate.sessionId)) {
+        this.aiSessions.delete(candidate.sessionId)
+        this.terminalRoutes.delete(candidate.sessionId)
+        return null
+      }
+      this.noteTerminalRoutes(plugin.instanceId, 'terminal.reattach', response.payload)
+      candidate.attachedInstanceId = plugin.instanceId
+      const binding = plugin.capabilityContext?.runtimeBinding
+      if (!binding) throw new Error('AI CLI runtime binding is missing')
+      const sessions = new Map(plugin.capabilityContext?.sessionBindings ?? [])
+      sessions.set(candidate.sessionId, binding)
+      this.setAiBindings(plugin, sessions, plugin.capabilityContext?.pendingStartBindings ?? new Map())
+      return { sessionId: candidate.sessionId, profileId: candidate.profileId }
+    }
     if (plan.address === 'aiCli.startSession') {
       const profileId = String(args.profileId)
       const requestId = nonEmptyString(args.requestId) ? args.requestId : randomUUID()
@@ -1889,7 +2193,8 @@ export class FrontendPluginManager {
       if (!binding) throw new Error('AI CLI runtime binding is missing')
       pending.set(requestId, binding)
       this.setAiBindings(plugin, plugin.capabilityContext?.sessionBindings ?? new Map(), pending)
-      this.pendingAiStarts.set(`${plugin.instanceId}:${requestId}`, {
+      const pendingKey = `${plugin.instanceId}:${requestId}`
+      this.pendingAiStarts.set(pendingKey, {
         pluginInstanceId: plugin.instanceId,
         paneId,
         requestId,
@@ -1897,6 +2202,7 @@ export class FrontendPluginManager {
       })
       const command = this.aiCliCommand(profileId, args, workspacePath)
       if (!command) throw new Error(`AI CLI profile '${profileId}' is not available`)
+      let committed = false
       try {
         const response = await client.send('terminal.create', {
           pane_id: paneId,
@@ -1918,12 +2224,26 @@ export class FrontendPluginManager {
         const sessions = new Map(plugin.capabilityContext?.sessionBindings ?? [])
         sessions.set(sessionId, binding)
         this.setAiBindings(plugin, sessions, plugin.capabilityContext?.pendingStartBindings ?? new Map())
+        this.aiSessions.set(sessionId, {
+          sessionId,
+          profileId,
+          pluginId: binding.pluginId,
+          packageVersion: binding.packageVersion,
+          workspaceId: binding.workspaceId,
+          audience: binding.audience,
+          attachedInstanceId: plugin.instanceId,
+          client,
+          createdAt: Date.now(),
+        })
+        committed = true
+        this.flushEarlyAiEvents(pendingKey)
         return { sessionId }
       } finally {
         const nextPending = new Map(plugin.capabilityContext?.pendingStartBindings ?? [])
         nextPending.delete(requestId)
         this.setAiBindings(plugin, plugin.capabilityContext?.sessionBindings ?? new Map(), nextPending)
-        this.pendingAiStarts.delete(`${plugin.instanceId}:${requestId}`)
+        this.pendingAiStarts.delete(pendingKey)
+        if (!committed) this.earlyAiEvents.delete(pendingKey)
       }
     }
 
@@ -2321,6 +2641,40 @@ export class FrontendPluginManager {
     sourceBinding?: AuthenticatedRuntimeBinding,
     targetPluginId?: string
   ): void {
+    if (event === 'git.credential_request' || event === 'git.credential_cancelled') {
+      const record = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+        ? payload as Record<string, unknown>
+        : null
+      const nonce = typeof record?.credential_owner_nonce === 'string'
+        ? record.credential_owner_nonce
+        : ''
+      const requestId = typeof record?.request_id === 'string' ? record.request_id : ''
+      const owner = nonce ? this.gitCredentialOwners.get(nonce) : undefined
+      const plugin = owner ? this.running.get(owner.instanceId) : undefined
+      if (record && owner && plugin && requestId && this.ownsGitCredentialRequest(plugin, owner)) {
+        const eventWorkspace = typeof record?.workspace_path === 'string'
+          ? resolve(record.workspace_path)
+          : null
+        if (eventWorkspace !== owner.workspacePath) return
+        if (event === 'git.credential_request') {
+          const existing = this.gitCredentialRequests.get(requestId)
+          if (existing && existing !== owner) return
+          owner.requestIds.add(requestId)
+          this.gitCredentialRequests.set(requestId, owner)
+        } else {
+          owner.requestIds.delete(requestId)
+          if (this.gitCredentialRequests.get(requestId) === owner) {
+            this.gitCredentialRequests.delete(requestId)
+          }
+        }
+        const { credential_owner_nonce: _nonce, ...safePayload } = record
+        this.emitToInstance(plugin.instanceId, event, safePayload)
+        return
+      }
+      // Legacy Git operations predate the Host correlation nonce and retain
+      // their workspace-scoped event fan-out during the recovery window.
+      if (nonce) return
+    }
     // Settings are a private first-party contract for the Git package. The
     // v2 surface receives only the typed Host read-only keys or the exact
     // plugin-owned storage key; the legacy loop below remains unchanged for
@@ -2425,24 +2779,8 @@ export class FrontendPluginManager {
       const route = this.terminalRoutes.get(sessionId)
       const owner = route ? this.activeTerminalOwnerKey(route) : null
       if (!owner) {
+        if (this.bufferEarlyAiEvent('terminal.output', payload)) return
         this.logDroppedTerminalEvent(event, sessionId, route)
-        return
-      }
-      const ownerPlugin = route ? this.runningPluginForTerminalRoute(route) : undefined
-      if (ownerPlugin?.hasV2DescriptorIdentity && ownerPlugin.id === GIT_PLUGIN_ID) {
-        const binding = ownerPlugin.capabilityContext?.runtimeBinding
-        const data = toPayload(payload).data
-        if (
-          binding &&
-          this.isPublicEventAllowedForInstance(
-            ownerPlugin,
-            'aiCli.output',
-            { sessionId, data },
-            binding
-          )
-        ) {
-          this.emitToInstance(ownerPlugin.instanceId, 'aiCli.output', { sessionId, data })
-        }
         return
       }
       const pendingOwner = this.pendingTerminalOwners.get(sessionId)
@@ -2457,8 +2795,10 @@ export class FrontendPluginManager {
       const sessionId = terminalSessionIdOf(payload)
       if (!sessionId) return
       const route = this.terminalRoutes.get(sessionId)
+      if (!route && this.bufferEarlyAiEvent('terminal.exit', payload)) return
       const ownerPlugin = route ? this.runningPluginForTerminalRoute(route) : undefined
       if (ownerPlugin?.hasV2DescriptorIdentity && ownerPlugin.id === GIT_PLUGIN_ID) {
+        this.terminalOutputBatcher.flushSession(sessionId)
         const binding = ownerPlugin.capabilityContext?.runtimeBinding
         const exitCode = toPayload(payload).exit_code
         const normalizedExitCode = typeof exitCode === 'number' ? exitCode : null
@@ -2784,6 +3124,10 @@ export class FrontendPluginManager {
       this.terminalOutputBatcher.dropSession(sessionId)
       this.pendingTerminalOwners.delete(sessionId)
       if (!route.legacy) {
+        const aiSession = this.aiSessions.get(sessionId)
+        if (aiSession?.attachedInstanceId === plugin.instanceId) {
+          aiSession.attachedInstanceId = null
+        }
         this.terminalRoutes.set(sessionId, { ...route, instanceId: null })
       }
     }
@@ -2821,9 +3165,11 @@ export class FrontendPluginManager {
     plugin.detachHostResize = null
     plugin.detachHostClosed?.()
     plugin.detachHostClosed = null
+    this.cancelPendingAiStarts(plugin)
     this.releaseTerminalOwnership(plugin)
     this.releaseInstanceSubscriptions(instanceId)
     this.discardGitPathGrants(instanceId)
+    this.releaseGitCredentialOwnersForInstance(instanceId)
     this.running.delete(instanceId)
     this.bySender.delete(plugin.senderId)
     for (const [key, handle] of this.contributionInstances) {
@@ -2850,6 +3196,19 @@ export class FrontendPluginManager {
       this.terminalOutputBatcher.dropSession(sessionId)
       this.pendingTerminalOwners.delete(sessionId)
       this.terminalRoutes.delete(sessionId)
+    }
+  }
+
+  private stopAiSessionsForPlugin(pluginId: string): void {
+    for (const [sessionId, session] of this.aiSessions) {
+      if (session.pluginId !== pluginId) continue
+      this.aiSessions.delete(sessionId)
+      void session.client.send('terminal.kill', {
+        terminal_session_id: sessionId,
+        force: true,
+      }).catch(() => {
+        // Removal still forgets ownership when the backend is unavailable.
+      })
     }
   }
 
@@ -3048,15 +3407,15 @@ export class FrontendPluginManager {
       detachHostClosed: null,
       closeHostOnHide: opts.closeHostOnHide ?? false,
       ready: false,
+      pluginReady: false,
       pendingTargets: [],
     }
     this.running.set(instanceId, record)
     if (isV2Identity && this.activationFailureHandler) {
-      const timer = setTimeout(() => {
-        this.failActivation(instanceId, 'plugin readiness handshake timed out')
-      }, 10_000)
-      timer.unref?.()
-      this.pendingActivations.set(instanceId, timer)
+      // Register the activation immediately so load failure / renderer death
+      // remain observable, but do not spend the readiness budget while the
+      // entry document itself is still loading.
+      this.pendingActivations.set(instanceId, null)
     }
     if (openedViaLegacyAdapter) this.legacyInstances.set(descriptor.id, instanceId)
     this.bySender.set(record.senderId, instanceId)
@@ -3104,6 +3463,16 @@ export class FrontendPluginManager {
       const current = this.running.get(instanceId)
       if (current?.view !== view) return
       current.ready = true
+      if (
+        this.pendingActivations.get(instanceId) === null &&
+        !current.pluginReady
+      ) {
+        const timer = setTimeout(() => {
+          this.failActivation(instanceId, 'plugin readiness handshake timed out')
+        }, 10_000)
+        timer.unref?.()
+        this.pendingActivations.set(instanceId, timer)
+      }
       for (const params of current.pendingTargets.splice(0)) {
         view.webContents.send(IPC_OPEN_TARGET, params)
       }
@@ -3326,6 +3695,7 @@ export class FrontendPluginManager {
    *  been rolled back. The package inventory itself is left untouched. */
   replaceBuiltinForRecovery(descriptor: PluginLaunchDescriptor): void {
     this.builtinFallbacks.set(descriptor.id, descriptor)
+    this.stopAiSessionsForPlugin(descriptor.id)
     this.destroyPluginInstances(descriptor.id)
     this.clearTerminalRoutes(descriptor.id)
     this.registerDescriptor(descriptor, { builtin: true })
@@ -3872,6 +4242,7 @@ export class FrontendPluginManager {
    * storage, while leaving the package registered so a failed cleanup can be
    * retried. */
   preparePluginRemoval(id: string): void {
+    this.stopAiSessionsForPlugin(id)
     this.destroyPluginInstances(id)
     this.clearTerminalRoutes(id)
   }

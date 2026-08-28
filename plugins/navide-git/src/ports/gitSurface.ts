@@ -102,6 +102,14 @@ export interface GitAccountPublic {
   label: string
   host: string
   username: string
+  tokenLast4: string
+}
+
+export interface GitAccountInput {
+  label: string
+  host: string
+  username: string
+  token: string
 }
 
 export interface GitAccountViewPort {
@@ -111,8 +119,16 @@ export interface GitAccountViewPort {
 
 export interface GitAccountPort extends GitAccountViewPort {
   refresh(): Promise<void>
-  getBinding(workspacePath: string): Promise<string | null>
+  addAccount(input: GitAccountInput): Promise<boolean>
+  bind(accountId: string): Promise<boolean>
+  unbind(): Promise<boolean>
+  getBinding(): Promise<string | null>
 }
+
+export type GitCredentialAccountPort = Pick<
+  GitAccountPort,
+  'accounts' | 'available' | 'refresh' | 'addAccount' | 'bind'
+>
 
 export interface IssuePort {
   provider(workspacePath: string): Promise<PortResponse<IssueProviderInfo>>
@@ -156,7 +172,7 @@ export const GIT_TRANSPORT_KEY: InjectionKey<GitTransport> = Symbol('git-transpo
 export const GIT_FILE_ACCESS_KEY: InjectionKey<GitFileAccessPort> = Symbol('git-file-access')
 export const GIT_UI_KEY: InjectionKey<GitWindowUiPort> = Symbol('git-ui')
 export const GIT_BRANCH_DIFF_KEY: InjectionKey<GitBranchDiffPort> = Symbol('git-branch-diff')
-export const GIT_ACCOUNTS_KEY: InjectionKey<GitAccountViewPort> = Symbol('git-accounts')
+export const GIT_ACCOUNTS_KEY: InjectionKey<GitAccountPort> = Symbol('git-accounts')
 export const GIT_ISSUES_KEY: InjectionKey<IssuePort> = Symbol('git-issues')
 
 // Keep these imports type-only and colocated with the contracts so adapters can

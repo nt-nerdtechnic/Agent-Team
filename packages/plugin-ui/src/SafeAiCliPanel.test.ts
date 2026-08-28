@@ -4,6 +4,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { i18n } from './foundation'
 import SafeAiCliPanel from './SafeAiCliPanel.vue'
 import type { AiCliSessionController, SafeAiCliPanelHandle } from './index'
+import { seedSettings, settingsGet } from './shared'
+import { __resetSettingsForTest } from './shared/testing'
 
 const { terminals, FakeTerminal } = vi.hoisted(() => {
   const terminals: Array<{
@@ -52,6 +54,7 @@ class FakeResizeObserver {
 beforeEach(() => {
   terminals.length = 0
   vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+  __resetSettingsForTest()
 })
 
 function makeController(): AiCliSessionController & { emitOutput(data: string): void; emitExit(): void } {
@@ -60,6 +63,12 @@ function makeController(): AiCliSessionController & { emitOutput(data: string): 
   let exit: (() => void) | null = null
   return {
     get sessionId() { return sessionId },
+    get profileId() { return sessionId ? 'claude' : null },
+    listProfiles: vi.fn(async () => [
+      { id: 'claude', label: 'Claude Code' },
+      { id: 'codex', label: 'Codex' },
+    ]),
+    resume: vi.fn(async () => null),
     start: vi.fn(async () => { sessionId = 'session-1'; return sessionId }),
     send: vi.fn(async () => undefined),
     resize: vi.fn(async () => undefined),
@@ -74,6 +83,17 @@ function makeController(): AiCliSessionController & { emitOutput(data: string): 
 }
 
 describe('SafeAiCliPanel', () => {
+  it('starts collapsed and checks for a tuple-owned detached session', async () => {
+    const controller = makeController()
+    const wrapper = mount(SafeAiCliPanel, { props: { controller }, global: { plugins: [i18n] } })
+    await flushPromises()
+
+    expect(wrapper.classes()).toContain('is-collapsed')
+    expect(controller.listProfiles).toHaveBeenCalledOnce()
+    expect(controller.resume).toHaveBeenCalledWith(80, 24)
+    expect(controller.start).not.toHaveBeenCalled()
+  })
+
   it('ignores terminal input until the Host-owned session is running', async () => {
     const controller = makeController()
     mount(SafeAiCliPanel, { props: { controller }, global: { plugins: [i18n] } })
@@ -131,10 +151,41 @@ describe('SafeAiCliPanel', () => {
     vi.useRealTimers()
   })
 
+  it('persists profile and width and injects fresh Git context with unattended mode', async () => {
+    vi.useFakeTimers()
+    seedSettings({
+      'git-ai-panel-width': 420,
+      'git-ai-panel-width.agent': 'codex',
+      'agentTeam.yolo': '1',
+    })
+    const controller = makeController()
+    const wrapper = mount(SafeAiCliPanel, {
+      props: { controller, buildContext: () => 'Git context' },
+      global: { plugins: [i18n] },
+    })
+    await flushPromises()
+
+    await wrapper.get('.navide-safe-ai-cli__toggle').trigger('click')
+    expect((wrapper.get('select').element as HTMLSelectElement).value).toBe('codex')
+    expect(wrapper.attributes('style')).toContain('width: 420px')
+
+    await wrapper.get('select').setValue('claude')
+    const start = (wrapper.vm as unknown as SafeAiCliPanelHandle).start()
+    await vi.advanceTimersByTimeAsync(4_000)
+    await start
+
+    expect(controller.start).toHaveBeenCalledWith('claude', 80, 24, { yolo: true })
+    expect(controller.send).toHaveBeenNthCalledWith(1, '\u001b[200~Git context\u001b[201~')
+    expect(controller.send).toHaveBeenNthCalledWith(2, '\r')
+    expect(settingsGet('git-ai-panel-width.agent', '')).toBe('claude')
+    vi.useRealTimers()
+  })
+
   it('does not clear terminal scrollback during resize', async () => {
     const controller = makeController()
     const wrapper = mount(SafeAiCliPanel, { props: { controller }, global: { plugins: [i18n] } })
     const handle = wrapper.vm as unknown as SafeAiCliPanelHandle
+    await wrapper.get('.navide-safe-ai-cli__toggle').trigger('click')
     await handle.start()
     await flushPromises()
 

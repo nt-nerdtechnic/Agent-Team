@@ -54,7 +54,7 @@ describe('ControlPane manifest-driven plugin placement', () => {
     wrapper.unmount()
   })
 
-  it('renders only left contributions and keeps the Host catalog order', () => {
+  it('renders only left contributions, keeps Host order, and toggles visibility without unmounting', async () => {
     const wrapper = mountPane([
       contribution({ contributionKey: 'zeta.left', pluginId: 'zeta.plugin', manifestOrder: 1 }),
       contribution({ contributionKey: 'acme.window', pluginId: 'acme.plugin', location: 'window' }),
@@ -66,7 +66,35 @@ describe('ControlPane manifest-driven plugin placement', () => {
       'zeta.left',
       'acme.left',
     ])
-    expect(wrapper.findComponent({ name: 'PluginRegionHost' }).exists()).toBe(false)
+    const hosts = wrapper.findAllComponents({ name: 'PluginRegionHost' })
+    expect(hosts).toHaveLength(2)
+    expect(hosts.map((host) => host.props('contribution').contributionKey)).toEqual([
+      'zeta.left',
+      'acme.left',
+    ])
+    expect(hosts.every((host) => host.props('visible') === false)).toBe(true)
+
+    await tabs[1].trigger('click')
+    await wrapper.vm.$nextTick()
+    const toggledHosts = wrapper.findAllComponents({ name: 'PluginRegionHost' })
+    expect(toggledHosts).toHaveLength(2)
+    expect(toggledHosts.map((host) => host.props('visible'))).toEqual([false, true])
+    wrapper.unmount()
+  })
+
+  it('hides an active plugin view when the sidebar collapses without unmounting it', async () => {
+    const wrapper = mountPane([contribution()])
+    await wrapper.get('.plugin-tab-btn').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findAllComponents({ name: 'PluginRegionHost' })).toHaveLength(1)
+    expect(wrapper.getComponent({ name: 'PluginRegionHost' }).props('visible')).toBe(true)
+
+    await wrapper.setProps({ collapsed: true })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findAllComponents({ name: 'PluginRegionHost' })).toHaveLength(1)
+    expect(wrapper.getComponent({ name: 'PluginRegionHost' }).props('visible')).toBe(false)
     wrapper.unmount()
   })
 

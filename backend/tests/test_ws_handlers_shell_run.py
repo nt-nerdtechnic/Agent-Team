@@ -75,6 +75,21 @@ async def test_allowlist_rejects_non_allowlisted_executable(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
+async def test_allowlist_rejects_git_execution_escape_hatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app.attribution, "known_workspaces", lambda: [str(tmp_path)])
+
+    payload = await _run(_session(), {
+        "host_mode": "allowlist",
+        "workspace_path": str(tmp_path),
+        "command": "git -c alias.x=!sh x",
+    })
+
+    assert payload == {"ok": False, "error": "command is not permitted by the public shell policy"}
+
+
+@pytest.mark.asyncio
 async def test_allowlist_truncates_output_and_preserves_nonzero_envelope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

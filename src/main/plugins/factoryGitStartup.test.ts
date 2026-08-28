@@ -52,4 +52,11 @@ describe('activateFactoryGitWithLegacyFallback', () => {
       legacyReason: 'legacy entry missing',
     })
   })
+
+  it('converts a thrown factory loader into legacy fallback', () => {
+    expect(activateFactoryGitWithLegacyFallback({
+      loadFactory: () => { throw new Error('bundle parse failed') },
+      activateLegacy: () => ({ registered: true }),
+    })).toEqual({ mode: 'legacy', v2Reason: 'bundle parse failed' })
+  })
 })

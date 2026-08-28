@@ -167,6 +167,14 @@ export interface GitCommitDetail {
   files: string[]
 }
 
+export interface GitCredentialPrompt {
+  host: string
+  usernameRequestId: string | null
+  passwordRequestId: string | null
+  username: string
+  password: string
+}
+
 const emptyStatus = (): GitStatus => ({
   is_git_repo: false,
   branch: '',
@@ -192,6 +200,9 @@ export function useGit(
   // Nested git repos found by scanning downward when the root is NOT a repo.
   const discoveredRepos = ref<DiscoveredRepo[]>([])
   const discoverySkipped = ref(false)
+  let discoveryForceSequence = 0
+  let pendingForce: { sequence: number; workspace: string } | null = null
+  let acceptedForce: { sequence: number; workspace: string } | null = null
   const showIgnored = ref(false)
   const gitLog = ref<GitCommit[]>([])
   // History view scope (SourceTree-style): 'all' shows every branch's commits as
@@ -293,17 +304,36 @@ export function useGit(
       discoverySkipped.value = false
       return
     }
+    const forceSequenceAtStart = discoveryForceSequence
+    const pendingForceAtStart = !force && pendingForce?.workspace === ws
+      ? pendingForce.sequence
+      : 0
+    const ownForceSequence = force ? ++discoveryForceSequence : 0
+    if (force) pendingForce = { sequence: ownForceSequence, workspace: ws }
     try {
       const resp = await send<DiscoverReposResponse>(
         'git.discover_repositories',
         { workspace_path: ws, force },
       )
       if (resp.ok && resp.payload?.ok && workspacePath() === ws) {
+        if (force) {
+          acceptedForce = { sequence: ownForceSequence, workspace: ws }
+        } else if (
+          acceptedForce?.workspace === ws
+          && (
+            acceptedForce.sequence > forceSequenceAtStart
+            || (pendingForceAtStart > 0 && acceptedForce.sequence >= pendingForceAtStart)
+          )
+        ) {
+          return
+        }
         discoveredRepos.value = resp.payload.repositories ?? []
         discoverySkipped.value = resp.payload.skipped === 'cloud_storage'
       }
     } catch {
       // transient WS error — leave previous list untouched
+    } finally {
+      if (force && pendingForce?.sequence === ownForceSequence) pendingForce = null
     }
   }
 
@@ -480,6 +510,8 @@ export function useGit(
       const msg = e instanceof Error ? e.message : String(e)
       gitError.value = `pushUpstream: ${msg}`
       return { ok: false, error: msg }
+    } finally {
+      settleCredentialPrompt()
     }
   }
 
@@ -937,6 +969,86 @@ export function useGit(
     return payloadError || response.error?.message || fallback
   }
 
+  const credentialPrompt = ref<GitCredentialPrompt | null>(null)
+  const credentialSubmitting = ref(false)
+  const showCredentialPrompt = computed(() => credentialPrompt.value !== null && !credentialSubmitting.value)
+
+  const _offCredentialRequest = on('git.credential_request', (payload: unknown) => {
+    const request = payload as { request_id?: string; host?: string; prompt?: string }
+    if (!request.request_id) return
+    const host = request.host ?? ''
+    const prompt = request.prompt ?? ''
+    const field = /^username\b/i.test(prompt)
+      ? 'username'
+      : /^password\b/i.test(prompt)
+        ? 'password'
+        : null
+    const current = credentialPrompt.value
+    if (!current || current.host !== host) {
+      credentialSubmitting.value = false
+      credentialPrompt.value = {
+        host,
+        usernameRequestId: field === 'username' ? request.request_id : null,
+        passwordRequestId: field === 'password' ? request.request_id : null,
+        username: '',
+        password: '',
+      }
+      return
+    }
+    if (field === 'username') current.usernameRequestId = request.request_id
+    else if (field === 'password') current.passwordRequestId = request.request_id
+    if (credentialSubmitting.value) {
+      if (field === 'username') void send('git.credential_submit', { request_id: request.request_id, value: current.username })
+      else if (field === 'password') void send('git.credential_submit', { request_id: request.request_id, value: current.password })
+      credentialPrompt.value = null
+      credentialSubmitting.value = false
+    }
+  })
+
+  const _offCredentialCancelled = on('git.credential_cancelled', (payload: unknown) => {
+    const request = payload as { request_id?: string }
+    const current = credentialPrompt.value
+    if (!current || !request.request_id) return
+    if (request.request_id === current.usernameRequestId || request.request_id === current.passwordRequestId) {
+      credentialPrompt.value = null
+      credentialSubmitting.value = false
+    }
+  })
+
+  onScopeDispose(() => {
+    _offCredentialRequest()
+    _offCredentialCancelled()
+  })
+
+  async function submitCredential(): Promise<void> {
+    const current = credentialPrompt.value
+    if (!current) return
+    credentialSubmitting.value = true
+    if (current.usernameRequestId) {
+      void send('git.credential_submit', { request_id: current.usernameRequestId, value: current.username })
+    }
+    if (current.passwordRequestId) {
+      void send('git.credential_submit', { request_id: current.passwordRequestId, value: current.password })
+      credentialPrompt.value = null
+      credentialSubmitting.value = false
+    }
+  }
+
+  async function cancelCredential(): Promise<void> {
+    const current = credentialPrompt.value
+    if (!current) return
+    if (current.usernameRequestId) void send('git.credential_cancel', { request_id: current.usernameRequestId })
+    if (current.passwordRequestId) void send('git.credential_cancel', { request_id: current.passwordRequestId })
+    credentialPrompt.value = null
+    credentialSubmitting.value = false
+  }
+
+  function settleCredentialPrompt(): void {
+    if (!credentialSubmitting.value) return
+    credentialPrompt.value = null
+    credentialSubmitting.value = false
+  }
+
   async function fetchRemote(): Promise<{ ok: boolean; output: string; error: string }> {
     const ws = workspacePath()
     if (!ws) return { ok: false, output: '', error: 'no workspace' }
@@ -953,6 +1065,7 @@ export function useGit(
       return { ok: false, output: '', error: msg }
     } finally {
       isFetching.value = false
+      settleCredentialPrompt()
     }
   }
 
@@ -969,6 +1082,7 @@ export function useGit(
       gitError.value = `pullOnly: ${msg}`
       return { ok: false, output: '', error: msg }
     } finally {
+      settleCredentialPrompt()
     }
   }
 
@@ -985,6 +1099,7 @@ export function useGit(
       gitError.value = `pushOnly: ${msg}`
       return { ok: false, output: '', error: msg }
     } finally {
+      settleCredentialPrompt()
     }
   }
 
@@ -1274,6 +1389,7 @@ export function useGit(
       syncError.value = e instanceof Error ? e.message : String(e)
     } finally {
       isSyncing.value = false
+      settleCredentialPrompt()
     }
   }
 
@@ -1385,6 +1501,8 @@ export function useGit(
       const msg = e instanceof Error ? e.message : String(e)
       gitError.value = `cloneRepo: ${msg}`
       return { ok: false, error: msg }
+    } finally {
+      settleCredentialPrompt()
     }
   }
 
@@ -1475,6 +1593,8 @@ export function useGit(
       const msg = e instanceof Error ? e.message : String(e)
       gitError.value = `pullRebase: ${msg}`
       return { ok: false, error: msg }
+    } finally {
+      settleCredentialPrompt()
     }
   }
 
@@ -1492,6 +1612,8 @@ export function useGit(
       const msg = e instanceof Error ? e.message : String(e)
       gitError.value = `pushForce: ${msg}`
       return { ok: false, error: msg }
+    } finally {
+      settleCredentialPrompt()
     }
   }
 
@@ -1572,6 +1694,7 @@ export function useGit(
     isCommitting, isSyncing, isFetching, isGenerating,
     syncOutput, syncError,
     gitError, clearGitError,
+    credentialPrompt, showCredentialPrompt, submitCredential, cancelCredential,
     // loaders
     loadStatus, discoverRepositories, loadLog, loadMoreLog, logSearch, setLogScope, setLogOrder, loadBranches, loadStashes, loadRemotes, loadTags,
     loadWorktrees, loadGitConfig,

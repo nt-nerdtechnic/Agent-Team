@@ -114,12 +114,28 @@
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "USER_CANCELLED", "INTERNAL_ERROR"]
     },
     {
+      "address": "aiCli.listProfiles",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "type": "object", "additionalProperties": false, "required": ["profiles"], "properties": { "profiles": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["id", "label"], "properties": { "id": { "type": "string", "minLength": 1 }, "label": { "type": "string", "minLength": 1 } } } } } },
+      "errors": ["CAPABILITY_DENIED", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
       "address": "aiCli.startSession",
       "visibility": "public",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["profileId", "cols", "rows"], "properties": { "profileId": { "type": "string", "minLength": 1 }, "requestId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
+      "params": { "type": "object", "additionalProperties": false, "required": ["profileId", "cols", "rows"], "properties": { "profileId": { "type": "string", "minLength": 1 }, "requestId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 }, "yolo": { "type": "boolean" } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "USER_CANCELLED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "aiCli.resumeSession",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["cols", "rows"], "properties": { "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
+      "result": { "oneOf": [{ "type": "null" }, { "type": "object", "additionalProperties": false, "required": ["sessionId", "profileId"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "profileId": { "type": "string", "minLength": 1 } } }] },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
     {
       "address": "aiCli.cancelStart",

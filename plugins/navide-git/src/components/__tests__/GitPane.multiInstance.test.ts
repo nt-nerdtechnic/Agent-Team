@@ -35,6 +35,16 @@ function responseFor(type: string): { ok: true; payload: unknown; error: null } 
 function mountPane(
   workspacePath: string,
   send: (type: string) => Promise<unknown> = async (type: string) => responseFor(type),
+  accounts = {
+    accounts: ref<Array<{ id: string; label: string; host: string; username: string; tokenLast4: string }>>([]),
+    available: ref(true),
+    refresh: vi.fn(async () => {}),
+    addAccount: vi.fn(async () => true),
+    bind: vi.fn(async () => true),
+    unbind: vi.fn(async () => true),
+    getBinding: vi.fn(async () => null as string | null),
+  },
+  on: (type: string, handler: (payload: unknown) => void) => () => void = () => () => {},
 ) {
   const wrapper = mount(GitPane, {
     attachTo: document.body,
@@ -43,7 +53,7 @@ function mountPane(
       gitTransport: {
         status: { value: 'connected' },
         send: vi.fn(send) as never,
-        on: vi.fn(() => () => {}),
+        on: vi.fn(on) as never,
       },
       fileAccess: { readFile: vi.fn(), writeFile: vi.fn(), readImage: vi.fn() },
       ui: {
@@ -52,7 +62,7 @@ function mountPane(
         openBranchDiffWindow: vi.fn(), openGitWindow: vi.fn(), openGitHistoryWindow: vi.fn(),
       },
       issuePort: { provider: vi.fn(), list: vi.fn(), get: vi.fn(), create: vi.fn(), comment: vi.fn(), setState: vi.fn() },
-      accounts: { accounts: ref([]), available: ref(true), refresh: vi.fn(), getBinding: vi.fn(async () => null) },
+      accounts,
     },
     global: { mocks: { $t: (key: string) => key } },
   })
@@ -61,14 +71,41 @@ function mountPane(
 }
 
 describe('GitPane menu ownership', () => {
-  it('opens the Host-owned account surface instead of presenting editable credentials', async () => {
-    const wrapper = mountPane('/workspace/account')
+  it('binds and unbinds accounts from the Host-backed selector', async () => {
+    const accounts = {
+      accounts: ref([{ id: 'account-1', label: 'GitHub', host: 'github.com', username: 'octo', tokenLast4: '1234' }]),
+      available: ref(true),
+      refresh: vi.fn(async () => {}),
+      addAccount: vi.fn(async () => true),
+      bind: vi.fn(async () => true),
+      unbind: vi.fn(async () => true),
+      getBinding: vi.fn(async () => null as string | null),
+    }
+    const wrapper = mountPane('/workspace/account', undefined, accounts)
     await flushPromises()
 
     await wrapper.get('.account-pill').trigger('click')
+    await flushPromises()
 
-    expect(wrapper.emitted('open-git-accounts')).toHaveLength(1)
-    expect(wrapper.find('.account-menu').exists()).toBe(false)
+    const menu = document.querySelector<HTMLElement>('.account-menu')
+    expect(menu).not.toBeNull()
+    const buttons = Array.from(menu!.querySelectorAll<HTMLButtonElement>('.menu-item'))
+    buttons.find((button) => button.textContent?.includes('GitHub'))!.click()
+    await flushPromises()
+
+    expect(accounts.bind).toHaveBeenCalledWith('account-1')
+    expect(wrapper.get('.account-pill-label').text()).toBe('GitHub')
+
+    await wrapper.get('.account-pill').trigger('click')
+    await flushPromises()
+    const reopened = document.querySelector<HTMLElement>('.account-menu')!
+    Array.from(reopened.querySelectorAll<HTMLButtonElement>('.menu-item'))
+      .find((button) => button.textContent?.includes('git.account.unbound'))!
+      .click()
+    await flushPromises()
+
+    expect(accounts.unbind).toHaveBeenCalledOnce()
+    expect(wrapper.get('.account-pill-label').text()).toBe('git.account.unbound')
   })
 
   it('gives mounted panes distinct owners and keeps a sibling menu open on Escape', async () => {
@@ -83,6 +120,29 @@ describe('GitPane menu ownership', () => {
     expect(document.querySelector(`${secondMenu}.tp-dropdown`)).not.toBeNull()
     first.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     expect(document.querySelector(`${secondMenu}.tp-dropdown`)).not.toBeNull()
+  })
+
+  it('renders the Host-correlated askpass prompt for this pane', async () => {
+    const listeners = new Map<string, (payload: unknown) => void>()
+    mountPane(
+      '/workspace/credential',
+      undefined,
+      undefined,
+      (type, handler) => {
+        listeners.set(type, handler)
+        return () => listeners.delete(type)
+      },
+    )
+    await flushPromises()
+
+    listeners.get('git.credential_request')?.({
+      request_id: 'request-1',
+      host: 'github.com',
+      prompt: 'Password for https://github.com:',
+    })
+    await flushPromises()
+
+    expect(document.querySelector('[data-submit-credential]')).not.toBeNull()
   })
 
   it('shows an actionable status error instead of repository initialization and retries', async () => {

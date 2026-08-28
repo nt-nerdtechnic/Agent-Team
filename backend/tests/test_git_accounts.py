@@ -43,6 +43,14 @@ class TestPureHelpers:
             "credential.helper=",
         ]
 
+    def test_credential_hosts_accept_idna_but_reject_nfkc_compatibility_characters(self):
+        assert git_service._canonical_credential_host("bücher.example") == "xn--bcher-kva.example"
+        assert git_service._canonical_credential_host("xn--bcher-kva.example") == "xn--bcher-kva.example"
+        assert git_service._canonical_credential_host("ｇｉｔｈｕｂ．ｃｏｍ") is None
+        assert git_service._canonical_https_prompt_host(
+            "Password for 'https://ｇｉｔｈｕｂ．ｃｏｍ/repo':"
+        ) is None
+
 
 class TestAutoAnswer:
     @pytest.mark.asyncio

@@ -8,6 +8,18 @@ export interface GitContributionState {
   issueHandoffs: Record<string, { paneId: string; mode: string; state: string }>
 }
 
+export const HOST_GIT_COMMAND_IDS = [
+  'controlPane.selectSidebarTab1',
+  'controlPane.selectSidebarTab2',
+  'controlPane.selectSidebarTab3',
+  'controlPane.selectSidebarTab4',
+  'controlPane.selectSidebarTab5',
+  'workbench.action.focusSourceControl',
+  'workbench.action.openGitWindow',
+] as const
+
+export type HostGitCommandId = typeof HOST_GIT_COMMAND_IDS[number]
+
 export type GitContributionAction =
   | { operation: 'open_path'; path: string }
   | { operation: 'open_temp_file'; name: string; content: string }
@@ -25,6 +37,7 @@ export type GitContributionAction =
   | { operation: 'spawn_for_issue'; payload: { agentKey: string; mode: IssueHandlerMode; issue: Issue; provider: IssueProvider } }
   | { operation: 'focus_pane'; paneId: string }
   | { operation: 'open_git_accounts' }
+  | { operation: 'execute_host_command'; command: HostGitCommandId }
 
 export interface GitContributionActionEnvelope {
   operation: string

@@ -13,9 +13,13 @@ export async function writeTempTextArtifact(
   displayName: string,
   content: string,
 ): Promise<TempTextArtifact> {
-  const directory = join(tempRoot, 'agent-team-head')
+  const directory = join(tempRoot, 'agent-team-head', randomUUID())
   await mkdir(directory, { recursive: true })
-  const path = join(directory, `${randomUUID()}.txt`)
+  const sanitizedName = displayName.replace(/[\\/\0]/g, '_')
+  const filename = sanitizedName === '.' || sanitizedName === '..' || sanitizedName.length === 0
+    ? 'artifact.txt'
+    : sanitizedName
+  const path = join(directory, filename)
   await writeFile(path, content, 'utf8')
   return { path, displayName }
 }

@@ -66,14 +66,14 @@ describe('navide.git production package boundary', () => {
     expect(sourceText(join(packageRoot, 'src'))).not.toMatch(/var\([^)]*\)\d/)
   })
 
-  it('uses public UI and capability seams without raw terminal or credential messages', () => {
+  it('uses public UI and capability seams while confining askpass to the Git transport', () => {
     const source = sourceText(join(packageRoot, 'src'))
+    const useGitSource = readFileSync(join(packageRoot, 'src/composables/useGit.ts'), 'utf8')
     const rendererSource = [
       'GitLeftApp.vue',
       'GitWindowApp.vue',
       'components/GitPane.vue',
       'components/MultiRepoGit.vue',
-      'composables/useGit.ts',
       'mount.ts',
       'pluginSurfacePorts.ts',
     ].map((path) => readFileSync(join(packageRoot, 'src', path), 'utf8')).join('\n')
@@ -84,5 +84,8 @@ describe('navide.git production package boundary', () => {
     expect(rendererSource).not.toContain('git.credential_request')
     expect(rendererSource).not.toContain('git.credential_submit')
     expect(rendererSource).not.toContain('git.credential_cancel')
+    expect(useGitSource).toContain("on('git.credential_request'")
+    expect(useGitSource).toContain("send('git.credential_submit'")
+    expect(useGitSource).toContain("send('git.credential_cancel'")
   })
 })

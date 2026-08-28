@@ -44,7 +44,8 @@ describe('Git v2 storage migration', () => {
         'agentTeam.analyzerModel': 'must-not-copy',
         'agentTeam.yolo': 'must-not-copy',
         'agentTeam.terminal.optionSelectHintSeen': 'must-not-copy',
-        'git-ai-panel-width': 'must-not-copy',
+        'git-ai-panel-width': 420,
+        'git-ai-panel-width.agent': 'claude',
         'agentTeam.unrelated': 'must-not-copy',
       },
     }
@@ -61,11 +62,14 @@ describe('Git v2 storage migration', () => {
       'agentTeam.analyzerModel',
       'agentTeam.yolo',
       'agentTeam.terminal.optionSelectHintSeen',
-      'git-ai-panel-width',
     ]) {
       await expect(store.execute(readExecution('active', 'plugin', key, null)))
         .resolves.toEqual({ found: false, value: null })
     }
+    await expect(store.execute(readExecution('active', 'plugin', 'git-ai-panel-width', null)))
+      .resolves.toEqual({ found: true, value: 420 })
+    await expect(store.execute(readExecution('active', 'plugin', 'git-ai-panel-width.agent', null)))
+      .resolves.toEqual({ found: true, value: 'claude' })
 
     await expect(migrateBundledGitPreferences(store, {
       ...options,
@@ -194,7 +198,7 @@ describe('Git v2 storage migration', () => {
       .resolves.toEqual({ found: true, value: 'current' })
   })
 
-  it('reports no migration when a pre-existing active snapshot remains authoritative', async () => {
+  it('merges missing candidate values into a pre-existing active snapshot without replacing active values', async () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-git-storage-existing-active-'))
     roots.push(root)
     const store = new PluginStorageStore(root)
@@ -208,9 +212,52 @@ describe('Git v2 storage migration', () => {
     await expect(migrateBundledGitPreferences(store, {
       packageVersion: version,
       sourceSnapshot: null,
-      legacySettings: { 'agentTeam.git.logScope': 'current' },
-    })).resolves.toEqual({ migrated: false, completed: true })
+      legacySettings: {
+        'agentTeam.git.logScope': 'current',
+        'git-ai-panel-width': 480,
+      },
+    })).resolves.toEqual({ migrated: true, completed: true })
     await expect(store.execute(readExecution('active', 'plugin', 'agentTeam.git.logScope', null)))
       .resolves.toEqual({ found: true, value: 'all' })
+    await expect(store.execute(readExecution('active', 'plugin', 'git-ai-panel-width', null)))
+      .resolves.toEqual({ found: true, value: 480 })
+  })
+
+  it('leaves the marker unset when an active merge is interrupted and completes on retry', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-git-storage-active-retry-'))
+    roots.push(root)
+    const store = new PluginStorageStore(root)
+    await store.execute({
+      address: 'storage.set',
+      args: { scope: 'plugin', key: 'agentTeam.git.logScope', value: 'all' },
+      partition: { pluginId, workspaceId: null, key: 'agentTeam.git.logScope' },
+      snapshot: { pluginId, packageVersion: version, tier: 'active' },
+    })
+    const originalExecute = store.execute.bind(store)
+    const execute = vi.spyOn(store, 'execute')
+    execute.mockImplementation(async (request) => {
+      if (
+        request.address === 'storage.set' &&
+        request.snapshot.tier === 'active' &&
+        request.args.key === 'git-ai-panel-width'
+      ) throw new Error('simulated active merge interruption')
+      return originalExecute(request)
+    })
+
+    const options = {
+      packageVersion: version,
+      sourceSnapshot: null,
+      legacySettings: { 'git-ai-panel-width': 500 },
+    }
+    await expect(migrateBundledGitPreferences(store, options))
+      .resolves.toEqual({ migrated: false, completed: false })
+    await expect(store.execute(readExecution('active', 'plugin', '__navide_git_storage_migration_v2', null)))
+      .resolves.toEqual({ found: false, value: null })
+
+    execute.mockRestore()
+    await expect(migrateBundledGitPreferences(store, options))
+      .resolves.toEqual({ migrated: true, completed: true })
+    await expect(store.execute(readExecution('active', 'plugin', 'git-ai-panel-width', null)))
+      .resolves.toEqual({ found: true, value: 500 })
   })
 })

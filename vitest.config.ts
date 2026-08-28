@@ -12,6 +12,7 @@ export default defineConfig({
     alias: {
       '@navide/plugin-contracts': resolve(__dirname, 'packages/plugin-contracts/src/index.ts'),
       '@navide/plugin-sdk': resolve(__dirname, 'packages/plugin-sdk/src/index.ts'),
+      '@navide/plugin-ui/styles.css': resolve(__dirname, 'packages/plugin-ui/src/foundation/styles.css'),
       '@navide/plugin-ui/shared/testing': resolve(__dirname, 'packages/plugin-ui/src/shared/testing.ts'),
       '@navide/plugin-ui/shared': resolve(__dirname, 'packages/plugin-ui/src/shared/index.ts'),
       '@navide/plugin-ui/foundation': resolve(__dirname, 'packages/plugin-ui/src/foundation/index.ts'),
@@ -19,7 +20,6 @@ export default defineConfig({
       '@navide/terminal/testing': resolve(__dirname, 'src/renderer/src/platform/terminal/testing.ts'),
       '@navide/terminal': resolve(__dirname, 'src/renderer/src/platform/terminal/index.ts'),
       '@navide/plugin-shell': resolve(__dirname, 'src/renderer/src/platform/plugin-shell/index.ts'),
-      '@navide/plugin-ui/styles.css': resolve(__dirname, 'packages/plugin-ui/src/foundation/styles.css'),
     },
   },
   define: {
@@ -29,6 +29,7 @@ export default defineConfig({
     environment: 'node',
     // Renderer tests plus electron-free main-process modules (e.g. window-registry).
     include: [
+      'vitest.*.{test,spec}.ts',
       'src/renderer/src/**/*.{test,spec}.ts',
       'src/renderer/plugins/**/*.{test,spec}.ts',
       'src/main/**/*.{test,spec}.ts',

@@ -38,6 +38,7 @@ import { useNotify, useTheme } from '@navide/plugin-ui/foundation'
 import { settingsGet, onSettingsChanged } from '@navide/plugin-ui/shared'
 import {
   GIT_BRANCH_DIFF_KEY,
+  GIT_ACCOUNTS_KEY,
   GIT_FILE_ACCESS_KEY,
   GIT_ISSUES_KEY,
   GIT_TRANSPORT_KEY,
@@ -45,6 +46,7 @@ import {
 } from './ports/gitSurface'
 import type { GitWorkspaceGrantPort } from './ports/gitSurface'
 import GitHistoryModal from './components/GitHistoryModal.vue'
+import GitCredentialModal from './components/GitCredentialModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
@@ -67,8 +69,9 @@ const gitTransport = inject(GIT_TRANSPORT_KEY)!
 const fileAccess = inject(GIT_FILE_ACCESS_KEY)!
 const uiPort = inject(GIT_UI_KEY)!
 const branchDiff = inject(GIT_BRANCH_DIFF_KEY)!
+const accountPort = inject(GIT_ACCOUNTS_KEY)!
 const issuePort = inject(GIT_ISSUES_KEY)!
-if (!gitTransport || !fileAccess || !uiPort || !branchDiff || !issuePort) {
+if (!gitTransport || !fileAccess || !uiPort || !branchDiff || !accountPort || !issuePort) {
   throw new Error('Git plugin ports were not provided by the composition root')
 }
 const { loadTheme } = useTheme()
@@ -172,6 +175,10 @@ const {
   isInitializing,
   cloneRepo,
   addToGitignore,
+  credentialPrompt,
+  showCredentialPrompt,
+  submitCredential,
+  cancelCredential,
 } = git
 
 // Cloud issues (GitHub via gh / GitLab via glab) — same wiring as GitPane.
@@ -423,6 +430,34 @@ async function onResolveOurs(path: string): Promise<void> {
 }
 async function onResolveTheirs(path: string): Promise<void> {
   toastResult(await resolveConflictTheirs(path))
+}
+
+// Fresh AI CLI sessions receive the same bounded repository context as the
+// Host Git window: the stable workspace plus the status currently visible in
+// this package-owned view. Resumed sessions intentionally receive no replay.
+const GIT_CONTEXT_MAX_FILES = 50
+function gitContextFileLines(label: string, files: GitFileEntry[]): string[] {
+  if (!files.length) return []
+  const shown = files.slice(0, GIT_CONTEXT_MAX_FILES).map((f) => `  ${f.status} ${f.path}`)
+  const more = files.length - GIT_CONTEXT_MAX_FILES
+  return [`${label} (${files.length}):`, ...shown, ...(more > 0 ? [`  …and ${more} more`] : [])]
+}
+function buildGitContext(): string {
+  const status = gitStatus.value
+  const lines = [
+    "You are running in a terminal embedded in Navide's Git window, assisting " +
+      'the user who is reviewing and committing changes in this repository.',
+    `Workspace: ${workspacePath}`,
+  ]
+  if (status.branch) lines.push(`Current branch: ${status.branch}`)
+  lines.push('')
+  const files = [
+    ...gitContextFileLines('Staged files', status.staged),
+    ...gitContextFileLines('Unstaged files', status.unstaged),
+    ...gitContextFileLines('Untracked files', status.untracked),
+  ]
+  lines.push(...(files.length ? files : ['Working tree clean.']))
+  return lines.join('\n')
 }
 const aiCliPanelRef = ref<SafeAiCliPanelHandle | null>(null)
 
@@ -2040,7 +2075,11 @@ registerCommand('git.focusAgent', () => {
         </div>
       </section>
 
-      <SafeAiCliPanel ref="aiCliPanelRef" :controller="props.aiCliController" />
+      <SafeAiCliPanel
+        ref="aiCliPanelRef"
+        :controller="props.aiCliController"
+        :build-context="buildGitContext"
+      />
     </div>
 
     <!-- ⋯ popover menu -->
@@ -2058,6 +2097,14 @@ registerCommand('git.focusAgent', () => {
         </template>
       </div>
     </template>
+
+    <GitCredentialModal
+      :show="showCredentialPrompt"
+      :prompt="credentialPrompt"
+      :account-port="accountPort"
+      @submit="submitCredential"
+      @cancel="cancelCredential"
+    />
 
     <NotificationHost />
   </div>

@@ -2,6 +2,7 @@
   "ai-cli": {
     "label": "AI CLI",
     "title": "AI CLI",
+    "profile": "AI CLI profile",
     "start": "Start",
     "stop": "Stop",
     "interrupt": "Interrupt",

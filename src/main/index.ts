@@ -579,11 +579,14 @@ const installedPluginTrust = {
 }
 const pluginCapabilityGrants = new PluginCapabilityGrantStore(pluginsRoot())
 const pluginFactoryOptOuts = new PluginFactoryOptOutStore(pluginsRoot())
-const installedGitPackagePresent = existsSync(join(pluginsRoot(), 'navide.git'))
 const installedPluginLoad = frontendPluginManager.loadInstalledPlugins(pluginsRoot(), {
   provenance: 'official-registry',
   trust: installedPluginTrust,
 })
+// Only a package that passed install verification and produced a usable
+// descriptor suppresses the bundled factory copy. A corrupt/quarantined
+// directory named navide.git is not an authoritative installation.
+const installedGitDescriptorPresent = frontendPluginManager.getDescriptor('navide.git') !== undefined
 frontendPluginManager.setCapabilityGrantResolver((pluginId, packageVersion) =>
   pluginCapabilityGrants.get(pluginId, packageVersion)
 )
@@ -610,7 +613,7 @@ function loadFactoryGitPackage() {
 }
 if (shouldAttemptFactoryGit({
   forcedLegacy: gitRecoveryEnabled,
-  installedPackagePresent: installedGitPackagePresent,
+  installedPackagePresent: installedGitDescriptorPresent,
   optedOut: pluginFactoryOptOuts.has('navide.git'),
 })) {
   const selection = activateFactoryGitWithLegacyFallback({
@@ -629,11 +632,6 @@ if (shouldAttemptFactoryGit({
       `[main] bundled navide.git is unavailable: ${selection.v2Reason}; ${selection.legacyReason}`
     )
   }
-} else if (installedGitPackagePresent && !frontendPluginManager.getDescriptor('navide.git')) {
-  // An installed package directory is authoritative evidence. If it fails
-  // Registry validation, keep Git unavailable instead of hiding the trust
-  // failure behind the factory or legacy artifacts.
-  console.warn('[main] installed navide.git failed validation; bundled fallback remains disabled')
 }
 frontendPluginManager.setActivationFailureHandler((failure) => {
   const recovered = recoverFailedGitV2Activation(failure, {
@@ -1119,16 +1117,40 @@ function currentGitReadOnlyQuery(): Record<string, string> {
   }
 }
 
+let gitStorageMigrationInFlight: { packageVersion: string; promise: Promise<void> } | null = null
+
 async function migrateGitStorage(): Promise<void> {
   const descriptor = frontendPluginManager.getDescriptor('navide.git')
   const packageVersion = descriptor?.packageVersion
   if (!packageVersion) return
-  const migration = await migrateBundledGitPreferences(pluginStorageStore, {
-    packageVersion,
-    sourceSnapshot: gitStorageLifecycle.sourceFor(packageVersion),
-    legacySettings: readUiSettings(),
-  })
-  if (migration.completed) gitStorageLifecycle.rememberActive(packageVersion)
+  if (gitStorageMigrationInFlight?.packageVersion === packageVersion) {
+    return gitStorageMigrationInFlight.promise
+  }
+  const promise = (async () => {
+    const migration = await migrateBundledGitPreferences(pluginStorageStore, {
+      packageVersion,
+      sourceSnapshot: gitStorageLifecycle.sourceFor(packageVersion),
+      legacySettings: readUiSettings(),
+    })
+    if (migration.completed) gitStorageLifecycle.rememberActive(packageVersion)
+  })()
+  gitStorageMigrationInFlight = { packageVersion, promise }
+  try {
+    await promise
+  } finally {
+    if (gitStorageMigrationInFlight?.promise === promise) gitStorageMigrationInFlight = null
+  }
+}
+
+async function prepareCatalogContribution(contributionKey: string): Promise<void> {
+  if (!contributionKey.startsWith('navide.git.')) return
+  const descriptor = frontendPluginManager.getDescriptor('navide.git')
+  if (
+    descriptor?.packageVersion &&
+    pluginCapabilityGrants.get(descriptor.id, descriptor.packageVersion)
+  ) {
+    await migrateGitStorage()
+  }
 }
 
 const DEFAULT_EDITOR_SETTING_KEY = 'agentTeam.defaultEditor'
@@ -1736,6 +1758,7 @@ async function openCatalogContributionWindow(
   workspacePath: string,
   extraParams: Record<string, string> = {},
 ): Promise<{ ok: boolean; error?: string }> {
+  await prepareCatalogContribution(contributionKey)
   const contribution = frontendPluginManager.listContributionCatalog().find(
     (entry) => entry.contributionKey === contributionKey && entry.location === 'window'
   )
@@ -1904,14 +1927,7 @@ ipcMain.handle('plugins:openContribution', async (event, args: Record<string, un
     : null
   const bounds = pluginBoundsFrom(args?.bounds)
   if (!hostWindow || !contributionKey || !workspacePath || !bounds) return { ok: false }
-  const descriptor = frontendPluginManager.getDescriptor(contributionKey.split('.').slice(0, -1).join('.'))
-  if (
-    contributionKey.startsWith('navide.git.') &&
-    descriptor?.packageVersion &&
-    pluginCapabilityGrants.get(descriptor.id, descriptor.packageVersion)
-  ) {
-    await migrateGitStorage()
-  }
+  await prepareCatalogContribution(contributionKey)
   return frontendPluginManager.openContribution(hostWindow, contributionKey, {
     bounds,
     workspacePath,
@@ -1933,14 +1949,6 @@ ipcMain.handle('plugins:openContributionWindow', async (event, args: Record<stri
     normalizeWorkspacePath,
   )
   if (!contributionKey || !workspacePath) return { ok: false }
-  const descriptor = frontendPluginManager.getDescriptor(contributionKey.split('.').slice(0, -1).join('.'))
-  if (
-    contributionKey.startsWith('navide.git.') &&
-    descriptor?.packageVersion &&
-    pluginCapabilityGrants.get(descriptor.id, descriptor.packageVersion)
-  ) {
-    await migrateGitStorage()
-  }
   return openCatalogContributionWindow(contributionKey, workspacePath)
 })
 

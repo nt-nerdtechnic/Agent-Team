@@ -552,7 +552,9 @@ export interface PublicMethodParams {
   'fs.statPath': { path: string }
   'ui.openInEditor': { path: string; line?: number; column?: number }
   'ui.openExternal': { url: string }
-  'aiCli.startSession': { profileId: string; requestId?: string; cols: number; rows: number }
+  'aiCli.listProfiles': Record<string, never>
+  'aiCli.startSession': { profileId: string; requestId?: string; cols: number; rows: number; yolo?: boolean }
+  'aiCli.resumeSession': { cols: number; rows: number }
   'aiCli.cancelStart': { requestId: string }
   'aiCli.reattachSession': { sessionId: string }
   'aiCli.sendInput': { sessionId: string; data: string }
@@ -577,7 +579,9 @@ export interface PublicMethodResults {
   'fs.statPath': { exists: boolean }
   'ui.openInEditor': { opened: boolean }
   'ui.openExternal': { opened: boolean }
+  'aiCli.listProfiles': { profiles: Array<{ id: string; label: string }> }
   'aiCli.startSession': { sessionId: string }
+  'aiCli.resumeSession': { sessionId: string; profileId: string } | null
   'aiCli.cancelStart': Record<string, never>
   'aiCli.reattachSession': { sessionId: string }
   'aiCli.sendInput': Record<string, never>

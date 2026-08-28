@@ -147,6 +147,7 @@ async function migrateBundledGitPreferencesUnlocked(
     const activeMarker = await read(store, 'plugin', MIGRATION_MARKER, packageVersion, 'active', null)
     const pluginMigrationComplete = activeMarker.found && activeMarker.value === true
     let promotedCandidate = false
+    let mergedCandidate = false
 
     if (!pluginMigrationComplete) {
       for (const key of GIT_STORAGE_KEYS) {
@@ -165,9 +166,20 @@ async function migrateBundledGitPreferencesUnlocked(
         )
         promotedCandidate = true
       } catch (error) {
-        // A pre-existing active snapshot is the user's authoritative state. Do
-        // not replace it; mark it once so subsequent opens stay idempotent.
+        // A pre-existing active snapshot is authoritative for keys it already
+        // owns. Missing keys still need to be filled from the prepared
+        // candidate before the completion marker is written.
         if (!(error instanceof Error && /already exists/i.test(error.message))) throw error
+      }
+      if (!promotedCandidate) {
+        for (const key of GIT_STORAGE_KEYS) {
+          const active = await read(store, 'plugin', key, packageVersion, 'active', null)
+          if (active.found) continue
+          const candidate = await read(store, 'plugin', key, packageVersion, 'candidate', null)
+          if (!candidate.found) continue
+          await write(store, 'plugin', key, candidate.value, packageVersion, 'active', null)
+          mergedCandidate = true
+        }
       }
       const activeAfterPromotion = await read(store, 'plugin', MIGRATION_MARKER, packageVersion, 'active', null)
       if (!activeAfterPromotion.found) {
@@ -175,7 +187,7 @@ async function migrateBundledGitPreferencesUnlocked(
       }
     }
 
-    return { migrated: promotedCandidate, completed: true }
+    return { migrated: promotedCandidate || mergedCandidate, completed: true }
   } catch (error) {
     console.warn('[git] v2 storage migration skipped:', error instanceof Error ? error.message : String(error))
     return { migrated: false, completed: false }

@@ -81,6 +81,19 @@ const plRenameText = ref('')
 // OTHER pipelines never clobber the list shown here.
 const stagesApi = useStages(backend, () => plEditingId.value)
 const sActiveStages = computed(() => stagesApi.stages.value)
+const sSelectedId = ref<string | null>(null)
+const sDraft = ref<Stage | null>(null)
+const sIsNew = ref(false)
+const sSaving = ref(false)
+const sError = ref('')
+const sConfirmDelete = ref(false)
+const sConfirmReset = ref(false)
+const sSummary = ref('')
+const sExportBusy = ref(false)
+const sImporting = ref(false)
+const sAddingSlot = ref(false)
+const sEditingSlotIndex = ref<number | null>(null)
+const sSlotDraft = ref<StageSlot>({ agentKey: 'claude', roleKey: '', label: '', kickoffBody: '', isCommander: false })
 
 const plCurrentPipeline = computed(
   () => pipelinesApi.pipelines.value.find((p) => p.id === plEditingId.value) ?? null
@@ -236,20 +249,6 @@ watch(
 const AGENT_OPTIONS: { key: AgentKey; label: string }[] = CLI_AGENT_SPECS.map(
   (s) => ({ key: s.agentKey as AgentKey, label: s.label })
 )
-
-const sSelectedId = ref<string | null>(null)
-const sDraft = ref<Stage | null>(null)
-const sIsNew = ref(false)
-const sSaving = ref(false)
-const sError = ref('')
-const sConfirmDelete = ref(false)
-const sConfirmReset = ref(false)
-const sSummary = ref('')
-const sExportBusy = ref(false)
-const sImporting = ref(false)
-const sAddingSlot = ref(false)
-const sEditingSlotIndex = ref<number | null>(null)
-const sSlotDraft = ref<StageSlot>({ agentKey: 'claude', roleKey: '', label: '', kickoffBody: '', isCommander: false })
 
 const sIsDirty = computed(() => {
   if (!sDraft.value) return false

@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { i18n } from '@navide/plugin-ui/foundation'
 import GitWindowApp from '../GitWindowApp.vue'
 import {
+  GIT_ACCOUNTS_KEY,
   GIT_BRANCH_DIFF_KEY,
   GIT_FILE_ACCESS_KEY,
   GIT_ISSUES_KEY,
@@ -52,6 +53,9 @@ const transport: GitTransport = {
 
 const aiCliController: AiCliSessionController = {
   sessionId: null,
+  profileId: null,
+  listProfiles: vi.fn(async () => [{ id: 'claude', label: 'Claude Code' }]),
+  resume: vi.fn(async () => null),
   start: vi.fn(async () => 'session'),
   send: vi.fn(async () => undefined),
   resize: vi.fn(async () => undefined),
@@ -87,6 +91,7 @@ describe('production navide.git window composition', () => {
         plugins: [i18n],
         stubs: {
           SafeAiCliPanel: true,
+          GitCredentialModal: true,
           GitHistoryModal: true,
           NotificationHost: true,
           DiffPane: true,
@@ -102,6 +107,15 @@ describe('production navide.git window composition', () => {
             openInEditor: vi.fn(), openExternal: vi.fn(), revealPath: vi.fn(), pickFolder: vi.fn(),
           },
           [GIT_BRANCH_DIFF_KEY as symbol]: { load: vi.fn() },
+          [GIT_ACCOUNTS_KEY as symbol]: {
+            accounts: { value: [] },
+            available: { value: true },
+            refresh: vi.fn(async () => undefined),
+            addAccount: vi.fn(async () => true),
+            bind: vi.fn(async () => true),
+            unbind: vi.fn(async () => true),
+            getBinding: vi.fn(async () => null),
+          },
           [GIT_ISSUES_KEY as symbol]: {
             provider: vi.fn(async () => ({ ok: true, payload: { provider: 'none' }, error: null })),
             list: vi.fn(), get: vi.fn(), create: vi.fn(), comment: vi.fn(), setState: vi.fn(),

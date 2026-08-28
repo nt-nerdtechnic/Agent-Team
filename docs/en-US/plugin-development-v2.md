@@ -630,7 +630,7 @@ are not Manifest v2 permissions.
 | `system:fs` | `fs.readFile`, `fs.listDirectory`, `fs.glob`, `fs.stat`, `workspace.filesChanged` | `workspace` |
 | `system:ui` | `ui.openInEditor` | `workspace` |
 | `system:ui` | `ui.openExternal` | `plugin` (HTTPS; Host user-gesture gate) |
-| `system:aiCli` | `aiCli.startSession`, `cancelStart`, `reattachSession`, `sendInput`, `resizeSession`, `redrawSession`, `interruptSession`, `stopSession`, `output`, `exited` | `workspace` |
+| `system:aiCli` | `aiCli.listProfiles`, `startSession`, `resumeSession`, `cancelStart`, `reattachSession`, `sendInput`, `resizeSession`, `redrawSession`, `interruptSession`, `stopSession`, `output`, `exited` | `workspace` |
 | `shell` | `shell.run` | `workspace` |
 
 `workspace` is a resource boundary, not raw workspace filesystem access. The
@@ -763,14 +763,22 @@ including `navide.git`, must still declare `shell: "allowlist"` and pass the
 same package-version grant and authenticated binding checks. This is one
 shared catalog allowlist: adding `gh` and `glab` for Host-owned GitHub/GitLab
 Issue detection also makes those executables available to every package that
-already has the generic allowlist grant. The allowlist matches only the
-canonical top-level executable name: it does not accept wrappers, aliases, or
-path-qualified replacements. It does not restrict subcommands or arguments
-and is not a process sandbox. Git and the `gh`/`glab` CLIs may use pagers,
-aliases, SSH configuration, hooks, tokens, or other mechanisms that indirectly
-execute or contact other programs and services. Therefore
-`shell: "allowlist"` combined with these executables remains a high-trust
-grant.
+already has the generic allowlist grant. The public allowlist accepts only
+canonical top-level executable names and a fixed set of built-in tool
+families; it does not accept wrappers, path-qualified replacements, aliases,
+extensions, credential/auth commands, or unknown external subcommands. Git
+configuration and execution overrides such as `-c`, `-C`, `--config-env`,
+`--git-dir`, `--work-tree`, `--exec-path`, `--upload-pack`, and
+`--receive-pack` are rejected, as are direct execution hooks such as
+`submodule foreach`, `bisect run`, and `rebase --exec`. Host-owned Git and
+Issues services use a separate trusted argv interface and are not constrained
+by this public plugin policy.
+
+This remains a command broker rather than a process sandbox. Permitted Git and
+provider commands can still modify repositories, contact remotes, and invoke
+repository-controlled behavior such as ordinary Git hooks. Treat
+`shell: "allowlist"` as a high-trust grant and request it only when the public
+catalog methods are insufficient.
 
 ### First-party production Git package (Issue 19)
 
@@ -813,7 +821,9 @@ catalog exposes only the Host-mediated AI CLI addresses below:
 
 | Public address | Meaning |
 | --- | --- |
+| `aiCli.listProfiles` | List the Host-allowlisted profile identifiers and labels |
 | `aiCli.startSession` | Start a Host-selected, allowlisted profile |
+| `aiCli.resumeSession` | Resume the detached session owned by this package/workspace/view tuple |
 | `aiCli.cancelStart` | Cancel a Host-owned start request |
 | `aiCli.reattachSession` | Reattach to an already Host-bound session |
 | `aiCli.sendInput` | Send input to an owned session |

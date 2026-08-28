@@ -30,7 +30,7 @@ import {
   GIT_TRANSPORT_KEY,
   GIT_UI_KEY,
 } from './ports/gitSurface'
-import { initKeybindingsPort, initSettingsBackend, seedSettings } from '@navide/plugin-ui/shared'
+import { initKeybindingsPort, initSettingsBackend, seedSettings, settingsReady } from '@navide/plugin-ui/shared'
 
 // Theme token layers — order matters: primitives → semantic roles → themes.
 import '@navide/plugin-ui/styles.css'
@@ -108,17 +108,25 @@ const aiCliController = isLeftContribution ? null : createAiCliSessionController
 initSettingsBackend(settingsPort)
 initKeybindingsPort(createPluginKeybindingsPort())
 
-const app = isLeftContribution
-  ? createApp(GitLeftApp, { surfacePorts, hostPort: contributionHostPort, legacyRepoSelection })
-  : createApp(GitWindowApp, { workspaceGrantPort, aiCliController: aiCliController! })
-app.use(i18n)
-app.provide(GIT_TRANSPORT_KEY, surfacePorts.gitTransport)
-app.provide(GIT_FILE_ACCESS_KEY, surfacePorts.fileAccess)
-app.provide(GIT_UI_KEY, surfacePorts.ui)
-app.provide(GIT_BRANCH_DIFF_KEY, surfacePorts.branchDiff)
-app.provide(GIT_ACCOUNTS_KEY, surfacePorts.accounts)
-app.provide(GIT_ISSUES_KEY, surfacePorts.issues)
-app.mount('#app')
+async function mountPlugin(): Promise<void> {
+  await settingsReady()
 
-// Announce readiness only after the app has mounted and installed every port.
-;(window as unknown as { nav?: { ready?: () => void } }).nav?.ready?.()
+  const app = isLeftContribution
+    ? createApp(GitLeftApp, { surfacePorts, hostPort: contributionHostPort, legacyRepoSelection })
+    : createApp(GitWindowApp, { workspaceGrantPort, aiCliController: aiCliController! })
+  app.use(i18n)
+  app.provide(GIT_TRANSPORT_KEY, surfacePorts.gitTransport)
+  app.provide(GIT_FILE_ACCESS_KEY, surfacePorts.fileAccess)
+  app.provide(GIT_UI_KEY, surfacePorts.ui)
+  app.provide(GIT_BRANCH_DIFF_KEY, surfacePorts.branchDiff)
+  app.provide(GIT_ACCOUNTS_KEY, surfacePorts.accounts)
+  app.provide(GIT_ISSUES_KEY, surfacePorts.issues)
+  app.mount('#app')
+
+  // Announce readiness only after the app has mounted and installed every port.
+  ;(window as unknown as { nav?: { ready?: () => void } }).nav?.ready?.()
+}
+
+void mountPlugin().catch((error: unknown) => {
+  console.error('[navide.git] Failed to mount the plugin view.', error)
+})

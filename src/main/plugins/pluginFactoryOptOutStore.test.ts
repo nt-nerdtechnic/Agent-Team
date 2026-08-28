@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,7 +20,7 @@ describe('PluginFactoryOptOutStore', () => {
     }
   })
 
-  it('fails closed for malformed state until an explicit restore repairs it', () => {
+  it('warns and treats malformed state as not opted out until restore repairs it', () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-plugin-factory-opt-outs-'))
     try {
       writeFileSync(join(root, '.navide-factory-plugin-opt-outs.json'), '{not-json', {
@@ -28,9 +28,12 @@ describe('PluginFactoryOptOutStore', () => {
       })
 
       const store = new PluginFactoryOptOutStore(root)
-      expect(store.has('navide.git')).toBe(true)
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      expect(store.has('navide.git')).toBe(false)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('invalid factory opt-out state'))
       store.remove('navide.git')
       expect(new PluginFactoryOptOutStore(root).has('navide.git')).toBe(false)
+      warn.mockRestore()
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

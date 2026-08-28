@@ -87,4 +87,37 @@ describe('PluginRegionHost', () => {
 
     expect(closeContribution).toHaveBeenCalledWith({ contributionKey: 'acme.files.left' })
   })
+
+  it('keeps an opened contribution mounted while its tab is hidden', async () => {
+    const openContribution = vi.fn().mockResolvedValue({ ok: true })
+    const updateContribution = vi.fn().mockResolvedValue({ ok: true })
+    const closeContribution = vi.fn().mockResolvedValue({ ok: true })
+    window.agentTeam = { plugins: { openContribution, updateContribution, closeContribution } } as unknown as typeof window.agentTeam
+
+    const wrapper = mount(PluginRegionHost, {
+      props: { contribution, workspacePath: '/workspace', visible: true },
+    })
+    await flushPromises()
+
+    await wrapper.setProps({ visible: false })
+    await flushPromises()
+    expect(closeContribution).not.toHaveBeenCalled()
+    expect(updateContribution).toHaveBeenLastCalledWith({
+      contributionKey: 'acme.files.left',
+      bounds: { x: 10, y: 20, width: 300, height: 400 },
+      visible: false,
+    })
+
+    await wrapper.setProps({ visible: true })
+    await flushPromises()
+    expect(openContribution).toHaveBeenCalledTimes(1)
+    expect(updateContribution).toHaveBeenLastCalledWith({
+      contributionKey: 'acme.files.left',
+      bounds: { x: 10, y: 20, width: 300, height: 400 },
+      visible: true,
+    })
+
+    wrapper.unmount()
+    await flushPromises()
+  })
 })

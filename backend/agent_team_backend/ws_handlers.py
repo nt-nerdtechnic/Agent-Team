@@ -37,7 +37,7 @@ from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID, vault_to_thread
-from .host_shell import parse_allowlisted_command, run_allowlisted_text
+from .host_shell import parse_public_allowlisted_command, run_allowlisted_text
 from .mcp_settings import (
     MCPSettingsConflictError,
     MCPSettingsError,
@@ -562,8 +562,12 @@ async def git_sync(session: "Session", msg_id: str, msg_type: str, payload: dict
     ws_path = payload.get("workspace_path") or ""
     result = await app.git_service.sync(
         ws_path,
-        on_credential_request=app.build_credential_request_emitter(ws_path),
-        on_credential_settled=app.build_credential_settled_emitter(ws_path),
+        on_credential_request=app.build_credential_request_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
+        on_credential_settled=app.build_credential_settled_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
         credential=app._git_credential(payload),
     )
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -601,8 +605,12 @@ async def git_fetch(session: "Session", msg_id: str, msg_type: str, payload: dic
     ws_path = payload.get("workspace_path") or ""
     result = await app.git_service.fetch(
         ws_path,
-        on_credential_request=app.build_credential_request_emitter(ws_path),
-        on_credential_settled=app.build_credential_settled_emitter(ws_path),
+        on_credential_request=app.build_credential_request_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
+        on_credential_settled=app.build_credential_settled_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
         credential=app._git_credential(payload),
     )
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -617,8 +625,12 @@ async def git_pull(session: "Session", msg_id: str, msg_type: str, payload: dict
     ws_path = payload.get("workspace_path") or ""
     result = await app.git_service.pull_only(
         ws_path,
-        on_credential_request=app.build_credential_request_emitter(ws_path),
-        on_credential_settled=app.build_credential_settled_emitter(ws_path),
+        on_credential_request=app.build_credential_request_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
+        on_credential_settled=app.build_credential_settled_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
         credential=app._git_credential(payload),
     )
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -637,8 +649,12 @@ async def git_push(session: "Session", msg_id: str, msg_type: str, payload: dict
         ws_path,
         remote,
         branch,
-        on_credential_request=app.build_credential_request_emitter(ws_path),
-        on_credential_settled=app.build_credential_settled_emitter(ws_path),
+        on_credential_request=app.build_credential_request_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
+        on_credential_settled=app.build_credential_settled_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
         credential=app._git_credential(payload),
     )
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -1272,8 +1288,12 @@ async def git_push_upstream(session: "Session", msg_id: str, msg_type: str, payl
         ws_path,
         branch,
         remote,
-        on_credential_request=app.build_credential_request_emitter(ws_path),
-        on_credential_settled=app.build_credential_settled_emitter(ws_path),
+        on_credential_request=app.build_credential_request_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
+        on_credential_settled=app.build_credential_settled_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
         credential=app._git_credential(payload),
     )
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -1305,8 +1325,12 @@ async def git_clone(session: "Session", msg_id: str, msg_type: str, payload: dic
     result = await app.git_service.clone_repo(
         url,
         target_dir,
-        on_credential_request=app.build_credential_request_emitter(ws_path),
-        on_credential_settled=app.build_credential_settled_emitter(ws_path),
+        on_credential_request=app.build_credential_request_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
+        on_credential_settled=app.build_credential_settled_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
         credential=app._git_credential(payload),
     )
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -1367,8 +1391,12 @@ async def git_pull_rebase(session: "Session", msg_id: str, msg_type: str, payloa
     ws_path = payload.get("workspace_path") or ""
     result = await app.git_service.pull_rebase(
         ws_path,
-        on_credential_request=app.build_credential_request_emitter(ws_path),
-        on_credential_settled=app.build_credential_settled_emitter(ws_path),
+        on_credential_request=app.build_credential_request_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
+        on_credential_settled=app.build_credential_settled_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
         credential=app._git_credential(payload),
     )
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -1387,8 +1415,12 @@ async def git_push_force(session: "Session", msg_id: str, msg_type: str, payload
         ws_path,
         remote,
         branch,
-        on_credential_request=app.build_credential_request_emitter(ws_path),
-        on_credential_settled=app.build_credential_settled_emitter(ws_path),
+        on_credential_request=app.build_credential_request_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
+        on_credential_settled=app.build_credential_settled_emitter(
+            ws_path, str(payload.get("credential_owner_nonce") or "")
+        ),
         credential=app._git_credential(payload),
     )
     await session.send_json(make_response(msg_id, msg_type, result))
@@ -3678,7 +3710,7 @@ async def shell_run(session: "Session", msg_id: str, msg_type: str, payload: dic
             await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "workspace path is required"}))
             return
         try:
-            argv = parse_allowlisted_command(cmd)
+            argv = parse_public_allowlisted_command(cmd)
         except ValueError as exc:
             await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": str(exc)}))
             return

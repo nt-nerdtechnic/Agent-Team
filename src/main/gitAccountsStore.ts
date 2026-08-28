@@ -92,7 +92,12 @@ function emptyDoc(): GitAccountsDoc {
  */
 export function normalizeGitAccountHost(value: string): string {
   const raw = String(value ?? '').trim()
-  if (!raw || raw !== value || /[/?#@]/.test(raw)) throw new Error('invalid Git host')
+  if (
+    !raw ||
+    raw !== value ||
+    raw.normalize('NFKC') !== raw ||
+    /[/?#@]/.test(raw)
+  ) throw new Error('invalid Git host')
   const isBracketedIpv6 = /^\[[0-9a-fA-F:.]+\]$/.test(raw)
   if (!isBracketedIpv6 && raw.includes(':')) throw new Error('invalid Git host')
   try {

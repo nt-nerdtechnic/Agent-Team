@@ -594,6 +594,7 @@ def _extract_host_from_prompt(prompt: str) -> str:
 
 def build_credential_request_emitter(
     workspace_path: str,
+    credential_owner_nonce: str = "",
 ) -> Callable[[str, str], Awaitable[None]]:
     """Build the `on_request` callback for git_service.create_askpass_context()
     (Phase C). Broadcasts a git.credential_request event to every connected
@@ -611,6 +612,11 @@ def build_credential_request_emitter(
                     "workspace_path": workspace_path,
                     "host": _extract_host_from_prompt(prompt),
                     "prompt": prompt,
+                    **(
+                        {"credential_owner_nonce": credential_owner_nonce}
+                        if credential_owner_nonce
+                        else {}
+                    ),
                 },
             )
         )
@@ -620,6 +626,7 @@ def build_credential_request_emitter(
 
 def build_credential_settled_emitter(
     workspace_path: str,
+    credential_owner_nonce: str = "",
 ) -> Callable[[str, str | None], Awaitable[None]]:
     """Build the `on_settled` callback for git_service.create_askpass_context()
     (Phase C). Emits git.credential_cancelled only when a request settles with
@@ -631,7 +638,15 @@ def build_credential_settled_emitter(
             await broadcast(
                 make_event(
                     "git.credential_cancelled",
-                    {"request_id": request_id, "workspace_path": workspace_path},
+                    {
+                        "request_id": request_id,
+                        "workspace_path": workspace_path,
+                        **(
+                            {"credential_owner_nonce": credential_owner_nonce}
+                            if credential_owner_nonce
+                            else {}
+                        ),
+                    },
                 )
             )
 

@@ -10,6 +10,8 @@ export const HOST_GIT_USER_PREFERENCE_KEYS = [
   'agentTeam.git.logOrder',
   'agentTeam.git.autoCommit',
   'agentTeam.gitTopRatio',
+  'git-ai-panel-width',
+  'git-ai-panel-width.agent',
 ] as const
 
 export const HOST_GIT_READ_ONLY_KEYS = [

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import MultiRepoGit from './components/MultiRepoGit.vue'
-import { onSettingsChanged, settingsGet } from '@navide/plugin-ui/shared'
+import { onSettingsChanged, settingsGet, useKeybindings } from '@navide/plugin-ui/shared'
 import type { GitSurfacePorts, LegacyRepoSelectionPort } from './ports/gitSurface'
-import type { GitContributionState } from './ports/gitContribution'
+import { HOST_GIT_COMMAND_IDS, type GitContributionState } from './ports/gitContribution'
 import type { PluginGitContributionHostPort } from './pluginSurfacePorts'
 
 const props = defineProps<{
@@ -23,6 +23,13 @@ const state = ref<GitContributionState>({
 const analyzerModel = ref(settingsGet('agentTeam.analyzerModel', ''))
 let stopState: (() => void) | null = null
 let stopSettings: (() => void) | null = null
+const { registerCommand } = useKeybindings()
+
+for (const command of HOST_GIT_COMMAND_IDS) {
+  registerCommand(command, () => {
+    void dispatch({ operation: 'execute_host_command', command })
+  })
+}
 
 function applyState(next: GitContributionState): void {
   if (next.workspacePath === workspacePath) state.value = next

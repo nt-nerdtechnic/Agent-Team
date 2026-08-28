@@ -39,7 +39,15 @@ export function activateFactoryGitWithLegacyFallback<T>(dependencies: {
   | { mode: 'v2'; activation: T }
   | { mode: 'legacy'; v2Reason: string }
   | { mode: 'unavailable'; v2Reason: string; legacyReason: string } {
-  const factory = dependencies.loadFactory()
+  let factory: FactoryLoadSuccess<T> | FactoryLoadFailure
+  try {
+    factory = dependencies.loadFactory()
+  } catch (error) {
+    factory = {
+      loaded: false,
+      reason: error instanceof Error ? error.message : String(error),
+    }
+  }
   if (factory.loaded) return { mode: 'v2', activation: factory.activation }
   const legacy = dependencies.activateLegacy()
   if (legacy.registered) return { mode: 'legacy', v2Reason: factory.reason }

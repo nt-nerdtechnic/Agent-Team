@@ -24,6 +24,7 @@ let observer: ResizeObserver | null = null
 let disposed = false
 let opened = false
 let openedWorkspace = ''
+let lastBounds: { x: number; y: number; width: number; height: number } | null = null
 let queue = Promise.resolve()
 let syncGeneration = 0
 
@@ -47,21 +48,36 @@ function sync(): void {
     if (disposed || generation !== syncGeneration) return
     const workspacePath = props.workspacePath.trim()
     const contributionKey = props.contribution.contributionKey
-    if (!workspacePath || !props.visible) {
+    if (!workspacePath) {
       if (opened) {
         await window.agentTeam?.plugins?.closeContribution({ contributionKey })
         opened = false
         openedWorkspace = ''
+        lastBounds = null
       }
       return
     }
-    const rect = bounds()
-    if (!rect) return
     if (opened && openedWorkspace !== workspacePath) {
       await window.agentTeam?.plugins?.closeContribution({ contributionKey })
       opened = false
       openedWorkspace = ''
+      lastBounds = null
     }
+    if (!props.visible) {
+      const rect = bounds() ?? lastBounds
+      if (!opened || !rect) return
+      const result = await window.agentTeam?.plugins?.updateContribution({
+        contributionKey,
+        bounds: rect,
+        visible: false,
+      })
+      if (!result?.ok) throw new Error('plugin contribution is no longer active')
+      error.value = null
+      return
+    }
+    const rect = bounds()
+    if (!rect) return
+    lastBounds = rect
     if (!opened) {
       const result = await window.agentTeam?.plugins?.openContribution({
         contributionKey,
@@ -115,6 +131,7 @@ onBeforeUnmount(() => {
     })
     opened = false
     openedWorkspace = ''
+    lastBounds = null
   })
 })
 </script>

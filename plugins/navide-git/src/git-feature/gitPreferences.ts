@@ -4,6 +4,8 @@ export const GIT_USER_PREFERENCE_KEYS = [
   'agentTeam.git.logOrder',
   'agentTeam.git.autoCommit',
   'agentTeam.gitTopRatio',
+  'git-ai-panel-width',
+  'git-ai-panel-width.agent',
 ] as const
 
 /** Host-owned settings bootstrapped into and broadcast to Git v2 views. */

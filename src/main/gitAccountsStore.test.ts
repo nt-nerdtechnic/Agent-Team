@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   GitAccountsStore,
   EncryptionUnavailableError,
+  normalizeGitAccountHost,
   type GitAccountCrypto
 } from './gitAccountsStore'
 
@@ -88,6 +89,12 @@ describe('GitAccountsStore', () => {
     ]) {
       expect(() => store.add({ label: 'bad', host, username: 'u', token: 'tok-host' })).toThrow()
     }
+  })
+
+  it('canonicalizes IDNA hostnames without accepting compatibility-character lookalikes', () => {
+    expect(normalizeGitAccountHost('bücher.example')).toBe('xn--bcher-kva.example')
+    expect(normalizeGitAccountHost('xn--bcher-kva.example')).toBe('xn--bcher-kva.example')
+    expect(() => normalizeGitAccountHost('ｇｉｔｈｕｂ．ｃｏｍ')).toThrow('invalid Git host')
   })
 
   it('normalizes trailing-slash workspace paths to the same binding', () => {

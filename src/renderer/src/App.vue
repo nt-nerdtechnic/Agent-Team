@@ -231,7 +231,7 @@ import {
 } from './lib/cliAwaitingInput'
 import { markerTurnActionFor } from './lib/sessionMarkerTurn'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
-import { initKeybindingsPort, useKeybindings, registerCommand, setContext } from '@navide/plugin-ui/shared'
+import { executeCommand, initKeybindingsPort, useKeybindings, registerCommand, setContext } from '@navide/plugin-ui/shared'
 import { useUiActionBus } from './composables/useUiActionBus'
 import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
 import { useStatusBarPopover } from './composables/useStatusBarPopover'
@@ -641,7 +641,10 @@ const workspaceSelected = ref<boolean>(
 // workspace (Welcome picks/switches happen without a reload, so main can't see
 // them), and ask once whether the previous run exited uncleanly — only the
 // first window to ask gets the list and shows the restore prompt.
-watch(currentWorkspace, (v) => { window.agentTeam?.reportWorkspace?.(v) }, { immediate: true })
+watch(currentWorkspace, (v, previous) => {
+  window.agentTeam?.reportWorkspace?.(v)
+  if (previous !== undefined && previous !== v) gitChangesCount.value = 0
+}, { immediate: true })
 
 // Record an externally opened folder in Recent once the backend accepts
 // requests — see bootWorkspaceToRecord for which boots qualify.
@@ -3824,6 +3827,9 @@ function onGitContributionAction(envelope: {
       return
     case 'changes_count':
       gitChangesCount.value = typedAction.count
+      return
+    case 'execute_host_command':
+      executeCommand(typedAction.command)
       return
   }
 }

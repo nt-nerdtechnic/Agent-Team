@@ -5,19 +5,19 @@
  * silently drift.
  */
 export const AI_CLI_PROFILES = {
-  claude: { command: 'claude', yoloFlag: '--dangerously-skip-permissions' },
-  codex: { command: 'codex', yoloFlag: '--dangerously-bypass-approvals-and-sandbox' },
-  antigravity: { command: 'agy', yoloFlag: '--dangerously-skip-permissions' },
-  grok: { command: 'grok' },
-  kimi: { command: 'kimi', yoloFlag: '--yolo' },
-  opencode: { command: 'opencode', yoloFlag: '--auto' },
-  qwen: { command: 'qwen', yoloFlag: '--yolo' },
-  kilo: { command: 'kilo', yoloFlag: '--auto' },
-  pi: { command: 'pi' },
-  copilot: { command: 'copilot', yoloFlag: '--yolo' },
-  cursor: { command: 'agent', yoloFlag: '--force' },
-  aider: { command: 'aider', yoloFlag: '--yes-always' },
-  muse: { command: 'muse', yoloFlag: '--disable-approval' },
+  claude: { label: 'Claude Code', command: 'claude', yoloFlag: '--dangerously-skip-permissions' },
+  codex: { label: 'Codex', command: 'codex', yoloFlag: '--dangerously-bypass-approvals-and-sandbox' },
+  antigravity: { label: 'Antigravity CLI', command: 'agy', yoloFlag: '--dangerously-skip-permissions' },
+  grok: { label: 'Grok CLI', command: 'grok' },
+  kimi: { label: 'Kimi Code', command: 'kimi', yoloFlag: '--yolo' },
+  opencode: { label: 'OpenCode', command: 'opencode', yoloFlag: '--auto' },
+  qwen: { label: 'Qwen Code', command: 'qwen', yoloFlag: '--yolo' },
+  kilo: { label: 'Kilo Code', command: 'kilo', yoloFlag: '--auto' },
+  pi: { label: 'Pi', command: 'pi' },
+  copilot: { label: 'Copilot CLI', command: 'copilot', yoloFlag: '--yolo' },
+  cursor: { label: 'Cursor CLI', command: 'agent', yoloFlag: '--force' },
+  aider: { label: 'Aider', command: 'aider', yoloFlag: '--yes-always' },
+  muse: { label: 'Muse Code', command: 'muse', yoloFlag: '--disable-approval' },
 } as const
 
 export type AiCliProfileId = keyof typeof AI_CLI_PROFILES

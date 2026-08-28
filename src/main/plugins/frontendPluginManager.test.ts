@@ -582,6 +582,22 @@ describe('registerDescriptor reserved-id guard', () => {
     })
   })
 
+  it('derives the same workspace identity across manager instances', () => {
+    const first = new FrontendPluginManager().gitCapabilityContext(
+      '1.0.0',
+      '/workspace/project/../project',
+      'git-left',
+    )
+    const second = new FrontendPluginManager().gitCapabilityContext(
+      '1.0.0',
+      '/workspace/project',
+      'git-window',
+    )
+
+    expect(first.runtimeBinding?.workspaceId).toBe(second.runtimeBinding?.workspaceId)
+    expect(first.runtimeBinding?.workspaceId).toMatch(/^[a-f0-9]{64}$/)
+  })
+
   it('fails closed when a catalog contribution lacks an exact approved grant', async () => {
     const mgr = new FrontendPluginManager()
     const packageDescriptor: PluginLaunchDescriptor = {
@@ -655,6 +671,104 @@ describe('registerDescriptor reserved-id guard', () => {
       packageVersion: '1.0.0',
       reason: 'entry load failed: NAME_NOT_RESOLVED (-105)',
     })
+  })
+
+  it('starts the v2 readiness timeout only after the entry finishes loading', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDescriptor: PluginLaunchDescriptor = {
+        ...descriptor('navide.git'),
+        packageVersion: '1.0.0',
+        capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+        views: [{
+          id: 'left',
+          contributionKey: 'navide.git.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Git',
+          entryFile: '/plugins/navide.git/frontend/left/index.html',
+        }],
+      }
+      mgr.registerInstalledPackage(
+        { id: 'navide.git', requires: ['fs'], provenance: 'official-registry' },
+        packageDescriptor,
+        { official: true },
+      )
+      mgr.setCapabilityGrantResolver(() => ({
+        packageVersion: '1.0.0', system: ['fs'], storage: true,
+      }))
+      const onFailure = vi.fn()
+      mgr.setActivationFailureHandler(onFailure)
+      const host = new FakeBrowserWindow()
+      await mgr.openContribution(asHost(host), 'navide.git.left', {
+        bounds: { x: 0, y: 0, width: 300, height: 500 },
+        workspacePath: '/workspace',
+      })
+      const webContents = (host.children[0] as FakeViewLike).webContents as unknown as {
+        emit(event: string, ...args: unknown[]): void
+      }
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(onFailure).not.toHaveBeenCalled()
+
+      webContents.emit('did-finish-load')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(onFailure).toHaveBeenCalledWith({
+        pluginId: 'navide.git',
+        packageVersion: '1.0.0',
+        reason: 'plugin readiness handshake timed out',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not start a timeout when readiness arrives before did-finish-load', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDescriptor: PluginLaunchDescriptor = {
+        ...descriptor('navide.git'),
+        packageVersion: '1.0.0',
+        capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+        views: [{
+          id: 'left',
+          contributionKey: 'navide.git.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Git',
+          entryFile: '/plugins/navide.git/frontend/left/index.html',
+        }],
+      }
+      mgr.registerInstalledPackage(
+        { id: 'navide.git', requires: ['fs'], provenance: 'official-registry' },
+        packageDescriptor,
+        { official: true },
+      )
+      mgr.setCapabilityGrantResolver(() => ({
+        packageVersion: '1.0.0', system: ['fs'], storage: true,
+      }))
+      const onFailure = vi.fn()
+      mgr.setActivationFailureHandler(onFailure)
+      const host = new FakeBrowserWindow()
+      await mgr.openContribution(asHost(host), 'navide.git.left', {
+        bounds: { x: 0, y: 0, width: 300, height: 500 },
+        workspacePath: '/workspace',
+      })
+      const webContents = (host.children[0] as FakeViewLike).webContents as unknown as {
+        id: number
+        emit(event: string, ...args: unknown[]): void
+      }
+
+      ipcListeners.get('plugin:ready')?.({ sender: { id: webContents.id } })
+      webContents.emit('did-finish-load')
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(onFailure).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -3428,6 +3542,7 @@ describe('first-party Git private bridge', () => {
     view: FakeViewLike
     host: FakeBrowserWindow
     sent: Array<{ channel: string; args: unknown[] }>
+    instanceId: string
   }> {
     const mgr = new FrontendPluginManager()
     const descriptor = gitDescriptor(mgr, workspacePath, audience)
@@ -3443,7 +3558,7 @@ describe('first-party Git private bridge', () => {
       workspacePath,
       capabilityContext: descriptor.capabilityContext,
     })
-    return { mgr, view: host.children[0] as FakeViewLike, host, sent }
+    return { mgr, view: host.children[0] as FakeViewLike, host, sent, instanceId: handle.instanceId }
   }
 
   async function call(
@@ -4110,14 +4225,16 @@ describe('first-party Git private bridge', () => {
 
   it('keeps account credentials Host-owned and workspace-scoped', async () => {
     const { mgr, view } = await openGitView()
+    const bind = vi.fn()
+    const unbind = vi.fn()
     mgr.setGitAccountHandlers({
       available: () => true,
       list: () => [{ id: 'account-1', label: 'GitHub', host: 'github.com', username: 'alice', tokenLast4: '1234' }],
       add: () => ({ id: 'account-2', label: 'GitLab', host: 'gitlab.com', username: 'bob', tokenLast4: '5678' }),
       update: () => undefined,
       remove: () => undefined,
-      bind: () => undefined,
-      unbind: () => undefined,
+      bind,
+      unbind,
       getBinding: () => 'account-1',
       getCredential: () => ({ username: 'alice', token: 'secret-token', expectedHost: 'github.com' }),
     })
@@ -4128,9 +4245,30 @@ describe('first-party Git private bridge', () => {
       ok: true,
       result: {
         available: true,
-        accounts: [{ id: 'account-1', label: 'GitHub', host: 'github.com', username: 'alice' }],
+        accounts: [{ id: 'account-1', label: 'GitHub', host: 'github.com', username: 'alice', tokenLast4: '1234' }],
       },
     })
+
+    await expect(call(view, 'git.account', {
+      operation: 'bind',
+      payload: { accountId: 'account-1' },
+    }, 'git-bind')).resolves.toMatchObject({ ok: true, result: { accountId: 'account-1' } })
+    expect(bind).toHaveBeenCalledWith('/workspace', 'account-1')
+
+    await expect(call(view, 'git.account', {
+      operation: 'unbind',
+      payload: {},
+    }, 'git-unbind')).resolves.toMatchObject({ ok: true, result: { accountId: null } })
+    expect(unbind).toHaveBeenCalledWith('/workspace')
+
+    await expect(call(view, 'git.account', {
+      operation: 'bind',
+      payload: { accountId: 'account-1', workspace_path: '/other' },
+    }, 'git-bind-forged-workspace')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+    expect(bind).toHaveBeenCalledTimes(1)
 
     const response = await call(view, 'git.account', {
       operation: 'get_credential',
@@ -4148,6 +4286,29 @@ describe('first-party Git private bridge', () => {
     }, 'git-2')
     expect(denied).toMatchObject({
       reqId: 'git-2',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('limits account actions to Git left and window audiences', async () => {
+    const { mgr, view } = await openGitView('/workspace', 'git-history')
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => null,
+      getCredential: () => null,
+    })
+
+    await expect(call(view, 'git.account', {
+      operation: 'list',
+      payload: {},
+    }, 'git-account-wrong-audience')).resolves.toMatchObject({
       ok: false,
       error: { code: 'CAPABILITY_DENIED' },
     })
@@ -4354,11 +4515,13 @@ describe('first-party Git private bridge', () => {
     }, 'git-with-native-auth')
     await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
     const request = JSON.parse(socket.sent[0]!)
-    expect(request.payload).toEqual({
+    expect(request.payload).toMatchObject({
       workspace_path: '/workspace',
       remote: 'origin',
       branch: 'main',
     })
+    expect(request.payload.credential_owner_nonce).toEqual(expect.any(String))
+    expect(request.payload).not.toHaveProperty('credential')
     socket.receive({
       id: request.id,
       type: request.type,
@@ -4369,6 +4532,317 @@ describe('first-party Git private bridge', () => {
     })
     await expect(operation).resolves.toMatchObject({ ok: true })
     expect(getCredential).toHaveBeenCalledWith('/workspace')
+  })
+
+  it('releases an interactive credential owner when the backend is unavailable', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => null,
+      getCredential: () => null,
+    })
+
+    await expect(call(view, 'git.request', {
+      type: 'git.fetch',
+      payload: { workspace_path: '/workspace' },
+    }, 'git-no-backend-owner')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BACKEND_ERROR' },
+    })
+    const owners = (mgr as unknown as { gitCredentialOwners: Map<string, unknown> }).gitCredentialOwners
+    expect(owners.size).toBe(0)
+  })
+
+  it('routes interactive credential prompts and replies to the exact requesting instance', async () => {
+    const first = await openGitView('/workspace', 'git-left')
+    const secondDescriptor = gitDescriptor(first.mgr, '/workspace', 'git-left')
+    const secondHost = new FakeBrowserWindow()
+    await first.mgr.openView(secondDescriptor, secondDescriptor.views![0], {
+      hostWindow: asHost(secondHost),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: secondDescriptor.capabilityContext,
+    })
+    const secondView = secondHost.children[0] as FakeViewLike
+    first.mgr.setBackendWsUrl('ws://git-interactive-credential-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    first.mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => null,
+      getCredential: () => null,
+    })
+
+    await expect(call(first.view, 'git.request', {
+      type: 'git.fetch',
+      payload: {
+        workspace_path: '/workspace',
+        credential_owner_nonce: 'renderer-chosen',
+      },
+    }, 'git-forged-credential-owner')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+
+    const operation = call(first.view, 'git.request', {
+      type: 'git.fetch',
+      payload: { workspace_path: '/workspace' },
+    }, 'git-interactive-fetch')
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+    const fetchRequest = JSON.parse(socket.sent[0]!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(fetchRequest.payload.credential_owner_nonce).toMatch(/^[a-f0-9-]{36}$/)
+
+    socket.receive({
+      id: 'credential-event',
+      type: 'git.credential_request',
+      payload: {
+        request_id: 'askpass-1',
+        workspace_path: '/workspace',
+        host: 'github.com',
+        prompt: "Username for 'https://github.com': ",
+        credential_owner_nonce: fetchRequest.payload.credential_owner_nonce,
+      },
+      timestamp: '',
+    })
+    const credentialEvents = (view: FakeViewLike) => view.webContents.sent.filter(
+      (message) => message.channel === 'plugin:cap:event' &&
+        (message.args[0] as { type?: string }).type === 'git.credential_request',
+    )
+    expect(credentialEvents(first.view)).toHaveLength(1)
+    expect(credentialEvents(secondView)).toHaveLength(0)
+
+    await expect(call(secondView, 'git.request', {
+      type: 'git.credential_submit',
+      payload: { request_id: 'askpass-1', value: 'forged' },
+    }, 'forged-submit')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+    expect(socket.sent).toHaveLength(1)
+
+    const submit = call(first.view, 'git.request', {
+      type: 'git.credential_submit',
+      payload: { request_id: 'askpass-1', value: 'alice' },
+    }, 'owner-submit')
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(2))
+    const submitRequest = JSON.parse(socket.sent[1]!)
+    expect(submitRequest.type).toBe('git.credential_submit')
+    socket.receive({
+      id: submitRequest.id,
+      type: submitRequest.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(submit).resolves.toMatchObject({ ok: true })
+
+    socket.receive({
+      id: fetchRequest.id,
+      type: fetchRequest.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(operation).resolves.toMatchObject({ ok: true })
+  })
+
+  it('buffers early AI output and resumes a detached session by Host tuple', async () => {
+    vi.useFakeTimers()
+    try {
+      const first = await openGitView('/workspace', 'git-window')
+      first.mgr.setBackendWsUrl('ws://git-ai-resume-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+      const runtimeOf = (instanceId: string) => (
+        first.mgr as unknown as {
+          running: Map<string, { capabilityContext: HostCapabilityContext }>
+        }
+      ).running.get(instanceId)!.capabilityContext.runtimeBinding!
+
+      await expect(first.mgr.executePublicCapability({
+        kind: 'public',
+        address: 'aiCli.listProfiles',
+        scope: 'workspace',
+        runtime: runtimeOf(first.instanceId),
+        args: {},
+      })).resolves.toMatchObject({
+        profiles: expect.arrayContaining([{ id: 'claude', label: 'Claude Code' }]),
+      })
+
+      const start = first.mgr.executePublicCapability({
+        kind: 'public',
+        address: 'aiCli.startSession',
+        scope: 'workspace',
+        runtime: runtimeOf(first.instanceId),
+        args: {
+          profileId: 'claude',
+          requestId: 'start-1',
+          cols: 80,
+          rows: 24,
+          yolo: true,
+        },
+      })
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+      const create = JSON.parse(socket.sent[0]!)
+      expect(create.type).toBe('terminal.create')
+      expect(create.payload.command).toContain('--dangerously-skip-permissions')
+
+      socket.receive({
+        id: 'early-output',
+        type: 'terminal.output',
+        payload: {
+          terminal_session_id: 'ai-session-1',
+          pane_id: create.payload.pane_id,
+          sequence: 1,
+          data: 'early output',
+        },
+        timestamp: '',
+      })
+      expect(first.view.webContents.sent.some((message) =>
+        message.channel === 'plugin:cap:event' &&
+        (message.args[0] as { type?: string }).type === 'aiCli.output'
+      )).toBe(false)
+
+      socket.receive({
+        id: create.id,
+        type: create.type,
+        ok: true,
+        payload: {
+          terminal_session_id: 'ai-session-1',
+          pane_id: create.payload.pane_id,
+          create_generation: 'start-1',
+        },
+        error: null,
+        timestamp: '',
+      })
+      await expect(start).resolves.toEqual({ sessionId: 'ai-session-1' })
+      await vi.advanceTimersByTimeAsync(12)
+      expect(first.view.webContents.sent).toContainEqual({
+        channel: 'plugin:cap:event',
+        args: [{ type: 'aiCli.output', data: { sessionId: 'ai-session-1', data: 'early output' } }],
+      })
+
+      first.mgr.destroyInstance(first.instanceId)
+      const descriptor = gitDescriptor(first.mgr, '/workspace', 'git-window')
+      const secondHost = new FakeBrowserWindow()
+      const second = await first.mgr.openView(descriptor, descriptor.views![0], {
+        hostWindow: asHost(secondHost),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        capabilityContext: descriptor.capabilityContext,
+      })
+      const resume = first.mgr.executePublicCapability({
+        kind: 'public',
+        address: 'aiCli.resumeSession',
+        scope: 'workspace',
+        runtime: runtimeOf(second.instanceId),
+        args: { cols: 100, rows: 30 },
+      })
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(2))
+      const reattach = JSON.parse(socket.sent[1]!)
+      expect(reattach).toMatchObject({
+        type: 'terminal.reattach',
+        payload: { terminal_session_ids: ['ai-session-1'], cols: 100, rows: 30 },
+      })
+      socket.receive({
+        id: reattach.id,
+        type: reattach.type,
+        ok: true,
+        payload: { alive: ['ai-session-1'], dead: [] },
+        error: null,
+        timestamp: '',
+      })
+      await expect(resume).resolves.toEqual({ sessionId: 'ai-session-1', profileId: 'claude' })
+      expect(socket.sent.map((raw) => JSON.parse(raw).type)).toEqual([
+        'terminal.create',
+        'terminal.reattach',
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bounds and expires AI output that arrives before session creation commits', async () => {
+    vi.useFakeTimers()
+    try {
+      const opened = await openGitView('/workspace', 'git-window')
+      opened.mgr.setBackendWsUrl('ws://git-ai-early-buffer-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+      const runtime = (
+        opened.mgr as unknown as {
+          running: Map<string, { capabilityContext: HostCapabilityContext }>
+        }
+      ).running.get(opened.instanceId)!.capabilityContext.runtimeBinding!
+      const start = opened.mgr.executePublicCapability({
+        kind: 'public',
+        address: 'aiCli.startSession',
+        scope: 'workspace',
+        runtime,
+        args: { profileId: 'claude', requestId: 'bounded-start', cols: 80, rows: 24 },
+      })
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+      const create = JSON.parse(socket.sent[0]!)
+      for (let index = 0; index < 130; index += 1) {
+        socket.receive({
+          id: `early-${index}`,
+          type: 'terminal.output',
+          payload: {
+            terminal_session_id: 'bounded-session',
+            pane_id: create.payload.pane_id,
+            sequence: index,
+            data: String(index),
+          },
+          timestamp: '',
+        })
+      }
+      const buffers = (
+        opened.mgr as unknown as {
+          earlyAiEvents: Map<string, { events: unknown[] }>
+        }
+      ).earlyAiEvents
+      expect([...buffers.values()][0]?.events).toHaveLength(128)
+
+      await vi.advanceTimersByTimeAsync(5_001)
+      socket.receive({
+        id: create.id,
+        type: create.type,
+        ok: true,
+        payload: {
+          terminal_session_id: 'bounded-session',
+          pane_id: create.payload.pane_id,
+          create_generation: 'bounded-start',
+        },
+        error: null,
+        timestamp: '',
+      })
+      await expect(start).resolves.toEqual({ sessionId: 'bounded-session' })
+      await vi.advanceTimersByTimeAsync(12)
+      expect(opened.view.webContents.sent.some((message) =>
+        message.channel === 'plugin:cap:event' &&
+        (message.args[0] as { type?: string }).type === 'aiCli.output'
+      )).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('injects a bound credential for a matching HTTPS clone host only', async () => {

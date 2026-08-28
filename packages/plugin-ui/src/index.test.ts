@@ -78,4 +78,55 @@ describe('public Vue plugin UI controllers', () => {
     expect(exited).toHaveBeenCalledOnce()
     expect(controller.sessionId).toBeNull()
   })
+
+  it('lists Host profiles and resumes only the tuple-owned detached session', async () => {
+    const invoke = vi.fn(async (address: string) => {
+      if (address === 'aiCli.listProfiles') {
+        return { profiles: [{ id: 'claude', label: 'Claude Code' }] }
+      }
+      if (address === 'aiCli.resumeSession') {
+        return { sessionId: 'session-resumed', profileId: 'claude' }
+      }
+      return null
+    })
+    const context = {
+      capabilities: { invoke },
+      events: { subscribe: () => ({ dispose: vi.fn() }) },
+    } as unknown as PluginContext
+    const controller = createAiCliSessionController(context)
+
+    await expect(controller.listProfiles()).resolves.toEqual([
+      { id: 'claude', label: 'Claude Code' },
+    ])
+    await expect(controller.resume(100, 30)).resolves.toEqual({
+      sessionId: 'session-resumed',
+      profileId: 'claude',
+    })
+    expect(controller.sessionId).toBe('session-resumed')
+    expect(invoke).toHaveBeenCalledWith('aiCli.resumeSession', { cols: 100, rows: 30 })
+  })
+
+  it('coalesces concurrent starts and forwards unattended mode once', async () => {
+    let resolveStart!: (value: { sessionId: string }) => void
+    const started = new Promise<{ sessionId: string }>((resolve) => { resolveStart = resolve })
+    const invoke = vi.fn(() => started)
+    const context = {
+      capabilities: { invoke },
+      events: { subscribe: () => ({ dispose: vi.fn() }) },
+    } as unknown as PluginContext
+    const controller = createAiCliSessionController(context)
+
+    const first = controller.start('claude', 100, 30, { yolo: true })
+    const second = controller.start('claude', 100, 30, { yolo: true })
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(invoke).toHaveBeenCalledWith('aiCli.startSession', {
+      profileId: 'claude',
+      cols: 100,
+      rows: 30,
+      yolo: true,
+    })
+
+    resolveStart({ sessionId: 'session-1' })
+    await expect(Promise.all([first, second])).resolves.toEqual(['session-1', 'session-1'])
+  })
 })

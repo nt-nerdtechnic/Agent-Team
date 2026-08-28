@@ -6,6 +6,7 @@ import GitLeftApp from '../GitLeftApp.vue'
 vi.mock('@navide/plugin-ui/shared', () => ({
   onSettingsChanged: vi.fn(() => () => undefined),
   settingsGet: vi.fn(() => ''),
+  useKeybindings: vi.fn(() => ({ registerCommand: vi.fn() })),
 }))
 
 vi.mock('../components/MultiRepoGit.vue', () => ({

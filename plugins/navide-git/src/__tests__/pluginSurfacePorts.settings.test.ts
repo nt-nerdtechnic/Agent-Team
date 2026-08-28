@@ -8,6 +8,8 @@ import {
 import type { PortResponse } from '@navide/plugin-ui/shared'
 import {
   createPluginGitSettingsPort,
+  createPluginGitContributionHostPort,
+  createPluginGitAccountPort,
   createPluginGitWorkspaceGrantPort,
   createPluginLegacyRepoSelectionPort,
   type PluginCapabilitySdk,
@@ -148,5 +150,67 @@ describe('navide.git legacy repository selection port', () => {
 
     await expect(createPluginLegacyRepoSelectionPort(sdk).readLegacyRepoSelection())
       .resolves.toBe('/workspace/nested')
+  })
+})
+
+describe('navide.git Host command port', () => {
+  it('sends a fixed Host command through the narrow contribution action', async () => {
+    const { sdk } = makeSdk()
+    sdk.hostRequest = vi.fn(async () => ({ ok: true, payload: null, error: null }))
+
+    await createPluginGitContributionHostPort(sdk).dispatch({
+      operation: 'execute_host_command',
+      command: 'workbench.action.openGitWindow',
+    })
+
+    expect(sdk.hostRequest).toHaveBeenCalledWith('git.contribution', {
+      operation: 'execute_host_command',
+      payload: { command: 'workbench.action.openGitWindow' },
+    })
+  })
+})
+
+describe('navide.git account port', () => {
+  it('lists safe metadata and mutates only the Host-bound workspace account', async () => {
+    const { sdk } = makeSdk()
+    sdk.hostRequest = vi.fn(async (_action, request) => {
+      const operation = request.operation
+      if (operation === 'list') {
+        return {
+          ok: true,
+          payload: {
+            available: true,
+            accounts: [{
+              id: 'account-1', label: 'GitHub', host: 'github.com', username: 'octocat', tokenLast4: '1234',
+            }],
+          },
+          error: null,
+        }
+      }
+      if (operation === 'get_binding') {
+        return { ok: true, payload: { accountId: 'account-1' }, error: null }
+      }
+      return { ok: true, payload: { ok: true }, error: null }
+    }) as PluginCapabilitySdk['hostRequest']
+    const port = createPluginGitAccountPort(sdk)
+
+    await port.refresh()
+    expect(port.accounts.value).toEqual([{
+      id: 'account-1', label: 'GitHub', host: 'github.com', username: 'octocat', tokenLast4: '1234',
+    }])
+    await expect(port.getBinding()).resolves.toBe('account-1')
+    await expect(port.addAccount({ label: 'Work', host: 'gitlab.com', username: 'me', token: 'secret' })).resolves.toBe(true)
+    await expect(port.bind('account-1')).resolves.toBe(true)
+    await expect(port.unbind()).resolves.toBe(true)
+
+    expect(sdk.hostRequest).toHaveBeenCalledWith('git.account', {
+      operation: 'get_binding', payload: {},
+    })
+    expect(sdk.hostRequest).toHaveBeenCalledWith('git.account', {
+      operation: 'bind', payload: { accountId: 'account-1' },
+    })
+    expect(sdk.hostRequest).toHaveBeenCalledWith('git.account', {
+      operation: 'unbind', payload: {},
+    })
   })
 })

@@ -186,15 +186,15 @@ export function createPluginGitAccountPort(sdk: PluginCapabilitySdk): GitAccount
         typeof account.id !== 'string' ||
         typeof account.label !== 'string' ||
         typeof account.host !== 'string' ||
-        typeof account.username !== 'string'
+        typeof account.username !== 'string' ||
+        typeof account.tokenLast4 !== 'string'
       ) return []
-      // Select only non-secret account metadata. In particular, do not carry
-      // tokenLast4 or any future credential-shaped field into the renderer.
       return [{
         id: account.id,
         label: account.label,
         host: account.host,
         username: account.username,
+        tokenLast4: account.tokenLast4,
       }]
     })
     available.value = payload?.available === true
@@ -203,9 +203,29 @@ export function createPluginGitAccountPort(sdk: PluginCapabilitySdk): GitAccount
     accounts,
     available,
     refresh,
-    async getBinding(workspacePath): Promise<string | null> {
+    async addAccount(input): Promise<boolean> {
       try {
-        const payload = await requireOk<{ accountId?: string | null }>(hostPayload(sdk, 'get_binding', { workspace_path: workspacePath }))
+        const payload = await requireOk<{ ok?: boolean }>(hostPayload(sdk, 'add', { ...input }))
+        if (payload?.ok === false) return false
+        await refresh()
+        return true
+      } catch { return false }
+    },
+    async bind(accountId): Promise<boolean> {
+      try {
+        const payload = await requireOk<{ ok?: boolean }>(hostPayload(sdk, 'bind', { accountId }))
+        return payload?.ok !== false
+      } catch { return false }
+    },
+    async unbind(): Promise<boolean> {
+      try {
+        const payload = await requireOk<{ ok?: boolean }>(hostPayload(sdk, 'unbind'))
+        return payload?.ok !== false
+      } catch { return false }
+    },
+    async getBinding(): Promise<string | null> {
+      try {
+        const payload = await requireOk<{ accountId?: string | null }>(hostPayload(sdk, 'get_binding'))
         return payload?.accountId ?? null
       } catch { return null }
     },
@@ -313,6 +333,7 @@ export function createPluginGitContributionHostPort(sdk: PluginCapabilitySdk): P
           }
           case 'open_git_history_window': return { workspace_path: action.workspace_path }
           case 'open_git_accounts': return {}
+          case 'execute_host_command': return { command: action.command }
         }
       })()
       await requireOk(sdk.hostRequest('git.contribution', {
