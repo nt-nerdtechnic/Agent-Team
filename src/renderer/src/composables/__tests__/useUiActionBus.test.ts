@@ -78,6 +78,43 @@ describe('useUiActionBus — ownership filtering', () => {
     expect(reply?.payload).toEqual({ request_id: 'req-1', ok: true, result: 'ok', error: null })
   })
 
+  // A window can hold several workspaces with only one showing; ownership is
+  // "does this window hold it", not "is it the one on screen".
+  it('answers for a workspace it holds but is not currently showing', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    registerCommand('noop', () => 'ok')
+    useUiActionBus({
+      backend,
+      currentWorkspace,
+      buildSnapshot: () => ({}),
+      ownsWorkspace: (p) => p === '/ws-a' || p === '/ws-held',
+    })
+
+    emit('ui.invoke.request', baseRequest({ workspace_path: '/ws-held', action: 'noop' }))
+    await flush()
+
+    const reply = sent.find((s) => s.type === 'ui.invoke.result')
+    expect(reply?.payload).toEqual({ request_id: 'req-1', ok: true, result: 'ok', error: null })
+  })
+
+  it('stays silent for a workspace it does not hold', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    registerCommand('noop', () => 'ok')
+    useUiActionBus({
+      backend,
+      currentWorkspace,
+      buildSnapshot: () => ({}),
+      ownsWorkspace: (p) => p === '/ws-a',
+    })
+
+    emit('ui.invoke.request', baseRequest({ workspace_path: '/ws-other', action: 'noop' }))
+    await flush()
+
+    expect(sent.find((s) => s.type === 'ui.invoke.result')).toBeUndefined()
+  })
+
   it('still ignores a mismatched request that is not addressed to it', async () => {
     const { backend, emit, sent } = createMockBackend()
     const currentWorkspace = ref('/ws-a')

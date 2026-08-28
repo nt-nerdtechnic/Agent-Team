@@ -6537,7 +6537,16 @@ async function buildUiActionSnapshot(): Promise<{
     openWorkspaces: (await window.agentTeam?.listOpenWorkspaces?.()) ?? [],
   }
 }
-useUiActionBus({ backend, currentWorkspace, buildSnapshot: buildUiActionSnapshot })
+// ownsWorkspace, not currentWorkspace: this window may hold several workspaces
+// with only one of them showing, and agent_spawn.request already claims by the
+// same test (handleMcpSpawnRequest) — the UI bus answering on a narrower rule
+// left requests for a held-but-not-active workspace unanswered.
+useUiActionBus({
+  backend,
+  currentWorkspace,
+  buildSnapshot: buildUiActionSnapshot,
+  ownsWorkspace: isLocalWorkspace,
+})
 
 // Single source of truth for the 'modalOpen' keybinding context. Hoisted so
 // the watches below can share it; only ever CALLED after setup completes, so

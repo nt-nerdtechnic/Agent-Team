@@ -36,6 +36,12 @@ export interface UseUiActionBusOptions {
   /** Reactive-or-plain holder for this window's open workspace path. */
   currentWorkspace: { value: string }
   buildSnapshot: () => unknown | Promise<unknown>
+  /** Whether this window holds `path` at all. A window can have several
+   *  workspaces open with only one of them showing, so the active one is too
+   *  narrow a test for ownership — and it compares raw strings, which a
+   *  trailing slash or a symlinked path defeats. Defaults to that narrow test
+   *  for callers (tests, plugin hosts) that have nothing better. */
+  ownsWorkspace?: (path: string) => boolean
 }
 
 function errorMessage(err: unknown): string {
@@ -59,7 +65,8 @@ export async function handleUiInvokeRequest(
   // matches answers — mirrors handleMcpSpawnRequest's local-ownership check in
   // App.vue for agent_spawn.request (another window silently owns any
   // mismatch), so a non-owner must stay silent rather than reply with an error.
-  const mine = req.global || req.addressed || req.workspace_path === opts.currentWorkspace.value
+  const owns = opts.ownsWorkspace ?? ((path: string) => path === opts.currentWorkspace.value)
+  const mine = req.global || req.addressed || owns(req.workspace_path ?? '')
   if (!mine) return
 
   const diagnosticSeq = currentDiagnosticSeq()
