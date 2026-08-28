@@ -13741,6 +13741,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :pipelines-api="pipelinesApi"
       :cli-profiles-api="cliProfilesApi"
       :workspace-open="!!currentWorkspace"
+      :workspace-path="currentWorkspace"
       :workspace-paths="knownWorkspacePaths"
       :initial-tab="settingsInitialTab"
       :tab-request="settingsTabRequest"

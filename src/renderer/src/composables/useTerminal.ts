@@ -3285,78 +3285,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     return text.replace(/\r?\n/g, '\r\n')
   }
 
-  // How recently the PTY must have produced output for a width change to clear
-  // the alternate screen. Sized to the RUNNING badge's hysteresis so "active"
-  // means the same thing in both places.
-  const ALT_CLEAR_ACTIVITY_MS = 4_000
-
-  // Clear the ALTERNATE screen after a width change so the CLI redraws it.
-  //
-  // This is PuTTY's behaviour, and it is why a full-screen TUI never looks
-  // stale there: term_size() throws the whole alternate screen away and
-  // rebuilds it blank at the new width (terminal.c:1927-1940), then marks
-  // disptext ATTR_INVALID so everything repaints. The application gets a blank
-  // canvas plus SIGWINCH and draws itself correctly.
-  //
-  // xterm.js keeps the old alternate-buffer contents across a resize instead,
-  // and it cannot reflow them (it reflows the normal buffer only), so a TUI
-  // that does not repaint on its own leaves the previous width's frame on
-  // screen — the truncated status line and short rules in a widened pane.
-  //
-  // Only ESC[2J ESC[H: it clears the screen the TUI owns, and while the
-  // alternate buffer is active that screen has no scrollback behind it, so no
-  // history is at risk. The normal buffer — where the conversation lives for
-  // line-mode CLIs — is never touched, and neither is any mode state.
-  async function repaintAfterWidthChange(): Promise<void> {
-    // MEASURED 2026-08-27, by spawning `claude` on a real PTY and counting what
-    // it emits: ESC[?1049h zero times, ESC[?1004h once, ESC[nG 51 times. Claude
-    // Code does NOT use the alternate buffer — it paints the normal buffer with
-    // absolute column moves, and it DOES turn focus reporting on.
-    //
-    // The previous version opened by bailing out unless the buffer was the
-    // alternate one, which made the whole thing dead code for every Claude
-    // pane — it fell out on line one. Two older notes said otherwise
-    // (a 2026-07-23 log line reading alt=true, and agents/claude.ts still
-    // carrying fullScreenTui: true); the PTY probe settles it against them.
-    const isAlt = term.buffer?.active?.type === 'alternate'
-    const active = Date.now() - lastRawActivityAt.value <= ALT_CLEAR_ACTIVITY_MS
-
-    // A genuine alternate-buffer TUI (vim, a pager) that is mid-draw: hand it a
-    // blank canvas at the new width, which is what PuTTY does on every resize
-    // (terminal.c term_size rebuilds the alt screen empty, then marks disptext
-    // ATTR_INVALID). Safe there because xterm keeps no scrollback behind an
-    // alternate buffer, so nothing can be lost.
-    if (isAlt && active) {
-      term.write('\x1b[2J\x1b[H')
-      return
-    }
-
-    // Everything else — including every Claude pane — gets the nudge only.
-    // Clearing is not an option in the normal buffer: the conversation sits in
-    // the scrollback right behind the screen, and a CLI that does not repaint
-    // would leave a hole in it.
-    nudgeTuiToRepaint()
-  }
-
-  // Ask a TUI to repaint, without writing anything to the screen.
-  //
-  // Only sent when the CLI has turned focus reporting ON itself (DECSET 1004,
-  // surfaced by xterm as modes.sendFocusMode — Claude Code does, measured
-  // above). Under that mode a focus-out/focus-in pair is ordinary input the
-  // application asked to receive, unlike synthetic keystrokes, which would land
-  // in the prompt. With the mode off nothing is sent at all.
-  //
-  // Whether Ink re-renders on refocus is still unproven — the previous attempt
-  // never actually ran, so it has never been tested in a real pane.
-  function nudgeTuiToRepaint(): void {
-    if (!sessionId.value) return
-    if (!term.modes?.sendFocusMode) return
-    void backend.send('terminal.input', {
-      terminal_session_id: sessionId.value,
-      data: '\x1b[O\x1b[I',
-    })
-  }
-
   function saveScrollSnapshot(): void {
     const key = scrollSnapKey()
     let lines = SCROLL_SNAP_LINES
@@ -4243,7 +4171,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     backend.send,
     () => !!pendingSpawn.value,
     () => { void createWhenMeasurable() },
-    repaintAfterWidthChange,
   )
 
   // Shared zoom → this pane. A new font size means a new cell size, so refit to

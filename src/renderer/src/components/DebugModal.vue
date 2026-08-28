@@ -15,6 +15,7 @@ import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '../lib/settings'
 import { CLI_AGENT_SPECS } from '../agents'
 import { aiTerminalPaneId, bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
+import { cliPermissionKey } from '../lib/cliPermission'
 import {
   LOG_LEVELS,
   capLines,
@@ -327,6 +328,7 @@ async function startAi(): Promise<void> {
       paneId: aiPaneId.value,
       historyRoot: aiWorkspace.value,
       yoloStored: settingsGet<string | null>('agentTeam.yolo', null),
+      permissionStored: settingsGet<string | null>(cliPermissionKey(aiAgent.value), null),
     })
     await term.spawn({
       command: [shell, shell.endsWith('zsh') ? '-ilc' : '-lc', command],

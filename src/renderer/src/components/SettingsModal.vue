@@ -87,8 +87,10 @@ import McpHelp from './McpHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
 import StorageUsagePane from './StorageUsagePane.vue'
 import LayoutSettingsPane from '../layout/LayoutSettingsPane.vue'
+import McpPane from './McpPane.vue'
 import SkillsPane from './SkillsPane.vue'
 import PromptSkillsPane from './PromptSkillsPane.vue'
+import MemoryPane from './MemoryPane.vue'
 import SettingsNavItem from './settings/SettingsNavItem.vue'
 import SettingsSection from './settings/SettingsSection.vue'
 import SettingsCard from './settings/SettingsCard.vue'
@@ -115,6 +117,10 @@ const props = defineProps<{
   /** Workspaces the app knows about — the Storage tab scans them for
    *  reclaimable build output and logs. */
   workspacePaths?: string[]
+  /** The workspace currently open, empty when none is. The Memory tab edits
+   *  this project's instruction files, so it needs the open one by name
+   *  rather than the first of ``workspacePaths``. */
+  workspacePath?: string
   stagesApi: ReturnType<typeof useStages>
   analyzerApi: ReturnType<typeof useAnalyzer>
   pipelinesApi?: ReturnType<typeof usePipelines>
@@ -173,7 +179,7 @@ const reclaimNowCount = computed(() => props.reclaimableNowCount ?? 0)
 const reclaimNowSize = computed(() => formatBytes(props.reclaimableNowBytes ?? 0))
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'prompts' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
+type Tab = 'mcp' | 'skills' | 'prompts' | 'memory' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
 type HelpTopic = 'messaging' | 'mcp'
@@ -353,6 +359,16 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     mcpView: 'catalog',
   },
   {
+    id: 'mcp-agents',
+    tab: 'mcp',
+    section: 'mcp-agents',
+    mcpView: 'list',
+    title: "Every CLI's MCP / 各 CLI 的 MCP",
+    group: 'MCP',
+    summary: "Read-only view of the MCP servers each CLI keeps in its own config, and where each server is set up.",
+    keywords: 'mcp native cli claude codex copilot cursor kimi grok reflect compare matrix 原生 對照 各家 設定檔 唯讀',
+  },
+  {
     id: 'skills',
     tab: 'skills',
     section: 'skills',
@@ -369,6 +385,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     group: 'Integrations',
     summary: 'Create and edit the prompt skills a CLI pane can cast from its loop button.',
     keywords: 'prompt skills loop 技能 提示詞 迴圈 循環 按鈕 預設 preset resume 續跑 輪次 max turns',
+  },
+  {
+    id: 'memory',
+    tab: 'memory',
+    section: 'memory',
+    title: 'Memory / 記憶',
+    group: 'Integrations',
+    summary: "View and edit the instruction files each CLI reads: CLAUDE.md, AGENTS.md, QWEN.md, .cursor rules.",
+    keywords: 'memory instructions claude.md agents.md qwen.md cursor rules mdc context 指示檔 記憶 規則 說明檔',
   },
   {
     id: 'analyzer-backend',
@@ -830,10 +855,13 @@ const settingsBundleError = ref('')
  *  it has no scope badge and no settings file to reveal. */
 type SettingsTab = Exclude<Tab, 'help'>
 
-const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof SettingsPaths | 'localStorage' | 'mainProcess' | 'safeStorage' }> = {
+const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof SettingsPaths | 'localStorage' | 'mainProcess' | 'safeStorage' | 'cliFiles' }> = {
   mcp: { scope: 'User', storage: 'mcp' },
   skills: { scope: 'User', storage: 'skills' },
   prompts: { scope: 'User', storage: 'localStorage' },
+  // The CLIs' own instruction files: each one lives where its CLI looks for
+  // it, so the pane shows per-file paths and this tab has none of its own.
+  memory: { scope: 'User / Workspace', storage: 'cliFiles' },
   analyzer: { scope: 'User', storage: 'analyzer' },
   cliAgents: { scope: 'User', storage: 'localStorage' },
   general: { scope: 'User', storage: 'localStorage' },
@@ -859,6 +887,7 @@ function pathForTab(tab: SettingsTab): string {
   if (storage === 'localStorage') return 'ui_settings.json (app data) + workspace backup'
   if (storage === 'mainProcess') return 'Electron main process userData'
   if (storage === 'safeStorage') return 'Encrypted local safeStorage registry'
+  if (storage === 'cliFiles') return "Each CLI's own instruction files"
   return settingsPaths.value[storage] ?? ''
 }
 
@@ -1586,6 +1615,9 @@ function mMarkDirty(): void {
   mEditVersion += 1
 }
 
+/** The unified reflection pane; refreshed alongside Navide's own list. */
+const mcpPaneRef = ref<{ reload: () => Promise<void> } | null>(null)
+
 async function mLoad(force = false) {
   if (!force && (mDirty.value || mAutosaveQueue.pending > 0)) return
   if (force) mDirty.value = false
@@ -1596,6 +1628,7 @@ async function mLoad(force = false) {
       mServers.value = resp.payload.servers.map(mNormalizeServer)
       mConfigPath.value = resp.payload.path ?? ''
       mRevision.value = resp.payload.revision
+      void mcpPaneRef.value?.reload()
     } else { mError.value = resp.error?.message ?? 'Load failed' }
   } catch (err) { mError.value = String((err as Error).message ?? err) }
   finally { mLoading.value = false }
@@ -1988,6 +2021,11 @@ watch(activeTab, (tab) => {
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.6" y="2.6" width="12.8" height="10.8" rx="1.6"/><path d="M4.6 6.2 6.8 8.2l-2.2 2"/><path d="M8.6 10.4h3"/></svg>
                 </template>
               </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.memory')" :active="activeTab === 'memory'" @select="activeTab = 'memory'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.2 2.6h6.1l3.5 3.5v7.3H3.2Z"/><path d="M9.1 2.7v3.5h3.5"/><path d="M5.4 8.4h5.2M5.4 10.7h3.4"/></svg>
+                </template>
+              </SettingsNavItem>
               <SettingsNavItem :label="$t('settings.nav.extensions')" :active="activeTab === 'extensions'" @select="activeTab = 'extensions'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 2.6h3.2v1.5a1.3 1.3 0 0 0 2.4 0V2.6h1.4v3.2h-1.5a1.3 1.3 0 0 0 0 2.4h1.5v3.2H6.4v-1.5a1.3 1.3 0 0 0-2.4 0v1.5H2.6V8.2h1.5a1.3 1.3 0 0 0 0-2.4H2.6V2.6h3.8Z"/></svg>
@@ -2045,6 +2083,7 @@ watch(activeTab, (tab) => {
               <span class="settings-path" :title="pathForTab('mcp')">{{ pathForTab('mcp') }}</span>
               <button class="settings-path-btn" :disabled="!settingsPaths.mcp" @click="openSettingsPath(settingsPaths.mcp)">{{ $t('action.open') }}</button>
             </div>
+            <p class="mcp-scope-hint">{{ $t('settings.mcp.installed-hint') }}</p>
             <p v-if="mError" class="err-msg" style="margin:6px 22px 0">{{ mError }}</p>
             <div v-if="mConflict" class="mcp-conflict">
               <span>{{ $t('settings.mcp.conflict') }}</span>
@@ -2199,6 +2238,15 @@ watch(activeTab, (tab) => {
               </div>
             </div>
 
+            <!-- ── Every CLI's MCP, reflected read-only ─────────────────── -->
+            <McpPane
+              v-if="activeTab === 'mcp'"
+              ref="mcpPaneRef"
+              class="mcp-agent-pane"
+              :backend="props.backend"
+              data-settings-section="mcp-agents"
+            />
+
             <!-- ── EXTERNAL ACCESS ──────────────────────────────────────── -->
             <div class="ea-section-wrap">
             <SettingsSection :label="$t('settings.mcp.external-access-title')" data-settings-section="mcp-external-access">
@@ -2340,6 +2388,20 @@ watch(activeTab, (tab) => {
             <span class="scope-badge">{{ settingsScopeNotes.prompts.scope }}</span>
           </div>
           <PromptSkillsPane />
+        </div>
+
+        <!-- ── MEMORY TAB ───────────────────────────────────────────────── -->
+        <div v-show="activeTab === 'memory'" class="s-body s-body--bleed" data-settings-section="memory">
+          <h1 class="s-page-title">{{ $t('settings.nav.memory') }}</h1>
+          <div class="settings-meta-row">
+            <span class="scope-badge">{{ settingsScopeNotes.memory.scope }}</span>
+          </div>
+          <!-- Project files belong to the folder that is actually open; the
+               first known workspace is the current one whenever there is one. -->
+          <MemoryPane
+            :backend="props.backend"
+            :workspace-path="props.workspacePath ?? ''"
+          />
         </div>
 
         <!-- ── ANALYZER TAB ─────────────────────────────────────────────── -->
@@ -4457,6 +4519,15 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 
 /* ── MCP tab ──────────────────────────────────────────────────────────────── */
+.mcp-scope-hint {
+  margin: 4px 22px 0;
+  color: var(--text-secondary);
+  font-size: var(--font-2xs);
+}
+/* Sits between the server list and External access inside the scrolling
+   column, so it must not be squeezed the way a flexible item would be. The
+   gutter lines it up with the <h1> and the scope band above it. */
+.mcp-agent-pane { flex-shrink: 0; padding: 18px 22px 4px; }
 .mcp-body { overflow-y: auto; display: flex; flex-direction: column; }
 
 /* Top bar */
@@ -4487,7 +4558,10 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 
 /* Server list */
-.mcp-server-list { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; flex: 1; min-height: 0; }
+/* min-height, not 0: this is `flex: 1` over a 0 basis, so when the blocks
+   below it (the reflection pane, external access) fill the column its share of
+   the free space is 0 and the list would vanish rather than scroll. */
+.mcp-server-list { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; flex: 1; min-height: 168px; }
 .mcp-loading { color: var(--text-secondary); font-size: var(--font-xs); padding: 8px 0; }
 .mcp-empty { color: var(--text-muted); font-size: var(--font-xs); padding: 24px 0; text-align: center; }
 

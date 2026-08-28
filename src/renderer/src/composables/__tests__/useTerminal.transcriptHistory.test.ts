@@ -138,7 +138,7 @@ async function doResume(result: ReturnType<typeof resumePane>['result']): Promis
   })
 }
 
-describe('useTerminal — transcript history and width reflow', () => {
+describe('useTerminal — transcript history', () => {
   afterEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
@@ -189,104 +189,4 @@ describe('useTerminal — transcript history and width reflow', () => {
     scope.stop()
   })
 
-  describe('repaint after a width change', () => {
-    it('blanks the alternate screen so the CLI repaints at the new width', async () => {
-      const { mock, result, scope } = resumePane(TRANSCRIPT)
-      await doResume(result)
-      bufferType.value = 'alternate'
-      // A chunk of PTY output marks the CLI as actively drawing, which is the
-      // only state where clearing is safe.
-      mock.emit('terminal.output', { terminal_session_id: 'sess-1', data: 'x' })
-      // Output is coalesced before it reaches xterm, and the activity clock is
-      // stamped on that flush — not on arrival. Wait for the coalesce window.
-      await new Promise((r) => setTimeout(r, 120))
-      writes.length = 0
-
-      await reflow.fn?.()
-
-      // ESC[2J ESC[H only: PuTTY rebuilds the alt screen blank at the new width
-      // and lets the application draw itself (terminal.c:1927-1940). No history
-      // is rewritten, and the scrollback is not touched.
-      expect(writes).toEqual(['\x1b[2J\x1b[H'])
-      expect(clears.count).toBe(0)
-      scope.stop()
-    })
-
-    it('leaves an IDLE pane alone rather than blanking it', async () => {
-      const { result, scope } = resumePane(TRANSCRIPT)
-      await doResume(result)
-      bufferType.value = 'alternate'
-      writes.length = 0
-      // No PTY output has arrived, so the activity clock is far in the past —
-      // exactly the state of a Claude pane sitting at its prompt. It ignores
-      // SIGWINCH there, so clearing would leave a blank pane nothing refills.
-      await reflow.fn?.()
-
-      expect(writes).toEqual([])
-      scope.stop()
-    })
-
-    it('nudges an idle TUI with focus events when it asked for them', async () => {
-      const { mock, result, scope } = resumePane(TRANSCRIPT)
-      await doResume(result)
-      bufferType.value = 'alternate'
-      focusMode.value = true   // the CLI turned DECSET 1004 on
-      writes.length = 0
-
-      await reflow.fn?.()
-
-      // Nothing written to the screen — the pane keeps its content.
-      expect(writes).toEqual([])
-      // Focus-out then focus-in, as ordinary input the CLI asked to receive.
-      const sent = mock.sent.filter((s) => s.type === 'terminal.input')
-      expect(sent.at(-1)?.payload).toMatchObject({ data: '\x1b[O\x1b[I' })
-      scope.stop()
-    })
-
-    it('sends nothing to an idle TUI that never enabled focus reporting', async () => {
-      const { mock, result, scope } = resumePane(TRANSCRIPT)
-      await doResume(result)
-      bufferType.value = 'alternate'
-      focusMode.value = false
-      writes.length = 0
-
-      await reflow.fn?.()
-
-      // Without DECSET 1004 these bytes would land in the prompt as garbage.
-      expect(mock.sent.filter((s) => s.type === 'terminal.input')).toEqual([])
-      expect(writes).toEqual([])
-      scope.stop()
-    })
-
-    it('never writes to the screen of a normal-buffer pane', async () => {
-      // Claude Code paints the NORMAL buffer (measured: zero ESC[?1049h), and
-      // the conversation sits in the scrollback right behind that screen, so
-      // clearing would punch a hole in the history. The nudge is all it gets.
-      const { mock, result, scope } = resumePane(TRANSCRIPT)
-      await doResume(result)
-      bufferType.value = 'normal'
-      focusMode.value = true
-      writes.length = 0
-
-      await reflow.fn?.()
-
-      expect(writes).toEqual([])
-      expect(clears.count).toBe(0)
-      expect(mock.sent.filter((s) => s.type === 'terminal.input').at(-1)?.payload)
-        .toMatchObject({ data: '\x1b[O\x1b[I' })
-      scope.stop()
-    })
-
-    it('reaches a normal-buffer pane at all — the guard used to skip them', () => {
-      // Regression for the dead-code bug: the function opened with
-      // `if (type !== 'alternate') return`, so every Claude pane fell out on
-      // line one and none of this ever ran.
-      const src = readFileSync(
-        resolve(process.cwd(), 'src/renderer/src/composables/useTerminal.ts'), 'utf8')
-      const at = src.indexOf('async function repaintAfterWidthChange(')
-      expect(at).toBeGreaterThan(-1)
-      const body = src.slice(at, src.indexOf('\n  }', at))
-      expect(body).not.toContain("!== 'alternate') return")
-    })
-  })
 })

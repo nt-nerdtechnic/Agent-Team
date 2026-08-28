@@ -29,6 +29,7 @@ import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '../lib/settings'
 import { CLI_AGENT_SPECS } from '../agents'
 import { bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
+import { cliPermissionKey } from '../lib/cliPermission'
 import type { useBackend } from '../composables/useBackend'
 import type { MentionCandidate } from '../lib/cliContext'
 import AiCliTerminal from './AiCliTerminal.vue'
@@ -231,6 +232,7 @@ async function start(): Promise<void> {
       paneId: props.paneId,
       historyRoot: props.workspacePath,
       yoloStored: settingsGet<string | null>('agentTeam.yolo', null),
+      permissionStored: settingsGet<string | null>(cliPermissionKey(agentKey.value), null),
     })
     await term.spawn({
       // zsh reads ~/.zshrc (where installers add PATH) only in interactive

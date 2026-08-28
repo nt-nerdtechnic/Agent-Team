@@ -66,6 +66,28 @@ describe('resolveCliCommand', () => {
       .toBe('claude')
   })
 
+  it('treats an absent per-vendor override as inherit', () => {
+    expect(resolveCliCommand({ ...base, agentKey: 'claude', yoloStored: '1', permissionStored: null }))
+      .toBe('claude --dangerously-skip-permissions')
+    expect(resolveCliCommand({ ...base, agentKey: 'claude', yoloStored: '0', permissionStored: null }))
+      .toBe('claude')
+  })
+
+  it('force-on overrides a disabled global toggle', () => {
+    expect(resolveCliCommand({ ...base, agentKey: 'claude', yoloStored: '0', permissionStored: 'force-on' }))
+      .toBe('claude --dangerously-skip-permissions')
+  })
+
+  it('force-off overrides an enabled global toggle', () => {
+    expect(resolveCliCommand({ ...base, agentKey: 'claude', yoloStored: '1', permissionStored: 'force-off' }))
+      .toBe('claude')
+  })
+
+  it('an override cannot invent a flag for a vendor that has none', () => {
+    expect(resolveCliCommand({ ...base, agentKey: 'pi', yoloStored: '1', permissionStored: 'force-on' }))
+      .toBe(resolveCliCommand({ ...base, agentKey: 'pi', yoloStored: '0', permissionStored: 'force-off' }))
+  })
+
   it('agents without a skipPermissionFlag get the bare default command', () => {
     expect(resolveCliCommand({ ...base, agentKey: 'grok', yoloStored: null })).toBe('grok')
   })

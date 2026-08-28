@@ -9,6 +9,7 @@
  */
 
 import { CLI_AGENT_SPECS } from '../agents'
+import { parseCliPermissionMode, skipPermissionFlagFor } from './cliPermission'
 
 /** Wrap text in a bracketed-paste envelope so TUI CLIs treat it as one paste
  *  (inserted literally, not interpreted keystroke-by-keystroke). */
@@ -51,13 +52,16 @@ export function truncateText(text: string, at: number): string {
  *  override is deliberately skipped — the backend backstops binary resolution.
  *
  *  `yoloStored` is the raw 'agentTeam.yolo' setting value: '1'/'0', or null
- *  when unset → defaults ON, mirroring App.vue's makeStickyBool semantics. */
+ *  when unset → defaults ON, mirroring App.vue's makeStickyBool semantics.
+ *  `permissionStored` is the raw per-vendor override (see cliPermission.ts);
+ *  null/absent means 'inherit'. */
 export function resolveCliCommand(input: {
   agentKey: string
   paneId: string
   /** Directory the per-pane files live in — the panel's workspace path. */
   historyRoot: string
   yoloStored: string | null
+  permissionStored?: string | null
 }): string {
   const spec = CLI_AGENT_SPECS.find((s) => s.agentKey === input.agentKey)
   const parts = [spec?.defaultCommand || input.agentKey]
@@ -65,8 +69,12 @@ export function resolveCliCommand(input: {
     ? spec.paneArg({ paneId: input.paneId, historyRoot: input.historyRoot })
     : ''
   if (paneArg) parts.push(paneArg)
-  const yolo = input.yoloStored === null ? true : input.yoloStored === '1'
-  if (yolo && spec?.skipPermissionFlag) parts.push(spec.skipPermissionFlag)
+  const skipFlag = skipPermissionFlagFor({
+    spec,
+    globalYolo: input.yoloStored === null ? true : input.yoloStored === '1',
+    mode: parseCliPermissionMode(input.permissionStored)
+  })
+  if (skipFlag) parts.push(skipFlag)
   return parts.join(' ')
 }
 

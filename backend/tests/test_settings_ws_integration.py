@@ -173,6 +173,10 @@ async def test_mcp_list_and_save_return_opaque_revision_and_keep_response_compat
     assert revision == str(store.revision)
     assert listed["payload"]["servers"][0]["status"] == "connected"
     assert listed["payload"]["path"] == str(store.path)
+    # The page is the single entry point for every CLI's MCP, so a listing
+    # also carries what each agent already loads on its own.
+    assert listed["payload"]["native"] == []
+    assert {agent["key"] for agent in listed["payload"]["agents"]} >= {"claude", "aider"}
 
     saved = await _request(
         session,
@@ -440,3 +444,26 @@ async def test_skills_create_over_ws_asks_for_consent_before_the_first_write(mon
     )
     assert granted["payload"]["skill"]["name"] == "demo"
     assert store.write_consented() is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_reflects_the_servers_each_cli_already_loads(
+    settings_stores: tuple[MCPSettingsStore, SkillsStore, FakeMCPManager],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_team_backend import native_mcp
+
+    home = tmp_path / "native-home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "config.toml").write_text(
+        '[mcp_servers.xmind]\nurl = "https://app.xmind.com/mcp"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(native_mcp, "_home", lambda: home)
+
+    listed = await _request(_session(), "mcp.list_servers")
+
+    native = listed["payload"]["native"]
+    assert [(entry["agent"], entry["name"]) for entry in native] == [("codex", "xmind")]
+    # Navide's own servers stay a separate list; reflection never merges in.
+    assert "xmind" not in {entry["name"] for entry in listed["payload"]["servers"]}
