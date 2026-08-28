@@ -320,6 +320,10 @@ declare global {
           location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
           manifestOrder: number
         }>>
+        prepareContribution: (args: {
+          contributionKey: string
+          workspace_path: string
+        }) => Promise<{ ok: boolean; url?: string; error?: string }>
         openContribution: (args: {
           contributionKey: string
           workspace_path: string

@@ -649,6 +649,11 @@ contextBridge.exposeInMainWorld('agentTeam', {
       location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
       manifestOrder: number
     }>> => ipcRenderer.invoke('plugins:listContributions'),
+    prepareContribution: (args: {
+      contributionKey: string
+      workspace_path: string
+    }): Promise<{ ok: boolean; url?: string; error?: string }> =>
+      ipcRenderer.invoke('plugins:prepareContribution', args),
     openContribution: (args: {
       contributionKey: string
       workspace_path: string

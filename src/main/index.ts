@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, powerMonitor, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron'
+import { createGuestAttachHooks } from './plugins/pluginGuestAttach'
 import { join, dirname } from 'node:path'
 import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
@@ -344,6 +345,18 @@ async function createWindow(
     }
   })
   mainWindows.add(win)
+  // In-window plugin contributions attach as <webview> guests. Main overrides
+  // their webPreferences here, so the tag the renderer wrote cannot widen what
+  // a guest gets, and binds each guest to the identity reserved for it.
+  {
+    const guestHooks = createGuestAttachHooks(frontendPluginManager)
+    win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+      guestHooks.onWillAttach(event, webPreferences, params)
+    })
+    win.webContents.on('did-attach-webview', (_event, guest) => {
+      guestHooks.onDidAttach(guest)
+    })
+  }
   mainWindow = win
   const winId = win.id // captured — win.id is not readable after destroy
   // A detached run-group child window is scoped to one group of its workspace —
@@ -1921,6 +1934,25 @@ function trustedPluginRegionHost(event: IpcMainInvokeEvent): BrowserWindow | nul
 /** Generic Manifest view-region lifecycle. The renderer supplies only the
  * stable contribution key and layout geometry; FrontendPluginManager keeps
  * the opaque instance handle in main. */
+ipcMain.handle('plugins:prepareContribution', async (event, args: Record<string, unknown>) => {
+  const hostWindow = trustedPluginRegionHost(event)
+  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
+  const workspacePath = hostWindow
+    ? registeredGitLeftWorkspace(
+        hostWindow,
+        args?.workspace_path,
+        mainWindowWorkspaces,
+        normalizeWorkspacePath,
+      )
+    : null
+  if (!hostWindow || !contributionKey || !workspacePath) return { ok: false }
+  await prepareCatalogContribution(contributionKey)
+  return frontendPluginManager.prepareGuestContribution(hostWindow, contributionKey, {
+    workspacePath,
+    query: catalogContributionQuery(contributionKey, workspacePath),
+  })
+})
+
 ipcMain.handle('plugins:openContribution', async (event, args: Record<string, unknown>) => {
   const hostWindow = trustedPluginRegionHost(event)
   const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''

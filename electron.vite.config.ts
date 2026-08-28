@@ -93,7 +93,15 @@ export default defineConfig({
       include: ['monaco-editor'],
     },
     plugins: [
-      vue(),
+      vue({
+        template: {
+          compilerOptions: {
+            // In-window plugin contributions mount as Electron <webview>, which
+            // is a built-in tag rather than a Vue component.
+            isCustomElement: (tag) => tag === 'webview',
+          },
+        },
+      }),
       // Block all non-Electron requests with a per-session random token.
       // The main process reads the token from tmpdir and injects it via
       // session.webRequest — no browser can guess a 32-byte random value.

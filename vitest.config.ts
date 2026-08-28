@@ -7,7 +7,9 @@ import { resolve } from 'node:path'
 // `// @vitest-environment happy-dom`. We mirror the renderer's build-time global
 // (`__APP_BUILD__`) so importing modules that reference it doesn't throw.
 export default defineConfig({
-  plugins: [vue()],
+  // Mirrors electron.vite.config.ts: <webview> carries in-window plugin
+  // contributions and is a built-in tag, not a Vue component.
+  plugins: [vue({ template: { compilerOptions: { isCustomElement: (tag) => tag === 'webview' } } })],
   resolve: {
     alias: {
       '@navide/plugin-contracts': resolve(__dirname, 'packages/plugin-contracts/src/index.ts'),
