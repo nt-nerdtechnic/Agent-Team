@@ -11,7 +11,7 @@ import { BrowserWindow, WebContentsView, ipcMain, type WebContents } from 'elect
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { URL } from 'node:url'
+import { URL, pathToFileURL } from 'node:url'
 import { WebSocket as NodeWebSocket } from 'ws'
 import {
   parseCapabilityCall,
@@ -131,6 +131,19 @@ export type PluginViewBounds = PluginBounds | 'fill' | 'hidden'
 /** Host-owned handle for one live contribution view. The instance id is
  * opaque: plugins never choose it and lifecycle calls must use the handle
  * returned by {@link FrontendPluginManager.openView}. */
+interface PendingGuest {
+  readonly token: string
+  readonly instanceId: string
+  readonly registryKey: string
+  readonly descriptor: PluginLaunchDescriptor
+  readonly hostWindow: BrowserWindow
+  readonly workspacePath: string | null
+  readonly query: string
+  readonly capabilityContext: HostCapabilityContext | null
+  readonly isV2Identity: boolean
+  timer: ReturnType<typeof setTimeout> | null
+}
+
 export interface PluginViewHandle {
   readonly instanceId: string
 }
@@ -741,6 +754,11 @@ export class FrontendPluginManager {
    *  key. The renderer only sees catalog metadata and never receives the
    *  opaque instance id. */
   private readonly contributionInstances = new Map<string, PluginViewHandle>()
+  /** In-window contributions whose `<webview>` guest has not attached yet,
+   *  keyed by the one-time token carried in the entry URL. The token — never
+   *  the instance id — is what reaches the renderer, so a guest can neither
+   *  claim another instance nor learn its own handle. */
+  private readonly pendingGuests = new Map<string, PendingGuest>()
   /** Awaiting terminal create/reattach responses. Teardown invalidates these
    *  records before a late backend response can register a route. */
   private readonly pendingTerminalOperations = new Map<string, PendingTerminalOperation>()
@@ -3432,6 +3450,140 @@ export class FrontendPluginManager {
     })
   }
 
+  /** Everything a mounted instance needs regardless of its carrier: the record
+   *  goes live, the sender is bound for capability attribution, and the
+   *  webContents hooks driving readiness, failure and queued open targets are
+   *  installed. Geometry is deliberately absent — a native view is placed by
+   *  {@link applyBounds}, a `<webview>` guest by the host document's CSS. */
+  /** The one place a RunningPlugin is shaped, so a `<webview>` guest and a
+   *  native view can never drift apart on identity or capability binding. */
+  private buildRecord(input: {
+    instanceId: string
+    descriptor: PluginLaunchDescriptor
+    surface: PluginSurface
+    hostWindow: BrowserWindow
+    workspacePath: string | null
+    query: string
+    capabilityContext: HostCapabilityContext | null
+    isV2Identity: boolean
+    openedViaLegacyAdapter: boolean
+    fill: boolean
+    closeHostOnHide: boolean
+  }): RunningPlugin {
+    const { instanceId, descriptor, isV2Identity, openedViaLegacyAdapter } = input
+    return {
+      instanceId,
+      id: descriptor.id,
+      openedViaLegacyAdapter,
+      hasV2DescriptorIdentity: isV2Identity,
+      requires: descriptor.requires,
+      capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
+      capabilityContext:
+        isV2Identity || !openedViaLegacyAdapter
+          ? this.bindCapabilityContext(input.capabilityContext, instanceId)
+          : input.capabilityContext ?? null,
+      view: input.surface,
+      hostWindow: input.hostWindow,
+      workspacePath: input.workspacePath,
+      query: input.query,
+      senderId: input.surface.webContents.id,
+      fill: input.fill,
+      detachHostResize: null,
+      detachHostClosed: null,
+      closeHostOnHide: input.closeHostOnHide,
+      ready: false,
+      pluginReady: false,
+      pendingTargets: [],
+    }
+  }
+
+  private wireSurface(
+    instanceId: string,
+    record: RunningPlugin,
+    hostWindow: BrowserWindow,
+    descriptor: PluginLaunchDescriptor,
+    isV2Identity: boolean,
+    openedViaLegacyAdapter: boolean
+  ): void {
+    const contents = record.view.webContents
+    this.running.set(instanceId, record)
+    if (isV2Identity && this.activationFailureHandler) {
+      // Register the activation immediately so load failure / renderer death
+      // remain observable, but do not spend the readiness budget while the
+      // entry document itself is still loading.
+      this.pendingActivations.set(instanceId, null)
+    }
+    if (openedViaLegacyAdapter) this.legacyInstances.set(descriptor.id, instanceId)
+    this.bySender.set(record.senderId, instanceId)
+
+    // A plugin needing the backend gets the shared transport connected now (if
+    // the backend url is already known) so server-push events reach it without
+    // waiting for its first capability call.
+    if (descriptor.requires.length > 0) this.ensureBackend()
+
+    // If the host window goes away, tear the view down with it. Guarded so a
+    // later record (view recreated on another window) is never torn down by a
+    // stale hook.
+    const onHostClosed = (): void => {
+      if (this.running.get(instanceId)?.view.webContents === contents) this.destroyInstance(instanceId)
+    }
+    hostWindow.on('closed', onHostClosed)
+    record.detachHostClosed = () => hostWindow.removeListener('closed', onHostClosed)
+
+    // Defensive cleanup: if the view's webContents dies through any path other
+    // than destroy() (renderer crash, Electron teardown), drop the record so
+    // the next open() recreates instead of loading into a destroyed view.
+    contents.once('destroyed', () => {
+      this.failActivation(instanceId, 'plugin renderer exited before readiness')
+      const plugin = this.forgetInstance(instanceId)
+      if (plugin) this.detachView(plugin)
+    })
+
+    contents.on(
+      'did-fail-load',
+      (_event, errorCode: number, errorDescription: string, _url: string, isMainFrame: boolean) => {
+        if (isMainFrame) {
+          this.failActivation(
+            instanceId,
+            `entry load failed: ${errorDescription} (${errorCode})`
+          )
+        }
+      }
+    )
+
+    // Open targets sent before the entry finished loading are queued and
+    // flushed here (mirrors the legacy editor window's did-finish-load flush).
+    contents.on('did-finish-load', () => {
+      const current = this.running.get(instanceId)
+      if (current?.view.webContents !== contents) return
+      current.ready = true
+      if (
+        this.pendingActivations.get(instanceId) === null &&
+        !current.pluginReady
+      ) {
+        const timer = setTimeout(() => {
+          this.failActivation(instanceId, 'plugin readiness handshake timed out')
+        }, 10_000)
+        timer.unref?.()
+        this.pendingActivations.set(instanceId, timer)
+      }
+      for (const params of current.pendingTargets.splice(0)) {
+        contents.send(IPC_OPEN_TARGET, params)
+      }
+      // Replay the current transport status: transitions before this load (or
+      // while a queued view was still booting) would otherwise be missed and
+      // the plugin's optimistic 'connected' default never corrected.
+      if (
+        current.requires.length > 0 &&
+        current.capabilityPolicy.kind !== 'manifest-v2' &&
+        this.wsClient
+      ) {
+        this.emitToInstance(instanceId, 'nav.backend_status', { status: this.wsStatus })
+      }
+    })
+
+  }
+
   private mountView(
     hostWindow: BrowserWindow,
     descriptor: PluginLaunchDescriptor,
@@ -3496,107 +3648,22 @@ export class FrontendPluginManager {
     // attach
     hostWindow.contentView.addChildView(view)
 
-    const record: RunningPlugin = {
+    const record = this.buildRecord({
       instanceId,
-      id: descriptor.id,
-      openedViaLegacyAdapter,
-      hasV2DescriptorIdentity: isV2Identity,
-      requires: descriptor.requires,
-      capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
-      capabilityContext:
-        isV2Identity || !openedViaLegacyAdapter
-          ? this.bindCapabilityContext(capabilityContext, instanceId)
-          : capabilityContext ?? null,
-      view: nativeSurface(view),
+      descriptor,
+      surface: nativeSurface(view),
       hostWindow,
       workspacePath: opts.workspacePath ?? null,
       query,
-      senderId: view.webContents.id,
+      capabilityContext: capabilityContext ?? null,
+      isV2Identity,
+      openedViaLegacyAdapter,
       fill: bounds === 'fill',
-      detachHostResize: null,
-      detachHostClosed: null,
       closeHostOnHide: opts.closeHostOnHide ?? false,
-      ready: false,
-      pluginReady: false,
-      pendingTargets: [],
-    }
-    this.running.set(instanceId, record)
-    if (isV2Identity && this.activationFailureHandler) {
-      // Register the activation immediately so load failure / renderer death
-      // remain observable, but do not spend the readiness budget while the
-      // entry document itself is still loading.
-      this.pendingActivations.set(instanceId, null)
-    }
-    if (openedViaLegacyAdapter) this.legacyInstances.set(descriptor.id, instanceId)
-    this.bySender.set(record.senderId, instanceId)
+    })
+    this.wireSurface(instanceId, record, hostWindow, descriptor, isV2Identity, openedViaLegacyAdapter)
     this.applyBounds(record, bounds)
     this.trackHostResize(record)
-
-    // A plugin needing the backend gets the shared transport connected now (if
-    // the backend url is already known) so server-push events reach it without
-    // waiting for its first capability call.
-    if (descriptor.requires.length > 0) this.ensureBackend()
-
-    // If the host window goes away, tear the view down with it. Guarded so a
-    // later record (view recreated on another window) is never torn down by a
-    // stale hook.
-    const onHostClosed = (): void => {
-      if (this.running.get(instanceId)?.view.nativeView === view) this.destroyInstance(instanceId)
-    }
-    hostWindow.on('closed', onHostClosed)
-    record.detachHostClosed = () => hostWindow.removeListener('closed', onHostClosed)
-
-    // Defensive cleanup: if the view's webContents dies through any path other
-    // than destroy() (renderer crash, Electron teardown), drop the record so
-    // the next open() recreates instead of loading into a destroyed view.
-    view.webContents.once('destroyed', () => {
-      this.failActivation(instanceId, 'plugin renderer exited before readiness')
-      const plugin = this.forgetInstance(instanceId, view)
-      if (plugin) this.detachView(plugin)
-    })
-
-    view.webContents.on(
-      'did-fail-load',
-      (_event, errorCode: number, errorDescription: string, _url: string, isMainFrame: boolean) => {
-        if (isMainFrame) {
-          this.failActivation(
-            instanceId,
-            `entry load failed: ${errorDescription} (${errorCode})`
-          )
-        }
-      }
-    )
-
-    // Open targets sent before the entry finished loading are queued and
-    // flushed here (mirrors the legacy editor window's did-finish-load flush).
-    view.webContents.on('did-finish-load', () => {
-      const current = this.running.get(instanceId)
-      if (current?.view.nativeView !== view) return
-      current.ready = true
-      if (
-        this.pendingActivations.get(instanceId) === null &&
-        !current.pluginReady
-      ) {
-        const timer = setTimeout(() => {
-          this.failActivation(instanceId, 'plugin readiness handshake timed out')
-        }, 10_000)
-        timer.unref?.()
-        this.pendingActivations.set(instanceId, timer)
-      }
-      for (const params of current.pendingTargets.splice(0)) {
-        view.webContents.send(IPC_OPEN_TARGET, params)
-      }
-      // Replay the current transport status: transitions before this load (or
-      // while a queued view was still booting) would otherwise be missed and
-      // the plugin's optimistic 'connected' default never corrected.
-      if (
-        current.requires.length > 0 &&
-        current.capabilityPolicy.kind !== 'manifest-v2' &&
-        this.wsClient
-      ) {
-        this.emitToInstance(instanceId, 'nav.backend_status', { status: this.wsStatus })
-      }
-    })
 
     this.loadEntry(view, loadDescriptor, viewDescriptor !== undefined)
 
@@ -4020,6 +4087,117 @@ export class FrontendPluginManager {
    *  composition. This projection contains no live view identity. */
   listContributionCatalog(): PluginContributionCatalogEntry[] {
     return buildPluginContributionCatalog(this.listDescriptors())
+  }
+
+
+  /** Compose the entry URL for an in-window contribution and reserve the Host
+   *  identity it will attach with. Everything authoritative — instance id,
+   *  workspace, package version, capability grant — is resolved here; the
+   *  renderer receives only a URL carrying an opaque one-time token, which it
+   *  puts on a `<webview src>`. */
+  async prepareGuestContribution(
+    hostWindow: BrowserWindow,
+    contributionKey: string,
+    options: { workspacePath: string; query: string }
+  ): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+    const descriptor = this.listDescriptors().find((candidate) =>
+      candidate.views?.some((view) => view.contributionKey === contributionKey)
+    )
+    const view = descriptor?.views?.find((candidate) => candidate.contributionKey === contributionKey)
+    if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
+    if (view.location === 'window') {
+      return { ok: false, error: 'window contributions require a dedicated Host window' }
+    }
+    const capabilityContext = this.contributionCapabilityContext(descriptor, view, options.workspacePath)
+    if (descriptor.capabilityPolicy?.kind === 'manifest-v2' && !capabilityContext) {
+      return { ok: false, error: 'package-version capability grant is missing' }
+    }
+    validateV2CapabilityContext(descriptor, capabilityContext ?? null)
+
+    // One live instance per (window, contribution). A re-prepare means the
+    // renderer is mounting a fresh guest, so the previous one is finished.
+    const registryKey = this.contributionInstanceKey(hostWindow, contributionKey)
+    const existing = this.contributionInstances.get(registryKey)
+    if (existing) {
+      this.destroyInstance(existing.instanceId)
+      this.contributionInstances.delete(registryKey)
+    }
+
+    const token = randomUUID()
+    const query = `${options.query}&nv_guest=${token}`
+    const entryFile = view.entryFile ?? descriptor.entryFile
+    const pending: PendingGuest = {
+      token,
+      instanceId: this.nextInstanceId(),
+      registryKey,
+      descriptor: { ...descriptor, entryFile, query },
+      hostWindow,
+      workspacePath: options.workspacePath || null,
+      query,
+      capabilityContext: capabilityContext ?? null,
+      isV2Identity: hasV2DescriptorIdentity(descriptor),
+      timer: null,
+    }
+    // A guest that never attaches (renderer error, unmount mid-flight) must not
+    // pin an identity forever.
+    pending.timer = setTimeout(() => this.pendingGuests.delete(token), 30_000)
+    pending.timer.unref?.()
+    this.pendingGuests.set(token, pending)
+    return { ok: true, url: `${pathToFileURL(entryFile).toString()}${query}` }
+  }
+
+  private pendingGuestFor(src: string): PendingGuest | null {
+    try {
+      const token = new URL(src).searchParams.get('nv_guest')
+      return token ? this.pendingGuests.get(token) ?? null : null
+    } catch {
+      return null
+    }
+  }
+
+  /** The webPreferences main must force onto an attaching guest. Null means the
+   *  src was not handed out by {@link prepareGuestContribution}, which is the
+   *  caller's signal to veto the attach. */
+  guestAttachPreferences(src: string): { preload: string; pluginId: string } | null {
+    const pending = this.pendingGuestFor(src)
+    if (!pending) return null
+    return {
+      preload: join(__dirname, '../preload/plugin-preload.js'),
+      pluginId: pending.descriptor.id,
+    }
+  }
+
+  /** Bind an attached guest to the identity reserved for it. The guest carries
+   *  its own webContents, so capability calls stay attributable by sender
+   *  exactly as they are for a native view. */
+  attachGuestContribution(src: string, guest: WebContents): boolean {
+    const pending = this.pendingGuestFor(src)
+    if (!pending) return false
+    if (pending.timer) clearTimeout(pending.timer)
+    this.pendingGuests.delete(pending.token)
+    const record = this.buildRecord({
+      instanceId: pending.instanceId,
+      descriptor: pending.descriptor,
+      surface: guestSurface(guest),
+      hostWindow: pending.hostWindow,
+      workspacePath: pending.workspacePath,
+      query: pending.query,
+      capabilityContext: pending.capabilityContext,
+      isV2Identity: pending.isV2Identity,
+      openedViaLegacyAdapter: false,
+      fill: false,
+      closeHostOnHide: false,
+    })
+    this.wireSurface(
+      pending.instanceId,
+      record,
+      pending.hostWindow,
+      pending.descriptor,
+      pending.isV2Identity,
+      false
+    )
+    this.contributionInstances.set(pending.registryKey, { instanceId: pending.instanceId })
+    return true
   }
 
   private contributionInstanceKey(hostWindow: BrowserWindow, contributionKey: string): string {
