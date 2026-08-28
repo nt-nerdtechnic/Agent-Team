@@ -416,13 +416,17 @@ def _mask_url(url: str) -> str:
         return url
     try:
         parts = urlsplit(url)
+        username = parts.username
+        password = parts.password
+        hostname = parts.hostname or ""
+        port = parts.port
     except ValueError:
         return REDACTED_SECRET
     netloc = parts.netloc
-    if parts.username or parts.password:
-        host = parts.hostname or ""
-        if parts.port:
-            host = f"{host}:{parts.port}"
+    if username or password:
+        host = hostname
+        if port:
+            host = f"{host}:{port}"
         netloc = f"{REDACTED_SECRET}@{host}"
     query = parts.query
     if query:
@@ -450,18 +454,17 @@ def _mask_args(args: tuple[str, ...]) -> tuple[str, ...]:
     masked: list[str] = []
     take_next = False
     for arg in args:
+        if take_next:
+            masked.append(_mask_named_value(arg) or REDACTED_SECRET)
+            take_next = False
+            continue
         # A URL argument is the third place a credential hides (mcp-remote is
         # routinely handed ``https://host/mcp?apikey=…``), and it is not a
         # name/value pair, so it needs the URL rule rather than this one.
         if _URL_RE.match(arg):
             masked.append(_mask_url(arg))
-            take_next = False
             continue
         named = _mask_named_value(arg)
-        if take_next:
-            masked.append(named or REDACTED_SECRET)
-            take_next = False
-            continue
         if named:
             masked.append(named)
             continue

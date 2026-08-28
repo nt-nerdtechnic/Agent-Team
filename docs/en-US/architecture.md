@@ -186,7 +186,7 @@ Supported coding CLIs, Git clients, model runtimes, and MCP servers retain their
 
 ## Agent integration boundary
 
-An agent integration is declared per vendor rather than threaded through the application. One spec file on each side — `backend/agent_team_backend/cli_vendors/<key>.py` and `src/renderer/src/agents/<key>.ts` — declares that CLI's credentials, usage interface, resume syntax, session paths, spawn environment, log reader and install entry, and one registration line on each side publishes it. Shared modules read the registry instead of branching on the agent key, and a vendor module may not import another vendor or any application module.
+An agent integration is declared per vendor rather than threaded through the application. One spec file on each side — `backend/agent_team_backend/cli_vendors/<key>.py` and `src/renderer/src/platform/plugin-shell/agents/<key>.ts` — declares that CLI's credentials, usage interface, resume syntax, session paths, spawn environment, log reader and install entry, and one registration line on each side publishes it. Shared modules read the registry instead of branching on the agent key, and a vendor module may not import another vendor or any application module.
 
 A capability the spec leaves undeclared is treated as unsupported for that vendor and degrades gracefully; it never falls back to another vendor's behavior. This keeps a partial integration honest — a CLI can ship with spawning and install detection while resume, log reading and credential switching stay visibly unavailable until they are verified against a real installation.
 
@@ -215,6 +215,42 @@ Sessions should publish structured progress back to the Project Intelligence Lay
 - Git history and run artifacts can preserve data after a working file is deleted.
 
 See [Privacy and Data Flows](privacy.md) and [SECURITY.md](../../SECURITY.md).
+
+## Git v2 process boundary and recovery
+
+The production Git v2 package runs in an isolated plugin renderer. Its Git and
+Issue requests cross a narrow Host-owned bridge to Electron main and then the
+local backend; the package never receives a generic backend route, a terminal
+surface, or a Git credential.
+
+Git account credentials are bound by the Host to one canonical HTTPS hostname.
+The Host sends a credential only for that destination, and the backend asks
+again which HTTPS host Git is prompting for before it answers. Picker-selected
+paths use short-lived, per-instance, one-time Host grants. A clone grant permits
+only one safe direct child of the chosen directory; a successful clone creates
+the separate grant required to open its exact result as a workspace.
+
+Git events are routed by Host-owned workspace and instance identity, so one
+view cannot refresh another workspace. Plugin Storage owns Git preferences and
+the selected repository value; older project/local values are read-only runtime
+seeds and never replace a newer storage value.
+
+Git uses the same installed Manifest, catalog, exact-version grant, instance,
+and capability runtime as third-party packages. Until Marketplace acquisition
+is available, the App ships a factory `navide.git` package and activates it on a
+fresh profile. A verified Marketplace version takes precedence. Removing the
+factory package records a durable opt-out; restart does not reinstall it, and
+the Extensions view is the only place that restores it.
+
+Electron main tries the selected v2 descriptor first. A load, mount, or ready
+failure retires the whole v2 Git package and selects the retained legacy
+descriptor for the remainder of that process. Trust, signature, revocation,
+grant, and capability denials fail closed without fallback. An installed
+`navide.git` directory that fails validation also remains a visible hard
+failure instead of being hidden by the factory or legacy copy.
+`NAVIDE_GIT_RECOVERY=legacy` forces the recovery descriptor before activation.
+Neither recovery path mutates Plugin Storage snapshots or legacy seeds. This
+is a compatibility recovery path, not a generic version lifecycle.
 
 ## Architectural direction
 

@@ -1,4 +1,4 @@
-import { collapseHomePath } from './paths'
+import { collapseHomePath } from '@navide/terminal'
 
 /** One row of the lineage tree: a pane id and where it sits in the subtree. */
 export interface LineageRow {

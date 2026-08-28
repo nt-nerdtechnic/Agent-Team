@@ -8,7 +8,9 @@ import { eventNamespace, resolveWsType } from './capabilityMap'
 import {
   HOST_SHELL_EXECUTABLE_ALLOWLIST,
   publicCapabilityEntry,
+  storageRequestValidationError,
   type PublicCapabilityScope,
+  type StoragePartitionClass,
 } from './pluginCapabilityCatalog'
 import type { PluginShellMode, PluginSystemNamespace } from './pluginManifestV2'
 import type { PluginCapabilityPolicy } from './pluginPermissions'
@@ -49,6 +51,8 @@ export type CapabilityErrorCode =
   | 'TIMEOUT'
   | 'BACKEND_UNAVAILABLE'
   | 'PLUGIN_STOPPING'
+  | 'CREDENTIAL_REQUIRED'
+  | 'STORAGE_QUOTA_EXCEEDED'
   | 'INTERNAL_ERROR'
 
 export interface AuthenticatedRuntimeBinding {
@@ -64,6 +68,9 @@ export interface HostCapabilityGrant {
   system: readonly PluginSystemNamespace[]
   shell?: PluginShellMode
   highRiskShellConfirmed?: boolean
+  /** Host-managed storage grant. Not declared in a Manifest: the Host decides
+   *  which packages may read/write their partition. */
+  storage?: boolean
 }
 
 export interface HostCapabilityContext {
@@ -79,6 +86,41 @@ export interface HostCapabilityContext {
   sessionBindings?: ReadonlyMap<string, AuthenticatedRuntimeBinding>
   /** Host-owned pending start bindings, keyed by opaque request id. */
   pendingStartBindings?: ReadonlyMap<string, AuthenticatedRuntimeBinding>
+  /** Package versions bound to each versioned storage snapshot, keyed by
+   *  snapshot tier. Lets a storage call select only the snapshot whose package
+   *  version matches the binding's — no other selection is permitted. */
+  storageSnapshots?: ReadonlyMap<StorageSnapshotTier, string>
+  /** Host-selected tier fixed for the lifetime of one runtime instance. */
+  storageSnapshotTier?: StorageSnapshotTier
+}
+
+/** A tier name for the Host-managed versioned storage snapshots. */
+export type StorageSnapshotTier = 'candidate' | 'active' | 'previous'
+
+/** The Host-derived partition a storage call may read/write. The Plugin never
+ *  selects any field here — `pluginId` and (for workspace scope) `workspaceId`
+ *  come from the authenticated runtime binding, and `key` is the only value the
+ *  Plugin supplies. */
+export interface StoragePartition {
+  pluginId: string
+  workspaceId: string | null
+  key: string
+}
+
+/** Which versioned storage snapshot a plan targets, matched to the package
+ *  version it is bound to. */
+export interface StorageSnapshotRef {
+  pluginId: string
+  tier: StorageSnapshotTier
+  packageVersion: string
+}
+
+/** A Host-managed storage plan. Besides the partition identity it carries the
+ *  selected snapshot tier so a plugin can never read or write a snapshot that
+ *  does not match its own package version. */
+export interface StoragePlan {
+  partition: StoragePartition
+  snapshot: StorageSnapshotRef
 }
 
 export interface PublicCapabilityExecutionPlan {
@@ -89,6 +131,7 @@ export interface PublicCapabilityExecutionPlan {
   runtime: AuthenticatedRuntimeBinding
   shellMode?: PluginShellMode
   session?: AuthenticatedRuntimeBinding
+  storage?: StoragePlan
 }
 
 export type PublicCapabilityDecision =
@@ -100,6 +143,9 @@ export type PublicCapabilityDecision =
  * is the M1 built-in used to prove the IPC envelope round-trips end to end.
  */
 export const BUILTIN_CAPABILITIES: readonly string[] = ['ping']
+
+/** Reserved source identity used by Host-produced workspace events. */
+export const HOST_EVENT_SOURCE_PLUGIN_ID = 'host'
 
 /**
  * Scoping decision: may a plugin whose manifest declares `requires` call `ns`?
@@ -403,7 +449,10 @@ export function planPublicCapabilityCall(
     return publicDenied(call.reqId, 'METHOD_NOT_FOUND', `unknown public capability '${address}'`)
   }
 
-  if (entry.namespace === 'shell') {
+  if (entry.storage === true) {
+    // Storage is Host-granted and deliberately absent from Manifest v2's
+    // `permissions.system` namespace array.
+  } else if (entry.namespace === 'shell') {
     if (!policy.shell) return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'shell access is not declared')
   } else if (!policy.system.includes(entry.namespace)) {
     return publicDenied(call.reqId, 'CAPABILITY_DENIED', `system namespace '${entry.namespace}' is not declared`)
@@ -411,6 +460,10 @@ export function planPublicCapabilityCall(
 
   if (entry.eligibility === 'firstParty' && !context.publisherEligible) {
     return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'publisher is not eligible for this capability')
+  }
+
+  if (entry.storage === true) {
+    return planStoragePartition(call, context)
   }
 
   const binding = context.runtimeBinding
@@ -492,12 +545,116 @@ export function planPublicCapabilityCall(
   }
 }
 
-/** Route a cataloged event only to the Host-authenticated session audience. */
+/** Select the versioned storage snapshot whose package version matches the
+ *  binding's. Only a snapshot bound to `packageVersion` may be selected; a
+ *  binding whose package version matches no stored snapshot fails closed. */
+function selectStorageSnapshot(
+  pluginId: string,
+  packageVersion: string,
+  tier: StorageSnapshotTier | undefined,
+  storageSnapshots: ReadonlyMap<StorageSnapshotTier, string> | undefined
+): StorageSnapshotRef | null {
+  if (!storageSnapshots || !tier) return null
+  if (!['candidate', 'active', 'previous'].includes(tier)) return null
+  for (const [candidateTier, version] of storageSnapshots) {
+    if (
+      !['candidate', 'active', 'previous'].includes(candidateTier) ||
+      typeof version !== 'string' ||
+      version.length === 0
+    ) {
+      return null
+    }
+  }
+  if (storageSnapshots.get(tier) !== packageVersion) return null
+  return { pluginId, tier, packageVersion }
+}
+
+/** Host-managed storage planning. A storage call selects only a partition
+ *  class (plugin|workspace) and a key; the Host derives the partition identity
+ *  from the authenticated runtime binding and selects the versioned snapshot
+ *  whose package version matches the binding. The Plugin never supplies, and
+ *  can never override, any partition identity. */
+function planStoragePartition(
+  call: CapabilityCall,
+  context: HostCapabilityContext
+): PublicCapabilityDecision {
+  const address = `${call.ns}.${call.method}`
+  const grant = context.userGrant
+  const binding = context.runtimeBinding
+
+  if (!binding || binding.pluginId !== call.pluginId) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'authenticated runtime binding is missing')
+  }
+
+  if (
+    !grant ||
+    grant.packageVersion !== binding.packageVersion ||
+    grant.storage !== true
+  ) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'storage grant is not user-approved')
+  }
+
+  const args = publicRequestArgs(call)
+  // Storage accepts only { scope, key }. Any partition identity the Plugin
+  // might try to supply (pluginId, workspaceId, packageVersion, path) is
+  // rejected because storageRequestValidationError allows only those keys.
+  if (!args) {
+    return publicDenied(call.reqId, 'INVALID_ARGUMENT', `invalid request for '${address}'`)
+  }
+  const requestError = storageRequestValidationError(
+    args,
+    address as 'storage.get' | 'storage.set' | 'storage.delete'
+  )
+  if (requestError) {
+    return publicDenied(call.reqId, requestError, `invalid request for '${address}'`)
+  }
+
+  const partitionClass = args.scope as StoragePartitionClass
+  const key = args.key as string
+
+  if (partitionClass !== 'plugin' && !requiresWorkspace(binding)) {
+    return publicDenied(call.reqId, 'WORKSPACE_SCOPE_VIOLATION', 'workspace binding is required')
+  }
+
+  const partition: StoragePartition =
+    partitionClass === 'plugin'
+      ? { pluginId: binding.pluginId, workspaceId: null, key }
+      : { pluginId: binding.pluginId, workspaceId: binding.workspaceId ?? null, key }
+
+  const snapshot = selectStorageSnapshot(
+    binding.pluginId,
+    binding.packageVersion,
+    context.storageSnapshotTier,
+    context.storageSnapshots
+  )
+  if (!snapshot) {
+    return publicDenied(
+      call.reqId,
+      'CAPABILITY_DENIED',
+      'no storage snapshot matches this package version'
+    )
+  }
+
+  return {
+    kind: 'allow',
+    plan: {
+      kind: 'public',
+      address,
+      scope: partitionClass,
+      args,
+      runtime: binding,
+      storage: { partition, snapshot },
+    },
+  }
+}
+
+/** Route a cataloged event only to the Host-authenticated package audience. */
 export function isPublicCapabilityEventAllowed(
   policy: Extract<PluginCapabilityPolicy, { kind: 'manifest-v2' }>,
   event: string,
   payload: unknown,
   context: HostCapabilityContext,
+  targetPluginId: string,
   sourceBinding?: AuthenticatedRuntimeBinding
 ): boolean {
   const entry = publicCapabilityEntry(event)
@@ -514,11 +671,18 @@ export function isPublicCapabilityEventAllowed(
   ) {
     return false
   }
+  if (typeof targetPluginId !== 'string' || targetPluginId.length === 0) return false
+  if (targetPluginId !== binding.pluginId) return false
   if (event === 'workspace.filesChanged') {
     if (
       !sourceBinding ||
+      sourceBinding.pluginId !== HOST_EVENT_SOURCE_PLUGIN_ID ||
       !requiresWorkspace(sourceBinding) ||
-      sourceBinding.workspaceId !== binding.workspaceId
+      sourceBinding.packageVersion.length === 0 ||
+      sourceBinding.instanceId !== null ||
+      sourceBinding.audience !== null ||
+      sourceBinding.workspaceId !== binding.workspaceId ||
+      sourceBinding.packageVersion !== binding.packageVersion
     ) {
       return false
     }
@@ -536,6 +700,7 @@ export function isPublicCapabilityEventAllowed(
     )
   }
   if (event !== 'aiCli.output' && event !== 'aiCli.exited') return false
+  if (!sourceBinding || !sameBinding(sourceBinding, binding)) return false
   if (!requiresAiCliBinding(binding) || !isRecord(payload)) return false
   if (!context.sessionBindings) return false
   if (event === 'aiCli.output') {

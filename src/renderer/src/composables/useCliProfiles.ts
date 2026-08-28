@@ -1,6 +1,6 @@
 import { onScopeDispose, ref, type InjectionKey } from 'vue'
-import { i18n } from '../i18n'
-import { paneCanRebuild } from '../lib/resume-command'
+import { i18n } from '@navide/plugin-ui/foundation'
+import { paneCanRebuild } from '@navide/plugin-shell'
 import type { useBackend } from './useBackend'
 
 // A CLI account profile: a stored credential slot for one agent CLI so the

@@ -8,6 +8,8 @@ function mockPlugins(overrides: Record<string, unknown> = {}) {
     listInstalled: vi.fn().mockResolvedValue([
       { id: 'navide.mini-ide', requires: ['fs', 'git', 'terminal'], sensitive: ['fs', 'terminal'] },
     ]),
+    listFactoryPackages: vi.fn().mockResolvedValue([]),
+    restoreFactoryPackage: vi.fn().mockResolvedValue({ ok: true }),
     marketplaceSearch: vi.fn().mockResolvedValue({
       items: [
         {
@@ -61,6 +63,50 @@ describe('ExtensionsPane', () => {
     expect(row.text()).toContain('navide.mini-ide')
     expect(row.find('.ext-sensitive').exists()).toBe(true)
     expect(row.find('.ext-sensitive').text()).toContain('fs, terminal')
+  })
+
+  it('shows an opted-out bundled Git package and restores it explicitly', async () => {
+    const listFactoryPackages = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { id: 'navide.git', version: '0.1.0', active: false, optedOut: true },
+      ])
+      .mockResolvedValueOnce([
+        { id: 'navide.git', version: '0.1.0', active: true, optedOut: false },
+      ])
+    const api = mockPlugins({ listFactoryPackages })
+    wrapper = mount(ExtensionsPane)
+    await flushPromises()
+
+    const row = wrapper.get('[data-factory-id="navide.git"]')
+    expect(row.text()).toContain('Bundled Git')
+    expect(row.text()).toContain('Removed')
+    await row.get('.ext-restore').trigger('click')
+    await flushPromises()
+
+    expect(api.restoreFactoryPackage).toHaveBeenCalledWith('navide.git')
+    expect(wrapper.get('[data-factory-id="navide.git"]').text()).toContain('Active')
+  })
+
+  it('shows an active factory Git package only in the Bundled section', async () => {
+    mockPlugins({
+      listInstalled: vi.fn().mockResolvedValue([
+        {
+          id: 'navide.git',
+          requires: ['fs', 'ui', 'shell'],
+          sensitive: ['fs', 'shell'],
+          provenance: 'factory-bundled',
+        },
+      ]),
+      listFactoryPackages: vi.fn().mockResolvedValue([
+        { id: 'navide.git', version: '0.1.0', active: true, optedOut: false },
+      ]),
+    })
+    wrapper = mount(ExtensionsPane)
+    await flushPromises()
+
+    expect(wrapper.get('[data-factory-id="navide.git"]').text()).toContain('Active')
+    expect(wrapper.find('[data-id="navide.git"]').exists()).toBe(false)
   })
 
   it('shows and removes a backend-only package with no capabilities', async () => {

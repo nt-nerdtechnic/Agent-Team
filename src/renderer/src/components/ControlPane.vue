@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch, defineAsyncComponent } from 'vue'
-import type { PaneArgContext } from '../agents'
+import { computed, defineAsyncComponent, onUnmounted, ref, watch } from 'vue'
+import type { PaneArgContext } from '@navide/plugin-shell'
 import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
-import { PANE_BATCH_MIME } from '../lib/cliContext'
+import { PANE_BATCH_MIME } from '@navide/terminal'
 import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import { paneStatusLabelKey } from '../lib/paneStatusLabel'
@@ -12,30 +12,27 @@ import AddPaneIcon from './AddPaneIcon.vue'
 import HistoryIcon from './HistoryIcon.vue'
 import FolderIcon from './FolderIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
+import GitPluginHostSlot from './GitPluginHostSlot.vue'
+import PluginRegionHost, { type PluginRegionContribution } from './PluginRegionHost.vue'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
-import type { DisplayStatus } from '../composables/useTerminal'
+import type { DisplayStatus } from '@navide/terminal'
 import type { Role, RoleKey } from '../data/roles'
 import type { Stage, StageId } from '../data/stages'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
-import { registerCommand } from '../keybindings/useKeybindings'
+import { registerCommand } from '@navide/plugin-ui/shared'
 import { useUpdater } from '../composables/useUpdater'
-import { i18n } from '../i18n'
-import { useNotify } from '../composables/useNotify'
+import { i18n } from '@navide/plugin-ui/foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 
-// MultiRepoGit wraps GitPane and adds a repo tab bar when 2+ repos are found.
-// Loaded async (same reasoning as GitPane: ~276KB, off first-paint path).
-// Kept v-show (not v-if) so its changes-count badge stays live while Explorer tab is showing.
-const MultiRepoGit = defineAsyncComponent(() => import('./MultiRepoGit.vue'))
-
-// PlanPane: the plan review surface (drill-down list → preview) embedded in the
-// Plans sidebar tab. Async-loaded (off first-paint path, pulls in plan machinery).
+// Plans remains a Host-owned bundled surface until the B6 migration moves the
+// complete frontend/backend feature behind a Manifest v2 contribution.
 const PlanPane = defineAsyncComponent(() => import('../editor/PlanPane.vue'))
 
 // Re-exported from the canonical per-vendor specs — this was a hand-kept
 // structural mirror before stage 2 of the one-file-per-vendor refactor.
-import type { AgentSpec } from '../agents'
-export type { AgentSpec } from '../agents'
-import { CLI_AGENT_SPECS } from '../agents'
+import type { AgentSpec } from '@navide/plugin-shell'
+export type { AgentSpec } from '@navide/plugin-shell'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 
 /** CLIs YOLO mode actually affects: the ones declaring a bypass flag. Derived,
  *  because the hand-written hint here listed three while eight qualified. */
@@ -283,6 +280,12 @@ interface Props {
   rebuildingAll?: boolean
   /** Issue dispatch/handle status — forwarded to GitPane for badges. */
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
+  /** Manifest-driven contributions available to this Host window. */
+  pluginContributions?: PluginRegionContribution[]
+  /** Main-process-only legacy Git recovery mode. */
+  legacyGitRecovery?: boolean
+  /** Change count published by the legacy Git recovery contribution. */
+  gitChangesCount?: number
   /** Left slot collapsed — swaps the panel body for a narrow icon rail.
    *  Unrelated to a pane's own collapsed flag (see `lineage`). */
   collapsed?: boolean
@@ -478,6 +481,7 @@ const emit = defineEmits<{
   (e: 'dispatch-issue', payload: { paneId: string; issue: IssueDetail }): void
   (e: 'spawn-for-issue', payload: { agentKey: string; mode: IssueHandlerMode; issue: Issue; provider: IssueProvider }): void
   (e: 'open-git-accounts'): void
+  (e: 'changes-count', count: number): void
   (e: 'rename-pane', paneId: string, name: string): void
   (e: 'install-cli', payload: { agentKey: string; label: string }): void
   (e: 'update:collapsed', v: boolean): void
@@ -694,21 +698,58 @@ watch(
   { immediate: true }
 )
 
-// ── Top-level tab: agents | pipeline | explorer | git | plans ─────────────────
+// ── Top-level tab: core tabs plus recovery Git and Manifest contributions ─────
 const _TAB_KEY = 'agentTeam.sidebarTab'
-type SidebarTab = 'agents' | 'pipeline' | 'explorer' | 'git' | 'plans'
+type SidebarTab = 'agents' | 'pipeline' | 'explorer' | 'git' | 'plans' | `plugin:${string}`
+const CORE_SIDEBAR_TABS = ['agents', 'pipeline', 'explorer'] as const
+type CoreSidebarTab = (typeof CORE_SIDEBAR_TABS)[number]
+const legacyGitRecovery = computed(() => props.legacyGitRecovery === true)
+const pluginTabId = (key: string): `plugin:${string}` => `plugin:${key}`
+const isPluginTab = (tab: SidebarTab): tab is `plugin:${string}` => tab.startsWith('plugin:')
+const pluginTabs = computed(() =>
+  (props.pluginContributions ?? [])
+    .filter((entry) => entry.location === 'left')
+    .map((entry) => ({ ...entry, tabId: pluginTabId(entry.contributionKey) }))
+)
+const gitPluginTab = computed(() => pluginTabs.value.find((entry) => entry.pluginId === 'navide.git') ?? null)
+const genericPluginTabs = computed(() => pluginTabs.value.filter((entry) => entry.pluginId !== 'navide.git'))
+const failedPluginIcons = ref(new Set<string>())
+const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): string =>
+  `${entry.contributionKey}\u0000${entry.icon ?? ''}`
+const hasPluginIcon = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): boolean =>
+  Boolean(entry.icon) && !failedPluginIcons.value.has(pluginIconFailureKey(entry))
+function markPluginIconFailed(entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): void {
+  const failures = new Set(failedPluginIcons.value)
+  failures.add(pluginIconFailureKey(entry))
+  failedPluginIcons.value = failures
+}
 const sidebarTab = ref<SidebarTab>(
   (() => {
     try {
       const v = sessionStorage.getItem(_TAB_KEY) as SidebarTab | null
       // Backward-compat: unknown / legacy values fall back to the first tab.
-      return v === 'agents' || v === 'pipeline' || v === 'explorer' || v === 'git' || v === 'plans' ? v : 'agents'
+      const isKnown = v !== null && (
+        v === 'agents' || v === 'pipeline' || v === 'explorer' ||
+        v === 'plans' || v.startsWith('plugin:') || (v === 'git' && legacyGitRecovery.value)
+      )
+      return isKnown ? v : 'agents'
     } catch { return 'agents' }
   })()
 )
 watch(sidebarTab, (v) => { try { sessionStorage.setItem(_TAB_KEY, v) } catch { /* ignore */ } })
 
-// Cmd+1/2/3/4/5 → switch sidebar tab (Agents / Pipeline / Explorer / Git / Plans)
+watch(legacyGitRecovery, (enabled) => {
+  if (!enabled && sidebarTab.value === 'git') sidebarTab.value = 'agents'
+}, { immediate: true })
+
+watch(pluginTabs, (tabs) => {
+  if (isPluginTab(sidebarTab.value) && !tabs.some((tab) => tab.tabId === sidebarTab.value)) {
+    sidebarTab.value = 'agents'
+  }
+}, { immediate: true })
+
+// Cmd+1/2/3/4/5 preserve the established Agents / Pipeline / Explorer / Git /
+// Plans positions. V2 Git owns the same fourth command slot as recovery Git.
 //
 // These used to be a bare `document.addEventListener('keydown')` sitting
 // outside the keybinding system, which meant Settings could neither list nor
@@ -716,7 +757,7 @@ watch(sidebarTab, (v) => { try { sessionStorage.setItem(_TAB_KEY, v) } catch { /
 // switching the sidebar. They are ordinary commands now; only the text-input
 // guard stayed behind, because the central dispatcher does not look at
 // `e.target` and this shortcut must not fire while someone is typing.
-const SIDEBAR_TABS: SidebarTab[] = ['agents', 'pipeline', 'explorer', 'git', 'plans']
+const SIDEBAR_TABS: SidebarTab[] = [...CORE_SIDEBAR_TABS, 'git', 'plans']
 
 function typingInTextField(): boolean {
   const el = document.activeElement as HTMLElement | null
@@ -740,7 +781,13 @@ for (let i = 1; i <= SIDEBAR_TABS.length; i++) {
 // the same command ids: Cmd+Shift+E / R / G.
 registerCommand('workbench.action.focusExplorer', () => selectSidebarTab('explorer'))
 registerCommand('workbench.action.focusPipeline', () => selectSidebarTab('pipeline'))
-registerCommand('workbench.action.focusSourceControl', () => selectSidebarTab('git'))
+registerCommand('workbench.action.focusSourceControl', () => {
+  if (legacyGitRecovery.value) {
+    selectSidebarTab('git')
+    return
+  }
+  if (gitPluginTab.value) selectSidebarTab(gitPluginTab.value.tabId)
+})
 // Cmd+Shift+U → spawn an agent with the currently picked CLI/role (the green
 // "Open Agent" button); spawn() itself no-ops when canSpawn is false.
 registerCommand('workbench.action.spawnAgent', () => spawn())
@@ -758,9 +805,6 @@ for (let i = 1; i <= 9; i++) {
     }
   })
 }
-
-// Git tab badge — updated by GitPane via changes-count event
-const gitChangesCount = ref(0)
 
 // ── Pipeline two-layer navigation ─────────────────────────────────────────────
 const sidebarView = ref<'list' | 'pipeline'>('list')
@@ -788,8 +832,14 @@ function showSidebarTab(tab: SidebarTab): void {
   if (tab === 'pipeline') sidebarView.value = 'list'
 }
 
+const gitChangesCount = computed(() => props.gitChangesCount ?? 0)
+
 function selectSidebarTab(tab: SidebarTab): void {
-  showSidebarTab(tab)
+  const target = tab === 'git' && !legacyGitRecovery.value
+    ? gitPluginTab.value?.tabId
+    : tab
+  if (!target) return
+  showSidebarTab(target)
   // Surfacing a tab while the slot is collapsed has to reopen it, or Cmd+1..5
   // and the programmatic entry points would only move a highlight on the rail.
   // Collapsing is the parent's state, so ask rather than set — the same one-way
@@ -835,7 +885,7 @@ const visibleTabIds = computed(() => new Set(visibleTabs.value.map((t) => t.id))
 // the first remaining tab keeps the panel showing something; without this the
 // body renders nothing and the sidebar looks broken rather than empty.
 watch(visibleTabs, (tabs) => {
-  if (!tabs.length || tabs.some((t) => t.id === sidebarTab.value)) return
+  if (!tabs.length || tabs.some((t) => t.id === sidebarTab.value) || isPluginTab(sidebarTab.value)) return
   showSidebarTab(tabs[0].id)
 }, { immediate: true })
 
@@ -1372,6 +1422,24 @@ const dispatchTargets = computed(() =>
     .map((p) => ({ id: p.id, label: p.slotLabel || p.roleLabel || p.agentLabel }))
 )
 
+function publishGitContributionState(): void {
+  window.agentTeam?.setGitContributionState?.({
+    workspacePath: workspacePath.value,
+    analyzerModel: props.analyzerModel,
+    dispatchTargets: dispatchTargets.value,
+    availableAgents: availableAgents.value,
+    issueHandoffs: props.issueHandoffs ?? {},
+  })
+}
+
+watch(
+  [workspacePath, () => props.analyzerModel, dispatchTargets, availableAgents, () => props.issueHandoffs],
+  publishGitContributionState,
+  { immediate: true, deep: true },
+)
+
+onUnmounted(() => window.agentTeam?.clearGitContributionState?.())
+
 const pipelineProgress = computed(() => {
   const total = props.pipeline.totalStages || props.stages.length || 1
   if (props.pipeline.state === 'idle') return 0
@@ -1542,15 +1610,44 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         v-for="t in visibleTabs"
         :key="t.id"
         class="rail-btn"
-        :class="{ active: sidebarTab === t.id }"
+        :class="{ active: sidebarTab === t.id || (t.id === 'git' && gitPluginTab?.tabId === sidebarTab) }"
         :title="$t('layout.expand')"
         @click="selectSidebarTab(t.id)"
       >
-        <svg v-if="!t.icon" class="rail-icon rail-icon-git" width="18" height="18"
+        <img
+          v-if="t.id === 'git' && gitPluginTab && hasPluginIcon(gitPluginTab)"
+          class="plugin-tab-icon"
+          :src="gitPluginTab.icon ?? ''"
+          width="18"
+          height="18"
+          alt=""
+          @error="markPluginIconFailed(gitPluginTab)"
+        />
+        <svg v-else-if="!t.icon" class="rail-icon rail-icon-git" width="18" height="18"
              viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path :d="t.path"/></svg>
         <span v-else class="rail-icon">{{ t.icon }}</span>
         <span class="rail-label">{{ $t(t.label) }}</span>
         <span v-if="t.id === 'git' && gitChangesCount > 0" class="rail-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
+      </button>
+      <button
+        v-for="pluginTab in genericPluginTabs"
+        :key="pluginTab.tabId"
+        class="rail-btn"
+        :class="{ active: sidebarTab === pluginTab.tabId }"
+        :title="pluginTab.title"
+        @click="selectSidebarTab(pluginTab.tabId)"
+      >
+        <img
+          v-if="hasPluginIcon(pluginTab)"
+          class="plugin-tab-icon"
+          :src="pluginTab.icon ?? ''"
+          width="18"
+          height="18"
+          alt=""
+          @error="markPluginIconFailed(pluginTab)"
+        />
+        <span v-else class="plugin-tab-fallback" aria-hidden="true">◇</span>
+        <span class="rail-label">{{ pluginTab.title }}</span>
       </button>
     </div>
 
@@ -1559,19 +1656,56 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       <button
         v-for="t in visibleTabs"
         :key="t.id"
-        :class="['tab-btn', { active: sidebarTab === t.id }]"
-        :title="t.title"
+        :class="[
+          'tab-btn',
+          { 'plugin-tab-btn': t.id === 'git' && !legacyGitRecovery && gitPluginTab },
+          { active: sidebarTab === t.id || (t.id === 'git' && gitPluginTab?.tabId === sidebarTab) }
+        ]"
+        :data-legacy-git-tab="t.id === 'git' && legacyGitRecovery ? '' : undefined"
+        :data-plugin-contribution="t.id === 'git' && !legacyGitRecovery ? gitPluginTab?.contributionKey : undefined"
+        :title="t.id === 'git' && gitPluginTab ? `${gitPluginTab.title} (⌘4)` : t.title"
         @click="selectSidebarTab(t.id)"
       >
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path :d="t.path"/></svg>
+        <template v-if="t.id === 'git' && !legacyGitRecovery && gitPluginTab">
+          <img
+            v-if="hasPluginIcon(gitPluginTab)"
+            class="plugin-tab-icon"
+            :src="gitPluginTab.icon ?? ''"
+            width="18"
+            height="18"
+            alt=""
+            @error="markPluginIconFailed(gitPluginTab)"
+          />
+          <span v-else class="plugin-tab-fallback" aria-hidden="true">◇</span>
+        </template>
+        <svg v-else width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path :d="t.path"/></svg>
         <span v-if="t.id === 'git' && gitChangesCount > 0" class="git-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
+      </button>
+      <button
+        v-for="pluginTab in genericPluginTabs"
+        :key="pluginTab.tabId"
+        :class="['tab-btn', 'plugin-tab-btn', { active: sidebarTab === pluginTab.tabId }]"
+        :data-plugin-contribution="pluginTab.contributionKey"
+        :title="pluginTab.title"
+        @click="selectSidebarTab(pluginTab.tabId)"
+      >
+        <img
+          v-if="hasPluginIcon(pluginTab)"
+          class="plugin-tab-icon"
+          :src="pluginTab.icon ?? ''"
+          width="18"
+          height="18"
+          alt=""
+          @error="markPluginIconFailed(pluginTab)"
+        />
+        <span v-else class="plugin-tab-fallback" aria-hidden="true">◇</span>
       </button>
       <span class="tab-spacer"></span>
       <button class="tab-collapse" :title="$t('layout.collapse')" @click="emit('update:collapsed', true)">‹</button>
     </div>
 
-    <!-- ── Explorer / Git tabs (shared split: panel on top, agent dock pinned at bottom) ── -->
-    <div v-show="sidebarTab === 'explorer' || sidebarTab === 'git'" class="pane-split">
+    <!-- ── Explorer / plugin regions (shared split: panel on top, agent dock pinned at bottom) ── -->
+    <div v-show="sidebarTab === 'explorer' || sidebarTab === 'git' || isPluginTab(sidebarTab)" class="pane-split">
       <div class="part-top" style="flex: 1">
         <ExplorerPane
           v-if="backend && visibleTabIds.has('explorer')"
@@ -1579,22 +1713,34 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           :workspace-path="workspace ?? ''"
           :backend="backend"
         />
-        <MultiRepoGit
-          v-if="backend && visibleTabIds.has('git')"
-          v-show="sidebarTab === 'git'"
+        <!-- Generic plugin views are mounted by contribution key; the renderer
+             never receives the Host-generated instance id. -->
+        <PluginRegionHost
+          v-for="pluginTab in pluginTabs"
+          :key="pluginTab.contributionKey"
+          :contribution="pluginTab"
           :workspace-path="workspace ?? ''"
-          :analyzer-model="analyzerModel"
-          :backend="backend"
-          :dispatch-targets="dispatchTargets"
-          :available-agents="availableAgents"
-          :issue-handoffs="issueHandoffs"
-          @changes-count="gitChangesCount = $event"
-          @open-workspace="$emit('workspace-browse', $event)"
-          @dispatch-issue="$emit('dispatch-issue', $event)"
-          @spawn-for-issue="$emit('spawn-for-issue', $event)"
-          @focus-pane="$emit('focus-pane', $event)"
-          @open-git-accounts="$emit('open-git-accounts')"
+          :visible="!collapsed && sidebarTab === pluginTab.tabId"
+          :prewarm="pluginTab.pluginId === 'navide.git'"
         />
+        <template v-if="legacyGitRecovery && backend && sidebarTab === 'git'">
+          <div class="legacy-recovery-label" data-legacy-recovery-label>Legacy recovery</div>
+          <GitPluginHostSlot
+            :workspace-path="workspace ?? ''"
+            :visible="true"
+            :backend="backend"
+            :analyzer-model="analyzerModel"
+            :dispatch-targets="dispatchTargets"
+            :available-agents="availableAgents"
+            :issue-handoffs="issueHandoffs"
+            @changes-count="$emit('changes-count', $event)"
+            @open-workspace="$emit('workspace-browse', $event)"
+            @dispatch-issue="$emit('dispatch-issue', $event)"
+            @spawn-for-issue="$emit('spawn-for-issue', $event)"
+            @focus-pane="$emit('focus-pane', $event)"
+            @open-git-accounts="$emit('open-git-accounts')"
+          />
+        </template>
       </div>
     </div>
 
@@ -2234,7 +2380,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
     </div><!-- /pipeline-detail-scroll -->
     </div><!-- end pipeline tab · detail view -->
 
-    <!-- ── Plans tab (embedded PlanPane, fits the narrow sidebar) ── -->
+    <!-- Plans remains Host-owned until the B6 package migration. -->
     <PlanPane
       v-if="backend && visibleTabIds.has('plans') && sidebarTab === 'plans'"
       class="plans-split"
@@ -2304,6 +2450,12 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 .tab-btn.active {
   color: var(--text-bright);
   background: var(--bg-muted);
+}
+.plugin-tab-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
 }
 .tab-spacer { flex: 1; }
 /* Not a .tab-btn: that class means "a sidebar tab", and both the shortcut
@@ -2388,7 +2540,6 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   border-radius: 999px;
   padding: 0 3px;
 }
-
 .git-badge {
   position: absolute;
   top: -2px;
@@ -2407,6 +2558,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   padding: 0 3px;
   line-height: 1;
   border: 1px solid var(--bg-base);
+}
+.legacy-recovery-label {
+  padding: 5px 10px;
+  color: var(--attention-fg);
+  background: var(--bg-muted);
+  border-bottom: 1px solid var(--border-muted);
+  font-size: 11px;
+  font-weight: 600;
 }
 .dot {
   width: 8px;
@@ -4040,12 +4199,6 @@ button.icon-btn.muted:hover {
   overflow: hidden;
   margin: 0 -14px -14px; /* compensate sidebar padding */
 }
-/* Plans tab fills the sidebar edge-to-edge like the explorer/git splits. */
-.plans-split {
-  flex: 1;
-  min-height: 0;
-  margin: 0 -14px -14px; /* compensate sidebar padding */
-}
 .pane-split .part-top,
 .pipeline-split .part-top {
   flex: 1;
@@ -4107,6 +4260,11 @@ button.icon-btn.muted:hover {
   gap: 12px;
   padding: 0 14px 14px;
   min-height: 0;
+}
+.plans-split {
+  flex: 1;
+  min-height: 0;
+  margin: 0 -14px -14px;
 }
 /* ExplorerPane fills its part-top container */
 .pane-split .part-top > * {

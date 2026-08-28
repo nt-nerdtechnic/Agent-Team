@@ -3,6 +3,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import type { Ref } from 'vue'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // Coverage for the login-expired badge: hidden by default, rendered while the
 // loginExpired prop is set, and clicking it emits 'fix-login' (App.vue owns
@@ -12,10 +13,12 @@ import TerminalPane from '../TerminalPane.vue'
 
 const mockTerminal = vi.hoisted(() => ({ displayStatus: null as unknown as Ref<string> }))
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   mockTerminal.displayStatus = ref('idle')
   return {
+    ...actual,
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: vi.fn(),
@@ -35,7 +38,13 @@ function tMock(key: string): string {
 function mountPane(props: Record<string, unknown>): VueWrapper {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {}, ...props },
+    props: {
+      paneId: 'pane-1',
+      title: 'Claude',
+      terminalPort: createTerminalDockStub(),
+      cliProfiles: {},
+      ...props,
+    },
     global: { mocks: { $t: tMock } }
   })
 }

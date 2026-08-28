@@ -209,6 +209,56 @@ def test_rename_into_internal_is_blocked(tmp_path: Path) -> None:
     assert res["ok"] is False
 
 
+def test_git_directory_is_never_a_public_fs_mutation_target(tmp_path: Path, monkeypatch) -> None:
+    ws = _ws(tmp_path)
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("original", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("ignored", encoding="utf-8")
+    trash_calls: list[str] = []
+    monkeypatch.setattr(fs_service, "send2trash", lambda path: trash_calls.append(path))
+
+    results = [
+        fs_service.mkdir(ws, ".git/new-dir"),
+        fs_service.create_file(ws, ".git/new-file", "x"),
+        fs_service.write_file(ws, ".git/config", "changed"),
+        fs_service.rename(ws, "README.md", ".git/moved"),
+        fs_service.rename(ws, ".git/config", "moved-config"),
+        fs_service.delete(ws, ".git/config"),
+    ]
+
+    assert all(result["ok"] is False for result in results)
+    assert (git_dir / "config").read_text(encoding="utf-8") == "original"
+    assert (tmp_path / "README.md").exists()
+    assert not (tmp_path / "moved-config").exists()
+    assert trash_calls == []
+
+
+def test_git_directory_remains_readable_by_host_fs(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+
+    root_listing = fs_service.list_dir(ws, "", show_hidden=True)
+    assert root_listing["ok"] is True
+    assert ".git" in [entry["name"] for entry in root_listing["entries"]]
+
+    git_listing = fs_service.list_dir(ws, ".git", show_hidden=True)
+    assert git_listing["ok"] is True
+    assert "config" in [entry["name"] for entry in git_listing["entries"]]
+
+    config = fs_service.read_file(ws, ".git/config")
+    assert config["ok"] is True
+    assert "repositoryformatversion" in config["content"]
+
+
+def test_gitignore_remains_a_normal_workspace_file(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    assert fs_service.write_file(ws, ".gitignore", "dist/\n")["ok"] is True
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "dist/\n"
+
+
 def _fake_trash(monkeypatch) -> list[str]:
     """Patch send2trash so tests don't move files into the developer's real
     Trash; the fake actually removes the path so 'gone from disk' still holds.

@@ -7,7 +7,7 @@
 // every save, so a downgrade to a build that predates skills still finds a
 // usable loop prompt where it expects one.
 import { DEFAULT_LOOP_PROMPT, LOOP_PROMPT_SETTING_KEY } from './loopPrompt'
-import { settingsGet, settingsSet } from './settings'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 
 export const PROMPT_SKILLS_SETTING_KEY = 'prompt-skills'
 

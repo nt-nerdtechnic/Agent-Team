@@ -14,7 +14,8 @@ import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
 import TokenStatsPanel from '../TokenStatsPanel.vue'
 import { usePreview } from '../../preview/usePreview'
-import { settingsSet, __resetSettingsForTest } from '../../lib/settings'
+import { settingsSet } from '@navide/plugin-ui/shared'
+import { __resetSettingsForTest } from '@navide/plugin-ui/shared/testing'
 import type { TokensSnapshot } from '../../composables/useTokens'
 
 type Handler = (raw: unknown) => void

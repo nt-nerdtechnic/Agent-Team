@@ -1,6 +1,6 @@
 # Plugin Developer Spec v2
 
-> **Status: target draft; Issue 03 contract enforcement is implemented.** The current runtime uses manifest
+> **Status: target draft; Issues 03 and 16 contract enforcement are implemented.** The current runtime uses manifest
 > v1 and is documented in [Plugin development guide](plugin-development.md).
 > This document is the author-facing contract that the v2 migration must
 > implement before third-party publishing opens.
@@ -9,8 +9,11 @@
 > Host authorization/planning seam. Actual backend child-process lifecycle
 > remains deferred to its owning follow-up issue. Issue 03 completes the
 > parser, catalog, authorization planner, and Host enforcement seams.
-> Production execution adapters and persisted consent wiring remain disabled
-> and belong to the later runtime integration issue.
+> Issue 16 adds the durable storage adapter and Host-only lifecycle seams to
+> Electron main. Production grant/consent and runtime-context production are
+> not wired yet, so ordinary production plugin instances cannot reach storage;
+> calls remain denied until that later integration is delivered. Other public
+> execution adapters and persisted consent wiring also remain disabled.
 >
 > Issue 06 adds the public package boundary and the external frontend workflow.
 > The checked-in SDK CLI currently supports `validate` and frontend-only
@@ -20,6 +23,13 @@
 > **Migration decision:** Plan B (the B0-B9 checkpoint path) was approved on
 > 2026-08-13. Plans A and C are not active implementation alternatives.
 
+> **Issue 19 production first-party package:** The approved Plan B Git
+> migration is now implemented as the bundled `navide.git` production case.
+> It is one Manifest v2 package with two isolated `custom` views (`left` and
+> `window`), and both views use the same active package version. This does not
+> open third-party publishing or complete the later Plans/Skills migration,
+> marketplace lifecycle, or legacy-removal work.
+
 ## What is public
 
 Third-party plugins may depend only on these public package names:
@@ -28,18 +38,21 @@ Third-party plugins may depend only on these public package names:
   error codes, and JSON Schema exports.
 - `@navide/plugin-sdk`: activation, capability calls, events, lifecycle, view,
   and target APIs.
-- `@navide/plugin-ui`: stable design tokens and UI primitives.
+- `@navide/plugin-ui`: Vue components, shared presentation services, stable
+  design tokens, and safe capability-backed UI controllers that do not expose
+  Host transports.
 
-The repository's `packages/features/*` packages are private, unpublished
-first-party implementation. A bundled plugin such as `navide.git` can use them;
-a third-party plugin cannot. They are not compatibility promises or examples of
-the public dependency graph.
+Official and third-party packages use the same public dependency graph and the
+same install, activation, update, rollback, and uninstall lifecycle. Official
+status changes only Registry trust and marketplace classification; it does not
+grant access to private Host modules or force an official package to be
+installed. The base App must remain usable with an empty plugin catalog.
 
 The package manifests declare public npm publication metadata and use normal
 SemVer 2.0.0 versions, but registry publication is future work outside Issue
 06. The package implementations live under
-`packages/plugin-{contracts,sdk,ui}/` and have no dependency on
-`packages/features/*`. Third-party projects must use registry versions in a
+`packages/plugin-{contracts,sdk,ui,ui-vue}/` and have no dependency on Host
+renderer sources. Third-party projects must use registry versions in a
 published workflow, never `workspace:` dependencies. The Issue 06 release
 gate packs those public packages and installs the tarballs in a directory
 outside the Navide workspace; it does not publish to npm.
@@ -617,7 +630,7 @@ are not Manifest v2 permissions.
 | `system:fs` | `fs.readFile`, `fs.listDirectory`, `fs.glob`, `fs.stat`, `workspace.filesChanged` | `workspace` |
 | `system:ui` | `ui.openInEditor` | `workspace` |
 | `system:ui` | `ui.openExternal` | `plugin` (HTTPS; Host user-gesture gate) |
-| `system:aiCli` | `aiCli.startSession`, `cancelStart`, `reattachSession`, `sendInput`, `resizeSession`, `redrawSession`, `interruptSession`, `stopSession`, `output`, `exited` | `workspace` |
+| `system:aiCli` | `aiCli.listProfiles`, `startSession`, `resumeSession`, `cancelStart`, `reattachSession`, `sendInput`, `resizeSession`, `redrawSession`, `interruptSession`, `stopSession`, `output`, `exited` | `workspace` |
 | `shell` | `shell.run` | `workspace` |
 
 `workspace` is a resource boundary, not raw workspace filesystem access. The
@@ -625,31 +638,111 @@ Host derives `workspaceId` from authenticated runtime binding. There is no
 public `runtime` scope. Workspace events also require a Host-authenticated
 event source for the same workspace; an unbound shared event is dropped.
 
-### Planned storage partitions — deferred to B2
+### Host-managed storage partitions
 
-Storage runtime remains deferred to B2 and is not opened by Issue 03. The
-planned API will accept a partition class in `scope`; it will not accept a
-plugin ID, workspace ID, package version, or storage path.
+Manifest v2 exposes durable JSON key/value storage through the public
+`storage.get`, `storage.set`, and `storage.delete` methods. Storage is a
+Host-managed grant, not a `permissions.system` namespace: a plugin must have a
+Host-approved storage grant for its authenticated package version, but must not
+declare a new `storage` permission in its manifest.
 
-When implemented:
+Current runtime status: the Electron main-process adapter and Host-only
+planning/lifecycle seams are implemented. The production source of `storage`
+grants and authenticated snapshot context is connected for the first-party
+`navide.git` migration; ordinary third-party production calls still receive
+`CAPABILITY_DENIED` until their own grant/context integration is delivered.
+The API below remains the public contract and does not expose the first-party
+storage migration seam to third-party packages.
 
-- `storage.get`, `storage.set`, and `storage.delete` will accept the partition
-  class in `scope`.
-- `scope: "plugin"` will address the Host-bound `(pluginId, key)` partition.
-  All live views and the backend of that plugin will share it, while another
-  plugin using the same key will receive a different value.
-- `scope: "workspace"` will address the Host-bound
-  `(pluginId, currentWorkspaceId, key)` partition. Calls without a current
-  workspace binding will fail with `WORKSPACE_SCOPE_VIOLATION`; they will
-  never fall back to plugin scope.
-- Package updates will copy the active Host-managed storage snapshot into an
-  isolated candidate. **Restart Plugin** will activate the package and
-  snapshot together; rollback will restore the previous package and snapshot
-  together.
-- Raw `ui.settings` will remain a first-party legacy surface, not plugin
-  storage. Theme, language, workbench layout, terminal runtime state,
-  workspace files, and other domain data will not become accessible through
-  the storage API.
+The SDK calls accept only a partition class and key; the Host derives the
+plugin identity, workspace identity, package version, and storage location
+from the authenticated runtime binding:
+
+```ts
+await context.capabilities.invoke('storage.set', {
+  scope: 'plugin',
+  key: 'panel-state',
+  value: { collapsed: false },
+})
+
+const result = await context.capabilities.invoke('storage.get', {
+  scope: 'workspace',
+  key: 'filters',
+})
+if (result.found) console.log(result.value)
+```
+
+`storage.get` returns `{ found: true, value }` for a stored value, including a
+stored top-level `null`, and `{ found: false, value: null }` when the key is
+absent. `storage.set` replaces one value atomically and `storage.delete`
+returns whether a value was removed. Requests cannot provide a plugin ID,
+workspace ID, package version, partition path, or snapshot tier. Such fields
+are rejected rather than treated as hints.
+
+`scope: "plugin"` addresses `(authenticatedPluginId, packageVersion, tier,
+key)`. All views using that authenticated plugin/package/tier binding share the
+partition; another plugin, package version, or tier does not.
+`scope: "workspace"` addresses
+`(authenticatedPluginId, packageVersion, tier, authenticatedWorkspaceId, key)`.
+Workspace storage requires a current authenticated workspace binding and never
+falls back to the plugin partition. Missing or mismatched bindings fail closed
+with `WORKSPACE_SCOPE_VIOLATION` or `CAPABILITY_DENIED`.
+
+The Host stores data in its application-data directory with owner-only file
+permissions. Each logical `(pluginId, packageVersion, tier)` snapshot is a
+separate Host-selected directory containing one `plugin.json` file and one
+hashed workspace file per workspace. Renderer/plugin identifiers are never
+used as path components. Reads touch only the requested partition file, while
+the snapshot quota is the sum of the canonical partition-file byte lengths.
+
+The Host-owned layout is:
+
+```text
+<userData>/plugin-storage-v2/<plugin-key>/<package-key>/<tier>/
+  plugin.json
+  workspaces/<workspace-key>.json
+```
+
+`<plugin-key>`, `<package-key>`, and `<workspace-key>` are Host-generated
+SHA-256 directory/file components; the raw identities never become paths.
+Limits are measured in UTF-8 bytes: keys are at most 256 bytes, one canonical
+JSON value is at most 1 MiB, and one package-version/tier snapshot is at most
+10 MiB.
+A 12 MiB per-partition physical format guard is independent of the current
+quota. Exceeding a write-time limit returns the stable
+`STORAGE_QUOTA_EXCEEDED` error; an unsuccessful write leaves the prior value
+intact. Existing structurally valid data is not rejected merely because a
+later policy quota is lower.
+
+Durable means that the Host writes a same-directory temporary file, fsyncs the
+file, atomically renames it, and fsyncs the parent directory before reporting
+success. Deletes use the corresponding directory fsync. A corrupt partition
+is preserved and fails only calls targeting that partition; it does not make
+other plugin or workspace partitions unreadable.
+
+Candidate, active, and previous snapshot selectors are Host-owned runtime
+metadata and are part of the internal storage identity. A request can select
+only the explicitly selected tier whose package version matches the
+authenticated binding; equal package versions in two tiers remain separate
+storage directories. The selected tier is fixed for the lifetime of a runtime
+instance, so lifecycle changes destroy/reopen the instance rather than
+silently retargeting it. Plugin code never sees tier, version, or storage
+identity.
+
+Package-version upgrades do not automatically carry data forward for ordinary
+public packages: a new version starts with its own empty snapshot. The
+first-party `navide.git` migration is an explicit Host-owned exception: before
+its current package version is promoted, the Host may clone the prior active
+Git snapshot into the current candidate, then retain the prior snapshot for
+rollback. Plugin code cannot select or read the old tier. Issue 28 still owns
+the general Host-only clone, promotion, rollback, retention, and
+garbage-collection orchestration. Actual uninstall removes all storage for
+that plugin after cleanup succeeds; a later reinstall does not restore the
+deleted data.
+
+Raw `ui.settings` remains a first-party legacy surface, not plugin storage.
+Theme, language, workbench layout, terminal runtime state, workspace files, and
+other domain data are not accessible through this API.
 
 The Host will derive every partition identity from the authenticated runtime
 binding. The `scope` argument will only select one of the two permitted
@@ -664,16 +757,62 @@ execution plan is returned.
 
 First-party identity affects eligibility only. It never grants a namespace,
 selects a package version, or bypasses the user grant. Git is not an
-independent permission. The Host shell executable allowlist contains `git`;
-all packages, including `navide.git`, must still declare `shell: "allowlist"`
-and pass the same package-version grant and authenticated binding checks.
-The allowlist matches only the canonical top-level executable name: it does
-not accept wrappers, aliases, or path-qualified replacements. It only confirms
-that the top-level executable is `git`; it does not restrict Git subcommands or
-arguments and is not a process sandbox. Git's pager, aliases, SSH command
-configuration, hooks, and similar mechanisms may indirectly execute other
-programs. Therefore `shell: "allowlist"` combined with Git remains a
-high-trust grant.
+independent permission. The Host shell executable allowlist contains the
+canonical top-level executables `git`, `gh`, and `glab`; all packages,
+including `navide.git`, must still declare `shell: "allowlist"` and pass the
+same package-version grant and authenticated binding checks. This is one
+shared catalog allowlist: adding `gh` and `glab` for Host-owned GitHub/GitLab
+Issue detection also makes those executables available to every package that
+already has the generic allowlist grant. The public allowlist accepts only
+canonical top-level executable names and a fixed set of built-in tool
+families; it does not accept wrappers, path-qualified replacements, aliases,
+extensions, credential/auth commands, or unknown external subcommands. Git
+configuration and execution overrides such as `-c`, `-C`, `--config-env`,
+`--git-dir`, `--work-tree`, `--exec-path`, `--upload-pack`, and
+`--receive-pack` are rejected, as are direct execution hooks such as
+`submodule foreach`, `bisect run`, and `rebase --exec`. Host-owned Git and
+Issues services use a separate trusted argv interface and are not constrained
+by this public plugin policy.
+
+This remains a command broker rather than a process sandbox. Permitted Git and
+provider commands can still modify repositories, contact remotes, and invoke
+repository-controlled behavior such as ordinary Git hooks. Treat
+`shell: "allowlist"` as a high-trust grant and request it only when the public
+catalog methods are insufficient.
+
+### First-party production Git package (Issue 19)
+
+The removable factory-installed `navide.git` package is the first production consumer of the
+Manifest v2 custom-view and Host-owned storage seams. Its `left` contribution
+is embedded in the workbench and its `window` contribution is opened in the
+dedicated Git window; the Host resolves both from one active package
+descriptor/version. The package uses custom views only. It does not add a
+tree/provider contribution or a public `git` or `issues` permission namespace.
+
+Repository Git operations remain the existing Host/backend service, reached
+through a typed first-party bridge and the Host shell broker. GitHub and GitLab
+Issue provider detection and JSON normalization remain Host-owned; their
+`gh`/`glab` calls use the same shell allowlist described above. The package
+cannot provide an executable, raw command, working directory, environment, or
+raw terminal access through this bridge. Its AI CLI dock uses the public
+`system.aiCli` semantic contract, including Host-generated session identity,
+terminal dimensions, redraw dimensions, and stop force semantics.
+
+The bridge also preserves the existing Git contribution behavior (repository
+tabs, change counts, issue dispatch/spawn handoffs, pane focus, account
+settings, and Git window targets) while keeping workspace and view identity
+Host-owned. Factory acquisition and verified Marketplace acquisition both feed
+the same Manifest, catalog, exact-version grant, instance, and capability
+runtime; factory provenance is not a permission bypass. Removing Bundled Git
+records a durable opt-out, and Extensions provides the explicit restore action.
+When the selected, trusted, approved `navide.git` version fails to
+load, mount, or report ready, the Host retires that package's v2 instances and
+uses the retained legacy renderer for the remainder of the process. Trust,
+signature, revocation, grant, and capability denials fail closed and never
+trigger the legacy path. An invalid installed package is also not hidden by the
+factory or legacy copy. `NAVIDE_GIT_RECOVERY=legacy` remains the explicit operator override.
+Issue 19 does not remove the legacy implementation or implement later
+Plans/Skills migration or marketplace lifecycle work.
 
 ### Embedded AI CLI public mapping
 
@@ -682,7 +821,9 @@ catalog exposes only the Host-mediated AI CLI addresses below:
 
 | Public address | Meaning |
 | --- | --- |
+| `aiCli.listProfiles` | List the Host-allowlisted profile identifiers and labels |
 | `aiCli.startSession` | Start a Host-selected, allowlisted profile |
+| `aiCli.resumeSession` | Resume the detached session owned by this package/workspace/view tuple |
 | `aiCli.cancelStart` | Cancel a Host-owned start request |
 | `aiCli.reattachSession` | Reattach to an already Host-bound session |
 | `aiCli.sendInput` | Send input to an owned session |
@@ -695,8 +836,11 @@ catalog exposes only the Host-mediated AI CLI addresses below:
 `aiCli.startSession` accepts only an allowlisted `profileId` and terminal
 display dimensions. The Host derives the command, arguments, working directory,
 environment, credentials, workspace, pane metadata, session ID, view instance,
-and event audience. Every control call validates the opaque session against the
-authenticated plugin, package version, workspace, view instance, and audience.
+and event audience. Resize and redraw carry validated positive terminal
+dimensions, and stop carries an explicit force value; neither permits raw PTY
+or process control. Every control call validates the opaque session against
+the authenticated plugin, package version, workspace, view instance, and
+audience.
 Directed output and exit events are delivered only to the authenticated
 audience that created or reattached the session.
 `shell.run`, raw command/executable/arguments/environment/working-directory
@@ -706,6 +850,50 @@ for `ui.openExternal` before opening a URL.
 Filesystem calls used by the dock's `@`-file picker remain authorized by
 the public `system:fs` catalog; they are not absorbed into the AI CLI
 permission.
+
+### Issue 15 runtime boundary
+
+The raw v1 `terminal` PTY namespace is not a Manifest v2 permission and is not
+part of the public v2 catalog. Public AI CLI sessions remain Host-mediated
+through the `aiCli.*` contract above. The current instance-aware PTY and event
+logic is a Host-only integration seam for staged view productionization; no
+renderer payload can supply an instance id or capability context, and the
+shared backend event listener has no public-event source binding, so v2 events
+received there fail closed. A Host producer must call the Host ingress with an
+authenticated source: AI CLI output/exit uses the exact per-instance binding,
+while `workspace.filesChanged` uses the reserved `host` source identity with
+matching workspace and package version. The Host ingress also names the target
+package id, so the event reaches eligible views for that exact package id,
+version, and workspace; another package sharing the same version and workspace
+never receives it.
+
+If a view is torn down while `terminal.create` is still completing, the Host
+first sends the generation-scoped create cancellation. If the backend has
+already committed and later returns a successful create response, the Host
+issues one force-kill for only that response's session id; it never creates a
+route for the dead view. A cleanup failure leaves the session unrouted but
+still owned by the Host's shared backend connection, so the ownerless-PTY
+janitor cannot reclaim it while that connection lives; the PTY is released
+when the connection ends and the janitor's grace period elapses.
+
+The v2 ownership table is process-local. Within the same Host process, a view
+may reattach only with its full authenticated package-version, workspace,
+audience, and instance binding. After a Host app restart, an unknown v2 raw
+PTY id is rejected even if the backend PTY process remains alive; durable
+reattach requires a future contract covering persistent identity, version,
+revocation, expiry, and a backend ownership namespace.
+
+V2 context validation follows the descriptor's canonical package version and
+view identity, not the temporary capability-policy adapter. Host-created
+instance ids replace any supplied runtime, session, or pending-start instance
+ids before the context reaches a running view.
+
+The legacy `open()` entry point is only a lifecycle and plugin-id lookup
+adapter. If it receives a descriptor with canonical Manifest v2 identity
+(`packageVersion` and `views`), that instance uses v2 event and PTY ownership
+rules: unknown reattach ids fail closed and a changed ownership tuple detaches
+the route. V1 PTY compatibility applies only to descriptors without v2
+identity.
 
 Before install, Navide shows the declared system namespaces and shell mode,
 resolves their catalog scope, and asks for an explicit package-version grant.
@@ -733,6 +921,7 @@ message, and optional structured details:
 | `TIMEOUT` | Host-owned deadline expired | Retry only when safe and user-visible |
 | `BACKEND_UNAVAILABLE` | Required Host/backend service is down | Disable the action and offer retry |
 | `PLUGIN_STOPPING` | Runtime is draining or restarting | Do not start new work |
+| `STORAGE_QUOTA_EXCEEDED` | A storage key, value, or package-version snapshot exceeds its Host limit | Reduce the stored data or remove old keys |
 | `INTERNAL_ERROR` | Non-actionable Host failure | Log the correlation ID; do not inspect internals |
 
 The v1 broker's `CAP_DENIED`, `UNKNOWN`, `BAD_REQUEST`, and `BACKEND_ERROR`

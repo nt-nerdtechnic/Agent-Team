@@ -2,18 +2,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // Coverage for the terminal's right-click menu (issue #12: right-click was
 // inert app-wide). Main cannot read an xterm selection from the context-menu
 // params — `.xterm` is `user-select: none`, so there is no DOM selection — so
 // the pane sends `term.getSelection()` along with the request.
-// useTerminal is mocked out: no xterm instance, no backend traffic.
+// useTerminal is mocked out: no xterm instance, no transport traffic.
 
 const mockTerminal = vi.hoisted(() => ({ selection: '' }))
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   return {
+    ...actual,
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: vi.fn(),
@@ -28,11 +31,15 @@ vi.mock('../../composables/useTerminal', async () => {
 })
 
 const showTerminalContextMenu = vi.fn()
+const terminalPort = {
+  ...createTerminalDockStub(),
+  showContextMenu: showTerminalContextMenu,
+}
 
 function mountPane(): VueWrapper {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {}, cliProfiles: {} },
+    props: { paneId: 'pane-1', title: 'Claude', terminalPort, cliProfiles: {} },
     global: { mocks: { $t: (key: string) => key } }
   })
 }

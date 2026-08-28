@@ -53,10 +53,7 @@ export async function stabilizeDroppedPaths(paths: string[]): Promise<string[]> 
   }
 }
 
-/** Shell-escape a path so it can be safely pasted into a PTY command line. */
-export function shellEscape(p: string): string {
-  return `'${p.replace(/'/g, "'\\''")}'`
-}
+export { shellEscape } from '@navide/plugin-shell'
 
 /**
  * Escapes a dropped path the way Terminal.app does — backslashes before shell

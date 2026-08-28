@@ -8,8 +8,10 @@
 // shared WebSocket transport below.
 
 import { BrowserWindow, WebContentsView, ipcMain, type WebContents } from 'electron'
-import { existsSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { URL } from 'node:url'
 import { WebSocket as NodeWebSocket } from 'ws'
 import {
   parseCapabilityCall,
@@ -24,17 +26,23 @@ import {
   terminalSessionIdOf,
   terminalSessionsFromResponse,
   HOST_CAPABILITIES,
+  HOST_EVENT_SOURCE_PLUGIN_ID,
   type CapabilityCall,
   type CapabilityResponse,
   type AuthenticatedRuntimeBinding,
   type HostCapabilityContext,
+  type HostCapabilityGrant,
   type PublicCapabilityExecutionPlan,
   type TerminalOutputBatcher,
 } from './pluginCapabilityBroker'
+import {
+  PluginStorageError,
+  type StorageExecution,
+  type StorageExecutionAddress,
+} from './pluginStorage'
 import { CAP_EVENTS } from './capabilityMap'
 import { PUBLIC_CAPABILITY_EVENT_ADDRESSES } from './pluginCapabilityCatalog'
 import {
-  GIT_PLUGIN_REQUIRES,
   MINI_IDE_PLUGIN_REQUIRES,
   PLANS_PLUGIN_REQUIRES,
 } from '../../shared/pluginCapabilities'
@@ -58,17 +66,31 @@ import {
   type WsClientStatus,
   type WsConstructor,
 } from '../../shared/wsClient'
+import { AI_CLI_PROFILES } from '../../shared/aiCliProfiles'
+import { resolveWsType } from './capabilityMap'
+import {
+  HOST_GIT_READ_ONLY_KEYS as GIT_HOST_READ_ONLY_KEYS,
+  HOST_GIT_USER_PREFERENCE_KEYS as GIT_USER_PREFERENCE_KEYS,
+  HOST_GIT_WORKSPACE_REPOSITORY_KEY as GIT_WORKSPACE_REPOSITORY_KEY,
+} from '../../shared/gitCompatibility'
+import {
+  buildPluginContributionCatalog,
+  type PluginContributionCatalogEntry,
+} from './pluginContributionCatalog'
 
 /** Everything the manager needs to launch one plugin view. */
 export interface PluginLaunchDescriptor {
   /** Manifest id, e.g. `navide.noop`. */
   id: string
+  /** Canonical package version for Manifest v2 descriptors. Legacy descriptors
+   *  omit this field because their loader identity is plugin-id keyed. */
+  packageVersion?: string
   /** Capabilities the plugin's manifest declares (drives broker scoping). */
   requires: string[]
   /** Access-aware policy for Manifest v2; omitted descriptors retain V1 behavior. */
   capabilityPolicy?: PluginCapabilityPolicy
   /** Host-authenticated v2 grant/binding context; never serialized to a plugin. */
-  capabilityContext?: HostCapabilityContext
+  capabilityContext?: HostCapabilityContext | null
   /** Dev-server URL for the plugin entry (used when running under electron-vite dev). */
   devUrl: string
   /** Absolute file path to the built plugin entry (packaged / built runs). */
@@ -88,7 +110,8 @@ export interface PluginViewLaunchDescriptor {
   kind: 'custom'
   location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
   title: string
-  icon?: string
+  /** Host-verified on-disk icon identity. It never crosses to the renderer. */
+  iconFile?: string
   entryFile: string
 }
 
@@ -100,16 +123,47 @@ export interface PluginBounds {
 }
 
 /** `'fill'` sizes the view to the host window's content bounds and keeps it
- *  in sync on host `resize` (full-overlay views like the mini-IDE editor). */
-export type PluginViewBounds = PluginBounds | 'fill'
+ *  in sync on host `resize` (full-overlay views like the mini-IDE editor).
+ *  `'hidden'` attaches a deactivated view without inventing visible geometry;
+ *  it is used for contributions that must subscribe before their tab opens. */
+export type PluginViewBounds = PluginBounds | 'fill' | 'hidden'
+
+/** Host-owned handle for one live contribution view. The instance id is
+ * opaque: plugins never choose it and lifecycle calls must use the handle
+ * returned by {@link FrontendPluginManager.openView}. */
+export interface PluginViewHandle {
+  readonly instanceId: string
+}
+
+export interface PluginViewOpenOptions {
+  hostWindow: BrowserWindow
+  bounds: PluginViewBounds
+  query?: string
+  closeHostOnHide?: boolean
+  mirrorTitle?: boolean
+  /** Host-owned workspace path used only to resolve bound capabilities. */
+  workspacePath?: string
+  /** Host-authenticated context for this view instance. Renderer data never
+   *  supplies or overrides this value. */
+  capabilityContext?: HostCapabilityContext | null
+  /** Keep a freshly mounted view deactivated until the Host activates it. */
+  initiallyVisible?: boolean
+}
 
 interface RunningPlugin {
+  instanceId: string
   id: string
+  /** True when this instance was created through the plugin-id keyed {@link open} adapter. */
+  openedViaLegacyAdapter: boolean
+  /** Canonical Manifest v2 identity; this controls PTY semantics regardless of opener. */
+  hasV2DescriptorIdentity: boolean
   requires: string[]
   capabilityPolicy: PluginCapabilityPolicy
   capabilityContext: HostCapabilityContext | null
   view: WebContentsView
   hostWindow: BrowserWindow
+  /** Host-owned workspace path; never sourced from plugin payloads. */
+  workspacePath: string | null
   /** Query string the entry was last loaded with (drives reload-on-change). */
   query: string
   /** webContents.id captured at creation (not readable after destroy). */
@@ -118,6 +172,8 @@ interface RunningPlugin {
   fill: boolean
   /** Removes the host `resize` listener; null when none is attached. */
   detachHostResize: (() => void) | null
+  /** Removes the host `closed` listener; null after instance teardown. */
+  detachHostClosed: (() => void) | null
   /** True when the host window exists solely for this view (dedicated plugin
    *  window): `hideSelf` then closes the window (legacy editor Esc semantics)
    *  instead of hiding the view under a still-visible host. */
@@ -126,16 +182,213 @@ interface RunningPlugin {
    *  queued in {@link pendingTargets} (mirrors the legacy editor window's
    *  pendingEditorOpenFiles flush on did-finish-load). */
   ready: boolean
+  /** True once the renderer sent the authenticated readiness handshake. */
+  pluginReady: boolean
   pendingTargets: Record<string, string>[]
+}
+
+interface GitContributionState {
+  workspacePath: string
+  analyzerModel: string
+  dispatchTargets: Array<{ id: string; label: string }>
+  availableAgents: Array<{ key: string; label: string }>
+  issueHandoffs: Record<string, { paneId: string; mode: string; state: string }>
+}
+
+interface GitAccountHandlers {
+  available(): boolean
+  list(): Array<{ id: string; label: string; host: string; username: string; tokenLast4: string }>
+  add(input: { label: string; host: string; username: string; token: string }): { id: string; label: string; host: string; username: string; tokenLast4: string }
+  update(id: string, patch: Partial<{ label: string; host: string; username: string; token: string }>): void
+  remove(id: string): void
+  bind(workspacePath: string, accountId: string): void
+  unbind(workspacePath: string): void
+  getBinding(workspacePath: string): string | null
+  getCredential(workspacePath: string): { username: string; token: string; expectedHost: string } | null
+}
+
+interface GitCredentialOwner {
+  nonce: string
+  instanceId: string
+  pluginId: string
+  packageVersion: string
+  workspaceId: string | null
+  audience: string | null
+  workspacePath: string
+  requestIds: Set<string>
+}
+
+type GitPathGrantOperation = 'clone_target' | 'open_workspace'
+
+interface GitPathGrant {
+  instanceId: string
+  workspacePath: string
+  packageVersion: string
+  path: string
+  operations: ReadonlySet<GitPathGrantOperation>
+  expiresAt: number
+}
+
+interface TerminalRoute {
+  pluginId: string
+  packageVersion: string | null
+  workspaceId: string | null
+  audience: string | null
+  /** Null while a v2 view is detached and awaiting an authenticated takeover. */
+  instanceId: string | null
+  /** Legacy route mode is derived from descriptor identity, not the opener. */
+  legacy: boolean
+}
+
+interface PendingTerminalOperation {
+  operationId: string
+  instanceId: string
+  wsType: 'terminal.create' | 'terminal.reattach'
+  client: WsClient
+  paneId?: string
+  createGeneration?: string
+  route: TerminalRoute | null
+  cancelled: boolean
+  cancelSent: boolean
+  cleanupSessionIds: Set<string>
+}
+
+interface PendingAiStart {
+  pluginInstanceId: string
+  paneId: string
+  requestId: string
+  client: WsClient
+}
+
+interface AiSessionLedgerEntry {
+  sessionId: string
+  profileId: string
+  pluginId: string
+  packageVersion: string
+  workspaceId: string | null
+  audience: string | null
+  attachedInstanceId: string | null
+  client: WsClient
+  createdAt: number
+}
+
+interface EarlyAiEventBuffer {
+  instanceId: string
+  expiresAt: number
+  events: Array<{ type: 'terminal.output' | 'terminal.exit'; payload: unknown }>
 }
 
 const IPC_CALL = 'plugin:cap:call'
 const IPC_CAST = 'plugin:cap:cast'
+const IPC_HOST_CALL = 'plugin:host:call'
 const IPC_EVENT = 'plugin:cap:event'
 const IPC_READY = 'plugin:ready'
 const IPC_HIDE_SELF = 'plugin:hideSelf'
 const IPC_OPEN_TARGET = 'plugin:openTarget'
+const TERMINAL_OWNED_WS_TYPES = new Set([
+  'terminal.input',
+  'terminal.log_sent',
+  'terminal.resize',
+  'terminal.interrupt',
+  'terminal.kill',
+  'terminal.redraw',
+])
 
+/** First-party compatibility actions used while the existing Git surface is
+ *  moved behind the Manifest v2 package boundary. These are deliberately
+ *  narrower than a generic Host RPC: package identity, sender identity, and
+ *  workspace binding are all checked before any action reaches the backend. */
+const GIT_HOST_ACTIONS = new Set(['git.request', 'issues.request', 'fs.request'])
+const GIT_PRIVATE_ACTIONS = new Set([
+  'git.contribution',
+  'git.account',
+  'git.legacyRepoSelection',
+])
+const GIT_CONTRIBUTION_OPERATIONS = new Set([
+  'get_state',
+  'open_path',
+  'open_temp_file',
+  'pick_workspace',
+  'open_main_window',
+  'open_branch_diff_window',
+  'open_git_window',
+  'open_git_history_window',
+  'changes_count',
+  'open_workspace',
+  'open_file',
+  'open_conflict',
+  'open_diff',
+  'open_branch_diff',
+  'dispatch_issue',
+  'spawn_for_issue',
+  'focus_pane',
+  'open_git_accounts',
+  'open_worktree',
+  'execute_host_command',
+])
+const GIT_HOST_COMMANDS = new Set([
+  'controlPane.selectSidebarTab1',
+  'controlPane.selectSidebarTab2',
+  'controlPane.selectSidebarTab3',
+  'controlPane.selectSidebarTab4',
+  'controlPane.selectSidebarTab5',
+  'workbench.action.focusSourceControl',
+  'workbench.action.openGitWindow',
+])
+const GIT_ACCOUNT_OPERATIONS = new Set([
+  'list',
+  'add',
+  'get_binding',
+  'bind',
+  'unbind',
+])
+const GIT_REMOTE_REQUEST_TYPES = new Set([
+  'git.clone',
+  'git.sync',
+  'git.fetch',
+  'git.pull',
+  'git.push',
+  'git.push_upstream',
+  'git.pull_rebase',
+  'git.push_force',
+])
+const GIT_HOST_UI_ACTIONS = new Set([
+  'ui.open_in_editor',
+  'ui.open_external',
+  'ui.reveal_path',
+  'ui.open_workspace',
+  'ui.pick_folder',
+])
+const GIT_PATH_GRANT_TTL_MS = 5 * 60 * 1000
+const MAX_GIT_PATH_GRANTS_PER_INSTANCE = 16
+const GIT_HOST_FS_TYPES = new Set([
+  'fs.read_file',
+  'fs.write_file',
+  'fs.list_dir',
+  'fs.list_files_flat',
+  'fs.glob_files',
+  'fs.delete',
+  'fs.rename',
+  'fs.read_image',
+  'fs.list_archive',
+  'fs.convert_office',
+  'fs.stat_path',
+])
+const GIT_HOST_FS_MUTATION_TYPES = new Set([
+  'fs.write_file',
+  'fs.delete',
+  'fs.rename',
+])
+const PUBLIC_FS_WS_TYPES: Readonly<Record<string, string>> = {
+  'fs.readFile': 'fs.read_file',
+  'fs.writeFile': 'fs.write_file',
+  'fs.readImage': 'fs.read_image',
+  'fs.listDirectory': 'fs.list_dir',
+  'fs.listFilesFlat': 'fs.list_files_flat',
+  'fs.glob': 'fs.glob_files',
+  'fs.statPath': 'fs.stat_path',
+  'fs.stat': 'fs.stat_path',
+}
 /** `workspace_path` param of an entry query ('' when absent) — the view's
  *  identity in {@link FrontendPluginManager.open}. Deliberately blind to
  *  `file_ws` (the root of a file opened from outside the workspace): an
@@ -160,13 +413,12 @@ function revealHostWindow(win: BrowserWindow): void {
   win.focus()
 }
 
-/** The `navide.` publisher namespace is reserved for first-party plugins
- *  (mini-IDE, noop, fs_probe). An id here may only be registered by the host
- *  itself (built-in/dev) or by an install whose official-key verification
- *  passed, so a third-party marketplace package cannot masquerade as — or
- *  overwrite — a trusted plugin like `navide.mini-ide`. */
+/** The `navide.` publisher namespace is reserved for first-party packages;
+ *  the internal Host event identity is never a plugin id. First-party ids may
+ *  only be registered by the host itself or an install whose official-key
+ *  verification passed. */
 export function isReservedPluginId(id: string): boolean {
-  return id === 'navide.mini-ide' || id.startsWith('navide.')
+  return id === HOST_EVENT_SOURCE_PLUGIN_ID || id.startsWith('navide.')
 }
 
 function hasOfficialRegistryAuthority(trust: InstalledRegistryTrustContext): boolean {
@@ -180,7 +432,7 @@ function hasOfficialRegistryAuthority(trust: InstalledRegistryTrustContext): boo
 
 /**
  * Manages the lifecycle of frontend plugin views and brokers their capability
- * calls. A single instance owns all plugin views across every host window.
+ * calls. Host-generated instances own plugin views across every host window.
  */
 /** Coerce plugin-supplied args into a WS payload object; non-objects become an
  *  empty payload rather than corrupting the backend request. */
@@ -188,9 +440,207 @@ function toPayload(args: unknown): Record<string, unknown> {
   return typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {}
 }
 
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+function isErrnoCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null &&
+    (error as { code?: unknown }).code === code
+}
+
+/** Resolve existing symlinks while preserving a non-existent trailing path. */
+function resolvePathForContainment(path: string): string | null {
+  let current = resolve(path)
+  const missingSegments: string[] = []
+
+  while (true) {
+    try {
+      lstatSync(current)
+    } catch (error) {
+      if (!isErrnoCode(error, 'ENOENT')) return null
+      const parent = dirname(current)
+      if (parent === current) return null
+      missingSegments.unshift(basename(current))
+      current = parent
+      continue
+    }
+
+    try {
+      return missingSegments.length > 0
+        ? resolve(realpathSync(current), ...missingSegments)
+        : realpathSync(current)
+    } catch {
+      // An existing symlink that cannot be resolved is not safe to fall back
+      // to lexically: this includes dangling links and symlink loops.
+      return null
+    }
+  }
+}
+
+function isWorkspaceContainedPath(workspacePath: string, candidatePath: string): boolean {
+  if (candidatePath.includes('\0')) return false
+  const root = resolvePathForContainment(workspacePath)
+  const normalizedCandidate = candidatePath.replace(/\\/g, '/')
+  const candidate = root
+    ? resolvePathForContainment(resolve(workspacePath, normalizedCandidate))
+    : null
+  if (!root || !candidate) return false
+  const relativePath = relative(root, candidate)
+  return relativePath !== '..' &&
+    !relativePath.startsWith(`..${sep}`) &&
+    !isAbsolute(relativePath)
+}
+
+/** Return the Host-side policy error for a filesystem mutation target. The
+ * backend repeats this check, but the Host must stop a denied request before it
+ * reaches the transport as well. `.gitignore` is intentionally not matched by
+ * the segment check. */
+function workspaceMutationPathError(workspacePath: string, candidatePath: unknown): string | null {
+  if (typeof candidatePath !== 'string' || !candidatePath || !isWorkspaceContainedPath(workspacePath, candidatePath)) {
+    return 'path escapes the Host workspace binding'
+  }
+  const normalizedCandidate = candidatePath.replace(/\\/g, '/')
+  const root = resolvePathForContainment(workspacePath)
+  const candidate = root
+    ? resolvePathForContainment(resolve(workspacePath, normalizedCandidate))
+    : null
+  if (!root || !candidate) return 'path cannot be safely resolved'
+  const relativePath = relative(root, candidate)
+  const rootIsGitDirectory = basename(root) === '.git'
+  if (rootIsGitDirectory || relativePath.split(sep).some((segment) => segment === '.git')) {
+    return 'Git metadata paths are protected'
+  }
+  return null
+}
+
+function isExpectedHttpsRemote(url: unknown, expectedHost: string): boolean {
+  if (typeof url !== 'string' || !url) return false
+  try {
+    const remote = new URL(url)
+    return remote.protocol === 'https:' && remote.hostname === expectedHost
+  } catch {
+    return false
+  }
+}
+
+function isStorageExecutionAddress(value: string): value is StorageExecutionAddress {
+  return value === 'storage.get' || value === 'storage.set' || value === 'storage.delete'
+}
+
+function nonEmptyOrNull(value: string | null): boolean {
+  return value === null || nonEmptyString(value)
+}
+
+function hasV2DescriptorIdentity(descriptor: PluginLaunchDescriptor): boolean {
+  return descriptor.packageVersion !== undefined || descriptor.views !== undefined
+}
+
+function hasValidBindingFields(binding: AuthenticatedRuntimeBinding): boolean {
+  return (
+    nonEmptyString(binding.pluginId) &&
+    nonEmptyString(binding.packageVersion) &&
+    nonEmptyOrNull(binding.workspaceId) &&
+    nonEmptyOrNull(binding.instanceId) &&
+    nonEmptyOrNull(binding.audience)
+  )
+}
+
+function sameRuntimeBinding(
+  left: AuthenticatedRuntimeBinding | null | undefined,
+  right: AuthenticatedRuntimeBinding | null | undefined
+): boolean {
+  return (
+    left !== null &&
+    left !== undefined &&
+    right !== null &&
+    right !== undefined &&
+    left.pluginId === right.pluginId &&
+    left.packageVersion === right.packageVersion &&
+    left.workspaceId === right.workspaceId &&
+    left.instanceId === right.instanceId &&
+    left.audience === right.audience
+  )
+}
+
+function sameTerminalRoute(left: TerminalRoute | null, right: TerminalRoute | null): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.pluginId === right.pluginId &&
+    left.packageVersion === right.packageVersion &&
+    left.workspaceId === right.workspaceId &&
+    left.audience === right.audience &&
+    left.instanceId === right.instanceId &&
+    left.legacy === right.legacy
+  )
+}
+
+function validateV2CapabilityContext(
+  descriptor: PluginLaunchDescriptor,
+  context: HostCapabilityContext | null
+): void {
+  if (context === null || !hasV2DescriptorIdentity(descriptor)) return
+  const packageVersion = descriptor.packageVersion
+  if (!nonEmptyString(packageVersion) || descriptor.views === undefined) {
+    throw new Error(`Manifest v2 plugin '${descriptor.id}' is missing canonical package identity`)
+  }
+  const binding = context.runtimeBinding
+  if (
+    !binding ||
+    !hasValidBindingFields(binding) ||
+    binding.pluginId !== descriptor.id ||
+    binding.packageVersion !== packageVersion
+  ) {
+    throw new Error(`capability context identity does not match plugin '${descriptor.id}'`)
+  }
+  if (context.userGrant && context.userGrant.packageVersion !== packageVersion) {
+    throw new Error(`capability context grant version does not match plugin '${descriptor.id}'`)
+  }
+  if (context.storageSnapshots) {
+    for (const [tier, version] of context.storageSnapshots) {
+      if (
+        !['candidate', 'active', 'previous'].includes(tier) ||
+        !nonEmptyString(version)
+      ) {
+        throw new Error(
+          `capability context storage snapshot map is invalid for plugin '${descriptor.id}'`
+        )
+      }
+    }
+  }
+  if (
+    context.storageSnapshotTier !== undefined &&
+    context.storageSnapshots?.get(context.storageSnapshotTier) !== packageVersion
+  ) {
+    throw new Error(
+      `capability context selected storage tier does not match plugin '${descriptor.id}'`
+    )
+  }
+  for (const [label, bindings] of [
+    ['session', context.sessionBindings],
+    ['pending start', context.pendingStartBindings],
+  ] as const) {
+    if (!bindings) continue
+    for (const binding of bindings.values()) {
+      if (
+        !hasValidBindingFields(binding) ||
+        binding.pluginId !== descriptor.id ||
+        binding.packageVersion !== packageVersion
+      ) {
+        throw new Error(`${label} binding does not match plugin '${descriptor.id}'`)
+      }
+    }
+  }
+}
+
 export class FrontendPluginManager {
+  /** Host-generated instance id → running view. */
   private readonly running = new Map<string, RunningPlugin>()
-  /** webContents.id → pluginId, so a call's origin can be trusted, not the payload. */
+  /** Plugin id → instances opened through the legacy adapter; a v2 descriptor may still be here. */
+  private readonly legacyInstances = new Map<string, string>()
+  /** webContents.id → opaque instance id, so a call's origin can be trusted,
+   *  not the payload. */
   private readonly bySender = new Map<number, string>()
   /** Installed/available plugin descriptors keyed by id (loader registry). The
    *  mini-IDE is registered here as the first built-in; third-party installs are
@@ -215,17 +665,1066 @@ export class FrontendPluginManager {
   private publicCapabilityHandler:
     | ((plan: PublicCapabilityExecutionPlan) => unknown | Promise<unknown>)
     | null = null
-  /** `terminal_session_id` → owning pluginId. Registered from terminal.create /
-   *  terminal.reattach responses ({@link noteTerminalRoutes}); terminal.output
-   *  and terminal.exit are delivered to the owner only, falling back to the
-   *  ns-gated fan-out for unregistered sessions. Cleared on terminal.exit and
-   *  on {@link destroy} of the owning plugin. */
-  private readonly terminalRoutes = new Map<string, string>()
+  /** Host-owned executor for the durable storage capability. Kept separate
+   *  from the generic public handler so unimplemented public methods retain
+   *  their existing unavailable behavior. */
+  private publicStorageHandler:
+    | ((execution: StorageExecution) => unknown | Promise<unknown>)
+    | null = null
+  /** Host-renderer state for the left Git contribution, keyed by its host
+   *  BrowserWindow. It is never serialized into a public capability context. */
+  private readonly gitContributionStates = new Map<number, GitContributionState>()
+  /** Main-owned safeStorage adapter for the first-party Git account surface. */
+  private gitAccountHandlers: GitAccountHandlers | null = null
+  private capabilityGrantResolver:
+    | ((pluginId: string, packageVersion: string) => HostCapabilityGrant | null)
+    | null = null
+  private activationFailureHandler:
+    | ((failure: { pluginId: string; packageVersion: string; reason: string }) => void)
+    | null = null
+  private readonly pendingActivations = new Map<
+    string,
+    ReturnType<typeof setTimeout> | null
+  >()
+  /** Opaque picker provenance for the private first-party Git bridge. */
+  private readonly gitPathGrants = new Map<string, GitPathGrant>()
+  /** One unbound remote operation owns each interactive askpass exchange.
+   *  The nonce crosses the backend transport but is never exposed to plugin
+   *  code; request ids are accepted only from the exact originating view. */
+  private readonly gitCredentialOwners = new Map<string, GitCredentialOwner>()
+  private readonly gitCredentialRequests = new Map<string, GitCredentialOwner>()
+  /** `terminal_session_id` → authenticated route ownership. v2 teardown
+   *  clears the live instance id but retains the stable tuple as a tombstone;
+   *  legacy routes retain their plugin-id adapter semantics. */
+  private readonly terminalRoutes = new Map<string, TerminalRoute>()
+  /** The owner captured when a pending output batch was queued. A flush must
+   *  still match the current route, otherwise a delayed timer could deliver a
+   *  detached view's bytes to a later instance. */
+  private readonly pendingTerminalOwners = new Map<string, string>()
+  /** Host-side subscription disposers grouped by exact view instance. */
+  private readonly instanceSubscriptions = new Map<string, Set<() => void>>()
+  /** Region composition owns these handles by Host window and contribution
+   *  key. The renderer only sees catalog metadata and never receives the
+   *  opaque instance id. */
+  private readonly contributionInstances = new Map<string, PluginViewHandle>()
+  /** Awaiting terminal create/reattach responses. Teardown invalidates these
+   *  records before a late backend response can register a route. */
+  private readonly pendingTerminalOperations = new Map<string, PendingTerminalOperation>()
+  /** Host-owned public aiCli start transactions. The package only receives an
+   *  opaque session id; pane ids and backend payloads stay in this map. */
+  private readonly pendingAiStarts = new Map<string, PendingAiStart>()
+  /** Detached AI sessions survive a view close and may be resumed only by a
+   *  new instance with the same Host-authenticated stable tuple. */
+  private readonly aiSessions = new Map<string, AiSessionLedgerEntry>()
+  /** PTY output can beat terminal.create's response. Buffer a small, short-
+   *  lived ordered prefix until the pending start establishes its route. */
+  private readonly earlyAiEvents = new Map<string, EarlyAiEventBuffer>()
   /** Per-session micro-batcher for terminal.output (see the broker module):
    *  coalesces the dense PTY stream into one IPC send per ~12 ms per session. */
   private readonly terminalOutputBatcher: TerminalOutputBatcher = createTerminalOutputBatcher(
-    (sessionId, payload) => this.deliverTerminalEvent('terminal.output', sessionId, payload)
+    (sessionId, payload) => {
+      const owner = this.pendingTerminalOwners.get(sessionId)
+      this.pendingTerminalOwners.delete(sessionId)
+      const route = this.terminalRoutes.get(sessionId)
+      const plugin = route ? this.runningPluginForTerminalRoute(route) : undefined
+      if (plugin?.hasV2DescriptorIdentity && plugin.id === GIT_PLUGIN_ID) {
+        const binding = plugin.capabilityContext?.runtimeBinding
+        const data = toPayload(payload).data
+        if (
+          binding &&
+          this.isPublicEventAllowedForInstance(plugin, 'aiCli.output', { sessionId, data }, binding)
+        ) {
+          this.emitToInstance(plugin.instanceId, 'aiCli.output', { sessionId, data })
+        }
+        return
+      }
+      this.deliverTerminalEvent('terminal.output', sessionId, payload, owner)
+    }
   )
+
+  private resolveInstance(id: string): RunningPlugin | undefined {
+    const direct = this.running.get(id)
+    if (direct) return direct
+    const legacyId = this.legacyInstances.get(id)
+    return legacyId ? this.running.get(legacyId) : undefined
+  }
+
+  private instancesForPlugin(pluginId: string): RunningPlugin[] {
+    return [...this.running.values()].filter((plugin) => plugin.id === pluginId)
+  }
+
+  private nextInstanceId(): string {
+    let instanceId = randomUUID()
+    while (this.running.has(instanceId)) instanceId = randomUUID()
+    return instanceId
+  }
+
+  private workspaceIdForPath(workspacePath: string): string | null {
+    if (!nonEmptyString(workspacePath)) return null
+    const normalized = resolve(workspacePath)
+    return createHash('sha256').update(normalized).digest('hex')
+  }
+
+  private issueGitCredentialOwner(plugin: RunningPlugin): GitCredentialOwner | null {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    if (
+      !plugin.workspacePath ||
+      !binding ||
+      binding.instanceId !== plugin.instanceId ||
+      binding.pluginId !== plugin.id
+    ) return null
+    const owner: GitCredentialOwner = {
+      nonce: randomUUID(),
+      instanceId: plugin.instanceId,
+      pluginId: plugin.id,
+      packageVersion: binding.packageVersion,
+      workspaceId: binding.workspaceId,
+      audience: binding.audience,
+      workspacePath: resolve(plugin.workspacePath),
+      requestIds: new Set(),
+    }
+    this.gitCredentialOwners.set(owner.nonce, owner)
+    return owner
+  }
+
+  private ownsGitCredentialRequest(plugin: RunningPlugin, owner: GitCredentialOwner): boolean {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    return (
+      this.gitCredentialOwners.get(owner.nonce) === owner &&
+      this.running.get(owner.instanceId) === plugin &&
+      binding?.instanceId === owner.instanceId &&
+      binding.pluginId === owner.pluginId &&
+      binding.packageVersion === owner.packageVersion &&
+      binding.workspaceId === owner.workspaceId &&
+      binding.audience === owner.audience &&
+      plugin.workspacePath !== null &&
+      resolve(plugin.workspacePath) === owner.workspacePath
+    )
+  }
+
+  private releaseGitCredentialOwner(owner: GitCredentialOwner): void {
+    if (this.gitCredentialOwners.get(owner.nonce) !== owner) return
+    const plugin = this.running.get(owner.instanceId)
+    const canNotify = plugin ? this.ownsGitCredentialRequest(plugin, owner) : false
+    this.gitCredentialOwners.delete(owner.nonce)
+    for (const requestId of owner.requestIds) {
+      if (this.gitCredentialRequests.get(requestId) === owner) {
+        this.gitCredentialRequests.delete(requestId)
+      }
+      if (plugin && canNotify) {
+        this.emitToInstance(plugin.instanceId, 'git.credential_cancelled', { request_id: requestId })
+      }
+    }
+    owner.requestIds.clear()
+  }
+
+  private releaseGitCredentialOwnersForInstance(instanceId: string): void {
+    for (const owner of [...this.gitCredentialOwners.values()]) {
+      if (owner.instanceId === instanceId) this.releaseGitCredentialOwner(owner)
+    }
+  }
+
+  private gitCredentialRequestOwner(
+    plugin: RunningPlugin,
+    requestId: unknown,
+  ): GitCredentialOwner | null {
+    if (!nonEmptyString(requestId)) return null
+    const owner = this.gitCredentialRequests.get(requestId)
+    return owner && this.ownsGitCredentialRequest(plugin, owner) ? owner : null
+  }
+
+  /** Host-selected grant used only by the official bundled Git package. The
+   *  package receives the resulting binding through openView; it cannot
+   *  choose or widen any of these fields. */
+  gitCapabilityContext(
+    packageVersion: string,
+    workspacePath: string,
+    audience = 'git'
+  ): HostCapabilityContext {
+    const workspaceId = this.workspaceIdForPath(workspacePath)
+    return {
+      publisherEligible: true,
+      userGrant: {
+        packageVersion,
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+        storage: true,
+      },
+      runtimeBinding: {
+        pluginId: GIT_PLUGIN_ID,
+        packageVersion,
+        workspaceId,
+        instanceId: null,
+        audience,
+      },
+      // These are Host-owned profile ids. The package supplies no command or
+      // executable; the public aiCli adapter resolves the profile here before
+      // the backend creates a PTY.
+      aiCliProfiles: [
+        'claude',
+        'codex',
+        'antigravity',
+        'grok',
+        'kimi',
+        'opencode',
+        'qwen',
+        'kilo',
+        'pi',
+        'copilot',
+        'cursor',
+        'aider',
+        'muse',
+      ],
+      storageSnapshots: new Map([
+        ['candidate', packageVersion],
+        ['active', packageVersion],
+        ['previous', packageVersion],
+      ]),
+      storageSnapshotTier: 'active',
+    }
+  }
+
+  setCapabilityGrantResolver(
+    resolver: ((pluginId: string, packageVersion: string) => HostCapabilityGrant | null) | null
+  ): void {
+    this.capabilityGrantResolver = resolver
+  }
+
+  setActivationFailureHandler(
+    handler: ((failure: { pluginId: string; packageVersion: string; reason: string }) => void) | null
+  ): void {
+    this.activationFailureHandler = handler
+  }
+
+  private settleActivation(instanceId: string): void {
+    const timer = this.pendingActivations.get(instanceId)
+    if (timer) clearTimeout(timer)
+    this.pendingActivations.delete(instanceId)
+  }
+
+  private failActivation(instanceId: string, reason: string): void {
+    const plugin = this.running.get(instanceId)
+    if (!plugin || !this.pendingActivations.has(instanceId)) return
+    this.settleActivation(instanceId)
+    const packageVersion = plugin.capabilityContext?.runtimeBinding?.packageVersion
+    if (!packageVersion) return
+    this.activationFailureHandler?.({ pluginId: plugin.id, packageVersion, reason })
+  }
+
+  private contributionCapabilityContext(
+    descriptor: PluginLaunchDescriptor,
+    view: PluginViewLaunchDescriptor,
+    workspacePath: string
+  ): HostCapabilityContext | null {
+    const packageVersion = descriptor.packageVersion
+    const policy = descriptor.capabilityPolicy
+    if (!packageVersion || policy?.kind !== 'manifest-v2') return null
+    const grant = this.capabilityGrantResolver?.(descriptor.id, packageVersion) ?? null
+    if (!grant || grant.packageVersion !== packageVersion || grant.storage !== true) return null
+    if (
+      grant.shell !== policy.shell ||
+      grant.system.length !== policy.system.length ||
+      grant.system.some((namespace) => !policy.system.includes(namespace)) ||
+      (policy.shell === 'full' && grant.highRiskShellConfirmed !== true)
+    ) return null
+    const installed = this.installedPackages.get(descriptor.id)
+    return {
+      publisherEligible:
+        isReservedPluginId(descriptor.id) &&
+        (installed?.provenance === 'official-registry' ||
+          installed?.provenance === 'factory-bundled'),
+      userGrant: grant,
+      runtimeBinding: {
+        pluginId: descriptor.id,
+        packageVersion,
+        workspaceId: this.workspaceIdForPath(workspacePath),
+        instanceId: null,
+        audience:
+          descriptor.id === GIT_PLUGIN_ID && view.location === 'left'
+            ? 'git-left'
+            : descriptor.id === GIT_PLUGIN_ID && view.location === 'window'
+              ? 'git-window'
+              : view.contributionKey,
+      },
+      aiCliProfiles: Object.keys(AI_CLI_PROFILES),
+      storageSnapshots: new Map([
+        ['candidate', packageVersion],
+        ['active', packageVersion],
+        ['previous', packageVersion],
+      ]),
+      storageSnapshotTier: 'active',
+    }
+  }
+
+  /** Rebind only the Host-created runtime identity. V1 descriptors retain
+   *  their existing context shape; v2 view instances receive their own id. */
+  private bindCapabilityContext(
+    context: HostCapabilityContext | null | undefined,
+    instanceId: string
+  ): HostCapabilityContext | null {
+    const bind = (binding: AuthenticatedRuntimeBinding): AuthenticatedRuntimeBinding => ({
+      ...binding,
+      instanceId,
+    })
+    if (!context) return null
+    return {
+      ...context,
+      runtimeBinding: context.runtimeBinding ? bind(context.runtimeBinding) : null,
+      ...(context.storageSnapshots
+        ? { storageSnapshots: new Map(context.storageSnapshots) }
+        : {}),
+      ...(context.sessionBindings
+        ? {
+            sessionBindings: new Map(
+              [...context.sessionBindings].map(([sessionId, binding]) => [
+                sessionId,
+                bind(binding),
+              ])
+            ),
+          }
+        : {}),
+      ...(context.pendingStartBindings
+        ? {
+            pendingStartBindings: new Map(
+              [...context.pendingStartBindings].map(([requestId, binding]) => [
+                requestId,
+                bind(binding),
+              ])
+            ),
+          }
+        : {}),
+    }
+  }
+
+  /** Apply a Host context to one live instance and preserve its PTY route only
+   *  when the instance is still authenticated for the same v2 tuple. Legacy
+   *  descriptors retain their plugin-id route semantics. */
+  private updateInstanceCapabilityContext(
+    plugin: RunningPlugin,
+    context: HostCapabilityContext | null | undefined
+  ): void {
+    const nextContext =
+      plugin.hasV2DescriptorIdentity || !plugin.openedViaLegacyAdapter
+        ? this.bindCapabilityContext(context, plugin.instanceId)
+        : context ?? null
+    if (
+      plugin.hasV2DescriptorIdentity &&
+      plugin.capabilityContext?.storageSnapshotTier !== nextContext?.storageSnapshotTier
+    ) {
+      throw new Error('storage snapshot tier is fixed for a live plugin instance; recreate the instance')
+    }
+    const preserveTerminalOwnership =
+      !plugin.hasV2DescriptorIdentity ||
+      (sameRuntimeBinding(
+        plugin.capabilityContext?.runtimeBinding,
+        nextContext?.runtimeBinding
+      ) && this.hasValidTerminalBinding({ ...plugin, capabilityContext: nextContext }))
+    if (!preserveTerminalOwnership) this.releaseTerminalOwnership(plugin)
+    plugin.capabilityContext = nextContext
+  }
+
+  private instanceForSender(senderId: number): RunningPlugin | undefined {
+    const instanceId = this.bySender.get(senderId)
+    return instanceId ? this.running.get(instanceId) : undefined
+  }
+
+  private discardGitPathGrants(instanceId: string): void {
+    for (const [grant, record] of this.gitPathGrants) {
+      if (record.instanceId === instanceId) this.gitPathGrants.delete(grant)
+    }
+  }
+
+  private issueGitPathGrant(
+    plugin: RunningPlugin,
+    path: string,
+    operations: readonly GitPathGrantOperation[],
+  ): string | null {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    const resolvedPath = resolvePathForContainment(path)
+    if (!resolvedPath || !binding?.packageVersion || !plugin.workspacePath) return null
+    this.discardExpiredGitPathGrants()
+    const existing = [...this.gitPathGrants.entries()]
+      .filter(([, grant]) => grant.instanceId === plugin.instanceId)
+    while (existing.length >= MAX_GIT_PATH_GRANTS_PER_INSTANCE) {
+      const oldest = existing.shift()
+      if (oldest) this.gitPathGrants.delete(oldest[0])
+    }
+    const grant = randomUUID()
+    this.gitPathGrants.set(grant, {
+      instanceId: plugin.instanceId,
+      workspacePath: resolve(plugin.workspacePath),
+      packageVersion: binding.packageVersion,
+      path: resolvedPath,
+      operations: new Set(operations),
+      expiresAt: Date.now() + GIT_PATH_GRANT_TTL_MS,
+    })
+    return grant
+  }
+
+  private discardExpiredGitPathGrants(): void {
+    const now = Date.now()
+    for (const [grant, record] of this.gitPathGrants) {
+      if (record.expiresAt <= now) this.gitPathGrants.delete(grant)
+    }
+  }
+
+  private consumeGitPathGrant(
+    plugin: RunningPlugin,
+    grant: unknown,
+    path: string,
+    operation: GitPathGrantOperation,
+  ): boolean {
+    if (typeof grant !== 'string' || !grant) return false
+    this.discardExpiredGitPathGrants()
+    const record = this.gitPathGrants.get(grant)
+    const binding = plugin.capabilityContext?.runtimeBinding
+    const resolvedPath = resolvePathForContainment(path)
+    if (
+      !record ||
+      !binding ||
+      !resolvedPath ||
+      record.instanceId !== plugin.instanceId ||
+      record.workspacePath !== resolve(plugin.workspacePath ?? '') ||
+      record.packageVersion !== binding.packageVersion ||
+      record.path !== resolvedPath ||
+      !record.operations.has(operation)
+    ) return false
+    this.gitPathGrants.delete(grant)
+    return true
+  }
+
+  /** A clone grant authorizes exactly one new direct child of the Host-picked
+   *  directory.  The plugin cannot turn a picked directory into an arbitrary
+   *  containment root by supplying a nested or traversal target. */
+  private consumeGitCloneTargetGrant(
+    plugin: RunningPlugin,
+    grant: unknown,
+    targetDir: unknown,
+  ): string | null {
+    if (typeof grant !== 'string' || !grant || typeof targetDir !== 'string' || !targetDir) return null
+    const requestedLeaf = basename(targetDir)
+    if (
+      requestedLeaf === '.' ||
+      requestedLeaf === '..' ||
+      requestedLeaf !== targetDir.split(/[\\/]/).at(-1) ||
+      requestedLeaf.includes('\\')
+    ) return null
+    this.discardExpiredGitPathGrants()
+    const record = this.gitPathGrants.get(grant)
+    const binding = plugin.capabilityContext?.runtimeBinding
+    const resolvedTarget = resolvePathForContainment(targetDir)
+    if (
+      !record ||
+      !binding ||
+      !resolvedTarget ||
+      record.instanceId !== plugin.instanceId ||
+      record.workspacePath !== resolve(plugin.workspacePath ?? '') ||
+      record.packageVersion !== binding.packageVersion ||
+      !record.operations.has('clone_target') ||
+      dirname(resolvedTarget) !== record.path
+    ) return null
+    this.gitPathGrants.delete(grant)
+    return resolvedTarget
+  }
+
+  private payloadClaimsInstance(payload: unknown): boolean {
+    // `pluginId` remains a tolerated legacy envelope field and is ignored by
+    // parseCapabilityCall. `instanceId` is new Host-owned identity and must
+    // never be supplied by a plugin, even when its value is undefined.
+    return (
+      typeof payload === 'object' &&
+      payload !== null &&
+      Object.prototype.hasOwnProperty.call(payload, 'instanceId')
+    )
+  }
+
+  private workspaceBoundPayload(
+    plugin: RunningPlugin,
+    payload: unknown
+  ): Record<string, unknown> | CapabilityResponse {
+    if (!plugin.workspacePath) {
+      return buildError('', 'WORKSPACE_SCOPE_VIOLATION', 'Git view is not bound to a workspace')
+    }
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+      return buildError('', 'BAD_REQUEST', 'Host action payload must be an object')
+    }
+    const record = payload as Record<string, unknown>
+    if (Object.prototype.hasOwnProperty.call(record, 'instanceId')) {
+      return buildError('', 'BAD_REQUEST', 'instance identity is Host-owned')
+    }
+    if (Object.prototype.hasOwnProperty.call(record, 'credential')) {
+      return buildError('', 'BAD_REQUEST', 'credentials are Host-owned')
+    }
+    if (Object.prototype.hasOwnProperty.call(record, 'credential_owner_nonce')) {
+      return buildError('', 'BAD_REQUEST', 'credential ownership is Host-owned')
+    }
+    if (
+      record.workspace_path !== undefined &&
+      (typeof record.workspace_path !== 'string' ||
+        resolve(record.workspace_path) !== resolve(plugin.workspacePath))
+    ) {
+      return buildError('', 'WORKSPACE_SCOPE_VIOLATION', 'workspace path does not match the Host binding')
+    }
+    return { ...record, workspace_path: resolve(plugin.workspacePath) }
+  }
+
+  /** Store the trusted main-renderer state consumed by the independent Git
+   *  left contribution. The renderer is the source of pane/issue state; the
+   *  plugin can only read a workspace-matched snapshot through the bridge. */
+  setGitContributionState(hostWindow: BrowserWindow, state: GitContributionState): void {
+    if (hostWindow.isDestroyed() || !nonEmptyString(state.workspacePath)) return
+    if (
+      !nonEmptyString(state.analyzerModel) && state.analyzerModel !== '' ||
+      !Array.isArray(state.dispatchTargets) ||
+      !Array.isArray(state.availableAgents) ||
+      typeof state.issueHandoffs !== 'object' ||
+      state.issueHandoffs === null ||
+      Array.isArray(state.issueHandoffs)
+    ) return
+    const normalized: GitContributionState = {
+      workspacePath: resolve(state.workspacePath),
+      analyzerModel: state.analyzerModel,
+      dispatchTargets: state.dispatchTargets
+        .filter((item) => nonEmptyString(item?.id) && typeof item.label === 'string')
+        .map((item) => ({ id: item.id, label: item.label })),
+      availableAgents: state.availableAgents
+        .filter((item) => nonEmptyString(item?.key) && typeof item.label === 'string')
+        .map((item) => ({ key: item.key, label: item.label })),
+      issueHandoffs: state.issueHandoffs,
+    }
+    this.gitContributionStates.set(hostWindow.id, normalized)
+    for (const plugin of this.running.values()) {
+      if (
+        plugin.id === GIT_PLUGIN_ID &&
+        plugin.hostWindow === hostWindow &&
+        plugin.workspacePath &&
+        resolve(plugin.workspacePath) === normalized.workspacePath &&
+        plugin.capabilityContext?.runtimeBinding?.audience === 'git-left'
+      ) {
+        this.emitToInstance(plugin.instanceId, 'git.contribution.state', normalized)
+      }
+    }
+  }
+
+  clearGitContributionState(hostWindow: BrowserWindow): void {
+    this.gitContributionStates.delete(hostWindow.id)
+  }
+
+  setGitAccountHandlers(handlers: GitAccountHandlers | null): void {
+    this.gitAccountHandlers = handlers
+  }
+
+  private validateContributionPayload(
+    operation: string,
+    payload: unknown,
+  ): boolean {
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return false
+    const record = payload as Record<string, unknown>
+    const stringField = (key: string): boolean => typeof record[key] === 'string' && String(record[key]).length > 0
+    if (operation === 'open_path') return stringField('path')
+    if (operation === 'open_temp_file') return stringField('name') && typeof record.content === 'string'
+    if (operation === 'pick_workspace') return record.default_path === undefined || typeof record.default_path === 'string'
+    if (operation === 'open_main_window') return stringField('workspace_path')
+    if (operation === 'open_branch_diff_window') return stringField('workspace_path') && stringField('base')
+    if (operation === 'open_git_history_window') return stringField('workspace_path')
+    if (operation === 'open_git_window') {
+      return stringField('workspace_path') &&
+        (record.filepath === undefined || typeof record.filepath === 'string') &&
+        (record.staged === undefined || typeof record.staged === 'boolean') &&
+        (record.commit === undefined || typeof record.commit === 'string') &&
+        (record.base === undefined || typeof record.base === 'string') &&
+        (record.compare === undefined || typeof record.compare === 'string')
+    }
+    if (operation === 'open_workspace') return stringField('path') && stringField('grant')
+    if (operation === 'open_worktree') return stringField('path')
+    if (operation === 'focus_pane') return stringField('paneId')
+    if (operation === 'open_file' || operation === 'open_conflict') {
+      return stringField('workspace_path') && stringField('filepath') && stringField('name')
+    }
+    if (operation === 'open_diff') {
+      return stringField('workspace_path') && stringField('filepath') && stringField('name') && typeof record.staged === 'boolean'
+    }
+    if (operation === 'open_branch_diff') {
+      return stringField('workspace_path') && stringField('base') && typeof record.compare === 'string'
+    }
+    if (operation === 'dispatch_issue') return stringField('paneId') && typeof record.issue === 'object' && record.issue !== null
+    if (operation === 'spawn_for_issue') {
+      return stringField('agentKey') && stringField('mode') &&
+        typeof record.issue === 'object' && record.issue !== null &&
+        typeof record.provider === 'string'
+    }
+    if (operation === 'changes_count') return typeof record.count === 'number' && Number.isInteger(record.count) && record.count >= 0
+    if (operation === 'execute_host_command') {
+      return typeof record.command === 'string' && GIT_HOST_COMMANDS.has(record.command)
+    }
+    return operation === 'open_git_accounts'
+  }
+
+  private async runGitContributionAction(
+    reqId: string,
+    args: Record<string, unknown>,
+    plugin: RunningPlugin,
+  ): Promise<CapabilityResponse> {
+    const operation = typeof args.operation === 'string' ? args.operation : ''
+    if (!GIT_CONTRIBUTION_OPERATIONS.has(operation)) {
+      return buildError(reqId, 'METHOD_NOT_FOUND', 'Git contribution action is not mapped')
+    }
+    if (operation === 'get_state') {
+      const state = this.gitContributionStates.get(plugin.hostWindow.id)
+      if (!state || !plugin.workspacePath || state.workspacePath !== resolve(plugin.workspacePath)) {
+        return buildSuccess(reqId, null)
+      }
+      return buildSuccess(reqId, state)
+    }
+    if (!this.validateContributionPayload(operation, args.payload)) {
+      return buildError(reqId, 'BAD_REQUEST', 'Git contribution payload is invalid')
+    }
+    const audience = plugin.capabilityContext?.runtimeBinding?.audience
+    const isWindowPickerAction = audience === 'git-window' &&
+      (operation === 'pick_workspace' || operation === 'open_workspace' || operation === 'open_worktree')
+    if (operation === 'open_worktree' && audience !== 'git-window') {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'worktree opening is only available to the Git window')
+    }
+    if (audience !== 'git-left' && !isWindowPickerAction) {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'Git contribution is only available to the left view')
+    }
+    const payload = args.payload as Record<string, unknown>
+    const workspaceField = typeof payload.workspace_path === 'string'
+      ? payload.workspace_path
+      : operation === 'open_workspace' && typeof payload.path === 'string'
+        ? payload.path
+        : null
+    // `open_workspace` is the one existing Git action whose target is chosen
+    // through the Host-owned folder picker and may intentionally leave the
+    // current workspace. All repository/file actions remain bound below.
+    if (workspaceField !== null && operation !== 'open_workspace') {
+      if (!plugin.workspacePath) return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git view is not workspace-bound')
+      if (!isWorkspaceContainedPath(plugin.workspacePath, workspaceField)) {
+        return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git contribution path is outside the Host binding')
+      }
+    }
+    if (['open_file', 'open_conflict', 'open_diff', 'open_git_window'].includes(operation) &&
+      typeof payload.filepath === 'string') {
+      const fileWorkspace = workspaceField ?? plugin.workspacePath
+      if (!fileWorkspace || !isWorkspaceContainedPath(fileWorkspace, payload.filepath)) {
+        return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git contribution file is outside the Host binding')
+      }
+    }
+    if (operation === 'open_path') {
+      if (!plugin.workspacePath || !isAbsolute(String(payload.path)) ||
+        !isWorkspaceContainedPath(plugin.workspacePath, String(payload.path))) {
+        return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git path must be absolute inside the Host binding')
+      }
+    }
+    if (operation === 'pick_workspace') {
+      if (!this.hostShellHandlers) return buildError(reqId, 'BACKEND_ERROR', 'host shell handlers not registered')
+      const picked = await this.hostShellHandlers.pickFolder(
+        typeof payload.default_path === 'string' ? payload.default_path : undefined,
+      )
+      if (!picked) return buildSuccess(reqId, { path: null, grant: null })
+      const grant = this.issueGitPathGrant(plugin, picked, ['clone_target', 'open_workspace'])
+      if (!grant) return buildError(reqId, 'CAPABILITY_DENIED', 'Host picker path is unavailable')
+      return buildSuccess(reqId, { path: resolvePathForContainment(picked), grant })
+    }
+    if (operation === 'open_workspace') {
+      const path = String(payload.path)
+      if (!this.consumeGitPathGrant(plugin, payload.grant, path, 'open_workspace')) {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'workspace path lacks a valid Host picker grant')
+      }
+      const grantedPath = resolvePathForContainment(path)
+      if (!grantedPath) return buildError(reqId, 'CAPABILITY_DENIED', 'workspace path lacks a valid Host picker grant')
+      if (audience === 'git-window') {
+        if (!this.hostShellHandlers) return buildError(reqId, 'BACKEND_ERROR', 'host shell handlers not registered')
+        const opened = this.hostShellHandlers.openWorkspace(grantedPath)
+        return opened.ok
+          ? buildSuccess(reqId, { accepted: true })
+          : buildError(reqId, 'BACKEND_ERROR', 'workspace could not be opened')
+      }
+      plugin.hostWindow.webContents.send('git:contribution-action', {
+        operation,
+        payload: { path: grantedPath },
+      })
+      return buildSuccess(reqId, { accepted: true })
+    }
+    if (operation === 'open_worktree') {
+      if (!plugin.workspacePath) {
+        return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git view is not workspace-bound')
+      }
+      if (!this.hostShellHandlers) {
+        return buildError(reqId, 'BACKEND_ERROR', 'host shell handlers not registered')
+      }
+      const requestedPath = resolvePathForContainment(String(payload.path))
+      if (!requestedPath || !isAbsolute(String(payload.path))) {
+        return buildError(reqId, 'BAD_REQUEST', 'worktree path must be an existing absolute path')
+      }
+      const client = this.ensureBackend()
+      if (!client) return buildError(reqId, 'BACKEND_ERROR', 'backend not connected')
+      try {
+        const response = await client.send<{ worktrees?: unknown }>('git.worktrees', {
+          workspace_path: resolve(plugin.workspacePath),
+        })
+        if (!response.ok) {
+          return buildError(reqId, 'BACKEND_ERROR', response.error?.message ?? 'worktrees lookup failed')
+        }
+        const worktrees = typeof response.payload === 'object' && response.payload !== null &&
+          Array.isArray(response.payload.worktrees)
+          ? response.payload.worktrees
+          : []
+        const authorized = worktrees.some((entry) => {
+          if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false
+          const path = (entry as { path?: unknown }).path
+          return typeof path === 'string' && resolvePathForContainment(path) === requestedPath
+        })
+        if (!authorized) {
+          return buildError(reqId, 'CAPABILITY_DENIED', 'worktree path is not registered for this workspace')
+        }
+        const opened = this.hostShellHandlers.openWorkspace(requestedPath)
+        return opened.ok
+          ? buildSuccess(reqId, { accepted: true })
+          : buildError(reqId, 'BACKEND_ERROR', 'workspace could not be opened')
+      } catch (error) {
+        return buildError(
+          reqId,
+          'BACKEND_ERROR',
+          error instanceof Error ? error.message : 'worktrees lookup failed',
+        )
+      }
+    }
+    if (plugin.hostWindow.isDestroyed()) return buildError(reqId, 'CAPABILITY_DENIED', 'Git host window is closed')
+    plugin.hostWindow.webContents.send('git:contribution-action', { operation, payload })
+    return buildSuccess(reqId, { accepted: true })
+  }
+
+  private async runGitAccountAction(
+    reqId: string,
+    args: Record<string, unknown>,
+    plugin: RunningPlugin,
+  ): Promise<CapabilityResponse> {
+    const operation = typeof args.operation === 'string' ? args.operation : ''
+    const audience = plugin.capabilityContext?.runtimeBinding?.audience
+    if (audience !== 'git-left' && audience !== 'git-window') {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'Git account actions are unavailable to this view')
+    }
+    const handlers = this.gitAccountHandlers
+    if (!handlers || !GIT_ACCOUNT_OPERATIONS.has(operation)) {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'Git account service is unavailable')
+    }
+    const rawPayload = args.payload
+    const payload = typeof rawPayload === 'object' && rawPayload !== null && !Array.isArray(rawPayload)
+      ? rawPayload as Record<string, unknown>
+      : {}
+    try {
+      if (operation === 'list') {
+        if (Object.keys(payload).length > 0) {
+          return buildError(reqId, 'BAD_REQUEST', 'Git account list takes no payload')
+        }
+        const accounts = handlers.list().map(({ id, label, host, username, tokenLast4 }) => ({
+          id, label, host, username, tokenLast4,
+        }))
+        return buildSuccess(reqId, { available: handlers.available(), accounts })
+      }
+      if (!plugin.workspacePath) {
+        return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git view is not workspace-bound')
+      }
+      const workspacePath = resolve(plugin.workspacePath)
+      if (operation === 'get_binding') {
+        if (Object.keys(payload).length > 0) {
+          return buildError(reqId, 'BAD_REQUEST', 'Git account binding lookup takes no payload')
+        }
+        return buildSuccess(reqId, { accountId: handlers.getBinding(workspacePath) })
+      }
+      if (operation === 'add') {
+        if (
+          Object.keys(payload).some((key) => !['label', 'host', 'username', 'token'].includes(key)) ||
+          !nonEmptyString(payload.label) ||
+          !nonEmptyString(payload.host) ||
+          !nonEmptyString(payload.username) ||
+          !nonEmptyString(payload.token)
+        ) {
+          return buildError(reqId, 'BAD_REQUEST', 'Git account details are invalid')
+        }
+        const { id, label, host, username, tokenLast4 } = handlers.add({
+          label: payload.label,
+          host: payload.host,
+          username: payload.username,
+          token: payload.token,
+        })
+        return buildSuccess(reqId, { account: { id, label, host, username, tokenLast4 } })
+      }
+      if (operation === 'bind') {
+        if (Object.keys(payload).some((key) => key !== 'accountId') || !nonEmptyString(payload.accountId)) {
+          return buildError(reqId, 'BAD_REQUEST', 'Git account binding payload is invalid')
+        }
+        handlers.bind(workspacePath, payload.accountId)
+        return buildSuccess(reqId, { accountId: payload.accountId })
+      }
+      if (Object.keys(payload).length > 0) {
+        return buildError(reqId, 'BAD_REQUEST', 'Git account unbind takes no payload')
+      }
+      handlers.unbind(workspacePath)
+      return buildSuccess(reqId, { accountId: null })
+    } catch (error) {
+      return buildError(reqId, 'BACKEND_ERROR', error instanceof Error ? error.message : 'Git account operation failed')
+    }
+  }
+
+  /** Execute the fixed first-party bridge used by the production Git package.
+   *  This is intentionally separate from the public Manifest v2 catalog: Git
+   *  and Issues are Host-owned product services, not public permission
+   *  namespaces. */
+  private async runGitHostAction(
+    reqId: string,
+    action: string,
+    args: Record<string, unknown>,
+    plugin: RunningPlugin
+  ): Promise<CapabilityResponse> {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    const grant = plugin.capabilityContext?.userGrant
+    const policy = plugin.capabilityPolicy
+    const baseDenied =
+      !plugin.hasV2DescriptorIdentity ||
+      plugin.id !== GIT_PLUGIN_ID ||
+      policy?.kind !== 'manifest-v2' ||
+      !binding ||
+      !grant ||
+      grant.packageVersion !== binding.packageVersion ||
+      binding.pluginId !== plugin.id ||
+      binding.instanceId !== plugin.instanceId ||
+      (plugin.workspacePath !== null &&
+        binding.workspaceId !== this.workspaceIdForPath(plugin.workspacePath))
+    if (baseDenied) {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'Git Host action is not available')
+    }
+    if (!grant || policy?.kind !== 'manifest-v2') {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'Git Host action is not available')
+    }
+
+    const hasSystemGrant = (namespace: 'fs' | 'ui'): boolean =>
+      policy.system.includes(namespace) && grant.system.includes(namespace)
+    const hasAllowlistShellGrant = (): boolean =>
+      policy.shell === 'allowlist' && grant.shell === 'allowlist'
+
+    if (GIT_PRIVATE_ACTIONS.has(action)) {
+      if (!plugin.capabilityContext?.publisherEligible || !hasSystemGrant('ui')) {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'Git Host action is not available')
+      }
+      if (action === 'git.contribution') return this.runGitContributionAction(reqId, args, plugin)
+      if (action === 'git.account') return this.runGitAccountAction(reqId, args, plugin)
+      if (plugin.capabilityContext?.runtimeBinding?.audience !== 'git-left' || !plugin.workspacePath) {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'legacy Git selection is unavailable')
+      }
+      const client = this.ensureBackend()
+      if (!client) return buildError(reqId, 'BACKEND_ERROR', 'backend not connected')
+      try {
+        const response = await client.send<{ project?: { ui_git_tab_repo?: unknown } | null }>(
+          'project.peek',
+          { workspace_path: resolve(plugin.workspacePath) },
+        )
+        if (!response.ok) {
+          return buildError(reqId, 'BACKEND_ERROR', response.error?.message ?? 'legacy Git selection lookup failed')
+        }
+        const selection = response.payload?.project?.ui_git_tab_repo
+        return buildSuccess(reqId, {
+          selection: typeof selection === 'string' && selection ? selection : null,
+        })
+      } catch (error) {
+        return buildError(
+          reqId,
+          'BACKEND_ERROR',
+          error instanceof Error ? error.message : 'legacy Git selection lookup failed',
+        )
+      }
+    }
+
+    if (GIT_HOST_ACTIONS.has(action)) {
+      if (!hasSystemGrant('fs')) {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'Git Host action is not available')
+      }
+      if ((action === 'git.request' || action === 'issues.request') &&
+        (!plugin.capabilityContext?.publisherEligible || !hasAllowlistShellGrant())) {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'Git Host action is not available')
+      }
+      const type = typeof args.type === 'string' ? args.type : ''
+      const rawPayload = args.payload
+      const mapped =
+        action === 'git.request'
+          ? type.startsWith('git.') && resolveWsType('git', type.slice('git.'.length)) === type
+          : action === 'issues.request'
+            ? type.startsWith('issues.') && resolveWsType('issues', type.slice('issues.'.length)) === type
+            : type.startsWith('fs.') && GIT_HOST_FS_TYPES.has(type)
+      if (!mapped) return buildError(reqId, 'METHOD_NOT_FOUND', 'Git Host action is not mapped')
+      const payload = this.workspaceBoundPayload(plugin, rawPayload)
+      if ('ok' in payload && typeof payload.ok === 'boolean' && 'reqId' in payload) {
+        return { ...payload, reqId } as CapabilityResponse
+      }
+      const wsPayload = payload as Record<string, unknown>
+      let cloneTarget: string | null = null
+      let credentialOwner: GitCredentialOwner | null = null
+      let credentialReplyOwner: GitCredentialOwner | null = null
+      if (action === 'fs.request' && GIT_HOST_FS_MUTATION_TYPES.has(type)) {
+        const mutationPaths = type === 'fs.rename'
+          ? [wsPayload.src_rel, wsPayload.dst_rel]
+          : [wsPayload.rel_path]
+        for (const candidate of mutationPaths) {
+          const violation = workspaceMutationPathError(plugin.workspacePath ?? '', candidate)
+          if (violation) return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', violation)
+        }
+      }
+      if (action === 'fs.request' && type === 'fs.stat_path') {
+        const candidate = typeof wsPayload.path === 'string' ? wsPayload.path : ''
+        if (!plugin.workspacePath || !isWorkspaceContainedPath(plugin.workspacePath, candidate)) {
+          return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'path is outside the Host workspace binding')
+        }
+        wsPayload.path = resolvePathForContainment(resolve(plugin.workspacePath, candidate))
+      }
+      if (action === 'git.request' && GIT_REMOTE_REQUEST_TYPES.has(type)) {
+        const workspacePath = plugin.workspacePath
+        if (!workspacePath) {
+          return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Git view is not bound to a workspace')
+        }
+        let credential: { username: string; token: string; expectedHost: string } | null = null
+        if (this.gitAccountHandlers) {
+          try {
+            credential = this.gitAccountHandlers.getCredential(resolve(workspacePath))
+          } catch (error) {
+            return buildError(
+              reqId,
+              'BACKEND_ERROR',
+              error instanceof Error ? error.message : 'Git credential lookup failed'
+            )
+          }
+        }
+        if (credential && type === 'git.clone') {
+          let isHttps = false
+          try {
+            isHttps = typeof wsPayload.url === 'string' && new URL(wsPayload.url).protocol === 'https:'
+          } catch {
+            // Invalid and non-URL Git forms stay credential-free; the backend
+            // owns clone URL validation and normal SSH authentication.
+          }
+          if (isHttps && !isExpectedHttpsRemote(wsPayload.url, credential.expectedHost)) {
+            return buildError(reqId, 'CREDENTIAL_REQUIRED', 'No workspace-bound Git credential is available for this HTTPS remote')
+          }
+          if (!isHttps) credential = null
+        }
+        if (credential) {
+          wsPayload.credential = credential
+        } else {
+          credentialOwner = this.issueGitCredentialOwner(plugin)
+          if (!credentialOwner) {
+            return buildError(reqId, 'CAPABILITY_DENIED', 'interactive Git credential owner is unavailable')
+          }
+          wsPayload.credential_owner_nonce = credentialOwner.nonce
+        }
+      }
+      if (
+        action === 'git.request' &&
+        (type === 'git.credential_submit' || type === 'git.credential_cancel')
+      ) {
+        credentialReplyOwner = this.gitCredentialRequestOwner(plugin, wsPayload.request_id)
+        if (!credentialReplyOwner) {
+          return buildError(reqId, 'CAPABILITY_DENIED', 'Git credential request is not owned by this view')
+        }
+        wsPayload.credential_owner_nonce = credentialReplyOwner.nonce
+      }
+      if (action === 'git.request' && type === 'git.clone') {
+        cloneTarget = this.consumeGitCloneTargetGrant(plugin, wsPayload.target_grant, wsPayload.target_dir)
+        if (!cloneTarget) {
+          return buildError(reqId, 'CAPABILITY_DENIED', 'clone target lacks a valid Host picker grant')
+        }
+        wsPayload.target_dir = cloneTarget
+        delete wsPayload.target_grant
+      }
+      const client = this.ensureBackend()
+      if (!client) {
+        if (credentialOwner) this.releaseGitCredentialOwner(credentialOwner)
+        return buildError(reqId, 'BACKEND_ERROR', 'backend not connected')
+      }
+      try {
+        const response = backendResponseToCapability(reqId, await client.send(type, wsPayload))
+        if (
+          type === 'git.clone' &&
+          cloneTarget &&
+          response.ok &&
+          typeof response.result === 'object' &&
+          response.result !== null &&
+          typeof (response.result as { path?: unknown }).path === 'string' &&
+          resolvePathForContainment((response.result as { path: string }).path) === cloneTarget
+        ) {
+          const grant = this.issueGitPathGrant(plugin, cloneTarget, ['open_workspace'])
+          if (!grant) return buildError(reqId, 'CAPABILITY_DENIED', 'cloned workspace is unavailable')
+          return buildSuccess(reqId, { ...response.result as Record<string, unknown>, openWorkspaceGrant: grant })
+        }
+        return response
+      } catch (error) {
+        return buildError(
+          reqId,
+          'BACKEND_ERROR',
+          error instanceof Error ? error.message : 'backend request failed'
+        )
+      } finally {
+        if (credentialOwner) this.releaseGitCredentialOwner(credentialOwner)
+        if (credentialReplyOwner && nonEmptyString(wsPayload.request_id)) {
+          credentialReplyOwner.requestIds.delete(wsPayload.request_id)
+          if (this.gitCredentialRequests.get(wsPayload.request_id) === credentialReplyOwner) {
+            this.gitCredentialRequests.delete(wsPayload.request_id)
+          }
+        }
+      }
+    }
+
+    if (action === 'ui.request') {
+      if (!plugin.capabilityContext?.publisherEligible || !hasSystemGrant('ui')) {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'Git Host action is not available')
+      }
+      const type = typeof args.type === 'string' ? args.type : ''
+      if (!GIT_HOST_UI_ACTIONS.has(type)) {
+        return buildError(reqId, 'METHOD_NOT_FOUND', 'Git UI Host action is not mapped')
+      }
+      // A Git plugin may open a workspace only by consuming the opaque grant
+      // on the private contribution bridge. Never turn an arbitrary renderer
+      // path into another workspace root through the generic UI adapter.
+      if (type === 'ui.open_workspace') {
+        return buildError(reqId, 'CAPABILITY_DENIED', 'workspace paths require a Host picker grant')
+      }
+      const rawPayload = args.payload
+      if (typeof rawPayload !== 'object' || rawPayload === null || Array.isArray(rawPayload)) {
+        return buildError(reqId, 'BAD_REQUEST', 'Git UI payload must be an object')
+      }
+      if (Object.prototype.hasOwnProperty.call(rawPayload, 'instanceId')) {
+        return buildError(reqId, 'BAD_REQUEST', 'instance identity is Host-owned')
+      }
+      const call: CapabilityCall = {
+        pluginId: plugin.id,
+        ns: 'ui',
+        method: type.slice('ui.'.length),
+        args: rawPayload,
+        reqId,
+      }
+      return this.runHostAction(call, plugin)
+    }
+
+    return buildError(reqId, 'METHOD_NOT_FOUND', 'Git Host action is not mapped')
+  }
+
+  private async handleHostCall(senderId: number, payload: unknown): Promise<CapabilityResponse> {
+    const plugin = this.instanceForSender(senderId)
+    if (!plugin) return buildError('', 'BAD_REQUEST', 'unknown plugin sender')
+    if (this.payloadClaimsInstance(payload)) {
+      return buildError('', 'BAD_REQUEST', 'instance identity is Host-owned')
+    }
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+      return buildError('', 'BAD_REQUEST', 'malformed Host action call')
+    }
+    const record = payload as Record<string, unknown>
+    const reqId = typeof record.reqId === 'string' ? record.reqId : ''
+    const action = typeof record.action === 'string' ? record.action : ''
+    const args = record.args
+    if (!reqId || !action || typeof args !== 'object' || args === null || Array.isArray(args)) {
+      return buildError(reqId, 'BAD_REQUEST', 'malformed Host action call')
+    }
+    return this.runGitHostAction(reqId, action, args as Record<string, unknown>, plugin)
+  }
 
   /** Register the broker IPC handlers exactly once. Safe to call repeatedly. */
   registerIpc(): void {
@@ -233,31 +1732,109 @@ export class FrontendPluginManager {
     this.ipcReady = true
 
     ipcMain.handle(IPC_CALL, async (event, payload: unknown): Promise<CapabilityResponse> => {
-      const pluginId = this.bySender.get(event.sender.id)
-      if (!pluginId) {
+      const plugin = this.instanceForSender(event.sender.id)
+      if (!plugin) {
         // Not a known plugin view — refuse without leaking anything.
         return buildError('', 'BAD_REQUEST', 'unknown plugin sender')
       }
-      const plugin = this.running.get(pluginId)
+      const pluginId = plugin.id
+      const reqId =
+        typeof payload === 'object' && payload && 'reqId' in payload
+          ? String((payload as Record<string, unknown>).reqId ?? '')
+          : ''
+      if (this.payloadClaimsInstance(payload)) {
+        return buildError(reqId, 'BAD_REQUEST', 'instance identity is Host-owned')
+      }
       const call = parseCapabilityCall(payload, pluginId)
-      if (!call || !plugin) {
-        const reqId =
-          typeof payload === 'object' && payload && 'reqId' in payload
-            ? String((payload as Record<string, unknown>).reqId ?? '')
-            : ''
+      if (!call) {
         return buildError(reqId, 'BAD_REQUEST', 'malformed capability call')
       }
 
       // Enforce scoping + route. A denied namespace is rejected here and never
       // reaches the backend; `ping`/unknown resolve in-process.
-      const plan = planCapabilityCall(
-        call,
-        plugin.capabilityPolicy,
-        plugin.capabilityContext ?? undefined
-      )
+      let plan: ReturnType<typeof planCapabilityCall>
+      try {
+        plan = planCapabilityCall(
+          call,
+          plugin.capabilityPolicy,
+          plugin.capabilityContext ?? undefined
+        )
+      } catch {
+        return buildError(call.reqId, 'INVALID_ARGUMENT', 'invalid capability request')
+      }
       if (plan.kind === 'respond') return plan.response
 
       if (plan.kind === 'public') {
+        if (plan.storage) {
+          const storageKey = typeof call.args === 'object' && call.args !== null
+            ? (call.args as Record<string, unknown>).key
+            : null
+          const storageScope = typeof call.args === 'object' && call.args !== null
+            ? (call.args as Record<string, unknown>).scope
+            : null
+          if (
+            plugin.hasV2DescriptorIdentity &&
+            plugin.id === GIT_PLUGIN_ID &&
+            (
+              typeof storageKey !== 'string' ||
+              !(
+                (storageScope === 'plugin' && GIT_USER_PREFERENCE_KEYS.includes(storageKey as typeof GIT_USER_PREFERENCE_KEYS[number])) ||
+                (storageScope === 'workspace' && storageKey === GIT_WORKSPACE_REPOSITORY_KEY && plugin.workspacePath)
+              )
+            )
+          ) {
+            return buildError(call.reqId, 'CAPABILITY_DENIED', 'Git storage key is not owned by the plugin')
+          }
+          const handler = this.publicStorageHandler
+          if (!handler || !isStorageExecutionAddress(plan.address)) {
+            return buildError(
+              call.reqId,
+              'BACKEND_UNAVAILABLE',
+              'storage capability broker is not connected'
+            )
+          }
+          try {
+            const result = await handler({
+              address: plan.address,
+              args: plan.args,
+              partition: plan.storage.partition,
+              snapshot: plan.storage.snapshot,
+            })
+            if (
+              plugin.hasV2DescriptorIdentity &&
+              plugin.id === GIT_PLUGIN_ID &&
+              (storageScope === 'plugin' || storageScope === 'workspace') &&
+              typeof storageKey === 'string'
+            ) {
+              const settingsEvent = {
+                source: 'plugin-storage' as const,
+                scope: storageScope,
+                settings: {
+                  [storageKey]: plan.address === 'storage.delete'
+                    ? null
+                    : (call.args as Record<string, unknown>).value,
+                },
+                ...(storageScope === 'workspace' ? { workspace_path: plugin.workspacePath } : {}),
+              }
+              this.dispatchEvent('ui.settings_changed', {
+                ...settingsEvent,
+              })
+            }
+            return buildSuccess(
+              call.reqId,
+              result
+            )
+          } catch (error) {
+            if (error instanceof PluginStorageError) {
+              const code =
+                error.code === 'STORAGE_QUOTA_EXCEEDED' || error.code === 'INVALID_ARGUMENT'
+                  ? error.code
+                  : 'INTERNAL_ERROR'
+              return buildError(call.reqId, code, error.message)
+            }
+            return buildError(call.reqId, 'INTERNAL_ERROR', 'storage capability failed')
+          }
+        }
         const handler = this.publicCapabilityHandler
         if (!handler) {
           return buildError(
@@ -279,21 +1856,46 @@ export class FrontendPluginManager {
         return this.runHostAction(call, plugin)
       }
 
+      let wsPayload =
+        plan.wsType === 'terminal.reattach'
+          ? this.filterTerminalReattachPayload(plugin.instanceId, toPayload(call.args))
+          : toPayload(call.args)
+      if (plan.wsType === 'terminal.create') {
+        const generation = nonEmptyString(wsPayload.create_generation)
+          ? wsPayload.create_generation
+          : randomUUID()
+        wsPayload = { ...wsPayload, create_generation: generation }
+      }
+      if (
+        this.requiresTerminalOwnership(plan.wsType) &&
+        !this.ownsTerminalSession(plugin, wsPayload)
+      ) {
+        return buildError(
+          call.reqId,
+          'CAPABILITY_DENIED',
+          'terminal session is not owned by this view'
+        )
+      }
       const client = this.ensureBackend()
       if (!client) {
         return buildError(call.reqId, 'BACKEND_ERROR', 'backend not connected')
       }
+      const pendingOperation = this.beginTerminalOperation(plugin, plan.wsType, client, wsPayload)
       try {
         // A reattach request may not claim PTY sessions bound to a DIFFERENT
         // plugin — strip those ids before the backend re-targets their output.
-        const wsPayload =
-          plan.wsType === 'terminal.reattach'
-            ? this.filterTerminalReattachPayload(pluginId, toPayload(call.args))
-            : toPayload(call.args)
         const resp = await client.send(plan.wsType, wsPayload)
         // A successful terminal.create/reattach binds the PTY to this plugin so
         // its output/exit events are routed to this view only.
-        if (resp.ok) this.noteTerminalRoutes(pluginId, plan.wsType, resp.payload)
+        const canCommit = resp.ok && this.canCommitTerminalOperation(pendingOperation)
+        if (canCommit) {
+          this.noteTerminalRoutes(plugin.instanceId, plan.wsType, resp.payload)
+        } else if (resp.ok && pendingOperation?.wsType === 'terminal.create') {
+          // The backend sends the create response immediately before marking
+          // its transaction committed. If teardown won that race, clean up
+          // only the PTY named by this operation's correlated response.
+          this.cleanupCancelledTerminalCreate(pendingOperation, resp.payload)
+        }
         return backendResponseToCapability(call.reqId, resp)
       } catch (err) {
         return buildError(
@@ -301,8 +1903,17 @@ export class FrontendPluginManager {
           'BACKEND_ERROR',
           err instanceof Error ? err.message : 'backend request failed'
         )
+      } finally {
+        if (pendingOperation) this.pendingTerminalOperations.delete(pendingOperation.operationId)
       }
     })
+
+    // Fixed first-party Git bridge. This does not expose a public `git` or
+    // `issues` permission; sender and workspace binding are resolved by the
+    // Host before the request reaches the backend.
+    ipcMain.handle(IPC_HOST_CALL, async (event, payload: unknown): Promise<CapabilityResponse> =>
+      this.handleHostCall(event.sender.id, payload)
+    )
 
     // Fire-and-forget capability channel (nav.castCapability) — see handleCast.
     ipcMain.on(IPC_CAST, (event, payload: unknown) => {
@@ -311,8 +1922,12 @@ export class FrontendPluginManager {
 
     // Plugins announce readiness; it is only logged (activation is not gated on it).
     ipcMain.on(IPC_READY, (event) => {
-      const pluginId = this.bySender.get(event.sender.id)
-      if (pluginId) console.log(`[plugin] ${pluginId} ready`)
+      const plugin = this.instanceForSender(event.sender.id)
+      if (plugin) {
+        plugin.pluginReady = true
+        this.settleActivation(plugin.instanceId)
+        console.log(`[plugin] ${plugin.id} ready`)
+      }
     })
 
     // A plugin dismisses its own view (e.g. the mini-IDE's Esc-close). Scoped
@@ -321,13 +1936,12 @@ export class FrontendPluginManager {
     // (legacy editor Esc behavior; the `closed` hook runs the normal teardown);
     // main-window-hosted views keep the plain view-hide.
     ipcMain.on(IPC_HIDE_SELF, (event) => {
-      const pluginId = this.bySender.get(event.sender.id)
-      if (!pluginId) return
-      const plugin = this.running.get(pluginId)
+      const plugin = this.instanceForSender(event.sender.id)
+      if (!plugin) return
       if (plugin?.closeHostOnHide && !plugin.hostWindow.isDestroyed()) {
         plugin.hostWindow.close()
       } else {
-        this.deactivate(pluginId)
+        this.deactivate(plugin.instanceId)
       }
     })
   }
@@ -390,16 +2004,426 @@ export class FrontendPluginManager {
     this.publicCapabilityHandler = fn
   }
 
-  /** Host-only event ingress for cataloged public events. A workspace event
-   * must carry the authenticated Host source binding; unbound backend fan-out
+  /** Execute a cataloged public plan for the Host. The plan is already
+   *  authorized by the broker; this method still resolves the exact live
+   *  instance so a stale plan cannot borrow a sibling workspace or PTY. */
+  async executePublicCapability(plan: PublicCapabilityExecutionPlan): Promise<unknown> {
+    const instanceId = plan.runtime.instanceId
+    const plugin = instanceId ? this.running.get(instanceId) : undefined
+    if (!plugin || plugin.id !== plan.runtime.pluginId) {
+      throw new Error('public capability instance is no longer active')
+    }
+    if (!sameRuntimeBinding(plugin.capabilityContext?.runtimeBinding, plan.runtime)) {
+      throw new Error('public capability runtime binding is stale')
+    }
+    const workspacePath = plugin.workspacePath
+    if (plan.scope === 'workspace' && !workspacePath) {
+      throw new Error('public capability workspace binding is missing')
+    }
+
+    if (plan.address.startsWith('aiCli.')) {
+      return this.executeAiCliCapability(plan, plugin, workspacePath ?? '')
+    }
+
+    if (plan.address.startsWith('fs.')) {
+      const wsType = PUBLIC_FS_WS_TYPES[plan.address]
+      if (!wsType) throw new Error(`unsupported public filesystem capability '${plan.address}'`)
+      if (!workspacePath) throw new Error('filesystem capability workspace binding is missing')
+      const args = plan.args
+      const path = typeof args.path === 'string' ? args.path : ''
+      const payload: Record<string, unknown> = { workspace_path: workspacePath }
+      if (wsType === 'fs.list_dir') payload.rel_path = path
+      else if (wsType === 'fs.list_files_flat') {
+        payload.query = typeof args.query === 'string' ? args.query : ''
+        payload.max_results = typeof args.maxResults === 'number' ? args.maxResults : 100
+      } else if (wsType === 'fs.glob_files') payload.pattern = args.pattern
+      else if (wsType === 'fs.stat_path') payload.path = path
+      else payload.rel_path = path
+      if (wsType === 'fs.stat_path') {
+        if (!isWorkspaceContainedPath(workspacePath, path)) {
+          throw new Error('filesystem path escapes the workspace')
+        }
+        payload.path = resolvePathForContainment(resolve(workspacePath, path))
+      }
+      if (wsType === 'fs.write_file') {
+        const violation = workspaceMutationPathError(workspacePath, path)
+        if (violation === 'Git metadata paths are protected') {
+          throw new Error(violation)
+        }
+        if (violation) throw new Error(`filesystem ${violation}`)
+      }
+      if (wsType === 'fs.write_file') payload.content = args.content
+      const response = await this.sendPublicBackend(wsType, payload)
+      return response
+    }
+
+    if (plan.address === 'ui.openInEditor') {
+      if (!workspacePath) throw new Error('editor capability requires a workspace')
+      const path = typeof plan.args.path === 'string' ? plan.args.path : ''
+      const root = resolve(workspacePath)
+      const relativePath = relative(root, resolve(root, path))
+      if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+        throw new Error('editor path escapes the workspace')
+      }
+      if (!this.openInEditorHandler) throw new Error('editor open handler not registered')
+      const opened = await this.openInEditorHandler({
+        workspace_path: root,
+        filepath: relativePath,
+        ...(typeof plan.args.line === 'number' ? { line: String(plan.args.line) } : {}),
+        ...(typeof plan.args.column === 'number' ? { column: String(plan.args.column) } : {}),
+      })
+      return { opened }
+    }
+
+    if (plan.address === 'ui.openExternal') {
+      const url = typeof plan.args.url === 'string' ? plan.args.url : ''
+      if (!this.hostShellHandlers) throw new Error('host shell handlers not registered')
+      const result = await this.hostShellHandlers.openExternal(url)
+      if (!result.ok) throw new Error(result.error ?? 'open external failed')
+      return { opened: true }
+    }
+
+    if (plan.address === 'shell.run') {
+      const command = typeof plan.args.command === 'string' ? plan.args.command : ''
+      const response = await this.sendPublicBackend('shell.run', {
+        workspace_path: workspacePath,
+        command,
+        host_mode: 'allowlist',
+      })
+      return {
+        exitCode: Number((response as Record<string, unknown>).exit_code ?? 0),
+        stdout: String((response as Record<string, unknown>).stdout ?? (response as Record<string, unknown>).output ?? ''),
+        stderr: String((response as Record<string, unknown>).stderr ?? ''),
+      }
+    }
+
+    throw new Error(`unsupported public capability '${plan.address}'`)
+  }
+
+  private async sendPublicBackend(
+    wsType: string,
+    payload: Record<string, unknown>
+  ): Promise<unknown> {
+    const client = this.ensureBackend()
+    if (!client) throw new Error('backend not connected')
+    const response = await client.send(wsType, payload)
+    if (!response.ok) throw new Error(response.error?.message ?? 'backend request failed')
+    return response.payload
+  }
+
+  private setAiBindings(
+    plugin: RunningPlugin,
+    sessionBindings: ReadonlyMap<string, AuthenticatedRuntimeBinding>,
+    pendingStartBindings: ReadonlyMap<string, AuthenticatedRuntimeBinding>
+  ): void {
+    if (!plugin.capabilityContext) return
+    plugin.capabilityContext = {
+      ...plugin.capabilityContext,
+      sessionBindings: new Map(sessionBindings),
+      pendingStartBindings: new Map(pendingStartBindings),
+    }
+  }
+
+  private aiSessionMatchesPlugin(entry: AiSessionLedgerEntry, plugin: RunningPlugin): boolean {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    return Boolean(
+      binding &&
+      entry.pluginId === plugin.id &&
+      entry.packageVersion === binding.packageVersion &&
+      entry.workspaceId === binding.workspaceId &&
+      entry.audience === binding.audience
+    )
+  }
+
+  private bufferEarlyAiEvent(
+    type: 'terminal.output' | 'terminal.exit',
+    payload: unknown,
+  ): boolean {
+    const record = toPayload(payload)
+    const paneId = typeof record.pane_id === 'string' ? record.pane_id : ''
+    if (!paneId) return false
+    const now = Date.now()
+    for (const [key, buffer] of this.earlyAiEvents) {
+      if (buffer.expiresAt <= now) this.earlyAiEvents.delete(key)
+    }
+    const pendingEntry = [...this.pendingAiStarts.entries()].find(([, pending]) => pending.paneId === paneId)
+    if (!pendingEntry) return false
+    const [key, pending] = pendingEntry
+    const buffer = this.earlyAiEvents.get(key) ?? {
+      instanceId: pending.pluginInstanceId,
+      expiresAt: now + 5_000,
+      events: [],
+    }
+    if (buffer.events.length >= 128) buffer.events.shift()
+    buffer.events.push({ type, payload })
+    this.earlyAiEvents.set(key, buffer)
+    return true
+  }
+
+  private flushEarlyAiEvents(key: string): void {
+    const buffer = this.earlyAiEvents.get(key)
+    this.earlyAiEvents.delete(key)
+    if (!buffer || buffer.expiresAt <= Date.now()) return
+    for (const event of buffer.events) this.dispatchEvent(event.type, event.payload)
+  }
+
+  private cancelPendingAiStarts(plugin: RunningPlugin): void {
+    for (const [key, pending] of this.pendingAiStarts) {
+      if (pending.pluginInstanceId !== plugin.instanceId) continue
+      this.pendingAiStarts.delete(key)
+      this.earlyAiEvents.delete(key)
+      void pending.client.send('terminal.create.cancel', {
+        pane_id: pending.paneId,
+        create_generation: pending.requestId,
+      }).catch(() => {
+        // Teardown still owns cancellation even when the backend is gone.
+      })
+    }
+  }
+
+  private removeAiSession(plugin: RunningPlugin, sessionId: string): void {
+    const sessions = new Map(plugin.capabilityContext?.sessionBindings ?? [])
+    sessions.delete(sessionId)
+    this.aiSessions.delete(sessionId)
+    this.setAiBindings(plugin, sessions, plugin.capabilityContext?.pendingStartBindings ?? new Map())
+  }
+
+  private async executeAiCliCapability(
+    plan: PublicCapabilityExecutionPlan,
+    plugin: RunningPlugin,
+    workspacePath: string
+  ): Promise<unknown> {
+    if (plan.address === 'aiCli.listProfiles') {
+      const allowedProfileIds = new Set(plugin.capabilityContext?.aiCliProfiles ?? [])
+      return {
+        profiles: Object.entries(AI_CLI_PROFILES)
+          .filter(([id]) => allowedProfileIds.has(id))
+          .map(([id, profile]) => ({
+            id,
+            label: 'label' in profile && typeof profile.label === 'string' ? profile.label : id,
+          })),
+      }
+    }
+    const client = this.ensureBackend()
+    if (!client) throw new Error('backend not connected')
+    const args = plan.args
+    if (plan.address === 'aiCli.resumeSession') {
+      const candidate = [...this.aiSessions.values()]
+        .filter((entry) => entry.attachedInstanceId === null && this.aiSessionMatchesPlugin(entry, plugin))
+        .sort((a, b) => b.createdAt - a.createdAt)[0]
+      if (!candidate) return null
+      const response = await client.send('terminal.reattach', {
+        terminal_session_ids: [candidate.sessionId],
+        cols: Number(args.cols),
+        rows: Number(args.rows),
+      })
+      if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI resume failed')
+      const alive = toPayload(response.payload).alive
+      if (!Array.isArray(alive) || !alive.includes(candidate.sessionId)) {
+        this.aiSessions.delete(candidate.sessionId)
+        this.terminalRoutes.delete(candidate.sessionId)
+        return null
+      }
+      this.noteTerminalRoutes(plugin.instanceId, 'terminal.reattach', response.payload)
+      candidate.attachedInstanceId = plugin.instanceId
+      const binding = plugin.capabilityContext?.runtimeBinding
+      if (!binding) throw new Error('AI CLI runtime binding is missing')
+      const sessions = new Map(plugin.capabilityContext?.sessionBindings ?? [])
+      sessions.set(candidate.sessionId, binding)
+      this.setAiBindings(plugin, sessions, plugin.capabilityContext?.pendingStartBindings ?? new Map())
+      return { sessionId: candidate.sessionId, profileId: candidate.profileId }
+    }
+    if (plan.address === 'aiCli.startSession') {
+      const profileId = String(args.profileId)
+      const requestId = nonEmptyString(args.requestId) ? args.requestId : randomUUID()
+      const paneId = `navide-git-${plugin.instanceId}-${requestId}`
+      const pending = new Map(plugin.capabilityContext?.pendingStartBindings ?? [])
+      const binding = plugin.capabilityContext?.runtimeBinding
+      if (!binding) throw new Error('AI CLI runtime binding is missing')
+      pending.set(requestId, binding)
+      this.setAiBindings(plugin, plugin.capabilityContext?.sessionBindings ?? new Map(), pending)
+      const pendingKey = `${plugin.instanceId}:${requestId}`
+      this.pendingAiStarts.set(pendingKey, {
+        pluginInstanceId: plugin.instanceId,
+        paneId,
+        requestId,
+        client,
+      })
+      const command = this.aiCliCommand(profileId, args, workspacePath)
+      if (!command) throw new Error(`AI CLI profile '${profileId}' is not available`)
+      let committed = false
+      try {
+        const response = await client.send('terminal.create', {
+          pane_id: paneId,
+          create_generation: requestId,
+          agent_key: profileId,
+          // The Host chooses the executable from the allowlisted profile. The
+          // package never supplies a command, shell, cwd, or environment.
+          command,
+          cwd: workspacePath,
+          cols: args.cols,
+          rows: args.rows,
+          metadata: { workspace_path: workspacePath, origin: 'navide-git' },
+        })
+        if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI start failed')
+        const result = toPayload(response.payload)
+        const sessionId = typeof result.terminal_session_id === 'string' ? result.terminal_session_id : ''
+        if (!sessionId) throw new Error('AI CLI start returned no session id')
+        this.noteTerminalRoutes(plugin.instanceId, 'terminal.create', result)
+        const sessions = new Map(plugin.capabilityContext?.sessionBindings ?? [])
+        sessions.set(sessionId, binding)
+        this.setAiBindings(plugin, sessions, plugin.capabilityContext?.pendingStartBindings ?? new Map())
+        this.aiSessions.set(sessionId, {
+          sessionId,
+          profileId,
+          pluginId: binding.pluginId,
+          packageVersion: binding.packageVersion,
+          workspaceId: binding.workspaceId,
+          audience: binding.audience,
+          attachedInstanceId: plugin.instanceId,
+          client,
+          createdAt: Date.now(),
+        })
+        committed = true
+        this.flushEarlyAiEvents(pendingKey)
+        return { sessionId }
+      } finally {
+        const nextPending = new Map(plugin.capabilityContext?.pendingStartBindings ?? [])
+        nextPending.delete(requestId)
+        this.setAiBindings(plugin, plugin.capabilityContext?.sessionBindings ?? new Map(), nextPending)
+        this.pendingAiStarts.delete(pendingKey)
+        if (!committed) this.earlyAiEvents.delete(pendingKey)
+      }
+    }
+
+    if (plan.address === 'aiCli.cancelStart') {
+      const requestId = String(args.requestId)
+      const pending = this.pendingAiStarts.get(`${plugin.instanceId}:${requestId}`)
+      if (!pending) throw new Error('AI CLI start request is no longer pending')
+      const response = await pending.client.send('terminal.create.cancel', {
+        pane_id: pending.paneId,
+        create_generation: pending.requestId,
+      })
+      if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI cancel failed')
+      const pendingBindings = new Map(plugin.capabilityContext?.pendingStartBindings ?? [])
+      pendingBindings.delete(requestId)
+      this.setAiBindings(plugin, plugin.capabilityContext?.sessionBindings ?? new Map(), pendingBindings)
+      this.pendingAiStarts.delete(`${plugin.instanceId}:${requestId}`)
+      return {}
+    }
+    const sessionId = typeof args.sessionId === 'string' ? args.sessionId : ''
+    if (!sessionId) throw new Error('AI CLI session id is required')
+    if (plan.address === 'aiCli.reattachSession') {
+      const response = await client.send('terminal.reattach', {
+        terminal_session_ids: [sessionId],
+        cols: Number(args.cols),
+        rows: Number(args.rows),
+      })
+      if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI reattach failed')
+      const alive = toPayload(response.payload).alive
+      if (!Array.isArray(alive) || !alive.includes(sessionId)) {
+        throw new Error('AI CLI session is no longer alive')
+      }
+      this.noteTerminalRoutes(plugin.instanceId, 'terminal.reattach', response.payload)
+      return { sessionId }
+    }
+    const wsType: Record<string, string> = {
+      'aiCli.sendInput': 'terminal.input',
+      'aiCli.resizeSession': 'terminal.resize',
+      'aiCli.redrawSession': 'terminal.redraw',
+      'aiCli.interruptSession': 'terminal.interrupt',
+      'aiCli.stopSession': 'terminal.kill',
+    }
+    const type = wsType[plan.address]
+    if (!type) throw new Error(`unsupported AI CLI capability '${plan.address}'`)
+    const payload: Record<string, unknown> = { terminal_session_id: sessionId }
+    if (type === 'terminal.input') payload.data = args.data
+    if (type === 'terminal.resize' || type === 'terminal.redraw') {
+      payload.cols = args.cols
+      payload.rows = args.rows
+    }
+    if (type === 'terminal.kill') payload.force = args.force === true
+    const response = await client.send(type, payload)
+    if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI request failed')
+    if (type === 'terminal.kill') {
+      this.removeAiSession(plugin, sessionId)
+      this.terminalRoutes.delete(sessionId)
+    }
+    return {}
+  }
+
+  /** Resolve the small semantic AI CLI contract into an argv owned by the
+   * Host. The package can select a registered profile and pane identity only;
+   * it cannot provide an executable, shell fragment, cwd, or environment. */
+  private aiCliCommand(
+    profileId: string,
+    args: Record<string, unknown>,
+    workspacePath: string
+  ): string[] | null {
+    const profile = AI_CLI_PROFILES[profileId as keyof typeof AI_CLI_PROFILES]
+    if (!profile || !workspacePath) return null
+    const executable = profile.command
+    const command: string[] = [executable]
+    if (profileId === 'aider') {
+      const paneId = typeof args.paneId === 'string' ? args.paneId : ''
+      const token = paneId.slice(0, 8).toLowerCase()
+      const historyName = /^[0-9a-f]{8}$/.test(token)
+        ? `.aider.chat.history.${token}.md`
+        : '.aider.chat.history.md'
+      command.push('--chat-history-file', join(workspacePath, historyName))
+    }
+    if (args.yolo === true) {
+      const flag = 'yoloFlag' in profile ? profile.yoloFlag : undefined
+      if (flag) command.push(flag)
+    }
+    return command
+  }
+
+  /** Install the Host-owned durable storage adapter for an already-authorized
+   * storage plan. The adapter receives only the derived partition and snapshot
+   * identity; it never receives the raw renderer request as an authority. */
+  setPublicStorageHandler(
+    fn: ((execution: StorageExecution) => unknown | Promise<unknown>) | null
+  ): void {
+    this.publicStorageHandler = fn
+  }
+
+  /** Host-only event ingress for cataloged public events. The target package id
+   * is Host-selected and never comes from renderer payload. The source binding
+   * must come from the Host producer, not the master package context: AI CLI
+   * output/exit requires the exact per-instance binding (including instanceId
+   * and audience), while workspace.filesChanged accepts the reserved Host
+   * source with matching workspace/packageVersion. Unbound shared-WS fan-out
    * is intentionally dropped by {@link dispatchEvent}. */
   dispatchPublicCapabilityEvent(
+    targetPluginId: string,
     event: string,
     payload: unknown,
     sourceBinding: AuthenticatedRuntimeBinding
   ): void {
-    if (!PUBLIC_CAPABILITY_EVENT_ADDRESSES.includes(event)) return
-    this.dispatchEvent(event, payload, sourceBinding)
+    if (
+      typeof targetPluginId !== 'string' ||
+      targetPluginId.length === 0 ||
+      !PUBLIC_CAPABILITY_EVENT_ADDRESSES.includes(event)
+    ) {
+      return
+    }
+    this.dispatchEvent(event, payload, sourceBinding, targetPluginId)
+  }
+
+  /** Route only the fixed Host-owned Git settings contract to v2 Git views. */
+  dispatchHostSettingsChanged(payload: unknown): void {
+    const rawSettings =
+      typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).settings
+        : null
+    if (typeof rawSettings !== 'object' || rawSettings === null || Array.isArray(rawSettings)) return
+    const settings = Object.fromEntries(
+      Object.entries(rawSettings as Record<string, unknown>)
+        .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
+    )
+    if (Object.keys(settings).length === 0) return
+    this.dispatchEvent('ui.settings_changed', { source: 'host', settings })
   }
 
   /** Main-registered handlers for the shell-level host capabilities
@@ -515,7 +2539,7 @@ export class FrontendPluginManager {
     this.wsStatus = status
     for (const plugin of this.running.values()) {
       if (plugin.requires.length > 0 && plugin.capabilityPolicy.kind !== 'manifest-v2') {
-        this.emit(plugin.id, 'nav.backend_status', { status })
+        this.emitToInstance(plugin.instanceId, 'nav.backend_status', { status })
       }
     }
   }
@@ -540,12 +2564,119 @@ export class FrontendPluginManager {
         onStatus: (s) => this.dispatchBackendStatus(s),
       })
       for (const event of new Set([...Object.keys(CAP_EVENTS), ...PUBLIC_CAPABILITY_EVENT_ADDRESSES])) {
-        client.on(event, (payload) => this.dispatchEvent(event, payload))
+        client.on(event, (payload) => {
+          // The shared backend listener has no authenticated public-event
+          // source binding. Manifest v2 events therefore fail closed here;
+          // Host producers must use dispatchPublicCapabilityEvent().
+          if (event === 'ui.settings_changed') {
+            this.dispatchHostSettingsChanged(payload)
+          } else {
+            this.dispatchEvent(event, payload)
+          }
+        })
       }
       client.connect(this.backendWsUrl)
       this.wsClient = client
     }
     return this.wsClient
+  }
+
+  private routeForPlugin(plugin: RunningPlugin): TerminalRoute | null {
+    const binding = plugin.capabilityContext?.runtimeBinding
+    if (plugin.hasV2DescriptorIdentity && !this.hasValidTerminalBinding(plugin)) {
+      return null
+    }
+    return {
+      pluginId: plugin.id,
+      packageVersion: binding?.packageVersion ?? null,
+      workspaceId: binding?.workspaceId ?? null,
+      audience: binding?.audience ?? null,
+      instanceId: plugin.hasV2DescriptorIdentity ? plugin.instanceId : null,
+      legacy: !plugin.hasV2DescriptorIdentity,
+    }
+  }
+
+  private routeMatchesPlugin(route: TerminalRoute, plugin: RunningPlugin): boolean {
+    if (
+      route.pluginId !== plugin.id ||
+      route.legacy !== !plugin.hasV2DescriptorIdentity
+    ) return false
+    if (route.legacy) return true
+    const binding = plugin.capabilityContext?.runtimeBinding
+    return (
+      this.hasValidTerminalBinding(plugin) &&
+      binding !== null &&
+      binding !== undefined &&
+      route.packageVersion === binding.packageVersion &&
+      route.workspaceId === binding.workspaceId &&
+      route.audience === binding.audience
+    )
+  }
+
+  private hasValidTerminalBinding(plugin: RunningPlugin): boolean {
+    const context = plugin.capabilityContext
+    const binding = context?.runtimeBinding
+    return (
+      plugin.hasV2DescriptorIdentity &&
+      context !== null &&
+      context !== undefined &&
+      binding !== null &&
+      binding !== undefined &&
+      binding.pluginId === plugin.id &&
+      nonEmptyString(binding.packageVersion) &&
+      nonEmptyString(binding.workspaceId) &&
+      nonEmptyString(binding.instanceId) &&
+      nonEmptyString(binding.audience) &&
+      context.userGrant !== null &&
+      context.userGrant.packageVersion === binding.packageVersion
+    )
+  }
+
+  private canRouteBeClaimed(route: TerminalRoute, plugin: RunningPlugin): boolean {
+    if (!this.routeMatchesPlugin(route, plugin)) return false
+    return route.legacy || route.instanceId === null || route.instanceId === plugin.instanceId
+  }
+
+  private runningPluginForTerminalRoute(route: TerminalRoute | undefined): RunningPlugin | undefined {
+    if (!route) return undefined
+    if (route.legacy) {
+      const legacyInstanceId = this.legacyInstances.get(route.pluginId)
+      return legacyInstanceId ? this.running.get(legacyInstanceId) : undefined
+    }
+    if (!route.instanceId) return undefined
+    const plugin = this.running.get(route.instanceId)
+    return plugin && this.routeMatchesPlugin(route, plugin) ? plugin : undefined
+  }
+
+  private activeTerminalOwnerKey(route: TerminalRoute): string | null {
+    if (route.legacy) {
+      return this.runningPluginForTerminalRoute(route) ? `legacy:${route.pluginId}` : null
+    }
+    return this.runningPluginForTerminalRoute(route) ? `instance:${route.instanceId}` : null
+  }
+
+  private logDroppedTerminalEvent(
+    event: string,
+    sessionId: string,
+    route: TerminalRoute | undefined
+  ): void {
+    const owner = route?.instanceId ?? route?.pluginId
+    console.debug(
+      `[plugin] dropping ${event} for terminal session ${sessionId}: ` +
+        (owner ? `owner ${owner} is not active` : 'no active route')
+    )
+  }
+
+  private requiresTerminalOwnership(wsType: string): boolean {
+    return TERMINAL_OWNED_WS_TYPES.has(wsType)
+  }
+
+  private ownsTerminalSession(plugin: RunningPlugin, payload: unknown): boolean {
+    const sessionId = terminalSessionIdOf(payload)
+    if (!sessionId) return false
+    const route = this.terminalRoutes.get(sessionId)
+    if (!route || !this.routeMatchesPlugin(route, plugin)) return false
+    return route.legacy || route.instanceId === plugin.instanceId
   }
 
   /** Fan a backend server-push event out to every running plugin whose
@@ -556,24 +2687,199 @@ export class FrontendPluginManager {
   private dispatchEvent(
     event: string,
     payload: unknown,
-    sourceBinding?: AuthenticatedRuntimeBinding
+    sourceBinding?: AuthenticatedRuntimeBinding,
+    targetPluginId?: string
   ): void {
-    if (event === 'terminal.output') {
-      const sessionId = terminalSessionIdOf(payload)
-      if (sessionId) {
-        this.terminalOutputBatcher.push(sessionId, toPayload(payload))
+    if (event === 'git.credential_request' || event === 'git.credential_cancelled') {
+      const record = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+        ? payload as Record<string, unknown>
+        : null
+      const nonce = typeof record?.credential_owner_nonce === 'string'
+        ? record.credential_owner_nonce
+        : ''
+      const requestId = typeof record?.request_id === 'string' ? record.request_id : ''
+      const owner = nonce ? this.gitCredentialOwners.get(nonce) : undefined
+      const plugin = owner ? this.running.get(owner.instanceId) : undefined
+      if (record && owner && plugin && requestId && this.ownsGitCredentialRequest(plugin, owner)) {
+        const eventWorkspace = typeof record?.workspace_path === 'string'
+          ? resolve(record.workspace_path)
+          : null
+        if (eventWorkspace !== owner.workspacePath) return
+        if (event === 'git.credential_request') {
+          const existing = this.gitCredentialRequests.get(requestId)
+          if (existing && existing !== owner) return
+          owner.requestIds.add(requestId)
+          this.gitCredentialRequests.set(requestId, owner)
+        } else {
+          owner.requestIds.delete(requestId)
+          if (this.gitCredentialRequests.get(requestId) === owner) {
+            this.gitCredentialRequests.delete(requestId)
+          }
+        }
+        const { credential_owner_nonce: _nonce, ...safePayload } = record
+        this.emitToInstance(plugin.instanceId, event, safePayload)
         return
       }
+      // Legacy Git operations predate the Host correlation nonce and retain
+      // their workspace-scoped event fan-out during the recovery window.
+      if (nonce) return
+    }
+    // Settings are a private first-party contract for the Git package. The
+    // v2 surface receives only the typed Host read-only keys or the exact
+    // plugin-owned storage key; the legacy loop below remains unchanged for
+    // rollback compatibility.
+    if (event === 'ui.settings_changed') {
+      const record = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+        ? payload as Record<string, unknown>
+        : null
+      const rawSettings = record?.settings
+      const source = record?.source
+      let settings: Record<string, unknown> = {}
+      let settingsWorkspace: string | null = null
+      let settingsPayload: Record<string, unknown> | null = null
+      if (typeof rawSettings === 'object' && rawSettings !== null && !Array.isArray(rawSettings)) {
+        if (source === 'host') {
+          settings = Object.fromEntries(
+            Object.entries(rawSettings as Record<string, unknown>)
+              .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
+          )
+          settingsPayload = { source, settings }
+        } else if (source === 'plugin-storage') {
+          const scope = record?.scope
+          const allowedKeys = scope === 'plugin'
+            ? GIT_USER_PREFERENCE_KEYS
+            : scope === 'workspace'
+              ? [GIT_WORKSPACE_REPOSITORY_KEY]
+              : []
+          settings = Object.fromEntries(
+            Object.entries(rawSettings as Record<string, unknown>)
+              .filter(([key]) => allowedKeys.includes(key as never))
+          )
+          const workspacePath = record?.workspace_path
+          if (scope === 'workspace' && typeof workspacePath === 'string' && workspacePath.length > 0) {
+            settingsWorkspace = resolve(workspacePath)
+          }
+          settingsPayload = {
+            source,
+            scope,
+            settings,
+            ...(settingsWorkspace ? { workspace_path: workspacePath } : {}),
+          }
+        }
+      }
+      if (settingsPayload && Object.keys(settings).length > 0 &&
+        (source !== 'plugin-storage' || record?.scope !== 'workspace' || settingsWorkspace !== null)) {
+        for (const plugin of this.running.values()) {
+          if (
+            plugin.hasV2DescriptorIdentity &&
+            plugin.id === GIT_PLUGIN_ID &&
+            plugin.capabilityPolicy.kind === 'manifest-v2' &&
+            plugin.capabilityPolicy.system.includes('ui') &&
+            plugin.capabilityContext?.userGrant?.system.includes('ui') &&
+            (settingsWorkspace === null || (
+              plugin.workspacePath !== null &&
+              resolve(plugin.workspacePath) === settingsWorkspace
+            ))
+          ) {
+            this.emitToInstance(plugin.instanceId, event, settingsPayload)
+          }
+        }
+      }
+      // Keep the legacy loop below active while the rollback bundle is live.
+    }
+    const deliveredInstanceIds = new Set<string>()
+    // Git's existing changed event is a private first-party transport seam,
+    // not a public Manifest v2 capability. Route it by the Host-owned
+    // workspace path so two Git view instances never receive one another's
+    // refresh. Credential events take the dedicated branch at the top of this
+    // method instead, routed to their owning instance by the Host-issued
+    // credential-owner nonce.
+    if (event === 'git.changed') {
+      const eventWorkspace =
+        typeof payload === 'object' && payload !== null &&
+        typeof (payload as Record<string, unknown>).workspace_path === 'string'
+          ? resolve((payload as Record<string, unknown>).workspace_path as string)
+          : null
+      if (!eventWorkspace) return
+      for (const plugin of this.running.values()) {
+        if (
+          !plugin.hasV2DescriptorIdentity ||
+          plugin.id !== GIT_PLUGIN_ID ||
+          (targetPluginId !== undefined && plugin.id !== targetPluginId) ||
+          !plugin.workspacePath ||
+          resolve(plugin.workspacePath) !== eventWorkspace
+        ) {
+          continue
+        }
+        const context = plugin.capabilityContext
+        const policy = plugin.capabilityPolicy
+        if (
+          policy.kind !== 'manifest-v2' ||
+          !policy.system.includes('fs') ||
+          !context?.userGrant?.system.includes('fs')
+        ) {
+          continue
+        }
+        this.emitToInstance(plugin.instanceId, event, payload)
+        deliveredInstanceIds.add(plugin.instanceId)
+      }
+    }
+    if (event === 'terminal.output') {
+      const sessionId = terminalSessionIdOf(payload)
+      if (!sessionId) return
+      const route = this.terminalRoutes.get(sessionId)
+      const owner = route ? this.activeTerminalOwnerKey(route) : null
+      if (!owner) {
+        if (this.bufferEarlyAiEvent('terminal.output', payload)) return
+        this.logDroppedTerminalEvent(event, sessionId, route)
+        return
+      }
+      const pendingOwner = this.pendingTerminalOwners.get(sessionId)
+      if (pendingOwner && pendingOwner !== owner) {
+        this.terminalOutputBatcher.dropSession(sessionId)
+        this.pendingTerminalOwners.delete(sessionId)
+      }
+      this.pendingTerminalOwners.set(sessionId, owner)
+      this.terminalOutputBatcher.push(sessionId, toPayload(payload))
+      return
     } else if (event === 'terminal.exit') {
       const sessionId = terminalSessionIdOf(payload)
-      if (sessionId) {
+      if (!sessionId) return
+      const route = this.terminalRoutes.get(sessionId)
+      if (!route && this.bufferEarlyAiEvent('terminal.exit', payload)) return
+      const ownerPlugin = route ? this.runningPluginForTerminalRoute(route) : undefined
+      if (ownerPlugin?.hasV2DescriptorIdentity && ownerPlugin.id === GIT_PLUGIN_ID) {
         this.terminalOutputBatcher.flushSession(sessionId)
-        this.deliverTerminalEvent(event, sessionId, payload)
+        const binding = ownerPlugin.capabilityContext?.runtimeBinding
+        const exitCode = toPayload(payload).exit_code
+        const normalizedExitCode = typeof exitCode === 'number' ? exitCode : null
+        if (
+          binding &&
+          this.isPublicEventAllowedForInstance(
+            ownerPlugin,
+            'aiCli.exited',
+            { sessionId, exitCode: normalizedExitCode },
+            binding
+          )
+        ) {
+          this.emitToInstance(ownerPlugin.instanceId, 'aiCli.exited', {
+            sessionId,
+            exitCode: normalizedExitCode,
+          })
+        }
+        this.removeAiSession(ownerPlugin, sessionId)
         this.terminalRoutes.delete(sessionId)
         return
       }
+      this.terminalOutputBatcher.flushSession(sessionId)
+      this.deliverTerminalEvent(event, sessionId, payload)
+      this.terminalRoutes.delete(sessionId)
+      this.pendingTerminalOwners.delete(sessionId)
+      return
     }
     for (const plugin of this.running.values()) {
+      if (deliveredInstanceIds.has(plugin.instanceId)) continue
+      if (targetPluginId !== undefined && plugin.id !== targetPluginId) continue
       const allowed =
         plugin.capabilityPolicy.kind === 'manifest-v2'
           ? plugin.capabilityContext !== null &&
@@ -582,68 +2888,105 @@ export class FrontendPluginManager {
               event,
               payload,
               plugin.capabilityContext,
+              targetPluginId ?? '',
               sourceBinding
             )
           : isEventAllowed(plugin.capabilityPolicy, event)
       if (allowed) {
-        this.emit(plugin.id, event, payload)
+        this.emitToInstance(plugin.instanceId, event, payload)
       }
     }
   }
 
-  /** Deliver a terminal.output/exit event to the session's registered owner —
-   *  and ONLY the owner. Unrouted sessions (or a dead owner view) are dropped,
-   *  never fanned out: PTY content must not leak to plugins that did not bind
-   *  the session. Registration always precedes delivery because the WS is
-   *  processed in order — the create/reattach response that feeds
-   *  noteTerminalRoutes arrives before the session's subsequent output frames
-   *  (and the renderer ignores pre-bind frames anyway). */
-  private deliverTerminalEvent(event: string, sessionId: string, payload: unknown): void {
-    const owner = this.terminalRoutes.get(sessionId)
-    if (owner && this.running.has(owner)) {
-      this.emit(owner, event, payload)
-      return
-    }
-    console.debug(
-      `[plugin] dropping ${event} for terminal session ${sessionId}: ` +
-        (owner ? `owner ${owner} is not running` : 'no plugin bound the session')
+  private isPublicEventAllowedForInstance(
+    plugin: RunningPlugin,
+    event: string,
+    payload: unknown,
+    sourceBinding: AuthenticatedRuntimeBinding
+  ): boolean {
+    return (
+      plugin.capabilityPolicy.kind === 'manifest-v2' &&
+      plugin.capabilityContext !== null &&
+      isPublicCapabilityEventAllowed(
+        plugin.capabilityPolicy,
+        event,
+        payload,
+        plugin.capabilityContext,
+        plugin.id,
+        sourceBinding
+      )
     )
   }
 
+  /** Deliver a terminal.output/exit event to the session's registered owner —
+   *  and ONLY the owner. Unrouted sessions, detached tombstones, and stale
+   *  batches are dropped; PTY content must not leak to a sibling or a later
+   *  instance. */
+  private deliverTerminalEvent(
+    event: string,
+    sessionId: string,
+    payload: unknown,
+    expectedOwner?: string
+  ): void {
+    const route = this.terminalRoutes.get(sessionId)
+    const owner = route ? this.activeTerminalOwnerKey(route) : null
+    if (!owner || (expectedOwner !== undefined && owner !== expectedOwner)) {
+      this.logDroppedTerminalEvent(event, sessionId, route)
+      return
+    }
+    const plugin = this.runningPluginForTerminalRoute(route)
+    if (plugin) {
+      this.emitToInstance(plugin.instanceId, event, payload)
+    }
+  }
+
   /** Register the PTY sessions a successful terminal.create/terminal.reattach
-   *  response binds to `pluginId` (route table feeding
-   *  {@link deliverTerminalEvent}). Any other WS type is a no-op. */
-  noteTerminalRoutes(pluginId: string, wsType: string, result: unknown): void {
+   *  response binds to one authenticated view instance. Legacy callers may
+   *  still pass their plugin id through the v1 adapter. */
+  noteTerminalRoutes(instanceOrPluginId: string, wsType: string, result: unknown): void {
+    const plugin = this.resolveInstance(instanceOrPluginId)
+    if (!plugin) return
+    const route = this.routeForPlugin(plugin)
+    if (!route) return
     for (const sessionId of terminalSessionsFromResponse(wsType, result)) {
-      this.terminalRoutes.set(sessionId, pluginId)
+      const previous = this.terminalRoutes.get(sessionId)
+      if (previous && !this.canRouteBeClaimed(previous, plugin)) continue
+      const previousOwner = previous ? this.activeTerminalOwnerKey(previous) : null
+      const nextOwner = this.activeTerminalOwnerKey(route)
+      if (previousOwner && previousOwner !== nextOwner) {
+        this.terminalOutputBatcher.dropSession(sessionId)
+        this.pendingTerminalOwners.delete(sessionId)
+      }
+      this.terminalRoutes.set(sessionId, route)
     }
   }
 
   /**
-   * Strip session ids owned by ANOTHER plugin from a terminal.reattach payload
-   * so one plugin view can never hijack a PTY the broker bound to a sibling
-   * (routes are retained across view teardown precisely so only the SAME
-   * plugin re-claims its sessions after a window close/reopen or crash). Ids
-   * the table has never seen pass through — that covers legitimate re-claims
-   * after a host-app restart, and also PTYs created outside the broker (main
-   * window panes): fully isolating those needs a backend-side ownership
-   * namespace, which is documented as a residual risk in
-   * docs/en-US/plugin-development.md (marketplace prerequisite).
+   * Strip every session id that the authenticated instance cannot claim. v2
+   * reattach is fail-closed for unknown ids: the session id is not a free
+   * credential. A live legacy adapter retains its bounded v1 compatibility for
+   * unknown ids; stale/unknown senders are fail-closed even when an old route
+   * remains in memory.
    */
   filterTerminalReattachPayload(
-    pluginId: string,
+    instanceOrPluginId: string,
     payload: Record<string, unknown>
   ): Record<string, unknown> {
     const ids = payload.terminal_session_ids
     if (!Array.isArray(ids)) return payload
+    const plugin = this.resolveInstance(instanceOrPluginId)
+    if (!plugin) {
+      return { ...payload, terminal_session_ids: [] }
+    }
     const kept = ids.filter((id) => {
       if (typeof id !== 'string') return false
-      const owner = this.terminalRoutes.get(id)
-      return owner === undefined || owner === pluginId
+      const route = this.terminalRoutes.get(id)
+      if (!route) return plugin.openedViaLegacyAdapter && !plugin.hasV2DescriptorIdentity
+      return this.canRouteBeClaimed(route, plugin)
     })
     if (kept.length === ids.length) return payload
     console.debug(
-      `[plugin] reattach: stripped ${ids.length - kept.length} session id(s) owned by another plugin from ${pluginId}`
+      `[plugin] reattach: stripped ${ids.length - kept.length} session id(s) not owned by ${plugin.id}`
     )
     return { ...payload, terminal_session_ids: kept }
   }
@@ -659,14 +3002,18 @@ export class FrontendPluginManager {
     senderId: number,
     payload: unknown
   ): 'dispatched' | 'no-backend' | 'unknown-sender' | 'malformed' | 'denied' | 'unmapped' | 'not-castable' {
-    const pluginId = this.bySender.get(senderId)
-    if (!pluginId) {
+    const plugin = this.instanceForSender(senderId)
+    if (!plugin) {
       console.debug('[plugin] cast dropped: unknown sender')
       return 'unknown-sender'
     }
-    const plugin = this.running.get(pluginId)
+    const pluginId = plugin.id
+    if (this.payloadClaimsInstance(payload)) {
+      console.debug(`[plugin] cast dropped: ${pluginId} instance identity is Host-owned`)
+      return 'malformed'
+    }
     const call = parseCapabilityCall(payload, pluginId)
-    if (!call || !plugin) {
+    if (!call) {
       console.debug(`[plugin] cast dropped: malformed call from ${pluginId}`)
       return 'malformed'
     }
@@ -699,28 +3046,220 @@ export class FrontendPluginManager {
       )
       return 'not-castable'
     }
+    const castPayload = toPayload(call.args)
+    if (
+      this.requiresTerminalOwnership(plan.wsType) &&
+      !this.ownsTerminalSession(plugin, castPayload)
+    ) {
+      console.debug(`[plugin] cast dropped: ${pluginId} ${plan.wsType} terminal session is not owned`)
+      return 'denied'
+    }
     const client = this.ensureBackend()
     if (!client) {
       console.debug(`[plugin] cast dropped: ${pluginId} ${plan.wsType} — backend not connected`)
       return 'no-backend'
     }
-    void client.send(plan.wsType, toPayload(call.args)).catch(() => {
+    void client.send(plan.wsType, castPayload).catch(() => {
       // Nobody is awaiting — a failed input write surfaces through the PTY
       // stream itself (or the next request/response call).
     })
     return 'dispatched'
   }
 
+  private beginTerminalOperation(
+    plugin: RunningPlugin,
+    wsType: string,
+    client: WsClient,
+    payload: Record<string, unknown>
+  ): PendingTerminalOperation | null {
+    if (wsType !== 'terminal.create' && wsType !== 'terminal.reattach') return null
+    const operation: PendingTerminalOperation = {
+      operationId: randomUUID(),
+      instanceId: plugin.instanceId,
+      wsType,
+      client,
+      route: this.routeForPlugin(plugin),
+      cancelled: false,
+      cancelSent: false,
+      cleanupSessionIds: new Set<string>(),
+      ...(wsType === 'terminal.create' && nonEmptyString(payload.pane_id)
+        ? { paneId: payload.pane_id }
+        : {}),
+      ...(wsType === 'terminal.create' && nonEmptyString(payload.create_generation)
+        ? { createGeneration: payload.create_generation }
+        : {}),
+    }
+    this.pendingTerminalOperations.set(operation.operationId, operation)
+    return operation
+  }
+
+  private canCommitTerminalOperation(operation: PendingTerminalOperation | null): boolean {
+    if (!operation || operation.cancelled) return false
+    const plugin = this.running.get(operation.instanceId)
+    if (!plugin) return false
+    return sameTerminalRoute(operation.route, this.routeForPlugin(plugin))
+  }
+
+  private cleanupCancelledTerminalCreate(
+    operation: PendingTerminalOperation,
+    result: unknown
+  ): void {
+    if (!operation.paneId || !operation.createGeneration) return
+    if (typeof result !== 'object' || result === null) return
+    const response = result as Record<string, unknown>
+    if (
+      response.pane_id !== operation.paneId ||
+      response.create_generation !== operation.createGeneration
+    ) {
+      return
+    }
+    const sessionIds = terminalSessionsFromResponse(operation.wsType, result)
+    if (sessionIds.length !== 1) return
+    const sessionId = sessionIds[0]
+    if (operation.cleanupSessionIds.has(sessionId)) return
+    operation.cleanupSessionIds.add(sessionId)
+
+    // This is Host cleanup for a create operation that could not be committed
+    // to a live view, not a plugin capability call. It intentionally bypasses
+    // the plugin authorization path and targets only this response's session.
+    void operation.client
+      .send('terminal.kill', { terminal_session_id: sessionId, force: true })
+      .then((response) => {
+        if (!response.ok) {
+          // The expected outcome when the cancellation won the race: the
+          // backend already rolled the create back and dropped its ownership,
+          // so the kill has nothing left to reclaim.
+          console.debug(`[plugin] late terminal.create cleanup was rejected for ${sessionId}`)
+        }
+      })
+      .catch(() => {
+        console.warn(`[plugin] late terminal.create cleanup failed for ${sessionId}`)
+      })
+  }
+
+  private invalidatePendingTerminalOperations(plugin: RunningPlugin): void {
+    for (const operation of this.pendingTerminalOperations.values()) {
+      if (operation.instanceId !== plugin.instanceId || operation.cancelled) continue
+      operation.cancelled = true
+      if (
+        operation.wsType === 'terminal.create' &&
+        !operation.cancelSent &&
+        operation.paneId &&
+        operation.createGeneration
+      ) {
+        operation.cancelSent = true
+        void operation.client
+          .send('terminal.create.cancel', {
+            pane_id: operation.paneId,
+            create_generation: operation.createGeneration,
+          })
+          .catch(() => {
+            // The ledger remains cancelled even if the backend is already
+            // unavailable; a late create response must never revive a route.
+          })
+      }
+    }
+  }
+
   /** Shared terminal teardown for BOTH view-death paths ({@link destroy} and
-   *  the defensive webContents 'destroyed' hook): discard the plugin's pending
-   *  output batches so they are never delivered anywhere. The route entries
-   *  themselves are RETAINED (still marked with the pluginId) — delivery
-   *  targets only live views, and a retained route both lets the same plugin
-   *  re-claim its PTY on a later reattach and blocks other plugins from
-   *  claiming it (see {@link filterTerminalReattachPayload}). */
-  private releaseTerminalOwnership(pluginId: string): void {
-    for (const [sessionId, owner] of this.terminalRoutes) {
-      if (owner === pluginId) this.terminalOutputBatcher.dropSession(sessionId)
+   *  the defensive webContents 'destroyed' hook): discard this instance's
+   *  pending output and detach only its live route ownership. The stable v2
+   *  tuple remains as a Host-owned tombstone for safe reattach. */
+  private releaseTerminalOwnership(plugin: RunningPlugin): void {
+    this.invalidatePendingTerminalOperations(plugin)
+    for (const [sessionId, route] of this.terminalRoutes) {
+      const ownsRoute = route.legacy
+        ? plugin.openedViaLegacyAdapter && route.pluginId === plugin.id
+        : route.instanceId === plugin.instanceId && this.routeMatchesPlugin(route, plugin)
+      if (!ownsRoute) continue
+      this.terminalOutputBatcher.dropSession(sessionId)
+      this.pendingTerminalOwners.delete(sessionId)
+      if (!route.legacy) {
+        const aiSession = this.aiSessions.get(sessionId)
+        if (aiSession?.attachedInstanceId === plugin.instanceId) {
+          aiSession.attachedInstanceId = null
+        }
+        this.terminalRoutes.set(sessionId, { ...route, instanceId: null })
+      }
+    }
+  }
+
+  private releaseInstanceSubscriptions(instanceId: string): void {
+    const subscriptions = this.instanceSubscriptions.get(instanceId)
+    if (!subscriptions) return
+    this.instanceSubscriptions.delete(instanceId)
+    for (const dispose of subscriptions) {
+      try {
+        dispose()
+      } catch {
+        // One broken subscription must not prevent sibling cleanup.
+      }
+    }
+  }
+
+  /** Detach a view from its host without changing the WebContents lifecycle. */
+  private detachView(plugin: RunningPlugin): void {
+    try {
+      if (!plugin.hostWindow.isDestroyed()) {
+        plugin.hostWindow.contentView.removeChildView(plugin.view)
+      }
+    } catch {
+      // Host teardown may already have removed the view.
+    }
+  }
+
+  private forgetInstance(instanceId: string, view?: WebContentsView): RunningPlugin | undefined {
+    const plugin = this.running.get(instanceId)
+    if (!plugin || (view && plugin.view !== view)) return undefined
+    this.settleActivation(instanceId)
+    plugin.detachHostResize?.()
+    plugin.detachHostResize = null
+    plugin.detachHostClosed?.()
+    plugin.detachHostClosed = null
+    this.cancelPendingAiStarts(plugin)
+    this.releaseTerminalOwnership(plugin)
+    this.releaseInstanceSubscriptions(instanceId)
+    this.discardGitPathGrants(instanceId)
+    this.releaseGitCredentialOwnersForInstance(instanceId)
+    this.running.delete(instanceId)
+    this.bySender.delete(plugin.senderId)
+    for (const [key, handle] of this.contributionInstances) {
+      if (handle.instanceId === instanceId) this.contributionInstances.delete(key)
+    }
+    if (![...this.running.values()].some((candidate) => candidate.hostWindow.id === plugin.hostWindow.id)) {
+      this.gitContributionStates.delete(plugin.hostWindow.id)
+    }
+    if (this.legacyInstances.get(plugin.id) === instanceId) {
+      this.legacyInstances.delete(plugin.id)
+    }
+    return plugin
+  }
+
+  private destroyPluginInstances(pluginId: string): void {
+    for (const plugin of this.instancesForPlugin(pluginId)) {
+      this.destroyInstance(plugin.instanceId)
+    }
+  }
+
+  private clearTerminalRoutes(pluginId: string): void {
+    for (const [sessionId, route] of this.terminalRoutes) {
+      if (route.pluginId !== pluginId) continue
+      this.terminalOutputBatcher.dropSession(sessionId)
+      this.pendingTerminalOwners.delete(sessionId)
+      this.terminalRoutes.delete(sessionId)
+    }
+  }
+
+  private stopAiSessionsForPlugin(pluginId: string): void {
+    for (const [sessionId, session] of this.aiSessions) {
+      if (session.pluginId !== pluginId) continue
+      this.aiSessions.delete(sessionId)
+      void session.client.send('terminal.kill', {
+        terminal_session_id: sessionId,
+        force: true,
+      }).catch(() => {
+        // Removal still forgets ownership when the backend is unavailable.
+      })
     }
   }
 
@@ -738,42 +3277,150 @@ export class FrontendPluginManager {
   ): void {
     this.registerIpc()
 
-    const existing = this.running.get(descriptor.id)
+    const existingId = this.legacyInstances.get(descriptor.id)
+    const existing = existingId ? this.running.get(existingId) : undefined
     if (existing) {
       if (existing.view.webContents.isDestroyed() || existing.hostWindow.isDestroyed()) {
         // Stale record (renderer crash / host teardown race) — drop it and fall
         // through to a fresh create; loadEntry on a dead webContents would brick.
-        this.destroy(descriptor.id)
+        this.destroyInstance(existing.instanceId)
       } else {
-        existing.capabilityContext = descriptor.capabilityContext ?? existing.capabilityContext
-        const query = descriptor.query ?? ''
-        const prevQuery = existing.query
-        existing.query = query
-        if (workspaceOf(query) !== workspaceOf(prevQuery)) {
-          // Different workspace → reload the entry with the new params (matches
-          // legacy routeEditorWindowOpen's `reload` branch). In-flight queued
-          // targets belong to the old workspace and are dropped with it.
-          existing.ready = false
-          existing.pendingTargets = []
-          this.loadEntry(existing.view, descriptor)
-        } else if (query) {
-          // Same workspace → deliver the open target in-page (legacy
-          // `editor:openFile`/`editor:openDiff` semantics: add/reveal the tab
-          // without reloading, so open tabs and unsaved buffers survive). This
-          // is also the path an out-of-workspace open takes: it carries
-          // `file_ws` in the params, which is not part of the identity above.
-          this.sendOpenTarget(existing, queryToParams(query))
+        const nextDescriptorContext =
+          descriptor.capabilityContext === undefined
+            ? existing.capabilityContext
+            : descriptor.capabilityContext
+        validateV2CapabilityContext(descriptor, nextDescriptorContext ?? null)
+        if (existing.hasV2DescriptorIdentity !== hasV2DescriptorIdentity(descriptor)) {
+          // A live instance must not switch between v1 and v2 route semantics.
+          // Recreate it so all existing routes are released under the old identity.
+          this.destroyInstance(existing.instanceId)
+        } else {
+          this.updateInstanceCapabilityContext(existing, nextDescriptorContext)
+          const query = descriptor.query ?? ''
+          const prevQuery = existing.query
+          existing.query = query
+          if (workspaceOf(query) !== workspaceOf(prevQuery)) {
+            // Different workspace → reload the entry with the new params (matches
+            // legacy routeEditorWindowOpen's `reload` branch). In-flight queued
+            // targets belong to the old workspace and are dropped with it.
+            existing.ready = false
+            existing.pendingTargets = []
+            this.loadEntry(existing.view, descriptor)
+          } else if (query) {
+            // Same workspace → deliver the open target in-page (legacy
+            // `editor:openFile`/`editor:openDiff` semantics: add/reveal the tab
+            // without reloading, so open tabs and unsaved buffers survive). This
+            // is also the path an out-of-workspace open takes: it carries
+            // `file_ws` in the params, which is not part of the identity above.
+            this.sendOpenTarget(existing, queryToParams(query))
+          }
+          if (bounds === 'hidden') {
+            this.deactivate(existing.instanceId)
+          } else {
+            existing.fill = bounds === 'fill'
+            this.applyBounds(existing, bounds)
+            this.trackHostResize(existing)
+            existing.view.setVisible(true)
+          }
+          // Surface the window that actually hosts the view. Cross-window opens
+          // keep the view on its original host, so focus that one — the open
+          // must never land invisibly behind another window.
+          revealHostWindow(existing.hostWindow)
+          return
         }
-        existing.fill = bounds === 'fill'
-        this.applyBounds(existing, bounds)
-        this.trackHostResize(existing)
-        existing.view.setVisible(true)
-        // Surface the window that actually hosts the view. Cross-window opens
-        // keep the view on its original host, so focus that one — the open
-        // must never land invisibly behind another window.
-        revealHostWindow(existing.hostWindow)
-        return
       }
+    }
+
+    this.mountView(hostWindow, descriptor, bounds, descriptor.query ?? '', opts, undefined, true)
+  }
+
+  /**
+   * Open one validated Manifest v2 contribution as a fresh Host-owned
+   * instance. The descriptor and view contribute only stable registry keys;
+   * entry launch data always comes from the current Host registry record.
+   * Capability context is either that registry context or an explicitly
+   * Host-supplied per-view context; renderer data never supplies either one.
+   */
+  async openView(
+    packageDescriptor: PluginLaunchDescriptor,
+    view: PluginViewLaunchDescriptor,
+    options: PluginViewOpenOptions
+  ): Promise<PluginViewHandle> {
+    const registered = this.descriptors.get(packageDescriptor.id)
+    if (!registered) {
+      throw new Error(`package descriptor '${packageDescriptor.id}' is not registered by the Host`)
+    }
+    const canonicalView = registered.views?.find(
+      (candidate) => candidate.contributionKey === view.contributionKey
+    )
+    if (!canonicalView) {
+      throw new Error(
+        `view '${view.contributionKey}' is not registered by the Host package descriptor`
+      )
+    }
+    const capabilityContext =
+      options.capabilityContext === undefined
+        ? registered.capabilityContext ?? null
+        : options.capabilityContext
+    validateV2CapabilityContext(registered, capabilityContext)
+    this.registerIpc()
+
+    const handle = this.mountView(
+      options.hostWindow,
+      registered,
+      options.bounds,
+      options.query ?? '',
+      { ...options, capabilityContext },
+      canonicalView,
+      false
+    )
+    if (options.initiallyVisible !== false && options.bounds !== 'hidden') {
+      this.focusInstance(handle.instanceId)
+    } else {
+      this.deactivate(handle.instanceId)
+    }
+    return handle
+  }
+
+  /** Ensure a contribution has a live, deactivated instance without creating
+   *  a visible placeholder rectangle. The renderer later activates the same
+   *  Host-owned instance through {@link openContribution}. */
+  async ensureContribution(
+    hostWindow: BrowserWindow,
+    contributionKey: string,
+    options: Omit<PluginViewOpenOptions, 'hostWindow' | 'bounds'>,
+  ): Promise<{ ok: boolean; error?: string }> {
+    return this.openContribution(hostWindow, contributionKey, {
+      ...options,
+      bounds: 'hidden',
+      initiallyVisible: false,
+    })
+  }
+
+  private mountView(
+    hostWindow: BrowserWindow,
+    descriptor: PluginLaunchDescriptor,
+    bounds: PluginViewBounds,
+    query: string,
+    opts: {
+      closeHostOnHide?: boolean
+      mirrorTitle?: boolean
+      workspacePath?: string
+      capabilityContext?: HostCapabilityContext | null
+      initiallyVisible?: boolean
+    },
+    viewDescriptor: PluginViewLaunchDescriptor | undefined,
+    openedViaLegacyAdapter: boolean
+  ): PluginViewHandle {
+    const capabilityContext =
+      opts.capabilityContext === undefined ? descriptor.capabilityContext : opts.capabilityContext
+    validateV2CapabilityContext(descriptor, capabilityContext ?? null)
+    const isV2Identity = hasV2DescriptorIdentity(descriptor)
+    const instanceId = this.nextInstanceId()
+    const loadDescriptor: PluginLaunchDescriptor = {
+      ...descriptor,
+      entryFile: viewDescriptor?.entryFile ?? descriptor.entryFile,
+      query,
     }
 
     const preload = join(__dirname, '../preload/plugin-preload.js')
@@ -815,22 +3462,38 @@ export class FrontendPluginManager {
     hostWindow.contentView.addChildView(view)
 
     const record: RunningPlugin = {
+      instanceId,
       id: descriptor.id,
+      openedViaLegacyAdapter,
+      hasV2DescriptorIdentity: isV2Identity,
       requires: descriptor.requires,
       capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
-      capabilityContext: descriptor.capabilityContext ?? null,
+      capabilityContext:
+        isV2Identity || !openedViaLegacyAdapter
+          ? this.bindCapabilityContext(capabilityContext, instanceId)
+          : capabilityContext ?? null,
       view,
       hostWindow,
-      query: descriptor.query ?? '',
+      workspacePath: opts.workspacePath ?? null,
+      query,
       senderId: view.webContents.id,
       fill: bounds === 'fill',
       detachHostResize: null,
+      detachHostClosed: null,
       closeHostOnHide: opts.closeHostOnHide ?? false,
       ready: false,
+      pluginReady: false,
       pendingTargets: [],
     }
-    this.running.set(descriptor.id, record)
-    this.bySender.set(record.senderId, descriptor.id)
+    this.running.set(instanceId, record)
+    if (isV2Identity && this.activationFailureHandler) {
+      // Register the activation immediately so load failure / renderer death
+      // remain observable, but do not spend the readiness budget while the
+      // entry document itself is still loading.
+      this.pendingActivations.set(instanceId, null)
+    }
+    if (openedViaLegacyAdapter) this.legacyInstances.set(descriptor.id, instanceId)
+    this.bySender.set(record.senderId, instanceId)
     this.applyBounds(record, bounds)
     this.trackHostResize(record)
 
@@ -842,32 +3505,49 @@ export class FrontendPluginManager {
     // If the host window goes away, tear the view down with it. Guarded so a
     // later record (view recreated on another window) is never torn down by a
     // stale hook.
-    hostWindow.once('closed', () => {
-      if (this.running.get(descriptor.id)?.view === view) this.destroy(descriptor.id)
-    })
+    const onHostClosed = (): void => {
+      if (this.running.get(instanceId)?.view === view) this.destroyInstance(instanceId)
+    }
+    hostWindow.on('closed', onHostClosed)
+    record.detachHostClosed = () => hostWindow.removeListener('closed', onHostClosed)
 
     // Defensive cleanup: if the view's webContents dies through any path other
     // than destroy() (renderer crash, Electron teardown), drop the record so
     // the next open() recreates instead of loading into a destroyed view.
     view.webContents.once('destroyed', () => {
-      const current = this.running.get(descriptor.id)
-      if (current?.view !== view) return
-      current.detachHostResize?.()
-      current.detachHostResize = null
-      this.running.delete(descriptor.id)
-      this.bySender.delete(current.senderId)
-      // Same terminal teardown as destroy(): a renderer crash must also stop
-      // pending output delivery, while the retained route marks keep the PTYs
-      // re-claimable by this plugin only.
-      this.releaseTerminalOwnership(descriptor.id)
+      this.failActivation(instanceId, 'plugin renderer exited before readiness')
+      const plugin = this.forgetInstance(instanceId, view)
+      if (plugin) this.detachView(plugin)
     })
+
+    view.webContents.on(
+      'did-fail-load',
+      (_event, errorCode: number, errorDescription: string, _url: string, isMainFrame: boolean) => {
+        if (isMainFrame) {
+          this.failActivation(
+            instanceId,
+            `entry load failed: ${errorDescription} (${errorCode})`
+          )
+        }
+      }
+    )
 
     // Open targets sent before the entry finished loading are queued and
     // flushed here (mirrors the legacy editor window's did-finish-load flush).
     view.webContents.on('did-finish-load', () => {
-      const current = this.running.get(descriptor.id)
+      const current = this.running.get(instanceId)
       if (current?.view !== view) return
       current.ready = true
+      if (
+        this.pendingActivations.get(instanceId) === null &&
+        !current.pluginReady
+      ) {
+        const timer = setTimeout(() => {
+          this.failActivation(instanceId, 'plugin readiness handshake timed out')
+        }, 10_000)
+        timer.unref?.()
+        this.pendingActivations.set(instanceId, timer)
+      }
       for (const params of current.pendingTargets.splice(0)) {
         view.webContents.send(IPC_OPEN_TARGET, params)
       }
@@ -879,14 +3559,22 @@ export class FrontendPluginManager {
         current.capabilityPolicy.kind !== 'manifest-v2' &&
         this.wsClient
       ) {
-        this.emit(descriptor.id, 'nav.backend_status', { status: this.wsStatus })
+        this.emitToInstance(instanceId, 'nav.backend_status', { status: this.wsStatus })
       }
     })
 
-    this.loadEntry(view, descriptor)
+    this.loadEntry(view, loadDescriptor, viewDescriptor !== undefined)
 
-    // activate (show)
-    view.setVisible(true)
+    // Activate only when requested. Hidden contributions have no visible
+    // placeholder bounds; their WebContents is still alive for subscriptions.
+    if (opts.initiallyVisible !== false && bounds !== 'hidden') view.setVisible(true)
+    else view.setVisible(false)
+    return Object.freeze({ instanceId })
+  }
+
+  /** Resolve a Host-supplied workspace path for an authenticated instance. */
+  workspacePathOfInstance(instanceId: string): string | null {
+    return this.running.get(instanceId)?.workspacePath ?? null
   }
 
   /** Deliver a new open target to a running view, queueing until its entry has
@@ -898,6 +3586,7 @@ export class FrontendPluginManager {
 
   /** Apply a bounds spec: `'fill'` overlays the host's full content area. */
   private applyBounds(record: RunningPlugin, bounds: PluginViewBounds): void {
+    if (bounds === 'hidden') return
     if (bounds === 'fill') {
       const { width, height } = record.hostWindow.getContentBounds()
       record.view.setBounds({ x: 0, y: 0, width, height })
@@ -921,20 +3610,25 @@ export class FrontendPluginManager {
     record.detachHostResize = () => host.removeListener('resize', onResize)
   }
 
-  /** Load the plugin entry (dev server when available, built file otherwise).
-   *  A plugin with an empty devUrl (e.g. the separately-built mini-IDE) always
-   *  loadFiles. */
-  private loadEntry(view: WebContentsView, descriptor: PluginLaunchDescriptor): void {
-    const devUrl = process.env['ELECTRON_RENDERER_URL'] ? descriptor.devUrl : null
+  /** Load a legacy entry from the dev server when available, or a built file.
+   *  Contribution views always load their canonical view entry file so one
+   *  package-level devUrl cannot collapse multiple views onto one document. */
+  private loadEntry(
+    view: WebContentsView,
+    descriptor: PluginLaunchDescriptor,
+    forceFile = false
+  ): void {
+    const devUrl = !forceFile && process.env['ELECTRON_RENDERER_URL'] ? descriptor.devUrl : null
     const query = descriptor.query ?? ''
     if (devUrl) void view.webContents.loadURL(devUrl + query)
     else void view.webContents.loadFile(descriptor.entryFile, query ? { search: query } : undefined)
   }
 
   /** Show a plugin view without recreating it. A fill view re-syncs to the
-   *  host's content bounds and resumes tracking host resizes. */
-  activate(pluginId: string): void {
-    const plugin = this.running.get(pluginId)
+   *  host's content bounds and resumes tracking host resizes. This does not
+   *  change OS focus; call {@link focusInstance} explicitly when needed. */
+  activate(instanceId: string): void {
+    const plugin = this.resolveInstance(instanceId)
     if (!plugin) return
     if (plugin.fill && !plugin.hostWindow.isDestroyed()) {
       this.applyBounds(plugin, 'fill')
@@ -943,10 +3637,19 @@ export class FrontendPluginManager {
     plugin.view.setVisible(true)
   }
 
+  /** Focus one exact live Host-owned instance without changing its visibility
+   *  or bounds. Stale/unknown instance ids are ignored. */
+  focusInstance(instanceId: string): void {
+    const plugin = this.running.get(instanceId)
+    if (!plugin || plugin.view.webContents.isDestroyed()) return
+    revealHostWindow(plugin.hostWindow)
+    plugin.view.webContents.focus()
+  }
+
   /** Hide a plugin view without destroying its WebContents. Stops tracking
    *  host resizes while hidden (open()/activate re-attach the listener). */
-  deactivate(pluginId: string): void {
-    const plugin = this.running.get(pluginId)
+  deactivate(instanceId: string): void {
+    const plugin = this.resolveInstance(instanceId)
     if (!plugin) return
     plugin.detachHostResize?.()
     plugin.detachHostResize = null
@@ -954,27 +3657,71 @@ export class FrontendPluginManager {
   }
 
   /** Update the plugin view's rect (host-driven layout). */
-  setBounds(pluginId: string, bounds: PluginBounds): void {
-    const plugin = this.running.get(pluginId)
+  setBounds(instanceId: string, bounds: PluginBounds): void {
+    const plugin = this.resolveInstance(instanceId)
     if (plugin) plugin.view.setBounds(bounds)
   }
 
-  /** detach → destroy. WebContents are not auto-released, so close explicitly. */
-  destroy(pluginId: string): void {
-    const plugin = this.running.get(pluginId)
+  /** Host-driven incremental entry target update for one exact v2 instance.
+   *  The package keeps its in-page state while the Host changes a diff target;
+   *  the workspace identity itself is changed only by recreating the view. */
+  updateViewQuery(instanceId: string, query: string): void {
+    const plugin = this.running.get(instanceId)
     if (!plugin) return
-    plugin.detachHostResize?.()
-    plugin.detachHostResize = null
-    this.running.delete(pluginId)
-    this.bySender.delete(plugin.senderId)
-    // The PTY itself keeps running — drop its pending output, keep the routes
-    // marked with this pluginId so only a reopened view of the SAME plugin can
-    // re-claim them (see releaseTerminalOwnership).
-    this.releaseTerminalOwnership(pluginId)
-    try {
-      if (!plugin.hostWindow.isDestroyed()) {
-        plugin.hostWindow.contentView.removeChildView(plugin.view)
+    plugin.query = query
+    if (query) this.sendOpenTarget(plugin, queryToParams(query))
+  }
+
+  /** Host-only/deferred integration seam: register an event/backend
+   *  subscription under one exact view instance. The returned function
+   *  unregisters and disposes it exactly once; instance teardown invokes the
+   *  same wrapper for any remaining subscription. No production v2 producer is
+   *  wired through this seam yet. */
+  registerInstanceSubscription(instanceId: string, dispose: () => void): () => void {
+    if (!this.running.has(instanceId)) {
+      try {
+        dispose()
+      } catch {
+        // A stale registration must not make a caller's cleanup path throw.
       }
+      return () => undefined
+    }
+    const subscriptions = this.instanceSubscriptions.get(instanceId) ?? new Set<() => void>()
+    this.instanceSubscriptions.set(instanceId, subscriptions)
+    let registered = true
+    const unregister = (): void => {
+      if (!registered) return
+      registered = false
+      subscriptions.delete(unregister)
+      if (
+        subscriptions.size === 0 &&
+        this.instanceSubscriptions.get(instanceId) === subscriptions
+      ) {
+        this.instanceSubscriptions.delete(instanceId)
+      }
+      try {
+        dispose()
+      } catch {
+        // A broken subscription must not make caller or instance teardown throw.
+      }
+    }
+    subscriptions.add(unregister)
+    return unregister
+  }
+
+  /** Destroy the legacy v1 instance identified by plugin id. */
+  destroy(pluginId: string): void {
+    const legacyInstanceId = this.legacyInstances.get(pluginId)
+    if (legacyInstanceId) this.destroyInstance(legacyInstanceId)
+  }
+
+  /** Detach and destroy one exact Host-owned instance. Stale/unknown ids are
+   *  ignored and never fall back to a plugin id. */
+  destroyInstance(instanceId: string): void {
+    const plugin = this.forgetInstance(instanceId)
+    if (!plugin) return
+    this.detachView(plugin)
+    try {
       if (!plugin.view.webContents.isDestroyed()) {
         plugin.view.webContents.close()
       }
@@ -989,13 +3736,16 @@ export class FrontendPluginManager {
    * Register (or replace) an available plugin descriptor. Ids under the
    * reserved `navide.` namespace may only be registered by the host itself
    * (`opts.builtin`) or by an install whose App-authorized Official Registry
-   * verification passed (`opts.official`); a third-party plugin claiming such an id (e.g.
-   * spoofing `navide.mini-ide` to hijack the trusted mini-IDE) is refused.
+   * verification passed (`opts.official`); the internal `host` identity is
+   * never a plugin id.
    */
   registerDescriptor(
     descriptor: PluginLaunchDescriptor,
     opts: { builtin?: boolean; official?: boolean } = {}
   ): void {
+    if (descriptor.id === HOST_EVENT_SOURCE_PLUGIN_ID) {
+      throw new Error(`internal Host event identity '${HOST_EVENT_SOURCE_PLUGIN_ID}' is not a plugin id`)
+    }
     if (!opts.builtin && !opts.official && isReservedPluginId(descriptor.id)) {
       throw new Error(
         `refusing to register reserved plugin id '${descriptor.id}' without official verification`
@@ -1017,6 +3767,18 @@ export class FrontendPluginManager {
     }
   }
 
+  /** Replace the active descriptor with an explicit Host recovery copy.
+   *  Recovery is intentionally destructive to live instances: a running v2
+   *  view must not continue using the old package after its descriptor has
+   *  been rolled back. The package inventory itself is left untouched. */
+  replaceBuiltinForRecovery(descriptor: PluginLaunchDescriptor): void {
+    this.builtinFallbacks.set(descriptor.id, descriptor)
+    this.stopAiSessionsForPlugin(descriptor.id)
+    this.destroyPluginInstances(descriptor.id)
+    this.clearTerminalRoutes(descriptor.id)
+    this.registerDescriptor(descriptor, { builtin: true })
+  }
+
   /** Look up a registered descriptor by id. */
   getDescriptor(id: string): PluginLaunchDescriptor | undefined {
     return this.descriptors.get(id)
@@ -1027,9 +3789,31 @@ export class FrontendPluginManager {
    * first-party identity can never become an automatic capability grant. */
   setCapabilityContext(pluginId: string, context: HostCapabilityContext | null): void {
     const descriptor = this.descriptors.get(pluginId)
-    if (descriptor) this.descriptors.set(pluginId, { ...descriptor, capabilityContext: context ?? undefined })
-    const running = this.running.get(pluginId)
-    if (running) running.capabilityContext = context
+    const running = this.instancesForPlugin(pluginId)
+    if (descriptor) validateV2CapabilityContext(descriptor, context)
+    if (
+      context !== null &&
+      running.some(
+        (instance) =>
+          instance.hasV2DescriptorIdentity &&
+          (descriptor === undefined || !hasV2DescriptorIdentity(descriptor))
+      )
+    ) {
+      throw new Error(`cannot validate capability context for unregistered plugin '${pluginId}'`)
+    }
+    if (
+      running.some(
+        (instance) =>
+          instance.hasV2DescriptorIdentity &&
+          instance.capabilityContext?.storageSnapshotTier !== context?.storageSnapshotTier
+      )
+    ) {
+      throw new Error('storage snapshot tier is fixed for a live plugin instance; recreate the instance')
+    }
+    if (descriptor) this.descriptors.set(pluginId, { ...descriptor, capabilityContext: context })
+    for (const runningInstance of running) {
+      this.updateInstanceCapabilityContext(runningInstance, context)
+    }
   }
 
   /** All registered (installed + built-in) descriptors. */
@@ -1110,6 +3894,50 @@ export class FrontendPluginManager {
     return { loaded: true, pluginId }
   }
 
+  /** Load one App-bundled Manifest v2 package through the same descriptor,
+   * catalog, grant, and instance runtime as a Registry package. App bundle
+   * integrity is the trust source, so no Registry receipt is consulted. */
+  loadFactoryPlugin(
+    packageDir: string,
+    expectedPluginId: string,
+  ):
+    | {
+        loaded: true
+        pluginId: string
+        packageVersion: string
+        activation: PluginActivationCatalogEntry
+      }
+    | { loaded: false; reason: string } {
+    if (this.installedPackages.has(expectedPluginId)) {
+      return { loaded: false, reason: 'installed package is active' }
+    }
+    const scanned = loadPluginDir(packageDir)
+    if (scanned.error) return { loaded: false, reason: scanned.error }
+    const activation = scanned.activation
+    const summary = scanned.packageSummary
+    if (!activation || !summary) {
+      return { loaded: false, reason: 'factory package must use Manifest v2' }
+    }
+    if (activation.pluginId !== expectedPluginId || summary.id !== expectedPluginId) {
+      return {
+        loaded: false,
+        reason: `expected factory plugin '${expectedPluginId}', received '${activation.pluginId}'`,
+      }
+    }
+    if (!scanned.descriptor) {
+      return { loaded: false, reason: 'factory package must contribute a frontend view' }
+    }
+    summary.provenance = 'factory-bundled'
+    activation.provenance = 'factory-bundled'
+    this.registerInstalledPackage(summary, scanned.descriptor, { official: true })
+    return {
+      loaded: true,
+      pluginId: activation.pluginId,
+      packageVersion: activation.packageVersion,
+      activation,
+    }
+  }
+
   /** Replace one installed package's inventory and optional frontend descriptor
    *  together. A backend-only update therefore cannot retain an older view. */
   registerInstalledPackage(
@@ -1117,6 +3945,9 @@ export class FrontendPluginManager {
     descriptor?: PluginLaunchDescriptor,
     opts: { official?: boolean } = {}
   ): void {
+    if (summary.id === HOST_EVENT_SOURCE_PLUGIN_ID) {
+      throw new Error(`internal Host event identity '${HOST_EVENT_SOURCE_PLUGIN_ID}' is not a plugin id`)
+    }
     if (descriptor && descriptor.id !== summary.id) {
       throw new Error(
         `installed package id '${summary.id}' does not match descriptor id '${descriptor.id}'`
@@ -1128,7 +3959,8 @@ export class FrontendPluginManager {
       )
     }
 
-    this.destroy(summary.id)
+    this.destroyPluginInstances(summary.id)
+    this.clearTerminalRoutes(summary.id)
     this.descriptors.delete(summary.id)
     if (descriptor) this.registerDescriptor(descriptor, opts)
     this.installedPackages.set(summary.id, {
@@ -1147,6 +3979,165 @@ export class FrontendPluginManager {
    */
   listViewContributions(): PluginViewLaunchDescriptor[] {
     return [...this.descriptors.values()].flatMap((descriptor) => descriptor.views ?? [])
+  }
+
+  /** Deterministic registry projection used by Host navigation and region
+   *  composition. This projection contains no live view identity. */
+  listContributionCatalog(): PluginContributionCatalogEntry[] {
+    return buildPluginContributionCatalog(this.listDescriptors())
+  }
+
+  private contributionInstanceKey(hostWindow: BrowserWindow, contributionKey: string): string {
+    return `${hostWindow.id}:${contributionKey}`
+  }
+
+  /** Open or update one catalog contribution without exposing the runtime
+   *  instance handle to renderer code. The Host resolves the canonical view
+   *  by contribution key and retains the handle in the main process. */
+  async openContribution(
+    hostWindow: BrowserWindow,
+    contributionKey: string,
+    options: Omit<PluginViewOpenOptions, 'hostWindow'>,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const descriptor = this.listDescriptors().find((candidate) =>
+      candidate.views?.some((view) => view.contributionKey === contributionKey)
+    )
+    const view = descriptor?.views?.find((candidate) => candidate.contributionKey === contributionKey)
+    if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
+    if (view.location === 'window') {
+      return { ok: false, error: 'window contributions require a dedicated Host window' }
+    }
+    const capabilityContext = this.contributionCapabilityContext(
+      descriptor,
+      view,
+      options.workspacePath ?? ''
+    )
+    if (descriptor.capabilityPolicy?.kind === 'manifest-v2' && !capabilityContext) {
+      return { ok: false, error: 'package-version capability grant is missing' }
+    }
+
+    const key = this.contributionInstanceKey(hostWindow, contributionKey)
+    const existing = this.contributionInstances.get(key)
+    if (existing && this.running.has(existing.instanceId)) {
+      const workspace = options.workspacePath ?? null
+      const currentWorkspace = this.workspacePathOfInstance(existing.instanceId)
+      if (!workspace || !currentWorkspace || resolve(workspace) === resolve(currentWorkspace)) {
+        this.updateViewQuery(existing.instanceId, options.query ?? '')
+        if (options.bounds === 'hidden') {
+          this.deactivate(existing.instanceId)
+        } else if (options.bounds === 'fill') {
+          this.activate(existing.instanceId)
+        } else {
+          this.setBounds(existing.instanceId, options.bounds)
+          this.activate(existing.instanceId)
+        }
+        return { ok: true }
+      }
+      this.destroyInstance(existing.instanceId)
+      this.contributionInstances.delete(key)
+    } else if (existing) {
+      this.contributionInstances.delete(key)
+    }
+
+    try {
+      const handle = await this.openView(descriptor, view, {
+        ...options,
+        hostWindow,
+        capabilityContext,
+      })
+      this.contributionInstances.set(key, handle)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** Open a catalog contribution whose placement is a dedicated BrowserWindow.
+   * The window host is supplied by Electron main; renderer callers only send
+   * the stable contribution key and workspace/query metadata. */
+  async openContributionWindow(
+    hostWindow: BrowserWindow,
+    contributionKey: string,
+    options: Omit<PluginViewOpenOptions, 'hostWindow' | 'bounds'>,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const descriptor = this.listDescriptors().find((candidate) =>
+      candidate.views?.some((view) => view.contributionKey === contributionKey)
+    )
+    const view = descriptor?.views?.find((candidate) => candidate.contributionKey === contributionKey)
+    if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
+    if (view.location !== 'window') {
+      return { ok: false, error: 'contribution is not a window view' }
+    }
+    const capabilityContext = this.contributionCapabilityContext(
+      descriptor,
+      view,
+      options.workspacePath ?? ''
+    )
+    if (descriptor.capabilityPolicy?.kind === 'manifest-v2' && !capabilityContext) {
+      return { ok: false, error: 'package-version capability grant is missing' }
+    }
+
+    const key = this.contributionInstanceKey(hostWindow, contributionKey)
+    const existing = this.contributionInstances.get(key)
+    if (existing && this.running.has(existing.instanceId)) {
+      const workspace = options.workspacePath ?? null
+      const currentWorkspace = this.workspacePathOfInstance(existing.instanceId)
+      if (!workspace || !currentWorkspace || resolve(workspace) === resolve(currentWorkspace)) {
+        this.updateViewQuery(existing.instanceId, options.query ?? '')
+        this.activate(existing.instanceId)
+        this.focusInstance(existing.instanceId)
+        return { ok: true }
+      }
+      this.destroyInstance(existing.instanceId)
+      this.contributionInstances.delete(key)
+    } else if (existing) {
+      this.contributionInstances.delete(key)
+    }
+
+    try {
+      const handle = await this.openView(descriptor, view, {
+        ...options,
+        hostWindow,
+        bounds: 'fill',
+        closeHostOnHide: true,
+        mirrorTitle: true,
+        capabilityContext,
+      })
+      this.contributionInstances.set(key, handle)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** Update visibility/bounds for a Host region without accepting an opaque
+   *  instance id from renderer input. */
+  updateContribution(
+    hostWindow: BrowserWindow,
+    contributionKey: string,
+    bounds: PluginBounds | null,
+    visible: boolean,
+  ): { ok: boolean } {
+    const key = this.contributionInstanceKey(hostWindow, contributionKey)
+    const handle = this.contributionInstances.get(key)
+    if (!handle || !this.running.has(handle.instanceId)) {
+      this.contributionInstances.delete(key)
+      return { ok: false }
+    }
+    if (visible && !bounds) return { ok: false }
+    if (bounds) this.setBounds(handle.instanceId, bounds)
+    if (visible) this.activate(handle.instanceId)
+    else this.deactivate(handle.instanceId)
+    return { ok: true }
+  }
+
+  /** Destroy one contribution in one Host region. */
+  closeContribution(hostWindow: BrowserWindow, contributionKey: string): { ok: boolean } {
+    const key = this.contributionInstanceKey(hostWindow, contributionKey)
+    const handle = this.contributionInstances.get(key)
+    this.contributionInstances.delete(key)
+    if (handle) this.destroyInstance(handle.instanceId)
+    return { ok: true }
   }
 
   /**
@@ -1310,7 +4301,8 @@ export class FrontendPluginManager {
           action: 'quarantine',
           reason: 'reserved plugin id requires the App-authorized Official Registry',
         })
-        this.destroy(pluginId)
+        this.destroyPluginInstances(pluginId)
+        this.clearTerminalRoutes(pluginId)
         this.installedPackages.delete(pluginId)
         this.descriptors.delete(pluginId)
         const fallback = this.builtinFallbacks.get(pluginId)
@@ -1319,7 +4311,8 @@ export class FrontendPluginManager {
       }
       decisions.push({ pluginId, ...decision })
       if (decision.action === 'quarantine') {
-        this.destroy(pluginId)
+        this.destroyPluginInstances(pluginId)
+        this.clearTerminalRoutes(pluginId)
         this.installedPackages.delete(pluginId)
         this.descriptors.delete(pluginId)
         const fallback = this.builtinFallbacks.get(pluginId)
@@ -1329,24 +4322,46 @@ export class FrontendPluginManager {
     return decisions
   }
 
+  /** Stop a plugin's live frontend runtime without unregistering its package.
+   * Destructive package-owned cleanup must use this phase before touching
+   * storage, while leaving the package registered so a failed cleanup can be
+   * retried. */
+  preparePluginRemoval(id: string): void {
+    this.stopAiSessionsForPlugin(id)
+    this.destroyPluginInstances(id)
+    this.clearTerminalRoutes(id)
+  }
+
   /** Unregister a descriptor and tear down its view if it is open. Used by the
    *  remove/update flow so a removed plugin's window does not linger. Removing
    *  a marketplace override of a bundled builtin re-registers the bundled copy
    *  (recorded by {@link registerBuiltin}) so the surface keeps working. */
-  removeInstalledPlugin(id: string): void {
-    this.destroy(id)
+  removeInstalledPlugin(id: string, opts: { restoreBuiltin?: boolean } = {}): void {
+    this.preparePluginRemoval(id)
     this.installedPackages.delete(id)
     this.descriptors.delete(id)
-    const fallback = this.builtinFallbacks.get(id)
-    if (fallback) this.registerDescriptor(fallback, { builtin: true })
+    if (opts.restoreBuiltin !== false) {
+      const fallback = this.builtinFallbacks.get(id)
+      if (fallback) this.registerDescriptor(fallback, { builtin: true })
+    }
   }
 
   /** Push an event to a plugin view (fed by the backend server-push fan-out
    *  in {@link dispatchEvent}). */
-  emit(pluginId: string, type: string, data: unknown): void {
-    const plugin = this.running.get(pluginId)
+  private emitToInstance(instanceId: string, type: string, data: unknown): void {
+    const plugin = this.running.get(instanceId)
     if (plugin && !plugin.view.webContents.isDestroyed()) {
       plugin.view.webContents.send(IPC_EVENT, { type, data })
+    }
+  }
+
+  /** Emit to one exact Host instance when the id is an instance id; otherwise
+   *  resolve the legacy plugin-id adapter and emit to its sole v1 view. This is
+   *  intentionally not a broadcast API for v2 packages. */
+  emit(instanceOrPluginId: string, type: string, data: unknown): void {
+    const direct = this.resolveInstance(instanceOrPluginId)
+    if (direct) {
+      this.emitToInstance(direct.instanceId, type, data)
     }
   }
 }
@@ -1685,57 +4700,48 @@ export function openPlansPluginView(
 /** Id of the Git extension (the standalone Git client surface). */
 export const GIT_PLUGIN_ID = 'navide.git'
 
-/** Directory of the bundled Git copy: `resources/plugins/git` inside the app
- *  package (shipped via electron-builder `extraResources`), or the local
- *  `dist-plugins/git` build output when running unpackaged. Mirrors
- *  {@link bundledPlansDir}. */
+/** Legacy Git bundle retained as an explicit rollback artifact. It is no
+ *  longer selected by the production composition, but remains buildable and
+ *  available until the next migration issue removes it. */
 export function bundledGitDir(source: BundledMiniIdeSource): string {
   return source.isPackaged
     ? join(source.resourcesPath, 'plugins', 'git')
     : join(source.devRoot ?? join(__dirname, '../..'), 'dist-plugins', 'git')
 }
 
-/**
- * Register the app-bundled Git surface as a builtin descriptor at startup,
- * mirroring {@link registerBundledPlans} exactly (same precedence order and
- * fail-closed validation). Never throws: a missing dir, invalid manifest,
- * spoofed id, or missing entry file returns `registered: false` with a reason
- * (caller logs), so a corrupt bundle degrades instead of crashing startup.
- */
-export function registerBundledGit(
+/** Explicit rollback registration for diagnostics and recovery tooling. The
+ *  normal Host startup prefers v2; this path replaces live v2 instances only
+ *  when recovery is explicitly requested. */
+export function registerLegacyBundledGit(
   manager: FrontendPluginManager,
   source: BundledMiniIdeSource
 ): { registered: boolean; reason?: string } {
   const dir = bundledGitDir(source)
   const scanned = loadPluginDir(dir)
-  if (!scanned.descriptor) {
-    return { registered: false, reason: `${dir}: ${scanned.error ?? 'invalid plugin dir'}` }
-  }
-  if (scanned.descriptor.id !== GIT_PLUGIN_ID) {
-    return {
-      registered: false,
-      reason: `${dir}: manifest id '${scanned.descriptor.id}' is not '${GIT_PLUGIN_ID}'`,
-    }
+  if (!scanned.descriptor || scanned.descriptor.id !== GIT_PLUGIN_ID) {
+    return { registered: false, reason: `${dir}: legacy Git bundle unavailable` }
   }
   if (!existsSync(scanned.descriptor.entryFile)) {
     return { registered: false, reason: `${dir}: entry file missing (${scanned.descriptor.entryFile})` }
   }
-  manager.registerBuiltin(scanned.descriptor)
+  manager.replaceBuiltinForRecovery(scanned.descriptor)
   return { registered: true }
 }
 
 /** Build the entry query GitWindowApp reads from `window.location.search`:
- *  `workspace_path`, the backend `http_url` (resolved by the git
- *  capabilityBackend shim), the current `theme` id so the plugin paints with
- *  the app theme before its first settings reconcile (zero-flash; see
- *  plugins/git/mount.ts), plus `extraParams` forwarding an optional diff target
+ *  `workspace_path`, the backend `http_url` (resolved by the Git package's
+ *  capability backend), the current `theme` id so the plugin paints with the
+ *  app theme before its first settings reconcile (zero-flash; see
+ *  plugins/navide-git/src/mount.ts), plus `extraParams` forwarding an optional diff target
  *  (`git_diff_filepath`/`git_diff_staged`/`git_diff_commit`) GitWindowApp reads
  *  to show a file diff in its own panel instead of the mini-IDE. */
 function gitQuery(
   workspacePath: string,
   httpUrl: string,
   theme: string,
-  extraParams: Record<string, string> = {}
+  extraParams: Record<string, string> = {},
+  v2 = true,
+  contribution: 'left' | 'window' = 'window',
 ): string {
   const params = new URLSearchParams()
   if (workspacePath) params.set('workspace_path', workspacePath)
@@ -1743,30 +4749,59 @@ function gitQuery(
   for (const [key, value] of Object.entries(extraParams)) {
     if (value) params.set(key, value)
   }
+  if (v2) params.set('v2', '1')
+  if (v2) params.set('contribution', contribution)
   if (theme) params.set('theme', theme)
   const qs = params.toString()
   return qs ? `?${qs}` : ''
 }
 
 /**
- * Dev-only Git descriptor pointing at the LOCAL build output
- * (`dist-plugins/git/`, produced by `pnpm run build:git`). Registered at
+ * Dev-only Git descriptor pointing at the LOCAL Manifest v2 build output
+ * (`dist-plugins/navide-git/`, produced by `pnpm run build:git:v2`). Registered at
  * startup only under `AGENT_TEAM_PLUGIN_DEV=1`, mirroring
  * {@link devPlansPluginDescriptor}. The bundle is built separately
- * (vite.git.config.ts) with the `useBackend` → capabilityBackend alias, so it
+ * (plugins/navide-git/vite.config.ts) with the package-local capability
+ * backend, so it
  * is not served by the electron-vite dev server: `devUrl` is empty and it
- * always loadFiles. `fs` grants the git.changed working-tree event; `ui` the
- * theme settings sync; `issues` the cloud issues panel. `requires` comes from
- * the shared declaration the packaged manifest also reads, so dev and packaged
- * runs cannot disagree about what is granted.
+ * always loadFiles. The packaged Manifest v2 permissions are the source of the
+ * system grant; the Host adds the official package's authenticated workspace
+ * binding at open time.
  */
 export function devGitPluginDescriptor(): PluginLaunchDescriptor {
+  const dir = join(__dirname, '../../dist-plugins/navide-git')
+  const scanned = loadPluginDir(dir)
+  if (scanned.descriptor) return scanned.descriptor
   return {
     id: GIT_PLUGIN_ID,
-    requires: [...GIT_PLUGIN_REQUIRES],
+    packageVersion: '0.0.0-dev',
+    requires: [],
+    capabilityPolicy: {
+      kind: 'manifest-v2',
+      system: ['fs', 'ui', 'aiCli'],
+      shell: 'allowlist',
+      grants: [],
+    },
     devUrl: '',
-    // __dirname is out/main in dev, so ../../ is the repo root.
-    entryFile: join(__dirname, '../../dist-plugins/git/index.html'),
+    entryFile: join(dir, 'frontend/window/index.html'),
+    views: [
+      {
+        id: 'left',
+        contributionKey: `${GIT_PLUGIN_ID}.left`,
+        kind: 'custom',
+        location: 'left',
+        title: 'Git',
+        entryFile: join(dir, 'frontend/left/index.html'),
+      },
+      {
+        id: 'window',
+        contributionKey: `${GIT_PLUGIN_ID}.window`,
+        kind: 'custom',
+        location: 'window',
+        title: 'Git',
+        entryFile: join(dir, 'frontend/window/index.html'),
+      },
+    ],
   }
 }
 
@@ -1775,6 +4810,19 @@ export function devGitPluginDescriptor(): PluginLaunchDescriptor {
  *  overlaid. Mirrors {@link ensureMiniIdeWindow} — the standalone SourceTree-
  *  style Git client lives in its own window, wider (1280x820) than the editor. */
 let gitWindow: BrowserWindow | null = null
+let gitWindowViewInstanceId: string | null = null
+const gitLeftViews = new Map<number, PluginViewHandle>()
+const gitLeftViewHostCleanup = new Map<number, () => void>()
+
+type GitLeftViewResult = { ok: boolean; fallback?: 'legacy' }
+
+function clearGitLeftView(hostWindow: BrowserWindow): void {
+  const handle = gitLeftViews.get(hostWindow.id)
+  if (handle) frontendPluginManager.destroyInstance(handle.instanceId)
+  gitLeftViews.delete(hostWindow.id)
+  gitLeftViewHostCleanup.get(hostWindow.id)?.()
+  gitLeftViewHostCleanup.delete(hostWindow.id)
+}
 
 function ensureGitWindow(): BrowserWindow {
   if (gitWindow && !gitWindow.isDestroyed()) return gitWindow
@@ -1787,7 +4835,10 @@ function ensureGitWindow(): BrowserWindow {
   })
   gitWindow = win
   win.on('closed', () => {
-    if (gitWindow === win) gitWindow = null
+    if (gitWindow === win) {
+      gitWindow = null
+      gitWindowViewInstanceId = null
+    }
   })
   return win
 }
@@ -1800,22 +4851,147 @@ function ensureGitWindow(): BrowserWindow {
  * descriptor up in the loader registry; returns false when the Git extension is
  * not registered (the caller surfaces the fallback).
  */
-export function openGitPluginView(
+export async function openGitPluginView(
   workspacePath: string,
   httpUrl = '',
   theme = '',
   extraParams: Record<string, string> = {}
-): boolean {
+): Promise<boolean> {
   const base = frontendPluginManager.getDescriptor(GIT_PLUGIN_ID)
   if (!base) return false
-  frontendPluginManager.open(
-    ensureGitWindow(),
-    { ...base, query: gitQuery(workspacePath, httpUrl, theme, extraParams) },
-    // Fill the dedicated window's content bounds and track its resizes.
-    'fill',
-    // Esc (nav.hideSelf) closes the dedicated window, like the mini-IDE editor.
-    // The window is this plugin's alone, so it wears the plugin's page title.
-    { closeHostOnHide: true, mirrorTitle: true }
+  const hostWindow = ensureGitWindow()
+  if (base.capabilityPolicy?.kind !== 'manifest-v2' || !base.views) {
+    // Explicit recovery may select the untouched V1 bundle. Keep this branch
+    // isolated from the production package path: it uses the legacy adapter,
+    // its original entry, and no v2 query/capability context.
+    frontendPluginManager.open(
+      hostWindow,
+      {
+        ...base,
+        query: gitQuery(workspacePath, httpUrl, theme, extraParams, false),
+      },
+      'fill',
+      { closeHostOnHide: true, mirrorTitle: true },
+    )
+    gitWindowViewInstanceId = null
+    return true
+  }
+  const query = gitQuery(workspacePath, httpUrl, theme, extraParams, true, 'window')
+  const currentWorkspace = gitWindowViewInstanceId
+    ? frontendPluginManager.workspacePathOfInstance(gitWindowViewInstanceId)
+    : null
+  if (gitWindowViewInstanceId && currentWorkspace && resolve(currentWorkspace) === resolve(workspacePath)) {
+    frontendPluginManager.updateViewQuery(gitWindowViewInstanceId, query)
+    frontendPluginManager.activate(gitWindowViewInstanceId)
+    frontendPluginManager.focusInstance(gitWindowViewInstanceId)
+    return true
+  }
+  if (gitWindowViewInstanceId) frontendPluginManager.destroyInstance(gitWindowViewInstanceId)
+  const context = frontendPluginManager.gitCapabilityContext(
+    base.packageVersion ?? '0.0.0-dev',
+    workspacePath,
+    'git-window'
   )
+  const view = base.views?.find((candidate) => candidate.contributionKey === `${GIT_PLUGIN_ID}.window`)
+  if (!view) return false
+  const handle = await frontendPluginManager.openView(base, view, {
+    hostWindow,
+    bounds: 'fill',
+    query,
+    closeHostOnHide: true,
+    mirrorTitle: true,
+    workspacePath,
+    capabilityContext: context,
+  })
+  gitWindowViewInstanceId = handle.instanceId
   return true
+}
+
+/** Open the same active package's left contribution in a Host-owned main
+ *  window. One left instance is tracked per host window; workspace changes
+ *  recreate only that instance and never touch the separate Git window. */
+export async function openGitLeftPluginView(
+  hostWindow: BrowserWindow,
+  workspacePath: string,
+  bounds: PluginBounds,
+  httpUrl = '',
+  theme = '',
+  extraParams: Record<string, string> = {}
+): Promise<GitLeftViewResult> {
+  const base = frontendPluginManager.getDescriptor(GIT_PLUGIN_ID)
+  if (!base) return { ok: false }
+  if (base.capabilityPolicy?.kind !== 'manifest-v2' || !base.packageVersion || !base.views) {
+    // Recovery swaps the descriptor before the renderer's next geometry tick.
+    // Clear any stale v2 handle and let the main-window renderer compose the
+    // retained legacy bundle in-process.
+    clearGitLeftView(hostWindow)
+    return { ok: true, fallback: 'legacy' }
+  }
+  const view = base.views?.find((candidate) => candidate.contributionKey === `${GIT_PLUGIN_ID}.left`)
+  if (!view) return { ok: false }
+  const existing = gitLeftViews.get(hostWindow.id)
+  if (existing) {
+    const existingWorkspace = frontendPluginManager.workspacePathOfInstance(existing.instanceId)
+    if (existingWorkspace && resolve(existingWorkspace) === resolve(workspacePath)) {
+      frontendPluginManager.setBounds(existing.instanceId, bounds)
+      frontendPluginManager.updateViewQuery(existing.instanceId, gitQuery(workspacePath, httpUrl, theme, extraParams, true, 'left'))
+      frontendPluginManager.activate(existing.instanceId)
+      return { ok: true }
+    }
+    clearGitLeftView(hostWindow)
+  }
+  const handle = await frontendPluginManager.openView(base, view, {
+    hostWindow,
+    bounds,
+    query: gitQuery(workspacePath, httpUrl, theme, extraParams, true, 'left'),
+    workspacePath,
+    capabilityContext: frontendPluginManager.gitCapabilityContext(
+      base.packageVersion,
+      workspacePath,
+      'git-left'
+    ),
+  })
+  gitLeftViews.set(hostWindow.id, handle)
+  const onHostClosed = (): void => {
+    if (gitLeftViews.get(hostWindow.id)?.instanceId !== handle.instanceId) return
+    gitLeftViews.delete(hostWindow.id)
+    gitLeftViewHostCleanup.delete(hostWindow.id)
+  }
+  hostWindow.once('closed', onHostClosed)
+  gitLeftViewHostCleanup.set(hostWindow.id, () => hostWindow.removeListener('closed', onHostClosed))
+  return { ok: true }
+}
+
+export function updateGitLeftPluginView(
+  hostWindow: BrowserWindow,
+  bounds: PluginBounds,
+  visible: boolean
+): GitLeftViewResult {
+  const base = frontendPluginManager.getDescriptor(GIT_PLUGIN_ID)
+  const isLegacy = !!base && (base.capabilityPolicy?.kind !== 'manifest-v2' || !base.packageVersion || !base.views)
+  if (isLegacy) {
+    clearGitLeftView(hostWindow)
+    return { ok: true, fallback: 'legacy' }
+  }
+  const handle = gitLeftViews.get(hostWindow.id)
+  if (!handle) return { ok: false }
+  frontendPluginManager.setBounds(handle.instanceId, bounds)
+  if (visible) frontendPluginManager.activate(handle.instanceId)
+  else frontendPluginManager.deactivate(handle.instanceId)
+  return { ok: true }
+}
+
+export function closeGitLeftPluginView(hostWindow: BrowserWindow): { ok: boolean } {
+  const handle = gitLeftViews.get(hostWindow.id)
+  const cleanup = gitLeftViewHostCleanup.get(hostWindow.id)
+  if (!handle) {
+    cleanup?.()
+    gitLeftViewHostCleanup.delete(hostWindow.id)
+    return { ok: true }
+  }
+  frontendPluginManager.destroyInstance(handle.instanceId)
+  gitLeftViews.delete(hostWindow.id)
+  cleanup?.()
+  gitLeftViewHostCleanup.delete(hostWindow.id)
+  return { ok: true }
 }

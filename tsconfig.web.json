@@ -10,13 +10,29 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": false,
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@navide/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
+      "@navide/plugin-contracts": ["packages/plugin-contracts/src/index.ts"],
+      "@navide/plugin-ui/shared": ["packages/plugin-ui/src/shared/index.ts"],
+      "@navide/plugin-ui/shared/testing": ["packages/plugin-ui/src/shared/testing.ts"],
+      "@navide/terminal": ["src/renderer/src/platform/terminal/index.ts"],
+      "@navide/terminal/testing": ["src/renderer/src/platform/terminal/testing.ts"],
+      "@navide/plugin-shell": ["src/renderer/src/platform/plugin-shell/index.ts"],
+      "@navide/plugin-ui/foundation": ["packages/plugin-ui/src/foundation/index.ts"],
+      "@navide/plugin-ui/foundation/*": ["packages/plugin-ui/src/foundation/*"]
+    }
   },
   "include": [
     "src/renderer/src/**/*.ts",
     "src/renderer/src/**/*.vue",
     "src/renderer/src/**/*.d.ts",
     "src/renderer/plugins/**/*.ts",
-    "src/shared/**/*.ts"
+    "src/shared/**/*.ts",
+    "packages/plugin-contracts/src/**/*.ts",
+    "packages/plugin-sdk/src/**/*.ts",
+    "packages/plugin-ui/src/**/*.ts",
+    "packages/plugin-ui/src/**/*.vue"
   ]
 }

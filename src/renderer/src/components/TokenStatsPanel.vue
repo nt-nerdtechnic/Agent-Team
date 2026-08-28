@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
-import { CLI_AGENT_SPECS } from '../agents'
-import { settingsGet, settingsSet } from '../lib/settings'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { useTokens, type TokenBucket, type ResetScope } from '../composables/useTokens'
-import { useNotify } from '../composables/useNotify'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import type { useBackend } from '../composables/useBackend'
 import HistoryPanel from './HistoryPanel.vue'
 import TaskerPanel from './TaskerPanel.vue'
@@ -437,7 +437,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
               <tr class="head">
                 <th></th><td>{{ $t('label.in') }}</td><td>{{ $t('label.out') }}</td><td class="dim">{{ $t('label.calls') }}</td>
               </tr>
-          
+
             </tbody>
           </table>
         </section>
@@ -454,7 +454,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
                 <td>{{ fmt(row.bucket.output) }}</td>
                 <td class="dim">{{ row.bucket.calls }}</td>
               </tr>
-          
+
             </tbody>
           </table>
         </section>
@@ -471,7 +471,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
                 <td>{{ fmt(row.bucket.output) }}</td>
                 <td class="dim">{{ row.bucket.calls }}</td>
               </tr>
-          
+
             </tbody>
           </table>
         </section>

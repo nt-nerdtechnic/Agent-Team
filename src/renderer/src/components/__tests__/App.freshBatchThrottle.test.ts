@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest'
 // mounted, since backend and terminal lifecycles start on mount.
 const appSource = readFileSync(resolve(process.cwd(), 'src/renderer/src/App.vue'), 'utf8')
 const terminalSource = readFileSync(
-  resolve(process.cwd(), 'src/renderer/src/composables/useTerminal.ts'),
+  resolve(process.cwd(), 'src/renderer/src/platform/terminal/composables/useTerminal.ts'),
   'utf8'
 )
 

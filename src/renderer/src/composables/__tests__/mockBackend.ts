@@ -1,5 +1,13 @@
 import { ref, effectScope, type EffectScope } from 'vue'
 import type { useBackend, WsResponse, BackendStatus } from '../useBackend'
+import {
+  createHostGitFileAccessPort,
+  createHostGitSettingsPort,
+  createHostIssuePort,
+  createHostTerminalDockPort,
+} from '../hostSurfacePorts'
+import type { GitFileAccessPort, GitSettingsPort, IssuePort } from '../../ports/gitSurface'
+import type { TerminalDockPort } from '@navide/terminal'
 
 // Lightweight stand-in for useBackend() used by composable tests. It records
 // outgoing send() calls, lets a test preset per-type responses, and exposes
@@ -20,6 +28,7 @@ export function createMockBackend(initialStatus: BackendStatus = 'connected') {
   const wsUrl = ref('')
   const httpUrl = ref('')
   const lastError = ref('')
+  const shell = ref('')
 
   const autoRestart = ref<{ attempt: number; max: number; reason: string } | null>(null)
 
@@ -93,9 +102,44 @@ export function createMockBackend(initialStatus: BackendStatus = 'connected') {
     })
   }
 
-  const backend = { status, wsUrl, httpUrl, lastError, autoRestart, send, on } as unknown as Backend
+  const rawBackend = { status, wsUrl, httpUrl, lastError, shell, autoRestart, send, on } as unknown as Backend
+  const fileAccess = createHostGitFileAccessPort(rawBackend)
+  const settingsPort = createHostGitSettingsPort(rawBackend)
+  const issuePort = createHostIssuePort(rawBackend)
+  const terminalPort = createHostTerminalDockPort(rawBackend)
 
-  return { backend, status, autoRestart, emit, setResponse, setRejection, clearRejection, sent }
+  // Keep the legacy-shaped mock usable by existing composable tests while the
+  // production code consumes named ports. The assigned methods are the same
+  // adapters used by the Host composition roots, so tests exercise the seam
+  // rather than a second fake protocol.
+  Object.assign(rawBackend, fileAccess, settingsPort, issuePort, terminalPort)
+  // `create` is the only name shared by the issue and terminal ports. Preserve
+  // the legacy mock's ability to stand in for either consumer while production
+  // compositions keep the ports separate and therefore cannot cross-route.
+  ;(rawBackend as unknown as {
+    create: (...args: unknown[]) => Promise<unknown>
+  }).create = ((first: unknown, ...rest: unknown[]) => {
+    if (typeof first === 'string') {
+      return issuePort.create(first, rest[0] as string, rest[1] as string)
+    }
+    return terminalPort.create(first as Parameters<TerminalDockPort['create']>[0], rest[0] as number)
+  })
+  const backend = rawBackend as Backend & GitFileAccessPort & GitSettingsPort & IssuePort & TerminalDockPort
+
+  return {
+    backend,
+    fileAccess,
+    settingsPort,
+    issuePort,
+    terminalPort,
+    status,
+    autoRestart,
+    emit,
+    setResponse,
+    setRejection,
+    clearRejection,
+    sent,
+  }
 }
 
 /** Run a composable inside its own effect scope so `watch`/`onScopeDispose`

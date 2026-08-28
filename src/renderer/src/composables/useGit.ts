@@ -1,6 +1,7 @@
 import { ref, computed, watch, onScopeDispose } from 'vue'
-import type { useBackend } from './useBackend'
-import { settingsGet, settingsSet } from '../lib/settings'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
+import type { GitRequestType, GitTransport } from '../../../shared/gitCompatibility'
+import type { GitCredentialPort } from '../ports/gitSurface'
 
 export interface GitFileEntry {
   path: string
@@ -196,17 +197,23 @@ const emptyStatus = (): GitStatus => ({
 
 export function useGit(
   workspacePath: () => string,
-  backend: ReturnType<typeof useBackend>,
+  transport: GitTransport,
+  credentialPort: GitCredentialPort = {},
 ) {
-  const { send, on } = backend
+  const { send, on } = transport
 
   const gitStatus = ref<GitStatus>(emptyStatus())
+  const statusError = ref('')
+  const statusLoaded = ref(false)
   // Nested git repos found by scanning downward when the root is NOT a repo.
   const discoveredRepos = ref<DiscoveredRepo[]>([])
   // True when the backend skipped the downward scan because the workspace lives
   // on a cloud-synced folder (walking it can block for minutes). Only a user
   // triggered forced scan clears it — nothing retries automatically.
   const discoverySkipped = ref(false)
+  let discoveryForceSequence = 0
+  let pendingForce: { sequence: number; workspace: string } | null = null
+  let acceptedForce: { sequence: number; workspace: string } | null = null
   const showIgnored = ref(false)
   const gitLog = ref<GitCommit[]>([])
   // History view scope (SourceTree-style): 'all' shows every branch's commits as
@@ -243,7 +250,7 @@ export function useGit(
   const gitError = ref('')
   function clearGitError(): void { gitError.value = '' }
   async function runWrite(
-    type: string,
+    type: GitRequestType,
     payload: Record<string, unknown>,
   ): Promise<{ ok: boolean; error?: string }> {
     gitError.value = ''
@@ -264,8 +271,10 @@ export function useGit(
 
   async function loadStatus(): Promise<void> {
     const ws = workspacePath()
+    statusError.value = ''
     if (!ws) {
       gitStatus.value = emptyStatus()
+      statusLoaded.value = false
       return
     }
     isLoadingStatus.value = true
@@ -274,8 +283,9 @@ export function useGit(
         workspace_path: ws,
         include_ignored: showIgnored.value,
       })
-      if (resp.ok && resp.payload && workspacePath() === ws) {
+      if (resp.ok && resp.payload && typeof resp.payload.is_git_repo === 'boolean' && workspacePath() === ws) {
         gitStatus.value = resp.payload
+        statusLoaded.value = true
         // Root isn't a repo — git only searches upward, so scan downward for
         // nested repos to offer in the empty state. Clear stale results first.
         if (resp.payload.is_git_repo) {
@@ -283,9 +293,16 @@ export function useGit(
         } else {
           void discoverRepositories()
         }
+      } else if (workspacePath() === ws) {
+        const payloadError = (resp.payload as { error?: unknown } | null)?.error
+        statusError.value = resp.error?.message
+          || (typeof payloadError === 'string' ? payloadError : '')
+          || 'Unable to load Git status'
       }
-    } catch {
-      // transient WS error — loading flag reset in finally
+    } catch (error) {
+      if (workspacePath() === ws) {
+        statusError.value = error instanceof Error ? error.message : String(error)
+      }
     } finally {
       if (workspacePath() === ws) isLoadingStatus.value = false
     }
@@ -300,17 +317,36 @@ export function useGit(
       discoverySkipped.value = false
       return
     }
+    const forceSequenceAtStart = discoveryForceSequence
+    const pendingForceAtStart = !force && pendingForce?.workspace === ws
+      ? pendingForce.sequence
+      : 0
+    const ownForceSequence = force ? ++discoveryForceSequence : 0
+    if (force) pendingForce = { sequence: ownForceSequence, workspace: ws }
     try {
       const resp = await send<DiscoverReposResponse>(
         'git.discover_repositories',
         { workspace_path: ws, force },
       )
       if (resp.ok && resp.payload?.ok && workspacePath() === ws) {
+        if (force) {
+          acceptedForce = { sequence: ownForceSequence, workspace: ws }
+        } else if (
+          acceptedForce?.workspace === ws
+          && (
+            acceptedForce.sequence > forceSequenceAtStart
+            || (pendingForceAtStart > 0 && acceptedForce.sequence >= pendingForceAtStart)
+          )
+        ) {
+          return
+        }
         discoveredRepos.value = resp.payload.repositories ?? []
         discoverySkipped.value = resp.payload.skipped === 'cloud_storage'
       }
     } catch {
       // transient WS error — leave previous list untouched
+    } finally {
+      if (force && pendingForce?.sequence === ownForceSequence) pendingForce = null
     }
   }
 
@@ -941,8 +977,8 @@ export function useGit(
   // Declared with `function` so it hoists above every remote-op caller below.
   async function withCredential<T extends Record<string, unknown>>(ws: string, payload: T): Promise<T> {
     try {
-      const res = await window.agentTeam?.gitAccounts?.getCredential(ws)
-      if (res?.ok && res.credential) return { ...payload, credential: res.credential }
+      const credential = await credentialPort.getCredential?.(ws)
+      if (credential) return { ...payload, credential }
     } catch {
       /* fall back to interactive askpass */
     }
@@ -1516,6 +1552,7 @@ export function useGit(
   // Refresh when workspace changes
   watch(workspacePath, () => {
     gitStatus.value = emptyStatus()
+    statusLoaded.value = false
     gitLog.value = []
     gitBranches.value = []
     gitStashes.value = []
@@ -1544,7 +1581,7 @@ export function useGit(
   // the backend GitWatcher via git.status. loadLog is also re-called so that
   // windows that open before the WS is ready (e.g. miniIDE) get their history.
   const _stopReconnect = watch(
-    () => backend.status.value,
+    () => transport.status.value,
     (s) => {
       if (s === 'connected' && workspacePath()) {
         void loadStatus()
@@ -1711,7 +1748,7 @@ export function useGit(
 
   return {
     // state
-    gitStatus, discoveredRepos, discoverySkipped, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
+    gitStatus, statusError, statusLoaded, discoveredRepos, discoverySkipped, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
     gitWorktrees, gitConfig,
     logScope, logOrder, logLimit, canLoadMoreLog,
     isLoadingStatus, isLoadingLog, isInitializing,

@@ -47,6 +47,36 @@ export interface GitAccountInput {
 export interface GitCredential {
   username: string
   token: string
+  expectedHost: string
+}
+
+/** Main-owned recovery transition. The renderer can only move into recovery;
+ * there is deliberately no public event or API for switching back. */
+export interface GitRecoveryChanged {
+  legacy: true
+}
+
+function isGitRecoveryChanged(payload: unknown): payload is GitRecoveryChanged {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    'legacy' in payload &&
+    payload.legacy === true
+  )
+}
+
+export interface GitContributionState {
+  workspacePath: string
+  analyzerModel: string
+  dispatchTargets: { id: string; label: string }[]
+  availableAgents: { key: string; label: string }[]
+  issueHandoffs: Record<string, { paneId: string; mode: string; state: string }>
+}
+
+export interface GitContributionActionEnvelope {
+  operation: string
+  payload?: Record<string, unknown>
 }
 
 export type PermissionKey = 'automation' | 'notifications' | 'folders' | 'fullDisk'
@@ -56,8 +86,15 @@ export interface InstalledPluginSummary {
   id: string
   requires: string[]
   sensitive: string[]
-  provenance?: 'official-registry' | 'developer-local-unpacked'
+  provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
+}
+
+export interface FactoryPluginSummary {
+  id: string
+  version: string | null
+  active: boolean
+  optedOut: boolean
 }
 
 export interface MarketplaceExtension {
@@ -107,6 +144,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
   stopBackend: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('backend:stop'),
   onBackendChanged: (cb: (info: BackendInfo) => void): void => {
     ipcRenderer.on('backend:changed', (_event, info: BackendInfo) => cb(info))
+  },
+  onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void): (() => void) => {
+    const listener = (_event: unknown, payload: unknown): void => {
+      if (isGitRecoveryChanged(payload)) cb(payload)
+    }
+    ipcRenderer.on('git:recoveryChanged', listener)
+    return () => ipcRenderer.removeListener('git:recoveryChanged', listener)
   },
   onMenuAction: (cb: (action: string) => void): void => {
     ipcRenderer.on('menu:action', (_event, action: string) => cb(action))
@@ -185,13 +229,34 @@ contextBridge.exposeInMainWorld('agentTeam', {
     filepath?: string
     staged?: boolean
     commit?: string
+    base?: string
+    compare?: string
   }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:openGit', {
       workspace_path: args.workspace_path,
       ...(args.filepath
         ? { filepath: args.filepath, staged: String(args.staged ?? false), commit: args.commit ?? '' }
         : {}),
+      ...(args.base === undefined ? {} : { base: args.base }),
+      ...(args.compare === undefined ? {} : { compare: args.compare }),
     }),
+  openGitLeftView: (args: {
+    workspace_path: string
+    bounds: { x: number; y: number; width: number; height: number }
+  }): Promise<{ ok: boolean; fallback?: 'legacy' }> =>
+    ipcRenderer.invoke('window:openGitLeft', args),
+  updateGitLeftView: (args: {
+    bounds: { x: number; y: number; width: number; height: number }
+    visible: boolean
+  }): Promise<{ ok: boolean; fallback?: 'legacy' }> =>
+    ipcRenderer.invoke('window:updateGitLeft', args),
+  closeGitLeftView: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('window:closeGitLeft'),
+  getZoomFactor: (): Promise<number> => ipcRenderer.invoke('window:getZoomFactor'),
+  onZoomChanged: (cb: () => void): (() => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on('window:zoom-changed', listener)
+    return () => ipcRenderer.removeListener('window:zoom-changed', listener)
+  },
   // Plan-window side receiver: main asks an already-open plan window to switch
   // to a newly clicked plan instead of reopening the window. Returns a disposer.
   onPlanOpenDoc: (handler: (relPath: string) => void): (() => void) => {
@@ -499,6 +564,17 @@ contextBridge.exposeInMainWorld('agentTeam', {
   reportWorkspace: (workspacePath: string): void => {
     ipcRenderer.send('window:reportWorkspace', workspacePath)
   },
+  setGitContributionState: (state: GitContributionState): void => {
+    ipcRenderer.send('git:contribution-state', state)
+  },
+  clearGitContributionState: (): void => {
+    ipcRenderer.send('git:contribution-state-clear')
+  },
+  onGitContributionAction: (handler: (action: GitContributionActionEnvelope) => void): (() => void) => {
+    const listener = (_event: unknown, action: GitContributionActionEnvelope): void => handler(action)
+    ipcRenderer.on('git:contribution-action', listener)
+    return () => ipcRenderer.removeListener('git:contribution-action', listener)
+  },
   restore: {
     getPending: (): Promise<string[] | null> => ipcRenderer.invoke('restore:getPending'),
     getSkipped: (): Promise<string[]> => ipcRenderer.invoke('restore:getSkipped'),
@@ -561,6 +637,46 @@ contextBridge.exposeInMainWorld('agentTeam', {
   plugins: {
     listInstalled: (): Promise<InstalledPluginSummary[]> =>
       ipcRenderer.invoke('plugins:listInstalled'),
+    listFactoryPackages: (): Promise<FactoryPluginSummary[]> =>
+      ipcRenderer.invoke('plugins:listFactoryPackages'),
+    listContributions: (): Promise<Array<{
+      pluginId: string
+      packageVersion: string | null
+      contributionKey: string
+      title: string
+      icon: string | null
+      kind: 'custom'
+      location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
+      manifestOrder: number
+    }>> => ipcRenderer.invoke('plugins:listContributions'),
+    openContribution: (args: {
+      contributionKey: string
+      workspace_path: string
+      bounds: { x: number; y: number; width: number; height: number }
+    }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('plugins:openContribution', args),
+    ensureContribution: (args: {
+      contributionKey: string
+      workspace_path: string
+    }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('plugins:ensureContribution', args),
+    openContributionWindow: (args: {
+      contributionKey: string
+      workspace_path: string
+    }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('plugins:openContributionWindow', args),
+    updateContribution: (args: {
+      contributionKey: string
+      bounds?: { x: number; y: number; width: number; height: number }
+      visible: boolean
+    }): Promise<{ ok: boolean }> => ipcRenderer.invoke('plugins:updateContribution', args),
+    closeContribution: (args: { contributionKey: string }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('plugins:closeContribution', args),
+    onContributionsChanged: (handler: () => void): (() => void) => {
+      const listener = (): void => handler()
+      ipcRenderer.on('plugins:contributionsChanged', listener)
+      return () => ipcRenderer.removeListener('plugins:contributionsChanged', listener)
+    },
     marketplaceSearch: (query?: string): Promise<MarketplaceListResponse> =>
       ipcRenderer.invoke('plugins:marketplaceSearch', query),
     prepareInstall: (args: {
@@ -575,5 +691,7 @@ contextBridge.exposeInMainWorld('agentTeam', {
       ipcRenderer.invoke('plugins:commitInstall', { id, ...approval }),
     remove: (id: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('plugins:remove', { id }),
+    restoreFactoryPackage: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('plugins:restoreFactoryPackage', { id }),
   },
 })

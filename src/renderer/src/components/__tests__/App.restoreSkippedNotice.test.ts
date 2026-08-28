@@ -2,8 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import enUS from '../../i18n/locales/en-US.json'
-import zhTW from '../../i18n/locales/zh-TW.json'
+import { enUSMessages as enUS, zhTWMessages as zhTW } from '@navide/plugin-ui/foundation'
 
 // App.vue mounts backend/terminal/onboarding lifecycles, so it isn't practical
 // to mount it here — see App.spawnAdvisories.test.ts for the same reasoning.

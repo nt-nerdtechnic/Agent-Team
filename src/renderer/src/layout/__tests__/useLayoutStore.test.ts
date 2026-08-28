@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 const store = new Map<string, unknown>()
 let listener: ((keys: string[]) => void) | null = null
 
-vi.mock('../../lib/settings', () => ({
+vi.mock('@navide/plugin-ui/shared', () => ({
   settingsGet: <T,>(key: string, fallback: T): T =>
     (store.has(key) ? (store.get(key) as T) : fallback),
   settingsSet: (key: string, value: unknown): void => { store.set(key, value) },

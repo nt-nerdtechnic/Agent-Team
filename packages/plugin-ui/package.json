@@ -1,22 +1,40 @@
 {
   "name": "@navide/plugin-ui",
   "version": "1.0.0",
-  "description": "Stable, framework-neutral UI tokens and primitives for Navide plugins.",
+  "description": "Vue components, controllers, shared UI primitives, and tokens for Navide plugins.",
   "license": "MIT",
   "publishConfig": {
     "access": "public"
   },
   "type": "module",
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "default": "./dist/index.js"
-    }
+      "import": "./dist/index.js"
+    },
+    "./shared": {
+      "types": "./dist/shared/index.d.ts",
+      "import": "./dist/shared/index.js"
+    },
+    "./foundation": {
+      "types": "./dist/foundation/index.d.ts",
+      "import": "./dist/foundation/index.js"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "peerDependencies": {
+    "@navide/plugin-sdk": "^1.0.0",
+    "vue": "^3.5.13",
+    "vue-i18n": "^10.0.5 || ^11.0.0"
+  },
+  "devDependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "@navide/plugin-sdk": "^1.0.0",
+    "vue": "^3.5.13",
+    "vue-i18n": "^10.0.5 || ^11.0.0"
   }
 }

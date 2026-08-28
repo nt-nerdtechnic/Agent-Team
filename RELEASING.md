@@ -69,6 +69,20 @@ The classic form still works unchanged:
 ./release.sh 0.3.0
 ```
 
+## Git recovery switch
+
+If a release needs the retained Git recovery bundle, launch the application
+from its main-process environment with `NAVIDE_GIT_RECOVERY=legacy`. Normal
+startup omits the variable: a verified Marketplace package is preferred, then
+the removable factory `navide.git` package tries v2. A durable user opt-out
+leaves Git absent until **Restore** is selected in Extensions. Load, mount, or
+ready failure may select legacy for that process; trust and permission failures
+must remain fail closed. Verify the Git left and window surfaces open against
+an existing workspace, the Extensions entry reports the expected source and
+version, and existing Git preferences and repository selection are still
+present. To retry v2, quit the application, remove the variable, and relaunch.
+Recovery does not edit Plugin Storage or legacy seed data.
+
 ## Notes
 
 - **Bump keywords** (`patch`/`minor`/`major`) compute the next version from the

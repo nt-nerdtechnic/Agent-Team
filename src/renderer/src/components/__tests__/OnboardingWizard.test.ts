@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import OnboardingWizard from '../OnboardingWizard.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import type { OnboardDep, OnboardStatus } from '../../composables/useOnboarding'
 

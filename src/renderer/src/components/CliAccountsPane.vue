@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { inject, onMounted, onUnmounted, ref, watch } from 'vue'
-import { CLI_AGENT_SPECS } from '../agents'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 import { cliAccountSwitchKey, type useCliProfiles, type CliProfile } from '../composables/useCliProfiles'
-import { useNotify } from '../composables/useNotify'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import {
   accountUsageFor,
   formatRemaining,
@@ -16,7 +16,7 @@ import {
   type UsageSnapshot,
   type UsageWindow,
 } from '../composables/useUsage'
-import { i18n } from '../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 const props = defineProps<{
   api: ReturnType<typeof useCliProfiles>

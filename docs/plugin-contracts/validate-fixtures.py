@@ -92,6 +92,16 @@ def _catalog_permissions(catalog: dict[str, Any]) -> tuple[set[str], int]:
         if not isinstance(permission, dict):
             raise AssertionError(f"catalog entry has no permission: {item['address']}")
         permission_id = permission.get("id")
+        if permission_id == "storage":
+            # Host-managed storage is never declared in a manifest. Storage is a
+            # public capability whose partition class (plugin|workspace) and key
+            # are chosen per request, so the permission carries no fixed scope
+            # and does not count as a system namespace or the shell entry.
+            if set(permission) != {"id"}:
+                raise AssertionError(
+                    f"storage catalog permission must be exactly {{\"id\": \"storage\"}}: {item['address']}"
+                )
+            continue
         scope = permission.get("scope")
         if scope not in {"workspace", "plugin"}:
             raise AssertionError(f"catalog has unsupported scope on {item['address']}")
@@ -179,8 +189,8 @@ def main() -> None:
         raise AssertionError(f"expected one public shell.run catalog entry, got {shell_entries}")
     if schema_shell_modes != {"allowlist", "full"}:
         raise AssertionError("manifest shell modes and public capability policy differ")
-    if catalog.get("hostShellExecutableAllowlist") != ["git"]:
-        raise AssertionError("Host shell executable allowlist must contain only git")
+    if catalog.get("hostShellExecutableAllowlist") != ["git", "gh", "glab"]:
+        raise AssertionError("Host shell executable allowlist must contain only git, gh, and glab")
     if "hostShellSubcommands" in catalog or "hostShellArgPatterns" in catalog:
         raise AssertionError("Host shell contract must not define subcommand or argument rules")
     print(

@@ -109,26 +109,23 @@ The `emitManifest()` hook writes `manifest.json` into the output directory at
 `closeBundle`, so the build output is itself a valid, loadable plugin
 directory.
 
-### 3. Register the build
+### 3. Package the build
 
-In `package.json`, add a `build:<name>` script and chain it into `build`. To
-ship the plugin inside the app, add its output to `build.extraResources`:
+Keep Marketplace plugin builds independent from the base App build. Validate
+and package their output with the public `navide-plugin` CLI, then install them
+through the same catalog lifecycle used by other packages. A factory package
+may be included in Electron `extraResources` only as an acquisition fallback;
+after discovery it must use that same installed Manifest, catalog, grant,
+instance, and capability lifecycle. Factory provenance must not bypass trust or
+authorization checks.
 
-```json
-{ "from": "dist-plugins/<name>", "to": "plugins/<name>" }
-```
+### 4. Open contributions through the catalog
 
-### 4. Register the plugin with the host
-
-In `src/main/plugins/frontendPluginManager.ts`, follow the Git plugin block:
-add the plugin id constant, a `bundled<Name>Dir()` resolver, a
-`registerBundled<Name>()` function, a dev descriptor, a query-string builder,
-and an `open<Name>PluginView()` entry point. Then call
-`registerBundled<Name>()` from `src/main/index.ts`.
-
-Keep the dev descriptor's `requires` identical to the manifest your Vite config
-emits. If they drift, dev runs deny capability calls that the packaged build
-allows — a failure that only reproduces under `AGENT_TEAM_PLUGIN_DEV=1`.
+Do not add package-specific registration code to Electron main. The Host reads
+the installed manifest, publishes its contributions in the catalog, and opens
+them through the generic placement and capability-context path. First-party
+and third-party packages use the same runtime; trust and publisher eligibility
+remain independent inputs to that runtime.
 
 ### 5. Receive host parameters
 
@@ -283,13 +280,17 @@ Splitting the interactive PTY into a dedicated `terminal.pty` namespace (so a
 plugin can be granted `run` without PTY spawning) is a possible future
 refinement; today one grant covers both.
 
-Known residual risk: the host strips `terminal.reattach` ids that are bound to
-a **different plugin**, but ids the broker has never seen pass through — which
-includes PTY sessions created by the app's own main windows. A
-terminal-granted plugin could therefore reattach (and take over the output of)
-a main-window terminal session whose id it somehow learns. Full isolation
-requires a backend-side ownership namespace and is a prerequisite for opening
-the `terminal` grant to marketplace plugins.
+Legacy v1 compatibility is bounded to a live, authenticated legacy view whose
+descriptor has no canonical Manifest v2 identity: an unknown
+`terminal.reattach` id is still allowed so an app-owned PTY can be recovered,
+but a stale sender, a foreign route, or a detached v2 tombstone is stripped.
+The legacy `open()` entry point is only a lifecycle and plugin-id lookup
+adapter; passing a v2 descriptor through it does not grant v1 PTY privileges.
+Manifest v2 does not expose the raw `terminal` PTY namespace; its public AI CLI
+surface is Host-mediated and instance-bound. Full isolation of legacy PTYs that
+were never registered by this broker still requires a backend-side ownership
+namespace and is a prerequisite for opening the legacy `terminal` grant to
+marketplace plugins.
 
 ### Calling a capability
 
@@ -350,9 +351,10 @@ Events are gated by namespace, so you only receive what your `requires` covers:
 `terminal.output` is micro-batched by the host (a few milliseconds per PTY
 session, `data` concatenated) and delivered only to the plugin whose
 `terminal.create`/`terminal.reattach` bound the session; `terminal.exit`
-always flushes the session's pending output first. Events for a session no
-running plugin view has bound are **dropped**, never fanned out — PTY content
-cannot leak to plugins that did not bind the session.
+always flushes the session's pending output first. A v2 detach retains only a
+tombstone for same-tuple reattach. Events for a session no running plugin view
+has bound are **dropped**, never fanned out — PTY content cannot leak to
+plugins that did not bind the session.
 
 The host also emits a synthetic `nav.backend_status` event so a plugin can track
 whether the backend connection is actually live.

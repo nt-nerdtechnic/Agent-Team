@@ -5,13 +5,15 @@ import MultiRepoGit from '../MultiRepoGit.vue'
 import GitPane from '../GitPane.vue'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import type { GitStatus } from '../../composables/useGit'
+import { createHostGitSurfacePorts } from '../../composables/hostSurfacePorts'
 
 // A workspace on a cloud-synced folder: the backend refuses the downward walk
 // until the user opts in. Clicking "scan anyway" inside GitPane must fill in
 // MultiRepoGit's tab bar too — and cost exactly ONE forced walk, because on a
 // File Provider mount each walk blocks for minutes.
 
-vi.mock('vue-i18n', () => ({
+vi.mock('vue-i18n', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('vue-i18n')>()),
   useI18n: () => ({ t: (k: string) => k }),
 }))
 
@@ -58,6 +60,10 @@ function forcedCalls(mock: ReturnType<typeof createMockBackend>) {
   return discoverCalls(mock).filter((s) => s.payload.force === true)
 }
 
+function surfacePorts(mock: ReturnType<typeof createMockBackend>) {
+  return createHostGitSurfacePorts(mock.backend, mock.backend)
+}
+
 const mountOpts = { global: { mocks: { $t: (k: string) => k } } }
 
 /** The "Scan for repositories anyway" button rendered by GitPane's init panel. */
@@ -75,7 +81,7 @@ describe('forced repo discovery — one click, one walk', () => {
   it('fills MultiRepoGit\'s tab bar from GitPane\'s scan with a single forced request', async () => {
     const mock = makeMock()
     const wrapper = mount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: mock.backend },
+      props: { workspacePath: '/ws', backend: mock.backend, surfacePorts: surfacePorts(mock) },
       ...mountOpts,
     })
     await flushPromises()
@@ -106,7 +112,7 @@ describe('forced repo discovery — one click, one walk', () => {
     try {
       const mock = makeMock()
       const wrapper = mount(MultiRepoGit, {
-        props: { workspacePath: '/ws', backend: mock.backend },
+        props: { workspacePath: '/ws', backend: mock.backend, surfacePorts: surfacePorts(mock) },
         ...mountOpts,
       })
       await vi.runAllTimersAsync()
@@ -136,7 +142,7 @@ describe('forced repo discovery — one click, one walk', () => {
   it('never forces on a workspace switch', async () => {
     const mock = makeMock()
     const wrapper = mount(MultiRepoGit, {
-      props: { workspacePath: '/ws', backend: mock.backend },
+      props: { workspacePath: '/ws', backend: mock.backend, surfacePorts: surfacePorts(mock) },
       ...mountOpts,
     })
     await flushPromises()
@@ -151,7 +157,14 @@ describe('forced repo discovery — one click, one walk', () => {
   it('standalone GitPane (no MultiRepoGit host) still scans on its own', async () => {
     const mock = makeMock()
     const wrapper = mount(GitPane, {
-      props: { workspacePath: '/ws', backend: mock.backend },
+      props: {
+        workspacePath: '/ws',
+        gitTransport: mock.backend,
+        fileAccess: mock.fileAccess,
+        ui: surfacePorts(mock).paneUi,
+        issuePort: mock.issuePort,
+        accounts: surfacePorts(mock).accounts,
+      },
       ...mountOpts,
     })
     await flushPromises()

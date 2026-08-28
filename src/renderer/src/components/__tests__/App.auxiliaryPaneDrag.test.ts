@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { CLI_CONTEXT_MIME, PANE_ID_MIME, type CliContextPayload } from '../../lib/cliContext'
+import { CLI_CONTEXT_MIME, PANE_ID_MIME, type CliContextPayload } from '@navide/terminal'
 import { reorderByIds } from '../../lib/paneOrder'
 import { usePaneReorderDrag } from '../../composables/usePaneReorderDrag'
 

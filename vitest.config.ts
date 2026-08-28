@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
+import { resolve } from 'node:path'
 
 // Renderer-only unit/component tests. Pure functions (lib/, data/) run in the
 // default `node` environment; composable tests opt into happy-dom per-file via
@@ -7,6 +8,20 @@ import vue from '@vitejs/plugin-vue'
 // (`__APP_BUILD__`) so importing modules that reference it doesn't throw.
 export default defineConfig({
   plugins: [vue()],
+  resolve: {
+    alias: {
+      '@navide/plugin-contracts': resolve(__dirname, 'packages/plugin-contracts/src/index.ts'),
+      '@navide/plugin-sdk': resolve(__dirname, 'packages/plugin-sdk/src/index.ts'),
+      '@navide/plugin-ui/styles.css': resolve(__dirname, 'packages/plugin-ui/src/foundation/styles.css'),
+      '@navide/plugin-ui/shared/testing': resolve(__dirname, 'packages/plugin-ui/src/shared/testing.ts'),
+      '@navide/plugin-ui/shared': resolve(__dirname, 'packages/plugin-ui/src/shared/index.ts'),
+      '@navide/plugin-ui/foundation': resolve(__dirname, 'packages/plugin-ui/src/foundation/index.ts'),
+      '@navide/plugin-ui': resolve(__dirname, 'packages/plugin-ui/src/index.ts'),
+      '@navide/terminal/testing': resolve(__dirname, 'src/renderer/src/platform/terminal/testing.ts'),
+      '@navide/terminal': resolve(__dirname, 'src/renderer/src/platform/terminal/index.ts'),
+      '@navide/plugin-shell': resolve(__dirname, 'src/renderer/src/platform/plugin-shell/index.ts'),
+    },
+  },
   define: {
     __APP_BUILD__: JSON.stringify('test')
   },
@@ -14,10 +29,15 @@ export default defineConfig({
     environment: 'node',
     // Renderer tests plus electron-free main-process modules (e.g. window-registry).
     include: [
+      'vitest.*.{test,spec}.ts',
       'src/renderer/src/**/*.{test,spec}.ts',
       'src/renderer/plugins/**/*.{test,spec}.ts',
       'src/main/**/*.{test,spec}.ts',
-      'src/shared/**/*.{test,spec}.ts'
+      'src/shared/**/*.{test,spec}.ts',
+      'packages/plugin-sdk/src/**/*.{test,spec}.ts',
+      'packages/plugin-ui/src/**/*.{test,spec}.ts',
+      'plugins/navide-git/src/**/*.{test,spec}.ts',
+      'plugins/navide-git/tests/**/*.{test,spec}.ts'
     ],
     // Playwright E2E lives in e2e/ and is run by `test:e2e`, not Vitest.
     exclude: ['e2e/**', 'node_modules/**'],

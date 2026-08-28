@@ -10,10 +10,23 @@ Depending on enabled features, Navide stores:
 
 - Private per-user project intelligence and run artifacts under `<workspace>/.agent-team/`
 - Roles, pipelines, recent workspaces, UI settings, analyzer settings, and AI provider settings in the application data directory
+- Host-managed plugin storage partitions in the application data directory;
+  these are keyed by authenticated plugin/package and, for workspace scope, by
+  authenticated workspace, and are not sent to Navide or plugin registries
 - Token-attribution and deduplication metadata derived from local CLI logs
 - Optional AI provider API keys in a local settings file protected with restrictive file permissions (`0600` on supported systems)
 
 Navide does not operate a project telemetry service and does not require a Navide account.
+
+When the Issue 16 production storage integration is enabled, uninstalling a
+plugin removes its local storage after the cleanup step succeeds. A later
+reinstall does not restore that deleted storage. Ordinary third-party
+production plugin calls remain denied until their later grant/context
+integration is enabled. The first-party `navide.git` migration is an explicit
+Host-owned consumer: its Git preferences use the authenticated package and
+workspace storage partitions, and an upgrade can clone the prior active
+snapshot into the new candidate while retaining the old snapshot for
+rollback.
 
 ## Private project intelligence
 
@@ -31,12 +44,29 @@ A future portability feature should use explicit local export/import with redact
 | Cloud AI (inline editing and code review) | Anthropic, OpenAI, Google, Groq, DeepSeek, Mistral, xAI, or a custom endpoint | Selected code, prompts, and model parameters |
 | Context7 injection | Context7 and its MCP distribution/runtime dependencies | Detected library names and documentation queries |
 | Web search | Search provider | Search query text |
-| Git operations | Configured Git host | Repository data and credentials handled by Git or the host flow |
+| Git operations and Issue detection | Configured Git host, through local `git`, `gh`, or `glab` CLIs | Repository and Issue data, plus credentials handled by the CLI or Host account flow |
 | Update checks | GitHub Releases | Application version and normal network metadata |
 | Plugin Registry trust refresh | The selected Official Registry or an explicitly approved self-hosted Registry | The namespace/name of an installed marketplace plugin; no plugin source or archive is sent by the refresh |
 | MCP servers | The configured MCP server and any service it uses | Depends entirely on that server's tools and configuration |
 
 Read each provider's policy before sending private code or regulated data.
+
+The production Git package invokes `git`, `gh`, and `glab` locally through a
+Host-owned argv allowlist. Navide does not proxy those services or upload the
+repository to Navide. GitHub or GitLab may still receive data when the local
+CLI performs a remote operation or Issue query, according to the configured
+remote, CLI login, and provider policy. Git account credentials remain in the
+Host's protected local account store or the CLI's own credential flow; they are
+not written into plugin-renderer storage. The isolated v2 Git renderer receives
+only non-secret account metadata and workspace binding state. For a remote Git
+operation, the Host injects the bound credential immediately before the backend
+call. When no Host account is bound to the workspace, v2 can still use an
+interactive credential flow owned by the Host: the Host creates an opaque,
+instance-bound owner for that operation, forwards Git's prompts to the exact
+originating Git view, and validates request ownership before accepting a
+response. The entered secret is held only for that exchange and is never
+persisted in plugin storage. A credential response from another view or for a
+different workspace is rejected.
 
 While an installed marketplace plugin is present, Navide sends that plugin's
 namespace/name to its selected Registry when the app starts and every 15

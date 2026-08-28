@@ -9,10 +9,10 @@ import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import { ref } from 'vue'
 import PlanWindowApp from '../../PlanWindowApp.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { resolvePlanStore } from '../../composables/planStore'
-import { aiTerminalPaneId } from '../../lib/aiCliContext'
-import { setContext, setUserRules } from '../../keybindings/useKeybindings'
+import { aiTerminalPaneId } from '@navide/plugin-shell'
+import { setContext, setUserRules } from '@navide/plugin-ui/shared'
 
 i18n.global.locale.value = 'en-US'
 
@@ -74,8 +74,10 @@ function setPlatform(mac: boolean): void {
 // Notify mock: section-delete confirms host-side; default accept.
 const toastMock = vi.hoisted(() => vi.fn())
 const confirmMock = vi.hoisted(() => vi.fn(async () => true))
-vi.mock('../../composables/useNotify', () => ({
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => ({ toast: toastMock, alert: vi.fn(), confirm: confirmMock }),
+  useTheme: () => ({ theme: ref('dark'), setTheme: vi.fn(), loadTheme: vi.fn() }),
 }))
 
 // Backing file state for the body write path (section edit/delete).
@@ -173,25 +175,22 @@ const cliTermSpies = vi.hoisted(() => ({
   fitTerminal: vi.fn(),
   focus: vi.fn(),
 }))
-vi.mock('../../components/AiCliTerminal.vue', () => ({
-  __esModule: true,
-  default: defineComponent({
-    name: 'AiCliTerminal',
-    props: ['paneId', 'backend', 'workspacePath'],
-    inheritAttrs: false,
-    setup(_, { expose }) {
-      expose({
-        ...cliTermSpies,
-        status: ref('idle'),
-        displayStatus: ref('idle'),
-        lastRawActivityAt: ref(0),
-        sessionId: ref(''),
-        error: ref(''),
-      })
-      return () => h('div', { class: 'stub-AiCliTerminal' })
-    },
-  }),
-}))
+vi.mock('@navide/terminal', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
+  return {
+    ...actual,
+    useTerminal: () => ({
+      ...cliTermSpies,
+      mount: vi.fn(),
+      updateXtermTheme: vi.fn(),
+      status: ref('idle'),
+      displayStatus: ref('idle'),
+      lastRawActivityAt: ref(0),
+      sessionId: ref(''),
+      error: ref(''),
+    }),
+  }
+})
 
 beforeEach(() => {
   toolbarSpies.cycleTodo.mockClear()
@@ -251,15 +250,12 @@ vi.mock('../../composables/useBackend', () => ({
   }),
 }))
 
-vi.mock('../../lib/settings', () => ({
+vi.mock('@navide/plugin-ui/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/shared')>()),
   initSettingsBackend: vi.fn(),
   settingsGet: vi.fn((_key: string, def: unknown) => def),
   settingsSet: vi.fn(),
   onSettingsChanged: vi.fn(() => () => {}),
-}))
-
-vi.mock('../../composables/useTheme', () => ({
-  useTheme: () => ({ theme: ref('dark'), setTheme: vi.fn(), loadTheme: vi.fn() }),
 }))
 
 // Track mounted apps so each is unmounted after its test — PlanWindowApp

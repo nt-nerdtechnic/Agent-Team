@@ -11,7 +11,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
 import HistoryPanel from '../HistoryPanel.vue'
-import { settingsGet, __resetSettingsForTest } from '../../lib/settings'
+import { settingsGet } from '@navide/plugin-ui/shared'
+import { __resetSettingsForTest } from '@navide/plugin-ui/shared/testing'
 import type { HistoryEvent } from '../../composables/useHistory'
 
 type Handler = (raw: unknown) => void

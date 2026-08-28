@@ -1,22 +1,39 @@
+<script lang="ts">
+// Module scope is shared by every pane in this renderer document.
+let nextMenuOwnerId = 0
+</script>
+
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsGet, settingsSet } from '../lib/settings'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { useGit } from '../composables/useGit'
 import type { IgnoreTarget, GitWorktree, DiscoveredRepo } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
 import type { IssueDetail } from '../composables/useIssues'
-import { useGitAccounts } from '../composables/useGitAccounts'
-import type { useBackend } from '../composables/useBackend'
-import { useNotify } from '../composables/useNotify'
+import type { GitTransport } from '../../../shared/gitCompatibility'
+import type {
+  GitAccountPort,
+  GitCredentialPort,
+  GitFileAccessPort,
+  GitPaneUiPort,
+  IssuePort,
+} from '../ports/gitSurface'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { computeGraph, laneColor } from '../lib/git-graph'
 import { guardedDiscard } from '../lib/discardConfirm'
+import { closeGitPaneMenusOnEscape } from '../lib/gitMenuEscape'
 import GitCredentialModal from './GitCredentialModal.vue'
 
 const props = defineProps<{
   workspacePath: string
   analyzerModel?: string
-  backend: ReturnType<typeof useBackend>
+  gitTransport: GitTransport
+  fileAccess: GitFileAccessPort
+  ui: GitPaneUiPort
+  issuePort: IssuePort
+  credentials?: GitCredentialPort
+  accounts: GitAccountPort
   // When embedded in the editor window, "open in editor" opens in-place via the
   // `open-file` event instead of spawning a separate editor window.
   embedded?: boolean
@@ -29,6 +46,11 @@ const props = defineProps<{
   // Issue dispatch/handle status — shows badges on issue rows.
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
 }>()
+
+const paneRoot = ref<HTMLElement | null>(null)
+const menuOwnerId = `git-pane-${++nextMenuOwnerId}`
+const openMenuOwners = new Set<string>()
+let activeMenuOwnerId: string | null = null
 
 const emit = defineEmits<{
   (e: 'changes-count', n: number): void
@@ -46,19 +68,13 @@ const emit = defineEmits<{
 }>()
 
 function openBranchDiffTab(base = 'main'): void {
-  type AgentTeamApi = { openBranchDiffWindow?: (a: { workspace_path: string; base: string }) => void }
-  const api = (window as Window & { agentTeam?: AgentTeamApi }).agentTeam
-  if (api?.openBranchDiffWindow) {
-    api.openBranchDiffWindow({ workspace_path: props.workspacePath, base })
-  } else {
-    emit('open-branch-diff', { base, compare: '' })
-  }
+  void props.ui.openBranchDiffWindow(props.workspacePath, base)
 }
 
 const {
-  gitStatus, loadStatus, discoveredRepos, discoverySkipped, discoverRepositories, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
+  gitStatus, statusError, statusLoaded, loadStatus, discoveredRepos, discoverySkipped, discoverRepositories, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
   gitWorktrees, gitConfig, gitConfigAllowedKeys,
-  isCommitting, isGenerating, isInitializing,
+  isLoadingStatus, isCommitting, isGenerating, isInitializing,
   syncOutput, syncError, gitError, clearGitError,
   initRepo, stageFile, unstageFile, stageAll, stageFiles, unstageFiles, discardFiles,
   fetchRemote, pullOnly, pushOnly, pushUpstream, sync,
@@ -74,7 +90,7 @@ const {
   cloneRepo, connectToRemote, addToGitignore, checkIgnore, abortOperation, stashApply,
   pullRebase, pushForce,
   credentialPrompt, showCredentialPrompt, submitCredential, cancelCredential,
-} = useGit(() => props.workspacePath, props.backend)
+} = useGit(() => props.workspacePath, props.gitTransport, props.credentials)
 
 const {
   provider: issueProvider, issues, selectedIssue,
@@ -83,10 +99,10 @@ const {
   ensureLoaded: ensureIssuesLoaded, refresh: refreshIssues,
   openIssue, closeDetail: closeIssueDetail,
   createIssue, addComment, setState: setIssueState,
-} = useIssues(() => props.workspacePath, props.backend)
+} = useIssues(() => props.workspacePath, props.issuePort)
 
 // ── git account binding (safeStorage-backed) ───────────────────────────────────
-const gitAccounts = useGitAccounts()
+const gitAccounts = props.accounts
 const boundAccountId = ref<string | null>(null)
 const showAccountMenu = ref(false)
 const accountMenuPos = ref({ top: 0, right: 0 })
@@ -314,7 +330,7 @@ async function ctxFolderAddIgnore(target: IgnoreTarget = 'project'): Promise<voi
   closeCtxMenu()
 }
 async function ctxFolderReveal(): Promise<void> {
-  if (ctxMenu.value.dir) await window.agentTeam?.revealPath(absPath(ctxMenu.value.dir))
+  if (ctxMenu.value.dir) await props.ui.revealPath(absPath(ctxMenu.value.dir))
   closeCtxMenu()
 }
 async function ctxFolderCopyPath(rel: boolean): Promise<void> {
@@ -328,7 +344,7 @@ function absPath(p: string): string {
 }
 async function ctxOpenFile(): Promise<void> {
   const f = ctxMenu.value.file
-  if (f) await window.agentTeam?.openPath(absPath(f.path))
+  if (f) await props.ui.openPath(absPath(f.path))
   closeCtxMenu()
 }
 async function ctxOpenFileAtHead(): Promise<void> {
@@ -336,12 +352,12 @@ async function ctxOpenFileAtHead(): Promise<void> {
   closeCtxMenu()
   if (!f) return
   const r = await showFile(f.path)
-  if (r.ok) await window.agentTeam?.openTempFile(`${fileName(f.path)} (HEAD)`, r.content)
+  if (r.ok) await props.ui.openTempFile(`${fileName(f.path)} (HEAD)`, r.content)
   else { gitError.value = r.error || 'Failed to read HEAD version' }
 }
 async function ctxReveal(): Promise<void> {
   const f = ctxMenu.value.file
-  if (f) await window.agentTeam?.revealPath(absPath(f.path))
+  if (f) await props.ui.revealPath(absPath(f.path))
   closeCtxMenu()
 }
 function ctxOpenChanges(): void {
@@ -356,11 +372,7 @@ function ctxOpenInEditor(): void {
     if (props.embedded) {
       emit('open-file', { filepath: f.path, name })
     } else {
-      void window.agentTeam?.openEditorWindow({
-        workspace_path: props.workspacePath,
-        filepath: f.path,
-        name,
-      })
+      void props.ui.openInEditor({ workspacePath: props.workspacePath, filepath: f.path })
     }
   }
   closeCtxMenu()
@@ -438,8 +450,7 @@ async function doInit(createGitignore: boolean): Promise<void> {
 // Pick any folder via the native picker and git init there, then open it.
 async function doInitInFolder(): Promise<void> {
   initError.value = ''
-  if (!window.agentTeam?.pickWorkspace) return
-  const picked = await window.agentTeam.pickWorkspace(props.workspacePath || undefined)
+  const picked = await props.ui.pickWorkspace(props.workspacePath || undefined)
   if (!picked) return
   const r = await initRepo(true, picked)
   if (!r.ok) { initError.value = r.error || 'git init failed'; return }
@@ -470,8 +481,7 @@ function repoNameFromUrl(url: string): string {
   return seg || 'repo'
 }
 async function pickCloneDir(): Promise<void> {
-  if (!window.agentTeam?.pickWorkspace) return
-  const picked = await window.agentTeam.pickWorkspace(cloneParent.value || undefined)
+  const picked = await props.ui.pickWorkspace(cloneParent.value || undefined)
   if (picked) cloneParent.value = picked
 }
 async function doClone(): Promise<void> {
@@ -527,12 +537,9 @@ watch(allConflictsResolved, async (val) => {
   if (!val || commitMessage.value) return
   // Read .git/MERGE_MSG to pre-populate commit message
   try {
-    const resp = await props.backend.send<{ ok: boolean; content: string }>(
-      'fs.read_file',
-      { workspace_path: props.workspacePath, rel_path: '.git/MERGE_MSG' },
-    )
-    if (resp.ok && resp.payload?.ok && resp.payload.content) {
-      commitMessage.value = resp.payload.content.trim()
+    const resp = await props.fileAccess.readFile(props.workspacePath, '.git/MERGE_MSG')
+    if (resp.ok && resp.content) {
+      commitMessage.value = resp.content.trim()
     }
   } catch {
     // best-effort — leave commitMessage empty if read fails
@@ -732,6 +739,9 @@ onUnmounted(() => {
   _clearAutoTimer()
   document.removeEventListener('mousemove', onGitDividerMove)
   document.removeEventListener('mouseup', onGitDividerEnd)
+  document.removeEventListener('keydown', closeMenusOnEscape)
+  openMenuOwners.delete(menuOwnerId)
+  if (activeMenuOwnerId === menuOwnerId) activeMenuOwnerId = [...openMenuOwners].at(-1) ?? null
 })
 
 // ── remote actions ────────────────────────────────────────────────────────────
@@ -1004,6 +1014,56 @@ function openChangesSectionMenu(e: MouseEvent): void {
 }
 function closeChangesSectionMenu(): void { changesSectionMenu.value.show = false }
 
+watch(
+  () => [
+    ctxMenu.value.show,
+    stagedSectionMenu.value.show,
+    changesSectionMenu.value.show,
+    showCommitMenu.value,
+    showRemoteMenu.value,
+    showAccountMenu.value,
+    showViewMenu.value,
+  ],
+  (states) => {
+    if (states.some(Boolean)) {
+      openMenuOwners.delete(menuOwnerId)
+      openMenuOwners.add(menuOwnerId)
+      activeMenuOwnerId = menuOwnerId
+      return
+    }
+    if (!openMenuOwners.delete(menuOwnerId)) return
+    if (activeMenuOwnerId === menuOwnerId) activeMenuOwnerId = [...openMenuOwners].at(-1) ?? null
+  },
+)
+
+function closeMenusOnEscape(event: KeyboardEvent): void {
+  const open =
+    ctxMenu.value.show ||
+    stagedSectionMenu.value.show ||
+    changesSectionMenu.value.show ||
+    showCommitMenu.value ||
+    showRemoteMenu.value ||
+    showAccountMenu.value ||
+    showViewMenu.value
+  closeGitPaneMenusOnEscape(event, {
+    root: paneRoot.value,
+    menuOwnerId,
+    activeMenuOwnerId,
+    isMenuOpen: open,
+    close: () => {
+      ctxMenu.value.show = false
+      stagedSectionMenu.value.show = false
+      changesSectionMenu.value.show = false
+      showCommitMenu.value = false
+      showRemoteMenu.value = false
+      showAccountMenu.value = false
+      showViewMenu.value = false
+    },
+  })
+}
+
+onMounted(() => document.addEventListener('keydown', closeMenusOnEscape))
+
 // ── stash ─────────────────────────────────────────────────────────────────────
 const stashExpanded = ref(false), stashMessage = ref(''), stashError = ref('')
 const showStashPrompt = ref(false)
@@ -1060,7 +1120,7 @@ async function doAddRemote(): Promise<void> {
   if (r.ok) { newRemoteName.value = ''; newRemoteUrl.value = '' } else remotesMgrError.value = r.error || 'failed'
 }
 function doOpenRemote(url: string): void {
-  if (url) void window.agentTeam?.openExternal(url)
+  if (url) void props.ui.openExternal(url)
 }
 async function doRemoveRemote(name: string): Promise<void> {
   remotesMgrError.value = ''
@@ -1121,14 +1181,12 @@ async function doRemoveWorktree(wt: GitWorktree): Promise<void> {
   }
 }
 async function doOpenWorktree(wt: GitWorktree): Promise<void> {
-  const api = (window as Window & {
-    agentTeam?: { openMainWindow?: (args?: { workspace_path?: string }) => Promise<{ ok: boolean }> }
-  }).agentTeam
-  await api?.openMainWindow?.({ workspace_path: wt.path })
+  await props.ui.openMainWindow(wt.path)
 }
 async function doRevealWorktree(wt: GitWorktree): Promise<void> {
-  const r = await window.agentTeam?.revealPath?.(wt.path)
-  if (r && !r.ok) notifyToast(r.error || t('label.worktree-reveal-failed'), { type: 'error' })
+  try { await props.ui.revealPath(wt.path) } catch (err) {
+    notifyToast(err instanceof Error ? err.message : t('label.worktree-reveal-failed'), { type: 'error' })
+  }
 }
 async function doToggleWorktreeLock(wt: GitWorktree): Promise<void> {
   worktreeError.value = ''
@@ -1141,8 +1199,7 @@ async function doToggleWorktreeLock(wt: GitWorktree): Promise<void> {
   }
 }
 async function doMoveWorktree(wt: GitWorktree): Promise<void> {
-  if (!window.agentTeam?.pickWorkspace) return
-  const dest = await window.agentTeam.pickWorkspace(wt.path)
+  const dest = await props.ui.pickWorkspace(wt.path)
   if (!dest) return
   worktreeError.value = ''
   worktreeBusy.value = wt.path
@@ -1176,8 +1233,7 @@ async function doRepairWorktrees(): Promise<void> {
   }
 }
 async function pickWorktreeDir(): Promise<void> {
-  if (!window.agentTeam?.pickWorkspace) return
-  const picked = await window.agentTeam.pickWorkspace(newWtPath.value || undefined)
+  const picked = await props.ui.pickWorkspace(newWtPath.value || undefined)
   if (picked) newWtPath.value = picked
 }
 
@@ -1274,11 +1330,7 @@ const diffBlameHunks = ref<import('../composables/useGit').DiffBlameHunk[]>([]),
 // target from its entry query / incremental openTarget; the backend broadcasts
 // git.changed afterwards so this pane refreshes itself.
 function toggleDiff(path: string, staged: boolean): void {
-  void window.agentTeam?.openGitWindow({
-    workspace_path: props.workspacePath,
-    filepath: path,
-    staged,
-  })
+  void props.ui.openGitWindow({ workspacePath: props.workspacePath, filepath: path, staged })
 }
 
 function isConflictFile(path: string): boolean {
@@ -1433,12 +1485,7 @@ function openCommitFileDiffInIDE(hash: string, file: string): void {
   if (props.embedded) {
     emit('open-diff', { filepath: file, staged: false, name: fileName(file), commit: hash })
   } else {
-    void window.agentTeam?.openGitWindow({
-      workspace_path: props.workspacePath,
-      filepath: file,
-      staged: false,
-      commit: hash,
-    })
+    void props.ui.openGitWindow({ workspacePath: props.workspacePath, filepath: file, staged: false, commit: hash })
   }
 }
 
@@ -1450,13 +1497,13 @@ const historyExpanded = ref(true)
 const latestLog = computed(() => gitLog.value.slice(0, 15))
 
 function openHistoryWindow(): void {
-  void window.agentTeam?.openGitHistoryWindow?.({ workspace_path: props.workspacePath })
+  void props.ui.openGitHistoryWindow(props.workspacePath)
 }
 
 // Pop the standalone Git client (navide.git plugin) into its own window —
 // parallel to this in-panel Git surface, not a replacement. Main window only.
 function openStandaloneGitWindow(): void {
-  void window.agentTeam?.openGitWindow?.({ workspace_path: props.workspacePath })
+  void props.ui.openGitWindow({ workspacePath: props.workspacePath })
 }
 
 // ── section expand states ─────────────────────────────────────────────────────
@@ -1545,9 +1592,18 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 </script>
 
 <template>
-  <div class="git-pane" @click="showViewMenu = false; showCommitMenu = false; clearSelection()">
+  <div ref="paneRoot" class="git-pane" :data-git-pane-owner="menuOwnerId" @click="showViewMenu = false; showCommitMenu = false; clearSelection()">
 
     <div v-if="!workspacePath" class="empty-state">{{ $t('label.select-workspace') }}</div>
+
+    <div v-else-if="statusError" class="status-error-panel">
+      <div class="init-title">{{ statusError }}</div>
+      <button class="btn-primary w-full status-retry" :disabled="isLoadingStatus" @click="loadStatus">
+        {{ $t('action.retry') }}
+      </button>
+    </div>
+
+    <div v-else-if="!statusLoaded" class="empty-state">{{ $t('label.loading') }}</div>
 
     <!-- ── Init panel ─────────────────────────────────────── -->
     <div v-else-if="!gitStatus.is_git_repo" class="init-panel">
@@ -1662,8 +1718,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         <!-- Sort menu -->
         <button class="hdr-btn" :title="$t('action.more-options')" @click.stop="openViewMenu($event)">···</button>
         <Teleport to="body">
-          <div v-if="showViewMenu" class="tp-backdrop" @click="showViewMenu = false" />
-          <div v-if="showViewMenu" class="tp-dropdown" :style="{ top: viewMenuPos.top + 'px', right: viewMenuPos.right + 'px' }" @click.stop>
+          <div v-if="showViewMenu" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="showViewMenu = false" />
+          <div v-if="showViewMenu" class="tp-dropdown" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: viewMenuPos.top + 'px', right: viewMenuPos.right + 'px' }" @click.stop>
             <div class="menu-group-label">{{ $t('label.view') }}</div>
             <button class="menu-item" @click="viewMode = 'list'; showViewMenu = false">
               <span class="menu-check">{{ viewMode === 'list' ? '✓' : '' }}</span> {{ $t('action.view-as-list') }}
@@ -1739,8 +1795,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           </button>
           <button class="commit-arrow-btn" :disabled="!hasStaged && !gitLog.length" :title="$t('action.commit-more-options')" @click.stop="openCommitMenu($event)">▾</button>
           <Teleport to="body">
-            <div v-if="showCommitMenu" class="tp-backdrop" @click="showCommitMenu = false" />
-            <div v-if="showCommitMenu" class="tp-dropdown" :style="{ top: showCommitMenuPos.top + 'px', right: showCommitMenuPos.right + 'px' }" @click.stop>
+            <div v-if="showCommitMenu" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="showCommitMenu = false" />
+            <div v-if="showCommitMenu" class="tp-dropdown" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: showCommitMenuPos.top + 'px', right: showCommitMenuPos.right + 'px' }" @click.stop>
               <button class="menu-item" :disabled="!canCommit" @click="runCommit()">✓ {{ $t('action.commit') }}</button>
               <button class="menu-item" :disabled="!gitLog.length" @click="runCommit({ amend: true })">✎ {{ $t('action.amend-commit') }}</button>
               <div class="menu-sep" />
@@ -2130,8 +2186,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         </button>
         <button class="remote-btn" :title="$t('action.more-pull-push')" :disabled="!!remoteBusy" @click.stop="openRemoteMenu($event)">▾</button>
         <Teleport to="body">
-          <div v-if="showRemoteMenu" class="tp-backdrop" @click="showRemoteMenu = false" />
-          <div v-if="showRemoteMenu" class="tp-dropdown" :style="{ top: remoteMenuPos.top + 'px', right: remoteMenuPos.right + 'px' }" @click.stop>
+          <div v-if="showRemoteMenu" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="showRemoteMenu = false" />
+          <div v-if="showRemoteMenu" class="tp-dropdown" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: remoteMenuPos.top + 'px', right: remoteMenuPos.right + 'px' }" @click.stop>
             <button class="menu-item" @click="doPull(); showRemoteMenu = false">↓ {{ $t('action.pull') }}</button>
             <button class="menu-item" @click="doPullRebase">↓ {{ $t('action.pull-rebase') }}</button>
             <div class="menu-sep" />
@@ -2150,8 +2206,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
           </div>
         </Teleport>
         <Teleport to="body">
-          <div v-if="showAccountMenu" class="tp-backdrop" @click="showAccountMenu = false" />
-          <div v-if="showAccountMenu" class="tp-dropdown" :style="{ top: accountMenuPos.top + 'px', right: accountMenuPos.right + 'px' }" @click.stop>
+          <div v-if="showAccountMenu" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="showAccountMenu = false" />
+          <div v-if="showAccountMenu" class="tp-dropdown" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: accountMenuPos.top + 'px', right: accountMenuPos.right + 'px' }" @click.stop>
             <div class="menu-group-label">{{ $t('git.account.selector-title') }}</div>
             <button class="menu-item" :class="{ active: !boundAccountId }" @click="selectAccount(null)">
               {{ $t('git.account.unbound') }}
@@ -2590,16 +2646,16 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 
     <!-- ── Staged section context menu ──────────────────────────────────── -->
     <Teleport to="body">
-      <div v-if="stagedSectionMenu.show" class="tp-backdrop" @click="closeStagedSectionMenu" @contextmenu.prevent="closeStagedSectionMenu" />
-      <div v-if="stagedSectionMenu.show" class="ctx-menu" :style="{ top: stagedSectionMenu.y + 'px', left: stagedSectionMenu.x + 'px' }" @click.stop>
+      <div v-if="stagedSectionMenu.show" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="closeStagedSectionMenu" @contextmenu.prevent="closeStagedSectionMenu" />
+      <div v-if="stagedSectionMenu.show" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: stagedSectionMenu.y + 'px', left: stagedSectionMenu.x + 'px' }" @click.stop>
         <button v-if="hasStaged" class="menu-item" @click="doUnstageAll(); closeStagedSectionMenu()">{{ $t('action.unstage-all') }}</button>
       </div>
     </Teleport>
 
     <!-- ── Changes section context menu ─────────────────────────────────── -->
     <Teleport to="body">
-      <div v-if="changesSectionMenu.show" class="tp-backdrop" @click="closeChangesSectionMenu" @contextmenu.prevent="closeChangesSectionMenu" />
-      <div v-if="changesSectionMenu.show" class="ctx-menu" :style="{ top: changesSectionMenu.y + 'px', left: changesSectionMenu.x + 'px' }" @click.stop>
+      <div v-if="changesSectionMenu.show" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="closeChangesSectionMenu" @contextmenu.prevent="closeChangesSectionMenu" />
+      <div v-if="changesSectionMenu.show" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: changesSectionMenu.y + 'px', left: changesSectionMenu.x + 'px' }" @click.stop>
         <button class="menu-item" @click="openStashPrompt(); closeChangesSectionMenu()">{{ $t('action.save-draft') }}</button>
         <div class="menu-sep" />
         <button v-if="hasChanges" class="menu-item" @click="stageAll(); closeChangesSectionMenu()">{{ $t('action.stage-all') }}</button>
@@ -2609,15 +2665,15 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 
     <!-- ── File context menu (right-click) ──────────────────────────────── -->
     <Teleport to="body">
-      <div v-if="ctxMenu.show" class="tp-backdrop" @click="closeCtxMenu" @contextmenu.prevent="closeCtxMenu" />
+      <div v-if="ctxMenu.show" class="tp-backdrop" :data-git-pane-menu-owner="menuOwnerId" @click="closeCtxMenu" @contextmenu.prevent="closeCtxMenu" />
       <!-- Multi-select menu -->
-      <div v-if="ctxMenu.show && selectedKeys.size > 1" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
+      <div v-if="ctxMenu.show && selectedKeys.size > 1" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
         <button v-if="selectedChangesPaths.length > 0" class="menu-item" @click="stageSelected(); closeCtxMenu()">{{ $t('action.stage-files', { count: selectedChangesPaths.length }) }}</button>
         <button v-if="selectedStagedPaths.length > 0" class="menu-item" @click="unstageSelected(); closeCtxMenu()">{{ $t('action.unstage-files', { count: selectedStagedPaths.length }) }}</button>
         <button v-if="selectedChangesPaths.length > 0" class="menu-item danger" @click="discardSelected(); closeCtxMenu()">{{ $t('action.discard-files', { count: selectedChangesPaths.length }) }}</button>
       </div>
       <!-- File menu -->
-      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'file'" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
+      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'file'" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
         <button class="menu-item" @click="ctxOpenChanges">{{ $t('action.open-changes') }}</button>
         <button class="menu-item" @click="ctxOpenInEditor">{{ $t('action.open-in-editor') }}</button>
         <button class="menu-item" @click="ctxOpenFile">{{ $t('action.open-file-plain') }}</button>
@@ -2650,7 +2706,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       </div>
 
       <!-- Folder menu (applies to all changed files under the folder) -->
-      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'folder'" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
+      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'folder'" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
         <button v-if="ctxMenu.staged" class="menu-item" @click="ctxFolderUnstage">{{ $t('action.unstage-changes') }}</button>
         <template v-else>
           <button class="menu-item" @click="ctxFolderStage">{{ $t('action.stage-changes') }}</button>
@@ -2673,7 +2729,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       </div>
 
       <!-- Branch menu -->
-      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'branch'" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
+      <div v-else-if="ctxMenu.show && ctxMenu.kind === 'branch'" class="ctx-menu" :data-git-pane-menu-owner="menuOwnerId" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
         <button class="menu-item" @click="doMergeInto(ctxMenu.branch)">{{ $t('action.merge-current-into', { branch: ctxMenu.branch }) }}</button>
         <button class="menu-item" @click="doMergeIntoAndPush(ctxMenu.branch)">{{ $t('action.merge-current-into-push', { branch: ctxMenu.branch }) }}</button>
         <div class="menu-sep" />
@@ -2697,6 +2753,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       :show="showCredentialPrompt"
       :prompt="credentialPrompt"
       :workspace-path="workspacePath"
+      :account-port="gitAccounts"
       @submit="submitCredential"
       @cancel="cancelCredential"
     />
@@ -2743,7 +2800,8 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 }
 
 /* ── Init panel ─────────────────────────────────────────────────────────────── */
-.init-panel {
+.init-panel,
+.status-error-panel {
   display: flex; flex-direction: column; align-items: center;
   gap: 10px; padding: 28px 20px; text-align: center;
 }

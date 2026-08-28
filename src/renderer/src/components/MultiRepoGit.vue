@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { defineAsyncComponent } from 'vue'
-import type { useBackend } from '../composables/useBackend'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
-import { useRepoDiscovery } from '../composables/useRepoDiscovery'
+import { useRepoDiscovery, type DiscoveredRepoWithBadge } from '../composables/useRepoDiscovery'
+import type { GitSurfacePorts } from '../ports/gitSurface'
+import type { useBackend } from '../composables/useBackend'
 import { useI18n } from 'vue-i18n'
 
 const GitPane = defineAsyncComponent(() => import('./GitPane.vue'))
@@ -16,15 +17,19 @@ const props = defineProps<{
   dispatchTargets?: { id: string; label: string }[]
   availableAgents?: { key: string; label: string }[]
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
+  /** Callers inject their already-authenticated transport and UI ports. */
+  surfacePorts: GitSurfacePorts
+  /** Optional composition seam for an already-owned repository discovery source. */
+  repositorySource?: { readonly value: DiscoveredRepoWithBadge[] }
 }>()
 
 const emit = defineEmits<{
   (e: 'changes-count', n: number): void
   (e: 'open-workspace', path: string): void
-  (e: 'open-file', payload: { filepath: string; name: string }): void
-  (e: 'open-conflict', payload: { filepath: string; name: string }): void
-  (e: 'open-diff', payload: { filepath: string; staged: boolean; name: string }): void
-  (e: 'open-branch-diff', payload: { base: string; compare: string }): void
+  (e: 'open-file', payload: { workspace_path: string; filepath: string; name: string }): void
+  (e: 'open-conflict', payload: { workspace_path: string; filepath: string; name: string }): void
+  (e: 'open-diff', payload: { workspace_path: string; filepath: string; staged: boolean; name: string; commit?: string }): void
+  (e: 'open-branch-diff', payload: { workspace_path: string; base: string; compare: string }): void
   (e: 'dispatch-issue', payload: { paneId: string; issue: IssueDetail }): void
   (e: 'spawn-for-issue', payload: { agentKey: string; mode: IssueHandlerMode; issue: Issue; provider: IssueProvider }): void
   (e: 'focus-pane', paneId: string): void
@@ -33,10 +38,14 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 
+const gitTransport = props.surfacePorts.gitTransport
+const surfacePorts = props.surfacePorts
 // `adopt` takes over the list GitPane's "scan anyway" button already fetched.
 // Re-running refresh(true) here would walk the same cloud-synced tree a second
 // time (minutes per walk), so the child's result is adopted instead.
-const { repositories, adopt } = useRepoDiscovery(() => props.workspacePath, props.backend)
+const discovery = useRepoDiscovery(() => props.workspacePath, gitTransport)
+const repositories = props.repositorySource ?? discovery.repositories
+const { adopt } = discovery
 
 // When root is not a git repo, inject it as the first tab so init/connect features remain accessible.
 const allTabs = computed(() => {
@@ -193,17 +202,22 @@ function repoLabel(relPath: string): string {
     v-if="!isMulti"
     :workspace-path="workspacePath"
     :analyzer-model="analyzerModel"
-    :backend="backend"
+    :git-transport="gitTransport"
+    :file-access="surfacePorts.fileAccess"
+    :ui="surfacePorts.paneUi"
+    :issue-port="surfacePorts.issues"
+    :credentials="surfacePorts.credentials"
+    :accounts="surfacePorts.accounts"
     :embedded="embedded"
     :dispatch-targets="dispatchTargets"
     :available-agents="availableAgents"
     :issue-handoffs="issueHandoffs"
     @changes-count="singleChangesCount = $event; $emit('changes-count', $event)"
     @open-workspace="$emit('open-workspace', $event)"
-    @open-file="$emit('open-file', $event)"
-    @open-conflict="$emit('open-conflict', $event)"
-    @open-diff="$emit('open-diff', $event)"
-    @open-branch-diff="$emit('open-branch-diff', $event)"
+    @open-file="$emit('open-file', { ...$event, workspace_path: workspacePath })"
+    @open-conflict="$emit('open-conflict', { ...$event, workspace_path: workspacePath })"
+    @open-diff="$emit('open-diff', { ...$event, workspace_path: workspacePath })"
+    @open-branch-diff="$emit('open-branch-diff', { ...$event, workspace_path: workspacePath })"
     @dispatch-issue="$emit('dispatch-issue', $event)"
     @spawn-for-issue="$emit('spawn-for-issue', $event)"
     @focus-pane="$emit('focus-pane', $event)"
@@ -246,7 +260,12 @@ function repoLabel(relPath: string): string {
           v-show="activeRepo === repo.abs_path"
           :workspace-path="repo.abs_path"
           :analyzer-model="analyzerModel"
-          :backend="backend"
+          :git-transport="gitTransport"
+          :file-access="surfacePorts.fileAccess"
+          :ui="surfacePorts.paneUi"
+          :issue-port="surfacePorts.issues"
+          :credentials="surfacePorts.credentials"
+          :accounts="surfacePorts.accounts"
           :embedded="embedded"
           :dispatch-targets="dispatchTargets"
           :available-agents="availableAgents"
@@ -254,10 +273,10 @@ function repoLabel(relPath: string): string {
           :issue-handoffs="issueHandoffs"
           @changes-count="repoChangesCounts[repo.abs_path] = $event"
           @open-workspace="$emit('open-workspace', $event)"
-          @open-file="$emit('open-file', $event)"
-          @open-conflict="$emit('open-conflict', $event)"
-          @open-diff="$emit('open-diff', $event)"
-          @open-branch-diff="$emit('open-branch-diff', $event)"
+          @open-file="$emit('open-file', { ...$event, workspace_path: repo.abs_path })"
+          @open-conflict="$emit('open-conflict', { ...$event, workspace_path: repo.abs_path })"
+          @open-diff="$emit('open-diff', { ...$event, workspace_path: repo.abs_path })"
+          @open-branch-diff="$emit('open-branch-diff', { ...$event, workspace_path: repo.abs_path })"
           @dispatch-issue="$emit('dispatch-issue', $event)"
           @spawn-for-issue="$emit('spawn-for-issue', $event)"
           @focus-pane="$emit('focus-pane', $event)"

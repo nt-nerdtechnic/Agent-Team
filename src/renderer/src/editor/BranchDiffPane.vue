@@ -1,19 +1,17 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { parseHunks, toSideBySide, type Hunk, type SideRow } from '../lib/git-diff'
-import type { useBackend } from '../composables/useBackend'
+import type { GitTransport } from '../../../shared/gitCompatibility'
+import type { GitBranchDiffPort, GitCredentialPort } from '../ports/gitSurface'
 import { useGit } from '../composables/useGit'
-import ReviewPane from '../components/ReviewPane.vue'
 
 const props = defineProps<{
   workspacePath: string
   base: string
   compare: string
-  backend: ReturnType<typeof useBackend>
-  // Hosts without the chat capability (the standalone Git plugin window) hide
-  // the AI-review section entirely instead of surfacing calls that would be
-  // denied by the broker.
-  hideAiReview?: boolean
+  gitTransport: GitTransport
+  branchDiff: GitBranchDiffPort
+  credentials?: GitCredentialPort
 }>()
 
 const emit = defineEmits<{
@@ -23,6 +21,22 @@ const emit = defineEmits<{
 
 function openFile(filename: string) {
   emit('open-file', { filepath: filename, name: filename.split('/').at(-1) ?? filename })
+}
+
+function closeReview(): void {
+  reviewOpen.value = false
+}
+
+function reviewOpenFile(payload: { filepath: string; line: number | null }): void {
+  emit('open-file', {
+    filepath: payload.filepath,
+    name: payload.filepath.split('/').at(-1) ?? payload.filepath,
+    ...(payload.line === null ? {} : { line: payload.line }),
+  })
+}
+
+function reviewAskAiFix(text: string): void {
+  emit('ask-ai-fix', text)
 }
 
 const reviewOpen = ref(true)
@@ -42,7 +56,11 @@ function startReviewDrag(e: MouseEvent) {
   window.addEventListener('mousemove', onMove)
   window.addEventListener('mouseup', onUp)
 }
-const { gitStatus, gitBranches } = useGit(() => props.workspacePath, props.backend)
+const { gitStatus, gitBranches } = useGit(
+  () => props.workspacePath,
+  props.gitTransport,
+  props.credentials,
+)
 
 interface FileDiff {
   filename: string
@@ -83,10 +101,6 @@ function countLines(hunks: Hunk[]) {
   return { added, deleted }
 }
 
-type AgentTeamApi = {
-  gitDiffHead?: (a: { workspace_path: string; base?: string; compare?: string }) => Promise<{ ok: boolean; diff: string; error?: string }>
-}
-
 async function loadDiff() {
   if (!props.workspacePath) return
   const seq = ++_seq
@@ -94,34 +108,11 @@ async function loadDiff() {
   loadError.value = ''
   fileDiffs.value = []
   try {
-    const api = (window as Window & { agentTeam?: AgentTeamApi }).agentTeam
+    const result = await props.branchDiff.load(props.workspacePath, props.base, props.compare)
+    if (seq !== _seq) return
     let raw = ''
-    if (api?.gitDiffHead) {
-      const result = await api.gitDiffHead({
-        workspace_path: props.workspacePath,
-        base: props.base || undefined,
-        compare: props.compare || undefined,
-      })
-      if (seq !== _seq) return
-      if (result.ok) {
-        raw = result.diff ?? ''
-      } else {
-        loadError.value = result.error || 'Failed to load diff'
-      }
-    } else {
-      // Fallback: use Python backend WebSocket
-      const resp = await props.backend.send<{ ok: boolean; diff: string; error?: string }>('git.diff_branches', {
-        workspace_path: props.workspacePath,
-        base: props.base,
-        compare: props.compare || '',
-      })
-      if (seq !== _seq) return
-      if (resp.ok && resp.payload?.ok) {
-        raw = resp.payload.diff ?? ''
-      } else {
-        loadError.value = resp.payload?.error || resp.error?.message || 'Failed to load diff'
-      }
-    }
+    if (result.ok) raw = result.diff ?? ''
+    else loadError.value = result.error || 'Failed to load diff'
     if (loadError.value) return
     const parts = splitFileDiffs(raw)
     let ta = 0; let td = 0
@@ -149,7 +140,7 @@ async function loadDiff() {
   }
 }
 
-watch(() => props.backend.status.value, s => {
+watch(() => props.gitTransport.status.value, s => {
   if (s === 'connected' && !fileDiffs.value.length && !loadError.value) void loadDiff()
 }, { immediate: true })
 
@@ -209,8 +200,9 @@ function cellClass(cell: SideRow['left']): string {
       </button>
     </div>
 
-    <!-- AI Review toggle -->
-    <div v-if="!hideAiReview" class="bdp-review-hdr" @click="reviewOpen = !reviewOpen">
+    <!-- Optional AI review is supplied through a slot so the plugin graph does
+         not import the review implementation or its extra chat surface. -->
+    <div v-if="$slots.review" class="bdp-review-hdr" @click="reviewOpen = !reviewOpen">
       <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" class="bdp-review-ic">
         <path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm0 1.5a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zM7 5v3.5l3 1.5-.5 1L6 9V5z"/>
       </svg>
@@ -220,19 +212,18 @@ function cellClass(cell: SideRow['left']): string {
         <path d="M4.427 7.427l3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427z"/>
       </svg>
     </div>
-    <div v-if="!hideAiReview" v-show="reviewOpen" class="bdp-review-body" :style="{ height: reviewHeight + 'px' }">
-      <ReviewPane
+    <div v-if="$slots.review" v-show="reviewOpen" class="bdp-review-body" :style="{ height: reviewHeight + 'px' }">
+      <slot
+        name="review"
         :workspace-path="workspacePath"
-        :backend="backend"
         :git-status="gitStatus"
         :git-branches="gitBranches"
-        :hide-header="true"
-        @close="reviewOpen = false"
-        @open-file="(p) => emit('open-file', { filepath: p.filepath, name: p.filepath.split('/').at(-1) ?? p.filepath, line: p.line ?? undefined })"
-        @ask-ai-fix="(text) => emit('ask-ai-fix', text)"
+        :close="closeReview"
+        :open-file="reviewOpenFile"
+        :ask-ai-fix="reviewAskAiFix"
       />
     </div>
-    <div v-if="!hideAiReview" v-show="reviewOpen" class="bdp-review-resizer" @mousedown.prevent="startReviewDrag" />
+    <div v-if="$slots.review" v-show="reviewOpen" class="bdp-review-resizer" @mousedown.prevent="startReviewDrag" />
 
     <!-- States -->
     <div v-if="loading" class="bdp-msg">{{ $t('label.loading-diff') }}</div>

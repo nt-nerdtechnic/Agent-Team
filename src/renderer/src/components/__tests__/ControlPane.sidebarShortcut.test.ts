@@ -1,11 +1,11 @@
 // @vitest-environment happy-dom
-// Cmd+1..5 sidebar-tab switching.
+// Cmd+1..4 core sidebar-tab switching.
 //
 // These used to be a bare `document.addEventListener('keydown')` inside
 // ControlPane, outside the keybinding system — which meant Settings could
 // neither list nor rebind them, and unbinding Cmd+1 there still left the
 // listener switching tabs. They are ordinary commands now
-// (`controlPane.selectSidebarTab1..5`, bound in defaults.ts under
+// (`controlPane.selectSidebarTab1..3`, bound in defaults.ts under
 // `paneStage && !editorOpen`), so this drives them through the real
 // capture-phase dispatcher instead of dispatching on `document`.
 //
@@ -16,8 +16,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { shallowMount, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import ControlPane from '../ControlPane.vue'
-import { useKeybindings, setContext, _resetKeybindingsState } from '../../keybindings/useKeybindings'
-import { _resetRegistry } from '../../keybindings/commandRegistry'
+import { useKeybindings, setContext } from '@navide/plugin-ui/shared'
+import { _resetKeybindingsState, _resetRegistry } from '@navide/plugin-ui/shared/testing'
+import { executeCommand } from '@navide/plugin-ui/shared'
 
 const minimalProps = {
   backendStatus: 'connected',
@@ -46,12 +47,10 @@ function keydown(init: KeyboardEventInit): void {
   window.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
 }
 
-/** Active tab off the nav: 0=agents, 1=pipeline, 2=explorer, 3=git, 4=plans. */
-function activeTab(wrapper: VueWrapper): 'agents' | 'pipeline' | 'explorer' | 'git' | 'plans' | null {
-  const order = ['agents', 'pipeline', 'explorer', 'git', 'plans'] as const
-  const btns = wrapper.findAll('.sidebar-tabs .tab-btn')
-  const idx = btns.findIndex((b) => b.classes().includes('active'))
-  return idx >= 0 ? order[idx] : null
+function activeTabTitle(wrapper: VueWrapper): string | null {
+  const active = wrapper.findAll('.sidebar-tabs .tab-btn')
+    .find((button) => button.classes().includes('active'))
+  return active?.attributes('title') ?? null
 }
 
 describe('ControlPane – Cmd+number sidebar shortcut', () => {
@@ -80,53 +79,74 @@ describe('ControlPane – Cmd+number sidebar shortcut', () => {
   })
 
   it('starts on the explorer tab', () => {
-    expect(activeTab(wrapper)).toBe('explorer')
+    expect(activeTabTitle(wrapper)).toContain('Explorer')
   })
 
   it('bare Cmd (key=Meta) does NOT change or blank the tab', async () => {
     keydown({ key: 'Meta', metaKey: true })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('explorer')
+    expect(activeTabTitle(wrapper)).toContain('Explorer')
   })
 
-  it('Cmd+4 switches to the git tab', async () => {
+  it('Cmd+4 is ignored when no plugin contribution owns that slot', async () => {
     keydown({ key: '4', metaKey: true, code: 'Digit4' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('git')
+    expect(activeTabTitle(wrapper)).toContain('Explorer')
   })
 
-  it('Cmd+5 switches to the plans tab', async () => {
+  it('Cmd+4 selects navide.git rather than the first left contribution', async () => {
+    wrapper.unmount()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapper = shallowMount(ControlPane as any, {
+      props: {
+        ...minimalProps,
+        pluginContributions: [
+          {
+            pluginId: 'acme.files', packageVersion: '1.0.0', contributionKey: 'acme.files.left',
+            title: 'Files', icon: null, kind: 'custom', location: 'left', manifestOrder: 0,
+          },
+          {
+            pluginId: 'navide.git', packageVersion: '1.0.0', contributionKey: 'navide.git.left',
+            title: 'Git', icon: null, kind: 'custom', location: 'left', manifestOrder: 0,
+          },
+        ],
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    })
+
+    keydown({ key: '4', metaKey: true, code: 'Digit4' })
+    await wrapper.vm.$nextTick()
+    expect(activeTabTitle(wrapper)).toContain('Git')
+  })
+
+  it('Cmd+5 opens the retained Plans tab', async () => {
     keydown({ key: '5', metaKey: true, code: 'Digit5' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('plans')
+    expect(activeTabTitle(wrapper)).toContain('Plans')
   })
 
   it('Cmd+1 switches to the agents tab', async () => {
-    keydown({ key: '4', metaKey: true, code: 'Digit4' })
-    await wrapper.vm.$nextTick()
     keydown({ key: '1', metaKey: true, code: 'Digit1' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('agents')
+    expect(activeTabTitle(wrapper)).toContain('Agents')
   })
 
   it('Cmd+3 switches back to the explorer tab', async () => {
-    keydown({ key: '4', metaKey: true, code: 'Digit4' })
-    await wrapper.vm.$nextTick()
     keydown({ key: '3', metaKey: true, code: 'Digit3' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('explorer')
+    expect(activeTabTitle(wrapper)).toContain('Explorer')
   })
 
   it('out-of-range Cmd+6 is ignored', async () => {
     keydown({ key: '6', metaKey: true, code: 'Digit6' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('explorer')
+    expect(activeTabTitle(wrapper)).toContain('Explorer')
   })
 
   it('Cmd+Shift+3 is ignored (modifier guard keeps the OS screenshot binding free)', async () => {
     keydown({ key: '3', metaKey: true, shiftKey: true, code: 'Digit3' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('explorer')
+    expect(activeTabTitle(wrapper)).toContain('Explorer')
   })
 
   it('does not fire while a text field has focus', async () => {
@@ -138,7 +158,7 @@ describe('ControlPane – Cmd+number sidebar shortcut', () => {
 
     keydown({ key: '4', metaKey: true, code: 'Digit4' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('explorer')
+    expect(activeTabTitle(wrapper)).toContain('Explorer')
 
     input.remove()
   })
@@ -151,7 +171,7 @@ describe('ControlPane – Cmd+number sidebar shortcut', () => {
 
     keydown({ key: '4', metaKey: true, code: 'Digit4' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('git')
+    expect(activeTabTitle(wrapper)).toContain('Explorer')
 
     ta.remove()
   })
@@ -160,6 +180,31 @@ describe('ControlPane – Cmd+number sidebar shortcut', () => {
     setContext('paneStage', false)
     keydown({ key: '4', metaKey: true, code: 'Digit4' })
     await wrapper.vm.$nextTick()
-    expect(activeTab(wrapper)).toBe('explorer')
+    expect(activeTabTitle(wrapper)).toContain('Explorer')
+  })
+
+  it('Cmd+Shift+G selects navide.git rather than the first left contribution', async () => {
+    wrapper.unmount()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapper = shallowMount(ControlPane as any, {
+      props: {
+        ...minimalProps,
+        pluginContributions: [
+          {
+            pluginId: 'acme.files', packageVersion: '1.0.0', contributionKey: 'acme.files.left',
+            title: 'Files', icon: null, kind: 'custom', location: 'left', manifestOrder: 0,
+          },
+          {
+            pluginId: 'navide.git', packageVersion: '1.0.0', contributionKey: 'navide.git.left',
+            title: 'Git', icon: null, kind: 'custom', location: 'left', manifestOrder: 0,
+          },
+        ],
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    })
+
+    executeCommand('workbench.action.focusSourceControl')
+    await wrapper.vm.$nextTick()
+    expect(activeTabTitle(wrapper)).toContain('Git')
   })
 })

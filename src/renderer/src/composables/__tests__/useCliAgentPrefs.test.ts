@@ -2,12 +2,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 // settings.ts is a backend-KV façade; stub it so the module's singleton refs
 // initialise empty and watch-writes are inert in the test environment.
-vi.mock('../../lib/settings', () => ({
+vi.mock('@navide/plugin-ui/shared', () => ({
   settingsGet: vi.fn(() => ''),
   settingsSet: vi.fn(),
 }))
 
-import { settingsGet } from '../../lib/settings'
+import { settingsGet } from '@navide/plugin-ui/shared'
 import {
   orderedAgentKeys,
   isAgentEnabled,

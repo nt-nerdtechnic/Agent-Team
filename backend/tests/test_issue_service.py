@@ -6,6 +6,8 @@ the normalization is verified against actual CLI output, not a guess.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 
 import pytest
 
@@ -255,6 +257,39 @@ class TestListIssues:
         r = await issue_service.list_issues("/ws")
         assert r["ok"] is False
         assert "gh not found" in r["error"]
+
+    @pytest.mark.asyncio
+    async def test_trusted_issue_route_inherits_existing_gh_auth_config(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        source_config = tmp_path / "gh-config"
+        source_config.mkdir()
+        (source_config / "hosts.yml").write_text(
+            "github.com:\n  user: trusted-fixture\n  oauth_token: trusted-secret-fixture\n",
+            encoding="utf-8",
+        )
+        fake_gh = bin_dir / "gh"
+        fake_gh.write_text(
+            "#!/bin/sh\n"
+            "if grep -Fq 'trusted-secret-fixture' \"$GH_CONFIG_DIR/hosts.yml\"; then printf '[]'; else exit 22; fi\n",
+            encoding="utf-8",
+        )
+        fake_gh.chmod(0o755)
+        repo = tmp_path / "repo"
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+        (repo / ".git" / "config").write_text(
+            "[core]\nrepositoryformatversion = 0\nbare = false\n"
+            '[remote "origin"]\nurl = https://github.com/acme/repo.git\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}/opt/homebrew/bin:/usr/bin:/bin")
+        monkeypatch.setenv("GH_CONFIG_DIR", str(source_config))
+
+        git_result = await issue_service._run(["git", "config", "--get", "remote.origin.url"], str(repo))
+        assert git_result == (0, "https://github.com/acme/repo.git\n", "")
+        result = await issue_service.list_issues(str(repo))
+
+        assert result == {"ok": True, "provider": "github", "issues": [], "error": ""}
 
     @pytest.mark.asyncio
     async def test_github_get_detail(self, monkeypatch):

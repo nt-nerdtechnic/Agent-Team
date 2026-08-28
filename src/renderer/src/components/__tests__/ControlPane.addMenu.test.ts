@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
-import { CLI_AGENT_SPECS } from '../../agents'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 
 // The ＋ on the workspace heading opens a menu of CLIs. It is a second door
 // onto the spawn card's own pickedAgent/pickedRole, NOT a second copy of them:

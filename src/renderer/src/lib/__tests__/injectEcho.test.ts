@@ -113,3 +113,35 @@ describe('echoTimeoutFor', () => {
     expect(echoTimeoutFor(42_000)).toBe(7_000)
   })
 })
+
+describe('echoLanded — a TUI that collapses a big paste', () => {
+  // A long payload the composer will never echo verbatim: the tail cannot
+  // match, and the summary the TUI draws instead is far shorter than the
+  // growth a payload that size would normally produce.
+  const tail = 'x'.repeat(40)
+  const summary = '[Pasted text #1 +40 lines]'
+
+  it('accepts the summary as evidence the paste arrived', () => {
+    // 26 chars of growth against a 2000-char payload: both older signals read
+    // "nothing landed", which resent the whole message — three copies of one
+    // message ended up in antigravity's composer and the send reported failure
+    // without ever pressing Enter.
+    expect(echoLanded(`> ${summary}`, tail, summary.length, 2_000)).toBe(true)
+  })
+
+  it('still refuses when the terminal did not react at all', () => {
+    // A summary already on screen from an earlier paste is not ours. Saying
+    // "landed" here would press Enter on a composer holding someone else's
+    // draft.
+    expect(echoLanded(`> ${summary}`, tail, 0, 2_000)).toBe(false)
+  })
+
+  it('ignores a summary that scrolled out of the region that grew', () => {
+    const stale = `> ${summary}` + ' '.repeat(400) + 'unrelated output'
+    expect(echoLanded(stale, tail, 16, 2_000)).toBe(false)
+  })
+
+  it('leaves the verbatim-echo path alone', () => {
+    expect(echoLanded(`> ${tail}`, tail, 0, 2_000)).toBe(true)
+  })
+})

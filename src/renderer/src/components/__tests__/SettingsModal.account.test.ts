@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
 
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 const LOCALES = ['en-US', 'zh-TW'] as const
 const MODES = ['login', 'register', 'token'] as const

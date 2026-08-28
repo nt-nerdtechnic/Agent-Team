@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const store: Record<string, unknown> = {}
-vi.mock('../settings', () => ({
+vi.mock('@navide/plugin-ui/shared', () => ({
   settingsGet: vi.fn((key: string, fallback: unknown) => (key in store ? store[key] : fallback)),
   settingsSet: vi.fn((key: string, value: unknown) => {
     store[key] = value

@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // Coverage for the pane-reorder drop target on `.pane-header`: dropping another
 // pane's header (dataTransfer type 'application/x-pane-id') emits 'reorder-drop'
@@ -9,9 +10,11 @@ import TerminalPane from '../TerminalPane.vue'
 // id payload, are ignored. The real terminal is irrelevant here, so useTerminal
 // is mocked out — no xterm instance, no backend traffic.
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   return {
+    ...actual,
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: vi.fn(),
@@ -47,7 +50,12 @@ describe('TerminalPane – reorder-drop on pane header', () => {
   beforeEach(() => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapper = mount(TerminalPane as any, {
-      props: { paneId: PANE_ID, title: 'Claude', backend: {} },
+      props: {
+        paneId: PANE_ID,
+        title: 'Claude',
+        terminalPort: createTerminalDockStub(),
+        cliProfiles: {},
+      },
       global: { mocks: { $t: (key: string) => key } }
     })
   })

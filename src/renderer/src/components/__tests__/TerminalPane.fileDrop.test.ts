@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // Coverage for the file-drop branch of onTerminalDrop: dropped paths are
 // stabilized (macOS moves screenshots out of its temp dir moments after the
@@ -14,9 +15,11 @@ const mockPasteText = vi.fn()
 const mockPasteFromClipboard = vi.fn()
 const mockDisplayStatus = { value: 'idle' }
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   return {
+    ...actual,
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: mockPasteText,
@@ -53,7 +56,12 @@ function fileDropEvent(files: File[], types: string[] = ['Files']): Event {
 function mountPane(): VueWrapper {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {}, cliProfiles: [] },
+    props: {
+      paneId: 'pane-1',
+      title: 'Claude',
+      terminalPort: createTerminalDockStub(),
+      cliProfiles: [],
+    },
     global: { mocks: { $t: (key: string) => key } }
   })
 }

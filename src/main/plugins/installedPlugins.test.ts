@@ -209,6 +209,7 @@ describe('Manifest v2 contract corpus', () => {
       contributionKey: 'acme.files.left',
       kind: 'custom',
       location: 'left',
+      iconFile: '/plugins/acme.files/assets/files.png',
       entryFile: '/plugins/acme.files/frontend/left/index.html',
     })
   })
@@ -277,6 +278,7 @@ describe('manifestToDescriptor', () => {
   it('resolves entry against the plugin dir and empties devUrl', () => {
     const d = manifestToDescriptor(parseInstalledManifest(VALID), '/plugins/acme.demo')
     expect(d.id).toBe('acme.demo')
+    expect(d.packageVersion).toBeUndefined()
     expect(d.devUrl).toBe('')
     expect(d.entryFile).toBe('/plugins/acme.demo/dist/main.js')
     expect(d.requires).toEqual(['fs', 'git'])
@@ -346,6 +348,7 @@ describe('loadPluginDir', () => {
         entryFile: join(root, 'frontend', 'left', 'index.html'),
       }),
     ])
+    expect(loaded.descriptor?.packageVersion).toBe('1.0.0')
   })
 
   it('loads a backend-only v2 package into the activation catalog', () => {

@@ -35,4 +35,17 @@ describe('lockPageZoom', () => {
     expect(contents.setZoomFactor).toHaveBeenCalledOnce()
     expect(contents.setZoomFactor).toHaveBeenCalledWith(1)
   })
+
+  it('resets page zoom and notifies the renderer when zoom is requested', () => {
+    const { contents, listeners } = webContentsStub()
+    const onZoomChanged = vi.fn()
+    lockPageZoom(contents as never, onZoomChanged)
+    contents.setZoomFactor.mockClear()
+
+    listeners.get('zoom-changed')?.()
+
+    expect(contents.setZoomFactor).toHaveBeenCalledOnce()
+    expect(contents.setZoomFactor).toHaveBeenCalledWith(1)
+    expect(onZoomChanged).toHaveBeenCalledOnce()
+  })
 })
