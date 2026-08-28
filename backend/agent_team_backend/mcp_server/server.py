@@ -1913,34 +1913,88 @@ def resolve_ui_invoke(request_id: str, result: dict[str, Any]) -> bool:
     return _ui_invoke_pending.resolve(request_id, result)
 
 
-def _ui_timeout_error(workspace_path: str, timeout: float) -> dict[str, Any]:
-    """Explain an unanswered ui.invoke.request as one of two failures.
+def _caller_window(caller: "_Caller | None", workspace_path: str) -> Any | None:
+    """The WS connection of the window that mirrors the calling pane.
 
-    A request is broadcast and every window decides for itself whether it owns
-    workspace_path, so a silent deadline could mean "nobody there" or "someone
-    there is stuck" — opposite fixes (check the path vs. retry/inspect that
-    window), which one blended sentence left the caller guessing.
+    A pane asking about its own workspace can only mean "in my own window", and
+    that window is known: agent_messaging records which connection mirrors each
+    pane. Addressing it directly is what lets a pane drive its own UI while its
+    window sits in the background, or after that window switched to another
+    project — neither of which the broadcast path survives, because there each
+    window self-selects by comparing workspace_path against the workspace it
+    *currently* has open, and a window that no longer matches simply says
+    nothing (indistinguishable from a hang, at the cost of a full timeout).
 
-    Windows mirror their CLI panes into agent_messaging, so a workspace with a
-    connected pane provably has a live window: that case is a real action
-    timeout. The reverse is a strong hint but not proof — a window with no CLI
-    pane open owns its workspace and answers ui.invoke while leaving no trace in
-    the registry — so that branch names the failure it can prove (no window
-    *known*), hands over the workspaces the backend can see, and says so. Both
-    read the registry the backend already holds; neither adds a round trip.
+    A workspace_path naming a *different* project is a deliberate call on
+    someone else's window ("what does that window have registered?"), so it
+    keeps the broadcast path rather than being quietly redirected home.
+
+    Returns None for a host or external caller (no pane, so no window to
+    address) and for a pane whose window is gone — both fall back to broadcast.
+    """
+    if caller is None or caller.kind != "pane":
+        return None
+    from agent_team_backend import agent_messaging
+
+    # caller.pane_id is already the live id: _resolve_caller followed any alias
+    # a re-attach left behind before handing it over.
+    pane = agent_messaging.get(caller.pane_id)
+    if pane is None:
+        return None
+    if workspace_path and _norm_workspace(workspace_path) != _norm_workspace(pane.workspace_path):
+        return None
+    session = agent_messaging.owner(caller.pane_id)
+    return None if session is None or getattr(session, "dead", False) else session
+
+
+def _ui_timeout_error(workspace_path: str, timeout: float, *, addressed: bool) -> dict[str, Any]:
+    """Explain an unanswered ui.invoke.request as one of three failures.
+
+    The fixes are opposite — inspect a stuck window vs. check the path — so a
+    silent deadline must not blend them into one sentence.
+
+    An *addressed* request went to one known window (the caller's own, see
+    :func:`_caller_window`), so reaching the deadline can only mean that window
+    is busy or wedged; workspace_path never entered into it.
+
+    A broadcast one is ambiguous. Windows mirror their CLI panes into
+    agent_messaging, so a workspace with a connected pane has a live window
+    *somewhere* — but the pane registry records the workspace a pane was
+    spawned under, which is not the workspace its window has open now, so this
+    cannot promise the path is right either; it says what it can prove and
+    names the check. The reverse is a weaker hint still — a window with no CLI
+    pane open answers ui.invoke while leaving no trace in the registry — so
+    that branch names the failure it can prove (no window *known*) and hands
+    over the workspaces the backend can see. All three read state the backend
+    already holds; none adds a round trip.
     """
     from agent_team_backend import agent_messaging
 
+    if addressed:
+        return {
+            "ok": False,
+            "result": None,
+            "error": (
+                f"your own Navide window was asked directly and did not answer within "
+                f"{timeout:.0f}s — the action may still be running there, or that window "
+                "is blocked (a native dialog freezes it). Retry, or check the window; "
+                "workspace_path is not involved in this failure"
+            ),
+            "error_code": "ui_action_timeout",
+        }
     connected = [e for e in agent_messaging.list_panes(workspace_path) if not e.offline]
     if connected:
         return {
             "ok": False,
             "result": None,
             "error": (
-                f"a Navide window is connected for workspace_path {workspace_path!r} "
-                f"but did not answer within {timeout:.0f}s — the action may still be "
-                "running there. Retry, or check that window; the workspace_path is "
-                "not the problem"
+                f"no window answered for workspace_path {workspace_path!r} within "
+                f"{timeout:.0f}s. A pane is registered under that path, so a window "
+                "exists — but a broadcast request is answered only by the window whose "
+                "*currently open* workspace matches, and a window that has since "
+                "switched project no longer matches. Check what that window has open, "
+                "or call from a CLI pane inside it (a pane's own window is addressed "
+                "directly and needs no path match)"
             ),
             "error_code": "ui_action_timeout",
         }
@@ -1963,6 +2017,7 @@ async def _ui_request(
     workspace_path: str,
     op: str,
     *,
+    caller: "_Caller | None" = None,
     action: str | None = None,
     args: dict[str, Any] | None = None,
     is_global: bool = False,
@@ -1971,18 +2026,22 @@ async def _ui_request(
     from agent_team_backend.ipc import make_event
 
     request_id = secrets.token_hex(16)
+    # Three ways out, narrowest first: a global action has no fixed owner and
+    # goes to any one window; a pane caller's own window is known and is asked
+    # directly ("addressed", so it answers without checking workspace_path);
+    # anything else is broadcast for the windows to filter, as before.
+    owner = None if is_global else _caller_window(caller, workspace_path)
     fut = _ui_invoke_pending.register(request_id)
-    event = make_event(
-        "ui.invoke.request",
-        {
-            "request_id": request_id,
-            "workspace_path": workspace_path,
-            "op": op,
-            "action": action,
-            "args": args,
-            "global": is_global,
-        },
-    )
+    payload: dict[str, Any] = {
+        "request_id": request_id,
+        "workspace_path": workspace_path,
+        "op": op,
+        "action": action,
+        "args": args,
+        "global": is_global,
+        "addressed": owner is not None,
+    }
+    event = make_event("ui.invoke.request", payload)
     if is_global:
         sent = await app.unicast_any(event)
         if not sent:
@@ -1993,13 +2052,19 @@ async def _ui_request(
                 "error": "no Navide window is open to handle this request",
                 "error_code": "ui_no_window",
             }
+    elif owner is not None and await app.unicast_to(owner, event):
+        pass
     else:
+        # The owner dropped between lookup and send: broadcast rather than fail,
+        # and stop claiming the request was addressed — the timeout message
+        # tells the two apart.
+        payload["addressed"] = False
         await app.broadcast(event)
 
     timeout = _UI_INVOKE_SLOW_TIMEOUT_S if action in _UI_INVOKE_SLOW_ACTIONS else _UI_INVOKE_TIMEOUT_S
     result = await _ui_invoke_pending.wait(request_id, fut, timeout=timeout)
     if result is TIMEOUT:
-        return _ui_timeout_error(workspace_path, timeout)
+        return _ui_timeout_error(workspace_path, timeout, addressed=bool(payload["addressed"]))
     return result
 
 
@@ -2010,9 +2075,12 @@ async def ui_list_actions(workspace_path: str, ctx: Context) -> dict[str, Any]:
     Returns the list of registered action ids (plain strings), so a caller
     can discover what ui_invoke accepts before calling it. Errors if no
     window owns workspace_path within 15s.
+
+    Called from a CLI pane, this goes to that pane's own window whatever
+    workspace_path says — see ui_invoke.
     """
-    _resolve_caller(ctx)
-    return await _ui_request(workspace_path, "list_actions")
+    caller = _resolve_caller(ctx)
+    return await _ui_request(workspace_path, "list_actions", caller=caller)
 
 
 @server.tool()
@@ -2027,10 +2095,21 @@ async def ui_invoke(
     any one live Navide window instead of broadcast to all. Errors if no
     window owns workspace_path (or, for ui.workspace.open, no window is open
     at all) within 15s.
+
+    Called from a CLI pane, the request is delivered straight to the window
+    that hosts that pane, whether or not it is focused and whatever project it
+    currently has open — a pane can always drive its own window. Only a caller
+    with no pane identity (host / external) depends on workspace_path matching
+    the workspace a window has open right now.
     """
-    _resolve_caller(ctx)
+    caller = _resolve_caller(ctx)
     return await _ui_request(
-        workspace_path, "invoke", action=action, args=args, is_global=action == "ui.workspace.open"
+        workspace_path,
+        "invoke",
+        caller=caller,
+        action=action,
+        args=args,
+        is_global=action == "ui.workspace.open",
     )
 
 
@@ -2040,9 +2119,12 @@ async def ui_snapshot(workspace_path: str, ctx: Context) -> dict[str, Any]:
 
     Shape is decided by the renderer (panes, tabs, focus, etc.). Errors if no
     window owns workspace_path within 15s.
+
+    Called from a CLI pane, this snapshots that pane's own window whatever
+    workspace_path says — see ui_invoke.
     """
-    _resolve_caller(ctx)
-    return await _ui_request(workspace_path, "snapshot")
+    caller = _resolve_caller(ctx)
+    return await _ui_request(workspace_path, "snapshot", caller=caller)
 
 
 @server.tool()
@@ -2062,11 +2144,15 @@ async def ui_diagnostics(
     pass the `nextSeq` from a previous call to poll incrementally without
     re-reading old entries. `pane_id` filters to one pane; `limit` caps how
     many entries come back. Errors if no window owns workspace_path within 15s.
+
+    Called from a CLI pane, this reads that pane's own window whatever
+    workspace_path says — see ui_invoke.
     """
-    _resolve_caller(ctx)
+    caller = _resolve_caller(ctx)
     return await _ui_request(
         workspace_path,
         "invoke",
+        caller=caller,
         action="ui.diagnostics.read",
         args={"sinceSeq": since_seq, "paneId": pane_id, "limit": limit},
     )

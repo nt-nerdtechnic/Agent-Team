@@ -293,6 +293,12 @@ pass the same path the window was opened with). `ui_invoke`'s `action:
 workspace, it is routed to any one live Navide window instead of the one
 matching `workspace_path`.
 
+The path match applies to a caller with no pane identity — an external client
+or the host wiring. A call from a Navide CLI pane is delivered straight to the
+window hosting that pane, whether or not it is focused and whatever project it
+currently has open, so a pane can always drive its own window; `workspace_path`
+is still passed through to the action, it just no longer decides who answers.
+
 `ui_list_actions` returns the *entire* command registry the window uses for
 its keybindings, not only the `ui.*` ids below — internal ids (e.g.
 `workbench.action.*`) exist for keyboard shortcuts and are not a documented

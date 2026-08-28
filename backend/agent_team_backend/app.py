@@ -275,6 +275,28 @@ async def broadcast(event: dict[str, Any], *, exclude: "Session | None" = None) 
             _SESSIONS.discard(session)
 
 
+async def unicast_to(session: "Session | None", event: dict[str, Any]) -> bool:
+    """Send *event* to one named session. Returns False when it is not there.
+
+    For a request whose owner is known — the window mirroring a particular pane
+    — rather than one any window may service (unicast_any) or one every window
+    has to filter for itself (broadcast). A False return is the caller's cue to
+    fall back, not an error: the window may have dropped between the lookup and
+    the send.
+    """
+    if session is None or getattr(session, "dead", False):
+        return False
+    try:
+        await session.send_json(event)
+    except Exception as err:  # noqa: BLE001
+        # Same defensive net as broadcast(): report the miss and let the caller
+        # decide, rather than failing the request outright.
+        log.warning("unicast_to send failed: %s", err)
+        _SESSIONS.discard(session)
+        return False
+    return True
+
+
 async def unicast_any(event: dict[str, Any]) -> bool:
     """Send *event* to one arbitrary connected session.
 
