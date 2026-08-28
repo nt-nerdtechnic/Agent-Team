@@ -79,24 +79,23 @@ export function createResizeController(
   // dimensions so it re-measures, then resize. Split out from proposeDimensions()
   // so applyFit can put the backend's ack between the two (see below).
   //
-  // Deferred through term.write('', cb) rather than resizing inline, because
-  // term.write() is asynchronous: xterm accepts data into an internal buffer and
-  // parses it in time-sliced batches, so bytes can be ACCEPTED before this call
-  // and PARSED after it. Resizing inline would let an already-queued old-width
-  // frame parse at the new width — the same race the ack barrier closes, one
-  // layer further down, and the one that survives continuous dragging (chunks
-  // are still queued when the next ack lands). The empty write puts nothing
-  // through the parser; it is purely a marker that runs cb once everything
-  // queued ahead of it has been parsed, which is what makes the resize land in
-  // byte-stream order. Pinned by the queued-output case in
-  // useTerminalResize.widthRace.test.ts.
+  // Resize inline. An earlier attempt deferred this behind term.write('', cb) so
+  // the resize would land in byte-stream order rather than wall-clock order.
+  // That was reverted, but honestly: not because it was measured worse. Both
+  // orderings push roughly the same number of rows out of the viewport across a
+  // drag (+32 vs +40 over 12 steps on a pre-scrolled buffer), and so does the
+  // ordering that predates the ack barrier — the growth comes from reflowing a
+  // frame that has already been materialised, which every ordering does
+  // somewhere. With no measurable difference between them, this keeps the
+  // simpler one.
+  //
+  // What the ack barrier above does fix is separate and is measured: an
+  // old-width frame parsed at the new width leaves wrapped fragments in the
+  // scrollback, where the CLI's repaint (viewport-only) can never reach them.
   function resizeTermTo(cols: number, rows: number): void {
     if (term.cols === cols && term.rows === rows) return
-    term.write('', () => {
-      if (term.cols === cols && term.rows === rows) return
-      try { (term as any)._core?._renderService?.clear() } catch { /* renderer not up yet */ }
-      term.resize(cols, rows)
-    })
+    try { (term as any)._core?._renderService?.clear() } catch { /* renderer not up yet */ }
+    term.resize(cols, rows)
   }
 
   // Run `cb` on the next animation frame, but fall back to a timer if rAF
