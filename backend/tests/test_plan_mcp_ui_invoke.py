@@ -12,16 +12,28 @@ from typing import Any
 import pytest
 
 from agent_team_backend import agent_messaging, app
-from agent_team_backend.mcp_server import server as plan_mcp, auth as plan_mcp_auth
+from agent_team_backend.mcp_server import (
+    server as plan_mcp,
+    auth as plan_mcp_auth,
+    wiring as plan_mcp_wiring,
+)
 
 
 @pytest.fixture(autouse=True)
 def _clean_registry() -> Any:
     """The timeout messages read the pane registry to say which workspaces have
-    a connected window, so it must not carry over between tests."""
+    a connected window, so it must not carry over between tests.
+
+    Nor may the pending-request table: a test that stubs out
+    `_ui_invoke_pending.wait` skips the `finally` that pops the key, and
+    `_answer` resolves `keys[0]` — so one leaked entry silently absorbs the
+    next test's reply and leaves its real request to time out.
+    """
     agent_messaging._reset_for_test()
+    plan_mcp._ui_invoke_pending.pending.clear()
     yield
     agent_messaging._reset_for_test()
+    plan_mcp._ui_invoke_pending.pending.clear()
 
 
 def _ctx() -> Any:
@@ -42,6 +54,37 @@ def broadcasts(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
     monkeypatch.setattr(app, "broadcast", fake_broadcast)
     return events
+
+
+class _Window:
+    """Stands in for a renderer window's WS session (what owner() hands back)."""
+
+    def __init__(self, dead: bool = False) -> None:
+        self.dead = dead
+
+
+def _pane_ctx(pane_id: str = "pa") -> Any:
+    """A Context carrying a CLI pane's credential, so the caller has an own
+    window for the request to be addressed to."""
+    params = {"pane": pane_id, "t": plan_mcp_wiring.caller_token()}
+    return SimpleNamespace(
+        request_context=SimpleNamespace(request=SimpleNamespace(query_params=params))
+    )
+
+
+@pytest.fixture
+def addressed(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, dict[str, Any]]]:
+    """Captures point-to-point sends to one known window."""
+    sends: list[tuple[Any, dict[str, Any]]] = []
+
+    async def fake_unicast_to(session: Any, event: dict[str, Any]) -> bool:
+        if session is None or getattr(session, "dead", False):
+            return False
+        sends.append((session, event))
+        return True
+
+    monkeypatch.setattr(app, "unicast_to", fake_unicast_to)
+    return sends
 
 
 @pytest.fixture
@@ -161,8 +204,11 @@ async def test_timeout_with_a_connected_window_is_reported_as_an_action_timeout(
 
     assert result["ok"] is False
     assert result["error_code"] == "ui_action_timeout"
-    assert "is connected for workspace_path" in result["error"]
-    assert "not the problem" in result["error"]
+    # The pane registry proves a window exists, not that any window still has
+    # this workspace open — so the message points at that check instead of
+    # clearing workspace_path of blame.
+    assert "currently open" in result["error"]
+    assert "/ws/gamma" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -306,3 +352,118 @@ async def test_pane_create_gets_a_longer_deadline_than_a_plain_action(
     assert seen[0] == plan_mcp._UI_INVOKE_TIMEOUT_S
     assert seen[1] == plan_mcp._UI_INVOKE_SLOW_TIMEOUT_S
     assert seen[1] > seen[0]
+
+
+# ── Addressing a pane caller's own window ───────────────────────────────────
+# A broadcast request is answered only by the window whose *currently open*
+# workspace matches, so a window that had switched project (or is merely in the
+# background with another workspace open) let every request from its own pane
+# run into the deadline. A pane's window is known, so it is asked directly.
+
+
+@pytest.mark.asyncio
+async def test_a_pane_callers_request_goes_to_its_own_window(
+    addressed: list[tuple[Any, dict[str, Any]]], broadcasts: list[dict[str, Any]]
+) -> None:
+    window = _Window()
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=window)
+
+    task = asyncio.create_task(_answer("addressed"))
+    result = await plan_mcp.ui_invoke("/ws/alpha", "ui.pane.create", _pane_ctx(), {"agent": "claude"})
+    await task
+
+    assert result["ok"] is True
+    assert broadcasts == []
+    assert len(addressed) == 1
+    session, event = addressed[0]
+    assert session is window
+    assert event["payload"]["addressed"] is True
+
+
+@pytest.mark.asyncio
+async def test_addressing_does_not_depend_on_the_workspace_path_matching(
+    addressed: list[tuple[Any, dict[str, Any]]], broadcasts: list[dict[str, Any]]
+) -> None:
+    """The path is carried through for the action to read, but it no longer
+    decides who answers — that was the whole failure."""
+    window = _Window()
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=window)
+
+    task = asyncio.create_task(_answer("mismatch"))
+    result = await plan_mcp.ui_invoke("/ws/somewhere-else", "editor.save", _pane_ctx(), None)
+    await task
+
+    assert result["ok"] is True
+    assert broadcasts == []
+    assert addressed[0][0] is window
+    assert addressed[0][1]["payload"]["workspace_path"] == "/ws/somewhere-else"
+
+
+@pytest.mark.asyncio
+async def test_a_pane_whose_window_is_gone_falls_back_to_broadcast(
+    addressed: list[tuple[Any, dict[str, Any]]], broadcasts: list[dict[str, Any]]
+) -> None:
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude")
+
+    task = asyncio.create_task(_answer("fallback"))
+    result = await plan_mcp.ui_invoke("/ws/alpha", "editor.save", _pane_ctx(), None)
+    await task
+
+    assert result["ok"] is True
+    assert addressed == []
+    assert len(broadcasts) == 1
+    # The claim has to match what actually went out, or the timeout message
+    # would blame the wrong thing.
+    assert broadcasts[0]["payload"]["addressed"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_dead_window_falls_back_to_broadcast(
+    addressed: list[tuple[Any, dict[str, Any]]], broadcasts: list[dict[str, Any]]
+) -> None:
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=_Window(dead=True))
+
+    task = asyncio.create_task(_answer("dead"))
+    result = await plan_mcp.ui_invoke("/ws/alpha", "editor.save", _pane_ctx(), None)
+    await task
+
+    assert result["ok"] is True
+    assert addressed == []
+    assert broadcasts[0]["payload"]["addressed"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_global_action_is_never_addressed_to_the_callers_window(
+    addressed: list[tuple[Any, dict[str, Any]]],
+    unicasts: list[dict[str, Any]],
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    """ui.workspace.open has no owner by definition — the workspace may have no
+    window yet — so a pane caller must not pin it to its own."""
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=_Window())
+
+    task = asyncio.create_task(_answer("global"))
+    result = await plan_mcp.ui_invoke("/ws/beta", "ui.workspace.open", _pane_ctx(), {"path": "/ws/beta"})
+    await task
+
+    assert result["ok"] is True
+    assert addressed == []
+    assert broadcasts == []
+    assert len(unicasts) == 1
+    assert unicasts[0]["payload"]["addressed"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_addressed_timeout_blames_the_window_not_the_path(
+    monkeypatch: pytest.MonkeyPatch, addressed: list[tuple[Any, dict[str, Any]]]
+) -> None:
+    monkeypatch.setattr(plan_mcp, "_UI_INVOKE_TIMEOUT_S", 0.05)
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=_Window())
+
+    result = await plan_mcp.ui_invoke("/ws/alpha", "editor.save", _pane_ctx(), None)
+
+    assert result["ok"] is False
+    assert result["error_code"] == "ui_action_timeout"
+    assert "your own Navide window" in result["error"]
+    assert "workspace_path is not involved" in result["error"]
+    assert plan_mcp._ui_invoke_pending.pending == {}

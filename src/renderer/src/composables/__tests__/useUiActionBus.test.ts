@@ -60,6 +60,35 @@ describe('useUiActionBus — ownership filtering', () => {
     const reply = sent.find((s) => s.type === 'ui.invoke.result')
     expect(reply?.payload).toEqual({ request_id: 'req-1', ok: true, result: 'ok', error: null })
   })
+
+  // The backend sends `addressed` to one window alone: the one hosting the pane
+  // that asked. That window must answer whatever workspace it currently has
+  // open — a pane whose window had switched project could otherwise never drive
+  // its own UI, and the mismatch looked exactly like a hung window.
+  it('handles an addressed request regardless of workspace_path', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    registerCommand('noop', () => 'ok')
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({ workspace_path: '/ws-b', action: 'noop', addressed: true }))
+    await flush()
+
+    const reply = sent.find((s) => s.type === 'ui.invoke.result')
+    expect(reply?.payload).toEqual({ request_id: 'req-1', ok: true, result: 'ok', error: null })
+  })
+
+  it('still ignores a mismatched request that is not addressed to it', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    registerCommand('noop', () => 'ok')
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({ workspace_path: '/ws-b', action: 'noop', addressed: false }))
+    await flush()
+
+    expect(sent.find((s) => s.type === 'ui.invoke.result')).toBeUndefined()
+  })
 })
 
 describe('handleUiInvokeRequest — op dispatch', () => {

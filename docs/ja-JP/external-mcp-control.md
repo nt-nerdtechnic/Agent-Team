@@ -286,6 +286,12 @@ Turn に対する判定ではない唯一のものです。待機が判定に至
 ため、`workspace_path` に一致するウィンドウではなく、生きている任意の Navide
 ウィンドウ一つにルーティングされます。
 
+Path の一致判定が効くのは Pane の識別子を持たない呼び出し元 — 外部 Client か
+Host Wiring — だけです。Navide の CLI Pane からの呼び出しは、その Pane を抱えて
+いるウィンドウへ直接届きます。Focus の有無も、そのウィンドウが今どのプロジェクト
+を開いているかも問いません。`workspace_path` は Action にそのまま渡りますが、誰が
+応答するかはもう決めません。
+
 `ui_list_actions` は、下記の `ui.*` の ID だけでなく、そのウィンドウが Keybinding
 に使う Command Registry *全体*を返します。内部 ID（例: `workbench.action.*`）は
 キーボードショートカットのために存在するもので、外部向けの文書化された契約では

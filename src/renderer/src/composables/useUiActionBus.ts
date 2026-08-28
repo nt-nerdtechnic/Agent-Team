@@ -5,7 +5,7 @@ import { currentDiagnosticSeq, takeDiagnosticsSince } from '../lib/uiDiagnostics
  * Bridges an external MCP client's `ui.invoke.request` broadcasts into this
  * window's command registry and replies with `ui.invoke.result`. Backend
  * contract (do not change without updating the backend side):
- *   request:  { request_id, workspace_path, op, action, args, global }
+ *   request:  { request_id, workspace_path, op, action, args, global, addressed }
  *   response: backend.send('ui.invoke.result', { request_id, ok, result, error, warnings? })
  * `warnings` is a string array and is only present when uiDiagnostics recorded
  * something during the action (e.g. injectText resending content) — it lets
@@ -21,6 +21,9 @@ export interface UiInvokeRequest {
   action: string | null
   args: Record<string, unknown> | null
   global: boolean
+  /** Backend sent this request to this window alone, because it hosts the pane
+   *  that asked for it. Answer it without checking workspace_path. */
+  addressed?: boolean
 }
 
 export interface UiActionBusBackend {
@@ -47,11 +50,17 @@ export async function handleUiInvokeRequest(
 ): Promise<void> {
   const req = raw as Partial<UiInvokeRequest> | null | undefined
   if (!req || !req.request_id || !req.op) return
-  // Ownership: global requests are already single-cast to the right window by
-  // the backend; otherwise only the window whose open workspace matches
-  // answers — mirrors handleMcpSpawnRequest's local-ownership check in App.vue
-  // for agent_spawn.request (another window silently owns any mismatch).
-  if (!req.global && req.workspace_path !== opts.currentWorkspace.value) return
+  // Ownership. `global` and `addressed` requests are already single-cast to
+  // this window by the backend and need no test: `global` because any window
+  // will do, `addressed` because this window hosts the pane that asked — which
+  // is what lets a pane drive its own window while it sits in the background
+  // or after it switched project, cases the workspace test below rejects.
+  // Everything else is broadcast, and only the window whose open workspace
+  // matches answers — mirrors handleMcpSpawnRequest's local-ownership check in
+  // App.vue for agent_spawn.request (another window silently owns any
+  // mismatch), so a non-owner must stay silent rather than reply with an error.
+  const mine = req.global || req.addressed || req.workspace_path === opts.currentWorkspace.value
+  if (!mine) return
 
   const diagnosticSeq = currentDiagnosticSeq()
   let ok = true
