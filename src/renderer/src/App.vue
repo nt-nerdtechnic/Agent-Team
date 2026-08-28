@@ -5242,7 +5242,11 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
       slot_label: pane.slotLabel,
     })
   }
-  if (opts.markRemoved !== false && pane?.origin === 'manual') {
+  // Mirrors the manual_pane.spawn side, which persists every non-pipeline pane:
+  // mcp-spawned panes are recorded on spawn, so they must be cleared on close too.
+  // Gating this on origin === 'manual' left them at spawn_status 'spawned', and a
+  // workspace switch resurrected them as placeholders.
+  if (opts.markRemoved !== false && pane != null && pane.origin !== 'pipeline') {
     await sendQuiet<ProjectPayload>('manual_pane.unspawn', {
       workspace_path: pane.workspacePath,
       pane_id: pane.id,
