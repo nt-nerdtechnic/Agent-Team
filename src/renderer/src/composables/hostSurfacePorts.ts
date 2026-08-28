@@ -292,12 +292,6 @@ export function createHostTerminalDockPort(backend: HostBackend): TerminalDockPo
       cols,
       rows,
     }),
-    history: (workspacePath, agentKey, paneId, chunk) => send('terminal.history', {
-      workspace_path: workspacePath,
-      agent_key: agentKey,
-      pane_id: paneId,
-      chunk,
-    }, 5000),
     onOutput: (callback: (payload: TerminalOutputEvent) => void) =>
       backend.on('terminal.output' as never, (payload) => callback(payload as TerminalOutputEvent)),
     onExit: (callback: (payload: TerminalExitEvent) => void) =>

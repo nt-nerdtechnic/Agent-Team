@@ -87,7 +87,6 @@ export type {
   TerminalDockPort,
   TerminalExitEvent,
   TerminalFileListResult,
-  TerminalHistoryResult,
   TerminalOutputEvent,
   TerminalSpawnOptions,
   TerminalStatusSource,

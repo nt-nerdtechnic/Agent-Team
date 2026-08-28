@@ -8,6 +8,13 @@ export type { AgentKey, AgentSpec, DirLister, PaneArgContext } from './agents'
 
 export { agentProfileFor, agentUsesBracketedPaste, encodeShiftEnter } from './agentProfile'
 
+export {
+  cliPermissionKey,
+  parseCliPermissionMode,
+  skipPermissionFlagFor,
+} from './lib/cliPermission'
+export type { CliPermissionMode } from './lib/cliPermission'
+
 export { default as AiCliDock } from './components/AiCliDock.vue'
 export { default as AiCliTerminal } from './components/AiCliTerminal.vue'
 

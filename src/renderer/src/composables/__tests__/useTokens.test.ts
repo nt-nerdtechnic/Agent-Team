@@ -11,7 +11,7 @@ function snapshot(workspacePath: string): TokensSnapshot {
       current_run: null,
       runs: [],
       cumulative: { totals: bucket, by_vendor: {}, by_stage: {} },
-      live_by_pane: {}
+      live_by_session: {}
     },
     global: { all_time: bucket, by_vendor: {}, by_day: {} }
   }

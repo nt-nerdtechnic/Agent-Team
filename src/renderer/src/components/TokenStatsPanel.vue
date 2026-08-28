@@ -33,6 +33,11 @@ interface Props {
   workspacePath: string
   stages: Stage[]
   panes: ActivePane[]
+  /** The pane the user is looking at right now. The top block reports this
+   *  pane's session alone — a workspace-wide tally answered a question nobody
+   *  asked. Absent (or naming a pane that is not a CLI pane) means "nothing
+   *  focused", which reports zero rather than somebody else's numbers. */
+  activePaneId?: string | null
   pipeline: PipelineStatusView
   /** Owned by the parent: this panel renders it and asks for changes. */
   expanded: boolean
@@ -171,27 +176,31 @@ const EMPTY: TokenBucket = { input: 0, output: 0, calls: 0 }
 const currentRun = computed(() => snapshot.value?.workspace?.current_run ?? null)
 const runTotals = computed<TokenBucket>(() => currentRun.value?.totals ?? EMPTY)
 
-// Live per-session tallies, keyed "<pane_id>::<session_id>" (or the bare pane
-// id). These accrue whether or not a pipeline run is active, so a manually
-// opened CLI pane still reports numbers.
-const liveByPane = computed<Record<string, TokenBucket>>(
-  () => snapshot.value?.workspace?.live_by_pane ?? {}
+// Live tallies keyed by SESSION id — read straight from each vendor's session
+// log, not accumulated from events. They exist whether or not a pipeline run
+// is active, so a manually opened CLI pane still reports numbers. Keying on
+// the session (not the pane) is what stops one CLI session from being counted
+// once per pane id it has been through: a restored or respawned pane resumes
+// the same session under a fresh ephemeral id.
+const liveBySession = computed<Record<string, TokenBucket>>(
+  () => snapshot.value?.workspace?.live_by_session ?? {}
 )
-const liveTotals = computed<TokenBucket>(() => {
-  const out: TokenBucket = { input: 0, output: 0, calls: 0 }
-  for (const b of Object.values(liveByPane.value)) {
-    out.input += b.input
-    out.output += b.output
-    out.calls += b.calls
-  }
-  return out
+// The pane in focus, or null when nothing focused resolves to a CLI pane.
+const focusPane = computed<ActivePane | null>(
+  () => (props.panes ?? []).find((p) => p.id === props.activePaneId) ?? null
+)
+// That pane's own live bucket. Null covers all three "no number to show"
+// cases at once: no focus, a pane with no session bound, and a session the
+// scanner has not reported yet.
+const focusSession = computed<TokenBucket | null>(() => {
+  const sid = focusPane.value?.sessionId
+  return (sid && liveBySession.value[sid]) || null
 })
-const livePaneCount = computed(
-  () => Object.values(liveByPane.value).filter((b) => b.calls > 0).length
-)
-// The top block shows the run when there is one and this session otherwise.
+// The top block shows the run when there is one and the FOCUSED pane's
+// session otherwise — never a sum across the workspace's sessions, which is
+// what made a single pane read as everybody's usage combined.
 const topTotals = computed<TokenBucket>(() =>
-  currentRun.value ? runTotals.value : liveTotals.value
+  currentRun.value ? runTotals.value : focusSession.value ?? EMPTY
 )
 const cumulative = computed<TokenBucket>(() =>
   snapshot.value?.workspace?.cumulative?.totals ?? EMPTY
@@ -240,25 +249,33 @@ const stageRows = computed(() => {
 
 const paneRows = computed(() => {
   const run = currentRun.value
-  const map = run ? run.by_pane : liveByPane.value
+  const map = run ? run.by_pane : liveBySession.value
+  // Without a run a bucket belongs to a session, and several panes can be
+  // bound to the same one — credit it to the first row only, so the same
+  // figure is never listed twice.
+  const claimed = new Set<string>()
   return (props.panes ?? []).map((p) => {
     // Prefer stable key (stageId:slotLabel) so data survives frontend restarts.
     // Fall back to UUID for manual panes that have no stage/slot.
     const stableKey = p.stageId && p.slotLabel ? `${p.stageId}:${p.slotLabel}`
                     : p.stageId || p.id
-    // Without a run the buckets are session-scoped, so the session id is part
-    // of the key; the stable/UUID chain below still covers a pane with none.
-    const liveKey = p.sessionId ? `${p.id}::${p.sessionId}` : p.id
+    let live: TokenBucket | undefined
+    if (!run && p.sessionId && !claimed.has(p.sessionId)) {
+      live = map[p.sessionId]
+      if (live) claimed.add(p.sessionId)
+    }
     return {
       id: p.id,
       label: p.agentLabel,
       sub: p.roleLabel,
-      bucket: (run ? undefined : map[liveKey]) ?? map[stableKey] ?? map[p.id] ?? EMPTY
+      bucket: live ?? (run ? map[stableKey] ?? map[p.id] : undefined) ?? EMPTY
     }
   })
 })
 
-const collapsedTotal = computed(() => fmt(topTotals.value.input + topTotals.value.output))
+// The collapsed rail badge stays tied to the pipeline run: a permanently
+// visible session tally on the rail is noise, not a signal.
+const collapsedTotal = computed(() => fmt(runTotals.value.input + runTotals.value.output))
 
 // ─────────────────────── Formatting helpers ───────────────────────────────
 
@@ -306,7 +323,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
       >
         <span class="rail-icon">{{ t.icon }}</span>
         <span class="rail-label">{{ $t(t.labelKey) }}</span>
-        <span v-if="t.id === 'tokens' && topTotals.calls > 0" class="rail-badge">{{ collapsedTotal }}</span>
+        <span v-if="t.id === 'tokens' && runTotals.calls > 0" class="rail-badge">{{ collapsedTotal }}</span>
       </button>
     </div>
 
@@ -360,8 +377,15 @@ async function confirmReset(scope: ResetScope): Promise<void> {
           <div v-if="currentRun" class="run-meta" :title="currentRun.task">
             <span class="run-id">{{ currentRun.run_id || '—' }}</span>
           </div>
-          <div v-else-if="livePaneCount > 0" class="run-meta">
-            <span class="run-id">{{ $t('label.n-panes', { count: livePaneCount }) }}</span>
+          <!-- Whose session these figures belong to. A count was meaningless
+               once the block stopped summing sessions — the reader needs to
+               recognise the pane in front of them. -->
+          <div v-else class="run-meta">
+            <span v-if="!focusPane" class="run-id">{{ $t('label.no-focused-pane') }}</span>
+            <span v-else-if="!focusSession" class="run-id">
+              {{ $t('label.pane-no-session', { pane: focusPane.agentLabel }) }}
+            </span>
+            <span v-else class="run-id">{{ focusPane.agentLabel }}</span>
           </div>
           <div class="totals">
             <div class="cell"><div class="big">{{ fmt(topTotals.input) }}</div><div class="lbl">{{ $t('label.in') }}</div></div>

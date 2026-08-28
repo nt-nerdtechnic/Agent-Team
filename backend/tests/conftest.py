@@ -54,7 +54,7 @@ def _isolated_skills_home(tmp_path, monkeypatch):
     (``~/.agents/skills``, ``~/.copilot/skills``, ...). A test that spawns a
     pane through the plugin host would otherwise pick up whatever skills the
     developer happens to have installed. Point both at an empty home."""
-    from agent_team_backend import native_skills, skills_store
+    from agent_team_backend import native_mcp, native_memory, native_skills, skills_store
 
     # A sibling of tmp_path, not inside it: several tests enumerate tmp_path
     # as the app-data dir and would see the fake home as a stray entry.
@@ -62,6 +62,13 @@ def _isolated_skills_home(tmp_path, monkeypatch):
     home.mkdir(exist_ok=True)
     monkeypatch.setattr(skills_store, "_real_home", lambda: home)
     monkeypatch.setattr(native_skills, "_home", lambda: home)
+    # The native MCP scan reads the same real home (~/.claude.json,
+    # ~/.codex/config.toml, ...); keep it off the developer's own configs.
+    monkeypatch.setattr(native_mcp, "_home", lambda: home)
+    # The instruction-file scan reads the real home too (~/.claude/CLAUDE.md,
+    # ~/.codex/AGENTS.md, ...) and its handlers can write; never let a test
+    # near the developer's own instructions.
+    monkeypatch.setattr(native_memory, "_home", lambda: home)
 
 
 @pytest.fixture(autouse=True)

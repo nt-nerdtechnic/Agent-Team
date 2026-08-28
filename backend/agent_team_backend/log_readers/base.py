@@ -435,6 +435,42 @@ class LogReader(ABC):
             totals["calls"] += 1
         return totals
 
+    def usage_since_for_session(
+        self, path: Path, session_id: str, checkpoint: dict[str, Any]
+    ) -> tuple[dict[str, int], dict[str, Any]]:
+        """Sum what this log gained for one session since `checkpoint`.
+
+        Same arithmetic and session filter as total_usage_for_session, but it
+        reads only the bytes/rows after the cursor and returns the cursor to
+        resume from, so a session file that only grows is never re-parsed from
+        the top. An empty checkpoint means "the whole source", and the totals
+        are then identical to total_usage_for_session's.
+
+        Built on parse_incremental — the same per-vendor primitive the
+        ingestion watcher uses — so the live per-session tally reads a file
+        exactly the way cumulative/global do. Nothing is recorded or
+        checkpointed: the cursor is the caller's private bookkeeping.
+
+        A reader still on parse_incremental's legacy fallback hands back an
+        unbounded key set; that form is dropped (empty cursor returned), which
+        makes the caller re-read in full next time rather than grow forever.
+
+        Heavy (session files reach tens of MB) — callers MUST run it off the
+        event loop. Vendors inherit this; none should need to override it.
+        """
+        parsed = self.parse_incremental(path, dict(checkpoint or {}))
+        totals = {"input": 0, "output": 0, "calls": 0}
+        for usage in parsed.events:
+            if session_id and usage.session_id != session_id:
+                continue
+            totals["input"] += int(usage.input_tokens)
+            totals["output"] += int(usage.output_tokens)
+            totals["calls"] += 1
+        cursor = dict(parsed.checkpoint)
+        if str(cursor.get("kind") or "") == "legacy":
+            cursor = {}
+        return totals, cursor
+
     def parse_activity(
         self, path: Path, seen_keys: set[str]
     ) -> list[ActivityEvent]:

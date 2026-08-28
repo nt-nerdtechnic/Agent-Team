@@ -48,11 +48,6 @@ export interface TerminalFileListResult {
   files?: string[]
 }
 
-export interface TerminalHistoryResult {
-  text: string
-  total_chunks: number
-}
-
 export interface TerminalDockPort {
   readonly status: ReactiveValue<'starting' | 'connecting' | 'connected' | 'disconnected' | 'error'>
   readonly shell: ReactiveValue<string>
@@ -66,7 +61,6 @@ export interface TerminalDockPort {
   interrupt(sessionId: string): Promise<PortResponse>
   kill(sessionId: string, force: boolean): Promise<PortResponse>
   redraw(sessionId: string, cols: number, rows: number): Promise<PortResponse>
-  history(workspacePath: string, agentKey: string, paneId: string, chunk: number): Promise<PortResponse<TerminalHistoryResult>>
 
   onOutput(callback: (payload: TerminalOutputEvent) => void): () => void
   onExit(callback: (payload: TerminalExitEvent) => void): () => void

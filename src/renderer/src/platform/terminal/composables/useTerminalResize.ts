@@ -28,9 +28,6 @@ export function createResizeController(
   sendRedrawRequest: ResizeRequest,
   getPendingSpawn: () => boolean,
   onCreateWhenMeasurable: () => void,
-  // Give the CLI a blank canvas at the new width. Called once per settled
-  // WIDTH change, right before the SIGWINCH nudge. See armResizeRedraw.
-  onWidthSettled?: () => Promise<void>,
 ): ResizeController {
   // How long the container must be quiet before we fit + send resize.
   // Also the quiet-gap gate in armResizeRedraw.
@@ -93,43 +90,6 @@ export function createResizeController(
     resizeFrameTimer = setTimeout(fire, 100)
   }
 
-  // Unfold the prompt frame's divider after a narrowing.
-  //
-  // SCOPE: the prompt frame at the bottom of the screen, nothing else. The
-  // scrollback is never touched and no content line is ever considered.
-  //
-  // Narrowing makes xterm fold a full-width divider onto a second row, and that
-  // remainder row is what shows as a stray half-length line under the prompt.
-  // DELETE the row (ESC[1M) rather than blank it (ESC[2K): blanking leaves the
-  // row in place, and since Claude Code paints with absolute coordinates, the
-  // extra row pushes its whole frame down — that attempt broke the input area
-  // outright. Deleting restores the row count the CLI is drawing against.
-  //
-  // Bottom-up so each deletion cannot shift a row still to be examined.
-  const RULE_ONLY = /^[\u2500-\u257f\u2014\u2015-]+$/
-  // How far up from the last row the prompt frame can reach.
-  const PROMPT_FRAME_ROWS = 12
-  function unfoldPromptDivider(): void {
-    // Self-contained: the caller wraps fit + sendResizeNow in one catch, and a
-    // cosmetic tidy must never be able to swallow the resize itself.
-    try {
-      const buf = term.buffer?.active
-      if (!buf || buf.type === 'alternate') return
-      const top = buf.viewportY
-      if (typeof top !== 'number' || !Number.isFinite(top)) return
-      const first = Math.max(0, term.rows - PROMPT_FRAME_ROWS)
-      const out: string[] = []
-      for (let y = term.rows - 1; y >= first; y--) {
-        const line = buf.getLine(top + y)
-        if (!line?.isWrapped) continue        // only a fold, never a drawn line
-        const text = line.translateToString(true).trim()
-        if (text.length >= 1 && RULE_ONLY.test(text)) out.push(`\x1b[${y + 1};1H\x1b[1M`)
-      }
-      if (!out.length) return
-      term.write(`\x1b7${out.join('')}\x1b8`)
-    } catch { /* cosmetic only */ }
-  }
-
   // Single source of truth for sizing: fit xterm to its container, then push
   // that size to the backend. Entry points: the (debounced) ResizeObserver,
   // the post-spawn frame, the reconciler, and fitTerminal().
@@ -166,9 +126,7 @@ export function createResizeController(
         // drains output around its resize ack, so ordering is preserved server
         // side; the brief client window where xterm is narrower than the PTY is
         // the same tradeoff VSCode's integrated terminal accepts.
-        const colsBefore = term.cols
         fit.fit()
-        if (term.cols < colsBefore) unfoldPromptDivider()   // narrowing only
         sendResizeNow()
       } catch { /* ignore transient fit errors during teardown */ }
     }
@@ -196,7 +154,7 @@ export function createResizeController(
   // can't postpone the redraw indefinitely.
   function armResizeRedraw(): void {
     if (resizeRedrawTimer) clearTimeout(resizeRedrawTimer)
-    resizeRedrawTimer = setTimeout(async () => {
+    resizeRedrawTimer = setTimeout(() => {
       resizeRedrawTimer = null
       if (!active || !sessionId.value) return
       // Not fully settled yet (xterm still differs from the backend-acked size):
@@ -219,31 +177,10 @@ export function createResizeController(
       const quiet = altBuffer || Date.now() - lastRawActivityAt.value >= RESIZE_QUIET_MS
       if (!quiet && Date.now() < resizeRedrawDeadline) { armResizeRedraw(); return }
       lastRedrawCols = term.cols
-      // Blank the alternate screen BEFORE the SIGWINCH below — PuTTY's order.
-      //
-      // term_size() there discards the whole alternate screen and rebuilds it
-      // empty at the new width (terminal.c:1927-1940), then marks disptext
-      // ATTR_INVALID so the next paint is a full one. The application wakes to
-      // a blank canvas of the right size and draws itself correctly; that is
-      // why a TUI never looks stale in PuTTY after a resize.
-      //
-      // xterm.js instead carries the old alternate-buffer frame across the
-      // resize and cannot reflow it (it reflows the normal buffer only), so a
-      // TUI that does not repaint by itself leaves the previous width's frame
-      // on screen. Clearing first turns the SIGWINCH into a real repaint.
-      if (onWidthSettled) {
-        try { await onWidthSettled() } catch { /* keep the redraw regardless */ }
-        if (!active || !sessionId.value) return
-      }
-      // NOTE: nothing below clears the buffer. Wiping the scrollback drops the
-      // user's conversation history (and, on a rebuild/resume, the freshly
-      // reprinted transcript). Per user decision (2026-06-23): never clear
-      // history — repaint the current frame via the SIGWINCH redraw instead.
-      //
-      // The onWidthSettled path above is not an exception: it clears only the
-      // ALTERNATE screen, which xterm keeps no scrollback for, so there is no
-      // history behind it to lose. A pane in the normal buffer — where a
-      // line-mode CLI's conversation lives — is left untouched.
+      // NOTE: we deliberately do NOT term.clear() on a width shrink. Wiping the
+      // scrollback drops the user's conversation history. Per user decision
+      // (2026-06-23): never clear history — accept any reflow residue, repaint
+      // the current frame via the SIGWINCH redraw below instead.
       void sendRedrawRequest(sessionId.value, term.cols, term.rows)
     }, RESIZE_REDRAW_SETTLE_MS)
   }

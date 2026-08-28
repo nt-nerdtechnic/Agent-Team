@@ -1,5 +1,37 @@
 export type McpTransport = 'stdio' | 'http' | 'sse'
 
+/**
+ * One MCP server a CLI keeps in its own config, as `native_mcp` reflected it.
+ * Read-only by construction: the backend module that produces these has no
+ * write path, and nothing here is ever sent back.
+ */
+export interface NativeMcpServer {
+  name: string
+  /** Agent key whose config this came from. */
+  agent: string
+  transport: string
+  /** The config file it was read from. */
+  path: string
+  command: string
+  args: string[]
+  url: string
+  env: Record<string, string>
+  headers: Record<string, string>
+  enabled: boolean
+  valid: boolean
+  error: string
+}
+
+/** One CLI vendor and what Navide can do with its MCP. */
+export interface McpAgent {
+  key: string
+  label: string
+  /** "off" and "impossible" must not look alike, so three states, not a flag. */
+  state: 'wired' | 'planned' | 'unsupported'
+  /** Whether the scan can read this CLI's own servers at all. */
+  reflects: boolean
+}
+
 interface McpTransportShape {
   transport: McpTransport
   command?: string

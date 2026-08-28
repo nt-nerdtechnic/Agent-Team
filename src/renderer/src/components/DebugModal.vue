@@ -13,8 +13,13 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
-import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
-import { aiTerminalPaneId, bracketedPaste, resolveCliCommand } from '@navide/plugin-shell'
+import {
+  aiTerminalPaneId,
+  bracketedPaste,
+  CLI_AGENT_SPECS,
+  cliPermissionKey,
+  resolveCliCommand,
+} from '@navide/plugin-shell'
 import {
   LOG_LEVELS,
   capLines,
@@ -329,6 +334,7 @@ async function startAi(): Promise<void> {
       paneId: aiPaneId.value,
       historyRoot: aiWorkspace.value,
       yoloStored: settingsGet<string | null>('agentTeam.yolo', null),
+      permissionStored: settingsGet<string | null>(cliPermissionKey(aiAgent.value), null),
     })
     await term.spawn({
       command: [shell, shell.endsWith('zsh') ? '-ilc' : '-lc', command],

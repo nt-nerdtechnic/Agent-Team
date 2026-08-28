@@ -27,7 +27,6 @@ export function createTerminalDockStub(): TerminalDockPort {
     interrupt: async () => ok(),
     kill: async () => ok(),
     redraw: async () => ok(),
-    history: async () => ok({ text: '', total_chunks: 1 }),
     onOutput: (_callback: (payload: TerminalOutputEvent) => void) => () => {},
     onExit: (_callback: (payload: TerminalExitEvent) => void) => () => {},
     listFiles: async () => ok<TerminalFileListResult>({ files: [] }),

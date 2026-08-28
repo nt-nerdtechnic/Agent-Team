@@ -159,12 +159,6 @@ export function createMockBackend(initialStatus: BackendStatus = 'connected') {
       cols,
       rows,
     }),
-    history: (workspacePath, agentKey, paneId, chunk) => request('terminal.history', {
-      workspace_path: workspacePath,
-      agent_key: agentKey,
-      pane_id: paneId,
-      chunk,
-    }),
     onOutput: (callback) => rawBackend.on('terminal.output', callback as unknown as (payload: unknown) => void),
     onExit: (callback) => rawBackend.on('terminal.exit', callback as unknown as (payload: unknown) => void),
     listFiles: (workspacePath, query, maxResults) => request('fs.list_files', {

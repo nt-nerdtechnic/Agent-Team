@@ -248,6 +248,96 @@ describe('TokenStatsPanel', () => {
     w.unmount()
   })
 
+  // ── "This session" scope ────────────────────────────────────────────────
+  // The block used to sum every live session in the workspace, so a second
+  // pane silently inflated the figure the user was reading for the pane in
+  // front of them. It now reports the focused pane's session and nothing else.
+
+  const LIVE_PANES = [
+    { id: 'p1', agentLabel: 'claude', roleLabel: 'backend', sessionId: 'sA' },
+    { id: 'p2', agentLabel: 'codex', roleLabel: 'frontend', sessionId: 'sB' },
+    { id: 'p3', agentLabel: 'droid', roleLabel: 'docs' },
+  ]
+  const liveSnapshot = () =>
+    snapshot({
+      current_run: null,
+      live_by_session: { sA: bucket(100, 10, 5), sB: bucket(7, 3, 2) },
+    })
+
+  // The top block is the one titled by the run/session header.
+  async function topCells(w: VueWrapper, emit: (ev: string, raw: unknown) => void, snap: TokensSnapshot) {
+    emit('tokens.changed', snap)
+    await w.findAll('.hdr .tab')[1].trigger('click')  // tokens
+    return w.findAll('.block')[0]
+  }
+
+  it('reports only the focused pane’s session, not every session in the workspace', async () => {
+    const { w, emit } = mountPanel({ panes: LIVE_PANES, activePaneId: 'p1' })
+    const block = await topCells(w, emit, liveSnapshot())
+    // sA alone (100/10) — not sA + sB (107/13), which is what the old sum showed.
+    expect(block.findAll('.cell .big').map((n) => n.text())).toEqual(['100', '10', '110', '5'])
+    expect(block.text()).toContain('claude')
+    w.unmount()
+  })
+
+  it('follows the focus to another pane', async () => {
+    const { w, emit } = mountPanel({ panes: LIVE_PANES, activePaneId: 'p1' })
+    await topCells(w, emit, liveSnapshot())
+    await w.setProps({ activePaneId: 'p2' })
+    const block = w.findAll('.block')[0]
+    expect(block.findAll('.cell .big').map((n) => n.text())).toEqual(['7', '3', '10', '2'])
+    expect(block.text()).toContain('codex')
+    w.unmount()
+  })
+
+  it('reports zero — never a neighbour’s figures — when the focused pane has no session', async () => {
+    const { w, emit } = mountPanel({ panes: LIVE_PANES, activePaneId: 'p3' })
+    const block = await topCells(w, emit, liveSnapshot())
+    expect(block.findAll('.cell .big').map((n) => n.text())).toEqual(['0', '0', '0', '0'])
+    expect(block.text()).toContain('label.pane-no-session')
+
+    // Nothing focused at all reads the same way, with its own caption.
+    await w.setProps({ activePaneId: null })
+    const none = w.findAll('.block')[0]
+    expect(none.findAll('.cell .big').map((n) => n.text())).toEqual(['0', '0', '0', '0'])
+    expect(none.text()).toContain('label.no-focused-pane')
+    w.unmount()
+  })
+
+  it('keeps the BY PANE table listing every pane, focused or not', async () => {
+    // Narrowing the top block must not narrow the breakdown underneath it —
+    // that table is the only place the other panes' usage is still visible.
+    const { w, emit } = mountPanel({ panes: LIVE_PANES, activePaneId: 'p1' })
+    await topCells(w, emit, liveSnapshot())
+    const paneBlock = w.findAll('.block').find((b) => b.text().includes('label.by-pane'))!
+    const rows = paneBlock.findAll('tbody tr')
+    expect(rows.map((r) => r.find('th').text())).toEqual(['claude', 'codex', 'droid'])
+    // Each row keeps its own session's numbers; the unbound pane shows zeros.
+    expect(rows.map((r) => r.findAll('td')[0].text())).toEqual(['100', '7', '0'])
+    w.unmount()
+  })
+
+  it('still reports the pipeline run when one is active', async () => {
+    // The run is a different question — "what has this pipeline spent" — and
+    // it outranks the focused session exactly as it did before.
+    const snap = snapshot({ live_by_session: { sA: bucket(100, 10, 5) } })
+    const { w, emit } = mountPanel({ panes: LIVE_PANES, activePaneId: 'p1' })
+    const block = await topCells(w, emit, snap)
+    expect(block.text()).toContain('label.current-run')
+    expect(block.findAll('.cell .big').map((n) => n.text())).toEqual(['10', '20', '30', '3'])
+    w.unmount()
+  })
+
+  it('leaves the rail badge tied to the pipeline run, not to session usage', async () => {
+    // A permanently visible session tally on the collapsed rail is noise; the
+    // badge stays off until a run exists, however busy the sessions are.
+    const { w, emit } = mountPanel({ expanded: false, panes: LIVE_PANES, activePaneId: 'p1' })
+    emit('tokens.changed', liveSnapshot())
+    await w.vm.$nextTick()
+    expect(w.find('.rail-badge').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('ignores a preview push once preview has been taken off the layout', async () => {
     // Claiming the tab would leave the panel showing nothing at all.
     const { w } = mountPanel({ expanded: false, views: ['history'] })

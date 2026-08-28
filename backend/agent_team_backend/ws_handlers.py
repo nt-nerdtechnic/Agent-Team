@@ -19,6 +19,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pydantic import ValidationError
@@ -26,6 +27,8 @@ from pydantic import ValidationError
 from . import (
     agent_messaging,
     executions_service,
+    native_mcp,
+    native_memory,
     pane_policy,
     remote_roster,
     server_link,
@@ -2121,6 +2124,10 @@ async def mcp_list_servers(session: "Session", msg_id: str, msg_type: str, paylo
         )
         return
     revision = str(app.mcp_settings_store.revision)
+    # The servers each CLI already loads on its own. Scanning reads the user's
+    # config files and reports its own failures per file, so it never raises;
+    # a thread keeps that file I/O off the loop.
+    native = await asyncio.to_thread(native_mcp.scan)
     live = await app.mcp_manager.list_status()
     live_map = {s["name"]: s for s in live}
     merged = []
@@ -2144,6 +2151,8 @@ async def mcp_list_servers(session: "Session", msg_id: str, msg_type: str, paylo
                 "servers": merged,
                 "path": str(app.mcp_settings_store.path),
                 "revision": revision,
+                "native": [server.as_dict() for server in native],
+                "agents": native_mcp.agent_targets(),
             },
         )
     )
@@ -2474,6 +2483,94 @@ async def skills_delete(session: "Session", msg_id: str, msg_type: str, payload:
     )
     if result is not None:
         await session.send_json(make_response(msg_id, msg_type, result))
+
+
+# ── CLI instruction files (memory.*) ────────────────────────────────────────
+def _memory_workspace(payload: dict) -> Path | None:
+    """The workspace root a memory request is scoped to, or None.
+
+    Project-scoped instruction files belong to the folder the user has open,
+    so every memory handler takes the workspace from the caller. An absent or
+    non-directory path yields None, which limits the request to user scope
+    rather than failing it — a window with no workspace still has a home.
+    """
+    raw = str(payload.get("workspace_path") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_dir() else None
+
+
+@handler("memory.list")
+async def memory_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    workspace = _memory_workspace(payload)
+    # The scan stats every candidate in the home and the workspace; a thread
+    # keeps that file I/O off the loop, as the native MCP scan does.
+    files = await asyncio.to_thread(native_memory.scan, None, workspace)
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "files": [f.as_dict() for f in files],
+                "agents": native_memory.agent_targets(),
+                "workspace_path": str(workspace) if workspace else "",
+            },
+        )
+    )
+
+
+@handler("memory.get")
+async def memory_get(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    workspace = _memory_workspace(payload)
+    path = str(payload.get("path") or "")
+    try:
+        result = await asyncio.to_thread(native_memory.read, path, None, workspace)
+    except ValueError as err:
+        await session.send_json(
+            make_error(msg_id, msg_type, "MEMORY_FILE_REJECTED", str(err), {"path": path})
+        )
+        return
+    except OSError as err:
+        await session.send_json(
+            make_error(msg_id, msg_type, "MEMORY_READ_FAILED", str(err), {"path": path})
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("memory.save")
+async def memory_save(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    workspace = _memory_workspace(payload)
+    path = str(payload.get("path") or "")
+    text = payload.get("text")
+    if not isinstance(text, str):
+        await session.send_json(
+            make_error(msg_id, msg_type, "MEMORY_FILE_REJECTED", "text is required", {"path": path})
+        )
+        return
+    expected_raw = payload.get("expected_modified")
+    expected = float(expected_raw) if isinstance(expected_raw, (int, float)) else None
+    try:
+        result = await asyncio.to_thread(
+            native_memory.save, path, text, None, workspace, expected
+        )
+    except native_memory.MemoryConflictError as err:
+        await session.send_json(
+            make_error(msg_id, msg_type, "MEMORY_FILE_CONFLICT", str(err), {"path": path})
+        )
+        return
+    except ValueError as err:
+        await session.send_json(
+            make_error(msg_id, msg_type, "MEMORY_FILE_REJECTED", str(err), {"path": path})
+        )
+        return
+    except OSError as err:
+        await session.send_json(
+            make_error(msg_id, msg_type, "MEMORY_WRITE_FAILED", str(err), {"path": path})
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, result))
 
 
 # ── Recent workspaces (workspace.*) ─────────────────────────────────────────
@@ -3595,7 +3692,12 @@ async def analyzer_ollama_health(session: "Session", msg_id: str, msg_type: str,
 async def tokens_snapshot(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
-    snap = app.tokens_store.snapshot(payload.get("workspace_path") or None)
+    workspace_path = payload.get("workspace_path") or None
+    # Answer from the cached scan results immediately; anything whose session
+    # log changed since is rescanned in the background and lands as a
+    # `tokens.changed` broadcast.
+    app.refresh_live_scans(workspace_path or "")
+    snap = app.tokens_store.snapshot(workspace_path)
     await session.send_json(make_response(msg_id, msg_type, snap))
 
 
@@ -4457,15 +4559,13 @@ async def _terminal_create_impl(
         transaction["attribution_future"] = attribution_future
         transaction["attribution_started"] = True
         await asyncio.shield(attribution_future)
-        # The live "THIS SESSION" tally is process-lifetime only, so a resumed
-        # session reads 0 after a backend restart. Now that the pane owns this
-        # session id, re-derive its real total from the vendor log. Fire and
-        # forget — a multi-MB parse must not delay the create ack below.
-        app.schedule_live_token_backfill(
+        # The live "THIS SESSION" tally is read straight from the vendor log.
+        # Now that the pane owns this session id, start tracking it and take
+        # the first scan. Fire and forget — a multi-MB parse must not delay
+        # the create ack below.
+        app.track_live_session(
             workspace_path=ws_for_pane,
             pane_id=term.pane_id,
-            # Same bucket key the token sink uses (slot_key or pane_id).
-            bucket_pane_key=app._stable_pane_key(metadata, "") or term.pane_id,
             vendor=agent_key,
             session_id=explicit_session_id,
         )

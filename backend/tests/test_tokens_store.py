@@ -281,33 +281,28 @@ def test_legacy_event_key_still_drains_via_record(tmp_path: Path) -> None:
 
 
 # ───────────────── live per-session tally (no persistence) ─────────────────
+#
+# The live tally is a cache of what a vendor's session log actually holds,
+# published by set_live_total() after an off-loop scan (app._scan_live_session).
+# record() must not touch it — an accumulator drifts the moment an event is
+# missed or deduped, which is the whole reason this dimension was moved off it.
 
 
-def test_live_bucket_accrues_without_an_active_run(store: TokensStore, workspace: str) -> None:
-    """A manually opened CLI pane has no run, so by_pane stays empty — but the
-    live tally is what the panel reads in that case and must still count."""
+def test_record_no_longer_feeds_the_live_tally(store: TokensStore, workspace: str) -> None:
     store.record(
         workspace, source="cli", vendor="claude",
         pane_id="pane-a", session_id="sess-1",
         input_tokens=10, output_tokens=20,
     )
     snap = store.snapshot(workspace)
-    assert snap["workspace"]["current_run"] is None
-    assert snap["workspace"]["live_by_pane"] == {
-        "pane-a::sess-1": {"input": 10, "output": 20, "calls": 1},
-    }
+    assert snap["workspace"]["live_by_session"] == {}
+    # ... while the durable tallies are recorded exactly as before.
+    assert snap["workspace"]["cumulative"]["totals"] == {"input": 10, "output": 20, "calls": 1}
+    assert snap["global"]["all_time"] == {"input": 10, "output": 20, "calls": 1}
 
 
-def test_live_bucket_falls_back_to_bare_pane_id(store: TokensStore, workspace: str) -> None:
-    store.record(
-        workspace, source="cli", vendor="claude", pane_id="pane-a",
-        input_tokens=1, output_tokens=2,
-    )
-    live = store.snapshot(workspace)["workspace"]["live_by_pane"]
-    assert live == {"pane-a": {"input": 1, "output": 2, "calls": 1}}
-
-
-def test_live_and_run_buckets_both_accrue(store: TokensStore, workspace: str) -> None:
+def test_record_still_fills_the_run_by_pane_bucket(store: TokensStore, workspace: str) -> None:
+    """by_pane belongs to the run ledger and keeps its pane dimension."""
     store.start_run(workspace, run_id="r1", task="t", run_dir="runs/r1")
     store.record(
         workspace, source="cli", vendor="claude",
@@ -316,35 +311,81 @@ def test_live_and_run_buckets_both_accrue(store: TokensStore, workspace: str) ->
     )
     ws = store.snapshot(workspace)["workspace"]
     assert ws["current_run"]["by_pane"]["pane-a"] == {"input": 10, "output": 20, "calls": 1}
-    assert ws["live_by_pane"]["pane-a::sess-1"] == {"input": 10, "output": 20, "calls": 1}
+    assert ws["live_by_session"] == {}
 
 
-def test_live_bucket_ignores_duplicate_events(store: TokensStore, workspace: str) -> None:
-    for _ in range(2):
-        store.record(
-            workspace, source="cli", vendor="claude",
-            pane_id="pane-a", session_id="sess-1",
-            input_tokens=10, output_tokens=20, dedup_key="evt-1",
+def test_set_live_total_overwrites_rather_than_accumulates(
+    store: TokensStore, workspace: str
+) -> None:
+    assert store.set_live_total(workspace, "sess-1", {"input": 900, "output": 90, "calls": 9})
+    assert store.set_live_total(workspace, "sess-1", {"input": 950, "output": 95, "calls": 10})
+    live = store.snapshot(workspace)["workspace"]["live_by_session"]
+    assert live == {"sess-1": {"input": 950, "output": 95, "calls": 10}}
+
+
+def test_set_live_total_reports_whether_the_value_changed(
+    store: TokensStore, workspace: str
+) -> None:
+    """The caller broadcasts only on a real change."""
+    total = {"input": 900, "output": 90, "calls": 9}
+    assert store.set_live_total(workspace, "sess-1", total)
+    assert not store.set_live_total(workspace, "sess-1", dict(total))
+    assert not store.set_live_total("", "sess-1", total)
+    assert not store.set_live_total(workspace, "", total)
+
+
+def test_one_session_is_one_bucket_across_pane_ids(
+    store: TokensStore, workspace: str
+) -> None:
+    """Regression: a pane that is restored/respawned comes back with a fresh
+    ephemeral id. Keying the bucket on the pane split one CLI session into
+    three, and the panel reported "3 pane(s)" for a single open pane."""
+    for _pane in ("pane-a", "pane-b", "pane-c"):
+        store.set_live_total(
+            workspace,
+            store.live_session_key("sess-1"),
+            {"input": 43021704, "output": 33024, "calls": 46},
         )
-    live = store.snapshot(workspace)["workspace"]["live_by_pane"]
-    assert live["pane-a::sess-1"] == {"input": 10, "output": 20, "calls": 1}
+    live = store.snapshot(workspace)["workspace"]["live_by_session"]
+    assert live == {"sess-1": {"input": 43021704, "output": 33024, "calls": 46}}
 
 
-def test_forget_pane_drops_every_session_of_that_pane(store: TokensStore, workspace: str) -> None:
-    for session in ("sess-1", "sess-2"):
-        store.record(
-            workspace, source="cli", vendor="claude",
-            pane_id="pane-a", session_id=session,
-            input_tokens=10, output_tokens=20,
-        )
+def test_live_session_key_falls_back_to_the_session_file(store: TokensStore) -> None:
+    assert store.live_session_key("sess-1", "/logs/a.jsonl") == "sess-1"
+    assert store.live_session_key("", "/logs/a.jsonl") == "/logs/a.jsonl"
+    assert store.live_session_key("", "") == ""
+
+
+def test_drop_live_session_removes_only_that_session(
+    store: TokensStore, workspace: str
+) -> None:
+    store.set_live_total(workspace, "sess-1", {"input": 10, "output": 1, "calls": 1})
+    store.set_live_total(workspace, "sess-2", {"input": 20, "output": 2, "calls": 1})
+    store.drop_live_session(workspace, "sess-1")
+    assert set(store.snapshot(workspace)["workspace"]["live_by_session"]) == {"sess-2"}
+
+
+def test_set_live_total_never_touches_cumulative_global_or_checkpoints(
+    store: TokensStore, workspace: str, tmp_path: Path
+) -> None:
+    """The scanned events are already in the durable tallies."""
+    session_file = str(tmp_path / "sess-1.jsonl")
     store.record(
         workspace, source="cli", vendor="claude",
-        pane_id="pane-b", session_id="sess-3",
-        input_tokens=5, output_tokens=5,
+        pane_id="pane-a", session_id="sess-1",
+        input_tokens=10, output_tokens=20, dedup_key="e1",
+        ingestion_file=session_file,
+        ingestion_checkpoint={"kind": "jsonl", "offset": 100, "identity": "1:2"},
     )
-    store.forget_pane("pane-a")
-    live = store.snapshot(workspace)["workspace"]["live_by_pane"]
-    assert set(live) == {"pane-b::sess-3"}
+    before = store.snapshot(workspace)
+    ckpt_before = store.get_ingestion_checkpoint(session_file, workspace)
+
+    store.set_live_total(workspace, "sess-1", {"input": 5000, "output": 400, "calls": 9})
+    after = store.snapshot(workspace)
+
+    assert after["workspace"]["cumulative"] == before["workspace"]["cumulative"]
+    assert after["global"] == before["global"]
+    assert store.get_ingestion_checkpoint(session_file, workspace) == ckpt_before
 
 
 def test_reset_run_without_a_run_clears_the_live_tally(store: TokensStore, workspace: str) -> None:
@@ -353,8 +394,9 @@ def test_reset_run_without_a_run_clears_the_live_tally(store: TokensStore, works
         pane_id="pane-a", session_id="sess-1",
         input_tokens=10, output_tokens=20,
     )
+    store.set_live_total(workspace, "sess-1", {"input": 10, "output": 20, "calls": 1})
     snap = store.reset("run", workspace_path=workspace)
-    assert snap["workspace"]["live_by_pane"] == {}
+    assert snap["workspace"]["live_by_session"] == {}
     # Cumulative + global untouched, same as a run reset.
     assert snap["workspace"]["cumulative"]["totals"]["input"] == 10
     assert snap["global"]["all_time"]["input"] == 10
@@ -362,18 +404,14 @@ def test_reset_run_without_a_run_clears_the_live_tally(store: TokensStore, works
 
 def test_reset_run_with_a_run_keeps_the_live_tally(store: TokensStore, workspace: str) -> None:
     store.start_run(workspace, run_id="r1", task="t", run_dir="runs/r1")
-    store.record(
-        workspace, source="cli", vendor="claude",
-        pane_id="pane-a", session_id="sess-1",
-        input_tokens=10, output_tokens=20,
-    )
+    store.set_live_total(workspace, "sess-1", {"input": 10, "output": 20, "calls": 1})
     snap = store.reset("run", workspace_path=workspace)
     assert snap["workspace"]["current_run"]["totals"]["calls"] == 0
-    assert snap["workspace"]["live_by_pane"]["pane-a::sess-1"]["calls"] == 1
+    assert snap["workspace"]["live_by_session"]["sess-1"]["calls"] == 1
 
 
 def test_live_tally_is_not_persisted(tmp_path: Path) -> None:
-    """"This session" semantics: a restart starts the live tally over."""
+    """A restart starts from an empty cache; the first scan re-derives it."""
     kwargs = {
         "global_path": tmp_path / "global-tokens.json",
         "workspace_base_dir": tmp_path / "workspaces",
@@ -384,13 +422,14 @@ def test_live_tally_is_not_persisted(tmp_path: Path) -> None:
         ws, source="cli", vendor="claude", pane_id="pane-a", session_id="sess-1",
         input_tokens=10, output_tokens=20,
     )
+    store.set_live_total(ws, "sess-1", {"input": 10, "output": 20, "calls": 1})
     store.flush()
 
     snap = TokensStore(**kwargs).snapshot(ws)
-    assert snap["workspace"]["live_by_pane"] == {}
+    assert snap["workspace"]["live_by_session"] == {}
     # The durable tallies did survive.
     assert snap["workspace"]["cumulative"]["totals"]["input"] == 10
 
 
-def test_snapshot_without_a_workspace_still_has_live_by_pane(store: TokensStore) -> None:
-    assert store.snapshot(None)["workspace"]["live_by_pane"] == {}
+def test_snapshot_without_a_workspace_still_has_live_by_session(store: TokensStore) -> None:
+    assert store.snapshot(None)["workspace"]["live_by_session"] == {}

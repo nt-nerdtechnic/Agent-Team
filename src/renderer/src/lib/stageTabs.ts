@@ -82,12 +82,13 @@ export function buildStageTabs(input: StageTabInput): StageTabShape[] {
   // running, and unreachable from the one place that opens it, with the whole
   // strip gone when every pane was in that state. Surfacing the tab shows the
   // fault AND keeps the panes usable; the repair that puts the record back
-  // then renames it. Skipped in a detached window, which is one group's view.
-  // Handing a group to a detached child takes its panes with it, so a group in
-  // detachedGroupIds normally has none left here and nothing is rebuilt for it.
-  // If any DO remain, the two states disagree — and skipping them for the sake
-  // of the hand-off is what puts a pane on no tab. Reachability wins: this
-  // shows the panes this window actually holds.
+  // then renames it.
+  //
+  // Skipped in a detached window, which is one group's view. A group handed to
+  // a detached child normally has no panes left here either, so nothing gets
+  // rebuilt for it; if any DO remain the two states disagree, and skipping
+  // them for the sake of the hand-off is exactly what puts a pane on no tab.
+  // Reachability wins over the book-keeping.
   if (!isDetached) {
     for (const [gid, paneIds] of byGroup) {
       if (shapes.some((s) => s.key === gid)) continue
