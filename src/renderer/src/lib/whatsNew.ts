@@ -36,6 +36,51 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.92',
+    title: {
+      'zh-TW': '終端 @ 提及選單、原生 MCP/Memory 管理、Prompt Skills 與縮放重排優化',
+      'en-US': 'Terminal @-Mention Menu, Native MCP & Memory Panes, Prompt Skills & Resize Reflow Fixes',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '終端 @ 提及選單與冷還原修復：在終端輸入 @ 即時彈出跨面板與上下文候選選單，並修復冷還原面板註冊 handle 與深淺主題固定色盤適配。',
+        'en-US':
+          'Terminal @-Mention Menu & Lazy Restore Fix: popup mention menu for panes and context autocomplete on @, with lazy restore handle registration and terminal palette styling.',
+      },
+      {
+        'zh-TW':
+          '原生 MCP 伺服器與 Native Memory 管理面板：獨立視覺化面板支援 MCP 伺服器健康檢查、工具調用診斷與系統進程記憶體即時採樣分析。',
+        'en-US':
+          'Native MCP & Memory Management: dedicated visual panes for MCP server health diagnostics, tool inspection, and kernel-level memory monitoring.',
+      },
+      {
+        'zh-TW':
+          'Prompt Skills 懸浮技能選取器：終端頂部新增技能快捷輪播選單，支援懸浮預覽與一鍵施放常用 Prompt 技能。',
+        'en-US':
+          'Prompt Skills Hover Picker: quick carousel menu for invoking and previewing reusable prompt skills directly from the terminal.',
+      },
+      {
+        'zh-TW':
+          '終端寬度縮放雙層競態修復：引入 Ack Barrier 與 Generation Guard，徹底消除視窗縮放與 TUI 寬度重排時的畫面殘留問題。',
+        'en-US':
+          'Terminal Resize Reflow Dual-Race Fix: incorporates ack barrier and generation guard to prevent resize race conditions and frame residue.',
+      },
+      {
+        'zh-TW':
+          'Droid (Factory) CLI 正式整合：新增 Droid 官方支援，支援參數自訂、日誌串流與獨立進程生命週期管理。',
+        'en-US':
+          'Droid (Factory) CLI Vendor: official Droid integration with tailored settings, log streaming, and lifecycle management.',
+      },
+      {
+        'zh-TW':
+          'Preview 預覽面板日誌與 MCP 遠端讀取：環形緩衝區自動捕獲 Console 與 Network 請求，並提供 MCP 診斷工具。',
+        'en-US':
+          'Preview Console/Network Ingestion & MCP Tools: ring-buffer log capture for preview panels with remote MCP inspection tools.',
+      },
+    ],
+  },
+  {
     version: '0.1.91',
     title: {
       'zh-TW': '全新資源管理器、背景子代理追蹤、Loop 迴圈等待退避與日誌防護',

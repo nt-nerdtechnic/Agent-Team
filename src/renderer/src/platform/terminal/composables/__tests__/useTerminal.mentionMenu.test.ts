@@ -343,6 +343,29 @@ describe('useTerminal — @-mention menu', () => {
     expect(labels).toEqual(['Running', 'Idle'])
   })
 
+  it('opens for a roster of nothing but cold-restore placeholders', async () => {
+    // The situation after any restart: every other pane in the window is a
+    // placeholder, so none of them can report a status. Until they were given
+    // messaging handles this list was empty and the menu never opened at all —
+    // typing '@' looked like a dead key. Now it opens, and the hollow-dot path
+    // this file already describes finally runs against real candidates.
+    const placeholders: MentionCandidate[] = [
+      { address: 'Anroute-Geo', group: 'This window' },
+      { address: 'Anroute-Real', group: 'This window' },
+      { address: 'Anroute-QA', group: 'This window' },
+    ]
+    await openMenu(placeholders)
+
+    expect(document.querySelector('.term-mention-menu-root')).not.toBeNull()
+    const rows = Array.from(document.querySelectorAll('.term-mention-row')).map((e) => e.textContent)
+    expect(rows.length).toBe(3)
+    // Every dot is hollow and no row claims a status, rather than the menu
+    // guessing one for a pane it cannot ask.
+    const dots = Array.from(document.querySelectorAll<HTMLElement>('.term-mention-dot'))
+    expect(dots.map((d) => d.dataset.status)).toEqual([undefined, undefined, undefined])
+    expect(document.querySelectorAll('.term-mention-status').length).toBe(0)
+  })
+
   it('draws group headers only when they separate something', async () => {
     await openMenu()
     expect(
