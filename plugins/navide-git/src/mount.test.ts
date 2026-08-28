@@ -2,8 +2,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const state = vi.hoisted(() => {
-  let resolveSettings!: () => void
-  const settings = new Promise<void>((resolve) => { resolveSettings = resolve })
   const app = {
     use: vi.fn(),
     provide: vi.fn(),
@@ -13,9 +11,6 @@ const state = vi.hoisted(() => {
     app,
     createApp: vi.fn(() => app),
     initSettingsBackend: vi.fn(),
-    settingsReady: vi.fn(() => settings),
-    settings,
-    resolveSettings,
   }
 })
 
@@ -26,7 +21,6 @@ vi.mock('@navide/plugin-ui/shared', () => ({
   initKeybindingsPort: vi.fn(),
   initSettingsBackend: state.initSettingsBackend,
   seedSettings: vi.fn(),
-  settingsReady: state.settingsReady,
 }))
 vi.mock('./capabilityBackend', () => ({ useBackend: vi.fn(() => ({})) }))
 vi.mock('./sdkGitTransport', () => ({ createPluginGitTransport: vi.fn(() => ({})) }))
@@ -57,17 +51,13 @@ describe('Git plugin composition root', () => {
     })
   })
 
-  it('waits for the owned settings snapshot before creating the app', async () => {
-    const loading = import('./mount')
+  it('mounts and announces readiness while the owned settings snapshot is pending', async () => {
+    await import('./mount')
     await vi.waitFor(() => expect(state.initSettingsBackend).toHaveBeenCalledTimes(1))
 
-    expect(state.settingsReady).toHaveBeenCalledTimes(1)
-    expect(state.createApp).not.toHaveBeenCalled()
-
-    state.resolveSettings()
-    await loading
-    await vi.waitFor(() => expect(state.createApp).toHaveBeenCalledTimes(1))
-
+    expect(state.createApp).toHaveBeenCalledTimes(1)
     expect(state.app.mount).toHaveBeenCalledWith('#app')
+    expect((window as unknown as { nav?: { ready: ReturnType<typeof vi.fn> } }).nav?.ready)
+      .toHaveBeenCalledTimes(1)
   })
 })

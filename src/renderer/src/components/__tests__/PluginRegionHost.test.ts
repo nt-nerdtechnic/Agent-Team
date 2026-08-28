@@ -14,6 +14,13 @@ const contribution: PluginRegionContribution = {
   manifestOrder: 0,
 }
 
+const gitContribution: PluginRegionContribution = {
+  ...contribution,
+  pluginId: 'navide.git',
+  contributionKey: 'navide.git.left',
+  title: 'Git',
+}
+
 describe('PluginRegionHost', () => {
   let originalAgentTeam: typeof window.agentTeam
   let originalRect: PropertyDescriptor | undefined
@@ -69,6 +76,38 @@ describe('PluginRegionHost', () => {
     expect(closeContribution).toHaveBeenCalledWith({ contributionKey: 'acme.files.left' })
   })
 
+  it('converts CSS bounds to Electron DIP at a non-100% zoom factor', async () => {
+    const openContribution = vi.fn().mockResolvedValue({ ok: true })
+    const updateContribution = vi.fn().mockResolvedValue({ ok: true })
+    const closeContribution = vi.fn().mockResolvedValue({ ok: true })
+    const getZoomFactor = vi.fn().mockResolvedValue(1.25)
+    window.agentTeam = {
+      getZoomFactor,
+      plugins: { openContribution, updateContribution, closeContribution },
+    } as unknown as typeof window.agentTeam
+
+    const wrapper = mount(PluginRegionHost, { props: { contribution, workspacePath: '/workspace', visible: true } })
+    await flushPromises()
+
+    expect(openContribution).toHaveBeenCalledWith({
+      contributionKey: 'acme.files.left',
+      workspace_path: '/workspace',
+      bounds: { x: 8, y: 16, width: 240, height: 320 },
+    })
+
+    resizeCallback?.()
+    await flushPromises()
+    expect(updateContribution).toHaveBeenLastCalledWith({
+      contributionKey: 'acme.files.left',
+      bounds: { x: 8, y: 16, width: 240, height: 320 },
+      visible: true,
+    })
+    expect(getZoomFactor).toHaveBeenCalledOnce()
+
+    wrapper.unmount()
+    await flushPromises()
+  })
+
   it('closes a view when unmount races an in-flight open', async () => {
     let resolveOpen: ((value: { ok: boolean }) => void) | undefined
     const openContribution = vi.fn().mockImplementation(
@@ -119,5 +158,46 @@ describe('PluginRegionHost', () => {
 
     wrapper.unmount()
     await flushPromises()
+  })
+
+  it('prewarms Git while hidden and activates the same instance after first open', async () => {
+    const ensureContribution = vi.fn().mockResolvedValue({ ok: true })
+    const openContribution = vi.fn().mockResolvedValue({ ok: true })
+    const updateContribution = vi.fn().mockResolvedValue({ ok: true })
+    const closeContribution = vi.fn().mockResolvedValue({ ok: true })
+    window.agentTeam = {
+      plugins: { ensureContribution, openContribution, updateContribution, closeContribution },
+    } as unknown as typeof window.agentTeam
+
+    const wrapper = mount(PluginRegionHost, {
+      props: { contribution: gitContribution, workspacePath: '/workspace', visible: false, prewarm: true },
+    })
+    await flushPromises()
+
+    expect(ensureContribution).toHaveBeenCalledWith({
+      contributionKey: 'navide.git.left',
+      workspace_path: '/workspace',
+    })
+    expect(openContribution).not.toHaveBeenCalled()
+
+    await wrapper.setProps({ visible: true })
+    await flushPromises()
+    expect(openContribution).not.toHaveBeenCalled()
+    expect(updateContribution).toHaveBeenLastCalledWith({
+      contributionKey: 'navide.git.left',
+      bounds: { x: 10, y: 20, width: 300, height: 400 },
+      visible: true,
+    })
+
+    await wrapper.setProps({ visible: false })
+    await flushPromises()
+    expect(updateContribution).toHaveBeenLastCalledWith({
+      contributionKey: 'navide.git.left',
+      bounds: { x: 10, y: 20, width: 300, height: 400 },
+      visible: false,
+    })
+    wrapper.unmount()
+    await flushPromises()
+    expect(closeContribution).toHaveBeenCalledWith({ contributionKey: 'navide.git.left' })
   })
 })

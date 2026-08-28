@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { parseLegacyRunGroups, resolveActiveTab, resolveManualSpawnGroupId } from '../runGroups'
+import {
+  parseLegacyRunGroups,
+  resolveActiveTab,
+  resolveManualSpawnGroupId,
+  runGroupCreatedAt,
+} from '../runGroups'
 
 describe('resolveActiveTab', () => {
   const groups = [{ id: 'rg-default' }, { id: 'rg-1' }, { id: 'rg-2' }]
@@ -41,6 +46,43 @@ describe('resolveManualSpawnGroupId', () => {
 
   it('does not assign a stale tab to an unrelated run', () => {
     expect(resolveManualSpawnGroupId(groups, 'missing')).toBe('')
+  })
+})
+
+describe('runGroupCreatedAt', () => {
+  const NOW = 1_800_000_000_000
+
+  it('recovers the minting time from an `rg-<epoch ms>` id', () => {
+    // A rebuilt group sorts where it always belonged instead of after every
+    // group made since.
+    expect(runGroupCreatedAt('rg-1755000000000', NOW)).toBe(1755000000000)
+  })
+
+  it('takes now for the fixed default id, which carries no time', () => {
+    expect(runGroupCreatedAt('rg-default', NOW)).toBe(NOW)
+  })
+
+  it('takes now for an id from some other scheme', () => {
+    expect(runGroupCreatedAt('run-1755000000000', NOW)).toBe(NOW)
+    expect(runGroupCreatedAt('', NOW)).toBe(NOW)
+    expect(runGroupCreatedAt('rg-', NOW)).toBe(NOW)
+  })
+
+  it('takes now rather than trusting a nonsensical stamp', () => {
+    expect(runGroupCreatedAt('rg--5', NOW)).toBe(NOW)
+    expect(runGroupCreatedAt('rg-0', NOW)).toBe(NOW)
+    expect(runGroupCreatedAt('rg-abc', NOW)).toBe(NOW)
+    expect(runGroupCreatedAt('rg-1.5', NOW)).toBe(NOW)
+    // Beyond Number.MAX_SAFE_INTEGER the value read back is not the value
+    // written, so it is no better evidence than now.
+    expect(runGroupCreatedAt('rg-99999999999999999999', NOW)).toBe(NOW)
+  })
+
+  it('defaults to the wall clock when no time is passed', () => {
+    const before = Date.now()
+    const got = runGroupCreatedAt('rg-default')
+    expect(got).toBeGreaterThanOrEqual(before)
+    expect(got).toBeLessThanOrEqual(Date.now())
   })
 })
 

@@ -10,6 +10,9 @@ import { CLI_CONTEXT_MIME, PANE_BATCH_MIME, PANE_ID_MIME, resolveCliDropSources,
 import type { MentionCandidate } from '@navide/terminal'
 import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
+import PromptSkillPicker from './PromptSkillPicker.vue'
+import { usePromptSkills } from '../composables/usePromptSkills'
+import { castablePromptSkills } from '../lib/promptSkills'
 import { paneStatusLabelKey } from '../lib/paneStatusLabel'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import { i18n } from '@navide/plugin-ui/foundation'
@@ -103,8 +106,10 @@ const emit = defineEmits<{
   /** A plan document was dropped onto this pane's terminal area — App.vue
    *  pastes the plan goal + execution instruction into this pane's input. */
   (e: 'plan-drop', ref: PlanDragRef): void
-  /** Loop button clicked — App.vue injects the loop prompt or clears the badge. */
-  (e: 'toggle-loop'): void
+  /** Loop button clicked — App.vue injects the loop prompt or clears the badge.
+   *  `skillId` is set only when the cast came from the skill picker; a plain
+   *  click still emits with no argument and keeps its original meaning. */
+  (e: 'toggle-loop', skillId?: string): void
   /** Waiting badge clicked — App.vue injects the resume prompt immediately
    *  instead of waiting for the scheduled quota reset. */
   (e: 'loop-resume-now'): void
@@ -490,6 +495,12 @@ function onHeaderDrop(e: DragEvent): void {
   emit('reorder-drop', draggedId)
 }
 
+const { skills: promptSkills } = usePromptSkills()
+/** The skill picker is showing (or about to). The header's own native tooltip
+ *  would otherwise be drawn on top of the ring. */
+const skillMenuActive = ref(false)
+const castableSkills = computed(() => castablePromptSkills(promptSkills.value))
+
 /** Single source for the loop badge's 3-way state machine (waiting /
  *  estimate / plain): which i18n keys to render and the formatted time they
  *  interpolate — the template's text and tooltip both read from here. */
@@ -538,7 +549,7 @@ onMounted(() => {
     <header
       :class="['pane-header', { 'drag-over': isReorderDragOver }]"
       :draggable="!editingTitle"
-      :title="$t('pane.terminal.drag-to-tab-tooltip')"
+      :title="skillMenuActive ? '' : $t('pane.terminal.drag-to-tab-tooltip')"
       @click="emit('set-focus', $event)"
       @dragstart="onHeaderDragStart"
       @dragend="onHeaderDragEnd"
@@ -580,13 +591,18 @@ onMounted(() => {
           :title="$t(loopBadge.titleKey, { time: loopBadge.time })"
           @click="onLoopBadgeClick"
         >{{ loopBadge.textKey ? $t(loopBadge.textKey, { time: loopBadge.time }) : '∞ Loop' }}</span>
-        <button
+        <PromptSkillPicker
           v-if="!loopActive && displayStatus !== 'exited' && displayStatus !== 'error'"
-          class="loop-btn"
-          @click.stop="emit('toggle-loop')"
-          :title="$t('pane.terminal.loop-tooltip')"
-          :aria-label="$t('pane.terminal.loop-tooltip')"
-        >∞</button>
+          :skills="castableSkills"
+          @cast="(id: string) => emit('toggle-loop', id)"
+          @active="(v: boolean) => (skillMenuActive = v)"
+        >
+          <button
+            class="loop-btn"
+            @click.stop="emit('toggle-loop')"
+            :aria-label="$t('pane.terminal.loop-tooltip')"
+          >∞</button>
+        </PromptSkillPicker>
         <span
           v-if="loginExpired"
           class="login-expired-inline"

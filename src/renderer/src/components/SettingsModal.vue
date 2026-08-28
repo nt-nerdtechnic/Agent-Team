@@ -83,6 +83,7 @@ import ExtensionsPane from './ExtensionsPane.vue'
 import StorageUsagePane from './StorageUsagePane.vue'
 import LayoutSettingsPane from '../layout/LayoutSettingsPane.vue'
 import SkillsPane from './SkillsPane.vue'
+import PromptSkillsPane from './PromptSkillsPane.vue'
 import SettingsNavItem from './settings/SettingsNavItem.vue'
 import SettingsSection from './settings/SettingsSection.vue'
 import SettingsCard from './settings/SettingsCard.vue'
@@ -163,7 +164,7 @@ const reclaimNowCount = computed(() => props.reclaimableNowCount ?? 0)
 const reclaimNowSize = computed(() => formatBytes(props.reclaimableNowBytes ?? 0))
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
+type Tab = 'mcp' | 'skills' | 'prompts' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
 type HelpTopic = 'messaging' | 'mcp'
@@ -311,6 +312,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     group: 'Integrations',
     summary: 'Create, edit, enable, disable, and inspect app-managed agent skills.',
     keywords: 'skills skill agent instructions markdown enable disable attachments 技能 指令 啟用 停用 附件',
+  },
+  {
+    id: 'prompts',
+    tab: 'prompts',
+    section: 'prompts',
+    title: 'Prompt Skills / Prompt 技能',
+    group: 'Integrations',
+    summary: 'Create and edit the prompt skills a CLI pane can cast from its loop button.',
+    keywords: 'prompt skills loop 技能 提示詞 迴圈 循環 按鈕 預設 preset resume 續跑 輪次 max turns',
   },
   {
     id: 'analyzer-backend',
@@ -775,6 +785,7 @@ type SettingsTab = Exclude<Tab, 'help'>
 const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof SettingsPaths | 'localStorage' | 'mainProcess' | 'safeStorage' }> = {
   mcp: { scope: 'User', storage: 'mcp' },
   skills: { scope: 'User', storage: 'skills' },
+  prompts: { scope: 'User', storage: 'localStorage' },
   analyzer: { scope: 'User', storage: 'analyzer' },
   cliAgents: { scope: 'User', storage: 'localStorage' },
   general: { scope: 'User', storage: 'localStorage' },
@@ -1924,6 +1935,11 @@ watch(activeTab, (tab) => {
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.2h4.2v4.2H3zM8.8 3.2H13v4.2H8.8zM3 9H7.2v3.8H3z"/><path d="M10.9 9v3.8M9 10.9h3.8"/></svg>
                 </template>
               </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.prompts')" :active="activeTab === 'prompts'" @select="activeTab = 'prompts'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.6" y="2.6" width="12.8" height="10.8" rx="1.6"/><path d="M4.6 6.2 6.8 8.2l-2.2 2"/><path d="M8.6 10.4h3"/></svg>
+                </template>
+              </SettingsNavItem>
               <SettingsNavItem :label="$t('settings.nav.extensions')" :active="activeTab === 'extensions'" @select="activeTab = 'extensions'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 2.6h3.2v1.5a1.3 1.3 0 0 0 2.4 0V2.6h1.4v3.2h-1.5a1.3 1.3 0 0 0 0 2.4h1.5v3.2H6.4v-1.5a1.3 1.3 0 0 0-2.4 0v1.5H2.6V8.2h1.5a1.3 1.3 0 0 0 0-2.4H2.6V2.6h3.8Z"/></svg>
@@ -2267,6 +2283,15 @@ watch(activeTab, (tab) => {
             <button class="settings-path-btn" :disabled="!settingsPaths.skills" @click="openSettingsPath(settingsPaths.skills)">{{ $t('action.open') }}</button>
           </div>
           <SkillsPane :backend="props.backend" />
+        </div>
+
+        <!-- ── PROMPTS TAB ──────────────────────────────────────────────── -->
+        <div v-show="activeTab === 'prompts'" class="s-body s-body--bleed" data-settings-section="prompts">
+          <h1 class="s-page-title">{{ $t('settings.nav.prompts') }}</h1>
+          <div class="settings-meta-row">
+            <span class="scope-badge">{{ settingsScopeNotes.prompts.scope }}</span>
+          </div>
+          <PromptSkillsPane />
         </div>
 
         <!-- ── ANALYZER TAB ─────────────────────────────────────────────── -->

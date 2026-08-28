@@ -412,8 +412,6 @@ class TerminalService:
         # maxlen only bounds memory against pathological tiny reads; the
         # window itself is trimmed by time in _window_bytes.
         self._recent_chunks: dict[str, deque[tuple[float, int]]] = {}
-        # TEMP DIAGNOSTIC (2026-08-27): last winsize pushed per session.
-        self._last_winsize: dict[str, tuple[int, int]] = {}
         # Latency probe state (see _ECHO_LAG_WARN_MS).  session_id -> loop time
         # of the keystroke whose echo is still outstanding.  Only the FIRST
         # keystroke of a burst is timed: a fast typist would otherwise keep
@@ -741,16 +739,6 @@ class TerminalService:
         session = self._require(session_id)
         if session.closed:
             return
-        prev = self._last_winsize.get(session_id)
-        self._last_winsize[session_id] = (cols, rows)
-        # TEMP DIAGNOSTIC (2026-08-27): a PTY probe showed Claude Code repaints
-        # on any COLS change and ignores a rows-only one, so a pane that does
-        # not reflow means cols never actually changed down here. Logs what the
-        # winsize really went to, and whether the width moved at all.
-        log.info(
-            "terminal.resize %s -> cols=%d rows=%d (was %s) width_changed=%s",
-            session_id[:8], cols, rows, prev, prev is None or prev[0] != cols,
-        )
         self._set_winsize(session.master_fd, rows, cols)
 
     def force_redraw(self, session_id: str, cols: int, rows: int) -> None:

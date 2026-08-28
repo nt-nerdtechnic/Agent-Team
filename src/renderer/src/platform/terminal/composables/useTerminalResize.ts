@@ -93,46 +93,41 @@ export function createResizeController(
     resizeFrameTimer = setTimeout(fire, 100)
   }
 
-  // Wipe the TUI's divider lines just before the PTY learns its new width.
+  // Unfold the prompt frame's divider after a narrowing.
   //
-  // Claude Code repaints on SIGWINCH but never clears first: a recording of its
-  // output across a resize has ESC[2J and ESC[K zero times — it homes the
-  // cursor and draws over whatever is there. That works while the width holds
-  // still. When it changes, the new frame no longer covers the old one, and the
-  // previous width's divider survives beside the new one: the stray short rule
-  // under the prompt, measured live as a 94-column rule left over after a
-  // widen to 105.
+  // SCOPE: the prompt frame at the bottom of the screen, nothing else. The
+  // scrollback is never touched and no content line is ever considered.
   //
-  // Only lines that are ENTIRELY box-drawing horizontals are touched. They
-  // carry no information — the CLI redraws them as part of the frame — so
-  // erasing one can lose nothing, which is what makes this safe to do blind.
-  // Content lines are never considered, and the cursor is saved and restored so
-  // the CLI's own position is undisturbed.
+  // Narrowing makes xterm fold a full-width divider onto a second row, and that
+  // remainder row is what shows as a stray half-length line under the prompt.
+  // DELETE the row (ESC[1M) rather than blank it (ESC[2K): blanking leaves the
+  // row in place, and since Claude Code paints with absolute coordinates, the
+  // extra row pushes its whole frame down — that attempt broke the input area
+  // outright. Deleting restores the row count the CLI is drawing against.
   //
-  // Runs BEFORE sendResizeNow: the SIGWINCH that follows is what makes the CLI
-  // repaint, so the old rules have to be gone by the time the new frame lands.
+  // Bottom-up so each deletion cannot shift a row still to be examined.
   const RULE_ONLY = /^[\u2500-\u257f\u2014\u2015-]+$/
-  function eraseStaleRules(): void {
-    // Self-contained try/catch ON PURPOSE. The caller wraps fit + sendResizeNow
-    // in one catch, so anything thrown here would swallow the resize itself and
-    // the PTY would never learn its new width — a cosmetic cleanup must never
-    // be able to break sizing. (Caught in tests, where the mocked buffer has no
-    // viewportY: every resize silently stopped being sent.)
+  // How far up from the last row the prompt frame can reach.
+  const PROMPT_FRAME_ROWS = 12
+  function unfoldPromptDivider(): void {
+    // Self-contained: the caller wraps fit + sendResizeNow in one catch, and a
+    // cosmetic tidy must never be able to swallow the resize itself.
     try {
       const buf = term.buffer?.active
       if (!buf || buf.type === 'alternate') return
       const top = buf.viewportY
       if (typeof top !== 'number' || !Number.isFinite(top)) return
+      const first = Math.max(0, term.rows - PROMPT_FRAME_ROWS)
       const out: string[] = []
-      for (let y = 0; y < term.rows; y++) {
-        const text = buf.getLine(top + y)?.translateToString(true).trim() ?? ''
-        if (text.length >= 3 && RULE_ONLY.test(text)) out.push(`\x1b[${y + 1};1H\x1b[2K`)
+      for (let y = term.rows - 1; y >= first; y--) {
+        const line = buf.getLine(top + y)
+        if (!line?.isWrapped) continue        // only a fold, never a drawn line
+        const text = line.translateToString(true).trim()
+        if (text.length >= 1 && RULE_ONLY.test(text)) out.push(`\x1b[${y + 1};1H\x1b[1M`)
       }
       if (!out.length) return
-      // ESC 7 / ESC 8 (DECSC/DECRC) rather than CSI s/u: the latter collides
-      // with the left-right-margin sequence when DECLRMM is on.
       term.write(`\x1b7${out.join('')}\x1b8`)
-    } catch { /* cosmetic only — never let this affect the resize */ }
+    } catch { /* cosmetic only */ }
   }
 
   // Single source of truth for sizing: fit xterm to its container, then push
@@ -173,7 +168,7 @@ export function createResizeController(
         // the same tradeoff VSCode's integrated terminal accepts.
         const colsBefore = term.cols
         fit.fit()
-        if (term.cols !== colsBefore) eraseStaleRules()
+        if (term.cols < colsBefore) unfoldPromptDivider()   // narrowing only
         sendResizeNow()
       } catch { /* ignore transient fit errors during teardown */ }
     }

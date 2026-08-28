@@ -54,9 +54,12 @@ Production Git Package 透過 Host-owned argv Allowlist 在本機執行 `git`、
 Credential 保留在 Host 保護的本機 Account Store 或 CLI 自己的 Credential
 Flow，不會寫入 Plugin Renderer Storage。隔離的 v2 Git Renderer 只會取得非
 Secret 的 Account Metadata 與 Workspace Binding State。Remote Git Operation
-送往 Backend 前，才由 Host 注入綁定的 Credential；沒有 Binding 時會以
-`CREDENTIAL_REQUIRED` 失敗，並引導使用者開啟 Host Git Accounts UI。v2
-Renderer 不能送出原始 Git Credential Prompt，也不能接收 Credential Event。
+送往 Backend 前，才由 Host 注入綁定的 Credential。即使 Workspace 沒有綁定
+Host Account，v2 仍可使用由 Host 擁有的 Interactive Credential Flow：Host
+會為該次 Operation 建立不透明且綁定 Instance 的 Owner，只把 Git Prompt
+轉送給發起它的 Git View，並在接受回覆前驗證 Request Ownership。輸入的
+Secret 只在這次 Exchange 中暫存，絕不保存到 Plugin Storage；來自其他 View
+或其他 Workspace 的 Credential Response 會被拒絕。
 
 只要仍有已安裝的 marketplace plugin，Navide 會在 App 啟動時及每 15
 分鐘，將該 Plugin 的 namespace/name 傳送給所選的 Registry。這個 Request

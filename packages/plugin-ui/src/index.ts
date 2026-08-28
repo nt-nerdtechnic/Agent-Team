@@ -129,7 +129,7 @@ export function createAiCliSessionController(context: AiCliPluginContext): AiCli
     },
     async stop() {
       const active = requireSession()
-      await context.capabilities.invoke('aiCli.stopSession', { sessionId: active })
+      await context.capabilities.invoke('aiCli.stopSession', { sessionId: active, force: true })
       if (sessionId === active) {
         sessionId = null
         profileId = null

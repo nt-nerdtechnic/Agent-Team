@@ -31,6 +31,7 @@ import httpx
 
 from agent_team_backend.applog import app_data_dir
 from agent_team_backend import commit_message_prompt
+from agent_team_backend.git_security import is_remote_helper_form
 from agent_team_backend.host_shell import run_allowlisted, run_allowlisted_text
 from agent_team_backend.pending_registry import TIMEOUT, PendingRegistry
 
@@ -44,12 +45,6 @@ _DISCOVERY_SCAN_BUDGET_S = 5.0
 
 # Only allow https/http and SSH-style URLs; block git pseudo-protocols (ext::, fd::, file://, etc.)
 _SAFE_GIT_URL = re.compile(r"^(https?://|ssh://|git@[\w.\-]+:)")
-
-# git's "transport::address" remote-helper syntax (ext::, fd::, …) can execute
-# arbitrary commands via the helper. Block that form while still allowing
-# http(s)/ssh/git@ URLs and local filesystem paths (used by clone_repo).
-_GIT_REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*::")
-
 
 # ─── Data classes ─────────────────────────────────────────────────────────────
 
@@ -2533,7 +2528,7 @@ async def clone_repo(
         return {"ok": False, "path": "", "error": "invalid repository URL"}
     if credential is not None and not _credential_matches_https_url(credential, url):
         return {"ok": False, "path": "", "error": "credential destination rejected"}
-    if _GIT_REMOTE_HELPER_RE.match(url):
+    if is_remote_helper_form(url):
         # Block ext::/fd:: remote-helper URLs that can run arbitrary commands,
         # while still permitting http(s)/ssh/git@ URLs and local paths.
         return {"ok": False, "path": "", "error": "unsupported repository URL scheme"}

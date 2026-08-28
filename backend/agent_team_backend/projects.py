@@ -1096,17 +1096,22 @@ class ProjectStore:
         *,
         pane_id: str,
         run_group_id: str,
-    ) -> Project:
+    ) -> Project | None:
         """Reassign a pane (pipeline or manual) to a run group / tab.
 
         Looks up by pane_id across all panes regardless of origin. An empty
         run_group_id is allowed (moves the pane to the ungrouped/手動 tab).
-        No-op if the pane isn't found.
+
+        Returns None when no record matches pane_id. Returning the project
+        made a miss indistinguishable from a write that landed, and the
+        frontend reads that as success: it drops the pane's group id in memory
+        while the record on disk keeps it, so the assignment comes back on the
+        next restore and the pane lands on a tab that no longer matches.
         """
         project = self.load_or_create(workspace_path)
         pane = next((p for p in project.panes if p.pane_id == pane_id), None)
         if pane is None:
-            return project
+            return None
         pane.run_group_id = run_group_id
         self.save(project)
         return project

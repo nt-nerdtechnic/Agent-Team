@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { generateKeyPairSync, sign as edSign } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -4164,6 +4164,125 @@ describe('first-party Git private bridge', () => {
     } finally {
       rmSync(workspacePath, { recursive: true, force: true })
       rmSync(outsidePath, { recursive: true, force: true })
+    }
+  })
+
+  it('prewarms Git hidden, deactivated, and reuses the instance when opened', async () => {
+    const mgr = new FrontendPluginManager()
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-prewarm-workspace-'))
+    try {
+      const descriptor = gitDescriptor(mgr, workspacePath, 'git-left')
+      mgr.registerDescriptor(descriptor, { builtin: true })
+      mgr.setCapabilityGrantResolver(() => descriptor.capabilityContext?.userGrant ?? null)
+      const host = new FakeBrowserWindow()
+
+      await expect(mgr.ensureContribution(asHost(host), 'navide.git.left', {
+        workspacePath,
+        capabilityContext: descriptor.capabilityContext,
+      })).resolves.toEqual({ ok: true })
+
+      const hidden = host.children[0] as FakeViewLike
+      expect(hidden.visible).toBe(false)
+      const running = (mgr as unknown as {
+        running: Map<string, { view: FakeViewLike }>
+        contributionInstances: Map<string, { instanceId: string }>
+      }).running
+      const instanceId = [...running.keys()][0]
+      expect(instanceId).toBeDefined()
+      ;(mgr as unknown as {
+        dispatchEvent(event: string, payload: unknown): void
+      }).dispatchEvent('git.changed', { workspace_path: workspacePath, changes_count: 4 })
+      expect(hidden.webContents.sent).toContainEqual({
+        channel: 'plugin:cap:event',
+        args: [{ type: 'git.changed', data: { workspace_path: workspacePath, changes_count: 4 } }],
+      })
+
+      await expect(mgr.openContribution(asHost(host), 'navide.git.left', {
+        workspacePath,
+        bounds: { x: 0, y: 0, width: 320, height: 480 },
+        capabilityContext: descriptor.capabilityContext,
+      })).resolves.toEqual({ ok: true })
+      expect(hidden.visible).toBe(true)
+      expect([...running.keys()]).toEqual([instanceId])
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects first-party filesystem mutations inside the Git metadata tree', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-mutation-workspace-'))
+    try {
+      mkdirSync(join(workspacePath, '.git'))
+      writeFileSync(join(workspacePath, '.git', 'config'), '[core]\n')
+      writeFileSync(join(workspacePath, 'ordinary.txt'), 'ordinary')
+      const { mgr, view } = await openGitView(workspacePath)
+      mgr.setBackendWsUrl('ws://git-mutation-boundary-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+
+      const requests = [
+        {
+          type: 'fs.write_file',
+          payload: { workspace_path: workspacePath, rel_path: '.git/config', content: 'changed' },
+        },
+        {
+          type: 'fs.write_file',
+          payload: { workspace_path: workspacePath, rel_path: '.git\\config', content: 'changed' },
+        },
+        {
+          type: 'fs.delete',
+          payload: { workspace_path: workspacePath, rel_path: '.git/config' },
+        },
+        {
+          type: 'fs.rename',
+          payload: { workspace_path: workspacePath, src_rel: 'ordinary.txt', dst_rel: '.git/moved' },
+        },
+        {
+          type: 'fs.rename',
+          payload: { workspace_path: workspacePath, src_rel: '.git/config', dst_rel: 'moved' },
+        },
+      ] as const
+
+      for (const [index, request] of requests.entries()) {
+        await expect(call(view, 'fs.request', request, `git-mutation-${index}`)).resolves.toMatchObject({
+          ok: false,
+          error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+        })
+      }
+      expect(socket.sent).toEqual([])
+      expect(readFileSync(join(workspacePath, 'ordinary.txt'), 'utf8')).toBe('ordinary')
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects public fs.writeFile before it reaches the backend for Git metadata', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-public-fs-workspace-'))
+    try {
+      mkdirSync(join(workspacePath, '.git'))
+      writeFileSync(join(workspacePath, '.git', 'config'), '[core]\n')
+      const { mgr } = await openGitView(workspacePath)
+      mgr.setBackendWsUrl('ws://public-fs-mutation-boundary-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+      const runtime = (
+        mgr as unknown as {
+          running: Map<string, { capabilityContext: HostCapabilityContext }>
+        }
+      ).running.get([...(
+        mgr as unknown as { running: Map<string, unknown> }
+      ).running.keys()][0]!)!.capabilityContext.runtimeBinding!
+
+      await expect(mgr.executePublicCapability({
+        kind: 'public',
+        address: 'fs.writeFile',
+        scope: 'workspace',
+        runtime,
+        args: { path: '.git/config', content: 'changed' },
+      })).rejects.toThrow(/Git metadata/)
+      expect(socket.sent).toEqual([])
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
     }
   })
 

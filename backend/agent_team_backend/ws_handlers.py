@@ -37,7 +37,7 @@ from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID, vault_to_thread
-from .host_shell import parse_public_allowlisted_command, run_allowlisted_text
+from .host_shell import parse_public_allowlisted_command, run_public_allowlisted_text
 from .mcp_settings import (
     MCPSettingsConflictError,
     MCPSettingsError,
@@ -3709,24 +3709,33 @@ async def shell_run(session: "Session", msg_id: str, msg_type: str, payload: dic
         if not isinstance(ws_path, str) or not ws_path.strip():
             await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "workspace path is required"}))
             return
-        try:
-            argv = parse_public_allowlisted_command(cmd)
-        except ValueError as exc:
-            await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": str(exc)}))
-            return
         resolved_cwd = app.Path(ws_path).resolve()
         known_roots = [app.Path(w).resolve() for w in app.attribution.known_workspaces()]
-        cwd_allowed = any(
+        registered_root = next((root for root in known_roots if (
             resolved_cwd == root or resolved_cwd.is_relative_to(root)
-            for root in known_roots
-        )
+        )), None)
+        cwd_allowed = registered_root is not None
         if not cwd_allowed:
             await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "workspace path not registered"}))
             return
         if resolved_cwd and not resolved_cwd.is_dir():
             await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "invalid workspace path"}))
             return
-        rc, stdout, stderr = await run_allowlisted_text(argv, str(resolved_cwd), timeout=30.0)
+        try:
+            argv = parse_public_allowlisted_command(
+                cmd,
+                cwd=str(resolved_cwd),
+                workspace_root=str(registered_root),
+            )
+        except ValueError as exc:
+            await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": str(exc)}))
+            return
+        rc, stdout, stderr = await run_public_allowlisted_text(
+            argv,
+            str(resolved_cwd),
+            workspace_root=str(registered_root),
+            timeout=30.0,
+        )
         await session.send_json(make_response(msg_id, msg_type, {
             "ok": True,
             "output": stdout[:8000],
@@ -4448,6 +4457,18 @@ async def _terminal_create_impl(
         transaction["attribution_future"] = attribution_future
         transaction["attribution_started"] = True
         await asyncio.shield(attribution_future)
+        # The live "THIS SESSION" tally is process-lifetime only, so a resumed
+        # session reads 0 after a backend restart. Now that the pane owns this
+        # session id, re-derive its real total from the vendor log. Fire and
+        # forget — a multi-MB parse must not delay the create ack below.
+        app.schedule_live_token_backfill(
+            workspace_path=ws_for_pane,
+            pane_id=term.pane_id,
+            # Same bucket key the token sink uses (slot_key or pane_id).
+            bucket_pane_key=app._stable_pane_key(metadata, "") or term.pane_id,
+            vendor=agent_key,
+            session_id=explicit_session_id,
+        )
     if transaction["cancelled"]:
         raise _TerminalCreateCancelled
     if getattr(term, "closed", False):
@@ -5866,6 +5887,19 @@ async def pane_set_run_group(session: "Session", msg_id: str, msg_type: str, pay
         pane_id=payload["pane_id"],
         run_group_id=payload.get("run_group_id", ""),
     )
+    if project is None:
+        # Say so rather than answering ok: the caller acts on this reply by
+        # dropping the pane's group id locally, which must not happen when
+        # nothing was written.
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "PANE_NOT_FOUND",
+                f"no pane record for {payload['pane_id']!r} in this workspace",
+            )
+        )
+        return
     await session.send_json(
         make_response(msg_id, msg_type, app._project_payload(project))
     )

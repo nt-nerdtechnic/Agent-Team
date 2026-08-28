@@ -47,6 +47,10 @@ describe('public Vue plugin UI controllers', () => {
 
     await controller.start('codex', 100, 30)
     await controller.stop()
+    expect(invoke).toHaveBeenNthCalledWith(2, 'aiCli.stopSession', {
+      sessionId: 'session-1',
+      force: true,
+    })
     expect(disposeOutput).not.toHaveBeenCalled()
     expect(disposeExit).not.toHaveBeenCalled()
 

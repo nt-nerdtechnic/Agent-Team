@@ -1935,6 +1935,28 @@ ipcMain.handle('plugins:openContribution', async (event, args: Record<string, un
   })
 })
 
+/** Prewarm a contribution without assigning it visible geometry. This is used
+ * by the first-party Git slot so backend change events reach a live instance
+ * even while the user is on another sidebar tab. */
+ipcMain.handle('plugins:ensureContribution', async (event, args: Record<string, unknown>) => {
+  const hostWindow = trustedPluginRegionHost(event)
+  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
+  const workspacePath = hostWindow
+    ? registeredGitLeftWorkspace(
+      hostWindow,
+      args?.workspace_path,
+      mainWindowWorkspaces,
+      normalizeWorkspacePath,
+    )
+    : null
+  if (!hostWindow || !contributionKey || !workspacePath) return { ok: false }
+  await prepareCatalogContribution(contributionKey)
+  return frontendPluginManager.ensureContribution(hostWindow, contributionKey, {
+    workspacePath,
+    query: catalogContributionQuery(contributionKey, workspacePath),
+  })
+})
+
 /** Open a catalog window contribution in a dedicated BrowserWindow. Only the
  * trusted main renderer may request this; the opaque plugin instance remains
  * entirely in the main process. */
@@ -1956,7 +1978,7 @@ ipcMain.handle('plugins:updateContribution', (event, args: Record<string, unknow
   const hostWindow = trustedPluginRegionHost(event)
   const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
   const bounds = pluginBoundsFrom(args?.bounds)
-  if (!hostWindow || !contributionKey || !bounds) return { ok: false }
+  if (!hostWindow || !contributionKey || (args.visible === true && !bounds)) return { ok: false }
   return frontendPluginManager.updateContribution(
     hostWindow,
     contributionKey,

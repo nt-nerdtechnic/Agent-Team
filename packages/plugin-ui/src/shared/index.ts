@@ -4,7 +4,9 @@ export {
   onSettingsChanged,
   seedSettings,
   settingsGet,
+  settingsReadiness,
   settingsReady,
+  retrySettings,
   settingsRemove,
   settingsSet,
   SETTINGS_FLUSH_DEBOUNCE_MS,
@@ -12,7 +14,7 @@ export {
   PURGED_LOCALSTORAGE_KEYS,
   PURGED_LOCALSTORAGE_PREFIXES,
 } from './lib/settings'
-export type { SettingsBackend } from './lib/settings'
+export type { SettingsBackend, SettingsReadinessStatus } from './lib/settings'
 
 export type { KeybindingsPort } from './ports/keybindings'
 export type { PortError, PortResponse } from './ports/response'

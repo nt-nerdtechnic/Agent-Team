@@ -47,6 +47,7 @@ import {
 import type { GitWorkspaceGrantPort } from './ports/gitSurface'
 import GitHistoryModal from './components/GitHistoryModal.vue'
 import GitCredentialModal from './components/GitCredentialModal.vue'
+import SettingsReadinessNotice from './components/SettingsReadinessNotice.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
@@ -1359,6 +1360,7 @@ registerCommand('git.focusAgent', () => {
 
 <template>
   <div class="git-window">
+    <SettingsReadinessNotice />
     <!-- ── Toolbar ────────────────────────────────────────────────────── -->
     <header class="toolbar">
       <span class="wm">Navide Git</span>

@@ -175,9 +175,7 @@ function validateSessionRequest(value: unknown): value is Record<string, unknown
 
 function validateReattachRequest(value: unknown): value is Record<string, unknown> {
   if (!isRecord(value) || !hasOnlyKeys(value, ['sessionId', 'cols', 'rows'])) return false
-  return nonEmptyString(value.sessionId) &&
-    ((positiveInteger(value.cols) && positiveInteger(value.rows)) ||
-      (value.cols === 0 && value.rows === 0))
+  return nonEmptyString(value.sessionId) && positiveInteger(value.cols) && positiveInteger(value.rows)
 }
 
 function validateStopRequest(value: unknown): value is Record<string, unknown> {

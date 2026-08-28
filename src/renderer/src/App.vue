@@ -170,9 +170,21 @@ import {
   shouldAttemptResume,
   type RawOrphanSession,
 } from './lib/sessionHeal'
-import { gridPageCount, gridPageSlice, gridPresetDims, parseGridPreset, type GridPreset } from './lib/gridLayout'
+import {
+  gridPageCount,
+  gridPageOf,
+  gridPageSlice,
+  gridPresetDims,
+  parseGridPreset,
+  type GridPreset,
+} from './lib/gridLayout'
 import { planPaneCycle, type CycleDirection } from './lib/paneCycle'
-import { parseLegacyRunGroups, resolveActiveTab, resolveManualSpawnGroupId } from './lib/runGroups'
+import {
+  parseLegacyRunGroups,
+  resolveActiveTab,
+  resolveManualSpawnGroupId,
+  runGroupCreatedAt,
+} from './lib/runGroups'
 import {
   ALL_SCOPE_RESTORE_CONCURRENCY,
   AUTO_RESUME_ON_RECONNECT_SETTING_KEY,
@@ -220,6 +232,8 @@ import {
   unseenTail,
   formatLoopTime,
 } from './lib/loopPrompt'
+import { resolvePromptSkill } from './lib/promptSkills'
+import { usePromptSkills } from './composables/usePromptSkills'
 import { loginCommandFor, matchLoginExpired } from './lib/cliLoginExpired'
 import {
   awaitingClearsOnMiss,
@@ -1123,6 +1137,14 @@ interface ActivePane {
   /** Epoch ms of the heuristic quota-reset estimate (runtime-only): loop start
    *  + 5h Claude session window, shown on the running badge as approximate. */
   loopEstimateResetAt?: number | null
+  /** Prompt skill this loop was cast with (runtime-only). Null / absent means
+   *  the default skill, i.e. what a plain ∞ click sends. */
+  loopSkillId?: string | null
+  /** Turns already continued in this loop, and the skill's cap (0 = no cap).
+   *  Counted on the continue path so the cap means "how many more turns after
+   *  the start injection", which is what the picker's ×N label promises. */
+  loopTurnCount?: number
+  loopMaxTurns?: number
   /** Runtime-only login-expired badge — lit when the pane's CLI printed its
    *  expired-login message (see lib/cliLoginExpired); cleared once the login
    *  command is re-sent via the badge click. Not persisted to PaneRecord. */
@@ -3055,6 +3077,16 @@ async function injectExternalPaneContext(sourcePaneId: string, targetPaneId: str
 // belongs to is still the current one. Without it a stale injection keys off the
 // boolean loopActive, which a re-click flips back to true — letting a cancelled
 // loop's in-flight inject land a stray prompt and corrupt the fresh loop's state.
+const { skills: promptSkills } = usePromptSkills()
+
+/** Resume text for a pane's running loop: the cast skill's own resume prompt,
+ *  falling back to the global setting when the skill doesn't override it. */
+function loopResumeTextFor(paneId: string): string {
+  const pane = panes.value.find((p) => p.id === paneId)
+  const skill = resolvePromptSkill(promptSkills.value, pane?.loopSkillId)
+  return skill.resumePrompt.trim() || settingsGet(LOOP_RESUME_SETTING_KEY, DEFAULT_LOOP_RESUME)
+}
+
 const loopGen = new Map<string, number>()
 function bumpLoopGen(paneId: string): number {
   const next = (loopGen.get(paneId) ?? 0) + 1
@@ -3062,22 +3094,32 @@ function bumpLoopGen(paneId: string): number {
   return next
 }
 
-async function togglePaneLoop(paneId: string): Promise<void> {
+async function togglePaneLoop(paneId: string, skillId?: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane?.realized) return
   if (pane.loopActive) {
     pane.loopActive = false
     pane.loopWaitUntil = null
     pane.loopEstimateResetAt = null
+    pane.loopSkillId = null
+    pane.loopTurnCount = 0
+    pane.loopMaxTurns = 0
     // Invalidate any in-flight/queued injection so it aborts instead of landing
     // a stray prompt (and never re-arms a loop the user just turned off).
     bumpLoopGen(paneId)
     stopLoopLimitWatcher(paneId)
     return
   }
+  // Which skill is being cast: the picker's choice, else the default one.
+  // resolvePromptSkill falls back to the default for an id whose skill the
+  // user has since deleted.
+  const skill = resolvePromptSkill(promptSkills.value, skillId)
   // Optimistic UI: badge + watcher arm immediately; rolled back below if the
   // start injection doesn't land (e.g. pane still 'starting', no session yet).
   pane.loopActive = true
+  pane.loopSkillId = skill.id
+  pane.loopTurnCount = 0
+  pane.loopMaxTurns = skill.maxTurns
   pane.loopEstimateResetAt = Date.now() + LOOP_ESTIMATE_WINDOW_MS
   const gen = bumpLoopGen(paneId)
   startLoopLimitWatcher(paneId)
@@ -3091,7 +3133,7 @@ async function togglePaneLoop(paneId: string): Promise<void> {
     if (loopGen.get(paneId) !== gen) return
     ok = await injectPane(
       paneId,
-      withLoopDoneInstruction(settingsGet(LOOP_PROMPT_SETTING_KEY, DEFAULT_LOOP_PROMPT)),
+      withLoopDoneInstruction(skill.prompt),
       'loop-start',
       true,
       () => loopGen.get(paneId) !== gen
@@ -3104,6 +3146,7 @@ async function togglePaneLoop(paneId: string): Promise<void> {
   if (!ok) {
     console.warn(`[loop] pane ${paneId}: loop-start injection failed — loop disarmed`)
     pane.loopActive = false
+    pane.loopSkillId = null
     pane.loopEstimateResetAt = null
     pane.loopWaitUntil = null
     stopLoopLimitWatcher(paneId)
@@ -3138,7 +3181,7 @@ async function fireLoopResume(paneId: string, logLabel: string): Promise<void> {
     if (loopGen.get(paneId) !== gen || !pane.loopActive) return
     ok = await injectPane(
       paneId,
-      withLoopDoneInstruction(settingsGet(LOOP_RESUME_SETTING_KEY, DEFAULT_LOOP_RESUME)),
+      withLoopDoneInstruction(loopResumeTextFor(paneId)),
       logLabel,
       true,
       () => loopGen.get(paneId) !== gen
@@ -3179,6 +3222,15 @@ async function fireLoopContinue(paneId: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
   const watcher = loopLimitWatchers.get(paneId)
   if (!pane || !pane.loopActive || !watcher || watcher.continuing) return
+  // The cast skill's turn cap. Checked here rather than on a counter of its
+  // own so it shares the existing continue gate — one place decides whether a
+  // turn happens at all.
+  const cap = pane.loopMaxTurns ?? 0
+  if (cap > 0 && (pane.loopTurnCount ?? 0) >= cap) {
+    console.info(`[loop] pane ${paneId}: turn cap reached (${cap}) — loop stopped`)
+    stopLoopComplete(paneId, 'turn-cap')
+    return
+  }
   const gen = loopGen.get(paneId)
   watcher.continuing = true
   await acquireInjectionSlot()
@@ -3189,7 +3241,7 @@ async function fireLoopContinue(paneId: string): Promise<void> {
     if (loopGen.get(paneId) !== gen || !pane.loopActive) return
     ok = await injectPane(
       paneId,
-      withLoopDoneInstruction(settingsGet(LOOP_RESUME_SETTING_KEY, DEFAULT_LOOP_RESUME)),
+      withLoopDoneInstruction(loopResumeTextFor(paneId)),
       'loop-continue',
       true,
       () => loopGen.get(paneId) !== gen
@@ -3204,6 +3256,7 @@ async function fireLoopContinue(paneId: string): Promise<void> {
     console.warn(`[loop] pane ${paneId}: continue injection failed — will retry next turn`)
     return
   }
+  pane.loopTurnCount = (pane.loopTurnCount ?? 0) + 1
   // Fresh turn started: re-arm and refresh the pre-limit estimate window.
   armLoopTurn(paneId)
   // Hold the next continue for the current stall tier (0 while productive), and
@@ -3284,6 +3337,9 @@ function stopLoopSpinning(paneId: string, reason: 'stalled' | 'capped'): void {
   pane.loopActive = false
   pane.loopWaitUntil = null
   pane.loopEstimateResetAt = null
+  pane.loopSkillId = null
+  pane.loopTurnCount = 0
+  pane.loopMaxTurns = 0
   bumpLoopGen(paneId)
   stopLoopLimitWatcher(paneId)
   sysNotify.notifyPaneState(
@@ -3297,12 +3353,16 @@ function stopLoopSpinning(paneId: string, reason: 'stalled' | 'capped'): void {
 /** The CLI reported LOOP_DONE_MARKER as its turn's final line — the task is
  *  complete. Clear all loop state and notify (same background-gated path as the
  *  paused/limit notifications). */
-function stopLoopComplete(paneId: string): void {
+function stopLoopComplete(paneId: string, reason: 'done-marker' | 'turn-cap' = 'done-marker'): void {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane || !pane.loopActive) return
+  console.info(`[loop] pane ${paneId}: loop complete — ${reason}`)
   pane.loopActive = false
   pane.loopWaitUntil = null
   pane.loopEstimateResetAt = null
+  pane.loopSkillId = null
+  pane.loopTurnCount = 0
+  pane.loopMaxTurns = 0
   // Invalidate any in-flight/queued continue so it can't re-arm after done.
   bumpLoopGen(paneId)
   stopLoopLimitWatcher(paneId)
@@ -5192,6 +5252,9 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
     pane.loopActive = false
     pane.loopWaitUntil = null
     pane.loopEstimateResetAt = null
+    pane.loopSkillId = null
+    pane.loopTurnCount = 0
+    pane.loopMaxTurns = 0
   }
   sysNotify.forgetPane(paneId)
   syncViews()
@@ -5969,7 +6032,7 @@ watch(currentWorkspace, (workspacePath) => {
 // alone is not enough: asking for the tab you are already on leaves the prop
 // unchanged, so the modal's watcher never fires and the request is dropped.
 const settingsTabRequest = ref(0)
-const settingsInitialTab = ref<'general' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts' | 'storage' | 'keybindings'>('general')
+const settingsInitialTab = ref<'general' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts' | 'storage' | 'keybindings' | 'prompts'>('general')
 // Needed to retarget an already-open modal: initialTab is only honoured on mount
 // and by its own watcher, so re-issuing the same tab is a no-op without this.
 const settingsModalRef = ref<{ setTab: (tab: string) => void } | null>(null)
@@ -6465,7 +6528,33 @@ function revealPaneTab(paneId: string): void {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return
   const key = pane.runGroupId || 'manual'
-  if (stageTabs.value.some((t) => t.key === key)) activeTab.value = key
+  if (stageTabs.value.some((t) => t.key === key)) {
+    activeTab.value = key
+    return
+  }
+  // buildStageTabs raises a tab for every group its panes name, so there is
+  // normally one to switch to. Getting here means the pane sits on no tab and
+  // the click cannot open it — the failure that used to pass in total silence.
+  recordDiagnostic({
+    level: 'warn',
+    code: 'pane.noTab',
+    message: `pane names run group "${key}", which no tab holds`,
+    paneId,
+  })
+}
+
+/** Bring the pane's grid page on screen too.
+ *
+ *  Switching the tab is not enough under a fixed grid preset: the pane can sit
+ *  on another page, and focus then lands on something the stage never draws —
+ *  clicking it in the sidebar looks like it did nothing. Ctrl+Tab already did
+ *  this for its own landing; every other jump went without it. */
+function revealPaneGridPage(paneId: string): void {
+  if (effectiveLayoutMode.value !== 'grid') return
+  const index = tabVisiblePanes.value.findIndex((p) => p.id === paneId)
+  if (index < 0) return
+  const page = gridPageOf(index, gridPreset.value)
+  if (page !== gridPage.value) onUserChangeGridPage(page)
 }
 
 interface PaneSelectionOptions {
@@ -6487,6 +6576,7 @@ function selectPane(paneId: string | null, options: PaneSelectionOptions): void 
 function onFocusPane(paneId: string): void {
   revealPaneTab(paneId)
   selectPane(paneId, { userInitiated: true, scrollIntoView: true })
+  revealPaneGridPage(paneId)
 }
 
 async function focusPaneFromNotification(paneId: string): Promise<void> {
@@ -7224,12 +7314,11 @@ async function onWorkspaceCheck(path: string): Promise<void> {
       // before or during restore (the await can span a user pause).
       coldRestoreBatch = await restoreWorkspacePanes(resp, path, undefined, () => seq !== workspaceCheckSeq)
     }
-    // Only now that the panes are back: a group id is only foreign once the
-    // restore has had its say, and restore recreates a tab whose record was
-    // lost under the same id (ensureSavedGroup). Running before it, this saw
-    // no panes at all on a cold start — and on a switch, panes kept across it
-    // whose tabs the entered workspace had lost, which it cleared as foreign.
-    void repairForeignRunGroups(path)
+    // Only now that the panes are back: an orphaned id is only visible once
+    // the restore has had its say, and restore already puts back the record
+    // for the panes it brings in (ensureSavedGroup). This covers the rest —
+    // panes kept across a switch, whose records the entered workspace lost.
+    adoptOrphanRunGroups(path)
     activeTab.value = resolveActiveTab(runGroups.value, activeTab.value)
     // If the active tab has no panes (e.g. old project.json panes landed in a
     // different group via fallback), switch to the first tab that has panes so
@@ -7802,11 +7891,35 @@ async function realizeRestoredPane(paneId: string, aggregateReconnect = false): 
 async function performRealizeRestoredPane(paneId: string, aggregateReconnect = false): Promise<void> {
   const placeholder = panes.value.find((p) => p.id === paneId)
   const deferred = placeholder?.deferredRestore
-  if (!placeholder || placeholder.realized || placeholder.restoring || !deferred) return
+  if (!placeholder || placeholder.realized || placeholder.restoring) return
+  if (!deferred) {
+    // A placeholder is only ever written together with its deferredRestore, so
+    // this cannot happen — but if some third writer ever sets realized = false
+    // without one, the placeholder can never be opened and says nothing about
+    // why. Leave a trace rather than another silent dead end.
+    recordDiagnostic({
+      level: 'warn',
+      code: 'restore.noDeferred',
+      message: 'restore placeholder has no deferred restore; it cannot be opened',
+      paneId,
+    })
+    return
+  }
 
   const saved = deferred.saved
   const batch = deferred.batch
-  if (!isLocalWorkspace(deferred.workspacePath)) return
+  if (!isLocalWorkspace(deferred.workspacePath)) {
+    // The window is running a pane in a workspace it no longer claims (detach
+    // leaves them behind). The sidebar now lists it, so it can be clicked —
+    // and clicking it would otherwise do nothing at all, forever.
+    recordDiagnostic({
+      level: 'warn',
+      code: 'restore.foreignWorkspace',
+      message: `restore needs workspace ${deferred.workspacePath}, which this window no longer holds`,
+      paneId,
+    })
+    return
+  }
   const session = workspaceRestoreSession(batch.workspacePath)
   const sessionId = normalizeResumeSessionId(saved.agent, (saved.session_id ?? '').trim())
   placeholder.restoring = true
@@ -9572,6 +9685,9 @@ backend.on('terminal.exit', (raw) => {
     pane.loopActive = false
     pane.loopWaitUntil = null
     pane.loopEstimateResetAt = null
+    pane.loopSkillId = null
+    pane.loopTurnCount = 0
+    pane.loopMaxTurns = 0
   }
   if (pane.sessionMarker && !pane.pinnedSessionId) {
     pane.sessionMarker = undefined
@@ -11191,8 +11307,7 @@ const applyingRemote = ref(false)
 // a wipe. Its panes keep their run_group_id, so they match no tab and cannot
 // be reached from any of them: present in the sidebar, on screen nowhere.
 // Restore alone fires enough saves (ensureSavedGroup per restored pane) to hit
-// the window every time. Nothing recovers from it either — repairForeignRunGroups
-// runs before those panes exist, so it finds no strays to clear.
+// the window every time.
 const runGroupsOwner = ref<string>('')
 
 function _saveRunGroups(): void {
@@ -11530,28 +11645,40 @@ function reorderRunGroupTab(fromKey: string, toKey: string): void {
   void persistTabOrder()
 }
 
-/** Clear a run group id that this workspace does not have.
+/** Put back a group record that this workspace's panes still point at.
  *
- *  Run groups are per-workspace, so an id from another workspace's set matches
- *  no tab here: the pane shows in the sidebar and on no tab at all — running
- *  and unreachable, which reads as the spawn having failed. buildStageTabs
- *  deliberately does not paper over this (a pane on no tab means something is
- *  wrong, and hiding it in the manual tab would hide the fault too), so the
- *  data is repaired instead of the view.
+ *  A pane whose run_group_id matches no record is on no tab of its own, and
+ *  the pane's id is the only surviving evidence of where it belonged. The
+ *  earlier repair cleared that id instead — which reached the same "the pane
+ *  is on a tab again" end state by destroying the grouping on the way, and
+ *  did it to the whole workspace at once whenever a record went missing.
+ *  Recovery afterwards was impossible: nothing else records the assignment.
  *
- *  The only source was the ＋ on another workspace's heading, which stamped
- *  the pane with the VIEWED workspace's group. That is fixed at the source;
- *  this clears the panes that were already written that way.
+ *  So rebuild the record under the SAME id and leave every pane's id alone.
+ *  Nothing here can lose data — worst case a group from another workspace's
+ *  set gains a tab in this one, which the user can delete, whereas a cleared
+ *  id is gone for good.
  */
-async function repairForeignRunGroups(path: string): Promise<void> {
+function adoptOrphanRunGroups(path: string): void {
   const known = new Set(runGroups.value.map((g) => g.id))
-  const strays = panes.value.filter(
-    (p) => normWs(p.workspacePath) === normWs(path) && p.runGroupId && !known.has(p.runGroupId),
-  )
-  if (!strays.length) return
-  for (const pane of strays) {
-    if (await persistPaneRunGroup(pane, '')) pane.runGroupId = undefined
+  const orphans: string[] = []
+  for (const pane of panes.value) {
+    const gid = pane.runGroupId
+    if (!gid || known.has(gid) || orphans.includes(gid)) continue
+    if (normWs(pane.workspacePath) !== normWs(path)) continue
+    orphans.push(gid)
   }
+  if (!orphans.length) return
+  const base = runGroups.value.length
+  runGroups.value = [
+    ...runGroups.value,
+    ...orphans.map((id, i) => ({
+      id,
+      name: `Run ${base + i + 1}`,
+      createdAt: runGroupCreatedAt(id),
+    })),
+  ]
+  _saveRunGroups()
   syncViews()
 }
 
@@ -11564,8 +11691,12 @@ async function movePaneToGroup(paneId: string, targetKey: string): Promise<void>
   for (const id of paneDragBatch(paneId)) {
     const pane = panes.value.find((p) => p.id === id)
     if (!pane || (pane.runGroupId ?? '') === targetGroupId) continue
+    const previous = pane.runGroupId
     pane.runGroupId = targetGroupId || undefined
-    await persistPaneRunGroup(pane, targetGroupId)
+    // Put it back when the write did not land. Showing the pane under the tab
+    // it was dropped on while the record still names the old one is a move
+    // that did not happen, and the next restore takes it back without a word.
+    if (!(await persistPaneRunGroup(pane, targetGroupId))) pane.runGroupId = previous
   }
 }
 
@@ -11673,6 +11804,7 @@ const stageTabShapes = computed<StageTabShape[]>(() =>
     // Was hard-coded, so an English UI showed a Chinese tab. The key has
     // existed all along.
     manualLabel: i18n.global.t('label.manual'),
+    orphanLabel: i18n.global.t('label.orphan-group'),
   })
 )
 
@@ -12351,6 +12483,12 @@ async function onSidebarFocusPane(paneId: string, ev?: MouseEvent): Promise<void
   // The sidebar lists every workspace this window holds, so a click can land
   // on a pane the grid is currently filtering out.
   if (!(await ensurePaneWorkspaceOnScreen(paneId))) return
+  // The other two ways to jump to a pane — agent history and the resource
+  // list — restore it first. Without this the sidebar sets focus on a pane the
+  // stage filters out, and the focus resolver hands the screen to a different
+  // one: the click appears to open somebody else. Minimized state persists, so
+  // the inconsistency came back on every restart.
+  if (minimizedPanes.value.has(paneId)) restorePane(paneId)
   onFocusPane(paneId)
 }
 
@@ -14061,7 +14199,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @reorder-drop="(draggedId) => reorderPane(draggedId, p.id)"
           @cli-context-drop="(sourceIds) => injectPaneContextSources(sourceIds, p.id)"
           @plan-drop="(ref) => injectPlanToPane(ref, p.id)"
-          @toggle-loop="togglePaneLoop(p.id)"
+          @toggle-loop="(skillId?: string) => togglePaneLoop(p.id, skillId)"
           @loop-resume-now="resumeLoopNow(p.id)"
           @fix-login="fixPaneLogin(p.id)"
           @continue-resume="continueRestoredPane(p.id)"

@@ -3,7 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { i18n } from './foundation'
 import SafeAiCliPanel from './SafeAiCliPanel.vue'
-import type { AiCliSessionController, SafeAiCliPanelHandle } from './index'
+import {
+  createAiCliSessionController,
+  type AiCliPluginContext,
+  type AiCliSessionController,
+  type SafeAiCliPanelHandle,
+} from './index'
 import { seedSettings, settingsGet } from './shared'
 import { __resetSettingsForTest } from './shared/testing'
 
@@ -179,6 +184,35 @@ describe('SafeAiCliPanel', () => {
     expect(controller.send).toHaveBeenNthCalledWith(2, '\r')
     expect(settingsGet('git-ai-panel-width.agent', '')).toBe('claude')
     vi.useRealTimers()
+  })
+
+  it('stops a real controller session with the required force contract', async () => {
+    const invoke = vi.fn(async (address: string) => {
+      if (address === 'aiCli.listProfiles') return { profiles: [{ id: 'claude', label: 'Claude Code' }] }
+      if (address === 'aiCli.resumeSession') return null
+      if (address === 'aiCli.startSession') return { sessionId: 'session-1' }
+      if (address === 'aiCli.stopSession') return {}
+      return {}
+    })
+    const capabilities: AiCliPluginContext['capabilities'] = {
+      invoke: invoke as unknown as AiCliPluginContext['capabilities']['invoke'],
+    }
+    const controller = createAiCliSessionController({
+      capabilities,
+      events: { subscribe: () => ({ dispose: vi.fn() }) },
+    })
+    const wrapper = mount(SafeAiCliPanel, { props: { controller }, global: { plugins: [i18n] } })
+    await flushPromises()
+
+    const handle = wrapper.vm as unknown as SafeAiCliPanelHandle
+    await handle.start()
+    await handle.stop()
+
+    expect(invoke).toHaveBeenCalledWith('aiCli.stopSession', {
+      sessionId: 'session-1',
+      force: true,
+    })
+    expect(controller.sessionId).toBeNull()
   })
 
   it('does not clear terminal scrollback during resize', async () => {

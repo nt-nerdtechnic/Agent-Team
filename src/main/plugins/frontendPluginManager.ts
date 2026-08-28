@@ -123,8 +123,10 @@ export interface PluginBounds {
 }
 
 /** `'fill'` sizes the view to the host window's content bounds and keeps it
- *  in sync on host `resize` (full-overlay views like the mini-IDE editor). */
-export type PluginViewBounds = PluginBounds | 'fill'
+ *  in sync on host `resize` (full-overlay views like the mini-IDE editor).
+ *  `'hidden'` attaches a deactivated view without inventing visible geometry;
+ *  it is used for contributions that must subscribe before their tab opens. */
+export type PluginViewBounds = PluginBounds | 'fill' | 'hidden'
 
 /** Host-owned handle for one live contribution view. The instance id is
  * opaque: plugins never choose it and lifecycle calls must use the handle
@@ -144,6 +146,8 @@ export interface PluginViewOpenOptions {
   /** Host-authenticated context for this view instance. Renderer data never
    *  supplies or overrides this value. */
   capabilityContext?: HostCapabilityContext | null
+  /** Keep a freshly mounted view deactivated until the Host activates it. */
+  initiallyVisible?: boolean
 }
 
 interface RunningPlugin {
@@ -370,6 +374,11 @@ const GIT_HOST_FS_TYPES = new Set([
   'fs.convert_office',
   'fs.stat_path',
 ])
+const GIT_HOST_FS_MUTATION_TYPES = new Set([
+  'fs.write_file',
+  'fs.delete',
+  'fs.rename',
+])
 const PUBLIC_FS_WS_TYPES: Readonly<Record<string, string>> = {
   'fs.readFile': 'fs.read_file',
   'fs.writeFile': 'fs.write_file',
@@ -470,15 +479,39 @@ function resolvePathForContainment(path: string): string | null {
 }
 
 function isWorkspaceContainedPath(workspacePath: string, candidatePath: string): boolean {
+  if (candidatePath.includes('\0')) return false
   const root = resolvePathForContainment(workspacePath)
+  const normalizedCandidate = candidatePath.replace(/\\/g, '/')
   const candidate = root
-    ? resolvePathForContainment(resolve(workspacePath, candidatePath))
+    ? resolvePathForContainment(resolve(workspacePath, normalizedCandidate))
     : null
   if (!root || !candidate) return false
   const relativePath = relative(root, candidate)
   return relativePath !== '..' &&
     !relativePath.startsWith(`..${sep}`) &&
     !isAbsolute(relativePath)
+}
+
+/** Return the Host-side policy error for a filesystem mutation target. The
+ * backend repeats this check, but the Host must stop a denied request before it
+ * reaches the transport as well. `.gitignore` is intentionally not matched by
+ * the segment check. */
+function workspaceMutationPathError(workspacePath: string, candidatePath: unknown): string | null {
+  if (typeof candidatePath !== 'string' || !candidatePath || !isWorkspaceContainedPath(workspacePath, candidatePath)) {
+    return 'path escapes the Host workspace binding'
+  }
+  const normalizedCandidate = candidatePath.replace(/\\/g, '/')
+  const root = resolvePathForContainment(workspacePath)
+  const candidate = root
+    ? resolvePathForContainment(resolve(workspacePath, normalizedCandidate))
+    : null
+  if (!root || !candidate) return 'path cannot be safely resolved'
+  const relativePath = relative(root, candidate)
+  const rootIsGitDirectory = basename(root) === '.git'
+  if (rootIsGitDirectory || relativePath.split(sep).some((segment) => segment === '.git')) {
+    return 'Git metadata paths are protected'
+  }
+  return null
 }
 
 function isExpectedHttpsRemote(url: unknown, expectedHost: string): boolean {
@@ -1528,6 +1561,15 @@ export class FrontendPluginManager {
       let cloneTarget: string | null = null
       let credentialOwner: GitCredentialOwner | null = null
       let credentialReplyOwner: GitCredentialOwner | null = null
+      if (action === 'fs.request' && GIT_HOST_FS_MUTATION_TYPES.has(type)) {
+        const mutationPaths = type === 'fs.rename'
+          ? [wsPayload.src_rel, wsPayload.dst_rel]
+          : [wsPayload.rel_path]
+        for (const candidate of mutationPaths) {
+          const violation = workspaceMutationPathError(plugin.workspacePath ?? '', candidate)
+          if (violation) return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', violation)
+        }
+      }
       if (action === 'fs.request' && type === 'fs.stat_path') {
         const candidate = typeof wsPayload.path === 'string' ? wsPayload.path : ''
         if (!plugin.workspacePath || !isWorkspaceContainedPath(plugin.workspacePath, candidate)) {
@@ -2002,6 +2044,13 @@ export class FrontendPluginManager {
           throw new Error('filesystem path escapes the workspace')
         }
         payload.path = resolvePathForContainment(resolve(workspacePath, path))
+      }
+      if (wsType === 'fs.write_file') {
+        const violation = workspaceMutationPathError(workspacePath, path)
+        if (violation === 'Git metadata paths are protected') {
+          throw new Error(violation)
+        }
+        if (violation) throw new Error(`filesystem ${violation}`)
       }
       if (wsType === 'fs.write_file') payload.content = args.content
       const response = await this.sendPublicBackend(wsType, payload)
@@ -3263,10 +3312,14 @@ export class FrontendPluginManager {
             // `file_ws` in the params, which is not part of the identity above.
             this.sendOpenTarget(existing, queryToParams(query))
           }
-          existing.fill = bounds === 'fill'
-          this.applyBounds(existing, bounds)
-          this.trackHostResize(existing)
-          existing.view.setVisible(true)
+          if (bounds === 'hidden') {
+            this.deactivate(existing.instanceId)
+          } else {
+            existing.fill = bounds === 'fill'
+            this.applyBounds(existing, bounds)
+            this.trackHostResize(existing)
+            existing.view.setVisible(true)
+          }
           // Surface the window that actually hosts the view. Cross-window opens
           // keep the view on its original host, so focus that one — the open
           // must never land invisibly behind another window.
@@ -3319,8 +3372,27 @@ export class FrontendPluginManager {
       canonicalView,
       false
     )
-    this.focusInstance(handle.instanceId)
+    if (options.initiallyVisible !== false && options.bounds !== 'hidden') {
+      this.focusInstance(handle.instanceId)
+    } else {
+      this.deactivate(handle.instanceId)
+    }
     return handle
+  }
+
+  /** Ensure a contribution has a live, deactivated instance without creating
+   *  a visible placeholder rectangle. The renderer later activates the same
+   *  Host-owned instance through {@link openContribution}. */
+  async ensureContribution(
+    hostWindow: BrowserWindow,
+    contributionKey: string,
+    options: Omit<PluginViewOpenOptions, 'hostWindow' | 'bounds'>,
+  ): Promise<{ ok: boolean; error?: string }> {
+    return this.openContribution(hostWindow, contributionKey, {
+      ...options,
+      bounds: 'hidden',
+      initiallyVisible: false,
+    })
   }
 
   private mountView(
@@ -3333,6 +3405,7 @@ export class FrontendPluginManager {
       mirrorTitle?: boolean
       workspacePath?: string
       capabilityContext?: HostCapabilityContext | null
+      initiallyVisible?: boolean
     },
     viewDescriptor: PluginViewLaunchDescriptor | undefined,
     openedViaLegacyAdapter: boolean
@@ -3490,8 +3563,10 @@ export class FrontendPluginManager {
 
     this.loadEntry(view, loadDescriptor, viewDescriptor !== undefined)
 
-    // activate (show)
-    view.setVisible(true)
+    // Activate only when requested. Hidden contributions have no visible
+    // placeholder bounds; their WebContents is still alive for subscriptions.
+    if (opts.initiallyVisible !== false && bounds !== 'hidden') view.setVisible(true)
+    else view.setVisible(false)
     return Object.freeze({ instanceId })
   }
 
@@ -3509,6 +3584,7 @@ export class FrontendPluginManager {
 
   /** Apply a bounds spec: `'fill'` overlays the host's full content area. */
   private applyBounds(record: RunningPlugin, bounds: PluginViewBounds): void {
+    if (bounds === 'hidden') return
     if (bounds === 'fill') {
       const { width, height } = record.hostWindow.getContentBounds()
       record.view.setBounds({ x: 0, y: 0, width, height })
@@ -3944,9 +4020,15 @@ export class FrontendPluginManager {
       const workspace = options.workspacePath ?? null
       const currentWorkspace = this.workspacePathOfInstance(existing.instanceId)
       if (!workspace || !currentWorkspace || resolve(workspace) === resolve(currentWorkspace)) {
-        this.setBounds(existing.instanceId, options.bounds as PluginBounds)
         this.updateViewQuery(existing.instanceId, options.query ?? '')
-        this.activate(existing.instanceId)
+        if (options.bounds === 'hidden') {
+          this.deactivate(existing.instanceId)
+        } else if (options.bounds === 'fill') {
+          this.activate(existing.instanceId)
+        } else {
+          this.setBounds(existing.instanceId, options.bounds)
+          this.activate(existing.instanceId)
+        }
         return { ok: true }
       }
       this.destroyInstance(existing.instanceId)
@@ -4031,7 +4113,7 @@ export class FrontendPluginManager {
   updateContribution(
     hostWindow: BrowserWindow,
     contributionKey: string,
-    bounds: PluginBounds,
+    bounds: PluginBounds | null,
     visible: boolean,
   ): { ok: boolean } {
     const key = this.contributionInstanceKey(hostWindow, contributionKey)
@@ -4040,7 +4122,8 @@ export class FrontendPluginManager {
       this.contributionInstances.delete(key)
       return { ok: false }
     }
-    this.setBounds(handle.instanceId, bounds)
+    if (visible && !bounds) return { ok: false }
+    if (bounds) this.setBounds(handle.instanceId, bounds)
     if (visible) this.activate(handle.instanceId)
     else this.deactivate(handle.instanceId)
     return { ok: true }

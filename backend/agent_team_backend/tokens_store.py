@@ -315,6 +315,12 @@ class TokensStore:
         # -> bucket. Process-lifetime only — never persisted, never flushed, so
         # a restart deliberately zeroes it ("this session" semantics).
         self._live_by_pane: dict[str, dict[str, dict[str, int]]] = {}
+        # (workspace_path, pane_id, session_id) already backfilled from the
+        # vendor log by seed_live(). Guards the one-shot: a pane can bind the
+        # same session again (rebuild, re-attach) and must not re-seed.
+        # Deliberately NOT cleared by reset() — a reset means the user wants
+        # zero, and a later re-bind must not resurrect the old total.
+        self._live_seeded: set[tuple[str, str, str]] = set()
 
         # Dirty tracking (mutated inside _lock, consumed by the flush path).
         self._dirty_workspaces: set[str] = set()
@@ -1250,6 +1256,76 @@ class TokensStore:
                 "global": deepcopy(self._global_data),
             }
 
+    # ─────────────────── Live per-session backfill ──────────────────
+    #
+    # The live tally is process-lifetime only, so after a backend restart it
+    # holds just the increments record() has seen since — while the CLI's own
+    # footer shows the whole session. These two methods let a caller re-derive
+    # the full session total from the vendor log and fold it in WITHOUT going
+    # through record(): the historic events are already in cumulative/global
+    # and their ingestion checkpoints have long since advanced, so replaying
+    # them would either be dropped by dedup or double-count. Nothing here
+    # touches cumulative, global, or any checkpoint.
+
+    def live_seed_state(
+        self, workspace_path: str, pane_id: str, session_id: str | None
+    ) -> dict[str, int] | None:
+        """The live bucket to backfill, or None when it is already seeded.
+
+        Read this BEFORE the (slow, off-loop) log scan and hand the result
+        back to seed_live() as `already_counted`.
+        """
+        if not workspace_path or not pane_id:
+            return None
+        mark = (workspace_path, pane_id, session_id or "")
+        with self._lock:
+            if mark in self._live_seeded:
+                return None
+            bucket = self._live_by_pane.get(workspace_path, {}).get(
+                _live_key(pane_id, session_id)
+            )
+            return dict(bucket) if bucket else _empty_bucket()
+
+    def seed_live(
+        self,
+        workspace_path: str,
+        pane_id: str,
+        session_id: str | None,
+        total: dict[str, int],
+        already_counted: dict[str, int] | None = None,
+    ) -> bool:
+        """Fold a whole-session total into the live bucket. Returns False when
+        the bucket was already seeded (one-shot per pane+session).
+
+        Applies `total - already_counted` as a DELTA rather than overwriting,
+        so increments record() landed while the scan was running survive
+        (record() keeps adding to this same bucket afterwards). Since
+        `already_counted` is the bucket as it stood when the scan started,
+        everything the scan found that was already tallied cancels out.
+
+        Residual window: a turn appended AND ingested by the watcher during
+        the scan, which the scan's sequential read also picked up, is counted
+        twice. Bounded to one turn, and the backfill only ever runs at
+        pane-bind time when the session file is quiescent — the alternative
+        (overwrite instead of add) would silently drop such a turn forever,
+        which is the worse failure.
+        """
+        if not workspace_path or not pane_id:
+            return False
+        mark = (workspace_path, pane_id, session_id or "")
+        base = already_counted or _empty_bucket()
+        with self._lock:
+            if mark in self._live_seeded:
+                return False
+            self._live_seeded.add(mark)
+            live = self._live_by_pane.setdefault(workspace_path, {})
+            bucket = live.setdefault(_live_key(pane_id, session_id), _empty_bucket())
+            for field in ("input", "output", "calls"):
+                delta = int(total.get(field, 0)) - int(base.get(field, 0))
+                if delta > 0:
+                    bucket[field] += delta
+            return True
+
     def forget_pane(self, pane_id: str) -> None:
         """Drop a closed pane's live buckets across every workspace. The key is
         "<pane_id>::<session_id>" (or the bare pane id), so match on the prefix
@@ -1263,6 +1339,11 @@ class TokensStore:
                     k for k in buckets if k == pane_id or k.startswith(prefix)
                 ]:
                     buckets.pop(key, None)
+            # The buckets are gone, so the one-shot marks must go with them —
+            # otherwise a pane id reused for a fresh bucket could never seed.
+            self._live_seeded.difference_update(
+                {m for m in self._live_seeded if m[1] == pane_id}
+            )
 
     # ───────────────────────── Reset ────────────────────────────────
 

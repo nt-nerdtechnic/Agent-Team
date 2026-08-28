@@ -1,9 +1,14 @@
 /** Durable preferences owned by the navide.git package. */
+export const GIT_LOG_SCOPE_KEY = 'agentTeam.git.logScope' as const
+export const GIT_LOG_ORDER_KEY = 'agentTeam.git.logOrder' as const
+export const GIT_AUTO_COMMIT_KEY = 'agentTeam.git.autoCommit' as const
+export const GIT_TOP_RATIO_KEY = 'agentTeam.gitTopRatio' as const
+
 export const GIT_USER_PREFERENCE_KEYS = [
-  'agentTeam.git.logScope',
-  'agentTeam.git.logOrder',
-  'agentTeam.git.autoCommit',
-  'agentTeam.gitTopRatio',
+  GIT_LOG_SCOPE_KEY,
+  GIT_LOG_ORDER_KEY,
+  GIT_AUTO_COMMIT_KEY,
+  GIT_TOP_RATIO_KEY,
   'git-ai-panel-width',
   'git-ai-panel-width.agent',
 ] as const

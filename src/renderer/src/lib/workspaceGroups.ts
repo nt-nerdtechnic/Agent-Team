@@ -136,12 +136,7 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
     return out
   }
 
-  // `here` is appended in case this runs before it joins the order list; the
-  // seen set keeps that from listing it twice.
-  const seenLocal = new Set<string>()
-  for (const path of [...order, ...(here ? [here] : [])]) {
-    if (!path || seenLocal.has(norm(path))) continue
-    seenLocal.add(norm(path))
+  const pushRow = (path: string): void => {
     const own = lineageFor(path)
     const groups = sectionsFor(own)
     rows.push({
@@ -156,6 +151,28 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
       lineage: groups.flatMap((g) => g.rows),
       groups,
     })
+  }
+
+  // `here` is appended in case this runs before it joins the order list; the
+  // seen set keeps that from listing it twice.
+  const seenLocal = new Set<string>()
+  for (const path of [...order, ...(here ? [here] : [])]) {
+    if (!path || seenLocal.has(norm(path))) continue
+    seenLocal.add(norm(path))
+    pushRow(path)
+  }
+
+  // A pane whose workspace is in neither list still has to be listed. Detaching
+  // a workspace takes it out of the order without taking its panes with it, and
+  // a manual resume can start one in a folder this window never adopted. The
+  // stage shows those panes either way; leaving them out here left them with no
+  // heading to sit under, which is not "hidden" but missing — and a restore
+  // placeholder among them could not be opened from anywhere else.
+  for (const pane of panes) {
+    const path = pane.workspacePath
+    if (!path || seenLocal.has(norm(path))) continue
+    seenLocal.add(norm(path))
+    pushRow(path)
   }
 
   return rows

@@ -14,6 +14,17 @@ export function resolveManualSpawnGroupId(groups: { id: string }[], activeTab: s
   return groups.some((group) => group.id === activeTab) ? activeTab : ''
 }
 
+/** The creation time to give a group record being rebuilt from the id its panes
+ *  still carry. Ids are minted as `rg-<epoch ms>`, so the original time is in
+ *  the id: recovering it keeps a rebuilt group where it belongs in the order
+ *  instead of sorting it after groups that were made long after it. Anything
+ *  not in that shape (the fixed `rg-default`, an id from an older scheme) has
+ *  no time to recover and takes now. */
+export function runGroupCreatedAt(id: string, now: number = Date.now()): number {
+  const stamp = Number(id.slice(3))
+  return id.startsWith('rg-') && Number.isSafeInteger(stamp) && stamp > 0 ? stamp : now
+}
+
 /** Parse the legacy per-workspace `agentTeam.runGroups.<ws>` localStorage blob
  *  (one-time migration into project.json's ui_run_groups). Returns null when
  *  nothing was stored; corrupt / non-array data yields [] — matching the old

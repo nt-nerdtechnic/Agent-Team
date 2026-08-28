@@ -12,6 +12,7 @@ import {
 } from '#git-feature'
 import {
   settingsGet,
+  settingsReadiness,
   settingsReady,
   settingsSet,
 } from '@navide/plugin-ui/shared'
@@ -88,7 +89,13 @@ let userSelected = false
 
 async function restoreSavedRepo(ws: string): Promise<void> {
   if (!ws) return
-  await settingsReady()
+  try {
+    await settingsReady()
+  } catch {
+    // The readiness notice owns retry. Do not read legacy fallbacks or write a
+    // replacement selection until the authoritative snapshot is available.
+    return
+  }
   if (ws !== props.workspacePath || userSelected) return
   const stored = settingsGet<string | null>(GIT_WORKSPACE_REPOSITORY_KEY, null)
   if (stored) {
@@ -119,6 +126,16 @@ watch(
     void restoreSavedRepo(ws)
   },
   { immediate: true },
+)
+
+// A failed first snapshot leaves the surface mounted so the Host notice can
+// retry in place. Re-run the authoritative selection restore after that retry;
+// the initial failed attempt must not fall back to a default and write it.
+watch(
+  () => settingsReadiness.status,
+  (status) => {
+    if (status === 'ready') void restoreSavedRepo(props.workspacePath)
+  },
 )
 
 // Track which tabs have been mounted at least once (lazy-mount).

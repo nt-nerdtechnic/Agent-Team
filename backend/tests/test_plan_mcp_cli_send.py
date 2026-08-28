@@ -276,6 +276,28 @@ async def test_pane_id_frees_an_external_caller_from_qualifying_the_target(
 
 
 @pytest.mark.asyncio
+async def test_a_bare_name_matching_two_panes_is_refused_and_an_id_gets_through(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The bare name and the qualified address now agree, and the refusal names
+    the way out — which is the whole point of the id having become an address."""
+    _seed()
+    agent_messaging.register("pd", "twin", "/ws/alpha")
+    agent_messaging.register("pe", "twin", "/ws/alpha")
+
+    refused = await plan_mcp.cli_send("twin", "x", _ctx())
+    assert refused["ok"] is False
+    assert refused["error_code"] == "ambiguous-target"
+    assert "pane_id" in refused["error"]
+    assert captured == []
+
+    delivered = await plan_mcp.cli_send("", "the second twin", _ctx(), pane_id="pe")
+    assert delivered["ok"] is True
+    assert len(captured) == 1
+    assert captured[0]["payload"]["target_pane_id"] == "pe"
+
+
+@pytest.mark.asyncio
 async def test_pane_id_is_ignored_when_blank(captured: list[dict[str, Any]]) -> None:
     """A blank id must not shadow the address — it is simply not given."""
     _seed()

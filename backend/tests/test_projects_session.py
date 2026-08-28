@@ -643,8 +643,9 @@ def test_set_pane_run_group_reassigns_pipeline_pane(
     store, ws = store_with_stage
     store.record_slot_spawn(ws, stage_index=0, slot_label="Build",
                             pane_id="pane-1", agent="codex", run_group_id="rg-a")
-    store.set_pane_run_group(ws, pane_id="pane-1", run_group_id="rg-b")
+    project = store.set_pane_run_group(ws, pane_id="pane-1", run_group_id="rg-b")
 
+    assert project is not None
     pane = next(p for p in store.peek(ws).panes if p.pane_id == "pane-1")
     assert pane.run_group_id == "rg-b"
 
@@ -654,17 +655,21 @@ def test_set_pane_run_group_can_clear_group(
 ) -> None:
     store, ws = store_with_stage
     store.record_manual_pane_spawn(ws, pane_id="mp-1", agent="claude", run_group_id="rg-a")
-    store.set_pane_run_group(ws, pane_id="mp-1", run_group_id="")
+    project = store.set_pane_run_group(ws, pane_id="mp-1", run_group_id="")
 
+    assert project is not None
     pane = next(p for p in store.peek(ws).panes if p.pane_id == "mp-1")
     assert pane.run_group_id == ""
 
 
-def test_set_pane_run_group_unknown_pane_is_noop(
+def test_set_pane_run_group_unknown_pane_returns_none(
     store_with_stage: tuple[ProjectStore, str]
 ) -> None:
+    """A miss must be distinguishable from a write that landed. Answering with
+    the project made the caller treat "nothing was written" as success and drop
+    the pane's group id locally, while the record on disk kept it."""
     store, ws = store_with_stage
-    store.set_pane_run_group(ws, pane_id="nope", run_group_id="rg-x")  # no raise
+    assert store.set_pane_run_group(ws, pane_id="nope", run_group_id="rg-x") is None
 
 
 def test_ensure_dir_writes_self_ignoring_gitignore(tmp_path: Path) -> None:

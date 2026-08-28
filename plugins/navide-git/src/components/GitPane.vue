@@ -6,7 +6,6 @@ let nextMenuOwnerId = 0
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { useGit } from '../composables/useGit'
 import type { DiscoveredRepo, IgnoreTarget, GitWorktree } from '../composables/useGit'
 import { useIssues } from '../composables/useIssues'
@@ -69,7 +68,7 @@ function openBranchDiffTab(base = 'main'): void {
 
 const {
   gitStatus, statusError, statusLoaded, loadStatus, discoveredRepos, discoverySkipped, discoverRepositories, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
-  gitWorktrees, gitConfig, gitConfigAllowedKeys,
+  gitWorktrees, gitConfig, gitConfigAllowedKeys, autoCommit, gitTopRatio, setAutoCommit, setGitTopRatio,
   isLoadingStatus, isCommitting, isGenerating, isInitializing,
   syncOutput, syncError, gitError, clearGitError,
   initRepo, stageFile, unstageFile, stageAll, stageFiles, unstageFiles, discardFiles,
@@ -639,8 +638,6 @@ async function doGenerate(): Promise<void> {
 // ── auto-commit (background patrol) ──────────────────────────────────────────
 // Replicates the manual flow: Stage All → AI Generate → Commit (local only).
 // Never pushes to remote.
-const AC_STORAGE_KEY = 'agentTeam.git.autoCommit'
-const autoCommit = ref(settingsGet<string | null>(AC_STORAGE_KEY, null) === 'true')
 const autoCommitPending = ref(false)
 // '' = idle, 'staging' | 'checking' | 'generating' | 'committing' = active step
 const autoCommitStep = ref<'' | 'staging' | 'checking' | 'generating' | 'committing'>('')
@@ -724,7 +721,6 @@ watch(
 )
 
 watch(autoCommit, (val) => {
-  settingsSet(AC_STORAGE_KEY, String(val))
   if (!val) {
     _clearAutoTimer()
     // Only clear step if not mid-run; running flow clears in finally
@@ -1546,10 +1542,6 @@ const selectedChangesPaths = computed(() =>
 
 // ── draggable split between top (changes) and bottom (history/cards) ────────────
 const partTopEl = ref<HTMLElement | null>(null)
-const gitTopRatio = ref<number>(
-  parseFloat(settingsGet('agentTeam.gitTopRatio', '')) || 0.5
-)
-watch(gitTopRatio, (v) => { settingsSet('agentTeam.gitTopRatio', String(v)) })
 
 let _gitDragStartY = 0, _gitDragStartTopPx = 0, _gitDragContainerPx = 0
 function onGitDividerStart(e: MouseEvent): void {
@@ -1567,7 +1559,7 @@ function onGitDividerStart(e: MouseEvent): void {
 function onGitDividerMove(e: MouseEvent): void {
   if (!_gitDragContainerPx) return
   const ratio = (_gitDragStartTopPx + e.clientY - _gitDragStartY) / _gitDragContainerPx
-  gitTopRatio.value = Math.max(0.15, Math.min(0.85, ratio))
+  setGitTopRatio(Math.max(0.15, Math.min(0.85, ratio)))
 }
 function onGitDividerEnd(): void {
   document.body.style.userSelect = ''
@@ -1809,7 +1801,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
                 ↺ {{ $t('action.undo-last-commit') }}
               </button>
               <div class="menu-sep" />
-              <button class="menu-item auto-commit-btn" :class="{ 'on': autoCommit }" @click="autoCommit = !autoCommit; showCommitMenu = false">
+              <button class="menu-item auto-commit-btn" :class="{ 'on': autoCommit }" @click="setAutoCommit(!autoCommit); showCommitMenu = false">
                 ✦ {{ $t('action.auto-commit') }}
                 <span class="spacer" />
                 <span class="ac-badge">{{ autoCommit ? $t('label.on') : $t('label.off') }}</span>

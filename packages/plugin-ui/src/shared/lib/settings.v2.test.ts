@@ -55,7 +55,7 @@ describe('Manifest v2 settings origin', () => {
     expect(settings.settingsGet('agentTeam.yolo', '')).toBe('0')
   })
 
-  it('keeps settingsReady pending after a failed snapshot and retries on reconnect', async () => {
+  it('reports the first snapshot failure and retries without waiting for a reconnect', async () => {
     window.history.replaceState({}, '', '/?v2=1')
     vi.resetModules()
     const settings = await import('./settings')
@@ -74,22 +74,15 @@ describe('Manifest v2 settings origin', () => {
     }
 
     settings.initSettingsBackend(backend)
-    let ready = false
-    void settings.settingsReady().then(() => { ready = true })
-    await nextTick()
-    await Promise.resolve()
-    expect(ready).toBe(false)
-
-    status.value = 'disconnected'
-    await nextTick()
-    status.value = 'connected'
-    await nextTick()
-    await settings.settingsReady()
+    await expect(settings.settingsReady()).rejects.toThrow('snapshot unavailable')
+    expect(settings.settingsReadiness).toMatchObject({ status: 'failed' })
+    await settings.retrySettings()
     expect(backend.getAll).toHaveBeenCalledTimes(2)
     expect(settings.settingsGet('agentTeam.gitTabRepo', '')).toBe('/workspace/sub')
+    expect(settings.settingsReadiness).toMatchObject({ status: 'ready' })
   })
 
-  it('resolves an early settingsReady waiter after a connection flap', async () => {
+  it('rejects an obsolete settingsReady waiter when the connection is replaced', async () => {
     window.history.replaceState({}, '', '/?v2=1')
     vi.resetModules()
     const settings = await import('./settings')
@@ -106,23 +99,16 @@ describe('Manifest v2 settings origin', () => {
     }
 
     settings.initSettingsBackend(backend)
-    let earlyReady = false
-    void settings.settingsReady().then(() => { earlyReady = true })
+    const earlyReady = settings.settingsReady()
 
     status.value = 'connected'
     await nextTick()
     status.value = 'disconnected'
     await nextTick()
-    status.value = 'connected'
-    await nextTick()
-    resolveSnapshot({ 'agentTeam.gitTabRepo': '/workspace/sub' })
-    await settings.settingsReady()
-    await Promise.resolve()
-
-    expect(earlyReady).toBe(true)
+    await expect(earlyReady).rejects.toThrow('settings backend disconnected')
   })
 
-  it('flushes queued writes when reconciliation fails', async () => {
+  it('does not flush queued writes until the authoritative snapshot succeeds', async () => {
     vi.useFakeTimers()
     try {
       window.history.replaceState({}, '', '/?v2=1')
@@ -130,10 +116,13 @@ describe('Manifest v2 settings origin', () => {
       const settings = await import('./settings')
       const status = ref<'connected' | 'disconnected'>('disconnected')
       const setMany = vi.fn(async () => undefined)
+      let resolveSnapshot!: (value: Record<string, unknown>) => void
       const backend = {
         status,
         ownedKeys: ['agentTeam.git.logScope'],
-        getAll: vi.fn(async () => { throw new Error('snapshot unavailable') }),
+        getAll: vi.fn(() => new Promise<Record<string, unknown>>((resolve) => {
+          resolveSnapshot = resolve
+        })),
         setMany,
         onChanged: () => () => undefined,
       }
@@ -144,6 +133,9 @@ describe('Manifest v2 settings origin', () => {
       await nextTick()
       await Promise.resolve()
 
+      expect(setMany).not.toHaveBeenCalled()
+      resolveSnapshot({ 'agentTeam.git.logScope': 'server' })
+      await settings.settingsReady()
       expect(setMany).toHaveBeenCalledWith({ 'agentTeam.git.logScope': 'queued' })
     } finally {
       vi.useRealTimers()

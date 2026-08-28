@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { AiCliProfile, AiCliSessionController, SafeAiCliPanelHandle } from './index'
-import { settingsGet, settingsSet } from './shared'
+import { settingsGet, settingsReadiness, settingsReady, settingsSet } from './shared'
 
 const QUIET_MS = 3_500
 const QUIET_TIMEOUT_MS = 25_000
@@ -196,16 +196,24 @@ onMounted(() => {
   })
   if (terminalHost.value) resizeObserver.observe(terminalHost.value)
   initialization = (async () => {
+    let canPersistSettings = false
+    try {
+      await settingsReady()
+      canPersistSettings = true
+    } catch {
+      // The owning v2 surface renders a retry affordance. Keep this panel
+      // usable with non-persistent defaults, but never write them back.
+    }
     profiles.value = await props.controller.listProfiles()
     if (!profiles.value.some(({ id }) => id === selectedProfileId.value)) {
       selectedProfileId.value = profiles.value[0]?.id ?? props.defaultProfileId
-      settingsSet('git-ai-panel-width.agent', selectedProfileId.value)
+      if (canPersistSettings) settingsSet('git-ai-panel-width.agent', selectedProfileId.value)
     }
     const resumed = await props.controller.resume(terminal?.cols || props.initialCols, terminal?.rows || props.initialRows)
     if (resumed) {
       running.value = true
       selectedProfileId.value = resumed.profileId
-      settingsSet('git-ai-panel-width.agent', resumed.profileId)
+      if (canPersistSettings) settingsSet('git-ai-panel-width.agent', resumed.profileId)
     }
     await fitAndResize()
   })().catch((cause) => reportError(cause, 'ai-cli.start-failed'))
@@ -215,6 +223,19 @@ watch(collapsed, async (value) => {
   if (value) return
   await nextTick()
   await fitAndResize().catch((cause) => reportError(cause, 'ai-cli.resize-failed'))
+})
+
+// If the first authoritative snapshot failed, the panel may have rendered with
+// non-persistent defaults while the surrounding v2 surface offers Retry. Apply
+// the real snapshot when that retry succeeds, without reacting to later user
+// edits or queued writes.
+watch(() => settingsReadiness.status, (status) => {
+  if (status !== 'ready') return
+  selectedProfileId.value = settingsGet('git-ai-panel-width.agent', selectedProfileId.value)
+  panelWidth.value = Math.min(
+    MAX_WIDTH,
+    Math.max(MIN_WIDTH, Number(settingsGet('git-ai-panel-width', panelWidth.value)) || panelWidth.value),
+  )
 })
 
 onUnmounted(() => {

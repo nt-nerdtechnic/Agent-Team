@@ -1,4 +1,4 @@
-import { watch } from 'vue'
+import { reactive, watch } from 'vue'
 import type { ReactiveValue } from '../ports/value'
 
 /** Private settings adapter seam shared by Host and isolated feature views. */
@@ -32,6 +32,16 @@ export interface SettingsBackend {
 type Backend = SettingsBackend
 
 export const SETTINGS_FLUSH_DEBOUNCE_MS = 500
+
+export type SettingsReadinessStatus = 'pending' | 'ready' | 'failed'
+
+/** State of the current authoritative settings snapshot. V2 surfaces render a
+ * retry affordance from this state instead of treating a failed snapshot as a
+ * successful empty/default store. */
+export const settingsReadiness = reactive<{
+  status: SettingsReadinessStatus
+  error: Error | null
+}>({ status: 'ready', error: null })
 
 // ── One-time localStorage → ui_settings.json migration ──────────────────────
 // User-level keys that used to live in renderer localStorage. On first run the
@@ -133,18 +143,25 @@ let stopStatusWatch: (() => void) | null = null
 let offSettingsChanged: (() => void) | null = null
 let backendReady: Promise<void> = Promise.resolve()
 let resolveBackendReady: (() => void) | null = null
+let rejectBackendReady: ((reason?: unknown) => void) | null = null
 let readinessGeneration = 0
 const warnedUnsupportedKeys = new Set<string>()
 
-function resetBackendReady(): void {
+function resetBackendReady(reason = 'settings backend disconnected'): void {
   readinessGeneration += 1
-  const previous = resolveBackendReady
-  backendReady = new Promise<void>((resolve) => {
-    resolveBackendReady = () => {
-      resolve()
-      previous?.()
-    }
+  rejectBackendReady?.(new Error(reason))
+  rejectBackendReady = null
+  resolveBackendReady = null
+  settingsReadiness.status = 'pending'
+  settingsReadiness.error = null
+  backendReady = new Promise<void>((resolve, reject) => {
+    resolveBackendReady = resolve
+    rejectBackendReady = reject
   })
+  // Consumers may call settingsReady() only after a component has mounted. Keep
+  // the rejection observable to those callers while preventing an unhandled
+  // rejection when a legacy surface never awaited the readiness gate.
+  void backendReady.catch(() => undefined)
 }
 
 function warnUnsupportedKeyOnce(key: string): void {
@@ -257,15 +274,17 @@ export function initSettingsBackend(b: Backend): void {
     }
     notifyChanged(changed)
   })
+  let previousStatus = b.status.value
   stopStatusWatch = watch(
     () => b.status.value,
     (s) => {
       if (s === 'connected') {
         const generation = readinessGeneration
         void reconcile(b, generation)
-      } else {
+      } else if (previousStatus === 'connected' || settingsReadiness.status !== 'pending') {
         resetBackendReady()
       }
+      previousStatus = s
     },
     { immediate: true },
   )
@@ -275,6 +294,41 @@ export function initSettingsBackend(b: Backend): void {
  * whose source is a workspace-scoped Plugin Storage partition. */
 export function settingsReady(): Promise<void> {
   return backendReady
+}
+
+/** Retry the current authoritative snapshot. Unlike a connection watcher this
+ *  also retries while the transport remains connected, which lets a v2 UI
+ *  recover from a transient `getAll` failure without remounting the app. */
+export function retrySettings(): Promise<void> {
+  const b = backend
+  if (!b) return Promise.reject(new Error('settings backend is not initialized'))
+  resetBackendReady('settings snapshot retry superseded the previous attempt')
+  if (b.status.value === 'connected') {
+    const generation = readinessGeneration
+    void reconcile(b, generation)
+  }
+  return backendReady
+}
+
+function markSettingsReady(generation: number): void {
+  if (generation !== readinessGeneration) return
+  settingsReadiness.status = 'ready'
+  settingsReadiness.error = null
+  const resolve = resolveBackendReady
+  resolveBackendReady = null
+  rejectBackendReady = null
+  resolve?.()
+}
+
+function markSettingsFailed(generation: number, cause: unknown): void {
+  if (generation !== readinessGeneration) return
+  const error = cause instanceof Error ? cause : new Error(String(cause))
+  settingsReadiness.status = 'failed'
+  settingsReadiness.error = error
+  const reject = rejectBackendReady
+  resolveBackendReady = null
+  rejectBackendReady = null
+  reject?.(error)
 }
 
 async function reconcile(b: Backend, generation: number): Promise<void> {
@@ -303,13 +357,14 @@ async function reconcile(b: Backend, generation: number): Promise<void> {
         }
       }
       notifyChanged(changed)
+    } else {
+      throw new Error('authoritative settings snapshot is invalid')
     }
-    resolveBackendReady?.()
-    resolveBackendReady = null
+    markSettingsReady(generation)
+    void flushPending()
   } catch (err) {
     console.warn('[settings] reconcile failed', err)
-  } finally {
-    void flushPending()
+    markSettingsFailed(generation, err)
   }
 }
 
@@ -326,6 +381,9 @@ async function flushPending(): Promise<void> {
   const b = backend
   // Not connected: keep the queue; the status watch flushes on reconnect.
   if (!b || b.status.value !== 'connected') return
+  // An owned v2 store may only receive writes after its authoritative snapshot
+  // succeeded. This prevents fallback defaults from overwriting preferences.
+  if (b.ownedKeys && settingsReadiness.status !== 'ready') return
   const updates: Record<string, unknown> = {}
   for (const [key, value] of pending) updates[key] = value
   pending.clear()
@@ -421,6 +479,9 @@ export function __resetSettingsForTest(): void {
   readinessGeneration += 1
   backendReady = Promise.resolve()
   resolveBackendReady = null
+  rejectBackendReady = null
+  settingsReadiness.status = 'ready'
+  settingsReadiness.error = null
   if (flushTimer !== null) {
     clearTimeout(flushTimer)
     flushTimer = null

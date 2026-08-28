@@ -581,7 +581,27 @@ def resolve(from_pane_id: str, to: str) -> ResolveResult:
             if entry.workspace_path == sender.workspace_path and entry.name == target
         ]
         if local:
-            return _accept(_prefer_online(local)[0], target)
+            # Same refusal the qualified branch makes below, for the same
+            # reason: a name matching two panes names neither of them, and
+            # picking whichever registered first would inject into an
+            # arbitrary one silently. Applied after _prefer_online so a
+            # not-yet-expired offline duplicate cannot manufacture an
+            # ambiguity that no live pane is part of.
+            picks = _prefer_online(local)
+            if len(picks) > 1:
+                return _resolve_error(
+                    "ambiguous-target",
+                    f'ambiguous target "{target}" in workspace '
+                    f'"{sender.workspace_label}" ({len(picks)} panes share that '
+                    f"name) — pass pane_id instead of a name to say which one, "
+                    f"or rename one of them",
+                    # ws is synthesized from the sender: a bare name never
+                    # spelled a workspace, but the UI string needs one.
+                    name=target,
+                    ws=sender.workspace_label,
+                    n=len(picks),
+                )
+            return _accept(picks[0], target)
         return _resolve_error("unknown-target", f'unknown target "{target}"', to=target)
 
     # From here on the target is workspace-qualified.

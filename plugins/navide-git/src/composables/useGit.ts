@@ -1,6 +1,6 @@
 import { ref, computed, watch, onScopeDispose } from 'vue'
-import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import type { GitRequestType, GitTransport } from '#git-feature'
+import { useGitPreferences } from './useGitPreferences'
 
 export interface GitFileEntry {
   path: string
@@ -209,17 +209,21 @@ export function useGit(
   // a multi-lane DAG, 'current' shows only HEAD's ancestry. logLimit grows via
   // loadMoreLog() to page through history without breaking the graph.
   const LOG_PAGE = 50
-  const LOG_SCOPE_KEY = 'agentTeam.git.logScope'
-  const loadLogScope = (): 'all' | 'current' =>
-    settingsGet<string | null>(LOG_SCOPE_KEY, null) === 'current' ? 'current' : 'all'
-  const logScope = ref<'all' | 'current'>(loadLogScope())
-  // Sort order for the history graph (SourceTree-style): 'ancestor' = topo order
-  // (default, matches the lane layout), 'date' = strict date order.
-  const LOG_ORDER_KEY = 'agentTeam.git.logOrder'
-  const loadLogOrder = (): 'ancestor' | 'date' =>
-    settingsGet<string | null>(LOG_ORDER_KEY, null) === 'date' ? 'date' : 'ancestor'
-  const logOrder = ref<'ancestor' | 'date'>(loadLogOrder())
   const logLimit = ref(LOG_PAGE)
+  const preferences = useGitPreferences(() => {
+    logLimit.value = LOG_PAGE
+    void loadLog()
+  })
+  const {
+    logScope,
+    logOrder,
+    autoCommit,
+    gitTopRatio,
+    setLogScope: persistLogScope,
+    setLogOrder: persistLogOrder,
+    setAutoCommit,
+    setGitTopRatio,
+  } = preferences
   const gitBranches = ref<GitBranch[]>([])
   const gitStashes = ref<GitStashEntry[]>([])
   const gitRemotes = ref<GitRemote[]>([])
@@ -344,15 +348,19 @@ export function useGit(
       return false
     }
     const scope = logScope.value  // capture before await to detect scope changes
+    const order = logOrder.value
     isLoadingLog.value = true
     try {
       const resp = await send<{ commits: GitCommit[] }>('git.log', {
         workspace_path: ws,
         n: logLimit.value,
         all: scope === 'all',
-        order: logOrder.value,
+        order,
       })
-      if (resp.ok && resp.payload && workspacePath() === ws && logScope.value === scope) {
+      if (
+        resp.ok && resp.payload && workspacePath() === ws
+        && logScope.value === scope && logOrder.value === order
+      ) {
         gitLog.value = resp.payload.commits ?? []
         return true
       }
@@ -361,7 +369,10 @@ export function useGit(
       // transient WS error — loading flag reset in finally
       return false
     } finally {
-      if (workspacePath() === ws && logScope.value === scope) isLoadingLog.value = false
+      if (
+        workspacePath() === ws
+        && logScope.value === scope && logOrder.value === order
+      ) isLoadingLog.value = false
     }
   }
 
@@ -401,16 +412,14 @@ export function useGit(
 
   async function setLogScope(scope: 'all' | 'current'): Promise<void> {
     if (logScope.value === scope) return
-    logScope.value = scope
+    persistLogScope(scope)
     logLimit.value = LOG_PAGE
-    settingsSet(LOG_SCOPE_KEY, scope)
     await loadLog()
   }
 
   async function setLogOrder(order: 'ancestor' | 'date'): Promise<void> {
     if (logOrder.value === order) return
-    logOrder.value = order
-    settingsSet(LOG_ORDER_KEY, order)
+    persistLogOrder(order)
     await loadLog()
   }
 
@@ -1689,14 +1698,15 @@ export function useGit(
     // state
     gitStatus, statusError, statusLoaded, discoveredRepos, discoverySkipped, showIgnored, gitLog, gitBranches, gitStashes, gitRemotes, gitTags,
     gitWorktrees, gitConfig,
-    logScope, logOrder, logLimit, canLoadMoreLog,
+    logScope, logOrder, autoCommit, gitTopRatio, logLimit, canLoadMoreLog,
     isLoadingStatus, isLoadingLog, isInitializing,
     isCommitting, isSyncing, isFetching, isGenerating,
     syncOutput, syncError,
     gitError, clearGitError,
     credentialPrompt, showCredentialPrompt, submitCredential, cancelCredential,
     // loaders
-    loadStatus, discoverRepositories, loadLog, loadMoreLog, logSearch, setLogScope, setLogOrder, loadBranches, loadStashes, loadRemotes, loadTags,
+    loadStatus, discoverRepositories, loadLog, loadMoreLog, logSearch, setLogScope, setLogOrder,
+    setAutoCommit, setGitTopRatio, loadBranches, loadStashes, loadRemotes, loadTags,
     loadWorktrees, loadGitConfig,
     // init
     initRepo,

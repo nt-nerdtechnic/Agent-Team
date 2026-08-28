@@ -149,7 +149,7 @@
       "address": "aiCli.reattachSession",
       "visibility": "public",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
+      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "cols", "rows"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
@@ -173,7 +173,7 @@
       "address": "aiCli.redrawSession",
       "visibility": "public",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
+      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "cols", "rows"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
@@ -189,7 +189,7 @@
       "address": "aiCli.stopSession",
       "visibility": "public",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
+      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "force"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "force": { "type": "boolean" } } },
       "result": { "type": "object", "additionalProperties": false },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },

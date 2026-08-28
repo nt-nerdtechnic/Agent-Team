@@ -230,24 +230,28 @@ describe('several workspaces in one window', () => {
     expect(fn).toContain("    : ''")
   })
 
-  it('repairs a pane already carrying a foreign group', () => {
-    // The data is repaired rather than the view: buildStageTabs deliberately
-    // leaves such a pane off every tab, because a pane on no tab means
-    // something is wrong and hiding it in the manual tab would hide that too.
-    const at = appSource.indexOf('async function repairForeignRunGroups')
+  it('adopts the group a pane names instead of stripping the pane', () => {
+    // The data is repaired rather than the view, but never by clearing the
+    // pane: its run_group_id is the only surviving record of the assignment, so
+    // clearing it destroyed the grouping for good — and did it to the whole
+    // workspace at once. Rebuilding the record under that same id restores the
+    // tab and leaves every pane alone.
+    const at = appSource.indexOf('function adoptOrphanRunGroups')
     expect(at).toBeGreaterThan(-1)
     const fn = appSource.slice(at, appSource.indexOf('\n}', at))
     expect(fn).toContain('const known = new Set(runGroups.value.map((g) => g.id))')
-    expect(fn).toContain('!known.has(p.runGroupId)')
-    // Cleared on disk first — a local-only clear comes back on the next load.
-    expect(fn).toContain("if (await persistPaneRunGroup(pane, '')) pane.runGroupId = undefined")
+    expect(fn).toContain('known.has(gid)')
+    expect(fn).toContain('createdAt: runGroupCreatedAt(id)')
+    expect(fn).not.toContain('persistPaneRunGroup')
+    expect(fn).not.toContain('pane.runGroupId = undefined')
   })
 
-  it('repairs only after this workspace groups are authoritative', () => {
+  it('adopts only after this workspace groups are authoritative', () => {
     // Before _loadRunGroups the list still belongs to the workspace being left,
-    // so every id would look foreign and every pane would be stripped.
+    // so every id would look orphaned and this workspace would gain a tab for
+    // every group of the one being left.
     expect(appSource.indexOf('_loadRunGroups(path, resp.project)')).toBeLessThan(
-      appSource.indexOf('void repairForeignRunGroups(path)')
+      appSource.indexOf('adoptOrphanRunGroups(path)')
     )
   })
 

@@ -8,6 +8,7 @@ import {
   settingsRemove,
   initSettingsBackend,
   settingsReady,
+  settingsReadiness,
   onSettingsChanged,
   migrateLegacyLocalStorage,
   SETTINGS_FLUSH_DEBOUNCE_MS,
@@ -204,7 +205,7 @@ describe('lib/settings', () => {
       off()
     })
 
-    it('resolves an early settingsReady waiter after a connection flap', async () => {
+    it('rejects an obsolete settingsReady waiter after a connection flap', async () => {
       const status = ref<'connected' | 'disconnected'>('disconnected')
       let resolveSnapshot!: (value: Record<string, unknown>) => void
       const backend = {
@@ -218,23 +219,20 @@ describe('lib/settings', () => {
       }
 
       initSettingsBackend(backend)
-      let earlyReady = false
-      void settingsReady().then(() => { earlyReady = true })
+      const earlyReady = settingsReady()
 
       status.value = 'connected'
       await nextTick()
       status.value = 'disconnected'
       await nextTick()
+      await expect(earlyReady).rejects.toThrow('settings backend disconnected')
       status.value = 'connected'
       await nextTick()
       resolveSnapshot({ 'agentTeam.gitTabRepo': '/workspace/sub' })
       await settingsReady()
-      await Promise.resolve()
-
-      expect(earlyReady).toBe(true)
     })
 
-    it('flushes queued writes when reconciliation fails', async () => {
+    it('does not flush queued writes when reconciliation fails', async () => {
       const status = ref<'connected' | 'disconnected'>('disconnected')
       const setMany = vi.fn(async () => undefined)
       const backend = {
@@ -251,7 +249,9 @@ describe('lib/settings', () => {
       await nextTick()
       await Promise.resolve()
 
-      expect(setMany).toHaveBeenCalledWith({ 'agentTeam.git.logScope': 'queued' })
+      await expect(settingsReady()).rejects.toThrow('snapshot unavailable')
+      expect(settingsReadiness).toMatchObject({ status: 'failed' })
+      expect(setMany).not.toHaveBeenCalled()
       vi.clearAllTimers()
     })
 

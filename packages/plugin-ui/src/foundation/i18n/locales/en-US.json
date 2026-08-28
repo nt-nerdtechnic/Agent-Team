@@ -102,7 +102,10 @@
       "open-accounts": "Open Git accounts"
     },
     "left-view-unavailable": "The embedded Git view is temporarily unavailable.",
-    "open-workspace": "Open a workspace to use Git."
+    "open-workspace": "Open a workspace to use Git.",
+    "settings-unavailable": "Git preferences could not be loaded.",
+    "settings-retry": "Retry",
+    "settings-retrying": "Retrying…"
   },
   "pane": {
     "git": {
@@ -343,7 +346,14 @@
       "login-expired-badge": "⚠ Login expired",
       "login-expired-tooltip": "The CLI's login has expired — click to send its login command",
       "login-expired-notify-title": "CLI login expired",
-      "login-expired-notify-body": "The CLI reported an expired login — click the pane's badge to re-login"
+      "login-expired-notify-body": "The CLI reported an expired login — click the pane's badge to re-login",
+      "skill-picker": {
+        "label": "Prompt skills",
+        "hint": "Point at a skill to see exactly what it will send.",
+        "max-turns": "Stops after {n} turns",
+        "unlimited": "No turn cap",
+        "is-default": "★ Default skill"
+      }
     },
     "prep": {
       "starting": "starting CLI",
@@ -768,6 +778,7 @@
       "pipelines": "Pipelines",
       "mcp": "MCP",
       "skills": "Skills",
+      "prompts": "Prompts",
       "analyzer": "Analyzer",
       "extensions": "Extensions",
       "storage": "Storage",
@@ -898,6 +909,36 @@
       "enabled": "Enabled",
       "enabled-hint": "Off means Navide delivers it nowhere; CLIs that read it on their own still see it.",
       "native-conflict-hint": "A CLI's own skill has this name and wins for that CLI."
+    },
+    "prompts": {
+      "title": "Prompt Skills",
+      "intro": "Reusable whole instructions a CLI pane can cast from its ∞ loop button. One skill is one complete prompt — picking a skill replaces the prompt, it never appends to another.",
+      "new": "New skill",
+      "new-name": "New skill",
+      "copy-name": "{name} copy",
+      "filter-label": "Filter by category",
+      "all": "All",
+      "search": "Search skills…",
+      "empty": "No skill matches this filter.",
+      "default-badge": "★ Default",
+      "turns": "×{n}",
+      "turns-unlimited": "No turn cap",
+      "disabled": "Disabled",
+      "name": "Name",
+      "icon": "Icon",
+      "description": "Summary",
+      "prompt": "Prompt sent on cast",
+      "resume": "Resume text",
+      "resume-placeholder": "Leave empty to use the global resume text",
+      "max-turns": "Turn cap (0 = none)",
+      "category": "Category",
+      "set-default": "Set as default",
+      "enable": "Enable",
+      "disable": "Disable",
+      "duplicate": "Duplicate",
+      "delete": "Delete",
+      "hint": "The default skill is what a plain click on ∞ casts; disabled skills stay here but leave the picker.",
+      "advanced": "Advanced"
     },
     "section": {
       "general-behavior": "General behavior",
@@ -1548,6 +1589,7 @@
     "branch": "Branch",
     "no-role": "No role",
     "manual": "manual",
+    "orphan-group": "Recovered group",
     "staged-changes": "Staged Changes",
     "changes": "Changes",
     "no-changes": "No changes",

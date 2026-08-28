@@ -188,6 +188,37 @@ def test_bare_name_resolves_only_within_sender_workspace() -> None:
     assert result.cross_workspace is False
 
 
+def test_bare_name_refuses_two_panes_sharing_a_name() -> None:
+    """The bare-name path used to pick whichever registered first, silently —
+    the exact thing the qualified path refuses to do. Both spellings of the
+    same situation must now give the same answer."""
+    agent_messaging.register("p1", "sender", "/ws/alpha")
+    agent_messaging.register("p2", "reviewer", "/ws/alpha")
+    agent_messaging.register("p3", "reviewer", "/ws/alpha")
+
+    result = agent_messaging.resolve("p1", "reviewer")
+    assert result.pane is None
+    assert result.code == "ambiguous-target"
+    # The way out is an id, and the message has to say so.
+    assert result.error is not None and "pane_id" in result.error
+    # The UI string takes ws/n/name; a bare name spelled no workspace, so it is
+    # synthesized from the sender or the message renders broken.
+    assert result.params == {"name": "reviewer", "ws": "alpha", "n": "2"}
+
+
+def test_a_bare_name_matching_one_live_pane_is_not_ambiguous() -> None:
+    """An offline duplicate still inside its grace period must not manufacture
+    an ambiguity no live pane is part of — the check runs after _prefer_online."""
+    gone, here = object(), object()
+    agent_messaging.register("p1", "sender", "/ws/alpha", owner=here)
+    agent_messaging.register("old", "reviewer", "/ws/alpha", owner=gone)
+    agent_messaging.drop_owner(gone)
+    agent_messaging.register("live", "reviewer", "/ws/alpha", owner=here)
+
+    result = agent_messaging.resolve("p1", "reviewer")
+    assert result.pane is not None and result.pane.pane_id == "live"
+
+
 def test_bare_name_never_reaches_another_workspace() -> None:
     agent_messaging.register("p1", "claude-1", "/ws/alpha")
     agent_messaging.register("p3", "reviewer", "/ws/beta")

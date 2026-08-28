@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import MultiRepoGit from './components/MultiRepoGit.vue'
+import SettingsReadinessNotice from './components/SettingsReadinessNotice.vue'
 import { onSettingsChanged, settingsGet, useKeybindings } from '@navide/plugin-ui/shared'
 import type { GitSurfacePorts, LegacyRepoSelectionPort } from './ports/gitSurface'
 import { HOST_GIT_COMMAND_IDS, type GitContributionState } from './ports/gitContribution'
@@ -60,31 +61,35 @@ async function dispatch(action: Parameters<PluginGitContributionHostPort['dispat
 
 <template>
   <div class="git-left-root">
-    <MultiRepoGit
-      :workspace-path="workspacePath"
-      :legacy-repo-selection="legacyRepoSelection"
-      :surface-ports="surfacePorts"
-      :analyzer-model="analyzerModel"
-      :dispatch-targets="state.dispatchTargets"
-      :available-agents="state.availableAgents"
-      :issue-handoffs="state.issueHandoffs"
-      @changes-count="dispatch({ operation: 'changes_count', count: $event })"
-      @open-workspace="dispatch({ operation: 'open_workspace', path: $event.path, grant: $event.grant })"
-      @open-file="dispatch({ operation: 'open_file', payload: $event })"
-      @open-conflict="dispatch({ operation: 'open_conflict', payload: $event })"
-      @open-diff="dispatch({ operation: 'open_diff', payload: $event })"
-      @open-branch-diff="dispatch({ operation: 'open_branch_diff', payload: $event })"
-      @dispatch-issue="dispatch({ operation: 'dispatch_issue', payload: $event })"
-      @spawn-for-issue="dispatch({ operation: 'spawn_for_issue', payload: $event })"
-      @focus-pane="dispatch({ operation: 'focus_pane', paneId: $event })"
-      @open-git-accounts="dispatch({ operation: 'open_git_accounts' })"
-    />
+    <SettingsReadinessNotice />
+    <div class="git-left-content">
+      <MultiRepoGit
+        :workspace-path="workspacePath"
+        :legacy-repo-selection="legacyRepoSelection"
+        :surface-ports="surfacePorts"
+        :analyzer-model="analyzerModel"
+        :dispatch-targets="state.dispatchTargets"
+        :available-agents="state.availableAgents"
+        :issue-handoffs="state.issueHandoffs"
+        @changes-count="dispatch({ operation: 'changes_count', count: $event })"
+        @open-workspace="dispatch({ operation: 'open_workspace', path: $event.path, grant: $event.grant })"
+        @open-file="dispatch({ operation: 'open_file', payload: $event })"
+        @open-conflict="dispatch({ operation: 'open_conflict', payload: $event })"
+        @open-diff="dispatch({ operation: 'open_diff', payload: $event })"
+        @open-branch-diff="dispatch({ operation: 'open_branch_diff', payload: $event })"
+        @dispatch-issue="dispatch({ operation: 'dispatch_issue', payload: $event })"
+        @spawn-for-issue="dispatch({ operation: 'spawn_for_issue', payload: $event })"
+        @focus-pane="dispatch({ operation: 'focus_pane', paneId: $event })"
+        @open-git-accounts="dispatch({ operation: 'open_git_accounts' })"
+      />
+    </div>
   </div>
 </template>
 
 <style scoped>
 .git-left-root {
   display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -92,5 +97,12 @@ async function dispatch(action: Parameters<PluginGitContributionHostPort['dispat
   overflow: hidden;
   background: var(--bg-base);
   color: var(--text-primary);
+}
+
+.git-left-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 </style>

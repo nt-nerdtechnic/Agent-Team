@@ -1707,6 +1707,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           :contribution="pluginTab"
           :workspace-path="workspace ?? ''"
           :visible="!collapsed && sidebarTab === pluginTab.tabId"
+          :prewarm="pluginTab.pluginId === 'navide.git'"
         />
         <template v-if="legacyGitRecovery && backend && sidebarTab === 'git'">
           <div class="legacy-recovery-label" data-legacy-recovery-label>Legacy recovery</div>

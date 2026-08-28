@@ -60,9 +60,13 @@ Host's protected local account store or the CLI's own credential flow; they are
 not written into plugin-renderer storage. The isolated v2 Git renderer receives
 only non-secret account metadata and workspace binding state. For a remote Git
 operation, the Host injects the bound credential immediately before the backend
-call; when no binding is available, the request fails with `CREDENTIAL_REQUIRED`
-and the user is directed to the Host Git Accounts UI. The v2 renderer cannot
-submit a raw Git credential prompt or receive credential events.
+call. When no Host account is bound to the workspace, v2 can still use an
+interactive credential flow owned by the Host: the Host creates an opaque,
+instance-bound owner for that operation, forwards Git's prompts to the exact
+originating Git view, and validates request ownership before accepting a
+response. The entered secret is held only for that exchange and is never
+persisted in plugin storage. A credential response from another view or for a
+different workspace is rejected.
 
 While an installed marketplace plugin is present, Navide sends that plugin's
 namespace/name to its selected Registry when the app starts and every 15

@@ -102,7 +102,10 @@
       "open-accounts": "開啟 Git 帳號"
     },
     "left-view-unavailable": "嵌入式 Git View 暫時無法使用。",
-    "open-workspace": "請先開啟工作區以使用 Git。"
+    "open-workspace": "請先開啟工作區以使用 Git。",
+    "settings-unavailable": "Git 偏好設定載入失敗。",
+    "settings-retry": "重試",
+    "settings-retrying": "重試中…"
   },
   "pane": {
     "git": {
@@ -343,7 +346,14 @@
       "login-expired-badge": "⚠ 登入過期",
       "login-expired-tooltip": "CLI 登入已過期 — 點擊送出其登入指令重新登入",
       "login-expired-notify-title": "CLI 登入已過期",
-      "login-expired-notify-body": "CLI 回報登入已過期 — 點擊該 pane 的標籤重新登入"
+      "login-expired-notify-body": "CLI 回報登入已過期 — 點擊該 pane 的標籤重新登入",
+      "skill-picker": {
+        "label": "Prompt 技能",
+        "hint": "把游標移到技能上，這裡會顯示它實際會送出的內容。",
+        "max-turns": "跑滿 {n} 輪後停止",
+        "unlimited": "無輪次上限",
+        "is-default": "★ 預設技能"
+      }
     },
     "prep": {
       "starting": "啟動 CLI 中",
@@ -768,6 +778,7 @@
       "pipelines": "流程",
       "mcp": "MCP",
       "skills": "技能",
+      "prompts": "Prompt 技能",
       "analyzer": "分析器",
       "extensions": "擴充功能",
       "storage": "儲存空間",
@@ -898,6 +909,36 @@
       "enabled": "啟用",
       "enabled-hint": "關閉＝Navide 不投遞給任何一家；自己會讀的 CLI 仍看得到。",
       "native-conflict-hint": "某家 CLI 自己也有同名 skill，對那家來說它的優先。"
+    },
+    "prompts": {
+      "title": "Prompt 技能",
+      "intro": "CLI pane 的 ∞ 按鈕可施放的整段指令。一個技能就是一整段 prompt —— 選技能是「換一段」，不會跟別的技能疊加。",
+      "new": "新增技能",
+      "new-name": "新技能",
+      "copy-name": "{name} 副本",
+      "filter-label": "依分類篩選",
+      "all": "全部",
+      "search": "搜尋技能…",
+      "empty": "沒有符合這個篩選的技能。",
+      "default-badge": "★ 預設",
+      "turns": "×{n}",
+      "turns-unlimited": "無輪次上限",
+      "disabled": "已停用",
+      "name": "名稱",
+      "icon": "圖示",
+      "description": "摘要",
+      "prompt": "施放時送出的 prompt",
+      "resume": "續跑詞",
+      "resume-placeholder": "留空則沿用全域續跑詞",
+      "max-turns": "輪次上限（0 表示不限）",
+      "category": "分類",
+      "set-default": "設為預設",
+      "enable": "啟用",
+      "disable": "停用",
+      "duplicate": "複製",
+      "delete": "刪除",
+      "hint": "預設技能就是單擊 ∞ 會送出的那一段；停用的技能留在這裡，但不會出現在選單上。",
+      "advanced": "進階"
     },
     "section": {
       "general-behavior": "一般行為",
@@ -1548,6 +1589,7 @@
     "branch": "分支",
     "no-role": "無角色",
     "manual": "手動",
+    "orphan-group": "找回的群組",
     "staged-changes": "已暫存的變更",
     "changes": "變更",
     "no-changes": "沒有變更",

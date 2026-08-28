@@ -30,7 +30,7 @@ import {
   GIT_TRANSPORT_KEY,
   GIT_UI_KEY,
 } from './ports/gitSurface'
-import { initKeybindingsPort, initSettingsBackend, seedSettings, settingsReady } from '@navide/plugin-ui/shared'
+import { initKeybindingsPort, initSettingsBackend, seedSettings } from '@navide/plugin-ui/shared'
 
 // Theme token layers — order matters: primitives → semantic roles → themes.
 import '@navide/plugin-ui/styles.css'
@@ -108,9 +108,7 @@ const aiCliController = isLeftContribution ? null : createAiCliSessionController
 initSettingsBackend(settingsPort)
 initKeybindingsPort(createPluginKeybindingsPort())
 
-async function mountPlugin(): Promise<void> {
-  await settingsReady()
-
+function mountPlugin(): void {
   const app = isLeftContribution
     ? createApp(GitLeftApp, { surfacePorts, hostPort: contributionHostPort, legacyRepoSelection })
     : createApp(GitWindowApp, { workspaceGrantPort, aiCliController: aiCliController! })
@@ -127,6 +125,8 @@ async function mountPlugin(): Promise<void> {
   ;(window as unknown as { nav?: { ready?: () => void } }).nav?.ready?.()
 }
 
-void mountPlugin().catch((error: unknown) => {
+try {
+  mountPlugin()
+} catch (error: unknown) {
   console.error('[navide.git] Failed to mount the plugin view.', error)
-})
+}

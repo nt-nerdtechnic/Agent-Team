@@ -556,12 +556,12 @@ export interface PublicMethodParams {
   'aiCli.startSession': { profileId: string; requestId?: string; cols: number; rows: number; yolo?: boolean }
   'aiCli.resumeSession': { cols: number; rows: number }
   'aiCli.cancelStart': { requestId: string }
-  'aiCli.reattachSession': { sessionId: string }
+  'aiCli.reattachSession': { sessionId: string; cols: number; rows: number }
   'aiCli.sendInput': { sessionId: string; data: string }
   'aiCli.resizeSession': { sessionId: string; cols: number; rows: number }
-  'aiCli.redrawSession': { sessionId: string }
+  'aiCli.redrawSession': { sessionId: string; cols: number; rows: number }
   'aiCli.interruptSession': { sessionId: string }
-  'aiCli.stopSession': { sessionId: string }
+  'aiCli.stopSession': { sessionId: string; force: boolean }
   'shell.run': { command: string }
   'storage.get': { scope: StoragePartitionScope; key: string }
   'storage.set': { scope: StoragePartitionScope; key: string; value: JsonValue }
