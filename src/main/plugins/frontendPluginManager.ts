@@ -2791,7 +2791,9 @@ export class FrontendPluginManager {
     // Git's existing changed event is a private first-party transport seam,
     // not a public Manifest v2 capability. Route it by the Host-owned
     // workspace path so two Git view instances never receive one another's
-    // refresh. Credential events intentionally remain legacy-only.
+    // refresh. Credential events take the dedicated branch at the top of this
+    // method instead, routed to their owning instance by the Host-issued
+    // credential-owner nonce.
     if (event === 'git.changed') {
       const eventWorkspace =
         typeof payload === 'object' && payload !== null &&
