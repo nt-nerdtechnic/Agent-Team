@@ -4100,9 +4100,12 @@ export class FrontendPluginManager {
     contributionKey: string,
     options: { workspacePath: string; query: string }
   ): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
-    const descriptor = this.listDescriptors().find((candidate) =>
+    const listed = this.listDescriptors().find((candidate) =>
       candidate.views?.some((view) => view.contributionKey === contributionKey)
     )
+    // Re-resolve against the registered descriptor rather than the listing, and
+    // require the view to be one the Host itself registered (mirrors openView).
+    const descriptor = listed ? this.descriptors.get(listed.id) : undefined
     const view = descriptor?.views?.find((candidate) => candidate.contributionKey === contributionKey)
     if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
     if (view.location === 'window') {
@@ -4113,6 +4116,10 @@ export class FrontendPluginManager {
       return { ok: false, error: 'package-version capability grant is missing' }
     }
     validateV2CapabilityContext(descriptor, capabilityContext ?? null)
+    // The guest starts calling as soon as its preload runs, which is before
+    // any native view may have registered the broker. (The native paths call
+    // this from mountView; a guest never goes through it.)
+    this.registerIpc()
 
     // One live instance per (window, contribution). A re-prepare means the
     // renderer is mounting a fresh guest, so the previous one is finished.
