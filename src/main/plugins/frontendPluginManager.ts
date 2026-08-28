@@ -150,6 +150,40 @@ export interface PluginViewOpenOptions {
   initiallyVisible?: boolean
 }
 
+/** What the manager needs from a mounted plugin surface.
+ *
+ *  A `location: 'window'` contribution is a native `WebContentsView`, which the
+ *  host positions and shows explicitly. An in-window contribution is a
+ *  `<webview>` living in the host document, so its geometry and visibility are
+ *  the renderer's CSS — `setBounds` and `setVisible` are then no-ops and the
+ *  guest's own `webContents` still carries the instance's identity. */
+export interface PluginSurface {
+  readonly webContents: WebContents
+  /** Present only for a native `WebContentsView`; a `<webview>` guest is owned
+   *  by the host document and is never added to / removed from `contentView`. */
+  readonly nativeView?: WebContentsView
+  setBounds(bounds: { x: number; y: number; width: number; height: number }): void
+  setVisible(visible: boolean): void
+}
+
+/** A native `WebContentsView` wrapped as a {@link PluginSurface}. Keeping the
+ *  handle on `nativeView` is what lets teardown remove it from `contentView`;
+ *  a guest surface has no such child to remove. */
+export function nativeSurface(view: WebContentsView): PluginSurface {
+  return {
+    webContents: view.webContents,
+    nativeView: view,
+    setBounds: (bounds) => view.setBounds(bounds),
+    setVisible: (visible) => view.setVisible(visible),
+  }
+}
+
+/** A `<webview>` guest wrapped as a {@link PluginSurface}. The renderer owns
+ *  layout, so only `webContents` is real here. */
+export function guestSurface(webContents: WebContents): PluginSurface {
+  return { webContents, setBounds: () => {}, setVisible: () => {} }
+}
+
 interface RunningPlugin {
   instanceId: string
   id: string
@@ -160,7 +194,7 @@ interface RunningPlugin {
   requires: string[]
   capabilityPolicy: PluginCapabilityPolicy
   capabilityContext: HostCapabilityContext | null
-  view: WebContentsView
+  view: PluginSurface
   hostWindow: BrowserWindow
   /** Host-owned workspace path; never sourced from plugin payloads. */
   workspacePath: string | null
@@ -3200,8 +3234,9 @@ export class FrontendPluginManager {
   /** Detach a view from its host without changing the WebContents lifecycle. */
   private detachView(plugin: RunningPlugin): void {
     try {
-      if (!plugin.hostWindow.isDestroyed()) {
-        plugin.hostWindow.contentView.removeChildView(plugin.view)
+      const native = plugin.view.nativeView
+      if (native && !plugin.hostWindow.isDestroyed()) {
+        plugin.hostWindow.contentView.removeChildView(native)
       }
     } catch {
       // Host teardown may already have removed the view.
@@ -3210,7 +3245,7 @@ export class FrontendPluginManager {
 
   private forgetInstance(instanceId: string, view?: WebContentsView): RunningPlugin | undefined {
     const plugin = this.running.get(instanceId)
-    if (!plugin || (view && plugin.view !== view)) return undefined
+    if (!plugin || (view && plugin.view.nativeView !== view)) return undefined
     this.settleActivation(instanceId)
     plugin.detachHostResize?.()
     plugin.detachHostResize = null
@@ -3472,7 +3507,7 @@ export class FrontendPluginManager {
         isV2Identity || !openedViaLegacyAdapter
           ? this.bindCapabilityContext(capabilityContext, instanceId)
           : capabilityContext ?? null,
-      view,
+      view: nativeSurface(view),
       hostWindow,
       workspacePath: opts.workspacePath ?? null,
       query,
@@ -3506,7 +3541,7 @@ export class FrontendPluginManager {
     // later record (view recreated on another window) is never torn down by a
     // stale hook.
     const onHostClosed = (): void => {
-      if (this.running.get(instanceId)?.view === view) this.destroyInstance(instanceId)
+      if (this.running.get(instanceId)?.view.nativeView === view) this.destroyInstance(instanceId)
     }
     hostWindow.on('closed', onHostClosed)
     record.detachHostClosed = () => hostWindow.removeListener('closed', onHostClosed)
@@ -3536,7 +3571,7 @@ export class FrontendPluginManager {
     // flushed here (mirrors the legacy editor window's did-finish-load flush).
     view.webContents.on('did-finish-load', () => {
       const current = this.running.get(instanceId)
-      if (current?.view !== view) return
+      if (current?.view.nativeView !== view) return
       current.ready = true
       if (
         this.pendingActivations.get(instanceId) === null &&
@@ -3614,7 +3649,7 @@ export class FrontendPluginManager {
    *  Contribution views always load their canonical view entry file so one
    *  package-level devUrl cannot collapse multiple views onto one document. */
   private loadEntry(
-    view: WebContentsView,
+    view: PluginSurface,
     descriptor: PluginLaunchDescriptor,
     forceFile = false
   ): void {

@@ -333,7 +333,14 @@ async function createWindow(
       // Terminal panes drain PTY output through a timer and xterm's WriteBuffer
       // yields with setTimeout every 12ms, so throttling turns a backgrounded
       // window into multi-second keystroke lag once the user switches back.
-      backgroundThrottling: false
+      backgroundThrottling: false,
+      // In-window plugin contributions (any manifest `location` other than
+      // 'window') mount as <webview> so they join this document's stacking
+      // context. A native WebContentsView always composites above the DOM,
+      // which left modals unable to cover a plugin panel. Every guest's
+      // webPreferences are overridden from main in 'will-attach-webview',
+      // so enabling the tag grants the renderer no authority of its own.
+      webviewTag: true
     }
   })
   mainWindows.add(win)
