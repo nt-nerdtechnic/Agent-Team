@@ -13,7 +13,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from agent_team_backend import agent_messaging
 from agent_team_backend import app as backend_app
 from agent_team_backend.app import app
-from agent_team_backend.plan_meta import parse_plan_meta
+from agent_team_backend.plugins.builtin.navide_plans.plan_meta import parse_plan_meta
 from agent_team_backend.plugins import wiring as plugin_wiring
 from agent_team_backend.mcp_server import server as plan_mcp, auth as plan_mcp_auth, wiring as plan_mcp_wiring
 from agent_team_backend.plugins.builtin.navide_plans import plan_tools

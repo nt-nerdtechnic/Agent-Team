@@ -28,7 +28,7 @@ from agent_team_backend.mcp_server.toolkit import (
     workspace_mismatch_warning,
 )
 from agent_team_backend.plan_index import resolve_plan_root
-from agent_team_backend.plan_meta import (
+from agent_team_backend.plugins.builtin.navide_plans.plan_meta import (
     PLAN_STAGES,
     TODO_STATUSES,
     parse_plan_meta,

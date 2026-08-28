@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agent_team_backend import plan_meta
+from agent_team_backend.plugins.builtin.navide_plans import plan_meta
 
 
 def _meta(**overrides: Any) -> dict[str, Any]:

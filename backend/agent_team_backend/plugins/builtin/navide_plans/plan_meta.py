@@ -1,5 +1,10 @@
 """Parse/serialize layer for the ``plan-meta`` JSON island in plan HTML files.
 
+Lives in the plugin because the plan document format is the plugin's own:
+nothing in core reads or writes this island, and only ``plan_tools`` imports
+this module. Core keeps ``plan_index`` (which the Plan window's WS handlers
+need) and ``plan_provisioning`` (which app.py runs at workspace registration).
+
 Python equivalent of the frontend ``usePlanHtml.ts`` composable, scoped to the
 two operations backend callers need:
 
