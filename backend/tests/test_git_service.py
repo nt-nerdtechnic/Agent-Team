@@ -3001,7 +3001,7 @@ class TestGitProcLimit:
         monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
 
         result = await git_service._run(["git", "status"], ".")
-        assert result == (128, "", "git command timed out")
+        assert result == (128, "", "git timed out")
         assert procs[0].killed is True
         assert procs[0].waited is True  # zombie reaped, not just killed
 
@@ -3040,7 +3040,7 @@ class TestGitProcLimit:
         monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
 
         result = await git_service._run_with_input(["git", "apply"], ".", "diff")
-        assert result == (128, "", "git command timed out")
+        assert result == (128, "", "git timed out")
         assert procs[0].killed is True
         assert procs[0].waited is True
 

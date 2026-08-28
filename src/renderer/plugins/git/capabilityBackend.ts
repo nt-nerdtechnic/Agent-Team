@@ -12,15 +12,31 @@
 //     → main broker enforces manifest.requires + dispatches to the backend WS
 //     ← CapabilityResponse, remapped to the WsResponse shape caller code expects
 //
-// The plugin build aliases `composables/useBackend` to this module (see
-// vite.git.config.ts), so GitWindowApp's `import { useBackend }` and every
-// `ReturnType<typeof useBackend>` prop type resolve here with zero source
-// changes. This module is Vue-aware (it owns the reactive `status` ref) but must
-// stay free of any `electron`/`window.agentTeam` reference — a plugin's only
-// host surface is `window.nav`.
+// The plugin composition root consumes this facade to create one SDK-bound
+// capability surface, then passes named feature ports to GitWindowApp. The Git
+// domain itself does not import this module or observe its generic facade.
+// This module is Vue-aware (it owns the reactive `status` ref) but must stay
+// free of any `electron`/`window.agentTeam` reference — a plugin's only host
+// surface is `window.nav`.
 
 import { ref, type Ref } from 'vue'
-import type { AutoRestartInfo, BackendStatus, WsResponse } from '../../src/composables/useBackend'
+
+type BackendStatus = 'starting' | 'connecting' | 'connected' | 'disconnected' | 'error'
+
+interface AutoRestartInfo {
+  attempt: number
+  max: number
+  reason: string
+}
+
+interface WsResponse<T = unknown> {
+  id: string
+  type: string
+  ok: boolean
+  payload: T | null
+  error: { code: string; message: string; details?: Record<string, unknown> } | null
+  timestamp: string
+}
 
 // ── window.nav (injected by src/preload/plugin-preload.ts) ───────────────────
 interface CapabilityResponse {
@@ -37,6 +53,11 @@ interface NavBridge {
   on(type: string, cb: (data: unknown) => void): () => void
   ready(): void
 }
+
+// Keep the plugin-side broker deadline aligned with the Git transport's
+// established default. The SDK source must enforce this before returning a
+// response to any feature port; forwarding the number alone is not enough.
+const DEFAULT_CAPABILITY_TIMEOUT_MS = 10_000
 
 // Deliberately NOT a `declare global` Window augmentation: the other plugin
 // modules already augment `Window.nav`, and their bridge surfaces are evolving
@@ -201,11 +222,10 @@ function errorWsResponse<T>(type: string, code: string, message: string): WsResp
   return { id: '', type, ok: false, payload: null, error: { code, message }, timestamp: nowIso() }
 }
 
-// ── The useBackend-compatible shim ───────────────────────────────────────────
+// ── Plugin capability facade ─────────────────────────────────────────────────
 /**
- * Drop-in replacement for `useBackend()` inside the Git plugin bundle. Returns
- * the identical public surface; the plugin build aliases the real composable to
- * this so GitWindowApp and useGit use it unchanged.
+ * Provides the plugin composition root with a capability-backed, backend-shaped
+ * facade. Feature code receives named ports before GitWindowApp is mounted.
  */
 export function useBackend(): {
   status: Ref<BackendStatus>
@@ -254,7 +274,7 @@ export function useBackend(): {
   async function send<T = unknown>(
     type: string,
     payload: Record<string, unknown> = {},
-    _timeoutMs?: number
+    timeoutMs?: number
   ): Promise<WsResponse<T>> {
     const cap = resolveCapability(type)
     if (!cap) {
@@ -268,8 +288,29 @@ export function useBackend(): {
         bridge.castCapability(cap.ns, cap.method, payload)
         return { id: '', type, ok: true, payload: null, error: null, timestamp: nowIso() }
       }
-      const resp = await bridge.callCapability(cap.ns, cap.method, payload)
-      return toWsResponse<T>(type, resp)
+      const deadlineMs = timeoutMs ?? DEFAULT_CAPABILITY_TIMEOUT_MS
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const outcome = await Promise.race([
+          bridge.callCapability(cap.ns, cap.method, payload).then((response) => ({
+            kind: 'response' as const,
+            response,
+          })),
+          new Promise<{ kind: 'timeout' }>((resolve) => {
+            timer = setTimeout(() => resolve({ kind: 'timeout' }), deadlineMs)
+          }),
+        ])
+        if (outcome.kind === 'timeout') {
+          return errorWsResponse<T>(
+            type,
+            'TIMEOUT',
+            `capability call '${type}' timed out after ${deadlineMs}ms`,
+          )
+        }
+        return toWsResponse<T>(type, outcome.response)
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
     } catch (err) {
       return errorWsResponse<T>(
         type,

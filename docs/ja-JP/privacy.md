@@ -10,6 +10,7 @@ Navide は **Local-first** ですが、常に完全オフラインという意�
 
 - `<workspace>/.agent-team/` 内の、ユーザーごとに非公開の Project Intelligence と Run Artifact
 - Application Data Directory 内の Role、Pipeline、Recent Workspace、UI Setting、Analyzer Setting、AI Provider Setting
+- Application Data Directory 内の Host 管理 Plugin Storage Partition。認証済みの Plugin/Package ごとに分離され、Workspace Scope では認証済み Workspace ごとに分離されます。Navide や Plugin Registry へ送信されません
 - Local CLI Log から得た Token Attribution と Deduplication Metadata
 - 任意の AI Provider API Key。制限された File Permission（対応 System では `0600`）で保護された Local Settings File に保存
 
@@ -31,12 +32,28 @@ Navide は Project Telemetry Service を運営せず、Navide Account を必要�
 | Cloud AI（Inline 編集と Code Review） | Anthropic、OpenAI、Google、Groq、DeepSeek、Mistral、xAI、Custom Endpoint | 選択したコード、Prompt、Model Parameter |
 | Context7 Injection | Context7 と MCP Distribution/Runtime Dependency | 検出された Library Name と Documentation Query |
 | Web Search | Search Provider | Search Query Text |
-| Git Operation | 設定された Git Host | Repository Data と、Git または Host Flow が扱う Credential |
+| Git Operation と Issue Detection | 設定された Git Host。Local `git`、`gh`、`glab` CLI 経由 | Repository/Issue Data と、CLI または Host Account Flow が扱う Credential |
 | Update Check | GitHub Releases | Application Version と通常の Network Metadata |
 | Plugin Registry Trust Refresh | 選択した Official Registry、または明示的に承認した self-hosted Registry | インストール済み marketplace plugin の namespace/name。Refresh では Plugin Source や Archive を送信しない |
 | MCP Server | 設定された MCP Server と、それが利用する Service | Server の Tool と Configuration に全面的に依存 |
 
 Private Code や規制対象 Data を送信する前に、各 Provider の Policy を確認してください。
+
+Production Git Package は Host 所有の argv Allowlist を通して `git`、`gh`、`glab`
+をローカルで実行します。Navide がこれらの Service を Proxy したり、Repository
+を Navide へ Upload したりすることはありません。Local CLI が Remote Operation
+または Issue Query を実行すると、設定された Remote、CLI Login、Provider Policy
+に従って GitHub または GitLab が Data を受け取る場合があります。Git Account
+Credential は Host の保護された Local Account Store または CLI 自身の Credential
+Flow に残り、Plugin Renderer Storage には書き込まれません。分離された v2 Git
+Renderer が受け取るのは非 Secret の Account Metadata と Workspace Binding State
+だけです。Remote Git Operation では、Host が Backend 呼び出しの直前に Bound
+Credential を注入します。Workspace に Host Account の Binding がない場合でも、v2
+は Host 所有の Interactive Credential Flow を使用できます。Host は Operation ごとに
+Opaque で Instance-bound な Owner を作成し、Git の Prompt を発行元の正確な Git
+View に転送し、Response を受け入れる前に Request Ownership を検証します。入力
+された Secret はその Exchange の間だけ保持され、Plugin Storage には保存されません。
+別の View または別の Workspace からの Credential Response は拒否されます。
 
 インストール済みの marketplace plugin がある間、Navide は Application 起動時と
 15 分ごとに、その Plugin の namespace/name を選択した Registry へ送信します。
@@ -52,6 +69,13 @@ Installation とともにローカルに保持します。Registry 自身の Req
 その Registry の管理に委ねられます。現在、Refresh 専用の無効化設定はありません。
 インストール済みの marketplace plugin をすべて削除すると、この Data Flow は停止
 します。その他の外部 Service の Data Flow は、それぞれの設定に従います。
+
+Issue 16 の Production Storage Integration が有効な場合、Plugin の Uninstall は
+Cleanup が成功した後に、その Plugin の Local Storage を削除します。後で再インストール
+しても、削除された Storage は復元されません。First-party `navide.git` の Migration
+は Host 所有の明示的な Consumer であり、Git Preference は認証済みの Package と
+Workspace Storage Partition を使用します。Upgrade 時には、以前の Active Snapshot
+を新しい Candidate に複製し、Rollback 用に旧 Snapshot を保持する場合があります。
 
 ## 認証情報
 

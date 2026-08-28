@@ -3,15 +3,18 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Ref } from 'vue'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 const mockTerminal = vi.hoisted(() => ({
   displayStatus: null as unknown as Ref<string>,
   onFirstOutput: undefined as (() => void) | undefined,
 }))
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   return {
+    ...actual,
     useTerminal: (
       _paneId: string,
       _backend: unknown,
@@ -37,7 +40,7 @@ function mountPane(): VueWrapper {
       paneId: 'restored-pane',
       title: 'Claude',
       subtitle: 'Architect',
-      backend: {} as never,
+      terminalPort: createTerminalDockStub(),
       cliProfiles: {} as never,
       restoring: true,
     },

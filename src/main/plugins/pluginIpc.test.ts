@@ -26,6 +26,7 @@ import { defaultInstallerDeps, type InstallerTrustConfig } from './pluginInstall
 import type { PluginActivationCatalogEntry } from './installedPlugins'
 import { projectBackendPluginActivationCatalog } from './pluginBackendActivationCatalog'
 import { makeZip } from './zipFixture'
+import { PluginCapabilityGrantStore } from './pluginCapabilityGrantStore'
 
 const { handlers, browserWindowFromWebContents } = vi.hoisted(() => ({
   handlers: new Map<string, (...a: unknown[]) => unknown>(),
@@ -51,7 +52,8 @@ import { FrontendPluginManager } from './frontendPluginManager'
 
 function buildPkg(
   packageId = 'acme.demo',
-  publisherId = 'acme'
+  publisherId = 'acme',
+  permissions: Record<string, unknown> = {}
 ): { bytes: Uint8Array; digest: string } {
   const manifest = JSON.stringify({
     schemaVersion: 2,
@@ -60,7 +62,7 @@ function buildPkg(
     name: 'Demo',
     version: '1.0.0',
     publisher: publisherId,
-    permissions: {},
+    permissions,
     marketplace: { description: 'Demo frontend', license: 'MIT' },
     contributes: {
       views: [
@@ -262,7 +264,9 @@ function register(
   pluginsRoot = '/plugins',
   manager = new FrontendPluginManager()
 ): (...a: unknown[]) => unknown {
-  registerPluginIpc(manager, pluginsRoot, () => true, TRUST_CONFIG)
+  registerPluginIpc(manager, pluginsRoot, () => true, TRUST_CONFIG, undefined, {
+    cleanupPluginStorage: async () => undefined,
+  })
   const handler = handlers.get('plugins:prepareInstall')
   if (!handler) throw new Error('prepareInstall handler not registered')
   return handler
@@ -365,6 +369,71 @@ describe('plugin management sender authorization', () => {
     ).toBe(false)
   })
 
+  it('projects sanitized manifest icons without exposing Host file paths', () => {
+    const resolveContributionIcon = vi.fn((iconFile: string) =>
+      iconFile.endsWith('primary.png') ? 'data:image/png;base64,AAAA' : null
+    )
+    const manager = {
+      listContributionCatalog: () => [
+        {
+          pluginId: 'acme.tools',
+          packageVersion: '1.2.3',
+          contributionKey: 'acme.tools.secondary',
+          title: 'Secondary',
+          iconFile: null,
+          kind: 'custom',
+          location: 'right',
+          manifestOrder: 0,
+        },
+        {
+          pluginId: 'acme.tools',
+          packageVersion: '1.2.3',
+          contributionKey: 'acme.tools.primary',
+          title: 'Primary',
+          iconFile: '/plugins/acme.tools/icons/primary.png',
+          kind: 'custom',
+          location: 'left',
+          manifestOrder: 1,
+        },
+      ],
+      listInstalledPackages: () => [],
+    } as unknown as FrontendPluginManager
+    registerPluginIpc(manager, '/plugins', () => true, undefined, undefined, {
+      resolveContributionIcon,
+    })
+
+    const handler = handlers.get('plugins:listContributions')
+    if (!handler) throw new Error('contribution catalog handler not registered')
+    const projected = handler(null) as Array<Record<string, unknown>>
+    expect(projected).toEqual([
+      {
+        pluginId: 'acme.tools',
+        packageVersion: '1.2.3',
+        contributionKey: 'acme.tools.secondary',
+        title: 'Secondary',
+        icon: null,
+        kind: 'custom',
+        location: 'right',
+        manifestOrder: 0,
+      },
+      {
+        pluginId: 'acme.tools',
+        packageVersion: '1.2.3',
+        contributionKey: 'acme.tools.primary',
+        title: 'Primary',
+        icon: 'data:image/png;base64,AAAA',
+        kind: 'custom',
+        location: 'left',
+        manifestOrder: 1,
+      },
+    ])
+    expect(resolveContributionIcon).toHaveBeenCalledOnce()
+    expect(resolveContributionIcon).toHaveBeenCalledWith(
+      '/plugins/acme.tools/icons/primary.png'
+    )
+    expect(projected[1]).not.toHaveProperty('iconFile')
+  })
+
   it('rejects unauthorized senders on every plugins channel before side effects', async () => {
     const manager = {
       listDescriptors: vi.fn(),
@@ -380,6 +449,7 @@ describe('plugin management sender authorization', () => {
 
     const calls: Array<[string, unknown]> = [
       ['plugins:listInstalled', undefined],
+      ['plugins:listContributions', undefined],
       ['plugins:marketplaceSearch', 'demo'],
       ['plugins:prepareInstall', { namespace: 'acme', name: 'demo' }],
       ['plugins:commitInstall', { id: 'acme.demo', confirmed: true }],
@@ -409,7 +479,7 @@ describe('plugin management sender authorization', () => {
 describe('plugins:remove boundary validation', () => {
   beforeEach(() => handlers.clear())
 
-  it('rejects malformed ids before deleting or changing activation state', () => {
+  it('rejects malformed ids before deleting or changing activation state', async () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-remove-invalid-'))
     const installedDir = join(root, 'acme.demo')
     mkdirSync(installedDir, { recursive: true })
@@ -444,9 +514,9 @@ describe('plugins:remove boundary validation', () => {
         42,
       ]
       for (const id of invalidIds) {
-        expect(() => removeHandler(null, { id })).toThrow(/invalid plugin id/)
+        await expect(removeHandler(null, { id })).rejects.toThrow(/invalid plugin id/)
       }
-      expect(() => removeHandler(null, null)).toThrow(/invalid plugin id/)
+      await expect(removeHandler(null, null)).rejects.toThrow(/invalid plugin id/)
       expect(existsSync(installedDir)).toBe(true)
       expect(removeInstalledPlugin).not.toHaveBeenCalled()
       expect(onActivationChange).not.toHaveBeenCalled()
@@ -455,11 +525,99 @@ describe('plugins:remove boundary validation', () => {
     }
   })
 
-  it('removes a valid direct-child id and clears its activation state', () => {
+  it('removes a valid direct-child id and clears its activation state', async () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-remove-valid-'))
     const installedDir = join(root, 'acme.demo')
     mkdirSync(installedDir, { recursive: true })
     const manager = new FrontendPluginManager()
+    const order: string[] = []
+    vi.spyOn(manager, 'preparePluginRemoval').mockImplementation(() => {
+      order.push('stop')
+    })
+    const removeInstalledPlugin = vi
+      .spyOn(manager, 'removeInstalledPlugin')
+      .mockImplementation(() => {
+        order.push('remove')
+      })
+    const cleanupPluginStorage = vi.fn(async () => {
+      order.push('cleanup')
+    })
+    const onActivationChange = vi.fn()
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        cleanupPluginStorage,
+        onActivationChange,
+      })
+      const removeHandler = handlers.get('plugins:remove')
+      if (!removeHandler) throw new Error('remove handler not registered')
+
+      await expect(removeHandler(null, { id: 'acme.demo' })).resolves.toEqual({ ok: true })
+      expect(existsSync(installedDir)).toBe(false)
+      expect(removeInstalledPlugin).toHaveBeenCalledWith('acme.demo')
+      expect(order).toEqual(['stop', 'cleanup', 'remove'])
+      expect(onActivationChange).toHaveBeenCalledWith({ pluginId: 'acme.demo' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('records factory removal without restoring its builtin descriptor', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-remove-factory-'))
+    const manager = new FrontendPluginManager()
+    const removeInstalledPlugin = vi
+      .spyOn(manager, 'removeInstalledPlugin')
+      .mockImplementation(() => undefined)
+    const onFactoryPackageRemoved = vi.fn()
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        cleanupPluginStorage: vi.fn(async () => undefined),
+        factoryPackageIds: ['navide.git'],
+        onFactoryPackageRemoved,
+      })
+      const removeHandler = handlers.get('plugins:remove')
+      if (!removeHandler) throw new Error('remove handler not registered')
+
+      await expect(removeHandler(null, { id: 'navide.git' })).resolves.toEqual({ ok: true })
+      expect(onFactoryPackageRemoved).toHaveBeenCalledWith('navide.git')
+      expect(removeInstalledPlugin).toHaveBeenCalledWith('navide.git', {
+        restoreBuiltin: false,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('restores an opted-out factory package through the Host lifecycle callback', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-restore-factory-'))
+    const manager = new FrontendPluginManager()
+    const restoreFactoryPackage = vi.fn(async () => undefined)
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        restoreFactoryPackage,
+        listFactoryPackages: () => [
+          { id: 'navide.git', version: '0.1.0', active: false, optedOut: true },
+        ],
+      })
+      const listHandler = handlers.get('plugins:listFactoryPackages')
+      const restoreHandler = handlers.get('plugins:restoreFactoryPackage')
+      if (!listHandler || !restoreHandler) throw new Error('factory handlers not registered')
+
+      expect(listHandler(null)).toEqual([
+        { id: 'navide.git', version: '0.1.0', active: false, optedOut: true },
+      ])
+      await expect(restoreHandler(null, { id: 'navide.git' })).resolves.toEqual({ ok: true })
+      expect(restoreFactoryPackage).toHaveBeenCalledWith('navide.git')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses uninstall when storage cleanup is unavailable', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-remove-no-storage-cleanup-'))
+    const installedDir = join(root, 'acme.demo')
+    mkdirSync(installedDir, { recursive: true })
+    const manager = new FrontendPluginManager()
+    const preparePluginRemoval = vi.spyOn(manager, 'preparePluginRemoval')
     const removeInstalledPlugin = vi.spyOn(manager, 'removeInstalledPlugin')
     const onActivationChange = vi.fn()
     try {
@@ -469,10 +627,48 @@ describe('plugins:remove boundary validation', () => {
       const removeHandler = handlers.get('plugins:remove')
       if (!removeHandler) throw new Error('remove handler not registered')
 
-      expect(removeHandler(null, { id: 'acme.demo' })).toEqual({ ok: true })
+      await expect(removeHandler(null, { id: 'acme.demo' })).rejects.toThrow(
+        'plugin storage cleanup is unavailable'
+      )
+      expect(existsSync(installedDir)).toBe(true)
+      expect(preparePluginRemoval).not.toHaveBeenCalled()
+      expect(removeInstalledPlugin).not.toHaveBeenCalled()
+      expect(onActivationChange).not.toHaveBeenCalled()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the package installed when storage cleanup fails and permits retry', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-remove-storage-failure-'))
+    const installedDir = join(root, 'acme.demo')
+    mkdirSync(installedDir, { recursive: true })
+    const manager = new FrontendPluginManager()
+    const preparePluginRemoval = vi.spyOn(manager, 'preparePluginRemoval')
+    const removeInstalledPlugin = vi
+      .spyOn(manager, 'removeInstalledPlugin')
+      .mockImplementation(() => undefined)
+    const cleanupPluginStorage = vi
+      .fn<(pluginId: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('storage unavailable'))
+      .mockResolvedValue(undefined)
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        cleanupPluginStorage,
+      })
+      const removeHandler = handlers.get('plugins:remove')
+      if (!removeHandler) throw new Error('remove handler not registered')
+
+      await expect(removeHandler(null, { id: 'acme.demo' })).rejects.toThrow('storage unavailable')
+      expect(existsSync(installedDir)).toBe(true)
+      expect(preparePluginRemoval).toHaveBeenCalledWith('acme.demo')
+      expect(removeInstalledPlugin).not.toHaveBeenCalled()
+
+      await expect(removeHandler(null, { id: 'acme.demo' })).resolves.toEqual({ ok: true })
       expect(existsSync(installedDir)).toBe(false)
+      expect(preparePluginRemoval).toHaveBeenCalledTimes(2)
       expect(removeInstalledPlugin).toHaveBeenCalledWith('acme.demo')
-      expect(onActivationChange).toHaveBeenCalledWith({ pluginId: 'acme.demo' })
+      expect(cleanupPluginStorage).toHaveBeenCalledTimes(2)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -776,9 +972,77 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         provenance: 'official-registry',
       }])
 
-      expect(removeHandler(null, { id: 'acme.demo' })).toEqual({ ok: true })
+      await expect(removeHandler(null, { id: 'acme.demo' })).resolves.toEqual({ ok: true })
       expect(listHandler(null)).toEqual([])
       expect(existsSync(join(root, 'acme.demo'))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('records full-shell approval only after explicit risk confirmation', async () => {
+    const { bytes, digest } = buildPkg('acme.demo', 'acme', { shell: 'full' })
+    installFetch(signedDetail(digest), bytes, digest)
+    const root = mkdtempSync(join(tmpdir(), 'navide-plugin-ipc-full-shell-'))
+    try {
+      const manager = new FrontendPluginManager()
+      const prepareHandler = register(root, manager)
+      await prepareHandler(null, { namespace: 'acme', name: 'demo' })
+      const commitHandler = handlers.get('plugins:commitInstall')
+      if (!commitHandler) throw new Error('commitInstall handler not registered')
+
+      expect(() => commitHandler(null, {
+        id: 'acme.demo',
+        publisherConfirmed: true,
+      })).toThrow(/capability and backend risk confirmation/)
+
+      commitHandler(null, {
+        id: 'acme.demo',
+        publisherConfirmed: true,
+        riskConfirmed: true,
+      })
+      expect(new PluginCapabilityGrantStore(root).get('acme.demo', '1.0.0')).toMatchObject({
+        shell: 'full',
+        highRiskShellConfirmed: true,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('persists the confirmed Manifest v2 grant only after a successful commit and removes it on uninstall', async () => {
+    const { bytes, digest } = buildPkg('acme.demo', 'acme', {
+      system: ['fs', 'ui'],
+      shell: 'allowlist',
+    })
+    installFetch(signedDetail(digest), bytes, digest)
+    const root = mkdtempSync(join(tmpdir(), 'navide-capability-grant-install-'))
+    try {
+      const manager = new FrontendPluginManager()
+      const prepareHandler = register(root, manager)
+      await prepareHandler(null, { namespace: 'acme', name: 'demo' })
+      const grants = new PluginCapabilityGrantStore(root)
+      expect(grants.get('acme.demo', '1.0.0')).toBeNull()
+
+      const commitHandler = handlers.get('plugins:commitInstall')
+      const removeHandler = handlers.get('plugins:remove')
+      if (!commitHandler || !removeHandler) throw new Error('plugin lifecycle handlers not registered')
+      expect(
+        commitHandler(null, {
+          id: 'acme.demo',
+          publisherConfirmed: true,
+          riskConfirmed: true,
+        })
+      ).toEqual({ id: 'acme.demo', requires: ['fs', 'ui', 'shell'] })
+      expect(grants.get('acme.demo', '1.0.0')).toEqual({
+        packageVersion: '1.0.0',
+        system: ['fs', 'ui'],
+        shell: 'allowlist',
+        storage: true,
+      })
+
+      await removeHandler(null, { id: 'acme.demo' })
+      expect(grants.get('acme.demo', '1.0.0')).toBeNull()
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -820,6 +1084,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
     try {
       const manager = new FrontendPluginManager()
       registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        cleanupPluginStorage: async () => undefined,
         onActivationChange: ({ pluginId, activation }) => {
           active.delete(pluginId)
           if (activation) active.set(pluginId, activation)
@@ -859,7 +1124,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
 
       const removeHandler = handlers.get('plugins:remove')
       if (!removeHandler) throw new Error('remove handler not registered')
-      expect(removeHandler(null, { id: 'acme.demo' })).toEqual({ ok: true })
+      await expect(removeHandler(null, { id: 'acme.demo' })).resolves.toEqual({ ok: true })
       expect(projectBackendPluginActivationCatalog([...active.values()])).toEqual({
         schemaVersion: 1,
         packages: [],

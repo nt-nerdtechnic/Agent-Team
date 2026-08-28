@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
-import { useNotify } from '../composables/useNotify'
+import { useNotify } from '@navide/plugin-ui/foundation'
 
 const { toasts, dialog, promptValue, dialogCheckbox, dismissToast, resolveDialog } = useNotify()
 

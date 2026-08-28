@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { PANE_BATCH_MIME, PANE_ID_MIME, type CliContextPayload } from '../../lib/cliContext'
+import { PANE_BATCH_MIME, PANE_ID_MIME, type CliContextPayload } from '@navide/terminal'
 import { reorderBatchByIds, resolveDragBatch } from '../../lib/paneBatchDrag'
 import { usePaneReorderDrag } from '../../composables/usePaneReorderDrag'
 

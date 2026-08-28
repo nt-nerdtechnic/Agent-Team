@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { URL } from 'node:url'
 
 /** Canonical key for a workspace path: resolve symlinks/worktrees when the path
  * exists and strip trailing separators, so trailing-slash or symlinked variants
@@ -61,6 +62,8 @@ export interface PublicAccount {
 export interface GitCredential {
   username: string
   token: string
+  /** Canonical bare hostname the credential may answer for. */
+  expectedHost: string
 }
 
 export interface GitAccountInput {
@@ -78,6 +81,40 @@ interface GitAccountsDoc {
 
 function emptyDoc(): GitAccountsDoc {
   return { version: 1, accounts: [], bindings: {} }
+}
+
+/**
+ * Convert an account's host field to the one hostname representation used by
+ * Git credential routing. Accounts deliberately identify a hostname, not a
+ * URL authority: schemes, ports and paths would make credential destinations
+ * ambiguous. WHATWG URL supplies lowercase + IDNA normalization; bracketed
+ * IPv6 is retained in URL.hostname and is therefore compared consistently.
+ */
+export function normalizeGitAccountHost(value: string): string {
+  const raw = String(value ?? '').trim()
+  if (
+    !raw ||
+    raw !== value ||
+    raw.normalize('NFKC') !== raw ||
+    /[/?#@]/.test(raw)
+  ) throw new Error('invalid Git host')
+  const isBracketedIpv6 = /^\[[0-9a-fA-F:.]+\]$/.test(raw)
+  if (!isBracketedIpv6 && raw.includes(':')) throw new Error('invalid Git host')
+  try {
+    const parsed = new URL(`https://${raw}`)
+    if (
+      !parsed.hostname ||
+      parsed.port ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== '/' ||
+      parsed.search ||
+      parsed.hash
+    ) throw new Error('invalid Git host')
+    return parsed.hostname
+  } catch {
+    throw new Error('invalid Git host')
+  }
 }
 
 /** Raised when a mutation needs encryption but it is unavailable. */
@@ -110,7 +147,7 @@ export class GitAccountsStore {
     const account: StoredAccount = {
       id: randomUUID(),
       label: String(input.label ?? '').trim(),
-      host: String(input.host ?? '').trim(),
+      host: normalizeGitAccountHost(String(input.host ?? '')),
       username: String(input.username ?? '').trim(),
       tokenEnc: this.crypto.encrypt(token),
       tokenLast4: token.slice(-4)
@@ -125,7 +162,7 @@ export class GitAccountsStore {
     const account = doc.accounts.find((a) => a.id === id)
     if (!account) throw new Error('account not found')
     if (patch.label !== undefined) account.label = String(patch.label).trim()
-    if (patch.host !== undefined) account.host = String(patch.host).trim()
+    if (patch.host !== undefined) account.host = normalizeGitAccountHost(String(patch.host))
     if (patch.username !== undefined) account.username = String(patch.username).trim()
     if (patch.token !== undefined && patch.token !== '') {
       this.requireEncryption()
@@ -182,7 +219,11 @@ export class GitAccountsStore {
     const account = doc.accounts.find((a) => a.id === accountId)
     if (!account) return null
     try {
-      return { username: account.username, token: this.crypto.decrypt(account.tokenEnc) }
+      return {
+        username: account.username,
+        token: this.crypto.decrypt(account.tokenEnc),
+        expectedHost: normalizeGitAccountHost(account.host),
+      }
     } catch {
       // Decryption can fail if the keychain master key is gone (e.g. restored to
       // a new machine). Treat as unbound rather than crashing the git op.

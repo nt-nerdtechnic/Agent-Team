@@ -9,10 +9,11 @@
 // the dispatcher back afterwards — including when the row is abandoned.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 import KeyboardShortcutsEditor from '../KeyboardShortcutsEditor.vue'
-import { _resetKeybindingsState, getUserRules, isKeyCaptureActive } from '../../keybindings/useKeybindings'
-import { NATIVE_MENU_KEYS, TERMINAL_KEYS } from '../../keybindings/externalKeys'
+import { getUserRules, initKeybindingsPort, isKeyCaptureActive } from '@navide/plugin-ui/shared'
+import { _resetKeybindingsState } from '@navide/plugin-ui/shared/testing'
+import { NATIVE_MENU_KEYS, TERMINAL_KEYS } from '@navide/plugin-ui/shared'
 
 interface Bridge {
   readKeybindings: ReturnType<typeof vi.fn>
@@ -48,11 +49,20 @@ beforeEach(() => {
     onKeybindingsChanged: vi.fn(),
   }
   ;(window as unknown as { agentTeam: Bridge }).agentTeam = bridge
+  initKeybindingsPort({
+    read: () => bridge.readKeybindings(),
+    write: (content) => bridge.writeKeybindings(content),
+    onChanged: (callback) => {
+      bridge.onKeybindingsChanged(callback)
+      return () => {}
+    },
+  })
 })
 
 afterEach(() => {
   wrapper?.unmount()
   delete (window as unknown as { agentTeam?: Bridge }).agentTeam
+  initKeybindingsPort({})
 })
 
 describe('rendering', () => {
@@ -199,7 +209,7 @@ describe('search and filters', () => {
     // Searching "⌘⇧P" (or "Win+Shift+P" off macOS) has to work as well as
     // searching "cmd+shift+p"; the display form is platform-dependent, so the
     // query is derived rather than hard-coded.
-    const { formatKeySpec } = await import('../../keybindings/keyDisplay')
+    const { formatKeySpec } = await import('@navide/plugin-ui/shared')
     wrapper = mountEditor()
     await wrapper.find('.kse-search').setValue(formatKeySpec('cmd+shift+y'))
     expect(wrapper.findAll('.kse-id').map((n) => n.text()))
@@ -433,7 +443,7 @@ describe('failure reporting', () => {
 describe('external changes', () => {
   it('re-renders when another window rewrites the rules', async () => {
     wrapper = mountEditor()
-    const { setUserRules } = await import('../../keybindings/useKeybindings')
+    const { setUserRules } = await import('@navide/plugin-ui/shared')
     setUserRules([{ key: 'cmd+s', command: '-editor.action.save', when: 'editorOpen && !terminalFocus' }])
     await wrapper.vm.$nextTick()
     expect(rowFor(wrapper, 'editor.action.save').find('.kse-unbound').exists()).toBe(true)

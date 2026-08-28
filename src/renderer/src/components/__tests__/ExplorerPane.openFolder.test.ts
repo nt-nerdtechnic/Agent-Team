@@ -2,10 +2,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import ExplorerPane from '../ExplorerPane.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 
-vi.mock('../../composables/useNotify', () => ({
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn() }),
 }))
 

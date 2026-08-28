@@ -9,7 +9,7 @@
 // which is what `pinsSessionIdAtLaunch` in its spec declares — currently just
 // Claude, which is why the vocabulary here is shaped by it.
 
-import { AGENT_SPECS } from '../agents'
+import { AGENT_SPECS } from '@navide/plugin-shell'
 
 /** How the attribution handler should react to a backend-attributed session id. */
 export type AttributionAction = 'adopt' | 'verify'

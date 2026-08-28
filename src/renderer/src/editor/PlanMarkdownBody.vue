@@ -15,7 +15,7 @@ import { parsePlanFile } from '../composables/usePlanFile'
 import type { PlanSection } from '../composables/usePlanFile'
 import type { useBackend } from '../composables/useBackend'
 import { resolvePlanStore, type PlanCtx } from '../composables/planStore'
-import { useNotify } from '../composables/useNotify'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { renderLines, InlineText } from './markdownRender'
 
 const props = defineProps<{

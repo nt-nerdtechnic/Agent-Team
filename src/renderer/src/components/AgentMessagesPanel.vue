@@ -8,7 +8,7 @@
 // that scrolls instead of widening the rail.
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { AGENT_SPECS } from '../agents'
+import { AGENT_SPECS } from '@navide/plugin-shell'
 import {
   useAgentMessaging,
   type AgentMessage,

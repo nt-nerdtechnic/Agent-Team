@@ -5,7 +5,7 @@
 // through ui_settings, which already replicates to the other windows, so a
 // change made here shows up everywhere without a restart.
 import { ref, computed, type Ref, type ComputedRef } from 'vue'
-import { onSettingsChanged, settingsGet, settingsSet } from '../lib/settings'
+import { onSettingsChanged, settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import {
   LAYOUT_SETTINGS_KEY,
   SLOT_IDS,

@@ -194,6 +194,43 @@ async def test_fs_write_file_success_broadcasts_git_changed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("msg_type", "payload"),
+    [
+        ("fs.mkdir", {"rel_path": ".git/new-dir"}),
+        ("fs.create_file", {"rel_path": ".git/new-file", "content": "x"}),
+        ("fs.write_file", {"rel_path": ".git/config", "content": "x"}),
+        ("fs.rename", {"src_path": "keep.txt", "dst_path": ".git/moved"}),
+        ("fs.rename", {"src_path": ".git/config", "dst_path": "moved"}),
+        ("fs.delete", {"rel_path": ".git/config"}),
+    ],
+)
+async def test_fs_handlers_reject_git_internal_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, msg_type: str, payload: dict[str, str]
+) -> None:
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("original", encoding="utf-8")
+    keep = tmp_path / "keep.txt"
+    keep.write_text("keep", encoding="utf-8")
+    trash_calls: list[str] = []
+    monkeypatch.setattr(fs_service, "send2trash", lambda path: trash_calls.append(path))
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "git-mutation",
+        "type": msg_type,
+        "payload": {"workspace_path": str(tmp_path), **payload},
+    })
+
+    response = session.websocket.sent[0]["payload"]  # type: ignore[attr-defined]
+    assert response["ok"] is False
+    assert (git_dir / "config").read_text(encoding="utf-8") == "original"
+    assert keep.exists()
+    assert trash_calls == []
+
+
+@pytest.mark.asyncio
 async def test_new_search_cancels_previous_in_flight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

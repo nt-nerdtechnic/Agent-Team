@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, powerMonitor, safeStorage, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, powerMonitor, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron'
 import { join, dirname } from 'node:path'
 import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
@@ -7,14 +7,27 @@ import { spawn } from 'node:child_process'
 import { startBackend, getResolvedUserPath, type BackendHandle } from './backend'
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
-import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
+import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, registerBundledMiniIde, registerBundledPlans, registerLegacyBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
 import {
   isTrustedPluginManagementSender,
   registerPluginIpc,
   resolveConfiguredMarketplace,
 } from './plugins/pluginIpc'
 import { readRegistryTrustSnapshot } from './plugins/pluginInstalledTrust'
+import { contributionIconDataUrl } from './plugins/pluginContributionIcon'
 import { currentPluginHostTarget } from './plugins/pluginTarget'
+import { PluginStorageStore } from './plugins/pluginStorage'
+import { PluginCapabilityGrantStore } from './plugins/pluginCapabilityGrantStore'
+import { PluginFactoryOptOutStore } from './plugins/pluginFactoryOptOutStore'
+import { recoverFailedGitV2Activation } from './plugins/gitV2ActivationRecovery'
+import { composePluginContributionQuery } from './plugins/pluginContributionQuery'
+import {
+  activateFactoryGitWithLegacyFallback,
+  assertFactoryGitRestoreAllowed,
+  shouldAttemptFactoryGit,
+} from './plugins/factoryGitStartup'
+import { migrateBundledGitPreferences } from './plugins/gitStorageMigration'
+import { GitStorageLifecycleSelector } from './plugins/gitStorageLifecycle'
 import {
   projectBackendPluginActivationCatalog,
   writeBackendPluginActivationCatalog,
@@ -25,7 +38,9 @@ import { installContextMenu, registerTerminalContextMenu } from './context-menu'
 import { initUpdater } from './updater'
 import { withDeadline } from './deadline'
 import { MAX_RESTORE_ATTEMPTS, WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
+import { registeredGitLeftWorkspace, trustedGitLeftWindow } from './gitLeftIpc'
 import { setWindowDockTileBadge } from './dock-tile-badge'
+import { writeTempTextArtifact } from './temp-text-artifact'
 import { BackendBroadcastTracker } from './backend-broadcast'
 import { createResumeGate } from './resume-gate'
 import { stabilizeDroppedPaths, pruneDroppedFiles, saveClipboardImage } from './dropped-file-store'
@@ -119,6 +134,11 @@ let quitConfirmed = false
 // holds them all for lifecycle code that must reach every main window.
 let mainWindow: BrowserWindow | null = null
 const mainWindows = new Set<BrowserWindow>()
+/** Dedicated hosts are keyed by the stable catalog contribution key. The
+ * renderer never receives the corresponding plugin instance id. */
+const contributionWindows = new Map<string, BrowserWindow>()
+const gitRecoveryForced = process.env['NAVIDE_GIT_RECOVERY'] === 'legacy'
+let gitRecoveryEnabled = gitRecoveryForced
 // Focus recency per window id — approximates z-order for the cross-window pane
 // drop hit-test (Electron has no cross-platform z-order query).
 const windowFocusSeq = new Map<number, number>()
@@ -247,6 +267,22 @@ function getGitAccountsStore(): GitAccountsStore {
   }
   return gitAccountsStore
 }
+
+// The production Git package reaches account storage through the private
+// first-party bridge. Keep safeStorage and decrypted credentials in main; the
+// renderer-facing package receives only masked accounts or one authenticated
+// workspace-bound credential response.
+frontendPluginManager.setGitAccountHandlers({
+  available: () => getGitAccountsStore().available,
+  list: () => getGitAccountsStore().list(),
+  add: (input) => getGitAccountsStore().add(input),
+  update: (id, patch) => getGitAccountsStore().update(id, patch),
+  remove: (id) => getGitAccountsStore().remove(id),
+  bind: (workspacePath, accountId) => getGitAccountsStore().bind(workspacePath, accountId),
+  unbind: (workspacePath) => getGitAccountsStore().unbind(workspacePath),
+  getBinding: (workspacePath) => getGitAccountsStore().getBinding(workspacePath),
+  getCredential: (workspacePath) => getGitAccountsStore().getCredentialForWorkspace(workspacePath),
+})
 // Windows from the previous (uncleanly exited) run, offered to the FIRST
 // renderer that asks via restore:getPending; cleared on apply/dismiss.
 let pendingRestore: WindowEntry[] | null = null
@@ -357,7 +393,8 @@ async function createWindow(
     broadcastOpenWorkspacesChanged()
   })
 
-  loadWindow(win, { window: 'main', ...params })
+  const mainBootParams: Record<string, string> = gitRecoveryEnabled ? { legacy_git_recovery: '1' } : {}
+  loadWindow(win, { window: 'main', ...params, ...mainBootParams })
   return win
 }
 
@@ -540,13 +577,121 @@ const installedPluginTrust = {
   officialRegistryUrl: installedOfficialRegistryUrl,
   expectedTarget: currentPluginHostTarget(),
 }
+const pluginCapabilityGrants = new PluginCapabilityGrantStore(pluginsRoot())
+const pluginFactoryOptOuts = new PluginFactoryOptOutStore(pluginsRoot())
 const installedPluginLoad = frontendPluginManager.loadInstalledPlugins(pluginsRoot(), {
   provenance: 'official-registry',
   trust: installedPluginTrust,
 })
-let approvedInstalledPluginActivations = installedPluginLoad.activationCatalog
+// Only a package that passed install verification and produced a usable
+// descriptor suppresses the bundled factory copy. A corrupt/quarantined
+// directory named navide.git is not an authoritative installation.
+const installedGitDescriptorPresent = frontendPluginManager.getDescriptor('navide.git') !== undefined
+frontendPluginManager.setCapabilityGrantResolver((pluginId, packageVersion) =>
+  pluginCapabilityGrants.get(pluginId, packageVersion)
+)
+const factoryGitActivations = installedPluginLoad.activationCatalog.slice(0, 0)
+function loadFactoryGitPackage() {
+  const factoryGitDir = app.isPackaged
+    ? join(process.resourcesPath, 'plugins', 'navide-git')
+    : join(__dirname, '../../dist-plugins/navide-git')
+  const factoryGit = frontendPluginManager.loadFactoryPlugin(factoryGitDir, 'navide.git')
+  if (!factoryGit.loaded) return factoryGit
+  const descriptor = frontendPluginManager.getDescriptor(factoryGit.pluginId)
+  const policy = descriptor?.capabilityPolicy
+  if (policy?.kind !== 'manifest-v2') {
+    frontendPluginManager.removeInstalledPlugin(factoryGit.pluginId, { restoreBuiltin: false })
+    return { loaded: false as const, reason: 'factory package has no Manifest v2 policy' }
+  }
+  pluginCapabilityGrants.set(factoryGit.pluginId, {
+    packageVersion: factoryGit.packageVersion,
+    system: [...policy.system],
+    ...(policy.shell ? { shell: policy.shell } : {}),
+    storage: true,
+  })
+  return factoryGit
+}
+if (shouldAttemptFactoryGit({
+  forcedLegacy: gitRecoveryEnabled,
+  installedPackagePresent: installedGitDescriptorPresent,
+  optedOut: pluginFactoryOptOuts.has('navide.git'),
+})) {
+  const selection = activateFactoryGitWithLegacyFallback({
+    loadFactory: loadFactoryGitPackage,
+    activateLegacy: () => registerLegacyBundledGit(frontendPluginManager, {
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    }),
+  })
+  if (selection.mode === 'v2') factoryGitActivations.push(selection.activation)
+  else if (selection.mode === 'legacy') {
+    gitRecoveryEnabled = true
+    console.warn(`[main] bundled navide.git v2 failed; using legacy recovery: ${selection.v2Reason}`)
+  } else {
+    console.warn(
+      `[main] bundled navide.git is unavailable: ${selection.v2Reason}; ${selection.legacyReason}`
+    )
+  }
+}
+frontendPluginManager.setActivationFailureHandler((failure) => {
+  const recovered = recoverFailedGitV2Activation(failure, {
+    selectedDescriptor: () => frontendPluginManager.getDescriptor('navide.git') ?? null,
+    hasExactGrant: (pluginId, packageVersion) =>
+      pluginCapabilityGrants.get(pluginId, packageVersion) !== null,
+    activateLegacy: () => registerLegacyBundledGit(frontendPluginManager, {
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    }),
+    onActivated: () => {
+      gitRecoveryEnabled = true
+      for (const [key, hostWindow] of contributionWindows) {
+        if (key.startsWith('navide.git.') && !hostWindow.isDestroyed()) hostWindow.close()
+      }
+      for (const hostWindow of mainWindows) {
+        if (hostWindow.isDestroyed() || detachedWindowIds.has(hostWindow.id)) continue
+        hostWindow.webContents.send('plugins:contributionsChanged')
+        hostWindow.webContents.send('git:recoveryChanged', { legacy: true })
+      }
+    },
+  })
+  if (!recovered && failure.pluginId === 'navide.git') {
+    console.warn(
+      `[main] failed navide.git v2 activation could not switch to legacy recovery: ${failure.reason}`
+    )
+  }
+})
+let approvedInstalledPluginActivations = [
+  ...installedPluginLoad.activationCatalog,
+  ...factoryGitActivations,
+]
 for (const error of installedPluginLoad.errors) {
   console.warn(`[main] installed plugin quarantined: ${error}`)
+}
+// Manifest v2 storage is Host-owned durable state. Resolve the path lazily so
+// the development userData override below is applied before the first request;
+// the plugin request never supplies any part of it or of the partition identity.
+const pluginStorageStore = new PluginStorageStore(
+  () => join(app.getPath('userData'), 'plugin-storage-v2')
+)
+const gitStorageLifecycle = new GitStorageLifecycleSelector(
+  join(app.getPath('userData'), 'plugin-storage-v2', 'lifecycle.json'),
+)
+const applyPluginActivationChange = ({
+  pluginId,
+  activation,
+}: {
+  pluginId: string
+  activation?: (typeof approvedInstalledPluginActivations)[number]
+}): void => {
+  approvedInstalledPluginActivations = approvedInstalledPluginActivations.filter(
+    (entry) => entry.pluginId !== pluginId
+  )
+  if (activation) approvedInstalledPluginActivations.push(activation)
+  for (const win of mainWindows) {
+    if (!win.isDestroyed() && !detachedWindowIds.has(win.id)) {
+      win.webContents.send('plugins:contributionsChanged')
+    }
+  }
 }
 const pluginTrustRefresh = registerPluginIpc(
   frontendPluginManager,
@@ -555,11 +700,52 @@ const pluginTrustRefresh = registerPluginIpc(
   undefined,
   undefined,
   {
-    onActivationChange: ({ pluginId, activation }) => {
-      approvedInstalledPluginActivations = approvedInstalledPluginActivations.filter(
-        (entry) => entry.pluginId !== pluginId
-      )
-      if (activation) approvedInstalledPluginActivations.push(activation)
+    resolveContributionIcon: contributionIconDataUrl,
+    onActivationChange: applyPluginActivationChange,
+    cleanupPluginStorage: (pluginId) => pluginStorageStore.cleanupPlugin(pluginId),
+    factoryPackageIds: ['navide.git'],
+    listFactoryPackages: () => {
+      const descriptor = frontendPluginManager.getDescriptor('navide.git')
+      const factoryActive = frontendPluginManager
+        .listInstalledPackages()
+        .some((pkg) => pkg.id === 'navide.git' && pkg.provenance === 'factory-bundled') &&
+        descriptor?.capabilityPolicy?.kind === 'manifest-v2' &&
+        !gitRecoveryEnabled
+      return [{
+        id: 'navide.git',
+        version: factoryActive ? descriptor?.packageVersion ?? null : null,
+        active: factoryActive,
+        optedOut: pluginFactoryOptOuts.has('navide.git'),
+      }]
+    },
+    restoreFactoryPackage: (pluginId) => {
+      if (pluginId !== 'navide.git') throw new Error('unknown factory package')
+      assertFactoryGitRestoreAllowed({ forcedLegacy: gitRecoveryForced })
+      if (existsSync(join(pluginsRoot(), pluginId))) {
+        throw new Error('an installed package already owns this plugin id')
+      }
+      const restored = loadFactoryGitPackage()
+      if (!restored.loaded) throw new Error(restored.reason)
+      pluginFactoryOptOuts.remove(pluginId)
+      gitRecoveryEnabled = false
+      applyPluginActivationChange({ pluginId, activation: restored.activation })
+      for (const hostWindow of mainWindows) {
+        if (!hostWindow.isDestroyed() && !detachedWindowIds.has(hostWindow.id)) {
+          hostWindow.webContents.send('git:recoveryChanged', { legacy: false })
+        }
+      }
+    },
+    onFactoryPackageRemoved: (pluginId) => {
+      pluginFactoryOptOuts.add(pluginId)
+      gitRecoveryEnabled = gitRecoveryForced
+      for (const hostWindow of mainWindows) {
+        if (!hostWindow.isDestroyed() && !detachedWindowIds.has(hostWindow.id)) {
+          hostWindow.webContents.send('git:recoveryChanged', { legacy: gitRecoveryEnabled })
+        }
+      }
+    },
+    onPackageInstalled: (pluginId) => {
+      if (pluginId === 'navide.git') pluginFactoryOptOuts.remove(pluginId)
     },
   }
 )
@@ -625,10 +811,11 @@ const approvedBackendPluginCatalog = () =>
 // code/GPU caches, electron-updater downloads). Never user state.
 registerStorageIpc()
 
-// Bundled mini-IDE — the official builtin editor surface, shipped inside the
-// app package (resources/plugins/mini-ide) and built from dist-plugins in dev.
-// An officially-verified marketplace install scanned above takes precedence;
-// see registerBundledMiniIde for the full precedence order.
+// Mini-IDE and Plans remain on their established bundled v1 delivery path
+// until the B6/B7 production migrations replace those paths. Verified
+// installed copies retain the precedence implemented by the registration
+// helpers; this compatibility wiring must not be removed as part of Git's B4
+// cutover.
 const bundledMiniIde = registerBundledMiniIde(frontendPluginManager, {
   isPackaged: app.isPackaged,
   resourcesPath: process.resourcesPath,
@@ -637,27 +824,12 @@ if (!bundledMiniIde.registered) {
   console.warn(`[main] bundled mini-IDE unavailable: ${bundledMiniIde.reason}`)
 }
 
-// Bundled Plans — the official builtin plan surface, shipped inside the app
-// package (resources/plugins/plans) and built from dist-plugins in dev. Mirrors
-// the mini-IDE registration above; see registerBundledPlans for precedence.
 const bundledPlans = registerBundledPlans(frontendPluginManager, {
   isPackaged: app.isPackaged,
   resourcesPath: process.resourcesPath,
 })
 if (!bundledPlans.registered) {
   console.warn(`[main] bundled Plans unavailable: ${bundledPlans.reason}`)
-}
-
-// Bundled Git — the official builtin standalone Git client surface, shipped
-// inside the app package (resources/plugins/git) and built from dist-plugins in
-// dev. Mirrors the mini-IDE / Plans registration above; see registerBundledGit
-// for precedence.
-const bundledGit = registerBundledGit(frontendPluginManager, {
-  isPackaged: app.isPackaged,
-  resourcesPath: process.resourcesPath,
-})
-if (!bundledGit.registered) {
-  console.warn(`[main] bundled Git unavailable: ${bundledGit.reason}`)
 }
 
 ipcMain.handle('backend:info', () => backendInfoPayload())
@@ -930,6 +1102,57 @@ function currentUiTheme(): string {
   return typeof theme === 'string' ? theme : ''
 }
 
+/** Read-only Host values bootstrapped into each Git v2 view's entry query.
+ *  They are deliberately encoded in the same shapes the settings facade uses:
+ *  yolo/analyzer are plain strings, while theme customizations remain JSON. */
+function currentGitReadOnlyQuery(): Record<string, string> {
+  const settings = readUiSettings()
+  const yolo = uiSetting<string>(settings, 'agentTeam.yolo')
+  const analyzerModel = uiSetting<string>(settings, 'agentTeam.analyzerModel')
+  const themeCustom = uiSetting<Record<string, string>>(settings, 'agent-team:theme-custom')
+  return {
+    git_yolo: yolo === '0' ? '0' : '1',
+    git_analyzer_model: typeof analyzerModel === 'string' ? analyzerModel : '',
+    git_theme_custom: JSON.stringify(themeCustom ?? {}),
+  }
+}
+
+let gitStorageMigrationInFlight: { packageVersion: string; promise: Promise<void> } | null = null
+
+async function migrateGitStorage(): Promise<void> {
+  const descriptor = frontendPluginManager.getDescriptor('navide.git')
+  const packageVersion = descriptor?.packageVersion
+  if (!packageVersion) return
+  if (gitStorageMigrationInFlight?.packageVersion === packageVersion) {
+    return gitStorageMigrationInFlight.promise
+  }
+  const promise = (async () => {
+    const migration = await migrateBundledGitPreferences(pluginStorageStore, {
+      packageVersion,
+      sourceSnapshot: gitStorageLifecycle.sourceFor(packageVersion),
+      legacySettings: readUiSettings(),
+    })
+    if (migration.completed) gitStorageLifecycle.rememberActive(packageVersion)
+  })()
+  gitStorageMigrationInFlight = { packageVersion, promise }
+  try {
+    await promise
+  } finally {
+    if (gitStorageMigrationInFlight?.promise === promise) gitStorageMigrationInFlight = null
+  }
+}
+
+async function prepareCatalogContribution(contributionKey: string): Promise<void> {
+  if (!contributionKey.startsWith('navide.git.')) return
+  const descriptor = frontendPluginManager.getDescriptor('navide.git')
+  if (
+    descriptor?.packageVersion &&
+    pluginCapabilityGrants.get(descriptor.id, descriptor.packageVersion)
+  ) {
+    await migrateGitStorage()
+  }
+}
+
 const DEFAULT_EDITOR_SETTING_KEY = 'agentTeam.defaultEditor'
 const DEFAULT_EDITOR_COMMAND_KEY = 'agentTeam.defaultEditor.customCommand'
 
@@ -1103,6 +1326,15 @@ function openMiniIdeEditor(host: BrowserWindow | null, params: Record<string, st
 // choice applies here too, with the mini-IDE as the fallback.
 frontendPluginManager.setOpenInEditorHandler((params) => routeEditorOpen(null, params))
 
+// Manifest v2 plans are executed by the Host-owned adapters. In particular,
+// Git's public fs/ui/aiCli calls resolve their workspace and executable/profile
+// identities here; the package never receives a backend socket or raw shell.
+frontendPluginManager.setPublicCapabilityHandler((plan) =>
+  frontendPluginManager.executePublicCapability(plan)
+)
+
+frontendPluginManager.setPublicStorageHandler((execution) => pluginStorageStore.execute(execution))
+
 // Shell-level host capabilities (plugin broker): the Git window's remote/
 // worktree cards need the same shell actions GitPane reaches via
 // window.agentTeam — browser open, Finder reveal, open-workspace-window
@@ -1247,6 +1479,20 @@ ipcMain.on('window:reportWorkspace', (event, workspacePath: string) => {
   else mainWindowWorkspaces.delete(win)
   windowRegistry.setWorkspace(win.id, ws)
   broadcastOpenWorkspacesChanged()
+})
+
+ipcMain.on('git:contribution-state', (event, state: unknown) => {
+  const hostWindow = BrowserWindow.fromWebContents(event.sender)
+  if (!isTrustedPluginManagementSender(event, mainWindows) ||
+    !hostWindow || typeof state !== 'object' || state === null || Array.isArray(state)) return
+  frontendPluginManager.setGitContributionState(hostWindow, state as Parameters<typeof frontendPluginManager.setGitContributionState>[1])
+})
+
+ipcMain.on('git:contribution-state-clear', (event) => {
+  const hostWindow = BrowserWindow.fromWebContents(event.sender)
+  if (isTrustedPluginManagementSender(event, mainWindows) && hostWindow) {
+    frontendPluginManager.clearGitContributionState(hostWindow)
+  }
 })
 
 // The sidebar can take on workspaces beyond the one the window was opened
@@ -1507,12 +1753,88 @@ ipcMain.handle('window:openDiff', (event, args: Record<string, string>) => {
 // The standalone Git client plugin view — its own dedicated window (mini-IDE
 // parity), opened from the main window's "open standalone Git" entry. Resolves
 // the backend HTTP base + current theme like openMiniIdeEditor.
-function openGitWindow(workspacePath: string, extraParams: Record<string, string> = {}): boolean {
-  const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
-  return openGitPluginView(workspacePath, httpUrl, currentUiTheme(), extraParams)
+async function openCatalogContributionWindow(
+  contributionKey: string,
+  workspacePath: string,
+  extraParams: Record<string, string> = {},
+): Promise<{ ok: boolean; error?: string }> {
+  await prepareCatalogContribution(contributionKey)
+  const contribution = frontendPluginManager.listContributionCatalog().find(
+    (entry) => entry.contributionKey === contributionKey && entry.location === 'window'
+  )
+  if (!contribution) return { ok: false, error: 'window contribution is not installed' }
+
+  let hostWindow = contributionWindows.get(contributionKey)
+  let created = false
+  if (!hostWindow || hostWindow.isDestroyed()) {
+    hostWindow = new BrowserWindow({
+      width: 1280,
+      height: 820,
+      title: contribution.title,
+      titleBarStyle: 'hidden',
+      backgroundColor: '#0d1117',
+      show: false,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    })
+    created = true
+    contributionWindows.set(contributionKey, hostWindow)
+    hostWindow.once('closed', () => {
+      contributionWindows.delete(contributionKey)
+      try {
+        frontendPluginManager.closeContribution(hostWindow!, contributionKey)
+      } catch {
+        // The host has already torn down its WebContentsView.
+      }
+    })
+  }
+
+  const result = await frontendPluginManager.openContributionWindow(hostWindow, contributionKey, {
+    workspacePath,
+    query: catalogContributionQuery(contributionKey, workspacePath, extraParams),
+  })
+  if (!result.ok) {
+    if (created && !hostWindow.isDestroyed()) hostWindow.close()
+    return result
+  }
+  if (!hostWindow.isDestroyed()) {
+    hostWindow.show()
+    hostWindow.focus()
+  }
+  return { ok: true }
 }
 
-ipcMain.handle('window:openGit', (_event, args: Record<string, string>) => {
+function catalogContributionQuery(
+  contributionKey: string,
+  workspacePath: string,
+  extraParams: Record<string, string> = {},
+): string {
+  const isGit = contributionKey.startsWith('navide.git.')
+  return composePluginContributionQuery({
+    contributionKey,
+    workspacePath,
+    theme: currentUiTheme(),
+    ...(isGit && backend ? { httpUrl: `http://${backend.host}:${backend.port}` } : {}),
+    ...(isGit ? { gitReadOnly: currentGitReadOnlyQuery() } : {}),
+    extraParams,
+  })
+}
+
+async function openGitWindow(workspacePath: string, extraParams: Record<string, string> = {}): Promise<boolean> {
+  const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
+  const generic = await openCatalogContributionWindow('navide.git.window', workspacePath, extraParams)
+  if (generic.ok) return true
+  if (!gitRecoveryEnabled) return false
+  await migrateGitStorage()
+  return openGitPluginView(workspacePath, httpUrl, currentUiTheme(), {
+    ...currentGitReadOnlyQuery(),
+    ...extraParams,
+  })
+}
+
+ipcMain.handle('window:openGit', async (_event, args: Record<string, string>) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }
   // Optional diff target: focus the Git window on a file's diff (shown in its
@@ -1524,8 +1846,159 @@ ipcMain.handle('window:openGit', (_event, args: Record<string, string>) => {
     extraParams.git_diff_staged = args.staged ?? ''
     extraParams.git_diff_commit = args.commit ?? ''
   }
-  const ok = openGitWindow(workspacePath, extraParams)
+  if (args.base) extraParams.git_diff_base = args.base
+  if (args.compare) extraParams.git_diff_compare = args.compare
+  const ok = await openGitWindow(workspacePath, extraParams)
   return { ok }
+})
+
+function pluginBoundsFrom(value: unknown): { x: number; y: number; width: number; height: number } | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const values = [record.x, record.y, record.width, record.height]
+  if (!values.every((entry) => typeof entry === 'number' && Number.isFinite(entry))) return null
+  if (Number(record.width) <= 0 || Number(record.height) <= 0) return null
+  return {
+    x: Math.round(Number(record.x)),
+    y: Math.round(Number(record.y)),
+    width: Math.round(Number(record.width)),
+    height: Math.round(Number(record.height)),
+  }
+}
+
+// The renderer supplies layout geometry and a workspace assertion. The main
+// process resolves the registered workspace and actual left contribution;
+// neither the workspace authority nor the opaque instance handle comes from
+// renderer input.
+ipcMain.handle('window:openGitLeft', async (event, args: Record<string, unknown>) => {
+  if (!gitRecoveryEnabled) return { ok: false }
+  const hostWindow = trustedGitLeftWindow(event, mainWindows, detachedWindowIds)
+  const requestedWorkspace = typeof args?.workspace_path === 'string' ? args.workspace_path : ''
+  const registeredWorkspace = hostWindow
+    ? registeredGitLeftWorkspace(hostWindow, requestedWorkspace, mainWindowWorkspaces, normalizeWorkspacePath)
+    : null
+  const bounds = pluginBoundsFrom(args?.bounds)
+  if (!hostWindow || !registeredWorkspace || !bounds) return { ok: false }
+  const workspacePath = normalizeWorkspacePath(registeredWorkspace)
+  if (!workspacePath) return { ok: false }
+  await migrateGitStorage()
+  const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
+  return openGitLeftPluginView(
+    hostWindow,
+    workspacePath,
+    bounds,
+    httpUrl,
+    currentUiTheme(),
+    currentGitReadOnlyQuery(),
+  )
+})
+
+ipcMain.handle('window:updateGitLeft', (event, args: Record<string, unknown>) => {
+  if (!gitRecoveryEnabled) return { ok: false }
+  const hostWindow = trustedGitLeftWindow(event, mainWindows, detachedWindowIds)
+  const bounds = pluginBoundsFrom(args?.bounds)
+  if (!hostWindow || !bounds) return { ok: false }
+  return updateGitLeftPluginView(hostWindow, bounds, args?.visible === true)
+})
+
+ipcMain.handle('window:closeGitLeft', (event) => {
+  if (!gitRecoveryEnabled) return { ok: false }
+  const hostWindow = trustedGitLeftWindow(event, mainWindows, detachedWindowIds)
+  return hostWindow ? closeGitLeftPluginView(hostWindow) : { ok: false }
+})
+
+function trustedPluginRegionHost(event: IpcMainInvokeEvent): BrowserWindow | null {
+  return trustedGitLeftWindow(event, mainWindows, detachedWindowIds)
+}
+
+/** Generic Manifest view-region lifecycle. The renderer supplies only the
+ * stable contribution key and layout geometry; FrontendPluginManager keeps
+ * the opaque instance handle in main. */
+ipcMain.handle('plugins:openContribution', async (event, args: Record<string, unknown>) => {
+  const hostWindow = trustedPluginRegionHost(event)
+  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
+  const workspacePath = hostWindow
+    ? registeredGitLeftWorkspace(
+        hostWindow,
+        args?.workspace_path,
+        mainWindowWorkspaces,
+        normalizeWorkspacePath,
+      )
+    : null
+  const bounds = pluginBoundsFrom(args?.bounds)
+  if (!hostWindow || !contributionKey || !workspacePath || !bounds) return { ok: false }
+  await prepareCatalogContribution(contributionKey)
+  return frontendPluginManager.openContribution(hostWindow, contributionKey, {
+    bounds,
+    workspacePath,
+    query: catalogContributionQuery(contributionKey, workspacePath),
+  })
+})
+
+/** Prewarm a contribution without assigning it visible geometry. This is used
+ * by the first-party Git slot so backend change events reach a live instance
+ * even while the user is on another sidebar tab. */
+ipcMain.handle('plugins:ensureContribution', async (event, args: Record<string, unknown>) => {
+  const hostWindow = trustedPluginRegionHost(event)
+  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
+  const workspacePath = hostWindow
+    ? registeredGitLeftWorkspace(
+      hostWindow,
+      args?.workspace_path,
+      mainWindowWorkspaces,
+      normalizeWorkspacePath,
+    )
+    : null
+  if (!hostWindow || !contributionKey || !workspacePath) return { ok: false }
+  await prepareCatalogContribution(contributionKey)
+  return frontendPluginManager.ensureContribution(hostWindow, contributionKey, {
+    workspacePath,
+    query: catalogContributionQuery(contributionKey, workspacePath),
+  })
+})
+
+/** Open a catalog window contribution in a dedicated BrowserWindow. Only the
+ * trusted main renderer may request this; the opaque plugin instance remains
+ * entirely in the main process. */
+ipcMain.handle('plugins:openContributionWindow', async (event, args: Record<string, unknown>) => {
+  const requestingWindow = trustedPluginRegionHost(event)
+  if (!requestingWindow) return { ok: false }
+  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
+  const workspacePath = registeredGitLeftWorkspace(
+    requestingWindow,
+    args?.workspace_path,
+    mainWindowWorkspaces,
+    normalizeWorkspacePath,
+  )
+  if (!contributionKey || !workspacePath) return { ok: false }
+  return openCatalogContributionWindow(contributionKey, workspacePath)
+})
+
+ipcMain.handle('plugins:updateContribution', (event, args: Record<string, unknown>) => {
+  const hostWindow = trustedPluginRegionHost(event)
+  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
+  const bounds = pluginBoundsFrom(args?.bounds)
+  if (!hostWindow || !contributionKey || (args.visible === true && !bounds)) return { ok: false }
+  return frontendPluginManager.updateContribution(
+    hostWindow,
+    contributionKey,
+    bounds,
+    args.visible === true,
+  )
+})
+
+ipcMain.handle('plugins:closeContribution', (event, args: Record<string, unknown>) => {
+  const hostWindow = trustedPluginRegionHost(event)
+  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
+  if (!hostWindow || !contributionKey) return { ok: false }
+  return frontendPluginManager.closeContribution(hostWindow, contributionKey)
+})
+
+ipcMain.handle('window:getZoomFactor', (event) => {
+  const hostWindow = trustedGitLeftWindow(event, mainWindows, detachedWindowIds)
+  if (!hostWindow) return 1
+  const factor = hostWindow.webContents.getZoomFactor()
+  return Number.isFinite(factor) && factor > 0 ? factor : 1
 })
 
 function openBranchDiffWindow(host: BrowserWindow | null, params: Record<string, string>): void {
@@ -1715,10 +2188,10 @@ ipcMain.handle('window:openPlans', (_event, args: { workspace_path?: string; rel
 
 // Git History: routes to the unified Git plugin window (its History view). The
 // dedicated `?window=githistory` renderer it used to open is gone.
-ipcMain.handle('window:openGitHistory', (_event, args: { workspace_path?: string }) => {
+ipcMain.handle('window:openGitHistory', async (_event, args: { workspace_path?: string }) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }
-  const ok = openGitWindow(workspacePath)
+  const ok = await openGitWindow(workspacePath)
   return { ok }
 })
 
@@ -2130,13 +2603,9 @@ ipcMain.handle('shell:openExternal', async (_event, url: string) => {
 ipcMain.handle('shell:openTempFile', async (_event, filename: string, content: string) => {
   if (!filename || typeof filename !== 'string') return { ok: false, error: 'invalid filename' }
   try {
-    const dir = join(tmpdir(), 'agent-team-head')
-    await mkdir(dir, { recursive: true })
-    const safe = filename.replace(/[/\\]/g, '_')
-    const file = join(dir, safe)
-    await writeFile(file, content ?? '', 'utf8')
-    const err = await shell.openPath(file)
-    return err ? { ok: false, error: err } : { ok: true, path: file }
+    const artifact = await writeTempTextArtifact(tmpdir(), filename, content ?? '')
+    const err = await shell.openPath(artifact.path)
+    return err ? { ok: false, error: err } : { ok: true, ...artifact }
   } catch (e) {
     return { ok: false, error: String(e) }
   }
@@ -2539,7 +3008,9 @@ function isAppNavigation(url: string): boolean {
 app.on('web-contents-created', (_e, contents) => {
   // Pane zoom changes terminal/editor font size only. Never let a retained
   // Chromium/Electron page zoom scale the entire Navide interface.
-  lockPageZoom(contents)
+  lockPageZoom(contents, () => {
+    if (!contents.isDestroyed()) contents.send('window:zoom-changed')
+  })
   // Electron has no default right-click menu; without this one, right-click is
   // inert everywhere and there is no fallback path for copy/paste.
   installContextMenu(contents)
@@ -2555,6 +3026,15 @@ registerTerminalContextMenu()
 
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return
+  if (gitRecoveryEnabled) {
+    const recovery = registerLegacyBundledGit(frontendPluginManager, {
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    })
+    if (!recovery.registered) {
+      console.warn(`[main] NAVIDE_GIT_RECOVERY=legacy but legacy Git bundle is unavailable: ${recovery.reason}`)
+    }
+  }
   // The plugin-view dev entry is opt-in via AGENT_TEAM_PLUGIN_DEV=1 so the
   // default menu / UI is unchanged for every normal launch (dev or packaged).
   // This mode keeps the fixed first-party dist-plugins bundles available for
@@ -2582,16 +3062,6 @@ app.whenReady().then(async () => {
     } else {
       console.warn(
         '[main] AGENT_TEAM_PLUGIN_DEV=1 but Plans dev bundle is missing — run `pnpm run build:plans`'
-      )
-    }
-    // Dev-only: register the locally built Git plugin (dist-plugins/git), same
-    // gate and override semantics as the mini-IDE / Plans above.
-    const devGitDescriptor = devGitPluginDescriptor()
-    if (existsSync(devGitDescriptor.entryFile)) {
-      frontendPluginManager.registerDeveloperDescriptor(devGitDescriptor)
-    } else {
-      console.warn(
-        '[main] AGENT_TEAM_PLUGIN_DEV=1 but Git dev bundle is missing — run `pnpm run build:git`'
       )
     }
     const explicitPackageDir = process.env['AGENT_TEAM_PLUGIN_DEV_PATH']

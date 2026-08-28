@@ -19,16 +19,20 @@ import stat
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
+from urllib.parse import urlparse
 
 import httpx
 
 from agent_team_backend.applog import app_data_dir
 from agent_team_backend import commit_message_prompt
+from agent_team_backend.git_security import is_remote_helper_form
+from agent_team_backend.host_shell import run_allowlisted, run_allowlisted_text
 from agent_team_backend.pending_registry import TIMEOUT, PendingRegistry
 
 log = logging.getLogger("agent_team_backend.git_service")
@@ -41,12 +45,6 @@ _DISCOVERY_SCAN_BUDGET_S = 5.0
 
 # Only allow https/http and SSH-style URLs; block git pseudo-protocols (ext::, fd::, file://, etc.)
 _SAFE_GIT_URL = re.compile(r"^(https?://|ssh://|git@[\w.\-]+:)")
-
-# git's "transport::address" remote-helper syntax (ext::, fd::, …) can execute
-# arbitrary commands via the helper. Block that form while still allowing
-# http(s)/ssh/git@ URLs and local filesystem paths (used by clone_repo).
-_GIT_REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*::")
-
 
 # ─── Data classes ─────────────────────────────────────────────────────────────
 
@@ -202,53 +200,18 @@ def _git_proc_semaphore() -> asyncio.Semaphore:
 
 async def _run(args: list[str], cwd: str) -> tuple[int, str, str]:
     """Run a git command; return (returncode, stdout, stderr)."""
-    try:
-        async with _git_proc_semaphore():
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-        return proc.returncode or 0, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
-        return 128, "", "git command timed out"
-    except FileNotFoundError:
-        return 128, "", "git executable not found"
-    except Exception as exc:
-        return 128, "", str(exc)
+    async with _git_proc_semaphore():
+        rc, stdout, stderr = await run_allowlisted_text(args, cwd, timeout=15.0)
+    return rc, stdout, stderr
 
 
 async def _run_with_input(args: list[str], cwd: str, stdin_text: str) -> tuple[int, str, str]:
     """Run a git command feeding *stdin_text* to stdin; return (rc, stdout, stderr)."""
-    try:
-        async with _git_proc_semaphore():
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=cwd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(stdin_text.encode("utf-8")), timeout=15.0)
-        return proc.returncode or 0, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
-        return 128, "", "git command timed out"
-    except FileNotFoundError:
-        return 128, "", "git executable not found"
-    except Exception as exc:
-        return 128, "", str(exc)
+    async with _git_proc_semaphore():
+        rc, stdout, stderr = await run_allowlisted_text(
+            args, cwd, timeout=15.0, input_text=stdin_text
+        )
+    return rc, stdout, stderr
 
 
 async def _run_bytes(args: list[str], cwd: str) -> tuple[int, bytes, str]:
@@ -258,27 +221,10 @@ async def _run_bytes(args: list[str], cwd: str) -> tuple[int, bytes, str]:
     binary blobs; conflict stages must be inspected as bytes to tell text from
     binary before any decoding happens.
     """
-    try:
-        async with _git_proc_semaphore():
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-        return proc.returncode or 0, stdout, stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
-        return 128, b"", "git command timed out"
-    except FileNotFoundError:
-        return 128, b"", "git executable not found"
-    except Exception as exc:
-        return 128, b"", str(exc)
+    async with _git_proc_semaphore():
+        rc, stdout, stderr = await run_allowlisted(args, cwd, timeout=15.0)
+    decoded = stderr.decode("utf-8", errors="replace")
+    return rc, stdout, decoded
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -1467,6 +1413,121 @@ def _field_for_prompt(prompt: str) -> str:
     return "username" if prompt.strip().lower().startswith("username") else "password"
 
 
+def _canonical_https_prompt_host(prompt: str) -> str | None:
+    """Return a normalized HTTPS prompt destination hostname, or None.
+
+    Git's askpass wording is not an authorization input by itself. It becomes
+    one only after this strict parse; prompts without an HTTPS URL (or with an
+    unreadable host) deliberately receive no bound credential.
+    """
+    match = re.search(r"https://[^\s'\"]+", prompt, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        parsed = urlparse(match.group(0))
+        if parsed.scheme.lower() != "https" or not parsed.hostname:
+            return None
+        if unicodedata.normalize("NFKC", parsed.hostname) != parsed.hostname:
+            return None
+        return parsed.hostname.encode("idna").decode("ascii").lower()
+    except (UnicodeError, ValueError):
+        return None
+
+
+def _canonical_credential_host(host: str | None) -> str | None:
+    raw = (host or "").strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    if not raw:
+        return None
+    if unicodedata.normalize("NFKC", raw) != raw:
+        return None
+    try:
+        return raw.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+
+
+def _credential_matches_https_url(credential: dict[str, str], remote_url: str) -> bool:
+    """Whether a bound account may answer prompts for *remote_url*.
+
+    This guard is intentionally independent from askpass: Git's configured
+    remote is the destination authority for fetch/pull/push, while askpass
+    prompts are only a second, fail-closed check at credential disclosure.
+    """
+    expected = _canonical_credential_host(credential.get("expected_host"))
+    if not expected:
+        return False
+    try:
+        parsed = urlparse(remote_url)
+        return (
+            parsed.scheme.lower() == "https"
+            and parsed.hostname is not None
+            and _canonical_credential_host(parsed.hostname) == expected
+        )
+    except (UnicodeError, ValueError):
+        return False
+
+
+async def _configured_remote_url(
+    workspace_path: str,
+    *,
+    remote: str = "",
+    push: bool = False,
+) -> str | None:
+    """Resolve the actual configured URL Git will use, without shelling out."""
+    remote_name = remote.strip()
+    if not remote_name:
+        rc, branch, _ = await _run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], workspace_path)
+        if rc == 0 and branch.strip():
+            rc, configured, _ = await _run(
+                ["git", "config", "--get", f"branch.{branch.strip()}.remote"], workspace_path
+            )
+            if rc == 0:
+                remote_name = configured.strip()
+        if not remote_name and push:
+            rc, configured, _ = await _run(["git", "config", "--get", "remote.pushDefault"], workspace_path)
+            if rc == 0:
+                remote_name = configured.strip()
+        if not remote_name:
+            remote_name = "origin"
+    command = ["git", "remote", "get-url"]
+    if push:
+        command.append("--push")
+    command.append(remote_name)
+    rc, url, _ = await _run(command, workspace_path)
+    return url.strip() if rc == 0 and url.strip() else None
+
+
+async def _bound_credential_for_remote(
+    workspace_path: str,
+    credential: dict[str, str] | None,
+    *,
+    remote: str = "",
+    push: bool = False,
+) -> tuple[dict[str, str] | None, bool]:
+    """Return ``(credential, rejected_https_destination)`` for a remote.
+
+    A bound PAT is relevant only to HTTPS. SSH, git, file, and absent remotes
+    retain Git's ordinary authentication/error behavior; only a concrete HTTPS
+    destination that is malformed or bound to another host fails closed.
+    """
+    if credential is None:
+        return None, False
+    remote_url = await _configured_remote_url(workspace_path, remote=remote, push=push)
+    if not remote_url:
+        return None, False
+    try:
+        is_https = urlparse(remote_url).scheme.lower() == "https"
+    except ValueError:
+        is_https = False
+    if not is_https:
+        return None, False
+    if _credential_matches_https_url(credential, remote_url):
+        return credential, False
+    return None, True
+
+
 def _git_base(credential: dict[str, str] | None) -> list[str]:
     """Base git argv. With a bound credential, disable inherited credential
     helpers (e.g. macOS osxkeychain) so git falls through to our GIT_ASKPASS
@@ -1507,7 +1568,11 @@ async def _askpass_env(
         yield None
         return
 
-    askpass_env, cleanup = await create_askpass_context(on_request, on_settled=on_settled)
+    askpass_env, cleanup = await create_askpass_context(
+        on_request,
+        on_settled=on_settled,
+        expected_host=_canonical_credential_host(credential.get("expected_host")) if credential is not None else None,
+    )
     try:
         yield {**os.environ, **askpass_env}
     finally:
@@ -1529,9 +1594,14 @@ async def push_set_upstream(
         return {"ok": False, "output": "", "error": err}
     if err := _validate_ref_name(remote, "remote name"):
         return {"ok": False, "output": "", "error": err}
-    async with _askpass_env(on_credential_request, on_credential_settled, credential) as env:
+    bound_credential, rejected_destination = await _bound_credential_for_remote(
+        workspace_path, credential, remote=remote, push=True
+    )
+    if rejected_destination:
+        return {"ok": False, "output": "", "error": "credential destination rejected"}
+    async with _askpass_env(on_credential_request, on_credential_settled, bound_credential) as env:
         rc, out, stderr = await _run_with_timeout(
-            _git_base(credential) + ["push", "--set-upstream", remote.strip(), branch.strip()],
+            _git_base(bound_credential) + ["push", "--set-upstream", remote.strip(), branch.strip()],
             workspace_path,
             timeout=60.0,
             env=env,
@@ -1548,9 +1618,12 @@ async def fetch(
     credential: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run `git fetch --prune` to update remote-tracking refs."""
-    async with _askpass_env(on_credential_request, on_credential_settled, credential) as env:
+    bound_credential, rejected_destination = await _bound_credential_for_remote(workspace_path, credential)
+    if rejected_destination:
+        return {"ok": False, "output": "", "error": "credential destination rejected"}
+    async with _askpass_env(on_credential_request, on_credential_settled, bound_credential) as env:
         rc, out, stderr = await _run_with_timeout(
-            _git_base(credential) + ["fetch", "--prune"], workspace_path, timeout=60.0, env=env
+            _git_base(bound_credential) + ["fetch", "--prune"], workspace_path, timeout=60.0, env=env
         )
     return {"ok": rc == 0, "output": (out + stderr).strip(), "error": stderr.strip() if rc != 0 else ""}
 
@@ -1564,9 +1637,12 @@ async def pull_only(
     credential: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run `git pull` (fast-forward preferred)."""
-    async with _askpass_env(on_credential_request, on_credential_settled, credential) as env:
+    bound_credential, rejected_destination = await _bound_credential_for_remote(workspace_path, credential)
+    if rejected_destination:
+        return {"ok": False, "output": "", "error": "credential destination rejected"}
+    async with _askpass_env(on_credential_request, on_credential_settled, bound_credential) as env:
         rc, out, stderr = await _run_with_timeout(
-            _git_base(credential) + ["pull"], workspace_path, timeout=60.0, env=env
+            _git_base(bound_credential) + ["pull"], workspace_path, timeout=60.0, env=env
         )
     return {"ok": rc == 0, "output": (out + stderr).strip(), "error": stderr.strip() if rc != 0 else ""}
 
@@ -1582,7 +1658,7 @@ async def push_only(
     credential: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run `git push`, or `git push <remote> <branch>` when a remote is given."""
-    cmd = _git_base(credential) + ["push"]
+    cmd = ["push"]
     if remote:
         if err := _validate_ref_name(remote, "remote name"):
             return {"ok": False, "output": "", "error": err}
@@ -1591,8 +1667,11 @@ async def push_only(
             if err := _validate_ref_name(branch, "branch name"):
                 return {"ok": False, "output": "", "error": err}
             cmd.append(branch.strip())
-    async with _askpass_env(on_credential_request, on_credential_settled, credential) as env:
-        rc, out, stderr = await _run_with_timeout(cmd, workspace_path, timeout=60.0, env=env)
+    bound_credential, rejected_destination = await _bound_credential_for_remote(workspace_path, credential, remote=remote, push=True)
+    if rejected_destination:
+        return {"ok": False, "output": "", "error": "credential destination rejected"}
+    async with _askpass_env(on_credential_request, on_credential_settled, bound_credential) as env:
+        rc, out, stderr = await _run_with_timeout(_git_base(bound_credential) + cmd, workspace_path, timeout=60.0, env=env)
     return {"ok": rc == 0, "output": (out + stderr).strip(), "error": stderr.strip() if rc != 0 else ""}
 
 
@@ -1605,9 +1684,12 @@ async def pull_rebase(
     credential: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run `git pull --rebase` (replay local commits on top of upstream)."""
-    async with _askpass_env(on_credential_request, on_credential_settled, credential) as env:
+    bound_credential, rejected_destination = await _bound_credential_for_remote(workspace_path, credential)
+    if rejected_destination:
+        return {"ok": False, "output": "", "error": "credential destination rejected"}
+    async with _askpass_env(on_credential_request, on_credential_settled, bound_credential) as env:
         rc, out, stderr = await _run_with_timeout(
-            _git_base(credential) + ["pull", "--rebase"], workspace_path, timeout=60.0, env=env
+            _git_base(bound_credential) + ["pull", "--rebase"], workspace_path, timeout=60.0, env=env
         )
     return {"ok": rc == 0, "output": (out + stderr).strip(), "error": stderr.strip() if rc != 0 else ""}
 
@@ -1626,7 +1708,7 @@ async def push_force(
 
     When a remote is given, targets `git push --force-with-lease <remote> <branch>`.
     """
-    cmd = _git_base(credential) + ["push", "--force-with-lease"]
+    cmd = ["push", "--force-with-lease"]
     if remote:
         if err := _validate_ref_name(remote, "remote name"):
             return {"ok": False, "output": "", "error": err}
@@ -1635,8 +1717,11 @@ async def push_force(
             if err := _validate_ref_name(branch, "branch name"):
                 return {"ok": False, "output": "", "error": err}
             cmd.append(branch.strip())
-    async with _askpass_env(on_credential_request, on_credential_settled, credential) as env:
-        rc, out, stderr = await _run_with_timeout(cmd, workspace_path, timeout=60.0, env=env)
+    bound_credential, rejected_destination = await _bound_credential_for_remote(workspace_path, credential, remote=remote, push=True)
+    if rejected_destination:
+        return {"ok": False, "output": "", "error": "credential destination rejected"}
+    async with _askpass_env(on_credential_request, on_credential_settled, bound_credential) as env:
+        rc, out, stderr = await _run_with_timeout(_git_base(bound_credential) + cmd, workspace_path, timeout=60.0, env=env)
     return {"ok": rc == 0, "output": (out + stderr).strip(), "error": stderr.strip() if rc != 0 else ""}
 
 
@@ -2207,30 +2292,8 @@ async def stage_all(workspace_path: str) -> dict[str, Any]:
 async def _run_with_timeout(
     args: list[str], cwd: str, timeout: float = 30.0, env: dict[str, str] | None = None
 ) -> tuple[int, str, str]:
-    proc: asyncio.subprocess.Process | None = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return proc.returncode or 0, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        return 1, "", f"timed out after {int(timeout)}s"
-    except FileNotFoundError:
-        return 128, "", "git executable not found"
-    except Exception as exc:
-        return 128, "", str(exc)
-    finally:
-        if proc is not None and proc.returncode is None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
+    rc, stdout, stderr = await run_allowlisted_text(args, cwd, timeout=timeout, env=env)
+    return rc, stdout, stderr
 
 
 async def check_staged(workspace_path: str) -> dict[str, Any]:
@@ -2313,16 +2376,21 @@ async def sync(
     credential: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Pull (rebase) then push.  Returns stdout/stderr for both steps."""
-    async with _askpass_env(on_credential_request, on_credential_settled, credential) as env:
+    pull_credential, pull_rejected = await _bound_credential_for_remote(workspace_path, credential)
+    push_credential, push_rejected = await _bound_credential_for_remote(workspace_path, credential, push=True)
+    if pull_rejected or push_rejected:
+        return asdict(GitSyncResult(ok=False, error="credential destination rejected"))
+    async with _askpass_env(on_credential_request, on_credential_settled, pull_credential) as env:
         pull_rc, pull_out, pull_err = await _run_with_timeout(
-            _git_base(credential) + ["pull", "--rebase"], workspace_path, timeout=60.0, env=env
+            _git_base(pull_credential) + ["pull", "--rebase"], workspace_path, timeout=60.0, env=env
         )
         pull_output = (pull_out + pull_err).strip()
         if pull_rc != 0:
             return asdict(GitSyncResult(ok=False, pull_output=pull_output, error="pull failed"))
 
+    async with _askpass_env(on_credential_request, on_credential_settled, push_credential) as env:
         push_rc, push_out, push_err = await _run_with_timeout(
-            _git_base(credential) + ["push"], workspace_path, timeout=60.0, env=env
+            _git_base(push_credential) + ["push"], workspace_path, timeout=60.0, env=env
         )
         push_output = (push_out + push_err).strip()
         if push_rc != 0:
@@ -2447,6 +2515,7 @@ async def clone_repo(
     *,
     on_credential_request: Callable[[str, str], Awaitable[None]] | None = None,
     on_credential_settled: Callable[[str, str | None], Awaitable[None]] | None = None,
+    credential: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Clone *url* into *target_dir*.
 
@@ -2457,7 +2526,9 @@ async def clone_repo(
     target = (target_dir or "").strip()
     if not url or url.startswith("-"):
         return {"ok": False, "path": "", "error": "invalid repository URL"}
-    if _GIT_REMOTE_HELPER_RE.match(url):
+    if credential is not None and not _credential_matches_https_url(credential, url):
+        return {"ok": False, "path": "", "error": "credential destination rejected"}
+    if is_remote_helper_form(url):
         # Block ext::/fd:: remote-helper URLs that can run arbitrary commands,
         # while still permitting http(s)/ssh/git@ URLs and local paths.
         return {"ok": False, "path": "", "error": "unsupported repository URL scheme"}
@@ -2470,9 +2541,12 @@ async def clone_repo(
     # Run from the parent dir so a relative/new target works; pass paths via `--`.
     # Uses _run_with_timeout (not _run) so a GIT_ASKPASS env can be injected for
     # private repos, same as the other network-writing git operations below.
-    async with _askpass_env(on_credential_request, on_credential_settled) as env:
+    async with _askpass_env(on_credential_request, on_credential_settled, credential) as env:
         rc, out, stderr = await _run_with_timeout(
-            ["git", "clone", "--", url, str(dest)], str(dest.parent), timeout=60.0, env=env
+            _git_base(credential) + ["clone", "--", url, str(dest)],
+            str(dest.parent),
+            timeout=60.0,
+            env=env,
         )
     if rc != 0:
         return {"ok": False, "path": "", "error": stderr.strip() or out.strip()}
@@ -2960,6 +3034,7 @@ async def create_askpass_context(
     *,
     timeout: float = 60.0,
     on_settled: Callable[[str, str | None], Awaitable[None]] | None = None,
+    expected_host: str | None = None,
 ) -> tuple[dict[str, str], Callable[[], Awaitable[None]]]:
     """Start a one-shot loopback TCP server for a GIT_ASKPASS helper to call back into.
 
@@ -3002,6 +3077,12 @@ async def create_askpass_context(
                 log.warning("git askpass: rejected connection with invalid token")
                 return
             prompt = str(request.get("prompt") or "")
+            if expected_host is not None:
+                prompt_host = _canonical_https_prompt_host(prompt)
+                if prompt_host != expected_host:
+                    writer.write(b'{"value": null}\n')
+                    await writer.drain()
+                    return
 
             request_id = uuid.uuid4().hex
             fut = _credentials.register(request_id)

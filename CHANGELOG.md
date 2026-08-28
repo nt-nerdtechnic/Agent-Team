@@ -6,14 +6,32 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Added
 
-- Add the public Plugin Platform v2 contracts, SDK CLI, UI package boundary,
+- Add the public Plugin Platform v2 contracts, SDK CLI, unified Vue UI package,
   and an external-workspace frontend package smoke workflow with fail-closed
   capability-denial coverage.
+- Use the same Manifest, catalog, grant, instance, and capability lifecycle for
+  official and third-party plugins. Until Marketplace acquisition is available,
+  the App includes a removable factory Git package whose durable opt-out and
+  explicit Extensions restore do not bypass that shared runtime.
+- Add the Issue 16 Host-managed durable plugin/workspace storage adapter and
+  lifecycle seams with authenticated package/workspace identity,
+  version-matched candidate/active/previous snapshot selection, atomic JSON
+  persistence, stable quota errors, and Host-derived package-version grants.
 - Enforce Manifest v2 coarse `system` namespace and `shell` grants through the
   Host capability catalog, authenticated workspace binding, package-version
   approval, and fail-closed AI CLI/shell request planning.
 - Allow the canonical `git` executable through Manifest v2 `shell.run`
   allowlist mode without adding a Git permission or first-party bypass.
+- Add the optional official `navide.git` Manifest v2 package
+  with isolated left and window custom views from one active package version,
+  Host-owned Git contribution/account bridges, workspace storage continuity,
+  and a retained legacy rollback path. Git-specific production source now lives
+  in the plugin package; remote credentials remain Host-injected and the
+  lifecycle selector uses a crash-safe atomic write. Approved v2 activation is
+  attempted first; load/mount/readiness failure selects the retained legacy
+  renderer for that process, while security and permission denials fail closed.
+  Contribution artwork is decoded by the Host and rendered from the shared
+  manifest catalog with a generic fallback for missing or invalid icons.
 - Configurable lazy CLI restore: resume one CLI, the first Grid page, or the active tab when opening a workspace; preserve manual-tab grouping and recover uniquely attributable missing Claude conversations on realization.
 - Add Meta Muse Code as a spawnable CLI agent, including install detection and one-click install. Resume, log reading and credential switching remain unavailable for it until they are verified against a real installation.
 - Validate Manifest v2 frontend contributions consistently in the App and marketplace registry, including strict view discovery and package-entry checks.
@@ -70,6 +88,32 @@ All notable released changes to Navide will be documented in this file. The form
 - Write every injection into a CLI pane as a bracketed paste for the vendors whose TUI keeps the mode on, instead of only multi-line ones, and send the paste guards as whole writes so a chunk boundary can never cut one in half.
 
 ### Fixed
+
+- Fill the complete Host slot with the isolated Git v2 left contribution,
+  without exposing the browser's default white canvas or outer page margin.
+
+- Make Git account sign-in safer by limiting saved credentials to the selected
+  Git host, protecting clone destinations chosen in the folder picker, and
+  keeping Git preferences and selected repositories when moving to Plugin
+  Storage. A documented legacy Git recovery launch option remains available if
+  a release needs to return temporarily to the previous Git interface.
+
+- Restore Git contribution parity across the embedded and dedicated views,
+  including AI CLI file/external opens, semantic resize/redraw/force controls,
+  change badges, and Escape-to-close behavior without affecting sibling
+  instances. GitHub/GitLab Issue calls remain Host-owned through the shared
+  `git`/`gh`/`glab` executable allowlist. Embedded left-view failures now fail
+  closed with a manual Retry state and ignore stale geometry completions.
+
+- Harden staged plugin event and PTY ownership: stable capability-context
+  refreshes no longer detach routes, in-flight creates are cancelled on view
+  teardown and late committed creates receive one operation-scoped cleanup kill,
+  stale reattach senders fail closed, and Manifest v2 raw PTY recovery remains
+  explicitly deferred to a persistent Host ownership contract.
+- Route public workspace events to the exact Host-selected package id, apply
+  Manifest v2 PTY rules even when a descriptor is opened through the legacy
+  adapter, and make instance subscription cleanup exactly-once for both active
+  unsubscribe and view teardown.
 
 - Keep Codex panes resumable after spawning sub-agents by excluding read-only thread-spawn child rollouts from the pane's persisted root session id.
 - Keep Kimi Code's arrow-key navigation reliable in the embedded terminal by allowing 100 ms to reassemble split escape sequences while preserving an explicit `PI_TUI_ESC_TIMEOUT` override.

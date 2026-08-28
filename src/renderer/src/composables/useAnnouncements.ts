@@ -1,6 +1,6 @@
 import { computed, ref, shallowRef, type ComputedRef, type Ref } from 'vue'
-import { i18n } from '../i18n'
-import { settingsGet, settingsSet } from '../lib/settings'
+import { i18n } from '@navide/plugin-ui/foundation'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { WHATS_NEW, cmpSemver, pickText } from '../lib/whatsNew'
 import type { UpdateState } from '../../../shared/updater'
 

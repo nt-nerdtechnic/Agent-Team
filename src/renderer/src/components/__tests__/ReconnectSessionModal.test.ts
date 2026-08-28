@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import ReconnectSessionModal, { type OrphanSession } from '../ReconnectSessionModal.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 beforeEach(() => {
   ;(i18n.global.locale as unknown as { value: string }).value = 'en-US'

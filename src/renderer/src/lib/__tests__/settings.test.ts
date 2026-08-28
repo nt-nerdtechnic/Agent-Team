@@ -1,24 +1,33 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { nextTick, ref } from 'vue'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import {
   settingsGet,
   settingsSet,
   settingsRemove,
   initSettingsBackend,
+  settingsReady,
+  settingsReadiness,
   onSettingsChanged,
   migrateLegacyLocalStorage,
-  __resetSettingsForTest,
   SETTINGS_FLUSH_DEBOUNCE_MS,
   MIGRATED_LOCALSTORAGE_KEYS,
   PURGED_LOCALSTORAGE_KEYS,
-} from '../settings'
+} from '@navide/plugin-ui/shared'
+import { __resetSettingsForTest } from '@navide/plugin-ui/shared/testing'
+import { readHostBootstrapSettings } from '../settingsBootstrap'
 
 function stubBootstrap(raw: string | undefined): void {
   window.agentTeam = (raw === undefined
     ? undefined
     : { getBootstrapSettings: () => raw }) as unknown as typeof window.agentTeam
+  const globalKey = globalThis as typeof globalThis & { __navideSettingsBootstrap?: Record<string, unknown> }
+  if (raw === undefined) {
+    delete globalKey.__navideSettingsBootstrap
+  } else {
+    globalKey.__navideSettingsBootstrap = readHostBootstrapSettings()
+  }
 }
 
 /** Advance fake timers and let the awaited send() chains settle. */
@@ -39,6 +48,7 @@ describe('lib/settings', () => {
   afterEach(() => {
     vi.useRealTimers()
     localStorage.clear()
+    delete (globalThis as typeof globalThis & { __navideSettingsBootstrap?: unknown }).__navideSettingsBootstrap
   })
 
   describe('bootstrap seeding', () => {
@@ -180,6 +190,71 @@ describe('lib/settings', () => {
   })
 
   describe('connect-time reconcile', () => {
+    it('keeps the Host cache when the settings snapshot payload is missing', async () => {
+      stubBootstrap('{"agent-team:theme":"dark","agentTeam.analyzerModel":"model"}')
+      __resetSettingsForTest()
+      const seen: string[][] = []
+      const off = onSettingsChanged((keys) => seen.push(keys))
+      const { backend } = createMockBackend('connected')
+      initSettingsBackend(backend)
+      await settle()
+
+      expect(settingsGet('agent-team:theme', '')).toBe('dark')
+      expect(settingsGet('agentTeam.analyzerModel', '')).toBe('model')
+      expect(seen).toEqual([])
+      off()
+    })
+
+    it('rejects an obsolete settingsReady waiter after a connection flap', async () => {
+      const status = ref<'connected' | 'disconnected'>('disconnected')
+      let resolveSnapshot!: (value: Record<string, unknown>) => void
+      const backend = {
+        status,
+        ownedKeys: ['agentTeam.gitTabRepo'],
+        getAll: vi.fn(() => new Promise<Record<string, unknown>>((resolve) => {
+          resolveSnapshot = resolve
+        })),
+        setMany: vi.fn(async () => undefined),
+        onChanged: () => () => undefined,
+      }
+
+      initSettingsBackend(backend)
+      const earlyReady = settingsReady()
+
+      status.value = 'connected'
+      await nextTick()
+      status.value = 'disconnected'
+      await nextTick()
+      await expect(earlyReady).rejects.toThrow('settings backend disconnected')
+      status.value = 'connected'
+      await nextTick()
+      resolveSnapshot({ 'agentTeam.gitTabRepo': '/workspace/sub' })
+      await settingsReady()
+    })
+
+    it('does not flush queued writes when reconciliation fails', async () => {
+      const status = ref<'connected' | 'disconnected'>('disconnected')
+      const setMany = vi.fn(async () => undefined)
+      const backend = {
+        status,
+        ownedKeys: ['agentTeam.git.logScope'],
+        getAll: vi.fn(async () => { throw new Error('snapshot unavailable') }),
+        setMany,
+        onChanged: () => () => undefined,
+      }
+
+      initSettingsBackend(backend)
+      settingsSet('agentTeam.git.logScope', 'queued')
+      status.value = 'connected'
+      await nextTick()
+      await Promise.resolve()
+
+      await expect(settingsReady()).rejects.toThrow('snapshot unavailable')
+      expect(settingsReadiness).toMatchObject({ status: 'failed' })
+      expect(setMany).not.toHaveBeenCalled()
+      vi.clearAllTimers()
+    })
+
     it('adopts the backend dict but keeps pending local writes', async () => {
       stubBootstrap('{"stale":"local","shared":"old"}')
       __resetSettingsForTest()

@@ -13,18 +13,13 @@
 // which the host sets when it loads this entry — no injection needed here.
 
 import { createApp } from 'vue'
-import { i18n } from '../../src/i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 // Theme token layers — order matters: primitives → semantic roles → themes.
-import '../../src/styles/tokens/base.css'
-import '../../src/styles/tokens/semantic.css'
-import '../../src/styles/tokens/themes/dark-midnight.css'
-import '../../src/styles/tokens/themes/dark-forest.css'
-import '../../src/styles/tokens/themes/light.css'
-import '../../src/styles/tokens/themes/high-contrast.css'
+import '@navide/plugin-ui/styles.css'
 
 import PlanWindowApp from '../../src/PlanWindowApp.vue'
-import { seedSettings } from '../../src/lib/settings'
+import { seedSettings } from '@navide/plugin-ui/shared'
 
 // Zero-flash initial theme: the host passes the current app theme as `?theme=`
 // (the plugin origin has no `window.agentTeam.getBootstrapSettings`, so the

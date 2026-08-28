@@ -1,12 +1,9 @@
 /// <reference types="vite/client" />
 
-import type { UpdateActionResult, UpdateSettingsResult, UpdaterSettings, UpdateState } from '../../shared/updater'
-
-declare module '*.vue' {
-  import type { DefineComponent } from 'vue'
-  const component: DefineComponent<Record<string, unknown>, Record<string, unknown>, unknown>
-  export default component
-}
+type UpdateActionResult = import('../../shared/updater').UpdateActionResult
+type UpdateSettingsResult = import('../../shared/updater').UpdateSettingsResult
+type UpdaterSettings = import('../../shared/updater').UpdaterSettings
+type UpdateState = import('../../shared/updater').UpdateState
 
 interface BackendInfo {
   status: 'starting' | 'ready' | 'error'
@@ -37,6 +34,11 @@ interface GitAccountInput {
 interface GitCredential {
   username: string
   token: string
+  expectedHost: string
+}
+
+interface GitRecoveryChanged {
+  legacy: true
 }
 
 declare global {
@@ -55,6 +57,7 @@ declare global {
       restartBackend: () => Promise<BackendInfo>
       stopBackend: () => Promise<{ ok: boolean }>
       onBackendChanged: (cb: (info: BackendInfo) => void) => void
+      onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void) => () => void
       onMenuAction: (cb: (action: string) => void) => void
       onSystemResumed: (cb: () => void) => () => void
       setRecentWorkspaces: (list: { path: string; name: string; exists: boolean }[]) => void
@@ -105,7 +108,21 @@ declare global {
         filepath?: string
         staged?: boolean
         commit?: string
+        base?: string
+        compare?: string
       }) => Promise<{ ok: boolean }>
+      openBranchDiffWindow?: (args: { workspace_path: string; base: string }) => Promise<{ ok: boolean }>
+      openGitLeftView: (args: {
+        workspace_path: string
+        bounds: { x: number; y: number; width: number; height: number }
+      }) => Promise<{ ok: boolean; fallback?: 'legacy' }>
+      updateGitLeftView: (args: {
+        bounds: { x: number; y: number; width: number; height: number }
+        visible: boolean
+      }) => Promise<{ ok: boolean; fallback?: 'legacy' }>
+      closeGitLeftView: () => Promise<{ ok: boolean }>
+      getZoomFactor?: () => Promise<number>
+      onZoomChanged?: (cb: () => void) => () => void
       onPlanOpenDoc: (handler: (relPath: string) => void) => () => void
       openDiffWindow: (args: {
         workspace_path: string
@@ -238,6 +255,18 @@ declare global {
       onTerminalCopyEmpty?: (cb: (branch: string) => void) => void
       setBadgeCount: (count: number) => void
       reportWorkspace: (workspacePath: string) => void
+      setGitContributionState?: (state: {
+        workspacePath: string
+        analyzerModel: string
+        dispatchTargets: { id: string; label: string }[]
+        availableAgents: { key: string; label: string }[]
+        issueHandoffs: Record<string, { paneId: string; mode: string; state: string }>
+      }) => void
+      clearGitContributionState?: () => void
+      onGitContributionAction?: (handler: (action: {
+        operation: string
+        payload?: Record<string, unknown>
+      }) => void) => () => void
       restore?: {
         getPending: () => Promise<string[] | null>
         /** Workspaces the restore failure breaker refused to reopen this
@@ -280,6 +309,37 @@ declare global {
       }
       plugins?: {
         listInstalled: () => Promise<InstalledPluginSummary[]>
+        listFactoryPackages: () => Promise<FactoryPluginSummary[]>
+        listContributions: () => Promise<Array<{
+          pluginId: string
+          packageVersion: string | null
+          contributionKey: string
+          title: string
+          icon: string | null
+          kind: 'custom'
+          location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
+          manifestOrder: number
+        }>>
+        openContribution: (args: {
+          contributionKey: string
+          workspace_path: string
+          bounds: { x: number; y: number; width: number; height: number }
+        }) => Promise<{ ok: boolean; error?: string }>
+        ensureContribution: (args: {
+          contributionKey: string
+          workspace_path: string
+        }) => Promise<{ ok: boolean; error?: string }>
+        openContributionWindow: (args: {
+          contributionKey: string
+          workspace_path: string
+        }) => Promise<{ ok: boolean; error?: string }>
+        updateContribution: (args: {
+          contributionKey: string
+          bounds?: { x: number; y: number; width: number; height: number }
+          visible: boolean
+        }) => Promise<{ ok: boolean }>
+        closeContribution: (args: { contributionKey: string }) => Promise<{ ok: boolean }>
+        onContributionsChanged: (handler: () => void) => () => void
         marketplaceSearch: (query?: string) => Promise<MarketplaceListResponse>
         prepareInstall: (args: {
           namespace: string
@@ -291,6 +351,7 @@ declare global {
           approval?: { publisherConfirmed?: boolean; riskConfirmed?: boolean }
         ) => Promise<{ id: string; requires: string[] }>
         remove: (id: string) => Promise<{ ok: boolean }>
+        restoreFactoryPackage: (id: string) => Promise<{ ok: boolean }>
       }
     }
   }
@@ -299,8 +360,15 @@ declare global {
     id: string
     requires: string[]
     sensitive: string[]
-    provenance?: 'official-registry' | 'developer-local-unpacked'
+    provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
     warning?: string
+  }
+
+  interface FactoryPluginSummary {
+    id: string
+    version: string | null
+    active: boolean
+    optedOut: boolean
   }
 
   interface MarketplaceExtension {

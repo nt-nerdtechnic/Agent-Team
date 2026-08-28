@@ -10,10 +10,19 @@ Navide 採用 **Local-first**，但不代表所有情況都完全離線。Electr
 
 - `<workspace>/.agent-team/` 中的個人私有專案智慧與 Run Artifact
 - 應用程式資料目錄中的 Role、Pipeline、Recent Workspace、UI Setting、Analyzer Setting 與 AI Provider Setting
+- 應用程式資料目錄中的 Host 管理 Plugin Storage Partition；它們依驗證過的 Plugin／Package 及（Workspace Scope）驗證過的 Workspace 分隔，不會傳送給 Navide 或 Plugin Registry
 - 從本機 CLI Log 衍生的 Token Attribution 與 Deduplication Metadata
 - 選用的 AI Provider API Key；它會儲存在受限制檔案權限保護的本機設定檔中（受支援系統上為 `0600`）
 
 Navide 不營運專案 Telemetry 服務，也不要求建立 Navide 帳號。
+
+當 Issue 16 的 Production Storage Integration 啟用後，解除安裝 Plugin 會在
+Cleanup 成功後刪除該 Plugin 的本機 Storage；之後重新安裝不會還原已刪除的
+資料。一般第三方 Production Plugin 在後續 Grant／Context Integration 完成
+前仍會被拒絕。First-party `navide.git` Migration 是明確的 Host-owned
+Consumer：Git Preference 使用驗證過的 Package／Workspace Storage Partition；
+升級時可以將前一個 Active Snapshot 複製到新的 Candidate，並保留舊 Snapshot
+作為 Rollback。
 
 ## 私有專案智慧
 
@@ -31,12 +40,26 @@ Navide 不營運專案 Telemetry 服務，也不要求建立 Navide 帳號。
 | Cloud AI（Inline 編輯與 Code Review） | Anthropic、OpenAI、Google、Groq、DeepSeek、Mistral、xAI 或自訂 Endpoint | 選取的程式碼、Prompt 與 Model Parameter |
 | Context7 Injection | Context7 及其 MCP Distribution／Runtime 相依套件 | 偵測到的 Library Name 與文件查詢 |
 | Web Search | Search Provider | 搜尋查詢文字 |
-| Git Operation | 設定的 Git Host | Repository 資料，以及由 Git 或 Host Flow 處理的憑證 |
+| Git Operation 與 Issue Detection | 設定的 Git Host，透過本機 `git`、`gh` 或 `glab` CLI | Repository／Issue 資料，以及由 CLI 或 Host Account Flow 處理的憑證 |
 | Update Check | GitHub Releases | 應用程式版本與一般網路 Metadata |
 | Plugin Registry Trust Refresh | 所選的 Official Registry，或明確核准的 self-hosted Registry | 已安裝 marketplace plugin 的 namespace/name；Refresh 不會傳送 Plugin Source 或 Archive |
 | MCP Server | 設定的 MCP Server 與它使用的服務 | 完全取決於該 Server 的 Tool 與設定 |
 
 傳送私人程式碼或受規範資料前，請先閱讀各 Provider 政策。
+
+Production Git Package 透過 Host-owned argv Allowlist 在本機執行 `git`、`gh`
+與 `glab`。Navide 不會代理這些服務，也不會將 Repository 上傳到 Navide。
+當本機 CLI 執行 Remote Operation 或 Issue Query 時，GitHub 或 GitLab 仍可能
+依照設定的 Remote、CLI Login 與 Provider Policy 收到資料。Git Account
+Credential 保留在 Host 保護的本機 Account Store 或 CLI 自己的 Credential
+Flow，不會寫入 Plugin Renderer Storage。隔離的 v2 Git Renderer 只會取得非
+Secret 的 Account Metadata 與 Workspace Binding State。Remote Git Operation
+送往 Backend 前，才由 Host 注入綁定的 Credential。即使 Workspace 沒有綁定
+Host Account，v2 仍可使用由 Host 擁有的 Interactive Credential Flow：Host
+會為該次 Operation 建立不透明且綁定 Instance 的 Owner，只把 Git Prompt
+轉送給發起它的 Git View，並在接受回覆前驗證 Request Ownership。輸入的
+Secret 只在這次 Exchange 中暫存，絕不保存到 Plugin Storage；來自其他 View
+或其他 Workspace 的 Credential Response 會被拒絕。
 
 只要仍有已安裝的 marketplace plugin，Navide 會在 App 啟動時及每 15
 分鐘，將該 Plugin 的 namespace/name 傳送給所選的 Registry。這個 Request

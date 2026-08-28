@@ -4,7 +4,9 @@ import type { useBackend } from '../composables/useBackend'
 import { useEditorTargets } from '../composables/useEditorTargets'
 import { useExplorer, type FsEntry } from '../composables/useExplorer'
 import { useGit } from '../composables/useGit'
-import { useNotify } from '../composables/useNotify'
+import { createHostGitTransport } from '../composables/hostGitTransport'
+import { createHostGitCredentialPort } from '../composables/hostSurfacePorts'
+import { useNotify } from '@navide/plugin-ui/foundation'
 
 import { usePreview } from '../preview/usePreview'
 
@@ -31,7 +33,7 @@ const wsRef = toRef(props, 'workspacePath')
 // user's input is never clobbered. (`prompt` is declared below; the guard only
 // runs on later focus events.)
 const explorer = useExplorer(props.backend, wsRef, { isRefreshBlocked: () => prompt.value !== null })
-const git = useGit(() => props.workspacePath, props.backend)
+const git = useGit(() => props.workspacePath, createHostGitTransport(props.backend), createHostGitCredentialPort())
 const { toast, alert, confirm } = useNotify()
 
 type FsResult = { ok: boolean; error?: string }

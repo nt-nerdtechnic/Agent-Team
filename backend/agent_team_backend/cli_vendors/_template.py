@@ -10,7 +10,7 @@ add a vendor (full guide: ``docs/adding-a-cli-vendor.md``):
 3. Register the SPEC in ``registry.py`` (one line, alphabetical).
 4. Add a log reader section below if your CLI writes local conversation
    logs, plus ``backend/tests/vendors/test_<key>.py``.
-5. Add the frontend spec in ``src/renderer/src/agents/<key>.ts`` and
+5. Add the frontend spec in ``src/renderer/src/platform/plugin-shell/agents/<key>.ts`` and
    register it in ``agents/index.ts``.
 6. Run the structural tests — they tell you what is missing or forbidden:
    ``uv --project backend run pytest backend/tests/test_cli_vendors_registry.py``

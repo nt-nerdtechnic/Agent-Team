@@ -1,17 +1,14 @@
 {
+  "extends": "../../tsconfig.web.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "strict": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "rootDir": "src",
-    "outDir": "dist"
+    "composite": false,
+    "declaration": false,
+    "noEmit": true,
+    "baseUrl": "../..",
+    "paths": {
+      "@navide/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
+      "@navide/plugin-contracts": ["packages/plugin-contracts/src/index.ts"]
+    }
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.vue"]
 }

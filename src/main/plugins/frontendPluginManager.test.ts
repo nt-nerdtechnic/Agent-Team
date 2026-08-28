@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { generateKeyPairSync, sign as edSign } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -20,6 +20,7 @@ vi.mock('electron', () => {
     id = nextWebContentsId++
     sent: Array<{ channel: string; args: unknown[] }> = []
     loads: string[] = []
+    focusCount = 0
     private destroyed = false
     private listeners = new Map<string, Handler[]>()
     isDestroyed(): boolean {
@@ -27,6 +28,9 @@ vi.mock('electron', () => {
     }
     send(channel: string, ...args: unknown[]): void {
       this.sent.push({ channel, args })
+    }
+    focus(): void {
+      this.focusCount++
     }
     loadURL(url: string): Promise<void> {
       this.loads.push(url)
@@ -174,6 +178,56 @@ vi.mock('electron', () => {
   }
 })
 
+const wsMock = vi.hoisted(() => {
+  class FakeNodeWebSocket {
+    static readonly OPEN = 1
+    static readonly CONNECTING = 0
+    static readonly CLOSED = 3
+    static instances: FakeNodeWebSocket[] = []
+    readonly url: string
+    readonly sent: string[] = []
+    readyState = FakeNodeWebSocket.CONNECTING
+    private readonly listeners = new Map<string, Array<(event: unknown) => void>>()
+
+    constructor(url: string) {
+      this.url = url
+      FakeNodeWebSocket.instances.push(this)
+    }
+
+    addEventListener(type: string, listener: (event: unknown) => void): void {
+      const listeners = this.listeners.get(type) ?? []
+      listeners.push(listener)
+      this.listeners.set(type, listeners)
+    }
+
+    send(data: string): void {
+      this.sent.push(data)
+    }
+
+    close(): void {
+      this.readyState = FakeNodeWebSocket.CLOSED
+      this.emit('close', {})
+    }
+
+    open(): void {
+      this.readyState = FakeNodeWebSocket.OPEN
+      this.emit('open', {})
+    }
+
+    receive(message: unknown): void {
+      this.emit('message', { data: JSON.stringify(message) })
+    }
+
+    private emit(type: string, event: unknown): void {
+      for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event)
+    }
+  }
+
+  return { FakeNodeWebSocket }
+})
+
+vi.mock('ws', () => ({ WebSocket: wsMock.FakeNodeWebSocket }))
+
 import * as electron from 'electron'
 import type { BrowserWindow } from 'electron'
 import {
@@ -182,6 +236,8 @@ import {
   isReservedPluginId,
   devPlansPluginDescriptor,
   openMiniIdePluginView,
+  openGitLeftPluginView,
+  closeGitLeftPluginView,
   PLANS_PLUGIN_ID,
   MINI_IDE_PLUGIN_ID,
   bundledMiniIdeDir,
@@ -189,12 +245,20 @@ import {
   type PluginLaunchDescriptor,
 } from './frontendPluginManager'
 import { manifestV2CapabilityPolicy } from './pluginPermissions'
+import {
+  HOST_EVENT_SOURCE_PLUGIN_ID,
+  type HostCapabilityContext,
+  type StorageSnapshotTier,
+} from './pluginCapabilityBroker'
+import { PluginStorageError } from './pluginStorage'
 
 interface FakeWebContentsLike {
   id: number
   sent: Array<{ channel: string; args: unknown[] }>
   loads: string[]
+  focusCount: number
   isDestroyed(): boolean
+  focus(): void
   emit(event: string, ...args: unknown[]): void
   close(): void
 }
@@ -299,10 +363,11 @@ function descriptor(id: string): PluginLaunchDescriptor {
 }
 
 describe('isReservedPluginId', () => {
-  it('flags the built-in navide.* namespace, not third-party ids', () => {
+  it('flags first-party and internal Host identities, not third-party ids', () => {
     expect(isReservedPluginId('navide.mini-ide')).toBe(true)
     expect(isReservedPluginId('navide.noop')).toBe(true)
     expect(isReservedPluginId('navide.plans')).toBe(true)
+    expect(isReservedPluginId(HOST_EVENT_SOURCE_PLUGIN_ID)).toBe(true)
     expect(isReservedPluginId('acme.demo')).toBe(false)
   })
 })
@@ -339,6 +404,12 @@ describe('registerDescriptor reserved-id guard', () => {
   it('refuses a third-party plugin claiming a reserved built-in id', () => {
     const mgr = new FrontendPluginManager()
     expect(() => mgr.registerDescriptor(descriptor('navide.mini-ide'))).toThrow(/reserved/)
+    expect(() => mgr.registerDescriptor(descriptor(HOST_EVENT_SOURCE_PLUGIN_ID))).toThrow(
+      /not a plugin id/
+    )
+    expect(() =>
+      mgr.registerDescriptor(descriptor(HOST_EVENT_SOURCE_PLUGIN_ID), { builtin: true })
+    ).toThrow(/not a plugin id/)
     expect(mgr.getDescriptor('navide.mini-ide')).toBeUndefined()
   })
 
@@ -375,6 +446,22 @@ describe('registerDescriptor reserved-id guard', () => {
     mgr.removeInstalledPlugin(PLANS_PLUGIN_ID)
 
     expect(mgr.getDescriptor(PLANS_PLUGIN_ID)).toBe(bundled)
+    expect(mgr.listInstalledPackages()).toEqual([])
+  })
+
+  it('can remove an installed package without restoring its remembered builtin', () => {
+    const mgr = new FrontendPluginManager()
+    const bundled = devPlansPluginDescriptor()
+    mgr.registerBuiltin(bundled)
+    mgr.registerInstalledPackage(
+      { id: PLANS_PLUGIN_ID, requires: [], provenance: 'official-registry' },
+      undefined,
+      { official: true },
+    )
+
+    mgr.removeInstalledPlugin(PLANS_PLUGIN_ID, { restoreBuiltin: false })
+
+    expect(mgr.getDescriptor(PLANS_PLUGIN_ID)).toBeUndefined()
     expect(mgr.listInstalledPackages()).toEqual([])
   })
 
@@ -417,6 +504,271 @@ describe('registerDescriptor reserved-id guard', () => {
         location: 'window',
       }),
     ])
+    expect(mgr.listContributionCatalog()).toEqual([
+      {
+        pluginId: 'acme.files',
+        packageVersion: null,
+        contributionKey: 'acme.files.left',
+        title: 'Files',
+        iconFile: null,
+        kind: 'custom',
+        location: 'left',
+        manifestOrder: 0,
+      },
+      {
+        pluginId: 'acme.files',
+        packageVersion: null,
+        contributionKey: 'acme.files.window',
+        title: 'Files window',
+        iconFile: null,
+        kind: 'custom',
+        location: 'window',
+        manifestOrder: 1,
+      },
+    ])
+  })
+
+  it('derives an exact per-instance context when a catalog contribution opens', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDescriptor: PluginLaunchDescriptor = {
+      ...descriptor('acme.files'),
+      packageVersion: '1.2.3',
+      capabilityPolicy: {
+        kind: 'manifest-v2',
+        system: ['fs'],
+        grants: [{ permission: 'system', namespace: 'fs' }],
+      },
+      views: [{
+        id: 'left',
+        contributionKey: 'acme.files.left',
+        kind: 'custom',
+        location: 'left',
+        title: 'Files',
+        entryFile: '/plugins/acme.files/frontend/left/index.html',
+      }],
+    }
+    mgr.registerInstalledPackage(
+      { id: 'acme.files', requires: ['fs'], provenance: 'official-registry' },
+      packageDescriptor,
+    )
+    const resolveGrant = vi.fn(() => ({
+      packageVersion: '1.2.3',
+      system: ['fs'] as const,
+      storage: true,
+    }))
+    mgr.setCapabilityGrantResolver(resolveGrant)
+    const host = new FakeBrowserWindow()
+
+    await expect(mgr.openContribution(asHost(host), 'acme.files.left', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })).resolves.toEqual({ ok: true })
+
+    expect(resolveGrant).toHaveBeenCalledWith('acme.files', '1.2.3')
+    const running = [...(mgr as unknown as {
+      running: Map<string, { capabilityContext: HostCapabilityContext | null }>
+    }).running.values()]
+    expect(running[0].capabilityContext).toMatchObject({
+      publisherEligible: false,
+      userGrant: { packageVersion: '1.2.3', system: ['fs'], storage: true },
+      runtimeBinding: {
+        pluginId: 'acme.files',
+        packageVersion: '1.2.3',
+        instanceId: expect.any(String),
+        workspaceId: expect.any(String),
+        audience: 'acme.files.left',
+      },
+      storageSnapshotTier: 'active',
+    })
+  })
+
+  it('derives the same workspace identity across manager instances', () => {
+    const first = new FrontendPluginManager().gitCapabilityContext(
+      '1.0.0',
+      '/workspace/project/../project',
+      'git-left',
+    )
+    const second = new FrontendPluginManager().gitCapabilityContext(
+      '1.0.0',
+      '/workspace/project',
+      'git-window',
+    )
+
+    expect(first.runtimeBinding?.workspaceId).toBe(second.runtimeBinding?.workspaceId)
+    expect(first.runtimeBinding?.workspaceId).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  it('fails closed when a catalog contribution lacks an exact approved grant', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDescriptor: PluginLaunchDescriptor = {
+      ...descriptor('acme.files'),
+      packageVersion: '1.2.3',
+      capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+      views: [{
+        id: 'left',
+        contributionKey: 'acme.files.left',
+        kind: 'custom',
+        location: 'left',
+        title: 'Files',
+        entryFile: '/plugins/acme.files/frontend/left/index.html',
+      }],
+    }
+    mgr.registerInstalledPackage(
+      { id: 'acme.files', requires: ['fs'], provenance: 'official-registry' },
+      packageDescriptor,
+    )
+    mgr.setCapabilityGrantResolver(() => null)
+
+    await expect(mgr.openContribution(asHost(new FakeBrowserWindow()), 'acme.files.left', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })).resolves.toEqual({ ok: false, error: 'package-version capability grant is missing' })
+  })
+
+  it('reports an early selected-v2 activation failure exactly once', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor: PluginLaunchDescriptor = {
+      id: 'navide.git',
+      packageVersion: '1.0.0',
+      requires: ['fs'],
+      capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+      devUrl: '',
+      entryFile: '/plugins/navide.git/frontend/left/index.html',
+      views: [{
+        id: 'left',
+        contributionKey: 'navide.git.left',
+        kind: 'custom',
+        location: 'left',
+        title: 'Git',
+        entryFile: '/plugins/navide.git/frontend/left/index.html',
+      }],
+    }
+    mgr.registerInstalledPackage(
+      { id: 'navide.git', requires: ['fs'], provenance: 'official-registry' },
+      descriptor,
+      { official: true },
+    )
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion: '1.0.0', system: ['fs'], storage: true,
+    }))
+    const onFailure = vi.fn()
+    mgr.setActivationFailureHandler(onFailure)
+    const host = new FakeBrowserWindow()
+    await mgr.openContribution(asHost(host), 'navide.git.left', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })
+    const webContents = (host.children[0] as FakeViewLike).webContents as unknown as {
+      emit(event: string, ...args: unknown[]): void
+    }
+
+    webContents.emit('did-fail-load', {}, -105, 'NAME_NOT_RESOLVED', 'file:///plugin', true)
+    webContents.emit('did-fail-load', {}, -105, 'NAME_NOT_RESOLVED', 'file:///plugin', true)
+
+    expect(onFailure).toHaveBeenCalledTimes(1)
+    expect(onFailure).toHaveBeenCalledWith({
+      pluginId: 'navide.git',
+      packageVersion: '1.0.0',
+      reason: 'entry load failed: NAME_NOT_RESOLVED (-105)',
+    })
+  })
+
+  it('starts the v2 readiness timeout only after the entry finishes loading', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDescriptor: PluginLaunchDescriptor = {
+        ...descriptor('navide.git'),
+        packageVersion: '1.0.0',
+        capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+        views: [{
+          id: 'left',
+          contributionKey: 'navide.git.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Git',
+          entryFile: '/plugins/navide.git/frontend/left/index.html',
+        }],
+      }
+      mgr.registerInstalledPackage(
+        { id: 'navide.git', requires: ['fs'], provenance: 'official-registry' },
+        packageDescriptor,
+        { official: true },
+      )
+      mgr.setCapabilityGrantResolver(() => ({
+        packageVersion: '1.0.0', system: ['fs'], storage: true,
+      }))
+      const onFailure = vi.fn()
+      mgr.setActivationFailureHandler(onFailure)
+      const host = new FakeBrowserWindow()
+      await mgr.openContribution(asHost(host), 'navide.git.left', {
+        bounds: { x: 0, y: 0, width: 300, height: 500 },
+        workspacePath: '/workspace',
+      })
+      const webContents = (host.children[0] as FakeViewLike).webContents as unknown as {
+        emit(event: string, ...args: unknown[]): void
+      }
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(onFailure).not.toHaveBeenCalled()
+
+      webContents.emit('did-finish-load')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(onFailure).toHaveBeenCalledWith({
+        pluginId: 'navide.git',
+        packageVersion: '1.0.0',
+        reason: 'plugin readiness handshake timed out',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not start a timeout when readiness arrives before did-finish-load', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDescriptor: PluginLaunchDescriptor = {
+        ...descriptor('navide.git'),
+        packageVersion: '1.0.0',
+        capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+        views: [{
+          id: 'left',
+          contributionKey: 'navide.git.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Git',
+          entryFile: '/plugins/navide.git/frontend/left/index.html',
+        }],
+      }
+      mgr.registerInstalledPackage(
+        { id: 'navide.git', requires: ['fs'], provenance: 'official-registry' },
+        packageDescriptor,
+        { official: true },
+      )
+      mgr.setCapabilityGrantResolver(() => ({
+        packageVersion: '1.0.0', system: ['fs'], storage: true,
+      }))
+      const onFailure = vi.fn()
+      mgr.setActivationFailureHandler(onFailure)
+      const host = new FakeBrowserWindow()
+      await mgr.openContribution(asHost(host), 'navide.git.left', {
+        bounds: { x: 0, y: 0, width: 300, height: 500 },
+        workspacePath: '/workspace',
+      })
+      const webContents = (host.children[0] as FakeViewLike).webContents as unknown as {
+        id: number
+        emit(event: string, ...args: unknown[]): void
+      }
+
+      ipcListeners.get('plugin:ready')?.({ sender: { id: webContents.id } })
+      webContents.emit('did-finish-load')
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(onFailure).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -503,6 +855,76 @@ describe('loadInstalledPlugins official receipt gate', () => {
     )
     return { id, version: '1.0.0', digest, signature }
   }
+
+  it('loads a validated Host-bundled Manifest v2 package through the installed runtime', () => {
+    writeV2Plugin('factory-git', { id: 'navide.git', frontend: true })
+    const mgr = new FrontendPluginManager()
+
+    const result = mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git')
+
+    expect(result).toMatchObject({ loaded: true, pluginId: 'navide.git', packageVersion: '1.0.0' })
+    expect(mgr.getDescriptor('navide.git')?.packageVersion).toBe('1.0.0')
+    expect(mgr.listInstalledPackages()).toEqual([
+      { id: 'navide.git', requires: [], provenance: 'factory-bundled' },
+    ])
+  })
+
+  it('treats the App-bundled Git package as publisher-eligible only after an exact grant', async () => {
+    writeV2Plugin('factory-git', { id: 'navide.git', frontend: true })
+    const mgr = new FrontendPluginManager()
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git').loaded).toBe(true)
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion: '1.0.0',
+      system: [],
+      storage: true,
+    }))
+    const host = new FakeBrowserWindow()
+
+    await expect(mgr.openContribution(asHost(host), 'navide.git.main', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })).resolves.toEqual({ ok: true })
+
+    const running = [...(mgr as unknown as {
+      running: Map<string, { capabilityContext: HostCapabilityContext | null }>
+    }).running.values()]
+    expect(running[0].capabilityContext).toMatchObject({
+      publisherEligible: true,
+      userGrant: { packageVersion: '1.0.0', system: [], storage: true },
+      runtimeBinding: { pluginId: 'navide.git', packageVersion: '1.0.0' },
+    })
+  })
+
+  it('does not let a Host-bundled package replace an active Registry package', () => {
+    writeV2Plugin('factory-git', { id: 'navide.git', version: '1.0.0', frontend: true })
+    const mgr = new FrontendPluginManager()
+    mgr.registerInstalledPackage(
+      { id: 'navide.git', requires: [], provenance: 'official-registry' },
+      {
+        ...descriptor('navide.git'),
+        packageVersion: '2.0.0',
+        capabilityPolicy: { kind: 'manifest-v2', system: [], grants: [] },
+      },
+      { official: true },
+    )
+
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git')).toMatchObject({
+      loaded: false,
+      reason: 'installed package is active',
+    })
+    expect(mgr.getDescriptor('navide.git')?.packageVersion).toBe('2.0.0')
+  })
+
+  it('rejects a factory package whose manifest claims another identity', () => {
+    writeV2Plugin('factory-git', { id: 'acme.git', frontend: true })
+    const mgr = new FrontendPluginManager()
+
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git')).toMatchObject({
+      loaded: false,
+      reason: expect.stringMatching(/expected.*navide\.git/i),
+    })
+    expect(mgr.listInstalledPackages()).toEqual([])
+  })
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'navide-plugins-'))
@@ -1128,6 +1550,919 @@ describe('view lifecycle (open / hideSelf / resize / death paths)', () => {
   })
 })
 
+describe('opaque view instance ownership', () => {
+  function dispatchEvent(mgr: FrontendPluginManager, event: string, payload: unknown): void {
+    ;(mgr as unknown as { dispatchEvent(event: string, payload: unknown): void }).dispatchEvent(
+      event,
+      payload
+    )
+  }
+
+  function eventsOf(
+    view: FakeViewLike,
+    type: string
+  ): Array<{ type: string; data: Record<string, unknown> }> {
+    return view.webContents.sent
+      .filter((message) => message.channel === 'plugin:cap:event')
+      .map((message) => message.args[0] as { type: string; data: Record<string, unknown> })
+      .filter((event) => event.type === type)
+  }
+
+  function output(id: string, data: string): Record<string, unknown> {
+    return { terminal_session_id: id, pane_id: 'p', sequence: 1, data, stream: 'stdout' }
+  }
+
+  function packageDescriptor(id = 'acme.multi-view'): PluginLaunchDescriptor {
+    return {
+      id,
+      packageVersion: '1.0.0',
+      requires: [],
+      devUrl: '',
+      entryFile: `/plugins/${id}/fallback.html`,
+      views: [
+        {
+          id: 'left',
+          contributionKey: `${id}.left`,
+          kind: 'custom',
+          location: 'left',
+          title: 'Left',
+          entryFile: `/plugins/${id}/left.html`,
+        },
+        {
+          id: 'window',
+          contributionKey: `${id}.window`,
+          kind: 'custom',
+          location: 'window',
+          title: 'Window',
+          entryFile: `/plugins/${id}/window.html`,
+        },
+      ],
+    }
+  }
+
+  function v2Context(options: {
+    pluginId?: string
+    packageVersion?: string
+    workspaceId?: string
+    audience?: string
+    sessionId?: string
+  } = {}): HostCapabilityContext {
+    const binding = {
+      pluginId: options.pluginId ?? 'acme.multi-view',
+      packageVersion: options.packageVersion ?? '1.0.0',
+      workspaceId: options.workspaceId ?? 'workspace-1',
+      instanceId: 'host-placeholder',
+      audience: options.audience ?? 'shared-audience',
+    }
+    return {
+      publisherEligible: true,
+      userGrant: { packageVersion: binding.packageVersion, system: ['fs', 'aiCli'] },
+      runtimeBinding: binding,
+      ...(options.sessionId
+        ? { sessionBindings: new Map([[options.sessionId, binding]]) }
+        : {}),
+    }
+  }
+
+  function v2PackageDescriptor(id = 'acme.multi-view'): PluginLaunchDescriptor {
+    return {
+      ...packageDescriptor(id),
+      requires: ['terminal'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs', 'aiCli'] }),
+      capabilityContext: v2Context({ pluginId: id }),
+    }
+  }
+
+  it('creates independently addressable opaque instances for one package', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: { x: 1, y: 2, width: 300, height: 400 },
+    })
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: { x: 5, y: 6, width: 700, height: 500 },
+    })
+
+    expect(left.instanceId).toBeTruthy()
+    expect(window.instanceId).toBeTruthy()
+    expect(left.instanceId).not.toBe(window.instanceId)
+    expect(left.instanceId).not.toBe(packageDesc.id)
+    expect(window.instanceId).not.toBe(packageDesc.id)
+    expect(hostA.children).toHaveLength(1)
+    expect(hostB.children).toHaveLength(1)
+    expect((hostA.children[0] as FakeViewLike).webContents.loads).toEqual([
+      packageDesc.views![0].entryFile,
+    ])
+    expect((hostB.children[0] as FakeViewLike).webContents.loads).toEqual([
+      packageDesc.views![1].entryFile,
+    ])
+    expect(hostA.focusCount).toBeGreaterThan(0)
+    expect(hostB.focusCount).toBeGreaterThan(0)
+    expect((hostA.children[0] as FakeViewLike).webContents.focusCount).toBeGreaterThan(0)
+    expect((hostB.children[0] as FakeViewLike).webContents.focusCount).toBeGreaterThan(0)
+  })
+
+  it('resolves stale catalog objects against the current registered package', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+
+    const stalePackage: PluginLaunchDescriptor = {
+      ...packageDesc,
+      views: packageDesc.views!.map((view) => ({
+        ...view,
+        entryFile: '/plugins/stale/forged.html',
+      })),
+    }
+    mgr.setCapabilityContext(packageDesc.id, null)
+
+    const host = new FakeBrowserWindow()
+    await mgr.openView(stalePackage, stalePackage.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+    })
+
+    expect((host.children[0] as FakeViewLike).webContents.loads).toEqual([
+      packageDesc.views![0].entryFile,
+    ])
+  })
+
+  it('targets bounds, visibility, focus, and destruction by handle only', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: { x: 0, y: 0, width: 100, height: 100 },
+    })
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: { x: 10, y: 20, width: 200, height: 150 },
+    })
+    const leftView = hostA.children[0] as FakeViewLike
+    const windowView = hostB.children[0] as FakeViewLike
+
+    mgr.setBounds(left.instanceId, { x: 1, y: 2, width: 300, height: 250 })
+    expect(leftView.bounds).toEqual({ x: 1, y: 2, width: 300, height: 250 })
+    expect(windowView.bounds).toEqual({ x: 10, y: 20, width: 200, height: 150 })
+
+    mgr.deactivate(left.instanceId)
+    expect(leftView.visible).toBe(false)
+    expect(windowView.visible).toBe(true)
+    const hostFocusBeforeActivate = hostA.focusCount
+    const viewFocusBeforeActivate = leftView.webContents.focusCount
+    mgr.activate(left.instanceId)
+    expect(leftView.visible).toBe(true)
+    expect(hostA.focusCount).toBe(hostFocusBeforeActivate)
+    expect(leftView.webContents.focusCount).toBe(viewFocusBeforeActivate)
+
+    mgr.focusInstance(left.instanceId)
+    expect(hostA.focusCount).toBeGreaterThan(hostFocusBeforeActivate)
+    expect(leftView.webContents.focusCount).toBeGreaterThan(viewFocusBeforeActivate)
+
+    mgr.destroyInstance(left.instanceId)
+    expect(leftView.webContents.isDestroyed()).toBe(true)
+    expect(hostA.children).not.toContain(leftView)
+    expect(windowView.webContents.isDestroyed()).toBe(false)
+    expect(hostB.children).toContain(windowView)
+
+    mgr.setBounds(window.instanceId, { x: 9, y: 8, width: 700, height: 600 })
+    expect(windowView.bounds).toEqual({ x: 9, y: 8, width: 700, height: 600 })
+  })
+
+  it('cleans a dead v2 instance without disturbing its sibling', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: 'fill',
+    })
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: 'fill',
+    })
+    const leftView = hostA.children[0] as FakeViewLike
+    const windowView = hostB.children[0] as FakeViewLike
+    const staleSender = leftView.webContents.id
+
+    leftView.webContents.close()
+
+    expect(leftView.webContents.isDestroyed()).toBe(true)
+    expect(hostA.children).not.toContain(leftView)
+    expect(windowView.webContents.isDestroyed()).toBe(false)
+    mgr.setBounds(window.instanceId, { x: 4, y: 5, width: 600, height: 400 })
+    expect(windowView.bounds).toEqual({ x: 4, y: 5, width: 600, height: 400 })
+
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+    await expect(
+      call!({ sender: { id: staleSender } }, { reqId: 'dead', ns: 'ping', method: 'ping', args: {} })
+    ).resolves.toEqual({
+      reqId: '',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'unknown plugin sender' },
+    })
+    expect(window.instanceId).toBeTruthy()
+  })
+
+  it('destroys every live instance when a package is removed', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: 'fill',
+    })
+    await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: 'fill',
+    })
+    const leftView = hostA.children[0] as FakeViewLike
+    const windowView = hostB.children[0] as FakeViewLike
+
+    mgr.removeInstalledPlugin(packageDesc.id)
+
+    expect(leftView.webContents.isDestroyed()).toBe(true)
+    expect(windowView.webContents.isDestroyed()).toBe(true)
+    expect(hostA.children).toHaveLength(0)
+    expect(hostB.children).toHaveLength(0)
+  })
+
+  it('keeps v1 and v2 instances independent for the same package id', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const legacyHost = new FakeBrowserWindow()
+    const v2Host = new FakeBrowserWindow()
+    mgr.open(
+      asHost(legacyHost),
+      { id: packageDesc.id, requires: [], devUrl: '', entryFile: '/plugins/legacy/index.html' },
+      'fill'
+    )
+    const legacyView = legacyHost.children[0] as FakeViewLike
+    const v2 = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(v2Host),
+      bounds: 'fill',
+    })
+    const v2View = v2Host.children[0] as FakeViewLike
+
+    mgr.destroy(v2.instanceId)
+    expect(v2View.webContents.isDestroyed()).toBe(false)
+    mgr.destroyInstance(v2.instanceId)
+    expect(legacyView.webContents.isDestroyed()).toBe(false)
+    expect(v2View.webContents.isDestroyed()).toBe(true)
+
+    mgr.destroy(packageDesc.id)
+    expect(legacyView.webContents.isDestroyed()).toBe(true)
+  })
+
+  it('routes v2 events to their authenticated instance and audience', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = v2PackageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    const leftContext = v2Context({ audience: 'left-audience', sessionId: 'left-session' })
+    const windowContext = v2Context({ audience: 'window-audience', sessionId: 'window-session' })
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: 'fill',
+      capabilityContext: leftContext,
+    })
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: 'fill',
+      capabilityContext: windowContext,
+    })
+    const leftView = hostA.children[0] as FakeViewLike
+    const windowView = hostB.children[0] as FakeViewLike
+
+    const leftSource = { ...leftContext.runtimeBinding!, instanceId: left.instanceId }
+    const windowSource = { ...windowContext.runtimeBinding!, instanceId: window.instanceId }
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'left-session', data: 'left only' },
+      leftSource
+    )
+    expect(eventsOf(leftView, 'aiCli.output')).toHaveLength(1)
+    expect(eventsOf(windowView, 'aiCli.output')).toHaveLength(0)
+
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'window-session', data: 'window only' },
+      windowSource
+    )
+    expect(eventsOf(leftView, 'aiCli.output')).toHaveLength(1)
+    expect(eventsOf(windowView, 'aiCli.output')).toHaveLength(1)
+
+    // Shared backend fan-out carries no authenticated public-event source and
+    // must not be treated as an AI CLI event source.
+    dispatchEvent(mgr, 'aiCli.output', { sessionId: 'left-session', data: 'unbound' })
+    expect(eventsOf(leftView, 'aiCli.output')).toHaveLength(1)
+
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'left-session', data: 'stale' },
+      { ...leftSource, instanceId: 'stale-instance' }
+    )
+    expect(eventsOf(leftView, 'aiCli.output')).toHaveLength(1)
+
+    const fileEvent = { changes: [{ path: 'README.md', kind: 'changed' }] }
+    mgr.dispatchPublicCapabilityEvent(packageDesc.id, 'workspace.filesChanged', fileEvent, {
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
+      packageVersion: '1.0.0',
+      workspaceId: 'workspace-1',
+      instanceId: null,
+      audience: null,
+    })
+    expect(eventsOf(leftView, 'workspace.filesChanged')).toHaveLength(1)
+    expect(eventsOf(windowView, 'workspace.filesChanged')).toHaveLength(1)
+
+    mgr.dispatchPublicCapabilityEvent(packageDesc.id, 'workspace.filesChanged', fileEvent, {
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
+      packageVersion: '2.0.0',
+      workspaceId: 'workspace-1',
+      instanceId: null,
+      audience: null,
+    })
+    expect(eventsOf(leftView, 'workspace.filesChanged')).toHaveLength(1)
+    expect(eventsOf(windowView, 'workspace.filesChanged')).toHaveLength(1)
+  })
+
+  it('does not route workspace events across packages sharing version and workspace', async () => {
+    const mgr = new FrontendPluginManager()
+    const firstPackage = v2PackageDescriptor('acme.files-one')
+    const secondPackage = v2PackageDescriptor('acme.files-two')
+    mgr.registerDescriptor(firstPackage)
+    mgr.registerDescriptor(secondPackage)
+    const firstHost = new FakeBrowserWindow()
+    const secondHost = new FakeBrowserWindow()
+
+    await mgr.openView(firstPackage, firstPackage.views![0], {
+      hostWindow: asHost(firstHost),
+      bounds: 'fill',
+      capabilityContext: v2Context({ pluginId: firstPackage.id }),
+    })
+    await mgr.openView(secondPackage, secondPackage.views![0], {
+      hostWindow: asHost(secondHost),
+      bounds: 'fill',
+      capabilityContext: v2Context({ pluginId: secondPackage.id }),
+    })
+
+    const payload = { changes: [{ path: 'README.md', kind: 'changed' }] }
+    mgr.dispatchPublicCapabilityEvent(firstPackage.id, 'workspace.filesChanged', payload, {
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
+      packageVersion: '1.0.0',
+      workspaceId: 'workspace-1',
+      instanceId: null,
+      audience: null,
+    })
+
+    expect(eventsOf(firstHost.children[0] as FakeViewLike, 'workspace.filesChanged')).toHaveLength(1)
+    expect(eventsOf(secondHost.children[0] as FakeViewLike, 'workspace.filesChanged')).toHaveLength(0)
+  })
+
+  it('treats omitted and undefined context as the registry context, while null denies access', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = v2PackageDescriptor()
+    const registryContext = v2Context({ audience: 'registry-audience', sessionId: 'registry-session' })
+    mgr.registerDescriptor({ ...packageDesc, capabilityContext: registryContext })
+
+    const omittedHost = new FakeBrowserWindow()
+    const undefinedHost = new FakeBrowserWindow()
+    const deniedHost = new FakeBrowserWindow()
+    const omitted = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(omittedHost),
+      bounds: 'fill',
+    })
+    const withUndefined = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(undefinedHost),
+      bounds: 'fill',
+      capabilityContext: undefined,
+    })
+    await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(deniedHost),
+      bounds: 'fill',
+      capabilityContext: null,
+    })
+
+    const source = (instanceId: string) => ({
+      ...registryContext.runtimeBinding!,
+      instanceId,
+    })
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'registry-session', data: 'allowed' },
+      source(omitted.instanceId)
+    )
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'registry-session', data: 'also allowed' },
+      source(withUndefined.instanceId)
+    )
+
+    expect(eventsOf(omittedHost.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(1)
+    expect(eventsOf(undefinedHost.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(1)
+    expect(eventsOf(deniedHost.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(0)
+  })
+
+  it('rejects an override whose package identity or grant version is not canonical', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = v2PackageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+
+    for (const context of [
+      v2Context({ pluginId: 'acme.other' }),
+      v2Context({ packageVersion: '2.0.0' }),
+      {
+        ...v2Context(),
+        userGrant: { packageVersion: '2.0.0', system: ['fs', 'aiCli'] as const },
+      },
+    ]) {
+      await expect(
+        mgr.openView(packageDesc, packageDesc.views![0], {
+          hostWindow: asHost(new FakeBrowserWindow()),
+          bounds: 'fill',
+          capabilityContext: context,
+        })
+      ).rejects.toThrow(/context/i)
+    }
+  })
+
+  it('validates v2 identity and rebinds context even under a legacy policy', async () => {
+    const mgr = new FrontendPluginManager()
+    const context = v2Context({ audience: 'legacy-policy-audience' })
+    const packageDesc = { ...packageDescriptor(), capabilityContext: context }
+    mgr.registerDescriptor(packageDesc)
+    const host = new FakeBrowserWindow()
+
+    mgr.open(asHost(host), packageDesc, 'fill')
+    const legacyView = host.children[0] as FakeViewLike
+    const running = (mgr as unknown as {
+      running: Map<string, { instanceId: string; capabilityContext: HostCapabilityContext | null }>
+    }).running
+    const instance = [...running.values()].find(
+      (candidate) => candidate.capabilityContext?.runtimeBinding?.audience === 'legacy-policy-audience'
+    )
+    expect(instance?.capabilityContext?.runtimeBinding?.instanceId).toBeTruthy()
+    expect(instance?.capabilityContext?.runtimeBinding?.instanceId).not.toBe(
+      context.runtimeBinding?.instanceId
+    )
+    expect(legacyView.webContents.isDestroyed()).toBe(false)
+    expect(() =>
+      mgr.open(
+        asHost(host),
+        { ...packageDesc, capabilityContext: v2Context({ pluginId: 'acme.other' }) },
+        'fill'
+      )
+    ).toThrow(/context/i)
+
+    await expect(
+      mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(new FakeBrowserWindow()),
+        bounds: 'fill',
+        capabilityContext: v2Context({ packageVersion: '2.0.0' }),
+      })
+    ).rejects.toThrow(/context/i)
+  })
+
+  it('keeps v2 PTY restrictions when opened through the legacy adapter', () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = v2PackageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const host = new FakeBrowserWindow()
+
+    mgr.open(asHost(host), packageDesc, 'fill')
+    mgr.noteTerminalRoutes(packageDesc.id, 'terminal.create', {
+      terminal_session_id: 'legacy-open-v2-session',
+    })
+
+    expect(
+      mgr.filterTerminalReattachPayload(packageDesc.id, {
+        terminal_session_ids: ['legacy-open-v2-session', 'unknown'],
+      }).terminal_session_ids
+    ).toEqual(['legacy-open-v2-session'])
+
+    mgr.setCapabilityContext(
+      packageDesc.id,
+      v2Context({ audience: 'changed-audience' })
+    )
+
+    expect(
+      mgr.filterTerminalReattachPayload(packageDesc.id, {
+        terminal_session_ids: ['legacy-open-v2-session', 'unknown'],
+      }).terminal_session_ids
+    ).toEqual([])
+  })
+
+  it('leaves the running context unchanged when a replacement context is invalid', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = v2PackageDescriptor()
+    const context = v2Context({ audience: 'stable-audience', sessionId: 'stable-session' })
+    mgr.registerDescriptor({ ...packageDesc, capabilityContext: context })
+    const host = new FakeBrowserWindow()
+    const handle = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+    })
+
+    expect(() =>
+      mgr.setCapabilityContext(packageDesc.id, v2Context({ packageVersion: '2.0.0' }))
+    ).toThrow(/context/i)
+    const source = { ...context.runtimeBinding!, instanceId: handle.instanceId }
+    mgr.dispatchPublicCapabilityEvent(
+      packageDesc.id,
+      'aiCli.output',
+      { sessionId: 'stable-session', data: 'unchanged' },
+      source
+    )
+    expect(eventsOf(host.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(1)
+  })
+
+  it('updates session bindings without detaching a route with the same live tuple', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = v2PackageDescriptor()
+      const oldContext = v2Context({ audience: 'same-audience', sessionId: 'old-session' })
+      mgr.registerDescriptor({ ...packageDesc, capabilityContext: oldContext })
+      const host = new FakeBrowserWindow()
+      const handle = await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+      })
+      mgr.noteTerminalRoutes(handle.instanceId, 'terminal.create', {
+        terminal_session_id: 'stable-route',
+      })
+
+      const newContext = v2Context({ audience: 'same-audience', sessionId: 'new-session' })
+      mgr.setCapabilityContext(packageDesc.id, newContext)
+      dispatchEvent(mgr, 'terminal.output', output('stable-route', 'still attached'))
+      vi.advanceTimersByTime(12)
+
+      expect(eventsOf(host.children[0] as FakeViewLike, 'terminal.output')).toHaveLength(1)
+      const source = { ...newContext.runtimeBinding!, instanceId: handle.instanceId }
+      mgr.dispatchPublicCapabilityEvent(
+        packageDesc.id,
+        'aiCli.output',
+        { sessionId: 'new-session', data: 'new binding reached the view' },
+        source
+      )
+      expect(eventsOf(host.children[0] as FakeViewLike, 'aiCli.output')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('detaches routes when the tuple changes or the grant is revoked', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = v2PackageDescriptor()
+      const context = v2Context({ audience: 'original-audience' })
+      mgr.registerDescriptor({ ...packageDesc, capabilityContext: context })
+      const host = new FakeBrowserWindow()
+      const handle = await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+      })
+      const view = host.children[0] as FakeViewLike
+      mgr.noteTerminalRoutes(handle.instanceId, 'terminal.create', {
+        terminal_session_id: 'detached-route',
+      })
+
+      mgr.setCapabilityContext(
+        packageDesc.id,
+        v2Context({ audience: 'new-audience' })
+      )
+      dispatchEvent(mgr, 'terminal.output', output('detached-route', 'must drop'))
+      vi.advanceTimersByTime(12)
+      expect(eventsOf(view, 'terminal.output')).toHaveLength(0)
+
+      mgr.noteTerminalRoutes(handle.instanceId, 'terminal.reattach', {
+        alive: ['detached-route'],
+      })
+      mgr.setCapabilityContext(packageDesc.id, {
+        ...v2Context({ audience: 'new-audience' }),
+        userGrant: null,
+      })
+      expect(
+        mgr.filterTerminalReattachPayload(handle.instanceId, {
+          terminal_session_ids: ['detached-route'],
+        }).terminal_session_ids
+      ).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('rejects an empty workspace or audience binding before mounting', async () => {
+    for (const context of [
+      v2Context({ workspaceId: '' }),
+      v2Context({ audience: '' }),
+    ]) {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = v2PackageDescriptor()
+      mgr.registerDescriptor({ ...packageDesc, capabilityContext: context })
+      const host = new FakeBrowserWindow()
+      await expect(
+        mgr.openView(packageDesc, packageDesc.views![0], {
+          hostWindow: asHost(host),
+          bounds: 'fill',
+        })
+      ).rejects.toThrow(/context/i)
+      expect(host.children).toHaveLength(0)
+    }
+  })
+
+  it('drops a v2 instance batch without affecting a sibling', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = v2PackageDescriptor()
+      mgr.registerDescriptor(packageDesc)
+      const hostA = new FakeBrowserWindow()
+      const hostB = new FakeBrowserWindow()
+      const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(hostA),
+        bounds: 'fill',
+        capabilityContext: v2Context({ audience: 'left-audience' }),
+      })
+      await mgr.openView(packageDesc, packageDesc.views![1], {
+        hostWindow: asHost(hostB),
+        bounds: 'fill',
+        capabilityContext: v2Context({ audience: 'window-audience' }),
+      })
+      const leftView = hostA.children[0] as FakeViewLike
+      const windowView = hostB.children[0] as FakeViewLike
+
+      mgr.noteTerminalRoutes(left.instanceId, 'terminal.create', { terminal_session_id: 't-14-batch' })
+      ;(
+        mgr as unknown as {
+          dispatchEvent(event: string, payload: unknown): void
+        }
+      ).dispatchEvent('terminal.output', {
+        terminal_session_id: 't-14-batch',
+        data: 'sibling output',
+        sequence: 1,
+      })
+      leftView.webContents.close()
+      vi.advanceTimersByTime(12)
+
+      expect(leftView.webContents.isDestroyed()).toBe(true)
+      expect(windowView.webContents.isDestroyed()).toBe(false)
+      const outputs = windowView.webContents.sent
+        .filter((message) => message.channel === 'plugin:cap:event')
+        .map((message) => message.args[0] as { type: string; data: Record<string, unknown> })
+        .filter((event) => event.type === 'terminal.output')
+      expect(outputs).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reattaches a detached v2 PTY only with the full ownership tuple', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = v2PackageDescriptor()
+      mgr.registerDescriptor(packageDesc)
+      const originalHost = new FakeBrowserWindow()
+      const siblingHost = new FakeBrowserWindow()
+      const originalContext = v2Context({ audience: 'left-audience' })
+      const siblingContext = v2Context({ audience: 'sibling-audience' })
+      const original = await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(originalHost),
+        bounds: 'fill',
+        capabilityContext: originalContext,
+      })
+      const sibling = await mgr.openView(packageDesc, packageDesc.views![1], {
+        hostWindow: asHost(siblingHost),
+        bounds: 'fill',
+        capabilityContext: siblingContext,
+      })
+      const originalView = originalHost.children[0] as FakeViewLike
+      const siblingView = siblingHost.children[0] as FakeViewLike
+      mgr.noteTerminalRoutes(original.instanceId, 'terminal.create', {
+        terminal_session_id: 't-v2-reconnect',
+      })
+      originalView.webContents.close()
+
+      expect(
+        mgr.filterTerminalReattachPayload(sibling.instanceId, {
+          terminal_session_ids: ['t-v2-reconnect'],
+        }).terminal_session_ids
+      ).toEqual([])
+
+      for (const context of [
+        v2Context({ workspaceId: 'workspace-2', audience: 'left-audience' }),
+        v2Context({ audience: 'other-audience' }),
+      ]) {
+        const wrongOwner = await mgr.openView(packageDesc, packageDesc.views![0], {
+          hostWindow: asHost(new FakeBrowserWindow()),
+          bounds: 'fill',
+          capabilityContext: context,
+        })
+        expect(
+          mgr.filterTerminalReattachPayload(wrongOwner.instanceId, {
+            terminal_session_ids: ['t-v2-reconnect'],
+          }).terminal_session_ids
+        ).toEqual([])
+      }
+
+      const reopenedHost = new FakeBrowserWindow()
+      const reopened = await mgr.openView(packageDesc, packageDesc.views![0], {
+        hostWindow: asHost(reopenedHost),
+        bounds: 'fill',
+        capabilityContext: v2Context({ audience: 'left-audience' }),
+      })
+      expect(
+        mgr.filterTerminalReattachPayload(reopened.instanceId, {
+          terminal_session_ids: ['t-v2-reconnect', 'unknown'],
+        }).terminal_session_ids
+      ).toEqual(['t-v2-reconnect'])
+
+      mgr.noteTerminalRoutes(reopened.instanceId, 'terminal.reattach', {
+        alive: ['t-v2-reconnect'],
+        dead: [],
+      })
+      dispatchEvent(mgr, 'terminal.output', output('t-v2-reconnect', 'reconnected'))
+      vi.advanceTimersByTime(12)
+      expect(eventsOf(reopenedHost.children[0] as FakeViewLike, 'terminal.output')).toHaveLength(1)
+      expect(eventsOf(siblingView, 'terminal.output')).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('disposes subscriptions for only the destroyed instance', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(new FakeBrowserWindow()),
+      bounds: 'fill',
+    })
+    const sibling = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(new FakeBrowserWindow()),
+      bounds: 'fill',
+    })
+    const leftDispose = vi.fn()
+    const siblingDispose = vi.fn()
+    const unregisterLeft = mgr.registerInstanceSubscription(left.instanceId, leftDispose)
+    mgr.registerInstanceSubscription(sibling.instanceId, siblingDispose)
+
+    unregisterLeft()
+    expect(leftDispose).toHaveBeenCalledTimes(1)
+
+    mgr.destroyInstance(left.instanceId)
+
+    expect(leftDispose).toHaveBeenCalledTimes(1)
+    expect(siblingDispose).not.toHaveBeenCalled()
+  })
+
+  it('loads each v2 contribution entry file in renderer dev mode', async () => {
+    vi.stubEnv('ELECTRON_RENDERER_URL', 'http://renderer.test')
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDesc = { ...packageDescriptor(), devUrl: 'http://package.test' }
+      mgr.registerDescriptor(packageDesc)
+      const host = new FakeBrowserWindow()
+
+      await mgr.openView(packageDesc, packageDesc.views![1], {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+      })
+
+      expect((host.children[0] as FakeViewLike).webContents.loads).toEqual([
+        packageDesc.views![1].entryFile,
+      ])
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('rejects unknown contribution keys and plugin-supplied or sibling instance ids', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc = packageDescriptor()
+    mgr.registerDescriptor(packageDesc)
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    const left = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(hostA),
+      bounds: 'fill',
+    })
+    const window = await mgr.openView(packageDesc, packageDesc.views![1], {
+      hostWindow: asHost(hostB),
+      bounds: 'fill',
+    })
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    await expect(
+      mgr.openView(
+        packageDesc,
+        { ...packageDesc.views![0], contributionKey: 'acme.multi-view.spoof' },
+        {
+          hostWindow: asHost(new FakeBrowserWindow()),
+          bounds: 'fill',
+        }
+      )
+    ).rejects.toThrow(/not registered by the Host package descriptor/)
+
+    const response = await call!(
+      { sender: { id: (hostB.children[0] as FakeViewLike).webContents.id } },
+      { reqId: 'spoofed', instanceId: left.instanceId, ns: 'ping', method: 'ping', args: {} }
+    )
+    expect(response).toEqual({
+      reqId: 'spoofed',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'instance identity is Host-owned' },
+    })
+    await expect(
+      call!(
+        { sender: { id: (hostB.children[0] as FakeViewLike).webContents.id } },
+        { reqId: 'undefined-instance', instanceId: undefined, ns: 'ping', method: 'ping', args: {} }
+      )
+    ).resolves.toEqual({
+      reqId: 'undefined-instance',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'instance identity is Host-owned' },
+    })
+    expect(window.instanceId).not.toBe(left.instanceId)
+
+    const staleSender = (hostB.children[0] as FakeViewLike).webContents.id
+    mgr.destroyInstance(window.instanceId)
+    await expect(
+      call!({ sender: { id: staleSender } }, { reqId: 'stale', ns: 'ping', method: 'ping', args: {} })
+    ).resolves.toEqual({
+      reqId: '',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'unknown plugin sender' },
+    })
+  })
+
+  it('rebinds v2 capability context to the Host-generated instance', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageDesc: PluginLaunchDescriptor = {
+      ...packageDescriptor(),
+      id: 'acme.runtime-view',
+      requires: ['shell'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ shell: 'allowlist' }),
+      capabilityContext: {
+        publisherEligible: false,
+        userGrant: { packageVersion: '1.0.0', system: [], shell: 'allowlist' },
+        runtimeBinding: {
+          pluginId: 'acme.runtime-view',
+          packageVersion: '1.0.0',
+          workspaceId: 'workspace-1',
+          instanceId: 'plugin-supplied-instance',
+          audience: 'audience-1',
+        },
+      },
+    }
+    mgr.registerDescriptor(packageDesc)
+    const host = new FakeBrowserWindow()
+    const handle = await mgr.openView(packageDesc, packageDesc.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+    })
+    const plans: unknown[] = []
+    mgr.setPublicCapabilityHandler((plan) => {
+      plans.push(plan)
+      return { accepted: true }
+    })
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    const response = await call!(
+      { sender: { id: (host.children[0] as FakeViewLike).webContents.id } },
+      { reqId: 'r1', ns: 'shell', method: 'run', args: { command: 'git status' } }
+    )
+    expect(response).toMatchObject({ ok: true, result: { accepted: true } })
+    expect(plans[0]).toMatchObject({ runtime: { instanceId: handle.instanceId } })
+    expect(plans[0]).not.toMatchObject({ runtime: { instanceId: 'plugin-supplied-instance' } })
+  })
+})
+
 describe('terminal PTY routing + output micro-batching', () => {
   const CAP_EVENT = 'plugin:cap:event'
 
@@ -1308,14 +2643,21 @@ describe('terminal PTY routing + output micro-batching', () => {
     mgr.noteTerminalRoutes('acme.term-a', 'terminal.create', { terminal_session_id: 't-1' })
     mgr.destroy('acme.term-a')
 
+    // A stale sender cannot use the retained route as an authentication token.
+    expect(
+      mgr.filterTerminalReattachPayload('acme.term-a', {
+        terminal_session_ids: ['t-1'],
+      }).terminal_session_ids
+    ).toEqual([])
+
     // Reopened view of the same plugin: its own retained id passes the filter…
+    const reopened = openTerminalPlugin(mgr, host, 'acme.term-a')
     const payload = mgr.filterTerminalReattachPayload('acme.term-a', {
       terminal_session_ids: ['t-1'],
     })
     expect(payload.terminal_session_ids).toEqual(['t-1'])
 
     // …and after the reattach response re-registers, delivery resumes.
-    const reopened = openTerminalPlugin(mgr, host, 'acme.term-a')
     mgr.noteTerminalRoutes('acme.term-a', 'terminal.reattach', { alive: ['t-1'], dead: [] })
     dispatch(mgr, 'terminal.output', output('t-1', 'back'))
     vi.advanceTimersByTime(12)
@@ -1343,6 +2685,190 @@ describe('terminal PTY routing + output micro-batching', () => {
     // A payload without an ids array passes through unchanged.
     const untouched = { cols: 80 }
     expect(mgr.filterTerminalReattachPayload('acme.term-b', untouched)).toBe(untouched)
+
+    const fresh = openTerminalPlugin(mgr, host, 'acme.term-fresh')
+    expect(
+      mgr.filterTerminalReattachPayload('acme.term-fresh', {
+        terminal_session_ids: ['after-host-restart'],
+      }).terminal_session_ids
+    ).toEqual(['after-host-restart'])
+    expect(fresh.webContents.isDestroyed()).toBe(false)
+  })
+
+  it('cancels an in-flight create and kills a late committed success exactly once', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openTerminalPlugin(mgr, host, 'acme.term-pending')
+    mgr.setBackendWsUrl('ws://plugin-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    const create = call!({ sender: { id: view.webContents.id } }, {
+      reqId: 'create',
+      ns: 'terminal',
+      method: 'create',
+      args: { pane_id: 'pane-pending', create_generation: 'generation-1' },
+    }) as Promise<unknown>
+    await Promise.resolve()
+    const createRequest = JSON.parse(socket.sent.at(-1)!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(createRequest.type).toBe('terminal.create')
+
+    mgr.destroy('acme.term-pending')
+    const cancelRequest = JSON.parse(socket.sent.at(-1)!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(cancelRequest.type).toBe('terminal.create.cancel')
+    expect(cancelRequest.payload).toEqual({
+      pane_id: 'pane-pending',
+      create_generation: 'generation-1',
+    })
+    expect(socket.sent.map((raw) => JSON.parse(raw).type)).not.toContain('terminal.kill')
+
+    socket.receive({
+      id: cancelRequest.id,
+      type: 'terminal.create.cancel',
+      ok: true,
+      payload: { cancelled: false },
+      error: null,
+      timestamp: '',
+    })
+    socket.receive({
+      id: createRequest.id,
+      type: 'terminal.create',
+      ok: true,
+      payload: {
+        terminal_session_id: 'late-session',
+        pane_id: 'pane-pending',
+        create_generation: 'generation-1',
+      },
+      error: null,
+      timestamp: '',
+    })
+    await expect(create).resolves.toMatchObject({ ok: true })
+
+    const killRequests = socket.sent
+      .map((raw) => JSON.parse(raw) as { type: string; payload: Record<string, unknown> })
+      .filter((request) => request.type === 'terminal.kill')
+    expect(killRequests).toHaveLength(1)
+    expect(killRequests[0].payload).toEqual({
+      terminal_session_id: 'late-session',
+      force: true,
+    })
+
+    // A duplicate late response cannot trigger a second cleanup request.
+    socket.receive({
+      id: createRequest.id,
+      type: 'terminal.create',
+      ok: true,
+      payload: {
+        terminal_session_id: 'late-session',
+        pane_id: 'pane-pending',
+        create_generation: 'generation-1',
+      },
+      error: null,
+      timestamp: '',
+    })
+    expect(
+      socket.sent.map((raw) => JSON.parse(raw).type).filter((type) => type === 'terminal.kill')
+    ).toHaveLength(1)
+
+    dispatch(mgr, 'terminal.output', output('late-session', 'must drop'))
+    vi.advanceTimersByTime(12)
+    expect(eventsOf(view, 'terminal.output')).toHaveLength(0)
+    expect(
+      mgr.filterTerminalReattachPayload('acme.term-pending', {
+        terminal_session_ids: ['late-session'],
+      }).terminal_session_ids
+    ).toEqual([])
+  })
+
+  it('does not kill a late create response with invalid ownership metadata', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openTerminalPlugin(mgr, host, 'acme.term-invalid-late')
+    mgr.setBackendWsUrl('ws://plugin-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    const create = call!({ sender: { id: view.webContents.id } }, {
+      reqId: 'create-invalid-late',
+      ns: 'terminal',
+      method: 'create',
+      args: { pane_id: 'pane-invalid-late', create_generation: 'generation-invalid-late' },
+    }) as Promise<unknown>
+    await Promise.resolve()
+    const createRequest = JSON.parse(socket.sent.at(-1)!) as { id: string }
+    mgr.destroy('acme.term-invalid-late')
+    const cancelRequest = JSON.parse(socket.sent.at(-1)!) as { id: string }
+
+    socket.receive({
+      id: cancelRequest.id,
+      type: 'terminal.create.cancel',
+      ok: true,
+      payload: { cancelled: false },
+      error: null,
+      timestamp: '',
+    })
+    socket.receive({
+      id: createRequest.id,
+      type: 'terminal.create',
+      ok: true,
+      payload: {
+        terminal_session_id: 42,
+        pane_id: 'pane-invalid-late',
+        create_generation: 'generation-invalid-late',
+      },
+      error: null,
+      timestamp: '',
+    })
+    await expect(create).resolves.toMatchObject({ ok: true })
+    expect(socket.sent.map((raw) => JSON.parse(raw).type)).not.toContain('terminal.kill')
+  })
+
+  it('invalidates an in-flight reattach without sending a kill or reviving its routes', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openTerminalPlugin(mgr, host, 'acme.term-reattach')
+    mgr.setBackendWsUrl('ws://plugin-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    const reattach = call!({ sender: { id: view.webContents.id } }, {
+      reqId: 'reattach',
+      ns: 'terminal',
+      method: 'reattach',
+      args: { terminal_session_ids: ['late-session'] },
+    }) as Promise<unknown>
+    await Promise.resolve()
+    const request = JSON.parse(socket.sent.at(-1)!) as { id: string; type: string }
+    expect(request.type).toBe('terminal.reattach')
+    mgr.destroy('acme.term-reattach')
+    expect(socket.sent.map((raw) => JSON.parse(raw).type)).not.toContain('terminal.kill')
+
+    socket.receive({
+      id: request.id,
+      type: 'terminal.reattach',
+      ok: true,
+      payload: { alive: ['late-session'], dead: [] },
+      error: null,
+      timestamp: '',
+    })
+    await expect(reattach).resolves.toMatchObject({ ok: true })
+    dispatch(mgr, 'terminal.output', output('late-session', 'must drop'))
+    vi.advanceTimersByTime(12)
+    expect(eventsOf(view, 'terminal.output')).toHaveLength(0)
   })
 })
 
@@ -1370,6 +2896,7 @@ describe('cast channel (IPC_CAST / handleCast)', () => {
     const mgr = new FrontendPluginManager()
     const host = new FakeBrowserWindow()
     const view = openPlugin(mgr, host, 'acme.term', ['terminal'])
+    mgr.noteTerminalRoutes('acme.term', 'terminal.create', { terminal_session_id: 't-1' })
     // No backend transport in tests — reaching 'no-backend' proves the cast
     // passed sender, shape, scoping AND the whitelist.
     expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'input'))).toBe('no-backend')
@@ -1395,6 +2922,30 @@ describe('cast channel (IPC_CAST / handleCast)', () => {
     const host = new FakeBrowserWindow()
     const view = openPlugin(mgr, host, 'acme.fsonly', ['fs'])
     expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'input'))).toBe('denied')
+  })
+
+  it('rejects terminal request controls from a sibling route owner', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const owner = openPlugin(mgr, host, 'acme.term-owner', ['terminal'])
+    const sibling = openPlugin(mgr, host, 'acme.term-sibling', ['terminal'])
+    mgr.noteTerminalRoutes('acme.term-owner', 'terminal.create', { terminal_session_id: 't-owner' })
+    const call = ipcHandlers.get('plugin:cap:call')
+    expect(call).toBeDefined()
+
+    await expect(
+      call!({ sender: { id: sibling.webContents.id } }, {
+        reqId: 'foreign',
+        ns: 'terminal',
+        method: 'resize',
+        args: { terminal_session_id: 't-owner', cols: 80, rows: 24 },
+      })
+    ).resolves.toEqual({
+      reqId: 'foreign',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED', message: 'terminal session is not owned by this view' },
+    })
+    expect(owner.webContents.isDestroyed()).toBe(false)
   })
 
   it('rejects unmapped methods, unknown senders and malformed payloads', () => {
@@ -1760,6 +3311,151 @@ describe('Manifest v2 capability runtime deferral', () => {
     })
   })
 
+  it('routes an authorized storage call to the durable storage seam', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const storageSnapshots = new Map<StorageSnapshotTier, string>([
+      ['candidate', '2.0.0'],
+      ['active', '1.0.0'],
+      ['previous', '0.9.0'],
+    ])
+    mgr.open(
+      asHost(host),
+      {
+        id: 'acme.storage',
+        packageVersion: '1.0.0',
+        requires: [],
+        capabilityPolicy: manifestV2CapabilityPolicy({ system: [] }),
+        capabilityContext: {
+          publisherEligible: false,
+          userGrant: { packageVersion: '1.0.0', system: [], storage: true },
+          runtimeBinding: {
+            pluginId: 'acme.storage',
+            packageVersion: '1.0.0',
+            workspaceId: 'workspace-1',
+            instanceId: 'instance-1',
+            audience: 'audience-1',
+          },
+          storageSnapshots,
+          storageSnapshotTier: 'active',
+        },
+        devUrl: '',
+        entryFile: '/plugins/acme.storage/index.html',
+        views: [
+          {
+            id: 'main',
+            contributionKey: 'acme.storage.main',
+            kind: 'custom',
+            location: 'main',
+            title: 'Storage',
+            entryFile: '/plugins/acme.storage/index.html',
+          },
+        ],
+      },
+      'fill'
+    )
+    const view = views[views.length - 1]
+    const executions: unknown[] = []
+    mgr.setPublicStorageHandler((execution) => {
+      executions.push(execution)
+      return null
+    })
+    const handler = ipcHandlers.get(CALL)
+    expect(handler).toBeDefined()
+
+    const response = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'storage-1',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'workspace', key: 'layout', value: { compact: true } },
+    })
+    expect(response).toEqual({ reqId: 'storage-1', ok: true, result: null })
+    expect(executions[0]).toMatchObject({
+      address: 'storage.set',
+      partition: { pluginId: 'acme.storage', workspaceId: 'workspace-1', key: 'layout' },
+      snapshot: { tier: 'active', packageVersion: '1.0.0' },
+    })
+
+    mgr.setPublicStorageHandler(() => {
+      throw new PluginStorageError('STORAGE_QUOTA_EXCEEDED', 'storage quota exceeded')
+    })
+    const failed = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'storage-2',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'workspace', key: 'layout', value: { compact: true } },
+    })
+    expect(failed).toEqual({
+      reqId: 'storage-2',
+      ok: false,
+      error: { code: 'STORAGE_QUOTA_EXCEEDED', message: 'storage quota exceeded' },
+    })
+
+    let nested: unknown = null
+    for (let index = 0; index < 129; index += 1) nested = [nested]
+    const invalidDepth = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'storage-depth',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'plugin', key: 'depth', value: nested },
+    })
+    expect(invalidDepth).toEqual({
+      reqId: 'storage-depth',
+      ok: false,
+      error: { code: 'INVALID_ARGUMENT', message: "invalid request for 'storage.set'" },
+    })
+  })
+
+  it('keeps the selected storage tier fixed for a live v2 instance', async () => {
+    const mgr = new FrontendPluginManager()
+    const activeContext: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion: '1.0.0', system: [], storage: true },
+      runtimeBinding: {
+        pluginId: 'acme.storage-tier',
+        packageVersion: '1.0.0',
+        workspaceId: 'workspace-1',
+        instanceId: null,
+        audience: 'audience-1',
+      },
+      storageSnapshots: new Map([
+        ['candidate', '1.0.0'],
+        ['active', '1.0.0'],
+      ]),
+      storageSnapshotTier: 'active',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: 'acme.storage-tier',
+      packageVersion: '1.0.0',
+      requires: [],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: [] }),
+      capabilityContext: activeContext,
+      devUrl: '',
+      entryFile: '/plugins/acme.storage-tier/index.html',
+      views: [
+        {
+          id: 'main',
+          contributionKey: 'acme.storage-tier.main',
+          kind: 'custom',
+          location: 'main',
+          title: 'Storage tier',
+          entryFile: '/plugins/acme.storage-tier/index.html',
+        },
+      ],
+    }
+    mgr.registerDescriptor(descriptor)
+    await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(new FakeBrowserWindow()),
+      bounds: 'fill',
+    })
+    expect(() =>
+      mgr.setCapabilityContext('acme.storage-tier', {
+        ...activeContext,
+        storageSnapshotTier: 'candidate',
+      })
+    ).toThrow(/tier is fixed/)
+  })
+
   it('routes workspace events only with a matching Host source binding', () => {
     const mgr = new FrontendPluginManager()
     const host = new FakeBrowserWindow()
@@ -1788,9 +3484,9 @@ describe('Manifest v2 capability runtime deferral', () => {
     )
     const view = views[views.length - 1]
     const eventPayload = { changes: [{ path: 'README.md', kind: 'changed' }] }
-    mgr.dispatchPublicCapabilityEvent('workspace.filesChanged', eventPayload, {
+    mgr.dispatchPublicCapabilityEvent('acme.files', 'workspace.filesChanged', eventPayload, {
       ...binding,
-      pluginId: 'host',
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
     })
     expect(view.webContents.sent).toContainEqual({
       channel: 'plugin:cap:event',
@@ -1798,11 +3494,1746 @@ describe('Manifest v2 capability runtime deferral', () => {
     })
 
     const before = view.webContents.sent.length
-    mgr.dispatchPublicCapabilityEvent('workspace.filesChanged', eventPayload, {
+    mgr.dispatchPublicCapabilityEvent('acme.files', 'workspace.filesChanged', eventPayload, {
       ...binding,
-      pluginId: 'host',
+      pluginId: HOST_EVENT_SOURCE_PLUGIN_ID,
       workspaceId: 'workspace-2',
     })
     expect(view.webContents.sent).toHaveLength(before)
+  })
+})
+
+describe('first-party Git private bridge', () => {
+  const HOST_CALL = 'plugin:host:call'
+  const CAPABILITY_CALL = 'plugin:cap:call'
+
+  function gitDescriptor(
+    mgr: FrontendPluginManager,
+    workspacePath = '/workspace',
+    audience = 'git-left',
+    packageVersion = '1.0.0',
+  ): PluginLaunchDescriptor {
+    return {
+      id: 'navide.git',
+      packageVersion,
+      requires: ['terminal'],
+      capabilityPolicy: manifestV2CapabilityPolicy({
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+      }),
+      capabilityContext: mgr.gitCapabilityContext(packageVersion, workspacePath, audience),
+      devUrl: '',
+      entryFile: '/plugins/navide.git/index.html',
+      views: [
+        {
+          id: 'left',
+          contributionKey: 'navide.git.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Git',
+          entryFile: '/plugins/navide.git/left.html',
+        },
+      ],
+    }
+  }
+
+  async function openGitView(workspacePath = '/workspace', audience = 'git-left'): Promise<{
+    mgr: FrontendPluginManager
+    view: FakeViewLike
+    host: FakeBrowserWindow
+    sent: Array<{ channel: string; args: unknown[] }>
+    instanceId: string
+  }> {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr, workspacePath, audience)
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    const sent: Array<{ channel: string; args: unknown[] }> = []
+    ;(host as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => sent.push({ channel, args }),
+    }
+    const handle = await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext: descriptor.capabilityContext,
+    })
+    return { mgr, view: host.children[0] as FakeViewLike, host, sent, instanceId: handle.instanceId }
+  }
+
+  async function call(
+    view: FakeViewLike,
+    action: string,
+    args: Record<string, unknown>,
+    reqId = 'git-1'
+  ): Promise<Record<string, unknown>> {
+    const handler = ipcHandlers.get(HOST_CALL)
+    expect(handler).toBeDefined()
+    return (await handler!({ sender: { id: view.webContents.id } }, {
+      reqId,
+      action,
+      args,
+    })) as Record<string, unknown>
+  }
+
+  it('denies Git storage writes outside the approved preference ownership', async () => {
+    const { mgr, view } = await openGitView()
+    const executions: unknown[] = []
+    mgr.setPublicStorageHandler((execution) => {
+      executions.push(execution)
+      return null
+    })
+    const handler = ipcHandlers.get(CAPABILITY_CALL)
+    expect(handler).toBeDefined()
+
+    const response = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'git-storage-host-key',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'plugin', key: 'agentTeam.yolo', value: '0' },
+    })
+
+    expect(response).toMatchObject({
+      reqId: 'git-storage-host-key',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+    expect(executions).toEqual([])
+  })
+
+  it('routes only Host-owned read-only settings to Git v2 views', async () => {
+    const { mgr, view } = await openGitView()
+
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agentTeam.yolo': '0',
+        'agentTeam.analyzerModel': 'qwen2:latest',
+        'agentTeam.git.autoCommit': '1',
+        'unknown.setting': 'ignored',
+      },
+    })
+
+    expect(view.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agentTeam.yolo': '0',
+            'agentTeam.analyzerModel': 'qwen2:latest',
+          },
+        },
+      }],
+    }])
+  })
+
+  it('labels plugin storage changes so the settings facade accepts only its owned scope', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setPublicStorageHandler(() => null)
+    const handler = ipcHandlers.get(CAPABILITY_CALL)
+    expect(handler).toBeDefined()
+
+    const response = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'git-storage-owned-key',
+      ns: 'storage',
+      method: 'set',
+      args: { scope: 'plugin', key: 'agentTeam.git.logScope', value: 'all' },
+    })
+
+    expect(response).toEqual({ reqId: 'git-storage-owned-key', ok: true, result: null })
+    expect(view.webContents.sent).toContainEqual({
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'plugin-storage',
+          scope: 'plugin',
+          settings: { 'agentTeam.git.logScope': 'all' },
+        },
+      }],
+    })
+  })
+
+  it('routes a validated contribution to its own Host window only', async () => {
+    const first = await openGitView()
+    const descriptor = gitDescriptor(first.mgr)
+    const secondHost = new FakeBrowserWindow()
+    const secondSent: Array<{ channel: string; args: unknown[] }> = []
+    ;(secondHost as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => secondSent.push({ channel, args }),
+    }
+    await first.mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(secondHost),
+      bounds: 'fill',
+      workspacePath: '/other',
+      capabilityContext: first.mgr.gitCapabilityContext('1.0.0', '/other', 'git-window'),
+    })
+
+    const response = await call(first.view, 'git.contribution', {
+      operation: 'changes_count',
+      payload: { count: 4, workspace_path: '/workspace' },
+    })
+
+    expect(response).toEqual({ reqId: 'git-1', ok: true, result: { accepted: true } })
+    expect(first.sent).toEqual([{
+      channel: 'git:contribution-action',
+      args: [{ operation: 'changes_count', payload: { count: 4, workspace_path: '/workspace' } }],
+    }])
+    expect(secondSent).toEqual([])
+
+    const windowResponse = await call(secondHost.children[0] as FakeViewLike, 'git.contribution', {
+      operation: 'changes_count',
+      payload: { count: 1, workspace_path: '/other' },
+    }, 'git-window-contribution')
+    expect(windowResponse).toMatchObject({
+      reqId: 'git-window-contribution',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+
+    const handler = ipcHandlers.get(HOST_CALL)
+    const rejected = await handler!({ sender: { id: first.view.webContents.id } }, {
+      reqId: 'git-2',
+      action: 'git.contribution',
+      args: {
+        operation: 'changes_count',
+        payload: { count: 2, workspace_path: '/other' },
+      },
+      instanceId: 'forged',
+    }) as Record<string, unknown>
+    expect(rejected).toEqual({
+      reqId: '',
+      ok: false,
+      error: { code: 'BAD_REQUEST', message: 'instance identity is Host-owned' },
+    })
+  })
+
+  it('projects only the bound workspace legacy repository selection', async () => {
+    const { mgr, view } = await openGitView('/workspace')
+    mgr.setBackendWsUrl('ws://git-legacy-selection-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+
+    const selection = call(view, 'git.legacyRepoSelection', {
+      workspace_path: '/renderer-forged',
+      packageVersion: 'renderer-forged',
+    }, 'git-legacy-selection')
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+    const request = JSON.parse(socket.sent[0]!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(request).toMatchObject({
+      type: 'project.peek',
+      payload: { workspace_path: '/workspace' },
+    })
+    socket.receive({
+      id: request.id,
+      type: request.type,
+      ok: true,
+      payload: {
+        project: {
+          ui_git_tab_repo: '/workspace/nested',
+          task_description: 'must not cross the private projection',
+        },
+      },
+      error: null,
+      timestamp: '',
+    })
+
+    await expect(selection).resolves.toEqual({
+      reqId: 'git-legacy-selection',
+      ok: true,
+      result: { selection: '/workspace/nested' },
+    })
+  })
+
+  it('requires nested Git actions to carry the bound workspace', async () => {
+    const { view, sent } = await openGitView()
+
+    const missingWorkspace = await call(view, 'git.contribution', {
+      operation: 'open_file',
+      payload: { filepath: 'src/app.ts', name: 'app.ts' },
+    }, 'git-missing-workspace')
+    expect(missingWorkspace).toMatchObject({
+      reqId: 'git-missing-workspace',
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+
+    const outsideWorkspace = await call(view, 'git.contribution', {
+      operation: 'open_diff',
+      payload: {
+        workspace_path: '/other',
+        filepath: 'src/app.ts',
+        staged: false,
+        name: 'app.ts',
+      },
+    }, 'git-outside-workspace')
+    expect(outsideWorkspace).toMatchObject({
+      reqId: 'git-outside-workspace',
+      ok: false,
+      error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+    })
+
+    const accepted = await call(view, 'git.contribution', {
+      operation: 'open_branch_diff',
+      payload: { workspace_path: '/workspace/repo', base: 'main', compare: 'feature' },
+    }, 'git-bound-workspace')
+    expect(accepted).toEqual({ reqId: 'git-bound-workspace', ok: true, result: { accepted: true } })
+    expect(sent.at(-1)).toEqual({
+      channel: 'git:contribution-action',
+      args: [{
+        operation: 'open_branch_diff',
+        payload: { workspace_path: '/workspace/repo', base: 'main', compare: 'feature' },
+      }],
+    })
+  })
+
+  it.each([
+    ['open_file', { workspace_path: '/workspace', filepath: '../../outside.txt', name: 'outside.txt' }],
+    ['open_conflict', { workspace_path: '/workspace', filepath: '../../outside.txt', name: 'outside.txt' }],
+    ['open_diff', { workspace_path: '/workspace', filepath: '../../outside.txt', staged: false, name: 'outside.txt' }],
+    ['open_git_window', { workspace_path: '/workspace', filepath: '../../outside.txt' }],
+    ['open_file', { workspace_path: '/workspace', filepath: '/absolute/outside.txt', name: 'outside.txt' }],
+    ['open_conflict', { workspace_path: '/workspace', filepath: '/absolute/outside.txt', name: 'outside.txt' }],
+    ['open_diff', { workspace_path: '/workspace', filepath: '/absolute/outside.txt', staged: false, name: 'outside.txt' }],
+    ['open_git_window', { workspace_path: '/workspace', filepath: '/absolute/outside.txt' }],
+  ] as const)('rejects an out-of-workspace %s filepath (%s)', async (operation, payload) => {
+    const { view, sent } = await openGitView()
+
+    const response = await call(view, 'git.contribution', { operation, payload }, `git-outside-file-${operation}`)
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+    })
+    expect(sent).toEqual([])
+  })
+
+  it('accepts an in-workspace relative contribution filepath', async () => {
+    const { view, sent } = await openGitView()
+
+    const response = await call(view, 'git.contribution', {
+      operation: 'open_file',
+      payload: { workspace_path: '/workspace', filepath: 'src/app.ts', name: 'app.ts' },
+    }, 'git-in-workspace-file')
+
+    expect(response).toEqual({ reqId: 'git-in-workspace-file', ok: true, result: { accepted: true } })
+    expect(sent).toEqual([{
+      channel: 'git:contribution-action',
+      args: [{
+        operation: 'open_file',
+        payload: { workspace_path: '/workspace', filepath: 'src/app.ts', name: 'app.ts' },
+      }],
+    }])
+  })
+
+  it('accepts open_workspace only with the exact one-time Host picker grant', async () => {
+    const { mgr, view, sent } = await openGitView()
+    mgr.setHostShellHandlers({
+      openExternal: async () => ({ ok: true }),
+      revealPath: () => ({ ok: true }),
+      openWorkspace: () => ({ ok: true }),
+      pickFolder: async () => '/picked/workspace',
+    })
+
+    const picked = await call(view, 'git.contribution', {
+      operation: 'pick_workspace',
+      payload: {},
+    }, 'pick-workspace')
+    const grant = (picked.result as { grant?: unknown }).grant
+    expect(picked).toMatchObject({
+      reqId: 'pick-workspace',
+      ok: true,
+      result: { path: '/picked/workspace' },
+    })
+    expect(typeof grant).toBe('string')
+
+    await expect(call(view, 'git.contribution', {
+      operation: 'open_workspace',
+      payload: { path: '/picked/sibling', grant },
+    }, 'forged-workspace')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+
+    await expect(call(view, 'git.contribution', {
+      operation: 'open_workspace',
+      payload: { path: '/picked/workspace', grant },
+    }, 'open-picked-workspace')).resolves.toEqual({
+      reqId: 'open-picked-workspace',
+      ok: true,
+      result: { accepted: true },
+    })
+    expect(sent).toEqual([{
+      channel: 'git:contribution-action',
+      args: [{ operation: 'open_workspace', payload: { path: '/picked/workspace' } }],
+    }])
+
+    await expect(call(view, 'git.contribution', {
+      operation: 'open_workspace',
+      payload: { path: '/picked/workspace', grant },
+    }, 'replayed-workspace')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('opens only an authoritative worktree from the bound git-window workspace', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-worktree-root-'))
+    const worktreePath = mkdtempSync(join(tmpdir(), 'navide-git-worktree-known-'))
+    const unknownPath = mkdtempSync(join(tmpdir(), 'navide-git-worktree-unknown-'))
+    try {
+      const { mgr, view } = await openGitView(workspacePath, 'git-window')
+      mgr.setBackendWsUrl('ws://git-worktree-open-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+      const openWorkspace = vi.fn(() => ({ ok: true }))
+      mgr.setHostShellHandlers({
+        openExternal: async () => ({ ok: true }),
+        revealPath: () => ({ ok: true }),
+        openWorkspace,
+        pickFolder: async () => null,
+      })
+
+      const openKnown = call(view, 'git.contribution', {
+        operation: 'open_worktree',
+        payload: { path: worktreePath },
+      }, 'open-known-worktree')
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+      const knownRequest = JSON.parse(socket.sent[0]!)
+      expect(knownRequest).toMatchObject({
+        type: 'git.worktrees',
+        payload: { workspace_path: workspacePath },
+      })
+      socket.receive({
+        id: knownRequest.id,
+        type: knownRequest.type,
+        ok: true,
+        payload: { worktrees: [{ path: worktreePath }] },
+        error: null,
+        timestamp: '',
+      })
+      await expect(openKnown).resolves.toEqual({
+        reqId: 'open-known-worktree',
+        ok: true,
+        result: { accepted: true },
+      })
+      expect(openWorkspace).toHaveBeenCalledWith(realpathSync(worktreePath))
+
+      const openUnknown = call(view, 'git.contribution', {
+        operation: 'open_worktree',
+        payload: { path: unknownPath },
+      }, 'open-unknown-worktree')
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(2))
+      const unknownRequest = JSON.parse(socket.sent[1]!)
+      socket.receive({
+        id: unknownRequest.id,
+        type: unknownRequest.type,
+        ok: true,
+        payload: { worktrees: [{ path: worktreePath }] },
+        error: null,
+        timestamp: '',
+      })
+      await expect(openUnknown).resolves.toMatchObject({
+        reqId: 'open-unknown-worktree',
+        ok: false,
+        error: { code: 'CAPABILITY_DENIED' },
+      })
+      expect(openWorkspace).toHaveBeenCalledTimes(1)
+
+      const rejectedLookup = call(view, 'git.contribution', {
+        operation: 'open_worktree',
+        payload: { path: worktreePath },
+      }, 'rejected-worktree-lookup')
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(3))
+      const rejectedRequest = JSON.parse(socket.sent[2]!)
+      socket.receive({
+        id: rejectedRequest.id,
+        type: rejectedRequest.type,
+        ok: false,
+        payload: null,
+        error: { code: 'GIT_ERROR', message: 'worktrees unavailable' },
+        timestamp: '',
+      })
+      await expect(rejectedLookup).resolves.toMatchObject({
+        reqId: 'rejected-worktree-lookup',
+        ok: false,
+        error: { code: 'BACKEND_ERROR', message: 'worktrees unavailable' },
+      })
+      expect(openWorkspace).toHaveBeenCalledTimes(1)
+
+      const leftView = await openGitView(workspacePath, 'git-left')
+      await expect(call(leftView.view, 'git.contribution', {
+        operation: 'open_worktree',
+        payload: { path: worktreePath },
+      }, 'left-open-worktree')).resolves.toMatchObject({
+        reqId: 'left-open-worktree',
+        ok: false,
+        error: { code: 'CAPABILITY_DENIED' },
+      })
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+      rmSync(worktreePath, { recursive: true, force: true })
+      rmSync(unknownPath, { recursive: true, force: true })
+    }
+  })
+
+  it('denies the generic UI route so an arbitrary path cannot become a workspace root', async () => {
+    const { view } = await openGitView()
+
+    await expect(call(view, 'ui.request', {
+      type: 'ui.open_workspace',
+      payload: { workspace_path: '/' },
+    }, 'generic-open-workspace')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('routes git.changed once to its matching v2 workspace without blocking a legal legacy subscriber', async () => {
+    const first = await openGitView('/workspace')
+    const secondHost = new FakeBrowserWindow()
+    const secondDescriptor = gitDescriptor(first.mgr, '/other-workspace')
+    await first.mgr.openView(secondDescriptor, secondDescriptor.views![0], {
+      hostWindow: asHost(secondHost),
+      bounds: 'fill',
+      workspacePath: '/other-workspace',
+      capabilityContext: secondDescriptor.capabilityContext,
+    })
+    const legacyHost = new FakeBrowserWindow()
+    first.mgr.open(asHost(legacyHost), {
+      id: 'acme.fs-subscriber',
+      requires: ['fs'],
+      devUrl: '',
+      entryFile: '/plugins/acme.fs-subscriber/index.html',
+    }, { x: 0, y: 0, width: 10, height: 10 })
+
+    const dispatch = first.mgr as unknown as {
+      dispatchEvent(event: string, payload: unknown, binding?: unknown, targetPluginId?: string): void
+    }
+    dispatch.dispatchEvent('git.changed', { workspace_path: '/workspace' })
+    const events = (view: FakeViewLike) => view.webContents.sent
+      .filter((message) => message.channel === 'plugin:cap:event')
+      .map((message) => message.args[0] as { type: string })
+      .filter((message) => message.type === 'git.changed')
+    expect(events(first.view)).toHaveLength(1)
+    expect(events(secondHost.children[0] as FakeViewLike)).toHaveLength(0)
+    expect(events(legacyHost.children[0] as FakeViewLike)).toHaveLength(1)
+
+    dispatch.dispatchEvent('git.changed', { workspace_path: '/workspace' }, undefined, 'acme.fs-subscriber')
+    expect(events(first.view)).toHaveLength(1)
+    expect(events(legacyHost.children[0] as FakeViewLike)).toHaveLength(2)
+  })
+
+  it('rejects picker grants from another instance, after expiry, and for clone sibling traversal', async () => {
+    const first = await openGitView()
+    first.mgr.setHostShellHandlers({
+      openExternal: async () => ({ ok: true }),
+      revealPath: () => ({ ok: true }),
+      openWorkspace: () => ({ ok: true }),
+      pickFolder: async () => '/picked',
+    })
+    const descriptor = gitDescriptor(first.mgr)
+    const secondHost = new FakeBrowserWindow()
+    await first.mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(secondHost),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: first.mgr.gitCapabilityContext('1.0.0', '/workspace', 'git-left'),
+    })
+    const firstPick = await call(first.view, 'git.contribution', { operation: 'pick_workspace', payload: {} }, 'first-pick')
+    const firstGrant = (firstPick.result as { grant: string }).grant
+
+    await expect(call(secondHost.children[0] as FakeViewLike, 'git.contribution', {
+      operation: 'open_workspace',
+      payload: { path: '/picked', grant: firstGrant },
+    }, 'wrong-instance')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+
+    const now = Date.now()
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(now)
+    const expiringPick = await call(first.view, 'git.contribution', { operation: 'pick_workspace', payload: {} }, 'expiring-pick')
+    const expiringGrant = (expiringPick.result as { grant: string }).grant
+    dateNow.mockReturnValue(now + (5 * 60 * 1000) + 1)
+    await expect(call(first.view, 'git.contribution', {
+      operation: 'open_workspace',
+      payload: { path: '/picked', grant: expiringGrant },
+    }, 'expired-grant')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+    dateNow.mockRestore()
+
+    first.mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => 'account',
+      getCredential: () => ({ username: 'alice', token: 'fixture-secret', expectedHost: 'github.com' }),
+    })
+    const clonePick = await call(first.view, 'git.contribution', { operation: 'pick_workspace', payload: {} }, 'clone-pick')
+    await expect(call(first.view, 'git.request', {
+      type: 'git.clone',
+      payload: {
+        workspace_path: '/workspace',
+        url: 'https://github.com/acme/repo.git',
+        target_dir: '/picked/../sibling',
+        target_grant: (clonePick.result as { grant: string }).grant,
+      },
+    }, 'clone-sibling-traversal')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('rejects Git contribution paths through a symlink to an outside target', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-workspace-'))
+    const outsidePath = mkdtempSync(join(tmpdir(), 'navide-git-outside-'))
+    try {
+      writeFileSync(join(outsidePath, 'secret.txt'), 'secret')
+      symlinkSync(outsidePath, join(workspacePath, 'link'), 'dir')
+      const { view, sent } = await openGitView(workspacePath)
+      const actions = [
+        {
+          operation: 'open_file',
+          payload: { workspace_path: workspacePath, filepath: 'link/secret.txt', name: 'secret.txt' },
+        },
+        {
+          operation: 'open_conflict',
+          payload: { workspace_path: workspacePath, filepath: 'link/secret.txt', name: 'secret.txt' },
+        },
+        {
+          operation: 'open_diff',
+          payload: { workspace_path: workspacePath, filepath: 'link/secret.txt', staged: false, name: 'secret.txt' },
+        },
+        {
+          operation: 'open_git_window',
+          payload: { workspace_path: workspacePath, filepath: 'link/secret.txt' },
+        },
+        {
+          operation: 'open_path',
+          payload: { path: join(workspacePath, 'link', 'secret.txt') },
+        },
+      ] as const
+
+      for (const [index, action] of actions.entries()) {
+        const response = await call(view, 'git.contribution', action, `git-symlink-outside-${index}`)
+        expect(response).toMatchObject({
+          ok: false,
+          error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+        })
+      }
+      expect(sent).toEqual([])
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+      rmSync(outsidePath, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps private fs.stat_path inside the symlink-aware workspace boundary', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-stat-workspace-'))
+    const outsidePath = mkdtempSync(join(tmpdir(), 'navide-git-stat-outside-'))
+    try {
+      symlinkSync(outsidePath, join(workspacePath, 'outside-link'), 'dir')
+      symlinkSync(join(workspacePath, 'missing-target'), join(workspacePath, 'dangling-link'), 'file')
+      const { mgr, view } = await openGitView(workspacePath)
+      mgr.setBackendWsUrl('ws://git-stat-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+
+      for (const path of ['../outside', 'outside-link', 'dangling-link']) {
+        await expect(call(view, 'fs.request', {
+          type: 'fs.stat_path',
+          payload: { workspace_path: workspacePath, path },
+        }, `stat-${path}`)).resolves.toMatchObject({
+          ok: false,
+          error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+        })
+      }
+      expect(socket.sent).toEqual([])
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+      rmSync(outsidePath, { recursive: true, force: true })
+    }
+  })
+
+  it('prewarms Git hidden, deactivated, and reuses the instance when opened', async () => {
+    const mgr = new FrontendPluginManager()
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-prewarm-workspace-'))
+    try {
+      const descriptor = gitDescriptor(mgr, workspacePath, 'git-left')
+      mgr.registerDescriptor(descriptor, { builtin: true })
+      mgr.setCapabilityGrantResolver(() => descriptor.capabilityContext?.userGrant ?? null)
+      const host = new FakeBrowserWindow()
+
+      await expect(mgr.ensureContribution(asHost(host), 'navide.git.left', {
+        workspacePath,
+        capabilityContext: descriptor.capabilityContext,
+      })).resolves.toEqual({ ok: true })
+
+      const hidden = host.children[0] as FakeViewLike
+      expect(hidden.visible).toBe(false)
+      const running = (mgr as unknown as {
+        running: Map<string, { view: FakeViewLike }>
+        contributionInstances: Map<string, { instanceId: string }>
+      }).running
+      const instanceId = [...running.keys()][0]
+      expect(instanceId).toBeDefined()
+      ;(mgr as unknown as {
+        dispatchEvent(event: string, payload: unknown): void
+      }).dispatchEvent('git.changed', { workspace_path: workspacePath, changes_count: 4 })
+      expect(hidden.webContents.sent).toContainEqual({
+        channel: 'plugin:cap:event',
+        args: [{ type: 'git.changed', data: { workspace_path: workspacePath, changes_count: 4 } }],
+      })
+
+      await expect(mgr.openContribution(asHost(host), 'navide.git.left', {
+        workspacePath,
+        bounds: { x: 0, y: 0, width: 320, height: 480 },
+        capabilityContext: descriptor.capabilityContext,
+      })).resolves.toEqual({ ok: true })
+      expect(hidden.visible).toBe(true)
+      expect([...running.keys()]).toEqual([instanceId])
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects first-party filesystem mutations inside the Git metadata tree', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-mutation-workspace-'))
+    try {
+      mkdirSync(join(workspacePath, '.git'))
+      writeFileSync(join(workspacePath, '.git', 'config'), '[core]\n')
+      writeFileSync(join(workspacePath, 'ordinary.txt'), 'ordinary')
+      const { mgr, view } = await openGitView(workspacePath)
+      mgr.setBackendWsUrl('ws://git-mutation-boundary-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+
+      const requests = [
+        {
+          type: 'fs.write_file',
+          payload: { workspace_path: workspacePath, rel_path: '.git/config', content: 'changed' },
+        },
+        {
+          type: 'fs.write_file',
+          payload: { workspace_path: workspacePath, rel_path: '.git\\config', content: 'changed' },
+        },
+        {
+          type: 'fs.delete',
+          payload: { workspace_path: workspacePath, rel_path: '.git/config' },
+        },
+        {
+          type: 'fs.rename',
+          payload: { workspace_path: workspacePath, src_rel: 'ordinary.txt', dst_rel: '.git/moved' },
+        },
+        {
+          type: 'fs.rename',
+          payload: { workspace_path: workspacePath, src_rel: '.git/config', dst_rel: 'moved' },
+        },
+      ] as const
+
+      for (const [index, request] of requests.entries()) {
+        await expect(call(view, 'fs.request', request, `git-mutation-${index}`)).resolves.toMatchObject({
+          ok: false,
+          error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+        })
+      }
+      expect(socket.sent).toEqual([])
+      expect(readFileSync(join(workspacePath, 'ordinary.txt'), 'utf8')).toBe('ordinary')
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects public fs.writeFile before it reaches the backend for Git metadata', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-public-fs-workspace-'))
+    try {
+      mkdirSync(join(workspacePath, '.git'))
+      writeFileSync(join(workspacePath, '.git', 'config'), '[core]\n')
+      const { mgr } = await openGitView(workspacePath)
+      mgr.setBackendWsUrl('ws://public-fs-mutation-boundary-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+      const runtime = (
+        mgr as unknown as {
+          running: Map<string, { capabilityContext: HostCapabilityContext }>
+        }
+      ).running.get([...(
+        mgr as unknown as { running: Map<string, unknown> }
+      ).running.keys()][0]!)!.capabilityContext.runtimeBinding!
+
+      await expect(mgr.executePublicCapability({
+        kind: 'public',
+        address: 'fs.writeFile',
+        scope: 'workspace',
+        runtime,
+        args: { path: '.git/config', content: 'changed' },
+      })).rejects.toThrow(/Git metadata/)
+      expect(socket.sent).toEqual([])
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects Git contribution paths through a dangling symlink', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-workspace-'))
+    const outsidePath = mkdtempSync(join(tmpdir(), 'navide-git-outside-'))
+    try {
+      symlinkSync(join(outsidePath, 'missing-target'), join(workspacePath, 'dangling'), 'file')
+      const { view, sent } = await openGitView(workspacePath)
+      const actions = [
+        {
+          operation: 'open_file',
+          payload: { workspace_path: workspacePath, filepath: 'dangling/secret.txt', name: 'secret.txt' },
+        },
+        {
+          operation: 'open_path',
+          payload: { path: join(workspacePath, 'dangling', 'secret.txt') },
+        },
+      ] as const
+
+      for (const [index, action] of actions.entries()) {
+        const response = await call(view, 'git.contribution', action, `git-symlink-dangling-${index}`)
+        expect(response).toMatchObject({
+          ok: false,
+          error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+        })
+      }
+      expect(sent).toEqual([])
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+      rmSync(outsidePath, { recursive: true, force: true })
+    }
+  })
+
+  it('allows an internal symlink and a missing ordinary leaf inside the workspace', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-workspace-'))
+    try {
+      mkdirSync(join(workspacePath, 'real-dir'))
+      writeFileSync(join(workspacePath, 'real-dir', 'app.ts'), 'export {}')
+      symlinkSync(join(workspacePath, 'real-dir'), join(workspacePath, 'inside-link'), 'dir')
+      const { view, sent } = await openGitView(workspacePath)
+
+      const internalLink = await call(view, 'git.contribution', {
+        operation: 'open_file',
+        payload: { workspace_path: workspacePath, filepath: 'inside-link/app.ts', name: 'app.ts' },
+      }, 'git-symlink-inside')
+      expect(internalLink).toMatchObject({ ok: true, result: { accepted: true } })
+
+      const missingLeaf = await call(view, 'git.contribution', {
+        operation: 'open_path',
+        payload: { path: join(workspacePath, 'new-dir', 'new-file.ts') },
+      }, 'git-missing-leaf')
+      expect(missingLeaf).toMatchObject({ ok: true, result: { accepted: true } })
+      expect(sent).toHaveLength(2)
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps account credentials Host-owned and workspace-scoped', async () => {
+    const { mgr, view } = await openGitView()
+    const bind = vi.fn()
+    const unbind = vi.fn()
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [{ id: 'account-1', label: 'GitHub', host: 'github.com', username: 'alice', tokenLast4: '1234' }],
+      add: () => ({ id: 'account-2', label: 'GitLab', host: 'gitlab.com', username: 'bob', tokenLast4: '5678' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind,
+      unbind,
+      getBinding: () => 'account-1',
+      getCredential: () => ({ username: 'alice', token: 'secret-token', expectedHost: 'github.com' }),
+    })
+
+    const listed = await call(view, 'git.account', { operation: 'list', payload: {} }, 'git-list')
+    expect(listed).toEqual({
+      reqId: 'git-list',
+      ok: true,
+      result: {
+        available: true,
+        accounts: [{ id: 'account-1', label: 'GitHub', host: 'github.com', username: 'alice', tokenLast4: '1234' }],
+      },
+    })
+
+    await expect(call(view, 'git.account', {
+      operation: 'bind',
+      payload: { accountId: 'account-1' },
+    }, 'git-bind')).resolves.toMatchObject({ ok: true, result: { accountId: 'account-1' } })
+    expect(bind).toHaveBeenCalledWith('/workspace', 'account-1')
+
+    await expect(call(view, 'git.account', {
+      operation: 'unbind',
+      payload: {},
+    }, 'git-unbind')).resolves.toMatchObject({ ok: true, result: { accountId: null } })
+    expect(unbind).toHaveBeenCalledWith('/workspace')
+
+    await expect(call(view, 'git.account', {
+      operation: 'bind',
+      payload: { accountId: 'account-1', workspace_path: '/other' },
+    }, 'git-bind-forged-workspace')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+    expect(bind).toHaveBeenCalledTimes(1)
+
+    const response = await call(view, 'git.account', {
+      operation: 'get_credential',
+      payload: { workspace_path: '/workspace' },
+    })
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+
+    const denied = await call(view, 'git.account', {
+      operation: 'get_credential',
+      payload: { workspace_path: '/other' },
+    }, 'git-2')
+    expect(denied).toMatchObject({
+      reqId: 'git-2',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('limits account actions to Git left and window audiences', async () => {
+    const { mgr, view } = await openGitView('/workspace', 'git-history')
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => null,
+      getCredential: () => null,
+    })
+
+    await expect(call(view, 'git.account', {
+      operation: 'list',
+      payload: {},
+    }, 'git-account-wrong-audience')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('requires the first-party allowlist shell policy and grant for Git requests', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr)
+    descriptor.capabilityPolicy = manifestV2CapabilityPolicy({
+      system: ['fs', 'ui', 'aiCli'],
+    })
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    const handle = await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: descriptor.capabilityContext,
+    })
+
+    const response = await call(host.children[0] as FakeViewLike, 'git.request', {
+      type: 'git.status',
+      payload: { workspace_path: '/workspace' },
+    })
+    expect(handle.instanceId).toBeTruthy()
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('requires publisher eligibility and an allowlist grant for Issues requests', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr)
+    descriptor.capabilityContext = {
+      ...descriptor.capabilityContext!,
+      publisherEligible: false,
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: descriptor.capabilityContext,
+    })
+
+    const response = await call(host.children[0] as FakeViewLike, 'issues.request', {
+      type: 'issues.list',
+      payload: { workspace_path: '/workspace', limit: 10 },
+    })
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('rejects Git requests when the shell mode is full instead of allowlist', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr)
+    descriptor.capabilityPolicy = manifestV2CapabilityPolicy({
+      system: ['fs', 'ui', 'aiCli'],
+      shell: 'full',
+    })
+    descriptor.capabilityContext = {
+      ...descriptor.capabilityContext!,
+      userGrant: { ...descriptor.capabilityContext!.userGrant!, shell: 'full' },
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: descriptor.capabilityContext,
+    })
+
+    const response = await call(host.children[0] as FakeViewLike, 'git.request', {
+      type: 'git.status',
+      payload: { workspace_path: '/workspace' },
+    })
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('rejects Git requests when the package grant omits shell access', async () => {
+    const mgr = new FrontendPluginManager()
+    const descriptor = gitDescriptor(mgr)
+    descriptor.capabilityContext = {
+      ...descriptor.capabilityContext!,
+      userGrant: {
+        packageVersion: '1.0.0',
+        system: ['fs', 'ui', 'aiCli'],
+        storage: true,
+      },
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const host = new FakeBrowserWindow()
+    await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: descriptor.capabilityContext,
+    })
+
+    const response = await call(host.children[0] as FakeViewLike, 'git.request', {
+      type: 'git.status',
+      payload: { workspace_path: '/workspace' },
+    })
+    expect(response).toMatchObject({
+      reqId: 'git-1',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+  })
+
+  it('injects the bound credential only into Host-to-backend remote Git requests', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setBackendWsUrl('ws://git-credential-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => 'account-1',
+      getCredential: (workspacePath) => workspacePath === '/workspace'
+        ? { username: 'alice', token: 'secret-token', expectedHost: 'github.com' }
+        : null,
+    })
+
+    const operation = call(view, 'git.request', {
+      type: 'git.push',
+      payload: { workspace_path: '/workspace', remote: 'origin', branch: 'main' },
+    })
+    await Promise.resolve()
+    const request = JSON.parse(socket.sent.at(-1)!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(request.type).toBe('git.push')
+    expect(request.payload).toEqual({
+      workspace_path: '/workspace',
+      remote: 'origin',
+      branch: 'main',
+      credential: { username: 'alice', token: 'secret-token', expectedHost: 'github.com' },
+    })
+    socket.receive({
+      id: request.id,
+      type: request.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(operation).resolves.toMatchObject({ ok: true })
+
+    const rawCredential = await call(view, 'git.request', {
+      type: 'git.push',
+      payload: {
+        workspace_path: '/workspace',
+        credential: { username: 'mallory', token: 'plugin-supplied' },
+      },
+    }, 'git-raw-credential')
+    expect(rawCredential).toMatchObject({
+      reqId: 'git-raw-credential',
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+    expect(socket.sent.map((raw) => JSON.parse(raw).payload.credential?.token)).not.toContain('plugin-supplied')
+  })
+
+  it('preserves Git-native authentication when no Host credential is bound', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setBackendWsUrl('ws://git-credential-required-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const getCredential = vi.fn(() => null)
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => null,
+      getCredential,
+    })
+
+    const operation = call(view, 'git.request', {
+      type: 'git.push',
+      payload: { workspace_path: '/workspace', remote: 'origin', branch: 'main' },
+    }, 'git-with-native-auth')
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+    const request = JSON.parse(socket.sent[0]!)
+    expect(request.payload).toMatchObject({
+      workspace_path: '/workspace',
+      remote: 'origin',
+      branch: 'main',
+    })
+    expect(request.payload.credential_owner_nonce).toEqual(expect.any(String))
+    expect(request.payload).not.toHaveProperty('credential')
+    socket.receive({
+      id: request.id,
+      type: request.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(operation).resolves.toMatchObject({ ok: true })
+    expect(getCredential).toHaveBeenCalledWith('/workspace')
+  })
+
+  it('releases an interactive credential owner when the backend is unavailable', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => null,
+      getCredential: () => null,
+    })
+
+    await expect(call(view, 'git.request', {
+      type: 'git.fetch',
+      payload: { workspace_path: '/workspace' },
+    }, 'git-no-backend-owner')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BACKEND_ERROR' },
+    })
+    const owners = (mgr as unknown as { gitCredentialOwners: Map<string, unknown> }).gitCredentialOwners
+    expect(owners.size).toBe(0)
+  })
+
+  it('routes interactive credential prompts and replies to the exact requesting instance', async () => {
+    const first = await openGitView('/workspace', 'git-left')
+    const secondDescriptor = gitDescriptor(first.mgr, '/workspace', 'git-left')
+    const secondHost = new FakeBrowserWindow()
+    await first.mgr.openView(secondDescriptor, secondDescriptor.views![0], {
+      hostWindow: asHost(secondHost),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: secondDescriptor.capabilityContext,
+    })
+    const secondView = secondHost.children[0] as FakeViewLike
+    first.mgr.setBackendWsUrl('ws://git-interactive-credential-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    first.mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => null,
+      getCredential: () => null,
+    })
+
+    await expect(call(first.view, 'git.request', {
+      type: 'git.fetch',
+      payload: {
+        workspace_path: '/workspace',
+        credential_owner_nonce: 'renderer-chosen',
+      },
+    }, 'git-forged-credential-owner')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+
+    const operation = call(first.view, 'git.request', {
+      type: 'git.fetch',
+      payload: { workspace_path: '/workspace' },
+    }, 'git-interactive-fetch')
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+    const fetchRequest = JSON.parse(socket.sent[0]!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(fetchRequest.payload.credential_owner_nonce).toMatch(/^[a-f0-9-]{36}$/)
+
+    socket.receive({
+      id: 'credential-event',
+      type: 'git.credential_request',
+      payload: {
+        request_id: 'askpass-1',
+        workspace_path: '/workspace',
+        host: 'github.com',
+        prompt: "Username for 'https://github.com': ",
+        credential_owner_nonce: fetchRequest.payload.credential_owner_nonce,
+      },
+      timestamp: '',
+    })
+    const credentialEvents = (view: FakeViewLike) => view.webContents.sent.filter(
+      (message) => message.channel === 'plugin:cap:event' &&
+        (message.args[0] as { type?: string }).type === 'git.credential_request',
+    )
+    expect(credentialEvents(first.view)).toHaveLength(1)
+    expect(credentialEvents(secondView)).toHaveLength(0)
+
+    await expect(call(secondView, 'git.request', {
+      type: 'git.credential_submit',
+      payload: { request_id: 'askpass-1', value: 'forged' },
+    }, 'forged-submit')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+    expect(socket.sent).toHaveLength(1)
+
+    const submit = call(first.view, 'git.request', {
+      type: 'git.credential_submit',
+      payload: { request_id: 'askpass-1', value: 'alice' },
+    }, 'owner-submit')
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(2))
+    const submitRequest = JSON.parse(socket.sent[1]!)
+    expect(submitRequest.type).toBe('git.credential_submit')
+    socket.receive({
+      id: submitRequest.id,
+      type: submitRequest.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(submit).resolves.toMatchObject({ ok: true })
+
+    socket.receive({
+      id: fetchRequest.id,
+      type: fetchRequest.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(operation).resolves.toMatchObject({ ok: true })
+  })
+
+  it('buffers early AI output and resumes a detached session by Host tuple', async () => {
+    vi.useFakeTimers()
+    try {
+      const first = await openGitView('/workspace', 'git-window')
+      first.mgr.setBackendWsUrl('ws://git-ai-resume-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+      const runtimeOf = (instanceId: string) => (
+        first.mgr as unknown as {
+          running: Map<string, { capabilityContext: HostCapabilityContext }>
+        }
+      ).running.get(instanceId)!.capabilityContext.runtimeBinding!
+
+      await expect(first.mgr.executePublicCapability({
+        kind: 'public',
+        address: 'aiCli.listProfiles',
+        scope: 'workspace',
+        runtime: runtimeOf(first.instanceId),
+        args: {},
+      })).resolves.toMatchObject({
+        profiles: expect.arrayContaining([{ id: 'claude', label: 'Claude Code' }]),
+      })
+
+      const start = first.mgr.executePublicCapability({
+        kind: 'public',
+        address: 'aiCli.startSession',
+        scope: 'workspace',
+        runtime: runtimeOf(first.instanceId),
+        args: {
+          profileId: 'claude',
+          requestId: 'start-1',
+          cols: 80,
+          rows: 24,
+          yolo: true,
+        },
+      })
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+      const create = JSON.parse(socket.sent[0]!)
+      expect(create.type).toBe('terminal.create')
+      expect(create.payload.command).toContain('--dangerously-skip-permissions')
+
+      socket.receive({
+        id: 'early-output',
+        type: 'terminal.output',
+        payload: {
+          terminal_session_id: 'ai-session-1',
+          pane_id: create.payload.pane_id,
+          sequence: 1,
+          data: 'early output',
+        },
+        timestamp: '',
+      })
+      expect(first.view.webContents.sent.some((message) =>
+        message.channel === 'plugin:cap:event' &&
+        (message.args[0] as { type?: string }).type === 'aiCli.output'
+      )).toBe(false)
+
+      socket.receive({
+        id: create.id,
+        type: create.type,
+        ok: true,
+        payload: {
+          terminal_session_id: 'ai-session-1',
+          pane_id: create.payload.pane_id,
+          create_generation: 'start-1',
+        },
+        error: null,
+        timestamp: '',
+      })
+      await expect(start).resolves.toEqual({ sessionId: 'ai-session-1' })
+      await vi.advanceTimersByTimeAsync(12)
+      expect(first.view.webContents.sent).toContainEqual({
+        channel: 'plugin:cap:event',
+        args: [{ type: 'aiCli.output', data: { sessionId: 'ai-session-1', data: 'early output' } }],
+      })
+
+      first.mgr.destroyInstance(first.instanceId)
+      const descriptor = gitDescriptor(first.mgr, '/workspace', 'git-window')
+      const secondHost = new FakeBrowserWindow()
+      const second = await first.mgr.openView(descriptor, descriptor.views![0], {
+        hostWindow: asHost(secondHost),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        capabilityContext: descriptor.capabilityContext,
+      })
+      const resume = first.mgr.executePublicCapability({
+        kind: 'public',
+        address: 'aiCli.resumeSession',
+        scope: 'workspace',
+        runtime: runtimeOf(second.instanceId),
+        args: { cols: 100, rows: 30 },
+      })
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(2))
+      const reattach = JSON.parse(socket.sent[1]!)
+      expect(reattach).toMatchObject({
+        type: 'terminal.reattach',
+        payload: { terminal_session_ids: ['ai-session-1'], cols: 100, rows: 30 },
+      })
+      socket.receive({
+        id: reattach.id,
+        type: reattach.type,
+        ok: true,
+        payload: { alive: ['ai-session-1'], dead: [] },
+        error: null,
+        timestamp: '',
+      })
+      await expect(resume).resolves.toEqual({ sessionId: 'ai-session-1', profileId: 'claude' })
+      expect(socket.sent.map((raw) => JSON.parse(raw).type)).toEqual([
+        'terminal.create',
+        'terminal.reattach',
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bounds and expires AI output that arrives before session creation commits', async () => {
+    vi.useFakeTimers()
+    try {
+      const opened = await openGitView('/workspace', 'git-window')
+      opened.mgr.setBackendWsUrl('ws://git-ai-early-buffer-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+      const runtime = (
+        opened.mgr as unknown as {
+          running: Map<string, { capabilityContext: HostCapabilityContext }>
+        }
+      ).running.get(opened.instanceId)!.capabilityContext.runtimeBinding!
+      const start = opened.mgr.executePublicCapability({
+        kind: 'public',
+        address: 'aiCli.startSession',
+        scope: 'workspace',
+        runtime,
+        args: { profileId: 'claude', requestId: 'bounded-start', cols: 80, rows: 24 },
+      })
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+      const create = JSON.parse(socket.sent[0]!)
+      for (let index = 0; index < 130; index += 1) {
+        socket.receive({
+          id: `early-${index}`,
+          type: 'terminal.output',
+          payload: {
+            terminal_session_id: 'bounded-session',
+            pane_id: create.payload.pane_id,
+            sequence: index,
+            data: String(index),
+          },
+          timestamp: '',
+        })
+      }
+      const buffers = (
+        opened.mgr as unknown as {
+          earlyAiEvents: Map<string, { events: unknown[] }>
+        }
+      ).earlyAiEvents
+      expect([...buffers.values()][0]?.events).toHaveLength(128)
+
+      await vi.advanceTimersByTimeAsync(5_001)
+      socket.receive({
+        id: create.id,
+        type: create.type,
+        ok: true,
+        payload: {
+          terminal_session_id: 'bounded-session',
+          pane_id: create.payload.pane_id,
+          create_generation: 'bounded-start',
+        },
+        error: null,
+        timestamp: '',
+      })
+      await expect(start).resolves.toEqual({ sessionId: 'bounded-session' })
+      await vi.advanceTimersByTimeAsync(12)
+      expect(opened.view.webContents.sent.some((message) =>
+        message.channel === 'plugin:cap:event' &&
+        (message.args[0] as { type?: string }).type === 'aiCli.output'
+      )).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('injects a bound credential for a matching HTTPS clone host only', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setBackendWsUrl('ws://git-clone-host-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => 'account-1',
+      getCredential: () => ({ username: 'alice', token: 'fixture-secret', expectedHost: 'github.com' }),
+    })
+
+    await expect(call(view, 'git.request', {
+      type: 'git.clone',
+      payload: { workspace_path: '/workspace', url: 'https://gitlab.com/acme/repo.git', target_dir: '/tmp/repo' },
+    }, 'clone-host-mismatch')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CREDENTIAL_REQUIRED' },
+    })
+    expect(socket.sent).toEqual([])
+
+    await expect(call(view, 'git.request', {
+      type: 'git.clone',
+      payload: { workspace_path: '/workspace', url: 'https://github.com/acme/repo.git', target_dir: '/tmp/repo' },
+    }, 'clone-without-grant')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' },
+    })
+    expect(socket.sent).toEqual([])
+
+    mgr.setHostShellHandlers({
+      openExternal: async () => ({ ok: true }),
+      revealPath: () => ({ ok: true }),
+      openWorkspace: () => ({ ok: true }),
+      pickFolder: async () => '/tmp',
+    })
+    const picked = await call(view, 'git.contribution', { operation: 'pick_workspace', payload: {} }, 'clone-parent-pick')
+    const targetGrant = (picked.result as { grant: string }).grant
+
+    const pending = call(view, 'git.request', {
+      type: 'git.clone',
+      payload: {
+        workspace_path: '/workspace',
+        url: 'https://github.com/acme/repo.git',
+        target_dir: '/tmp/repo',
+        target_grant: targetGrant,
+      },
+    }, 'clone-host-match')
+    await Promise.resolve()
+    const request = JSON.parse(socket.sent.at(-1)!) as { id: string; type: string; payload: Record<string, unknown> }
+    expect(request.payload.credential).toEqual({ username: 'alice', token: 'fixture-secret', expectedHost: 'github.com' })
+    socket.receive({ id: request.id, type: request.type, ok: true, payload: { ok: true, path: '/tmp/repo' }, error: null, timestamp: '' })
+    const cloned = await pending
+    expect(cloned).toMatchObject({ ok: true, result: { path: '/tmp/repo', openWorkspaceGrant: expect.any(String) } })
+    await expect(call(view, 'git.contribution', {
+      operation: 'open_workspace',
+      payload: {
+        path: '/tmp/repo',
+        grant: (cloned.result as { openWorkspaceGrant: string }).openWorkspaceGrant,
+      },
+    }, 'open-cloned-workspace')).resolves.toMatchObject({ ok: true })
+  })
+
+  it('opens a git-window clone through the Host seam after consuming only its exact derived grant', async () => {
+    const { mgr, view, sent } = await openGitView('/workspace', 'git-window')
+    const opened: string[] = []
+    mgr.setHostShellHandlers({
+      openExternal: async () => ({ ok: true }),
+      revealPath: () => ({ ok: true }),
+      openWorkspace: (path) => {
+        opened.push(path)
+        return { ok: true }
+      },
+      pickFolder: async () => '/private/tmp',
+    })
+    mgr.setBackendWsUrl('ws://git-window-clone-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => 'account-1',
+      getCredential: () => ({ username: 'alice', token: 'fixture-secret', expectedHost: 'github.com' }),
+    })
+
+    const picked = await call(view, 'git.contribution', { operation: 'pick_workspace', payload: {} }, 'window-clone-pick')
+    const clone = call(view, 'git.request', {
+      type: 'git.clone',
+      payload: {
+        workspace_path: '/workspace',
+        url: 'https://github.com/acme/repo.git',
+        target_dir: '/private/tmp/repo',
+        target_grant: (picked.result as { grant: string }).grant,
+      },
+    }, 'window-clone')
+    await Promise.resolve()
+    const request = JSON.parse(socket.sent.at(-1)!) as { id: string; type: string }
+    socket.receive({ id: request.id, type: request.type, ok: true, payload: { ok: true, path: '/private/tmp/repo' }, error: null, timestamp: '' })
+    const cloned = await clone
+    const derivedGrant = (cloned.result as { openWorkspaceGrant: string }).openWorkspaceGrant
+
+    const sameVersion = gitDescriptor(mgr, '/workspace', 'git-window')
+    const sameVersionHost = new FakeBrowserWindow()
+    await mgr.openView(sameVersion, sameVersion.views![0], {
+      hostWindow: asHost(sameVersionHost),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: sameVersion.capabilityContext,
+    })
+    const differentVersion = gitDescriptor(mgr, '/workspace', 'git-window', '2.0.0')
+    const differentVersionHost = new FakeBrowserWindow()
+    mgr.registerDescriptor(differentVersion, { builtin: true })
+    await mgr.openView(differentVersion, differentVersion.views![0], {
+      hostWindow: asHost(differentVersionHost),
+      bounds: 'fill',
+      workspacePath: '/workspace',
+      capabilityContext: differentVersion.capabilityContext,
+    })
+
+    for (const [candidate, path, reqId] of [
+      [sameVersionHost.children[0] as FakeViewLike, '/private/tmp/repo', 'window-wrong-instance'],
+      [differentVersionHost.children[0] as FakeViewLike, '/private/tmp/repo', 'window-wrong-version'],
+      [view, '/private/tmp/other', 'window-wrong-path'],
+    ] as const) {
+      await expect(call(candidate, 'git.contribution', {
+        operation: 'open_workspace', payload: { path, grant: derivedGrant },
+      }, reqId)).resolves.toMatchObject({ ok: false, error: { code: 'CAPABILITY_DENIED' } })
+    }
+
+    await expect(call(view, 'git.contribution', {
+      operation: 'open_workspace', payload: { path: '/private/tmp/repo', grant: derivedGrant },
+    }, 'window-open-clone')).resolves.toEqual({
+      reqId: 'window-open-clone', ok: true, result: { accepted: true },
+    })
+    expect(opened).toEqual(['/private/tmp/repo'])
+    expect(sent).toEqual([])
+
+    await expect(call(view, 'git.contribution', {
+      operation: 'open_workspace', payload: { path: '/private/tmp/repo', grant: derivedGrant },
+    }, 'window-replay')).resolves.toMatchObject({ ok: false, error: { code: 'CAPABILITY_DENIED' } })
+  })
+
+  it('does not inject a credential into Issues requests', async () => {
+    const { mgr, view } = await openGitView()
+    mgr.setBackendWsUrl('ws://git-issues-test')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+    const getCredential = vi.fn(() => ({ username: 'alice', token: 'secret-token', expectedHost: 'github.com' }))
+    mgr.setGitAccountHandlers({
+      available: () => true,
+      list: () => [],
+      add: () => ({ id: 'unused', label: 'unused', host: 'github.com', username: 'unused', tokenLast4: '0000' }),
+      update: () => undefined,
+      remove: () => undefined,
+      bind: () => undefined,
+      unbind: () => undefined,
+      getBinding: () => 'account-1',
+      getCredential,
+    })
+
+    const operation = call(view, 'issues.request', {
+      type: 'issues.list',
+      payload: { workspace_path: '/workspace', limit: 10 },
+    })
+    await Promise.resolve()
+    const request = JSON.parse(socket.sent.at(-1)!) as { id: string; type: string; payload: Record<string, unknown> }
+    expect(request.payload).toEqual({ workspace_path: '/workspace', limit: 10 })
+    expect(getCredential).not.toHaveBeenCalled()
+    socket.receive({
+      id: request.id,
+      type: request.type,
+      ok: true,
+      payload: { ok: true, issues: [] },
+      error: null,
+      timestamp: '',
+    })
+    await expect(operation).resolves.toMatchObject({ ok: true })
+
+    const localOperation = call(view, 'git.request', {
+      type: 'git.status',
+      payload: { workspace_path: '/workspace' },
+    }, 'git-local-no-credential')
+    await Promise.resolve()
+    const localRequest = JSON.parse(socket.sent.at(-1)!) as {
+      id: string
+      type: string
+      payload: Record<string, unknown>
+    }
+    expect(localRequest.type).toBe('git.status')
+    expect(localRequest.payload).toEqual({ workspace_path: '/workspace' })
+    socket.receive({
+      id: localRequest.id,
+      type: localRequest.type,
+      ok: true,
+      payload: { ok: true },
+      error: null,
+      timestamp: '',
+    })
+    await expect(localOperation).resolves.toMatchObject({ ok: true })
+    expect(getCredential).not.toHaveBeenCalled()
+  })
+})
+
+describe('Git left legacy rollback composition', () => {
+  it('returns an explicit legacy fallback after replacing a live v2 left view', async () => {
+    const host = new FakeBrowserWindow()
+    Object.defineProperty(host, 'id', { value: 77 })
+    const v2: PluginLaunchDescriptor = {
+      id: 'navide.git',
+      packageVersion: '2.0.0',
+      requires: ['terminal'],
+      capabilityPolicy: manifestV2CapabilityPolicy({
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+      }),
+      capabilityContext: frontendPluginManager.gitCapabilityContext('2.0.0', '/workspace', 'git-left'),
+      devUrl: '',
+      entryFile: '/plugins/navide-git/index.html',
+      views: [
+        {
+          id: 'left',
+          contributionKey: 'navide.git.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Git',
+          entryFile: '/plugins/navide-git/left.html',
+        },
+      ],
+    }
+    const legacy: PluginLaunchDescriptor = {
+      id: 'navide.git',
+      requires: [],
+      devUrl: '',
+      entryFile: '/plugins/git/index.html',
+    }
+
+    frontendPluginManager.replaceBuiltinForRecovery(v2)
+    await expect(openGitLeftPluginView(
+      asHost(host),
+      '/workspace',
+      { x: 0, y: 0, width: 400, height: 300 },
+      '',
+      '',
+      {
+        git_yolo: '0',
+        git_analyzer_model: 'qwen2:latest',
+        git_theme_custom: '{}',
+      },
+    )).resolves.toEqual({ ok: true })
+    expect((host.children[0] as FakeViewLike).webContents.loads).toEqual([
+      '/plugins/navide-git/left.html?workspace_path=%2Fworkspace&git_yolo=0&git_analyzer_model=qwen2%3Alatest&git_theme_custom=%7B%7D&v2=1&contribution=left',
+    ])
+
+    frontendPluginManager.replaceBuiltinForRecovery(legacy)
+    await expect(openGitLeftPluginView(
+      asHost(host),
+      '/workspace',
+      { x: 0, y: 0, width: 400, height: 300 },
+    )).resolves.toEqual({ ok: true, fallback: 'legacy' })
+    expect(host.children).toHaveLength(0)
+    expect(closeGitLeftPluginView(asHost(host))).toEqual({ ok: true })
   })
 })

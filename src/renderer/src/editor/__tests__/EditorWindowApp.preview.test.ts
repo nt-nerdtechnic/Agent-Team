@@ -6,15 +6,16 @@ import { describe, it, expect, vi } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref } from 'vue'
 import EditorWindowApp from '../../EditorWindowApp.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 i18n.global.locale.value = 'en-US'
 
-function stub(name: string) {
+function stub(name: string, props: string[] = []) {
   return {
     __esModule: true,
     default: defineComponent({
       name,
+      props,
       inheritAttrs: false,
       render: () => h('div', { class: `stub-${name}` }),
     }),
@@ -27,7 +28,6 @@ vi.mock('../../components/ExplorerPane.vue', () => stub('ExplorerPane'))
 vi.mock('../../components/SearchPane.vue', () => stub('SearchPane'))
 vi.mock('../../components/GitPane.vue', () => stub('GitPane'))
 vi.mock('../../components/ProblemsPane.vue', () => stub('ProblemsPane'))
-vi.mock('../../components/AiCliTerminal.vue', () => stub('AiCliTerminal'))
 vi.mock('../../components/NotificationHost.vue', () => stub('NotificationHost'))
 vi.mock('../EditorPane.vue', () => stub('EditorPane'))
 vi.mock('../PlanFileView.vue', () => stub('PlanFileView'))
@@ -52,23 +52,49 @@ vi.mock('../../composables/useBackend', () => ({
   }),
 }))
 
-vi.mock('../../lib/settings', () => ({
+vi.mock('@navide/plugin-ui/shared', () => ({
   initSettingsBackend: vi.fn(),
   settingsGet: vi.fn((_key: string, def: unknown) => def),
   settingsSet: vi.fn(),
   onSettingsChanged: vi.fn(() => () => {}),
 }))
 
-vi.mock('../../composables/useNotify', () => ({
-  useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn() }),
-}))
+vi.mock('@navide/plugin-shell', async (importOriginal) => {
+  const { defineComponent: makeComponent, h: hVue, ref: refVue } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/plugin-shell')>()
+  const aiDockStub = makeComponent({
+    name: 'AiCliDock',
+    props: {
+      widthKey: String,
+      origin: String,
+      paneId: String,
+      workspacePath: String,
+      buildContext: Function,
+    },
+    setup() {
+      const open = refVue(false)
+      return () => hVue('div', [
+        hVue('button', { class: 'ai-dock-rail-btn', onClick: () => { open.value = !open.value } }),
+        open.value ? hVue('div', { class: 'ai-cli-empty' }, 'No workspace available') : null,
+      ])
+    },
+  })
+  return {
+    ...actual,
+    AiCliDock: aiDockStub,
+  }
+})
 
-vi.mock('../../composables/useTheme', () => ({
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
+  useNotify: () => ({ toast: vi.fn(), alert: vi.fn(), confirm: vi.fn() }),
   useTheme: () => ({ theme: ref('dark'), setTheme: vi.fn(), loadTheme: vi.fn() }),
   BUILTIN_THEMES: [],
 }))
 
-vi.mock('../../keybindings/useKeybindings', () => ({
+vi.mock('@navide/plugin-ui/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/shared')>()),
+  initKeybindingsPort: vi.fn(),
   useKeybindings: vi.fn(),
   registerCommand: vi.fn(),
   setContext: vi.fn(),

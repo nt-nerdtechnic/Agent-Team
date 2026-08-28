@@ -2,14 +2,23 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "catalogVersion": 1,
   "status": "draft",
-  "runtimeStatus": "host-enforced-by-issue-03",
+  "runtimeStatus": "host-enforced-by-issue-03-with-issue-16-storage-seam",
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        { "type": ["string", "number", "boolean", "null"] },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+      ]
+    }
+  },
   "manifestPermissionContract": {
     "shape": "system-namespace-array-plus-shell-mode",
     "scopeSource": "catalog",
     "duplicateObjectKeys": "reject-before-schema-validation",
     "unknownPermissionOrAccess": "reject"
   },
-  "hostShellExecutableAllowlist": ["git"],
+  "hostShellExecutableAllowlist": ["git", "gh", "glab"],
   "errors": [
     "CAPABILITY_DENIED",
     "METHOD_NOT_FOUND",
@@ -19,6 +28,7 @@
     "TIMEOUT",
     "BACKEND_UNAVAILABLE",
     "PLUGIN_STOPPING",
+    "STORAGE_QUOTA_EXCEEDED",
     "INTERNAL_ERROR"
   ],
   "methods": [
@@ -39,6 +49,30 @@
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
     {
+      "address": "fs.writeFile",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "fs", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path", "content"], "properties": { "path": { "type": "string" }, "content": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["ok"], "properties": { "ok": { "type": "boolean" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "fs.readImage",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "fs", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["ok"], "properties": { "ok": { "type": "boolean" }, "data_url": { "type": "string" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "fs.listFilesFlat",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "fs", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "properties": { "query": { "type": "string" }, "maxResults": { "type": "integer", "minimum": 1 } } },
+      "result": { "type": "object", "additionalProperties": false, "properties": { "files": { "type": "array", "items": { "type": "string" } } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
       "address": "fs.glob",
       "visibility": "public",
       "permission": { "id": "system", "access": "fs", "scope": "workspace" },
@@ -52,6 +86,14 @@
       "permission": { "id": "system", "access": "fs", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["kind", "size", "modifiedAt"], "properties": { "kind": { "enum": ["file", "directory"] }, "size": { "type": "integer", "minimum": 0 }, "modifiedAt": { "type": "string", "format": "date-time" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "fs.statPath",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "fs", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["exists"], "properties": { "exists": { "type": "boolean" } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
     {
@@ -72,18 +114,32 @@
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "USER_CANCELLED", "INTERNAL_ERROR"]
     },
     {
+      "address": "aiCli.listProfiles",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "type": "object", "additionalProperties": false, "required": ["profiles"], "properties": { "profiles": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["id", "label"], "properties": { "id": { "type": "string", "minLength": 1 }, "label": { "type": "string", "minLength": 1 } } } } } },
+      "errors": ["CAPABILITY_DENIED", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
       "address": "aiCli.startSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["profileId", "cols", "rows"], "properties": { "profileId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
+      "params": { "type": "object", "additionalProperties": false, "required": ["profileId", "cols", "rows"], "properties": { "profileId": { "type": "string", "minLength": 1 }, "requestId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 }, "yolo": { "type": "boolean" } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "USER_CANCELLED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
     {
+      "address": "aiCli.resumeSession",
+      "visibility": "public",
+      "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["cols", "rows"], "properties": { "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
+      "result": { "oneOf": [{ "type": "null" }, { "type": "object", "additionalProperties": false, "required": ["sessionId", "profileId"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "profileId": { "type": "string", "minLength": 1 } } }] },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
       "address": "aiCli.cancelStart",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["requestId"], "properties": { "requestId": { "type": "string", "minLength": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -92,16 +148,14 @@
     {
       "address": "aiCli.reattachSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
+      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "cols", "rows"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
     {
       "address": "aiCli.sendInput",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "data"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "data": { "type": "string" } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -110,7 +164,6 @@
     {
       "address": "aiCli.resizeSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "cols", "rows"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -119,16 +172,14 @@
     {
       "address": "aiCli.redrawSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
+      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "cols", "rows"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "cols": { "type": "integer", "minimum": 1 }, "rows": { "type": "integer", "minimum": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
     {
       "address": "aiCli.interruptSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
       "result": { "type": "object", "additionalProperties": false },
@@ -137,9 +188,8 @@
     {
       "address": "aiCli.stopSession",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string", "minLength": 1 } } },
+      "params": { "type": "object", "additionalProperties": false, "required": ["sessionId", "force"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "force": { "type": "boolean" } } },
       "result": { "type": "object", "additionalProperties": false },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     },
@@ -150,6 +200,33 @@
       "params": { "type": "object", "additionalProperties": false, "required": ["command"], "properties": { "command": { "type": "string", "minLength": 1 } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["exitCode", "stdout", "stderr"], "properties": { "exitCode": { "type": "integer" }, "stdout": { "type": "string" }, "stderr": { "type": "string" } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "USER_CANCELLED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "storage.get",
+      "visibility": "public",
+      "permission": { "id": "storage" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["scope", "key"], "properties": { "scope": { "enum": ["plugin", "workspace"] }, "key": { "type": "string", "minLength": 1 } } },
+      "result": { "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["found", "value"], "properties": { "found": { "const": true }, "value": { "$ref": "#/$defs/jsonValue" } } },
+        { "type": "object", "additionalProperties": false, "required": ["found", "value"], "properties": { "found": { "const": false }, "value": { "const": null } } }
+      ] },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "STORAGE_QUOTA_EXCEEDED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "storage.set",
+      "visibility": "public",
+      "permission": { "id": "storage" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["scope", "key", "value"], "properties": { "scope": { "enum": ["plugin", "workspace"] }, "key": { "type": "string", "minLength": 1 }, "value": { "$ref": "#/$defs/jsonValue" } } },
+      "result": { "type": "null" },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "STORAGE_QUOTA_EXCEEDED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "storage.delete",
+      "visibility": "public",
+      "permission": { "id": "storage" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["scope", "key"], "properties": { "scope": { "enum": ["plugin", "workspace"] }, "key": { "type": "string", "minLength": 1 } } },
+      "result": { "type": "boolean" },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "STORAGE_QUOTA_EXCEEDED", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
     }
   ],
   "events": [
@@ -162,19 +239,17 @@
     {
       "address": "aiCli.output",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "payload": { "type": "object", "additionalProperties": false, "required": ["sessionId", "data"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "data": { "type": "string" } } }
     },
     {
       "address": "aiCli.exited",
       "visibility": "public",
-      "eligibility": "firstParty",
       "permission": { "id": "system", "access": "aiCli", "scope": "workspace" },
       "payload": { "type": "object", "additionalProperties": false, "required": ["sessionId", "exitCode"], "properties": { "sessionId": { "type": "string", "minLength": 1 }, "exitCode": { "type": ["integer", "null"] } } }
     }
   ],
-  "firstPartyNamespaces": ["aiCli"],
+  "firstPartyNamespaces": [],
   "legacyExceptions": [
     { "event": "git.changed", "authorizedBy": "legacy fs", "replacement": "workspace.filesChanged" }
   ]

@@ -6,15 +6,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, effectScope, type EffectScope } from 'vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import { useRoles, type Role } from '../../composables/useRoles'
 import { usePipelines } from '../../composables/usePipelines'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // The dock owns a real PTY terminal (xterm); the roles tab never touches it.
-vi.mock('../AiCliDock.vue', () => ({
-  __esModule: true,
-  default: defineComponent({ name: 'AiCliDock', render: () => null }),
+vi.mock('@navide/plugin-shell', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-shell')>()),
+  AiCliDock: defineComponent({ name: 'AiCliDock', render: () => null }),
 }))
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -43,7 +44,10 @@ describe('PipelineManagerModal — roles tab', () => {
     scope = undefined
   })
 
-  async function open(roles: Role[] = baseRoles): Promise<{
+  async function open(
+    roles: Role[] = baseRoles,
+    options: { initialPipelineId?: string; selectRoles?: boolean } = {},
+  ): Promise<{
     wrapper: VueWrapper
     mock: ReturnType<typeof createMockBackend>
     rolesApi: ReturnType<typeof useRoles>
@@ -54,6 +58,11 @@ describe('PipelineManagerModal — roles tab', () => {
       pipelines: [{ id: 'default', name: 'Default', builtin: true, stage_count: 0 }],
       active_pipeline_id: 'default',
       path: '/data/pipelines.json',
+    })
+    mock.setResponse('stages.list', {
+      stages: [],
+      pipeline_id: 'default',
+      path: '/data/stages.json',
     })
 
     scope = effectScope()
@@ -68,20 +77,37 @@ describe('PipelineManagerModal — roles tab', () => {
     const w = mount(PipelineManagerModal, {
       props: {
         backend: mock.backend,
+        terminalPort: createTerminalDockStub(),
         rolesApi,
         pipelinesApi,
         workspacePath: '/tmp/ws',
         open: true,
+        initialPipelineId: options.initialPipelineId,
       },
       global: { plugins: [i18n], stubs: { teleport: true } },
     })
     await flushPromises()
     wrapper = w
 
-    await w.findAll('.tabs button')[1].trigger('click')
-    await flushPromises()
+    if (options.selectRoles !== false) {
+      await w.findAll('.tabs button')[1].trigger('click')
+      await flushPromises()
+    }
     return { wrapper: w, mock, rolesApi }
   }
+
+  it('opens an already-loaded initial pipeline after stage state is initialized', async () => {
+    const { wrapper: w, mock } = await open(baseRoles, {
+      initialPipelineId: 'default',
+      selectRoles: false,
+    })
+
+    expect(w.text()).toContain('Default')
+    expect(mock.sent).toContainEqual(expect.objectContaining({
+      type: 'stages.list',
+      payload: { pipeline_id: 'default' },
+    }))
+  })
 
   /** The roles tab body (index 1; index 0 is the pipelines tab). */
   function tab(w: VueWrapper): DOMWrapper<Element> {

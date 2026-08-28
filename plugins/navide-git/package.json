@@ -1,0 +1,18 @@
+{
+  "name": "@navide/navide-git",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "imports": {
+    "#git-feature": "./src/git-feature/index.ts",
+    "#git-feature/testing": "./src/git-feature/testing.ts"
+  },
+  "dependencies": {
+    "@navide/plugin-ui": "^1.0.0",
+    "vue": "^3.5.13",
+    "vue-i18n": "^10.0.5 || ^11.0.0"
+  }
+}

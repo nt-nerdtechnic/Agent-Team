@@ -5,8 +5,9 @@ import { GIT_PLUGIN_REQUIRES } from '../../../../shared/pluginCapabilities'
 import type { useBackend as realUseBackend } from '../../../src/composables/useBackend'
 
 // ── Compile-time interface parity ────────────────────────────────────────────
-// The plugin build aliases the real `useBackend` to the shim; if their public
-// surfaces drift, these assignments stop type-checking (caught by vue-tsc).
+// The plugin capability facade mirrors the real `useBackend` shape at its
+// composition boundary; if their public surfaces drift, these assignments
+// stop type-checking (caught by vue-tsc).
 type Real = ReturnType<typeof realUseBackend>
 type Shim = ReturnType<typeof useBackend>
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -212,5 +213,27 @@ describe('useBackend shim one-way input casts', () => {
     const resp = await backend.send('terminal.input', { data: 'x' })
     expect(callCapability).toHaveBeenCalledWith('terminal', 'input', { data: 'x' })
     expect(resp.ok).toBe(true)
+  })
+
+  it('returns a timeout envelope when the capability broker misses the deadline', async () => {
+    installNav(true)
+    callCapability.mockReturnValue(new Promise(() => {}))
+    vi.useFakeTimers()
+    try {
+      const backend = useBackend()
+      const responsePromise = backend.send('git.status', { workspace_path: '/workspace' }, 25)
+      await vi.advanceTimersByTimeAsync(24)
+      expect(callCapability).toHaveBeenCalledWith('git', 'status', { workspace_path: '/workspace' })
+
+      await vi.advanceTimersByTimeAsync(1)
+      const response = await responsePromise
+      expect(response.ok).toBe(false)
+      expect(response.error).toEqual({
+        code: 'TIMEOUT',
+        message: "capability call 'git.status' timed out after 25ms",
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

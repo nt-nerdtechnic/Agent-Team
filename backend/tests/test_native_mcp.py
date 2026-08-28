@@ -182,6 +182,39 @@ def test_an_unnamed_secret_argument_is_masked_whole(tmp_path: Path) -> None:
     assert native_mcp.scan(tmp_path)[0].args == ("--token", native_mcp.REDACTED_SECRET)
 
 
+def test_url_shaped_secret_arguments_are_masked_whole(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        (".claude.json",),
+        json.dumps(
+            {
+                "mcpServers": {
+                    "s": {
+                        "command": "x",
+                        "args": [
+                            "--token",
+                            "https://secret.example/token",
+                            "--header",
+                            "https://secret.example/header",
+                        ],
+                    }
+                }
+            }
+        ),
+    )
+
+    found = native_mcp.scan(tmp_path)[0]
+
+    assert found.args == (
+        "--token",
+        native_mcp.REDACTED_SECRET,
+        "--header",
+        native_mcp.REDACTED_SECRET,
+    )
+    serialized = json.dumps(found.as_dict())
+    assert "secret.example" not in serialized
+
+
 def test_our_own_endpoint_is_not_reported_as_the_users(tmp_path: Path) -> None:
     _write(
         tmp_path,
@@ -258,6 +291,30 @@ def test_credentials_inside_a_url_are_redacted(tmp_path: Path) -> None:
     assert "p%40ss" not in found.url
     # The host and the harmless parameter still identify the entry.
     assert found.url == "https://***@api.example.com/mcp?token=***&mode=fast"
+
+
+def test_malformed_url_does_not_hide_other_servers_or_credentials(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        (".claude.json",),
+        json.dumps(
+            {
+                "mcpServers": {
+                    "broken": {"url": "https://user:secret@host:bad/mcp"},
+                    "healthy": {"url": "https://example.com/mcp"},
+                }
+            }
+        ),
+    )
+
+    found = {server.name: server for server in native_mcp.scan(tmp_path)}
+
+    assert set(found) == {"broken", "healthy"}
+    assert found["broken"].url == native_mcp.REDACTED_SECRET
+    assert found["healthy"].url == "https://example.com/mcp"
+    serialized = json.dumps([server.as_dict() for server in found.values()])
+    assert "user" not in serialized
+    assert "secret" not in serialized
 
 
 def test_a_url_argument_is_redacted_like_a_url(tmp_path: Path) -> None:

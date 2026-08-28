@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { parsePlanFile, writePlanFile, planProgress, replacePlanSectionBody } from '../composables/usePlanFile'
 import type { PlanTodo, PlanSection, TodoStatus } from '../composables/usePlanFile'
 import type { useBackend } from '../composables/useBackend'
-import { useNotify } from '../composables/useNotify'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { renderLines, InlineText } from './markdownRender'
 
 const props = defineProps<{

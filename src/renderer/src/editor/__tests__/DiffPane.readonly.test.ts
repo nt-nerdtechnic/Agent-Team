@@ -39,7 +39,16 @@ function mountDiff(props: Record<string, unknown>) {
       filepath: 'a.ts',
       staged: false,
       name: 'a.ts',
-      backend,
+      gitTransport: {
+        status: backend.status,
+        send: backend.send,
+        on: () => () => {},
+      },
+      fileAccess: {
+        readFile: async () => ({ ok: true, content: '' }),
+        writeFile: async () => ({ ok: true }),
+        readImage: async () => '',
+      },
       ...props,
     },
     global: { mocks: { $t: (key: string) => key } },

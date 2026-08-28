@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { AGENT_SPECS } from '../../agents'
+import { AGENT_SPECS } from '@navide/plugin-shell'
 
 // A CLI that queues typed input mid-turn does not need Navide to wait for its
 // turn to end. Lifting that wait is what closes the 78s-vs-2s gap between a

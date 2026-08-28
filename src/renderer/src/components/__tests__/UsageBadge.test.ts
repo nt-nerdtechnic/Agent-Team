@@ -3,7 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import UsageBadge from '../UsageBadge.vue'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 import type { UsageSnapshot } from '../../composables/useUsage'
 import {
   cliAccountSwitchKey,
@@ -41,10 +41,16 @@ const notify = vi.hoisted(() => ({
   confirm: vi.fn(),
   prompt: vi.fn(),
 }))
-vi.mock('../../composables/useNotify', () => ({ useNotify: () => notify }))
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
+  useNotify: () => notify,
+}))
 
 const executeCommand = vi.hoisted(() => vi.fn(() => true))
-vi.mock('../../keybindings/commandRegistry', () => ({ executeCommand }))
+vi.mock('@navide/plugin-ui/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/shared')>()),
+  executeCommand,
+}))
 
 function snapshot(over: Partial<UsageSnapshot> = {}): UsageSnapshot {
   return {

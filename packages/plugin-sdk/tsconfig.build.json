@@ -7,5 +7,6 @@
     "paths": {
       "@navide/plugin-contracts": ["../plugin-contracts/dist/index.d.ts"]
     }
-  }
+  },
+  "exclude": ["src/**/*.test.ts", "src/**/__tests__/**"]
 }

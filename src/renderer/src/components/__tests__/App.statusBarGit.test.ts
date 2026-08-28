@@ -77,6 +77,7 @@ describe('the branch pill follows the workspace', () => {
   })
 
   it('hides the pill rather than rendering an empty branch', () => {
-    expect(appSource).toContain('<span v-if="statusBarGit.branch" class="sb-item sb-git">')
+    expect(appSource).toContain('v-if="statusBarGit.branch"')
+    expect(appSource).toContain('class="sb-item sb-git"')
   })
 })

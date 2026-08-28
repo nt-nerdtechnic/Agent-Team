@@ -11,7 +11,7 @@
  *  Every surface now resolves its text through this key, so a new status value
  *  or a reworded label lands in all of them at once.
  */
-import type { DisplayStatus } from '../composables/useTerminal'
+import type { DisplayStatus } from '@navide/terminal'
 
 /** Every status a pane badge or pane row can carry — DisplayStatus plus the
  *  two the pane itself cannot report: 'waiting' for a cold-restore placeholder

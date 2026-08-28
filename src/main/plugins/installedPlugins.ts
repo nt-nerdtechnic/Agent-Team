@@ -131,15 +131,18 @@ function manifestViewsToDescriptors(
   manifest: PluginManifestV2,
   pluginDir: string
 ): PluginViewLaunchDescriptor[] {
-  return (manifest.contributes?.views ?? []).map((view) => ({
-    id: view.id,
-    contributionKey: `${manifest.id}.${view.id}`,
-    kind: view.kind,
-    location: view.location,
-    title: view.title,
-    icon: view.icon,
-    entryFile: join(pluginDir, view.entry),
-  }))
+  return (manifest.contributes?.views ?? []).map((view) => {
+    const icon = view.icon ?? manifest.marketplace.icon
+    return {
+      id: view.id,
+      contributionKey: `${manifest.id}.${view.id}`,
+      kind: view.kind,
+      location: view.location,
+      title: view.title,
+      ...(icon ? { iconFile: join(pluginDir, icon) } : {}),
+      entryFile: join(pluginDir, view.entry),
+    }
+  })
 }
 
 /**
@@ -159,6 +162,7 @@ export function manifestToDescriptor(
     }
     return {
       id: manifest.id,
+      packageVersion: manifest.version,
       requires: manifestCapabilities(manifest),
       capabilityPolicy: manifestCapabilityPolicy(manifest),
       devUrl: '',
@@ -189,7 +193,7 @@ export interface PluginActivationCatalogEntry {
   packageDir: string
   views: PluginViewLaunchDescriptor[]
   backend?: PluginBackendActivation
-  provenance?: 'official-registry' | 'developer-local-unpacked'
+  provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   artifactDigest?: string
 }
 
@@ -314,7 +318,7 @@ export interface ScannedPlugin {
 export interface InstalledPluginPackageSummary {
   id: string
   requires: string[]
-  provenance?: 'official-registry' | 'developer-local-unpacked'
+  provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
 }
 

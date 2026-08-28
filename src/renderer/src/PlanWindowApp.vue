@@ -10,15 +10,16 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useBackend } from './composables/useBackend'
-import { initSettingsBackend, onSettingsChanged } from './lib/settings'
-import { useTheme } from './composables/useTheme'
-import { useNotify } from './composables/useNotify'
+import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
+import { initSettingsBackend, onSettingsChanged } from '@navide/plugin-ui/shared'
+import { useTheme } from '@navide/plugin-ui/foundation'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { resolvePlanStore, type PlanCtx, type WriteResult } from './composables/planStore'
 import { sanitizePlanSectionHtml } from './editor/planRuntime'
 import PlansPane from './editor/PlansPane.vue'
 import { lastOpenedStorageKey, loadStoredValue, saveStoredChoice } from './editor/plansPaneModel'
-import { useKeybindings, setContext } from './keybindings/useKeybindings'
-import { registerCommand } from './keybindings/commandRegistry'
+import { initKeybindingsPort, useKeybindings, setContext } from '@navide/plugin-ui/shared'
+import { registerCommand } from '@navide/plugin-ui/shared'
 import PlanReviewToolbar from './editor/PlanReviewToolbar.vue'
 import PlanFileView from './editor/PlanFileView.vue'
 import PlanMarkdownBody from './editor/PlanMarkdownBody.vue'
@@ -26,8 +27,8 @@ import FilePreviewPane from './editor/FilePreviewPane.vue'
 import PlanDocPreview from './editor/PlanDocPreview.vue'
 import NotificationHost from './components/NotificationHost.vue'
 // Shared right-side CLI agent terminal shell (rail toggle + resize + real PTY).
-import AiCliDock from './components/AiCliDock.vue'
-import { aiTerminalPaneId, buildPlanCliContext, type PlanCliMetaSummary } from './lib/aiCliContext'
+import { AiCliDock } from '@navide/plugin-shell'
+import { aiTerminalPaneId, buildPlanCliContext, type PlanCliMetaSummary } from '@navide/plugin-shell'
 
 const params = new URLSearchParams(window.location.search)
 const workspacePath = params.get('workspace_path') ?? ''
@@ -40,9 +41,11 @@ const initialRelPath = params.get('rel_path') ?? ''
 const lastOpenedKey = lastOpenedStorageKey(workspacePath)
 
 const backend = useBackend()
+const terminalPort = createHostTerminalDockPort(backend)
 // Hook the settings cache to this window's own ws connection so theme changes
 // made in other windows arrive as ui.settings_changed broadcasts.
-initSettingsBackend(backend)
+initSettingsBackend(createHostGitSettingsPort(backend))
+initKeybindingsPort(createHostKeybindingsPort())
 
 // Plan documents live in the project root, which is the workspace itself
 // unless the workspace is a subdirectory of the repository holding them (see
@@ -559,7 +562,7 @@ onUnmounted(() => {
       :pane-id="AI_PANE_ID"
       origin="plan-window"
       :workspace-path="workspacePath"
-      :backend="backend"
+      :terminal-port="terminalPort"
       :build-context="buildPlanContext"
     />
     <NotificationHost />

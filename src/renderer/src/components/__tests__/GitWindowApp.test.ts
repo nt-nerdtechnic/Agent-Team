@@ -3,14 +3,14 @@
 // "Editorial Calm" design: the checkbox-IS-the-stage-state file card, the
 // commit composer, conflict quick-resolution, the sidebar "⋯" popover menus
 // (branches / stashes / worktrees / remotes), and the diff detail. The backend
-// is mocked at the useBackend seam (exactly what the plugin build aliases), so
-// every assertion is on the real useGit → send() wire format.
+// is composed with the same Host adapters as the production renderer, so every
+// assertion is on the real useGit → GitTransport wire format.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref } from 'vue'
 import { extractDropPaths, shellEscape } from '../../lib/drop'
-import { aiTerminalPaneId } from '../../lib/aiCliContext'
-import { i18n } from '../../i18n'
+import { aiTerminalPaneId } from '@navide/plugin-shell'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 // Control surface for the stubbed CLI terminal: tests seed the PTY state the
 // dock sees at mount and read back what "Resolve with agent" pasted into it.
@@ -28,15 +28,15 @@ const term = vi.hoisted(() => ({
 
 // The CLI dock's terminal host pulls in useTerminal/xterm — stub it with the
 // imperative surface the dock drives (reattach/fit are called on first open).
-vi.mock('../AiCliTerminal.vue', () => ({
-  __esModule: true,
-  default: defineComponent({
-    name: 'AiCliTerminal',
-    props: ['paneId', 'backend', 'workspacePath'],
-    inheritAttrs: false,
-    setup(_, { expose }) {
+vi.mock('@navide/terminal', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
+  return {
+    ...actual,
+    useTerminal: () => {
       const status = ref(term.status)
-      expose({
+      return {
+        mount: vi.fn(),
+        updateXtermTheme: vi.fn(),
         spawn: vi.fn(async () => {
           term.spawnCalls++
           if (term.spawnRuns) status.value = 'running'
@@ -57,11 +57,10 @@ vi.mock('../AiCliTerminal.vue', () => ({
         lastRawActivityAt: ref(term.lastRawActivityAt),
         sessionId: ref(''),
         error: ref('')
-      })
-      return () => h('div', { class: 'stub-AiCliTerminal' })
+      }
     }
-  })
-}))
+  }
+})
 
 interface SentCall {
   type: string
@@ -222,7 +221,20 @@ vi.mock('../../composables/useBackend', () => {
 })
 
 import GitWindowApp from '../../GitWindowApp.vue'
-import { useNotify } from '../../composables/useNotify'
+import { useNotify } from '@navide/plugin-ui/foundation'
+import { useBackend } from '../../composables/useBackend'
+import { createHostGitTransport } from '../../composables/hostGitTransport'
+import { createHostGitSurfacePorts, createHostTerminalDockPort } from '../../composables/hostSurfacePorts'
+import {
+  GIT_BRANCH_DIFF_KEY,
+  GIT_ACCOUNTS_KEY,
+  GIT_CREDENTIALS_KEY,
+  GIT_FILE_ACCESS_KEY,
+  GIT_ISSUES_KEY,
+  GIT_TRANSPORT_KEY,
+  GIT_UI_KEY,
+} from '../../ports/gitSurface'
+import { TERMINAL_DOCK_KEY } from '@navide/terminal'
 
 // notify.confirm resolves through the (stubbed-out) NotificationHost, so tests
 // answer the dialog directly on the shared useNotify singleton.
@@ -279,9 +291,28 @@ function textPlainPayload(ev: DragStub): string | undefined {
   return call?.[1] as string | undefined
 }
 
-async function mountApp(): Promise<VueWrapper> {
-  window.history.replaceState({}, '', '/?workspace_path=%2Ftmp%2Fws')
-  const wrapper = mount(GitWindowApp, { global: { stubs: STUBS, plugins: [i18n] } })
+async function mountApp(workspacePath = '/tmp/ws'): Promise<VueWrapper> {
+  window.history.replaceState({}, '', `/?workspace_path=${encodeURIComponent(workspacePath)}`)
+  const backend = useBackend()
+  const gitTransport = createHostGitTransport(backend)
+  const surfacePorts = createHostGitSurfacePorts(backend, gitTransport)
+  const terminalPort = createHostTerminalDockPort(backend)
+  const wrapper = mount(GitWindowApp, {
+    global: {
+      stubs: STUBS,
+      plugins: [i18n],
+      provide: {
+        [GIT_TRANSPORT_KEY as symbol]: gitTransport,
+        [GIT_FILE_ACCESS_KEY as symbol]: surfacePorts.fileAccess,
+        [GIT_UI_KEY as symbol]: surfacePorts.ui,
+        [GIT_BRANCH_DIFF_KEY as symbol]: surfacePorts.branchDiff,
+        [GIT_CREDENTIALS_KEY as symbol]: surfacePorts.credentials,
+        [GIT_ACCOUNTS_KEY as symbol]: surfacePorts.accounts,
+        [GIT_ISSUES_KEY as symbol]: surfacePorts.issues,
+        [TERMINAL_DOCK_KEY as symbol]: terminalPort,
+      },
+    },
+  })
   await flushPromises()
   return wrapper
 }
@@ -408,9 +439,7 @@ describe('GitWindowApp — Editorial Calm wiring', () => {
   })
 
   it('normalizes a trailing slash in the workspace path and tolerates a missing dataTransfer', async () => {
-    window.history.replaceState({}, '', '/?workspace_path=%2Ftmp%2Fws%2F')
-    wrapper = mount(GitWindowApp, { global: { stubs: STUBS, plugins: [i18n] } })
-    await flushPromises()
+    wrapper = await mountApp('/tmp/ws/')
     expect(textPlainPayload(dispatchDragStart(rowFor(wrapper, 'a.ts')))).toBe('/tmp/ws/src/a.ts')
 
     const bare = new Event('dragstart', { bubbles: true, cancelable: true })
@@ -780,7 +809,7 @@ describe('GitWindowApp — toolbar ⋯, detail modes, file menu, bootstrap', () 
     expect(wrapper.findAll('.dt-modes button.on').map((b) => b.text())).toEqual(['Conflict'])
   })
 
-  it('mounts ConflictPane on the conflicted file with the brokered backend', async () => {
+  it('mounts ConflictPane on the conflicted file with the composed ports', async () => {
     statusOverride.value = mergingStatus()
     wrapper = await mountApp()
     await wrapper.find('.frow.conflict').trigger('click')
@@ -790,10 +819,11 @@ describe('GitWindowApp — toolbar ⋯, detail modes, file menu, bootstrap', () 
     expect(pane.exists()).toBe(true)
     expect(pane.props('filepath')).toBe('src/conflict.ts')
     expect(pane.props('workspacePath')).toBe('/tmp/ws')
-    expect(pane.props('backend')).toBeTruthy()
+    expect(pane.props('gitTransport')).toBeTruthy()
+    expect(pane.props('fileAccess')).toBeTruthy()
     // The merge is live, so the panel is in service.
     expect(pane.props('mergeAborted')).toBe(false)
-    // It reads the file and the index's three stages through that backend.
+    // It reads the file and the index's three stages through named ports.
     expect(callsOf('fs.read_file').some((c) => c.payload.rel_path === 'src/conflict.ts')).toBe(true)
     expect(callsOf('git.conflict_stages')[0]!.payload).toMatchObject({
       workspace_path: '/tmp/ws',

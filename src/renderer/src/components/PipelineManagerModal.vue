@@ -5,18 +5,20 @@
 // host app, so this component only owns the pipeline/stage/role UI.
 import { computed, ref, watch } from 'vue'
 import type { useBackend } from '../composables/useBackend'
-import { useNotify } from '../composables/useNotify'
-import AiCliDock from './AiCliDock.vue'
+import type { TerminalDockPort } from '@navide/terminal'
+import { useNotify } from '@navide/plugin-ui/foundation'
+import { AiCliDock } from '@navide/plugin-shell'
 import type { useRoles, Role } from '../composables/useRoles'
 import type { usePipelines, PipelineSummary } from '../composables/usePipelines'
 import { useStages } from '../composables/useStages'
 import { stageToBackend, type AgentKey, type Stage, type StageSlot } from '../data/stages'
-import { CLI_AGENT_SPECS } from '../agents'
+import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 import { buildPmAiContext } from '../lib/pmAiContext'
-import { aiTerminalPaneId } from '../lib/aiCliContext'
+import { aiTerminalPaneId } from '@navide/plugin-shell'
 
 const props = defineProps<{
   backend: ReturnType<typeof useBackend>
+  terminalPort: TerminalDockPort
   rolesApi: ReturnType<typeof useRoles>
   pipelinesApi: ReturnType<typeof usePipelines>
   /** Workspace the embedded CLI dock spawns in; empty = no workspace open. */
@@ -79,6 +81,19 @@ const plRenameText = ref('')
 // OTHER pipelines never clobber the list shown here.
 const stagesApi = useStages(backend, () => plEditingId.value)
 const sActiveStages = computed(() => stagesApi.stages.value)
+const sSelectedId = ref<string | null>(null)
+const sDraft = ref<Stage | null>(null)
+const sIsNew = ref(false)
+const sSaving = ref(false)
+const sError = ref('')
+const sConfirmDelete = ref(false)
+const sConfirmReset = ref(false)
+const sSummary = ref('')
+const sExportBusy = ref(false)
+const sImporting = ref(false)
+const sAddingSlot = ref(false)
+const sEditingSlotIndex = ref<number | null>(null)
+const sSlotDraft = ref<StageSlot>({ agentKey: 'claude', roleKey: '', label: '', kickoffBody: '', isCommander: false })
 
 const plCurrentPipeline = computed(
   () => pipelinesApi.pipelines.value.find((p) => p.id === plEditingId.value) ?? null
@@ -234,20 +249,6 @@ watch(
 const AGENT_OPTIONS: { key: AgentKey; label: string }[] = CLI_AGENT_SPECS.map(
   (s) => ({ key: s.agentKey as AgentKey, label: s.label })
 )
-
-const sSelectedId = ref<string | null>(null)
-const sDraft = ref<Stage | null>(null)
-const sIsNew = ref(false)
-const sSaving = ref(false)
-const sError = ref('')
-const sConfirmDelete = ref(false)
-const sConfirmReset = ref(false)
-const sSummary = ref('')
-const sExportBusy = ref(false)
-const sImporting = ref(false)
-const sAddingSlot = ref(false)
-const sEditingSlotIndex = ref<number | null>(null)
-const sSlotDraft = ref<StageSlot>({ agentKey: 'claude', roleKey: '', label: '', kickoffBody: '', isCommander: false })
 
 const sIsDirty = computed(() => {
   if (!sDraft.value) return false
@@ -877,7 +878,7 @@ function buildAiContext(): string {
       :pane-id="aiPaneId"
       origin="pipeline-manager"
       :workspace-path="aiWorkspace"
-      :backend="backend"
+      :terminal-port="terminalPort"
       :build-context="buildAiContext"
     />
     </div><!-- end main-row -->

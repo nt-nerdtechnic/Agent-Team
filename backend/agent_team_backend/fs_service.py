@@ -29,6 +29,7 @@ except ImportError:
     _HAVE_CHARDET = False
 
 from .projects import PROJECT_DIR_NAME
+from .git_security import is_git_internal_path
 
 _log = logging.getLogger(__name__)
 
@@ -73,6 +74,31 @@ def _resolve_safe(workspace_path: str, rel_path: str) -> Path:
 
     _reject_protected_internal_dir(target)
     return target
+
+
+def _resolve_mutation_safe(workspace_path: str, rel_path: str) -> Path:
+    """Resolve a path and reject writes to Git's internal directory.
+
+    Host Explorer is allowed to inspect ``.git``. The stronger Git-internal
+    guard belongs only on filesystem mutation paths, where changing Git's
+    metadata could alter the execution policy or repository state.
+    """
+    target = _resolve_safe(workspace_path, rel_path)
+    root = Path(workspace_path).resolve()
+    if is_git_internal_path(root, target):
+        raise FsError("the Git internal directory is protected")
+    return target
+
+
+def _reject_git_internal_tree(target: Path) -> None:
+    """Reject moving/removing a directory that contains a nested Git dir."""
+    if not target.is_dir():
+        return
+    try:
+        if any(child.name == ".git" for child in target.rglob(".git")):
+            raise FsError("the Git internal directory is protected")
+    except OSError as exc:
+        raise FsError("cannot verify Git internal directory protection") from exc
 
 
 def _reject_protected_internal_dir(target: Path) -> None:
@@ -240,7 +266,7 @@ def glob_files(
 
 def mkdir(workspace_path: str, rel_path: str) -> dict[str, Any]:
     try:
-        target = _resolve_safe(workspace_path, rel_path)
+        target = _resolve_mutation_safe(workspace_path, rel_path)
         if target == Path(workspace_path).resolve():
             raise FsError("invalid name")
         if target.exists():
@@ -253,7 +279,7 @@ def mkdir(workspace_path: str, rel_path: str) -> dict[str, Any]:
 
 def create_file(workspace_path: str, rel_path: str, content: str = "") -> dict[str, Any]:
     try:
-        target = _resolve_safe(workspace_path, rel_path)
+        target = _resolve_mutation_safe(workspace_path, rel_path)
         if target == Path(workspace_path).resolve():
             raise FsError("invalid name")
         if target.exists():
@@ -267,10 +293,12 @@ def create_file(workspace_path: str, rel_path: str, content: str = "") -> dict[s
 
 def rename(workspace_path: str, src_rel: str, dst_rel: str) -> dict[str, Any]:
     try:
-        src = _resolve_safe(workspace_path, src_rel)
-        dst = _resolve_safe(workspace_path, dst_rel)
+        src = _resolve_mutation_safe(workspace_path, src_rel)
+        dst = _resolve_mutation_safe(workspace_path, dst_rel)
         if src == Path(workspace_path).resolve():
             raise FsError("cannot rename the workspace root")
+        _reject_git_internal_tree(src)
+        _reject_git_internal_tree(dst)
         if src == dst:
             raise FsError("source and destination are the same path")
         if not src.exists():
@@ -639,7 +667,7 @@ def write_file(
     Success responses include the file's new ``mtime``.
     """
     try:
-        target = _resolve_safe(workspace_path, rel_path)
+        target = _resolve_mutation_safe(workspace_path, rel_path)
         if target == Path(workspace_path).resolve():
             raise FsError("invalid path")
         if target.exists() and target.is_dir():
@@ -704,9 +732,10 @@ def delete(workspace_path: str, rel_path: str) -> dict[str, Any]:
     unavailable, leave the original in place and return an error.
     """
     try:
-        target = _resolve_safe(workspace_path, rel_path)
+        target = _resolve_mutation_safe(workspace_path, rel_path)
         if target == Path(workspace_path).resolve():
             raise FsError("cannot delete the workspace root")
+        _reject_git_internal_tree(target)
         if not target.exists():
             raise FsError("not found")
         try:

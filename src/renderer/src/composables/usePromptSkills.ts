@@ -4,7 +4,7 @@
 // settings pane must see the same list, and a save in one has to show up in
 // the others without prop plumbing through App.vue.
 import { readonly, ref } from 'vue'
-import { onSettingsChanged } from '../lib/settings'
+import { onSettingsChanged } from '@navide/plugin-ui/shared'
 import { LOOP_PROMPT_SETTING_KEY } from '../lib/loopPrompt'
 import {
   PROMPT_SKILLS_SETTING_KEY,

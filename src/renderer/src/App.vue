@@ -30,6 +30,7 @@ import ControlPane, {
   type AnalyzerStatusView,
   type WorkspaceMode
 } from './components/ControlPane.vue'
+import PluginRegionHost, { type PluginRegionContribution } from './components/PluginRegionHost.vue'
 import QuestionAlert from './components/QuestionAlert.vue'
 import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import { asAgentPush, normalizePreviewTarget } from './preview/previewTarget'
@@ -37,8 +38,9 @@ import { usePreview } from './preview/usePreview'
 import { usePreviewLog } from './preview/usePreviewLog'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
-import { useNotify } from './composables/useNotify'
-import { agentUsesBracketedPaste, collapseHomePath, migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
+import { agentUsesBracketedPaste } from '@navide/plugin-shell'
+import { useNotify, useTheme } from '@navide/plugin-ui/foundation'
+import { collapseHomePath, migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from '@navide/terminal'
 import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
 import type { PushOutcome, RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
@@ -54,7 +56,7 @@ import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
 import { paneStatusLabelKey } from './lib/paneStatusLabel'
 import { useBackend } from './composables/useBackend'
-import { useTheme } from './composables/useTheme'
+import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
 import { useSettings } from './composables/useSettings'
 import { useRoles } from './composables/useRoles'
 import {
@@ -75,6 +77,7 @@ import { usePaneReorderDrag } from './composables/usePaneReorderDrag'
 import { cliHealthGuideForLaunch, type CliHealthStatus, type OnboardStatus } from './composables/useOnboarding'
 import { playDoneSound, playAttentionSound } from './composables/useSoundNotify'
 import { formatIssueForDispatch, buildIssueKickoff, type IssueDetail, type Issue, type IssueProvider, type IssueHandlerMode } from './composables/useIssues'
+import { normalizeGitContributionAction, type GitContributionAction } from './ports/gitContribution'
 import type { RoleKey } from './data/roles'
 import {
   renderSlotKickoff,
@@ -90,12 +93,12 @@ import {
   type StageId,
   type StageSlot
 } from './data/stages'
-import { i18n } from './i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
-import { diagLog } from './lib/diagLog'
+import { diagLog } from '@navide/terminal'
 import { reclaimBlockedBy, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
-import { findConsecutiveQuestionBlocks, findSentinel } from './lib/buffer'
+import { findConsecutiveQuestionBlocks, findSentinel } from '@navide/terminal'
 import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
@@ -113,13 +116,13 @@ import {
   screenToClientPoint,
   CLI_CHIP_LINE_CAP,
   CLI_PASTE_LINE_CAP
-} from './lib/cliContext'
+} from '@navide/terminal'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
 import { activityMeansWorking, allSlotsFinished, applyLoopWait, applyTurnProgress, detailMeansToolUse, loopWaitBackoffMs, loopWaitHonoured, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal, type LoopWaitState } from './lib/completion'
 import { reorderByIds, reorderStrings, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
 import { resolveDragBatch, reorderBatchByIds } from './lib/paneBatchDrag'
-import { AGENT_SPECS, type PaneArgContext } from './agents'
+import { AGENT_SPECS, type PaneArgContext } from '@navide/plugin-shell'
 import {
   orderedAgentKeys,
   isAgentEnabled,
@@ -135,7 +138,7 @@ import {
 import { recordDiagnostic, readDiagnostics, currentDiagnosticSeq } from './lib/uiDiagnostics'
 import { injectStandaloneTask, type StandaloneTaskInjectionDeps } from './lib/standalonePaneTask'
 import { quickClassify } from './lib/quick-classify'
-import type { DirLister } from './agents/types'
+import type { DirLister } from '@navide/plugin-shell'
 import {
   buildResumeCommand,
   acquirePaneRebuildLock,
@@ -149,7 +152,7 @@ import {
   RESTORE_PIN_AGENTS,
   shouldPreserveMissingSessionOnRestore,
   shouldWarnMissingResume,
-} from './lib/resume-command'
+} from '@navide/plugin-shell'
 import {
   claimFreshSessionId,
   classifyAttributedSession,
@@ -200,12 +203,8 @@ import {
   type RestoreSessionTrigger,
   type WorkspaceRestoreSession,
 } from './lib/resumeBehavior'
-import { initSettingsBackend, settingsGet, settingsSet } from './lib/settings'
-import {
-  cliPermissionKey,
-  parseCliPermissionMode,
-  skipPermissionFlagFor
-} from './lib/cliPermission'
+import { initSettingsBackend, settingsGet, settingsSet } from '@navide/plugin-ui/shared'
+import { cliPermissionKey, parseCliPermissionMode, skipPermissionFlagFor } from '@navide/plugin-shell'
 import { useLayoutStore } from './layout/useLayoutStore'
 import { RAIL_SIZE } from './layout/slots'
 import SlotContainer from './layout/SlotContainer.vue'
@@ -247,7 +246,7 @@ import {
 } from './lib/cliAwaitingInput'
 import { markerTurnActionFor } from './lib/sessionMarkerTurn'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
-import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
+import { executeCommand, initKeybindingsPort, useKeybindings, registerCommand, setContext } from '@navide/plugin-ui/shared'
 import { useUiActionBus } from './composables/useUiActionBus'
 import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
 import { useStatusBarPopover } from './composables/useStatusBarPopover'
@@ -268,9 +267,11 @@ const AnnouncementsPanel = defineAsyncComponent(() => import('./components/Annou
 const ClockPanel = defineAsyncComponent(() => import('./components/ClockPanel.vue'))
 
 const backend = useBackend()
+const terminalPort = createHostTerminalDockPort(backend)
 // Hook the settings cache to the ws: reconciles + flushes queued writes once
 // connected, and applies ui.settings_changed broadcasts from other windows.
-initSettingsBackend(backend)
+initSettingsBackend(createHostGitSettingsPort(backend))
+initKeybindingsPort(createHostKeybindingsPort())
 // Per-CLI quota badges: configure the backend poller and mirror its
 // usage.changed broadcasts (read by TerminalPane's UsageBadge).
 initUsage(backend)
@@ -552,6 +553,7 @@ const WS_PATH_KEY = 'agentTeam.currentWorkspace'
 // restore — see onWorkspaceCheck.
 const _bootWorkspace = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
 const _bootIsDuplicate = new URLSearchParams(window.location.search).get('duplicate') === '1'
+const legacyGitRecovery = ref(new URLSearchParams(window.location.search).get('legacy_git_recovery') === '1')
 // Set by main when this window is reopened from the saved session snapshot
 // (index.ts passes restore: '1'). Distinguishes "the app restored this
 // workspace for you" from "the user deliberately opened it" — an empty
@@ -593,6 +595,52 @@ const currentWorkspace = ref<string>(
     }
   })()
 )
+const pluginContributions = ref<PluginRegionContribution[]>([])
+const gitChangesCount = ref(0)
+
+type PluginRegionLocation = PluginRegionContribution['location']
+
+const pluginContributionsByLocation = computed(() => {
+  const grouped: Record<PluginRegionLocation, PluginRegionContribution[]> = {
+    top: [],
+    bottom: [],
+    right: [],
+    left: [],
+    main: [],
+    window: [],
+  }
+  for (const contribution of pluginContributions.value) {
+    grouped[contribution.location].push(contribution)
+  }
+  return grouped
+})
+
+function pluginContributionsAt(location: Exclude<PluginRegionLocation, 'left' | 'window'>): PluginRegionContribution[] {
+  return pluginContributionsByLocation.value[location]
+}
+
+const windowPluginContributions = computed(() => pluginContributionsByLocation.value.window)
+
+async function openPluginContributionWindow(contribution: PluginRegionContribution): Promise<void> {
+  const workspacePath = currentWorkspace.value.trim()
+  if (!workspacePath) return
+  const result = await window.agentTeam?.plugins?.openContributionWindow?.({
+    contributionKey: contribution.contributionKey,
+    workspace_path: workspacePath,
+  })
+  if (!result?.ok) {
+    console.warn(`[renderer] plugin window '${contribution.contributionKey}' could not be opened: ${result?.error ?? 'unknown error'}`)
+  }
+}
+
+async function refreshPluginContributions(): Promise<void> {
+  try {
+    const list = await window.agentTeam?.plugins?.listContributions?.()
+    pluginContributions.value = Array.isArray(list) ? list : []
+  } catch {
+    pluginContributions.value = []
+  }
+}
 const workspaceSelected = ref<boolean>(
   _bootWorkspace !== '' ||
   (() => {
@@ -608,7 +656,10 @@ const workspaceSelected = ref<boolean>(
 // workspace (Welcome picks/switches happen without a reload, so main can't see
 // them), and ask once whether the previous run exited uncleanly — only the
 // first window to ask gets the list and shows the restore prompt.
-watch(currentWorkspace, (v) => { window.agentTeam?.reportWorkspace?.(v) }, { immediate: true })
+watch(currentWorkspace, (v, previous) => {
+  window.agentTeam?.reportWorkspace?.(v)
+  if (previous !== undefined && previous !== v) gitChangesCount.value = 0
+}, { immediate: true })
 
 // Record an externally opened folder in Recent once the backend accepts
 // requests — see bootWorkspaceToRecord for which boots qualify.
@@ -3772,6 +3823,114 @@ async function onHandleIssue(payload: {
   }
 }
 
+/** Host-only action receiver for the package-owned Git left contribution. The
+ *  package never receives App callbacks or a generic renderer event channel;
+ *  the main process validates the fixed operation and forwards this typed
+ *  envelope to the active main window. */
+function onGitContributionAction(envelope: {
+  operation: string
+  payload?: Record<string, unknown>
+}): void {
+  const typedAction = normalizeGitContributionAction(envelope)
+  switch (typedAction.operation) {
+    case 'open_path':
+      void window.agentTeam?.openPath?.(typedAction.path)
+      return
+    case 'open_temp_file':
+      void window.agentTeam?.openTempFile?.(typedAction.name, typedAction.content)
+      return
+    case 'open_main_window':
+      void window.agentTeam?.openMainWindow?.({ workspace_path: typedAction.workspace_path })
+      return
+    case 'open_branch_diff_window':
+      void window.agentTeam?.openBranchDiffWindow?.({ workspace_path: typedAction.workspace_path, base: typedAction.base })
+      return
+    case 'open_git_window':
+      void window.agentTeam?.openGitWindow?.({
+        workspace_path: typedAction.workspace_path,
+        ...(typedAction.filepath === undefined ? {} : { filepath: typedAction.filepath }),
+        ...(typedAction.staged === undefined ? {} : { staged: typedAction.staged }),
+        ...(typedAction.commit === undefined ? {} : { commit: typedAction.commit }),
+        ...(typedAction.base === undefined ? {} : { base: typedAction.base }),
+        ...(typedAction.compare === undefined ? {} : { compare: typedAction.compare }),
+      })
+      return
+    case 'open_git_history_window':
+      void window.agentTeam?.openGitHistoryWindow?.({ workspace_path: typedAction.workspace_path })
+      return
+    case 'open_workspace':
+      void window.agentTeam?.openMainWindow?.({ workspace_path: typedAction.path })
+      return
+    case 'open_file':
+      void window.agentTeam?.openEditorWindow?.({
+        workspace_path: typedAction.payload.workspace_path,
+        filepath: typedAction.payload.filepath,
+        name: typedAction.payload.name,
+      })
+      return
+    case 'open_conflict':
+      void window.agentTeam?.openGitWindow?.({
+        workspace_path: typedAction.payload.workspace_path,
+        filepath: typedAction.payload.filepath,
+      })
+      return
+    case 'open_diff':
+      void window.agentTeam?.openGitWindow?.({
+        workspace_path: typedAction.payload.workspace_path,
+        filepath: typedAction.payload.filepath,
+        staged: typedAction.payload.staged,
+        commit: typedAction.payload.commit,
+      })
+      return
+    case 'open_branch_diff':
+      void window.agentTeam?.openBranchDiffWindow?.({
+        workspace_path: typedAction.payload.workspace_path,
+        base: typedAction.payload.base,
+      })
+      return
+    case 'dispatch_issue':
+      void onDispatchIssue(typedAction.payload)
+      return
+    case 'spawn_for_issue':
+      void onHandleIssue(typedAction.payload)
+      return
+    case 'focus_pane':
+      onSidebarFocusPane(typedAction.paneId)
+      return
+    case 'open_git_accounts':
+      openSettingsAccounts()
+      return
+    case 'changes_count':
+      gitChangesCount.value = typedAction.count
+      return
+    case 'execute_host_command':
+      executeCommand(typedAction.command)
+      return
+  }
+}
+
+let stopGitContributionActions: (() => void) | null = null
+let stopPluginContributionChanges: (() => void) | null = null
+let stopGitRecoveryChanged: (() => void) | null = null
+onMounted(() => {
+  stopGitContributionActions = window.agentTeam?.onGitContributionAction?.(onGitContributionAction) ?? null
+  stopGitRecoveryChanged = window.agentTeam?.onGitRecoveryChanged?.((change) => {
+    if (change.legacy) legacyGitRecovery.value = true
+  }) ?? null
+  void refreshPluginContributions()
+  stopPluginContributionChanges = window.agentTeam?.plugins?.onContributionsChanged?.(() => {
+    void refreshPluginContributions()
+  }) ?? null
+})
+onUnmounted(() => {
+  stopGitContributionActions?.()
+  stopGitContributionActions = null
+  stopGitRecoveryChanged?.()
+  stopGitRecoveryChanged = null
+  stopPluginContributionChanges?.()
+  stopPluginContributionChanges = null
+})
+
 // Default delay if no startup trust dialog is observed.
 const ROLE_PROMPT_DELAY_MS = 4000
 // Minimum time between the start of dialog-watching and role injection.
@@ -4046,7 +4205,7 @@ function setPrepStatus(pane: ActivePane, next: ActivePane['preparationStatus']):
   if (next === 'ready' || next === 'failed') prepStageEnteredAt.delete(pane.id)
   else prepStageEnteredAt.set(pane.id, now)
   diagLog(
-    backend,
+    terminalPort,
     'pane-prep',
     `pane=${pane.id.slice(0, 8)} agent=${pane.agentKey} ${prev}->${next}${spent}`
   )
@@ -6099,7 +6258,6 @@ watch(currentWorkspace, () => {
   statusBarGit.value = { branch: '', ahead: 0, behind: 0, dirty: false }
   void refreshStatusBarGit()
 })
-
 // ── Keybinding system ─────────────────────────────────────────────────────────
 useKeybindings()
 registerCommand('workbench.action.newWindow', async () => {
@@ -8876,6 +9034,11 @@ async function doCloseWorkspace(): Promise<void> {
 }
 
 // Titlebar 📁 button: open the current workspace folder in Finder.
+async function titlebarRevealWorkspace(): Promise<void> {
+  if (!currentWorkspace.value || !window.agentTeam?.openPath) return
+  await window.agentTeam.openPath(currentWorkspace.value)
+}
+
 // Titlebar 📋 button: reveal the current workspace's plans. Plans now live in
 // the main-window left sidebar as their own tab (embedded PlanPane), not a
 // detached window — so this just switches ControlPane's sidebar tab to 'plans'
@@ -13664,6 +13827,34 @@ function paneIsCommander(p: ActivePane): boolean {
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </button>
+      <div v-if="workspaceSelected && windowPluginContributions.length" class="titlebar-plugin-actions">
+        <button
+          v-for="contribution in windowPluginContributions"
+          :key="contribution.contributionKey"
+          class="titlebar-plugin-action"
+          type="button"
+          :title="contribution.title"
+          @mousedown.stop
+          @click="openPluginContributionWindow(contribution)"
+        >
+          {{ contribution.title }}
+        </button>
+      </div>
+    </div>
+    <!-- Manifest-driven top workbench contributions. The Host keeps opaque
+         instance handles in main; this renderer only supplies layout bounds. -->
+    <div
+      v-if="pluginContributionsAt('top').length"
+      class="plugin-region-layer plugin-region-layer--top"
+      data-plugin-region="top"
+    >
+      <PluginRegionHost
+        v-for="contribution in pluginContributionsAt('top')"
+        :key="contribution.contributionKey"
+        :contribution="contribution"
+        :workspace-path="currentWorkspace"
+        :visible="true"
+      />
     </div>
     <ControlPane
       ref="controlPaneRef"
@@ -13683,6 +13874,9 @@ function paneIsCommander(p: ActivePane): boolean {
       :pipelines="pipelinesApi.pipelines.value"
       :active-pipeline-id="pipelinesApi.activePipelineId.value"
       :backend="backend"
+      :plugin-contributions="pluginContributions"
+      :legacy-git-recovery="legacyGitRecovery"
+      :git-changes-count="gitChangesCount"
       v-model:yolo-enabled="yoloEnabled"
       v-model:analyzer-model="analyzerModel"
       v-model:auto-answer-enabled="autoAnswerEnabled"
@@ -13719,6 +13913,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @pipeline-restart="onPipelineRestart"
       @refresh-analyzer="onRefreshAnalyzer"
       @focus-pane="onSidebarFocusPane"
+      @changes-count="gitChangesCount = $event"
       @reorder-pane="reorderPane"
       @open-settings="showSettings = true"
       @open-pipeline-manager="openPipelineManager"
@@ -13824,6 +14019,7 @@ function paneIsCommander(p: ActivePane): boolean {
       ref="pmRef"
       :open="showPipelineManager"
       :backend="backend"
+      :terminal-port="terminalPort"
       :roles-api="rolesApi"
       :pipelines-api="pipelinesApi"
       :workspace-path="currentWorkspace"
@@ -13834,6 +14030,7 @@ function paneIsCommander(p: ActivePane): boolean {
       v-if="debugEverOpened"
       :open="showDebug"
       :backend="backend"
+      :terminal-port="terminalPort"
       :workspace-path="currentWorkspace"
       @close="showDebug = false"
     />
@@ -13896,6 +14093,19 @@ function paneIsCommander(p: ActivePane): boolean {
       :class="{ 'stage--tabbed': stageTabs.length > 0 }"
       :data-layout="effectiveLayoutMode"
     >
+      <div
+        v-if="pluginContributionsAt('main').length"
+        class="plugin-region-layer plugin-region-layer--main"
+        data-plugin-region="main"
+      >
+        <PluginRegionHost
+          v-for="contribution in pluginContributionsAt('main')"
+          :key="contribution.contributionKey"
+          :contribution="contribution"
+          :workspace-path="currentWorkspace"
+          :visible="true"
+        />
+      </div>
       <StageTabBar
         v-if="stageTabs.length > 0"
         :tabs="stageTabs"
@@ -14037,7 +14247,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :rebuilding="paneRebuilding(p)"
           :is-preparing="paneShowsPrepOverlay(p)"
           :preparing-label="panePreparationLabel(p)"
-          :backend="backend"
+          :terminal-port="terminalPort"
           :cli-profiles="cliProfilesApi"
           :workspace-path="p.workspacePath"
           :mention-candidates="mentionCandidatesFor"
@@ -14424,10 +14634,36 @@ function paneIsCommander(p: ActivePane): boolean {
     </Teleport>
     <div v-if="leftHandleVisible" class="resize-handle resize-handle-left" @mousedown="onResizeStart($event, 'left')" />
     <div v-if="rightHandleVisible" class="resize-handle resize-handle-right" @mousedown="onResizeStart($event, 'right')" />
+    <div
+      v-if="pluginContributionsAt('right').length"
+      class="plugin-region-layer plugin-region-layer--right"
+      data-plugin-region="right"
+    >
+      <PluginRegionHost
+        v-for="contribution in pluginContributionsAt('right')"
+        :key="contribution.contributionKey"
+        :contribution="contribution"
+        :workspace-path="currentWorkspace"
+        :visible="true"
+      />
+    </div>
     <NotificationHost />
     <WhatsNewModal v-if="whatsNewEntry" :entry="whatsNewEntry" @close="dismissWhatsNew" />
     <!-- Status bar -->
     <div v-if="shellLayout.chrome.statusbar" class="statusbar">
+      <div
+        v-if="pluginContributionsAt('bottom').length"
+        class="plugin-region-layer plugin-region-layer--bottom"
+        data-plugin-region="bottom"
+      >
+        <PluginRegionHost
+          v-for="contribution in pluginContributionsAt('bottom')"
+          :key="contribution.contributionKey"
+          :contribution="contribution"
+          :workspace-path="currentWorkspace"
+          :visible="true"
+        />
+      </div>
       <div class="statusbar-left">
         <span v-if="statusBarGit.branch" class="sb-item sb-git">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -14750,6 +14986,42 @@ function paneIsCommander(p: ActivePane): boolean {
   padding-bottom: var(--chrome-bottom, 24px);
 }
 
+/* Native plugin views are positioned from these DOM anchors. Empty locations
+   render no anchor, so an app with no installed contribution has no plugin
+   slot, button, or prompt. */
+.plugin-region-layer {
+  position: absolute;
+  min-width: 0;
+  min-height: 0;
+  pointer-events: none;
+  z-index: 120;
+}
+.plugin-region-layer :deep(.plugin-region-host) {
+  pointer-events: none;
+}
+.plugin-region-layer--top {
+  top: 38px;
+  left: var(--left-width, 360px);
+  right: var(--token-panel-width, 36px);
+  height: 32px;
+}
+.plugin-region-layer--main {
+  inset: 0;
+  z-index: 110;
+}
+.plugin-region-layer--right {
+  top: 38px;
+  right: var(--token-panel-width, 36px);
+  bottom: 24px;
+  width: min(320px, 28vw);
+}
+.plugin-region-layer--bottom {
+  top: 0;
+  left: var(--left-width, 360px);
+  right: var(--token-panel-width, 36px);
+  height: 24px;
+}
+
 /* ── Custom Titlebar ─────────────────────────────────────────────────────────── */
 .titlebar {
   position: absolute;
@@ -14887,6 +15159,27 @@ function paneIsCommander(p: ActivePane): boolean {
   transition: background 0.15s, color 0.15s;
 }
 .titlebar-gear:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+.titlebar-plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+  flex-shrink: 0;
+}
+.titlebar-plugin-action {
+  -webkit-app-region: no-drag;
+  border: 1px solid var(--border-muted);
+  border-radius: 5px;
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+.titlebar-plugin-action:hover {
   background: var(--bg-hover);
   color: var(--text-bright);
 }

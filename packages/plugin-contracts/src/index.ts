@@ -6,6 +6,10 @@ export * from './archive.js'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
+export type StoragePartitionScope = 'plugin' | 'workspace'
+export type StorageGetResult =
+  | { found: true; value: JsonValue }
+  | { found: false; value: null }
 
 export const V2_VIEW_LOCATIONS = ['top', 'bottom', 'right', 'left', 'main', 'window'] as const
 export const V2_SYSTEM_NAMESPACES = ['fs', 'ui', 'aiCli'] as const
@@ -520,6 +524,7 @@ export const PLUGIN_ERROR_CODES = [
   'TIMEOUT',
   'BACKEND_UNAVAILABLE',
   'PLUGIN_STOPPING',
+  'STORAGE_QUOTA_EXCEEDED',
   'INTERNAL_ERROR',
 ] as const
 
@@ -538,30 +543,45 @@ export class PluginError extends Error {
 
 export interface PublicMethodParams {
   'fs.readFile': { path: string }
+  'fs.writeFile': { path: string; content: string }
+  'fs.readImage': { path: string }
   'fs.listDirectory': { path: string }
+  'fs.listFilesFlat': { query?: string; maxResults?: number }
   'fs.glob': { pattern: string }
   'fs.stat': { path: string }
+  'fs.statPath': { path: string }
   'ui.openInEditor': { path: string; line?: number; column?: number }
   'ui.openExternal': { url: string }
-  'aiCli.startSession': { profileId: string; cols: number; rows: number }
+  'aiCli.listProfiles': Record<string, never>
+  'aiCli.startSession': { profileId: string; requestId?: string; cols: number; rows: number; yolo?: boolean }
+  'aiCli.resumeSession': { cols: number; rows: number }
   'aiCli.cancelStart': { requestId: string }
-  'aiCli.reattachSession': { sessionId: string }
+  'aiCli.reattachSession': { sessionId: string; cols: number; rows: number }
   'aiCli.sendInput': { sessionId: string; data: string }
   'aiCli.resizeSession': { sessionId: string; cols: number; rows: number }
-  'aiCli.redrawSession': { sessionId: string }
+  'aiCli.redrawSession': { sessionId: string; cols: number; rows: number }
   'aiCli.interruptSession': { sessionId: string }
-  'aiCli.stopSession': { sessionId: string }
+  'aiCli.stopSession': { sessionId: string; force: boolean }
   'shell.run': { command: string }
+  'storage.get': { scope: StoragePartitionScope; key: string }
+  'storage.set': { scope: StoragePartitionScope; key: string; value: JsonValue }
+  'storage.delete': { scope: StoragePartitionScope; key: string }
 }
 
 export interface PublicMethodResults {
   'fs.readFile': { content: string }
+  'fs.writeFile': { ok: boolean }
+  'fs.readImage': { ok: boolean; data_url?: string }
   'fs.listDirectory': { entries: Array<{ name: string; kind: 'file' | 'directory' }> }
+  'fs.listFilesFlat': { files?: string[] }
   'fs.glob': { paths: string[] }
   'fs.stat': { kind: 'file' | 'directory'; size: number; modifiedAt: string }
+  'fs.statPath': { exists: boolean }
   'ui.openInEditor': { opened: boolean }
   'ui.openExternal': { opened: boolean }
+  'aiCli.listProfiles': { profiles: Array<{ id: string; label: string }> }
   'aiCli.startSession': { sessionId: string }
+  'aiCli.resumeSession': { sessionId: string; profileId: string } | null
   'aiCli.cancelStart': Record<string, never>
   'aiCli.reattachSession': { sessionId: string }
   'aiCli.sendInput': Record<string, never>
@@ -570,6 +590,9 @@ export interface PublicMethodResults {
   'aiCli.interruptSession': Record<string, never>
   'aiCli.stopSession': Record<string, never>
   'shell.run': { exitCode: number; stdout: string; stderr: string }
+  'storage.get': StorageGetResult
+  'storage.set': null
+  'storage.delete': boolean
 }
 
 export type PublicMethod = keyof PublicMethodParams

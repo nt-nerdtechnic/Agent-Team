@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { useNotify } from '../composables/useNotify'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import {
   parseConflicts, buildResolved, countConflicts, hasConflicts,
   type FileSection, type ConflictChoice,
 } from '../lib/conflict-parser'
-import type { useBackend } from '../composables/useBackend'
+import type { GitTransport } from '../../../shared/gitCompatibility'
+import type { GitFileAccessPort } from '../ports/gitSurface'
 // Type-only — erased at build time, so this never pulls useGit into a bundle.
 import type { ConflictStages } from '../composables/useGit'
 
@@ -13,7 +14,8 @@ const props = defineProps<{
   workspacePath: string
   filepath: string
   name: string
-  backend: ReturnType<typeof useBackend>
+  gitTransport: GitTransport
+  fileAccess: GitFileAccessPort
   // injected by parent when merge is no longer in progress (abort)
   mergeAborted?: boolean
 }>()
@@ -33,7 +35,7 @@ const applying = ref(false)
 // recognise a binary conflict, which has no text merge to offer at all.
 const stages = ref<ConflictStages | null>(null)
 const showBase = ref(false)
-/** A binary conflict: the backend returns empty stages plus this flag. */
+/** A binary conflict: the transport returns empty stages plus this flag. */
 const binaryConflict = computed(() => stages.value?.binary === true)
 /** The base toggle is offered only when stage 1 exists (add/add has none). */
 const canShowBase = computed(
@@ -69,19 +71,16 @@ async function loadFile(): Promise<void> {
   stages.value = null
   void loadStages()
   try {
-    const resp = await props.backend.send<{ ok: boolean; content: string; error?: string }>(
-      'fs.read_file',
-      { workspace_path: props.workspacePath, rel_path: props.filepath },
-    )
-    if (resp.ok && resp.payload?.ok) {
-      const raw = resp.payload.content ?? ''
+    const resp = await props.fileAccess.readFile(props.workspacePath, props.filepath)
+    if (resp.ok) {
+      const raw = resp.content ?? ''
       if (!hasConflicts(raw)) {
         loadError.value = 'This file has no conflict markers'
       } else {
         content.value = raw
       }
     } else {
-      loadError.value = resp.payload?.error || resp.error?.message || 'Failed to read file'
+      loadError.value = resp.error || 'Failed to read file'
     }
   } catch (e) {
     loadError.value = e instanceof Error ? e.message : 'Failed to read file'
@@ -95,7 +94,7 @@ async function loadFile(): Promise<void> {
 async function loadStages(): Promise<void> {
   const target = props.filepath
   try {
-    const resp = await props.backend.send<ConflictStages>(
+    const resp = await props.gitTransport.send<ConflictStages>(
       'git.conflict_stages',
       { workspace_path: props.workspacePath, filepath: target },
     )
@@ -107,7 +106,7 @@ async function loadStages(): Promise<void> {
 }
 
 watch(
-  () => props.backend.status.value,
+  () => props.gitTransport.status.value,
   (s) => { if (s === 'connected' && content.value === null && !loadError.value) void loadFile() },
   { immediate: true },
 )
@@ -183,15 +182,12 @@ async function applyAndStage(): Promise<void> {
   applying.value = true
   try {
     const resolved = buildResolved(sections.value, choices.value, manualEdits.value)
-    const writeResp = await props.backend.send<{ ok: boolean; error?: string }>(
-      'fs.write_file',
-      { workspace_path: props.workspacePath, rel_path: props.filepath, content: resolved },
-    )
-    if (!(writeResp.ok && writeResp.payload?.ok)) {
-      notify.toast(writeResp.payload?.error || 'Write failed', { type: 'error' })
+    const writeResp = await props.fileAccess.writeFile(props.workspacePath, props.filepath, resolved)
+    if (!writeResp.ok) {
+      notify.toast(writeResp.error || 'Write failed', { type: 'error' })
       return
     }
-    const stageResp = await props.backend.send<{ ok: boolean; error?: string }>(
+    const stageResp = await props.gitTransport.send<{ ok: boolean; error?: string }>(
       'git.stage',
       { workspace_path: props.workspacePath, files: [props.filepath] },
     )
@@ -277,7 +273,7 @@ function choiceOf(idx: number): ConflictChoice | undefined {
       <div v-if="loading" class="cp-msg">{{ $t('label.loading') }}</div>
       <div v-else-if="mergeAborted" class="cp-msg warn">{{ $t('status.merge-aborted') }}</div>
       <!-- A binary conflict has no text to merge — say so instead of showing an
-           empty merge view (the backend returns empty stages plus the flag). -->
+           empty merge view (the transport returns empty stages plus the flag). -->
       <div v-else-if="binaryConflict" class="cp-msg warn">{{ $t('label.binary-conflict') }}</div>
       <div v-else-if="loadError" class="cp-msg err">{{ loadError }}</div>
       <div v-else-if="content === null" class="cp-msg">{{ $t('label.not-loaded') }}</div>

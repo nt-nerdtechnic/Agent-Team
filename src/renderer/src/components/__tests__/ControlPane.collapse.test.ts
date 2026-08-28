@@ -14,6 +14,15 @@ import { describe, it, expect } from 'vitest'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
 
+const gitContribution = {
+  pluginId: 'navide.git',
+  packageVersion: '0.1.0',
+  contributionKey: 'navide.git:left',
+  location: 'left',
+  title: 'Git',
+  icon: null,
+}
+
 const minimalProps = {
   backendStatus: 'connected',
   backendUrl: '',
@@ -26,7 +35,8 @@ const minimalProps = {
   analyzerModel: '',
   analyzerStatus: {},
   autoAnswerEnabled: false,
-  existingProject: null
+  existingProject: null,
+  pluginContributions: [gitContribution],
 } as unknown as Record<string, unknown>
 
 /** The exposed tab switcher — what Cmd+1..5 and App's entry points both call. */
@@ -176,15 +186,11 @@ describe('ControlPane – left slot collapse', () => {
   })
 
   it('carries the git change count onto the rail, capped at 99+', async () => {
-    const w = mountPane({ collapsed: true, backend: {} })
+    const w = mountPane({ collapsed: true, gitChangesCount: 0 })
     expect(w.find('.rail .rail-badge').exists()).toBe(false)
-    // MultiRepoGit stays mounted while collapsed, so its count keeps flowing.
-    const git = w.findComponent({ name: 'MultiRepoGit' })
-    git.vm.$emit('changes-count', 7)
-    await w.vm.$nextTick()
+    await w.setProps({ gitChangesCount: 7 })
     expect(w.find('.rail .rail-badge').text()).toBe('7')
-    git.vm.$emit('changes-count', 150)
-    await w.vm.$nextTick()
+    await w.setProps({ gitChangesCount: 150 })
     expect(w.find('.rail .rail-badge').text()).toBe('99+')
     w.unmount()
   })

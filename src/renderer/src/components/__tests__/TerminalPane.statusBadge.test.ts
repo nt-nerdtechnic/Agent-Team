@@ -3,7 +3,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import type { Ref } from 'vue'
 import TerminalPane from '../TerminalPane.vue'
-import type { DisplayStatus } from '../../composables/useTerminal'
+import type { DisplayStatus } from '@navide/terminal'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 import { paneStatusLabelKey } from '../../lib/paneStatusLabel'
 
 // The pane-header status pill — the badge the user actually reads. Every value
@@ -18,11 +19,13 @@ const mockTerminal = vi.hoisted(() => ({
   awaitingKind: null as unknown as Ref<string | null>,
 }))
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   mockTerminal.displayStatus = ref('idle')
   mockTerminal.awaitingKind = ref(null)
   return {
+    ...actual,
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: vi.fn(),
@@ -45,7 +48,12 @@ function mountPane(status: DisplayStatus, kind: 'permission' | 'question' | null
   mockTerminal.awaitingKind.value = kind
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {}, cliProfiles: {} },
+    props: {
+      paneId: 'pane-1',
+      title: 'Claude',
+      terminalPort: createTerminalDockStub(),
+      cliProfiles: {},
+    },
     global: { mocks: { $t: tMock } }
   })
 }

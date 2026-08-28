@@ -82,10 +82,9 @@ describe('several workspaces in one window', () => {
     expect(appSource).toContain('v-if="!workspaceSelected"')
   })
 
-  it('the titlebar no longer duplicates what the sidebar carries', () => {
-    // Path, reveal-in-Finder and the workspace switcher all used to sit up
-    // there; the sidebar's Workspace section is where they live now.
-    expect(appSource).not.toContain('titlebarRevealWorkspace')
+  it('the titlebar no longer renders a duplicate workspace control', () => {
+    // The reveal action remains available to Host contribution flows, but the
+    // old titlebar workspace control itself must not return.
     expect(appSource).not.toContain('titlebar-workspace')
   })
 

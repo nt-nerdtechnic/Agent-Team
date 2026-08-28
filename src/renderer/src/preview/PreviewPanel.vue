@@ -10,8 +10,10 @@
 // panel is read-only, and pulling Monaco into the main window would cost every
 // workspace window. "Open in editor" is the escape hatch instead.
 import { computed, ref, toRef } from 'vue'
-import { useNotify } from '../composables/useNotify'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import type { useBackend } from '../composables/useBackend'
+import { createHostGitFileAccessPort } from '../composables/hostSurfacePorts'
+import { createHostGitTransport } from '../composables/hostGitTransport'
 import DiffPane from '../editor/DiffPane.vue'
 import FilePreviewPane from '../editor/FilePreviewPane.vue'
 import InlineHtmlPreview from './InlineHtmlPreview.vue'
@@ -27,6 +29,8 @@ const props = defineProps<{
 }>()
 
 const notify = useNotify()
+const gitTransport = createHostGitTransport(props.backend)
+const fileAccess = createHostGitFileAccessPort(props.backend)
 const { current, clear, show } = usePreview()
 
 const target = computed<PreviewTarget | null>(() => current.value)
@@ -234,7 +238,8 @@ function clearTrack(): void {
           :staged="target.staged === true"
           :commit="target.commit"
           :name="title"
-          :backend="props.backend"
+          :git-transport="gitTransport"
+          :file-access="fileAccess"
           readonly
           @open-file="(f) => openInEditor(f.filepath, f.name)"
         />

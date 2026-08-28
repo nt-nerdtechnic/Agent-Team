@@ -25,5 +25,8 @@
   },
   "peerDependencies": {
     "@navide/plugin-contracts": "^1.0.0"
+  },
+  "devDependencies": {
+    "@navide/plugin-contracts": "1.0.0"
   }
 }

@@ -8,7 +8,7 @@
  * truncation) live in aiCliContext.ts.
  */
 
-import { truncateText } from './aiCliContext'
+import { truncateText } from '@navide/plugin-shell'
 
 export interface PmAiPipelineSummary {
   name: string

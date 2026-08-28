@@ -7,7 +7,7 @@
 // list's status vocabulary and jump.
 import { describe, expect, it } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
-import { i18n } from '../../i18n'
+import { i18n } from '@navide/plugin-ui/foundation'
 import ResourceSummaryPanel, { type ResourceSummaryRow } from '../ResourceSummaryPanel.vue'
 import { useStatusBarPopover } from '../../composables/useStatusBarPopover'
 

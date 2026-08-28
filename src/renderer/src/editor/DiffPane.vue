@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useNotify } from '../composables/useNotify'
+import { useNotify } from '@navide/plugin-ui/foundation'
 import { parseHunks, buildPatch, hunkHasChanges, toSideBySide, type Hunk } from '../lib/git-diff'
 import { loadImageDataUrl } from '../lib/imageData'
-import type { useBackend } from '../composables/useBackend'
+import type { GitTransport } from '../../../shared/gitCompatibility'
+import type { GitFileAccessPort } from '../ports/gitSurface'
 
 const props = defineProps<{
   workspacePath: string
   filepath: string
   staged: boolean
   name: string
-  backend: ReturnType<typeof useBackend>
+  gitTransport: GitTransport
+  fileAccess: GitFileAccessPort
   // When set, shows the diff this commit introduced (read-only: no stage/
   // unstage/discard actions) instead of the working-tree/staged diff.
   commit?: string
@@ -77,7 +79,7 @@ async function loadImage(): Promise<void> {
   imageDataUrl.value = ''
   // Commit mode: the working-tree version may not match the commit — skip.
   if (props.commit || !isImage.value || !props.filepath) return
-  imageDataUrl.value = await loadImageDataUrl(props.backend, props.workspacePath, props.filepath)
+  imageDataUrl.value = await loadImageDataUrl(props.fileAccess, props.workspacePath, props.filepath)
 }
 
 async function loadDiff(): Promise<void> {
@@ -86,7 +88,7 @@ async function loadDiff(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const resp = await props.backend.send<{ ok: boolean; diff: string; error?: string }>('git.diff_file', {
+    const resp = await props.gitTransport.send<{ ok: boolean; diff: string; error?: string }>('git.diff_file', {
       workspace_path: props.workspacePath,
       filepath: props.filepath,
       staged: props.staged,
@@ -108,7 +110,7 @@ async function loadDiff(): Promise<void> {
 }
 
 watch(
-  () => props.backend.status.value,
+  () => props.gitTransport.status.value,
   (s) => { if (s === 'connected' && rawDiff.value === null) { void loadDiff(); void loadImage() } },
   { immediate: true },
 )
@@ -135,7 +137,7 @@ function selectedCount(hunkIdx: number): number {
 async function apply(patch: string, reverse: boolean, cached: boolean): Promise<void> {
   if (!canEdit.value) return
   try {
-    const resp = await props.backend.send<{ ok: boolean; error?: string }>('git.apply_patch', {
+    const resp = await props.gitTransport.send<{ ok: boolean; error?: string }>('git.apply_patch', {
       workspace_path: props.workspacePath,
       patch,
       reverse,

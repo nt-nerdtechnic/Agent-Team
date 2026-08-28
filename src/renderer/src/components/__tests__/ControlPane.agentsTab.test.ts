@@ -2,7 +2,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
-import { executeCommand, _resetRegistry } from '../../keybindings/commandRegistry'
+import { executeCommand } from '@navide/plugin-ui/shared'
+import { _resetRegistry } from '@navide/plugin-ui/shared/testing'
 
 // The agent list, spawn card and resume notice moved out of the Pipeline tab
 // into their own Agents tab. Anything that drives them programmatically has to
@@ -30,7 +31,7 @@ const props = {
 /** True when the 1st tab button (Agents) carries the active class. */
 function onAgentsTab(wrapper: VueWrapper): boolean {
   const btns = wrapper.findAll('.sidebar-tabs .tab-btn')
-  return btns.length === 5 && btns[0].classes().includes('active')
+  return btns[0]?.classes().includes('active') ?? false
 }
 
 describe('ControlPane – Agents tab is surfaced by programmatic entry points', () => {

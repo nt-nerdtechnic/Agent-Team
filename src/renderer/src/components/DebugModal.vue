@@ -12,10 +12,14 @@
 // fire while a terminal has focus (Esc is the CLI's own interrupt key).
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsGet, settingsSet } from '../lib/settings'
-import { CLI_AGENT_SPECS } from '../agents'
-import { aiTerminalPaneId, bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
-import { cliPermissionKey } from '../lib/cliPermission'
+import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
+import {
+  aiTerminalPaneId,
+  bracketedPaste,
+  CLI_AGENT_SPECS,
+  cliPermissionKey,
+  resolveCliCommand,
+} from '@navide/plugin-shell'
 import {
   LOG_LEVELS,
   capLines,
@@ -25,7 +29,8 @@ import {
   type LogLevel,
 } from '../lib/debugLog'
 import type { useBackend } from '../composables/useBackend'
-import AiCliTerminal from './AiCliTerminal.vue'
+import type { TerminalDockPort } from '@navide/terminal'
+import { AiCliTerminal } from '@navide/plugin-shell'
 
 const logLevelList = LOG_LEVELS
 const getLineLevel = logLineLevel
@@ -33,6 +38,7 @@ const getLineLevel = logLineLevel
 const props = defineProps<{
   open: boolean
   backend: ReturnType<typeof useBackend>
+  terminalPort: TerminalDockPort
   /** Workspace the AI tab spawns in; falls back to the log directory. */
   workspacePath: string
 }>()
@@ -548,7 +554,7 @@ onUnmounted(() => stopTail())
               :key="shellPaneId"
               ref="shellRef"
               :pane-id="shellPaneId"
-              :backend="backend"
+              :terminal-port="terminalPort"
               :workspace-path="logDir"
             />
           </div>
@@ -589,7 +595,7 @@ onUnmounted(() => stopTail())
               :key="aiPaneId"
               ref="aiRef"
               :pane-id="aiPaneId"
-              :backend="backend"
+              :terminal-port="terminalPort"
               :workspace-path="aiWorkspace"
             />
           </div>

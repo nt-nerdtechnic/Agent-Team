@@ -13,9 +13,9 @@ import {
   type UsageWindow
 } from '../composables/useUsage'
 import { cliAccountSwitchKey, type useCliProfiles } from '../composables/useCliProfiles'
-import { useNotify } from '../composables/useNotify'
-import { executeCommand } from '../keybindings/commandRegistry'
-import { i18n } from '../i18n'
+import { useNotify } from '@navide/plugin-ui/foundation'
+import { executeCommand } from '@navide/plugin-ui/shared'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 // Compact remaining-quota badge for a CLI pane header. Renders nothing when
 // the agent has no usage provider or nothing was fetched yet; shows ⚠ when

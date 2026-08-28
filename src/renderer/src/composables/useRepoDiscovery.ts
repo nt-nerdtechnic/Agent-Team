@@ -1,6 +1,6 @@
 import { ref, watch, onScopeDispose } from 'vue'
-import type { useBackend } from './useBackend'
 import type { DiscoveredRepo, DiscoverReposResponse, GitStatus } from './useGit'
+import type { GitTransport } from '../../../shared/gitCompatibility'
 
 export interface RepoBadge {
   branch: string
@@ -13,9 +13,9 @@ export interface DiscoveredRepoWithBadge extends DiscoveredRepo {
 
 export function useRepoDiscovery(
   workspacePath: () => string,
-  backend: ReturnType<typeof useBackend>,
+  transport: GitTransport,
 ) {
-  const { send, on } = backend
+  const { send, on } = transport
   const repositories = ref<DiscoveredRepoWithBadge[]>([])
   // True when the backend skipped the downward scan because the workspace lives
   // on a cloud-synced folder (walking it can block for minutes). Only a user
@@ -72,6 +72,7 @@ export function useRepoDiscovery(
         { workspace_path: ws, force },
       )
       if (!resp.ok || !resp.payload?.ok || workspacePath() !== ws) return
+      if (force) forcedWorkspace = ws
       const skipped = resp.payload.skipped === 'cloud_storage'
       // Don't throw away a result the user already paid a tree walk for.
       if (skipped && forcedWorkspace === ws) return
@@ -81,7 +82,6 @@ export function useRepoDiscovery(
       return
     }
 
-    if (force) forcedWorkspace = ws
     const badged = await withBadges(discovered)
 
     if (workspacePath() === ws) {

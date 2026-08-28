@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // A copy or paste that comes to nothing writes a diagnostic line, which serves
 // a later bug report. The pane also has to tell the person who just pressed
@@ -14,9 +15,11 @@ const captured = vi.hoisted(() => ({
   onClipboardFailure: undefined as ((reason: string, chars: number) => void) | undefined
 }))
 
-vi.mock('../../composables/useTerminal', async () => {
+vi.mock('@navide/terminal', async (importOriginal) => {
   const { ref } = await import('vue')
+  const actual = await importOriginal<typeof import('@navide/terminal')>()
   return {
+    ...actual,
     useTerminal: (
       _paneId: string,
       _backend: unknown,
@@ -39,26 +42,29 @@ vi.mock('../../composables/useTerminal', async () => {
 
 const toasts = vi.hoisted(() => [] as Array<{ message: string, type?: string }>)
 
-vi.mock('../../composables/useNotify', () => ({
+vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@navide/plugin-ui/foundation')>()),
   useNotify: () => ({
     toast: (message: string, opts?: { type?: string }) => { toasts.push({ message, type: opts?.type }) }
-  })
-}))
-
-vi.mock('../../i18n', () => ({
+  }),
   // Echo the key and its params so assertions can see both without pinning
   // wording, which belongs to the locale files rather than to this behaviour.
   i18n: {
     global: {
       t: (key: string, params?: Record<string, unknown>) => `${key} ${JSON.stringify(params ?? {})}`
     }
-  }
+  },
 }))
 
 function mountPane(): VueWrapper {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {}, cliProfiles: {} },
+    props: {
+      paneId: 'pane-1',
+      title: 'Claude',
+      terminalPort: createTerminalDockStub(),
+      cliProfiles: {},
+    },
     global: { mocks: { $t: (key: string) => key } }
   })
 }
