@@ -11,7 +11,7 @@ needs tests of its own.
 
 from __future__ import annotations
 
-from agent_team_backend.plugins.builtin.navide_plans.plan_mcp import _ui_status_is_idle
+from agent_team_backend.mcp_server.server import _ui_status_is_idle
 
 
 def test_plain_idle_statuses_pass() -> None:

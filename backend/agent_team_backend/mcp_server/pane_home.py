@@ -44,9 +44,7 @@ from typing import Any
 from agent_team_backend.cli_vendors import registry
 from agent_team_backend.cli_vendors.base import McpWiring, mcp_document
 
-log = logging.getLogger(
-    "agent_team_backend.plugins.builtin.navide_plans.pane_home"
-)
+log = logging.getLogger("agent_team_backend.mcp_server.pane_home")
 
 PANES_DIR_NAME = ".navide-panes"
 

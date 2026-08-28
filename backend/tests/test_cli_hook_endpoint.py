@@ -181,7 +181,7 @@ def test_stop_hook_records_pane_activity_so_wait_idle_sees_it(
     from types import SimpleNamespace
 
     from agent_team_backend import agent_messaging
-    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
+    from agent_team_backend.mcp_server import server as plan_mcp, wiring as plan_mcp_wiring
 
     agent_messaging._reset_for_test()
     app_module._pane_activity.clear()

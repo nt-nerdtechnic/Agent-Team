@@ -20,7 +20,7 @@ from agent_team_backend import agent_messaging
 from agent_team_backend import app as app_module
 from agent_team_backend.app import app
 from agent_team_backend.git_watcher import _RepoHandler
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
+from agent_team_backend.mcp_server import server as plan_mcp, wiring as plan_mcp_wiring
 
 WS_SESSION = "s-hook"
 

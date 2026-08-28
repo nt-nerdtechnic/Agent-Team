@@ -146,6 +146,26 @@ def apply_routes(host: PluginHost, router: Any) -> None:
             log.warning("failed to mount plugin route %s: %s", registered.path, err)
 
 
+def apply_mcp_tools(host: PluginHost, server: Any) -> list[str]:
+    """Let every activated plugin add its tools to the core MCP server.
+
+    Must run after all plugins are activated and BEFORE the server's session
+    manager is built: the manager snapshots the tool registry, so a tool added
+    afterwards is missing from the list clients see, silently. A failing
+    installer is isolated the way a failing route is — the rest of the server
+    still comes up. Returns the ids of the plugins that installed tools.
+    """
+    installed: list[str] = []
+    for plugin_id, installer in host.registered_mcp_tool_installers():
+        try:
+            installer(server)
+        except Exception as err:  # noqa: BLE001 - isolate broken plugins
+            log.warning("plugin %s failed to install MCP tools: %s", plugin_id, err)
+            continue
+        installed.append(plugin_id)
+    return installed
+
+
 async def _run_hooks(pairs: list, kind: str) -> None:
     for plugin_id, hook in pairs:
         try:

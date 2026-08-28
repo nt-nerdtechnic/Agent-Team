@@ -4293,6 +4293,20 @@ async def _terminal_create_impl(
         # env is passed last and mutated in place: CLIs with no additive MCP
         # flag take their wiring through a variable instead, and it is settled
         # by this point (CODEX_HOME above is the last writer).
+        # Navide's own MCP endpoint first — it is core, not a plugin, and a
+        # pane that misses it loses every navide tool. env is mutated in place
+        # for the CLIs that take their wiring through a variable.
+        from .mcp_server import wiring as mcp_server_wiring
+
+        payload["command"] = await asyncio.to_thread(
+            mcp_server_wiring.wire_command,
+            agent_key,
+            payload["command"],
+            mcp_server_wiring.backend_port(),
+            str(payload.get("pane_id") or ""),
+            env,
+            str(payload.get("cwd") or ""),
+        )
         payload["command"] = await asyncio.to_thread(
             app.plugin_wiring.apply_spawn_wiring,
             app.plugin_host,
@@ -6277,7 +6291,7 @@ async def agent_msg_set_busy(session: "Session", msg_id: str, msg_type: str, pay
 
 def _external_access_status() -> dict:
     """{enabled, token, port} for the Settings UI's external-access panel."""
-    from .plugins.builtin.navide_plans import plan_mcp_auth, plan_mcp_wiring
+    from .mcp_server import auth as plan_mcp_auth, wiring as plan_mcp_wiring
 
     return {
         "enabled": plan_mcp_auth.external_enabled(),
@@ -6295,7 +6309,7 @@ async def external_access_get(session: "Session", msg_id: str, msg_type: str, pa
 @handler("external_access.set")
 async def external_access_set(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Settings UI: turn external access to /plan-mcp on or off."""
-    from .plugins.builtin.navide_plans import plan_mcp_auth
+    from .mcp_server import auth as plan_mcp_auth
 
     plan_mcp_auth.set_external_enabled(bool(payload.get("enabled")))
     await session.send_json(make_response(msg_id, msg_type, _external_access_status()))
@@ -6306,7 +6320,7 @@ async def external_access_regenerate(
     session: "Session", msg_id: str, msg_type: str, payload: dict
 ) -> None:
     """Settings UI: mint a new external token, invalidating the old one."""
-    from .plugins.builtin.navide_plans import plan_mcp_auth
+    from .mcp_server import auth as plan_mcp_auth
 
     plan_mcp_auth.regenerate_external_token()
     await session.send_json(make_response(msg_id, msg_type, _external_access_status()))
@@ -6316,7 +6330,7 @@ async def external_access_regenerate(
 async def agent_spawn_result(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """A window's verdict on an agent_spawn.request, handed to the waiting
     cli_open_agent call."""
-    from .plugins.builtin.navide_plans import plan_mcp
+    from .mcp_server import server as plan_mcp
 
     request_id = str(payload.get("request_id") or "")
     if not request_id:
@@ -6340,7 +6354,7 @@ async def agent_spawn_result(session: "Session", msg_id: str, msg_type: str, pay
 async def ui_invoke_result(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """A renderer window's reply to a ui.invoke.request, handed to the
     waiting ui_invoke/ui_snapshot/ui_list_actions MCP call."""
-    from .plugins.builtin.navide_plans import plan_mcp
+    from .mcp_server import server as plan_mcp
 
     request_id = str(payload.get("request_id") or "")
     if not request_id:
@@ -6563,7 +6577,7 @@ async def agent_msg_hold_update(
     `hold` is {key, n?} or null (nothing holding it any more). Keys this server
     never minted are ignored, exactly as agent_msg.delivered ignores them.
     """
-    from .plugins.builtin.navide_plans import plan_mcp
+    from .mcp_server import server as plan_mcp
 
     msg_key = str(payload.get("msg_key") or "")
     if not msg_key:
@@ -6614,7 +6628,7 @@ async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, pa
     matching msg_key ignore the event.
     """
     from . import app
-    from .plugins.builtin.navide_plans import plan_mcp
+    from .mcp_server import server as plan_mcp
 
     msg_key = str(payload.get("msg_key") or "")
     if not msg_key:

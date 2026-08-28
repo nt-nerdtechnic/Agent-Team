@@ -60,9 +60,9 @@ from urllib.parse import quote
 from agent_team_backend.applog import app_data_dir, backend_port_file
 from agent_team_backend.cli_vendors import registry
 from agent_team_backend.cli_vendors.base import McpWiring, mcp_document, mcp_entry
-from agent_team_backend.plugins.builtin.navide_plans import pane_home, plan_mcp_auth
+from agent_team_backend.mcp_server import auth, pane_home
 
-log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mcp_wiring")
+log = logging.getLogger("agent_team_backend.mcp_server.wiring")
 
 SERVER_NAME = "navide"
 SERVER_LABEL = "Navide"
@@ -99,7 +99,7 @@ def plan_mcp_url(port: int, pane_id: str = "") -> str:
     base = f"http://127.0.0.1:{port}/plan-mcp"
     if pane_id:
         return f"{base}?pane={quote(pane_id, safe='')}&t={quote(caller_token(), safe='')}"
-    return f"{base}?client=host&t={quote(plan_mcp_auth.internal_token(), safe='')}"
+    return f"{base}?client=host&t={quote(auth.internal_token(), safe='')}"
 
 
 def caller_token() -> str:
@@ -474,3 +474,14 @@ def wire_command(
                 env_var, root = prepared
                 env[env_var] = root
     return command
+
+
+def write_claude_config_for_current_port() -> None:
+    """Refresh the app-owned claude ``--mcp-config`` file with this run's port.
+
+    Port discovery file absent -> no-op; panes just spawn unwired. Kept apart
+    from the session-manager startup so a failure in one never skips the other.
+    """
+    port = backend_port()
+    if port is not None:
+        write_claude_config(port)

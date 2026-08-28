@@ -44,7 +44,7 @@ from .credential_vault import LOGIN_HOME_DIRNAME
 from .db import DB_FILENAME, MIGRATED_SUFFIX
 from .history_store import HISTORY_FILE
 from .plan_history import HISTORY_DIR_NAME as PLAN_HISTORY_DIR_NAME
-from .plugins.builtin.navide_plans import pane_home
+from .mcp_server import pane_home
 from .profiles_store import PROFILE_HOME_DIRNAME, default_profiles_root
 from .projects import (
     PROJECT_DIR_NAME,

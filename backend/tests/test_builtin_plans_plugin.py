@@ -1,4 +1,11 @@
-"""Builtin navide.plans plugin: discovery, registrations, spawn wiring."""
+"""Builtin navide.plans plugin, and the core MCP server it contributes to.
+
+The plugin owns the ``plan_*`` tools and nothing else. The endpoint those
+tools are served from, its lifecycle, and the spawn wiring that hands a
+pane its URL are core — this file asserts that split, because getting it
+wrong is silent: tools installed after the session manager starts simply
+do not appear in tools/list.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +21,7 @@ from agent_team_backend.plugins.activation_catalog import (
     ACTIVATION_CATALOG_DIGEST_ENV,
     ACTIVATION_CATALOG_PATH_ENV,
 )
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
+from agent_team_backend.mcp_server import server as plan_mcp, wiring as plan_mcp_wiring
 from agent_team_backend.plugins.host import PluginHost
 
 
@@ -47,53 +54,60 @@ def test_startup_activates_builtin_and_registers_contributions(
 ) -> None:
     assert wiring.startup(host) == ["navide.plans", "navide.skills"]
 
-    routes = host.registered_routes()
-    assert [(r.path, r.methods) for r in routes] == [
-        ("/plan-mcp", ["GET", "POST", "DELETE"])
-    ]
-    assert routes[0].asgi_app is plan_mcp.asgi_app
-    # Two startup hooks (MCP session manager + claude config refresh), one
-    # shutdown hook, one spawn transformer — all attributed to the plugin.
-    assert [pid for pid, _ in host.startup_hooks()] == ["navide.plans"] * 2
-    assert [pid for pid, _ in host.shutdown_hooks()] == ["navide.plans"]
-    assert [pid for pid, _ in host.spawn_transformers()] == [
-        "navide.plans",
-        "navide.skills",
-    ]
+    # The plugin contributes exactly one thing: its tools. The route, the
+    # session-manager lifecycle, the claude config refresh and the MCP spawn
+    # wiring are core — none of them is about plans, and every one of them
+    # must work whether or not this plugin loads.
+    assert host.registered_routes() == []
+    assert host.startup_hooks() == []
+    assert host.shutdown_hooks() == []
+    assert [pid for pid, _ in host.spawn_transformers()] == ["navide.skills"]
+    assert [pid for pid, _ in host.registered_mcp_tool_installers()] == ["navide.plans"]
 
 
-async def test_lifecycle_hooks_drive_plan_mcp_and_claude_config(
+async def test_core_lifecycle_starts_the_server_and_refreshes_claude_config(
     host: PluginHost, tmp_path: Path
 ) -> None:
     _stage_port_file(tmp_path)
     wiring.startup(host)
 
-    await wiring.run_startup_hooks(host)
+    await plan_mcp.startup()
     try:
         assert plan_mcp._session_manager is not None  # noqa: SLF001
+        plan_mcp_wiring.write_claude_config_for_current_port()
         assert plan_mcp_wiring.claude_config_path().is_file()
     finally:
-        await wiring.run_shutdown_hooks(host)
+        await plan_mcp.shutdown()
     assert plan_mcp._session_manager is None  # noqa: SLF001
+
+
+def test_plugin_tools_are_installed_on_the_core_server(host: PluginHost) -> None:
+    """The whole point of register_mcp_tools: one server, one tool list.
+
+    A plugin serving its own endpoint instead would give an agent two, and a
+    tool installed after the session manager starts would be in neither.
+    """
+    wiring.startup(host)
+    assert wiring.apply_mcp_tools(host, plan_mcp.server) == ["navide.plans"]
 
 
 # -- spawn wiring ------------------------------------------------------------
 
 
-def test_spawn_wiring_appends_claude_flag(host: PluginHost, tmp_path: Path) -> None:
-    wiring.startup(host)
+def test_spawn_wiring_appends_claude_flag(tmp_path: Path) -> None:
+    # Core wiring, called directly the way terminal.create calls it — no
+    # plugin host involved, because a pane must be wired even with none loaded.
     _stage_port_file(tmp_path)
     config = plan_mcp_wiring.write_claude_config(4567)
 
-    wired = wiring.apply_spawn_wiring(host, "claude", "claude")
+    wired = plan_mcp_wiring.wire_command("claude", "claude", plan_mcp_wiring.backend_port())
     assert wired == f"claude --mcp-config {shlex.quote(str(config))}"
 
 
-def test_spawn_wiring_appends_codex_override(host: PluginHost, tmp_path: Path) -> None:
-    wiring.startup(host)
+def test_spawn_wiring_appends_codex_override(tmp_path: Path) -> None:
     _stage_port_file(tmp_path)
 
-    wired = wiring.apply_spawn_wiring(host, "codex", "codex")
+    wired = plan_mcp_wiring.wire_command("codex", "codex", plan_mcp_wiring.backend_port())
     # No pane id given, so the override URL carries the host credential.
     assert wired == (
         f"codex -c 'mcp_servers.navide.url=\"{plan_mcp_wiring.plan_mcp_url(4567)}\"'"

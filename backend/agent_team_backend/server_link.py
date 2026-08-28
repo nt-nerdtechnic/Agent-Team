@@ -1186,7 +1186,7 @@ class ServerLink:
 
     def _on_message_acked(self, payload: Any) -> None:
         """The far side reported what became of a message this device sent."""
-        from .plugins.builtin.navide_plans import plan_mcp
+        from .mcp_server import server as plan_mcp
 
         data = payload if isinstance(payload, dict) else {}
         msg_key = str(data.get("msgKey") or "")

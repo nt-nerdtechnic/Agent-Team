@@ -21,11 +21,7 @@ from agent_team_backend import app as backend_app
 from agent_team_backend import preview_log as preview_log_module
 from agent_team_backend.fs_service import FsError
 from agent_team_backend.plan_index import resolve_plan_root
-from agent_team_backend.plugins.builtin.navide_plans import (
-    plan_mcp,
-    plan_mcp_auth,
-    plan_mcp_wiring,
-)
+from agent_team_backend.mcp_server import server as plan_mcp, auth as plan_mcp_auth, wiring as plan_mcp_wiring
 from agent_team_backend.preview_log import PreviewLog
 
 

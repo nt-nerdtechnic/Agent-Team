@@ -30,7 +30,7 @@ def test_startup_activates_skills_plugin_and_registers_transformer(
     host: PluginHost,
 ) -> None:
     assert wiring.startup(host) == ["navide.plans", "navide.skills"]
-    assert [plugin_id for plugin_id, _ in host.spawn_transformers()] == [
-        "navide.plans",
-        "navide.skills",
-    ]
+    # Only skills registers a spawn transformer now: the MCP endpoint wiring
+    # that navide.plans used to contribute is core, applied ahead of the
+    # plugin transformers by the terminal.create handler.
+    assert [plugin_id for plugin_id, _ in host.spawn_transformers()] == ["navide.skills"]

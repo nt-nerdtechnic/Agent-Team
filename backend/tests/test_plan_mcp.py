@@ -15,7 +15,8 @@ from agent_team_backend import app as backend_app
 from agent_team_backend.app import app
 from agent_team_backend.plan_meta import parse_plan_meta
 from agent_team_backend.plugins import wiring as plugin_wiring
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_auth, plan_mcp_wiring
+from agent_team_backend.mcp_server import server as plan_mcp, auth as plan_mcp_auth, wiring as plan_mcp_wiring
+from agent_team_backend.plugins.builtin.navide_plans import plan_tools
 from agent_team_backend.plugins.host import PluginHost
 
 
@@ -66,9 +67,19 @@ class _ToolResult:
         return [SimpleNamespace(text=str(self._error))]
 
 
+def _tool(name: str):
+    """Resolve a tool by name across the core/plugin split.
+
+    The plan tools live in the navide.plans plugin and are installed onto the
+    core server at startup; everything else is core. Tests address them the
+    same way an agent does — by name — so the lookup spans both.
+    """
+    return getattr(plan_tools, name, None) or getattr(plan_mcp, name)
+
+
 async def _call(tool: str, args: dict) -> _ToolResult:
     try:
-        value = await getattr(plan_mcp, tool)(**args, ctx=_ctx())
+        value = await _tool(tool)(**args, ctx=_ctx())
     except Exception as err:  # noqa: BLE001 — mirrors the MCP session's isError wrapping
         return _ToolResult(error=err)
     return _ToolResult(value=value)
@@ -493,7 +504,7 @@ def _pane_ctx(pane_id: str = "pa") -> SimpleNamespace:
 
 async def _pane_call(tool: str, args: dict, pane_id: str = "pa") -> _ToolResult:
     try:
-        value = await getattr(plan_mcp, tool)(**args, ctx=_pane_ctx(pane_id))
+        value = await _tool(tool)(**args, ctx=_pane_ctx(pane_id))
     except Exception as err:  # noqa: BLE001 — mirrors the MCP session's isError wrapping
         return _ToolResult(error=err)
     return _ToolResult(value=value)
@@ -603,14 +614,26 @@ async def test_a_caller_with_no_pane_identity_must_pass_a_workspace(
 
 
 async def test_mounted_endpoint_serves_mcp(workspace: Path) -> None:
-    # Full plugin path: activate the builtin plugin, apply its registered
-    # route to the real app router, run its startup hooks, then speak MCP.
+    # The real startup path: activate the plugin so it installs its tools onto
+    # the core server, mount the core route on the real app router, start the
+    # session manager, then speak MCP. The order matters — the manager
+    # snapshots the tool registry, so installing after it starts would leave
+    # the plan tools out of tools/list with no error anywhere.
+    from starlette.routing import Route
+
     host = PluginHost()
     host.load(plugin_wiring.builtin_plugins_root() / "navide_plans")
     host.activate("navide.plans")
+    assert plugin_wiring.apply_mcp_tools(host, plan_mcp.server) == ["navide.plans"]
     routes_before = list(app.router.routes)
-    plugin_wiring.apply_routes(host, app.router)
-    await plugin_wiring.run_startup_hooks(host)
+    app.router.routes.append(
+        Route(
+            plan_mcp.ROUTE_PATH,
+            endpoint=plan_mcp.asgi_app,
+            methods=plan_mcp.ROUTE_METHODS,
+        )
+    )
+    await plan_mcp.startup()
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -632,6 +655,6 @@ async def test_mounted_endpoint_serves_mcp(workspace: Path) -> None:
             body = resp.json()
             assert body["result"]["serverInfo"]["name"] == "navide"
     finally:
-        await plugin_wiring.run_shutdown_hooks(host)
+        await plan_mcp.shutdown()
         app.router.routes[:] = routes_before
         host.unload("navide.plans")

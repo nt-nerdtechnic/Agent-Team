@@ -4,7 +4,10 @@ plan_mcp_auth token store it reads from.
 Every tool on the server requires one of three credential kinds — pane, host,
 or external (only while enabled). This exercises the acceptance/rejection
 matrix directly against _resolve_caller (shared by every tool) plus one
-integration check that a real tool (plan_list) enforces it.
+integration check that a real tool (plan_list) enforces it. plan_list is a
+plugin tool deliberately: it reaches the same gate through the public
+mcp_server.toolkit re-export, so this also proves a plugin's tools are not a
+way past the credential check.
 """
 
 from __future__ import annotations
@@ -15,7 +18,8 @@ from typing import Any
 import pytest
 
 from agent_team_backend import agent_messaging
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_auth, plan_mcp_wiring
+from agent_team_backend.mcp_server import server as plan_mcp, auth as plan_mcp_auth, wiring as plan_mcp_wiring
+from agent_team_backend.plugins.builtin.navide_plans import plan_tools
 
 
 @pytest.fixture(autouse=True)
@@ -144,14 +148,14 @@ def test_resolve_caller_rejects_a_bad_external_token_even_when_enabled() -> None
 @pytest.mark.asyncio
 async def test_plan_list_rejects_a_request_with_no_credential(tmp_path) -> None:
     with pytest.raises(plan_mcp.CallerUnknown):
-        await plan_mcp.plan_list(_ctx(), workspace_path=str(tmp_path))
+        await plan_tools.plan_list(_ctx(), workspace_path=str(tmp_path))
 
 
 @pytest.mark.asyncio
 async def test_plan_list_accepts_a_host_credential(tmp_path) -> None:
     # No plans directory yet — plan_list just returns [] rather than erroring,
     # so reaching that (instead of CallerUnknown) proves the credential passed.
-    result = await plan_mcp.plan_list(
+    result = await plan_tools.plan_list(
         _ctx(client="host", t=plan_mcp_auth.internal_token()), workspace_path=str(tmp_path)
     )
     assert result == []

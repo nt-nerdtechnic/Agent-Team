@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from agent_team_backend import agent_messaging, app
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_auth
+from agent_team_backend.mcp_server import server as plan_mcp, auth as plan_mcp_auth
 
 
 @pytest.fixture(autouse=True)

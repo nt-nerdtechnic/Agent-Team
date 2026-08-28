@@ -25,7 +25,7 @@ import pytest
 
 from agent_team_backend import agent_messaging, app
 from agent_team_backend.log_readers import ActivityEvent
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
+from agent_team_backend.mcp_server import server as plan_mcp, wiring as plan_mcp_wiring
 
 
 @pytest.fixture(autouse=True)

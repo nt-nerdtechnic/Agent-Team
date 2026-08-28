@@ -119,7 +119,8 @@ async def test_an_agents_plan_is_visible_from_the_subdirectory_workspace(
     from types import SimpleNamespace
 
     from agent_team_backend import agent_messaging, fs_service
-    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
+    from agent_team_backend.mcp_server import wiring as plan_mcp_wiring
+    from agent_team_backend.plugins.builtin.navide_plans import plan_tools
 
     root, subdir = repo_with_subdir
     agent_messaging._reset_for_test()
@@ -129,7 +130,7 @@ async def test_an_agents_plan_is_visible_from_the_subdirectory_workspace(
         ctx = SimpleNamespace(
             request_context=SimpleNamespace(request=SimpleNamespace(query_params=params))
         )
-        created = await plan_mcp.plan_create(
+        created = await plan_tools.plan_create(
             name="Vendor Review", overview="", todos=["Task"], ctx=ctx
         )
     finally:

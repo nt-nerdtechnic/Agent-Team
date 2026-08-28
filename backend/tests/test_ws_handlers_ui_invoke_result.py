@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from agent_team_backend import app
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
+from agent_team_backend.mcp_server import server as plan_mcp
 
 
 class FakeWebSocket:

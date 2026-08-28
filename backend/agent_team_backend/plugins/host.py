@@ -96,6 +96,7 @@ class PluginContext:
     startup_hooks: list[Callable[[], Any]] = field(default_factory=list)
     shutdown_hooks: list[Callable[[], Any]] = field(default_factory=list)
     spawn_transformers: list[Callable[..., Any]] = field(default_factory=list)
+    mcp_tool_installers: list[Callable[[Any], Any]] = field(default_factory=list)
 
     def register_route(self, path: str, asgi_app: Any, methods: list[str]) -> None:
         """Ask the host to serve ``asgi_app`` (raw ASGI) at ``path``."""
@@ -123,12 +124,29 @@ class PluginContext:
         """
         self.spawn_transformers.append(transformer)
 
+    def register_mcp_tools(self, installer: Callable[[Any], Any]) -> None:
+        """Register a callable that adds this plugin's tools to the core MCP server.
+
+        The installer is handed the core ``FastMCP`` server and decorates its
+        own tool functions onto it. This is the one way a plugin contributes to
+        a service core owns rather than serving its own — a route gives a
+        plugin a whole new endpoint, which is the wrong shape for tools that
+        must appear in the same tool list as core's.
+
+        Timing matters: installers run after every plugin is activated and
+        before the server's session manager is built, so a plugin's tools are
+        in the list every client sees. A tool registered later would be
+        invisible to already-connected clients with no error anywhere.
+        """
+        self.mcp_tool_installers.append(installer)
+
     def clear_registrations(self) -> None:
         """Drop everything registered during activation (used on deactivate)."""
         self.routes.clear()
         self.startup_hooks.clear()
         self.shutdown_hooks.clear()
         self.spawn_transformers.clear()
+        self.mcp_tool_installers.clear()
 
 
 @dataclass
@@ -235,6 +253,14 @@ class PluginHost:
     def registered_routes(self) -> list[RegisteredRoute]:
         """Routes contributed by currently activated plugins, in load order."""
         return [route for lp in self._activated() for route in lp.context.routes]
+
+    def registered_mcp_tool_installers(self) -> list[tuple[str, Callable[[Any], Any]]]:
+        """``(plugin_id, installer)`` pairs from activated plugins, in load order."""
+        return [
+            (lp.manifest.id, installer)
+            for lp in self._activated()
+            for installer in lp.context.mcp_tool_installers
+        ]
 
     def startup_hooks(self) -> list[tuple[str, Callable[[], Any]]]:
         """``(plugin_id, hook)`` pairs from activated plugins, in load order."""

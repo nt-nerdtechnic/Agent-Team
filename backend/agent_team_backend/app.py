@@ -70,6 +70,8 @@ from .credential_vault import CredentialVault
 from .credential_watcher import CredentialWatcher, reconcile_live_account
 from .doc_injector import fetch_stage_docs
 from .mcp_manager import MCPManager
+from .mcp_server import server as mcp_server
+from .mcp_server import wiring as mcp_server_wiring
 from .mcp_settings import (
     MCPServersDocument,
     MCPSettingsConflictError,
@@ -1534,10 +1536,38 @@ async def _start_log_watcher() -> None:
         activated = await asyncio.to_thread(plugin_wiring.startup, plugin_host)
         if activated:
             log.info("backend plugins activated: %s", activated)
+        # Before the server starts: its session manager snapshots the tool
+        # registry, so a tool installed afterwards is missing from the list
+        # clients see, with no error anywhere.
+        contributed = plugin_wiring.apply_mcp_tools(plugin_host, mcp_server.server)
+        if contributed:
+            log.info("plugins contributing MCP tools: %s", contributed)
         plugin_wiring.apply_routes(plugin_host, app.router)
         await plugin_wiring.run_startup_hooks(plugin_host)
     except Exception as err:  # noqa: BLE001
         log.warning("plugin host startup failed: %s", err)
+
+    # Navide's own MCP server. Deliberately outside the guard above: this is
+    # the endpoint every CLI pane is wired to, and it must come up even if
+    # every plugin failed to load. A Route, not a Mount — a Mount would
+    # 307-redirect the slashless path and some MCP clients drop the body.
+    from starlette.routing import Route
+
+    try:
+        app.router.routes.append(
+            Route(
+                mcp_server.ROUTE_PATH,
+                endpoint=mcp_server.asgi_app,
+                methods=mcp_server.ROUTE_METHODS,
+            )
+        )
+        await mcp_server.startup()
+    except Exception as err:  # noqa: BLE001
+        log.warning("MCP server startup failed: %s", err)
+    try:
+        await asyncio.to_thread(mcp_server_wiring.write_claude_config_for_current_port)
+    except Exception as err:  # noqa: BLE001
+        log.warning("claude mcp-config refresh failed: %s", err)
 
 
 @app.on_event("shutdown")
@@ -1572,6 +1602,10 @@ async def _stop_log_watcher() -> None:
         await plugin_wiring.run_shutdown_hooks(plugin_host)
     except Exception as err:  # noqa: BLE001
         log.warning("plugin shutdown hooks failed: %s", err)
+    try:
+        await mcp_server.shutdown()
+    except Exception as err:  # noqa: BLE001
+        log.warning("MCP server shutdown failed: %s", err)
     try:
         plugin_wiring.shutdown(plugin_host)
     except Exception as err:  # noqa: BLE001

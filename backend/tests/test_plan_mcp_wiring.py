@@ -11,7 +11,7 @@ import pytest
 
 from agent_team_backend import app
 from agent_team_backend.plugins import wiring as plugin_wiring
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_auth, plan_mcp_wiring
+from agent_team_backend.mcp_server import auth as plan_mcp_auth, wiring as plan_mcp_wiring
 
 
 # ---- write_claude_config ----

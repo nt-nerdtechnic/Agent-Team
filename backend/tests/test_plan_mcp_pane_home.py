@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from agent_team_backend.plugins.builtin.navide_plans import pane_home, plan_mcp_wiring
+from agent_team_backend.mcp_server import pane_home, wiring as plan_mcp_wiring
 
 URL = "http://127.0.0.1:4567/plan-mcp?pane=p1&t=tok"
 SERVER = "navide"

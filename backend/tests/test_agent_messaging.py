@@ -940,7 +940,7 @@ async def test_delivered_handler_also_settles_a_cli_send_for_cli_check_message(
     """A message sent through the MCP cli_send has no window holding its
     msg_key, so the outcome has to be handed to the MCP server too — without
     disturbing the rebroadcast every window relies on."""
-    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
+    from agent_team_backend.mcp_server import server as plan_mcp
 
     captured: list[dict[str, Any]] = []
 
@@ -1196,7 +1196,7 @@ def test_every_resolve_code_has_a_ui_string() -> None:
 async def test_hold_update_hands_the_reason_to_the_mcp_server() -> None:
     """Delivery lives in the window, so why a message has not gone in yet
     exists nowhere else — and an MCP caller has no Messages panel to read."""
-    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
+    from agent_team_backend.mcp_server import server as plan_mcp
 
     plan_mcp._record_message_sent("mcp-key", "beta/reviewer", "pa", "hi")
     try:
@@ -1216,7 +1216,7 @@ async def test_hold_update_hands_the_reason_to_the_mcp_server() -> None:
 
 @pytest.mark.asyncio
 async def test_hold_update_with_a_null_hold_clears_it() -> None:
-    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
+    from agent_team_backend.mcp_server import server as plan_mcp
 
     plan_mcp._record_message_sent("mcp-key", "beta/reviewer", "pa", "hi")
     plan_mcp.record_message_hold("mcp-key", {"key": "typing"})
