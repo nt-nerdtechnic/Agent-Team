@@ -11,13 +11,27 @@ gate and valuable as an audit — run it deliberately:
 The regression line for the resize path is test_force_redraw_signal.py, which
 pins the mechanism (a SIGWINCH is delivered at an unchanged size) without
 launching anything. This file pins the fact that motivates keeping that
-mechanism: as of 2026-08-28, five of eleven vendors repaint on the signal
-alone. It is how you find out that list has changed.
+mechanism: some shipped vendors repaint on the signal alone, so removing it
+would silently cost them their post-resize repaint. It is how you find out that
+list has changed.
 
-Baseline, bytes emitted in response to force_redraw's ioctl pair:
+Baseline over six runs on 2026-08-28, bytes emitted in response to
+force_redraw's ioctl pair at an unchanged size:
 
-    kilo 8437 · copilot 6030 · qwen 4446 · aider 442 · codex 144
-    claude · opencode · droid · kimi · grok · cursor-agent — all 0
+    copilot  6030 / 6036 / 6008 / 3010 / 6022 / 6018   responds every time
+    codex     144 /   96 /   96 /   96 /   96 /   96   responds every time
+    aider     442 /  221 /  442 /  515 /  736          responds every time
+    kilo     8437 /    0 /    0 /    0 /    0          indeterminate
+    qwen     4446 /    0 /    0 / 4673 /    0          indeterminate
+
+    claude · opencode · droid · kimi · grok · cursor-agent — 0, every run
+
+Only the first three are asserted. kilo and qwen emit continuously while their
+startup animation runs, so whether bytes land in the measurement window depends
+on where that animation happens to be — the non-zero readings above are that
+output, not a reply. Asserting them would ship a coin flip. (The very first
+measurement of this put kilo and qwen in the responding set for exactly that
+reason: a fixed boot window instead of draining to quiet.)
 
 A vendor dropping out of the responding set is not a bug in Navide, but it does
 mean the "keep force_redraw" argument rests on a smaller set than it used to.
@@ -37,10 +51,11 @@ import time
 
 import pytest
 
-# The five that repaint on the signal alone. Kept as an explicit list rather
-# than probing every vendor: the other six emit nothing by design (they compare
-# the winsize and skip), so they cannot regress in the direction this guards.
-RESPONDING_VENDORS = ["kilo", "copilot", "qwen", "aider", "codex"]
+# Only vendors whose reply is reproducible. The rest either never reply (six of
+# them, by design — they compare the winsize and skip) or cannot be measured
+# reliably (kilo, qwen; see the module docstring). Neither group can regress in
+# the direction this file guards.
+RESPONDING_VENDORS = ["copilot", "codex", "aider"]
 
 # Boot is drained to QUIET, not for a fixed window. A fixed window was how the
 # first measurement of this got the vendor list wrong: slower CLIs were still
@@ -146,9 +161,9 @@ def test_vendor_repaints_on_the_force_redraw_nudge(vendor: str) -> None:
         print(f"\n{vendor}: boot={len(boot)}B nudge={len(nudge)}B real={len(real)}B")
         assert real, f"{vendor} ignored a real width change — probe is unreliable here"
         assert nudge, (
-            f"{vendor} no longer repaints on force_redraw's nudge. It was in the "
-            f"responding set on 2026-08-28; if it has genuinely changed, update "
-            f"RESPONDING_VENDORS and the note in test_force_redraw_signal.py."
+            f"{vendor} no longer repaints on force_redraw's nudge. It replied on "
+            f"every one of six runs on 2026-08-28; if it has genuinely changed, "
+            f"update RESPONDING_VENDORS and the note in test_force_redraw_signal.py."
         )
     finally:
         try:

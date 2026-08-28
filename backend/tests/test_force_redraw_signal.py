@@ -1,20 +1,21 @@
 """force_redraw must deliver a SIGWINCH even when the size does not change.
 
-Five of the CLI vendors we ship repaint on receiving SIGWINCH rather than on
-observing a size delta, so this nudge is their only repaint path after a
-resize settles. Measured against real PTYs on 2026-08-28, bytes emitted in
+Some of the CLI vendors we ship repaint on receiving SIGWINCH rather than on
+observing a size delta, so this nudge is their only repaint path after a resize
+settles. Measured against real PTYs on 2026-08-28 (six runs), bytes emitted in
 response to force_redraw's exact ioctl pair at an unchanged size:
 
-    kilo 8437, copilot 6030, qwen 4446, aider 442, codex 144
-    claude, opencode, droid, kimi, grok, cursor-agent: 0
+    copilot ~6000, aider ~400, codex ~96   — every run
+    claude, opencode, droid, kimi, grok, cursor-agent — 0, every run
+    kilo, qwen — indeterminate; see test_vendor_redraw_probe.py
 
-The six that emit nothing compare the new winsize against the old one and skip
-the repaint, which is what makes force_redraw look like dead code from a
-claude pane. It is not: deleting it, or "simplifying" it to skip a resize to
-the size the PTY already has, silently removes the post-resize repaint for the
-other five. No other test covers this — the frontend gates around
-requestResizeRedraw are pinned by useTerminalResize.test.ts, but nothing
-checked that the backend end of that path still signals anything.
+Vendors that emit nothing compare the new winsize against the old one and skip
+the repaint, which is what makes force_redraw look like dead code from a claude
+pane. It is not: deleting it, or "simplifying" it to skip a resize to the size
+the PTY already has, silently removes the post-resize repaint for the others.
+No other test covers this — the frontend gates around requestResizeRedraw are
+pinned by useTerminalResize.test.ts, but nothing checked that the backend end of
+that path still signals anything.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import pty
 import select
 import signal
 import struct
+import subprocess
 import sys
 import termios
 import time
@@ -35,35 +37,53 @@ import pytest
 from agent_team_backend import app
 from agent_team_backend.terminals import TerminalSession
 
+# All tests here are async even where nothing is awaited: app.Session builds the
+# TerminalService lazily and its constructor needs a running event loop, so a
+# sync test raises "no current event loop" as soon as another test in the run
+# has not already created one.
 ROWS, COLS = 24, 80
 # Long enough for the child to be scheduled and run its handler, short enough
 # that a genuine regression fails fast rather than hanging the suite.
 SIGNAL_WAIT_S = 3.0
 
 
-def _spawn_winch_counter() -> tuple[int, int]:
-    """Fork a child on a real PTY that emits one byte per SIGWINCH received.
+# Runs in a separate interpreter, not a forked copy of this one. Doing the work
+# in a forked child instead deadlocks: by the time the full suite reaches this
+# file the process has TerminalService reader threads, and forkpty() in a
+# multi-threaded process gives the child a copy of locks no one will release
+# (CPython warns about exactly this). Passes standalone, fails in the suite —
+# so it must exec.
+_CHILD = """
+import fcntl, os, signal, termios, time
+# start_new_session leaves us a session leader with no controlling terminal;
+# claim the slave so the kernel will deliver SIGWINCH here.
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+signal.signal(signal.SIGWINCH, lambda *_: os.write(1, b"W"))
+os.write(1, b"R")
+end = time.monotonic() + 30
+while time.monotonic() < end:
+    time.sleep(0.05)
+"""
 
-    pty.fork() is what gives the child a controlling terminal and puts it in
-    the foreground process group; without that the kernel would not deliver
-    SIGWINCH to it at all, and the test would pass for the wrong reason.
+
+def _spawn_winch_counter() -> tuple[subprocess.Popen, int]:
+    """Start a process on a real PTY that emits one byte per SIGWINCH received.
+
+    The controlling terminal is what makes the kernel deliver SIGWINCH at all;
+    without it this test would pass for the wrong reason.
     """
-    pid, master_fd = pty.fork()
-    if pid == 0:  # child
-        try:
-            signal.signal(signal.SIGWINCH, lambda *_: os.write(1, b"W"))
-            # Report readiness, then idle. SIGWINCH interrupts the sleep, so
-            # loop rather than sleeping once.
-            os.write(1, b"R")
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                time.sleep(0.05)
-        finally:
-            os._exit(0)
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _CHILD],
+        stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+        start_new_session=True,
+        close_fds=True,
+    )
+    os.close(slave_fd)
     # drain_output() reads the master until EAGAIN; on a blocking fd with an
     # idle child that never returns.
     fcntl.fcntl(master_fd, fcntl.F_SETFL, os.O_NONBLOCK)
-    return pid, master_fd
+    return proc, master_fd
 
 
 def _read_until(fd: int, marker: bytes, seconds: float) -> bytes:
@@ -121,14 +141,15 @@ def _set_size(fd: int, rows: int, cols: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+@pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform == "win32", reason="pty/SIGWINCH are POSIX-only")
-def test_force_redraw_signals_even_at_an_unchanged_size() -> None:
+async def test_force_redraw_signals_even_at_an_unchanged_size() -> None:
     """The case the resize path actually uses: the PTY is already the right
     size, and the point of the call is the signal, not the size."""
-    pid, master_fd = _spawn_winch_counter()
+    proc, master_fd = _spawn_winch_counter()
     session = app.Session(SimpleNamespace())  # type: ignore[arg-type]
     sid = "term-winch"
-    _register(session, sid, master_fd, pid)
+    _register(session, sid, master_fd, proc.pid)
     try:
         _set_size(master_fd, ROWS, COLS)
         _await_ready(master_fd)
@@ -137,23 +158,24 @@ def test_force_redraw_signals_even_at_an_unchanged_size() -> None:
         session.terminals.force_redraw(sid, COLS, ROWS)
 
         assert b"W" in _read_until(master_fd, b"W", SIGNAL_WAIT_S), (
-            "force_redraw delivered no SIGWINCH at an unchanged size. Five "
-            "shipped vendors (kilo, copilot, qwen, aider, codex) repaint on "
-            "the signal alone, so this is their post-resize repaint path."
+            "force_redraw delivered no SIGWINCH at an unchanged size. Shipped "
+            "vendors (copilot, codex, aider) repaint on the signal alone, so "
+            "this is their post-resize repaint path."
         )
     finally:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
+        proc.kill()
+        proc.wait(timeout=5)
         os.close(master_fd)
 
 
+@pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform == "win32", reason="pty/SIGWINCH are POSIX-only")
-def test_force_redraw_leaves_the_requested_size_in_place() -> None:
+async def test_force_redraw_leaves_the_requested_size_in_place() -> None:
     """The transient off-by-one row must not be what the PTY is left at."""
-    pid, master_fd = _spawn_winch_counter()
+    proc, master_fd = _spawn_winch_counter()
     session = app.Session(SimpleNamespace())  # type: ignore[arg-type]
     sid = "term-winch-size"
-    _register(session, sid, master_fd, pid)
+    _register(session, sid, master_fd, proc.pid)
     try:
         _set_size(master_fd, ROWS, COLS)
         _await_ready(master_fd)
@@ -164,8 +186,8 @@ def test_force_redraw_leaves_the_requested_size_in_place() -> None:
         rows, cols, _, _ = struct.unpack("HHHH", packed)
         assert (rows, cols) == (ROWS, COLS)
     finally:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
+        proc.kill()
+        proc.wait(timeout=5)
         os.close(master_fd)
 
 
@@ -186,10 +208,10 @@ async def test_terminal_redraw_message_reaches_the_pty() -> None:
         async def send_bytes(self, data: bytes) -> None:  # pragma: no cover
             pass
 
-    pid, master_fd = _spawn_winch_counter()
+    proc, master_fd = _spawn_winch_counter()
     session = app.Session(RecordingWS())  # type: ignore[arg-type]
     sid = "term-winch-ws"
-    _register(session, sid, master_fd, pid)
+    _register(session, sid, master_fd, proc.pid)
     try:
         _set_size(master_fd, ROWS, COLS)
         _await_ready(master_fd)
@@ -205,6 +227,6 @@ async def test_terminal_redraw_message_reaches_the_pty() -> None:
             "terminal.redraw no longer signals the PTY"
         )
     finally:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
+        proc.kill()
+        proc.wait(timeout=5)
         os.close(master_fd)
