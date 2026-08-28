@@ -78,10 +78,25 @@ export function createResizeController(
   // The half of FitAddon.fit() that touches xterm: drop the renderer's cached
   // dimensions so it re-measures, then resize. Split out from proposeDimensions()
   // so applyFit can put the backend's ack between the two (see below).
+  //
+  // Deferred through term.write('', cb) rather than resizing inline, because
+  // term.write() is asynchronous: xterm accepts data into an internal buffer and
+  // parses it in time-sliced batches, so bytes can be ACCEPTED before this call
+  // and PARSED after it. Resizing inline would let an already-queued old-width
+  // frame parse at the new width — the same race the ack barrier closes, one
+  // layer further down, and the one that survives continuous dragging (chunks
+  // are still queued when the next ack lands). The empty write puts nothing
+  // through the parser; it is purely a marker that runs cb once everything
+  // queued ahead of it has been parsed, which is what makes the resize land in
+  // byte-stream order. Pinned by the queued-output case in
+  // useTerminalResize.widthRace.test.ts.
   function resizeTermTo(cols: number, rows: number): void {
     if (term.cols === cols && term.rows === rows) return
-    try { (term as any)._core?._renderService?.clear() } catch { /* renderer not up yet */ }
-    term.resize(cols, rows)
+    term.write('', () => {
+      if (term.cols === cols && term.rows === rows) return
+      try { (term as any)._core?._renderService?.clear() } catch { /* renderer not up yet */ }
+      term.resize(cols, rows)
+    })
   }
 
   // Run `cb` on the next animation frame, but fall back to a timer if rAF

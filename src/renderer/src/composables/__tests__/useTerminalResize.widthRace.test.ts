@@ -207,6 +207,33 @@ describe('width resize ordering (real xterm, recorded claude output)', () => {
 
     ctrl.dispose()
   })
+  it('does not parse queued old-width output at the new width', async () => {
+    // The IPC-level barrier is not the whole story. term.write() is
+    // asynchronous — xterm accepts data into an internal buffer and parses it
+    // in time-sliced batches — so bytes can be *accepted* before the resize and
+    // *parsed* after it. Resizing straight from the ack handler therefore still
+    // lets an old-width frame land at the new width, which is the same race one
+    // layer down. Only shows up under continuous dragging, when chunks are
+    // still queued as the next ack arrives.
+    const send = vi.fn(async () => ({ ok: true }))
+    const ctrl = makeController(send)
+
+    await write(term, BOOT_120)
+
+    measuredCols = NARROW
+    // Accepted by xterm, deliberately NOT drained: still unparsed.
+    term.write(BOOT_120)
+    ctrl.applyFit()
+    await frame()
+    await macrotask()
+    await write(term, SHRINK_90)
+
+    expect(term.cols).toBe(NARROW)
+    expect(wrappedRuleRowsInScrollback(term)).toEqual([])
+
+    ctrl.dispose()
+  })
+
   it('leaves the input box frame intact across a resize', async () => {
     // The other half of the damage the old cleanup attempts caused: not stray
     // fragments in the scrollback, but holes in the frame the CLI had already
