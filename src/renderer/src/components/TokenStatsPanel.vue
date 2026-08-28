@@ -33,6 +33,11 @@ interface Props {
   workspacePath: string
   stages: Stage[]
   panes: ActivePane[]
+  /** The pane the user is looking at right now. The top block reports this
+   *  pane's session alone — a workspace-wide tally answered a question nobody
+   *  asked. Absent (or naming a pane that is not a CLI pane) means "nothing
+   *  focused", which reports zero rather than somebody else's numbers. */
+  activePaneId?: string | null
   pipeline: PipelineStatusView
   /** Owned by the parent: this panel renders it and asks for changes. */
   expanded: boolean
@@ -180,21 +185,22 @@ const runTotals = computed<TokenBucket>(() => currentRun.value?.totals ?? EMPTY)
 const liveBySession = computed<Record<string, TokenBucket>>(
   () => snapshot.value?.workspace?.live_by_session ?? {}
 )
-const liveTotals = computed<TokenBucket>(() => {
-  const out: TokenBucket = { input: 0, output: 0, calls: 0 }
-  for (const b of Object.values(liveBySession.value)) {
-    out.input += b.input
-    out.output += b.output
-    out.calls += b.calls
-  }
-  return out
-})
-const liveSessionCount = computed(
-  () => Object.values(liveBySession.value).filter((b) => b.calls > 0).length
+// The pane in focus, or null when nothing focused resolves to a CLI pane.
+const focusPane = computed<ActivePane | null>(
+  () => (props.panes ?? []).find((p) => p.id === props.activePaneId) ?? null
 )
-// The top block shows the run when there is one and this session otherwise.
+// That pane's own live bucket. Null covers all three "no number to show"
+// cases at once: no focus, a pane with no session bound, and a session the
+// scanner has not reported yet.
+const focusSession = computed<TokenBucket | null>(() => {
+  const sid = focusPane.value?.sessionId
+  return (sid && liveBySession.value[sid]) || null
+})
+// The top block shows the run when there is one and the FOCUSED pane's
+// session otherwise — never a sum across the workspace's sessions, which is
+// what made a single pane read as everybody's usage combined.
 const topTotals = computed<TokenBucket>(() =>
-  currentRun.value ? runTotals.value : liveTotals.value
+  currentRun.value ? runTotals.value : focusSession.value ?? EMPTY
 )
 const cumulative = computed<TokenBucket>(() =>
   snapshot.value?.workspace?.cumulative?.totals ?? EMPTY
@@ -371,8 +377,15 @@ async function confirmReset(scope: ResetScope): Promise<void> {
           <div v-if="currentRun" class="run-meta" :title="currentRun.task">
             <span class="run-id">{{ currentRun.run_id || '—' }}</span>
           </div>
-          <div v-else-if="liveSessionCount > 0" class="run-meta">
-            <span class="run-id">{{ $t('label.n-sessions', { count: liveSessionCount }) }}</span>
+          <!-- Whose session these figures belong to. A count was meaningless
+               once the block stopped summing sessions — the reader needs to
+               recognise the pane in front of them. -->
+          <div v-else class="run-meta">
+            <span v-if="!focusPane" class="run-id">{{ $t('label.no-focused-pane') }}</span>
+            <span v-else-if="!focusSession" class="run-id">
+              {{ $t('label.pane-no-session', { pane: focusPane.agentLabel }) }}
+            </span>
+            <span v-else class="run-id">{{ focusPane.agentLabel }}</span>
           </div>
           <div class="totals">
             <div class="cell"><div class="big">{{ fmt(topTotals.input) }}</div><div class="lbl">{{ $t('label.in') }}</div></div>

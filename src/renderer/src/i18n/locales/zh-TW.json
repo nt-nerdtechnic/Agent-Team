@@ -827,7 +827,8 @@
       "open-config-file": "開啟設定檔",
       "native-readonly-hint": "Navide 只讀取這些檔案，不會寫入。只掃描各 CLI 的使用者層級設定，專案層級的 MCP 不會顯示。要修改請到該 CLI 自己的設定檔，改完回來重新整理。",
       "navide-scope-hint": "這是 Navide 自己連線的 server，CLI pane 不會拿到它。",
-      "installed-hint": "Navide 以 client 身分連線的 server；這些不會傳給 CLI pane。"
+      "tool-count": "{n} 個工具",
+      "all-title": "所有 MCP"
     },
     "skills": {
       "title": "受管 Skills",
@@ -1700,7 +1701,8 @@
     "messages": "訊息",
     "current-run": "目前執行",
     "current-session": "本 session",
-    "n-sessions": "{count} 個 session",
+    "no-focused-pane": "目前沒有聚焦的 pane",
+    "pane-no-session": "{pane} — 尚無 session 資料",
     "workspace-elsewhere-hint": "在其他視窗開啟中，點擊前往那個視窗",
     "workspace-switch-hint": "點擊將這個視窗切換過去",
     "workspace-detach-hint": "拖到視窗外可讓它獨立成一個視窗",

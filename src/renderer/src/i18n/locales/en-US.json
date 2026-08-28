@@ -827,7 +827,8 @@
       "open-config-file": "Open config file",
       "native-readonly-hint": "Navide reads these files and never writes to them. Only each CLI's user-level config is scanned — project-level MCP is not shown. Change a server where its CLI expects it, then refresh.",
       "navide-scope-hint": "Navide connects to this server itself. CLI panes do not receive it.",
-      "installed-hint": "Servers Navide connects to as a client. These are not passed to CLI panes."
+      "tool-count": "{n} tools",
+      "all-title": "All MCP servers"
     },
     "skills": {
       "title": "Managed Skills",
@@ -1700,7 +1701,8 @@
     "messages": "Messages",
     "current-run": "Current run",
     "current-session": "This session",
-    "n-sessions": "{count} session(s)",
+    "no-focused-pane": "No pane in focus",
+    "pane-no-session": "{pane} — no session data yet",
     "workspace-elsewhere-hint": "Open in another window — click to go there",
     "workspace-switch-hint": "Click to switch this window to it",
     "workspace-detach-hint": "Drag outside the window to give it its own",
