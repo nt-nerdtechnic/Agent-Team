@@ -335,6 +335,16 @@ const orderedPanes = computed(() => {
   return out
 })
 
+/** Whether any row in this list can show a fold caret.
+ *
+ *  The caret sits in a 12px slot before the status dot, so a row that has one
+ *  starts 18px further right than a row that does not — which is why a pane
+ *  that happened to spawn a child stopped lining up with its childless
+ *  siblings at the same depth. Reserving the slot on every row puts them back
+ *  on one left edge. A list with no lineage at all reserves nothing, so a flat
+ *  sidebar keeps the left edge it has always had. */
+const lineageRail = computed(() => (props.lineage ?? []).some((r) => r.hasChildren))
+
 /** The workspaces this window runs panes in — the one it was opened with plus
  *  any adopted from the picker. A single `null` entry stands for the ungrouped
  *  list: no heading, every pane under it, which is what this looked like
@@ -2018,7 +2028,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               :title="folded ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
               @click.stop="emit('toggle-collapsed', p.id)"
             >{{ folded ? '▸' : '▾' }}</button>
-            <span v-else-if="depth" class="lineage-spacer"></span>
+            <span v-else-if="depth || lineageRail" class="lineage-spacer"></span>
             <span class="status-dot" :data-state="p.status" :title="$t(paneStatusLabelKey(p.status))"></span>
             <!-- No MCP tag beside it. `origin === 'mcp'` is still recorded and
                  still drives spawn behaviour; it just does not need a badge.

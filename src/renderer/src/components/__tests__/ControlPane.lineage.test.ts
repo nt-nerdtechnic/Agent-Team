@@ -85,6 +85,39 @@ describe('ControlPane – lineage tree', () => {
     expect(wrapper.findAll('.lineage-caret')).toHaveLength(1)
   })
 
+  it('reserves the caret slot on childless rows once any row has children', () => {
+    // The caret occupies a fixed slot before the status dot. Without a spacer
+    // on the rows that have no caret, a pane that happened to spawn a child
+    // sat 18px right of its childless siblings at the SAME depth.
+    wrapper = mountWith({
+      lineage: [
+        { id: 'root', depth: 0, hasChildren: true, collapsed: false },
+        { id: 'kid-1', depth: 1, hasChildren: false, collapsed: false },
+        { id: 'kid-2', depth: 0, hasChildren: false, collapsed: false }
+      ]
+    })
+    const lines = wrapper.findAll('.agent-line')
+    // Row 0 draws the caret; rows 1 and 2 draw the spacer that matches it.
+    expect(lines[0].find('.lineage-caret').exists()).toBe(true)
+    expect(lines[0].find('.lineage-spacer').exists()).toBe(false)
+    expect(lines[1].find('.lineage-spacer').exists()).toBe(true)
+    expect(lines[2].find('.lineage-spacer').exists()).toBe(true)
+  })
+
+  it('reserves nothing when no row in the list has children', () => {
+    // A sidebar with no parent/child anywhere keeps the left edge it has
+    // always had — the fix must not shift a flat list sideways.
+    wrapper = mountWith({
+      lineage: [
+        { id: 'root', depth: 0, hasChildren: false, collapsed: false },
+        { id: 'kid-1', depth: 0, hasChildren: false, collapsed: false },
+        { id: 'kid-2', depth: 0, hasChildren: false, collapsed: false }
+      ]
+    })
+    expect(wrapper.findAll('.lineage-caret')).toHaveLength(0)
+    expect(wrapper.findAll('.lineage-spacer')).toHaveLength(0)
+  })
+
   it('emits toggle-collapsed with the pane id when the caret is clicked', async () => {
     wrapper = mountWith({
       lineage: [{ id: 'root', depth: 0, hasChildren: true, collapsed: false }]
