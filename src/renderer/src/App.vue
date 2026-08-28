@@ -201,6 +201,11 @@ import {
   type WorkspaceRestoreSession,
 } from './lib/resumeBehavior'
 import { initSettingsBackend, settingsGet, settingsSet } from './lib/settings'
+import {
+  cliPermissionKey,
+  parseCliPermissionMode,
+  skipPermissionFlagFor
+} from './lib/cliPermission'
 import { useLayoutStore } from './layout/useLayoutStore'
 import { RAIL_SIZE } from './layout/slots'
 import SlotContainer from './layout/SlotContainer.vue'
@@ -728,6 +733,19 @@ function makeStickyBool(key: string, fallback: boolean) {
 }
 
 const yoloEnabled = makeStickyBool('agentTeam.yolo', true)
+
+/** The permission-bypass flag a fresh spawn of `agentKey` should carry, or ''.
+ *  Every spawn / resume / restore path calls this instead of reading
+ *  yoloEnabled directly, so the per-vendor override cannot apply to some
+ *  paths and miss others. */
+function skipFlagFor(agentKey: string, spec?: AgentSpec): string {
+  return skipPermissionFlagFor({
+    spec,
+    globalYolo: yoloEnabled.value,
+    mode: parseCliPermissionMode(settingsGet<string | null>(cliPermissionKey(agentKey), null))
+  })
+}
+
 const autoAnswerEnabled = makeStickyBool('agentTeam.autoAnswer', false)
 // Confirm before closing a workspace or quitting the app. Default ON.
 const confirmBeforeClose = makeStickyBool('agentTeam.confirmClose', true)
@@ -959,7 +977,8 @@ function resolveCommand(agentKey: string, override: string, paneArgCtx?: PaneArg
   const parts = [spec?.defaultCommand ?? agentKey]
   const paneArg = paneArgCtx && spec?.paneArg ? spec.paneArg(paneArgCtx) : ''
   if (paneArg) parts.push(paneArg)
-  if (yoloEnabled.value && spec?.skipPermissionFlag) parts.push(spec.skipPermissionFlag)
+  const skipFlag = skipFlagFor(agentKey, spec)
+  if (skipFlag) parts.push(skipFlag)
   return commandWithSelectedBinary(agentKey, parts.join(' '))
 }
 
@@ -4836,7 +4855,7 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
     return false
   }
   const spec = agentSpecs.find((s) => s.agentKey === agentKey)
-  const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
+  const skipFlag = skipFlagFor(agentKey, spec)
   const chatHistoryFile = payload.historyPaneId
     ? await savedHistoryFile(agentKey, workspacePath, payload.historyPaneId)
     : ''
@@ -5325,7 +5344,7 @@ async function rebuildPaneViaResume(
       return resumable === false ? 'not-resumable' : 'probe-failed'
     }
     const spec = agentSpecs.find((s) => s.agentKey === pane.agentKey)
-    const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
+    const skipFlag = skipFlagFor(pane.agentKey, spec)
     const resumeCmd = commandWithSelectedBinary(
       pane.agentKey,
       buildResumeCommand(pane.agentKey, sessionId, skipFlag)
@@ -7469,7 +7488,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         saved.agent, saved.pane_id, saved.session_home_id,
       )
       const spec = agentSpecs.find((s) => s.agentKey === saved.agent)
-      const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
+      const skipFlag = skipFlagFor(saved.agent, spec)
       // A pane with a saved group keeps it, recreating the tab if it is missing
       // (ensureSavedGroup). Only panes that never had a group fall back: pipeline
       // panes collapse into one restore group, manual panes go to the first tab.
@@ -7769,7 +7788,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     if (!deferredPaneStillCurrent(paneId, deferred)) return
     const forceFresh = decision === 'fresh'
     const spec = agentSpecs.find((s) => s.agentKey === saved.agent)
-    const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
+    const skipFlag = skipFlagFor(saved.agent, spec)
     const canResume = await canResumeSession(saved.agent, batch.workspacePath, sessionId, { timeoutMs: 2500 })
     if (!deferredPaneStillCurrent(paneId, deferred)) return
     if (!forceFresh && shouldPreserveMissingSessionOnRestore(saved.agent, sessionId, canResume === true)) {
@@ -13727,6 +13746,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :tab-request="settingsTabRequest"
       v-model:confirm-before-close="confirmBeforeClose"
       v-model:confirm-before-close-pane="confirmBeforeClosePane"
+      v-model:yolo-enabled="yoloEnabled"
       v-model:idle-reclaim-enabled="idleReclaimEnabled"
       v-model:idle-reclaim-minutes="idleReclaimMinutes"
       :reclaimable-now-count="reclaimableNowIds.length"

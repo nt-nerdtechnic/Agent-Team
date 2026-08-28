@@ -1161,6 +1161,16 @@
       "hint": "Enable, disable, and reorder which CLI agents appear in the manual spawn dropdown. At least one must stay enabled.",
       "drag-hint": "Drag to reorder"
     },
+    "cliPermission": {
+      "title": "Permission bypass",
+      "hint": "Most CLIs take a flag that skips their permission prompts so the agent runs unattended. The global switch decides whether a newly spawned pane gets it; the per-CLI setting below overrides that switch for one vendor.",
+      "global-label": "Bypass permission prompts by default (YOLO mode)",
+      "mode-inherit": "Follow global",
+      "mode-force-on": "Always bypass",
+      "mode-force-off": "Never bypass",
+      "flagless-note": "Not listed: {list} — these CLIs have no permission-bypass flag, so there is nothing to switch.",
+      "restart-note": "The flag is fixed into a pane's command when it starts. Changing anything here affects panes spawned afterwards; a pane already running keeps whatever it started with until it is rebuilt or restored."
+    },
     "keybindings": {
       "intro": "Rebind any shortcut below. Click a key cap to record a new combination, use + to add a second binding, and ✕ to remove one. Changes are saved to keybindings.json immediately and apply to every open window.",
       "search-placeholder": "Search command, key or context…",

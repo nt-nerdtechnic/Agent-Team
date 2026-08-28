@@ -11,6 +11,11 @@ import { useTheme } from '../composables/useTheme'
 import { useSettings } from '../composables/useSettings'
 import { settingsGet, settingsSet } from '../lib/settings'
 import {
+  cliPermissionKey,
+  parseCliPermissionMode,
+  type CliPermissionMode
+} from '../lib/cliPermission'
+import {
   USAGE_ENABLED_KEY,
   USAGE_REFRESH_OPTIONS,
   setUsageEnabled,
@@ -118,6 +123,9 @@ const props = defineProps<{
   tabRequest?: number
   confirmBeforeClose?: boolean
   confirmBeforeClosePane?: boolean
+  /** Global permission-bypass toggle. Owned by App.vue; ControlPane edits the
+   *  same ref, so this page mirrors it rather than owning a second copy. */
+  yoloEnabled?: boolean
   idleReclaimEnabled?: boolean
   idleReclaimMinutes?: string
   /** Panes that could be reclaimed right now, ignoring the idle threshold. */
@@ -130,6 +138,7 @@ const emit = defineEmits<{
   (e: 'reopen-onboarding'): void
   (e: 'cli-login', agentKey: string, loginProfileId?: string): void
   (e: 'update:confirmBeforeClose', v: boolean): void
+  (e: 'update:yoloEnabled', v: boolean): void
   (e: 'update:confirmBeforeClosePane', v: boolean): void
   (e: 'update:idleReclaimEnabled', v: boolean): void
   (e: 'update:idleReclaimMinutes', v: string): void
@@ -240,6 +249,45 @@ function togglePushChannel(k: string): void {
   pushDisabled.value = [...set]
   settingsSet(PUSH_DISABLED_KEY, pushDisabled.value)
 }
+
+// ── Permission bypass (global toggle + per-vendor override) ──────────────────
+// The global flag is owned by App.vue (ControlPane edits the same ref), so it
+// travels as a model prop rather than being written here — two writers on one
+// settings key would leave App's ref stale until reload.
+const yoloModel = computed({
+  get: () => props.yoloEnabled ?? true,
+  set: (v: boolean) => emit('update:yoloEnabled', v),
+})
+/** CLIs that declare a bypass flag. The rest (grok / opencode / pi) have no
+ *  permission gate to skip, so an override row for them would be a no-op. */
+const permissionRows = computed(() => CLI_AGENT_SPECS.filter((s) => s.skipPermissionFlag))
+const permissionModes = ref<Record<string, CliPermissionMode>>(
+  Object.fromEntries(
+    CLI_AGENT_SPECS.filter((s) => s.skipPermissionFlag).map((s) => [
+      s.agentKey,
+      parseCliPermissionMode(settingsGet<string | null>(cliPermissionKey(s.agentKey), null)),
+    ])
+  )
+)
+function cliPermissionMode(k: string): CliPermissionMode {
+  return permissionModes.value[k] ?? 'inherit'
+}
+function setCliPermissionMode(k: string, mode: CliPermissionMode): void {
+  permissionModes.value = { ...permissionModes.value, [k]: mode }
+  // 'inherit' is the absence of an override, so it clears the key instead of
+  // storing a value the resolver would read the same way anyway.
+  settingsSet(cliPermissionKey(k), mode === 'inherit' ? null : mode)
+}
+function onPermissionSelect(k: string, e: Event): void {
+  setCliPermissionMode(k, parseCliPermissionMode((e.target as HTMLSelectElement).value))
+}
+/** Named in the footnote so the list's absences are explained rather than
+ *  looking like an oversight. */
+const flaglessVendors = computed(() =>
+  CLI_AGENT_SPECS.filter((s) => !s.skipPermissionFlag)
+    .map((s) => s.label)
+    .join(' / ')
+)
 
 const cliDragKey = ref('')
 const cliDragOverKey = ref('')
@@ -2604,6 +2652,37 @@ watch(activeTab, (tab) => {
               </li>
             </ul>
           </section>
+          <section class="ap-section" data-settings-section="cli-agents-permissions">
+            <h3 class="ap-title">{{ $t('settings.cliPermission.title') }}</h3>
+            <p class="ap-hint">{{ $t('settings.cliPermission.hint') }}</p>
+            <label class="cli-agent-toggle perm-global">
+              <input type="checkbox" v-model="yoloModel" />
+              <span class="cli-agent-label">{{ $t('settings.cliPermission.global-label') }}</span>
+            </label>
+            <ul class="cli-agent-list">
+              <li
+                v-for="spec in permissionRows"
+                :key="spec.agentKey"
+                class="cli-agent-row perm-row"
+                :class="{ 'perm-overridden': cliPermissionMode(spec.agentKey) !== 'inherit' }"
+              >
+                <span class="cli-agent-label perm-name">{{ spec.label }}</span>
+                <code class="perm-flag">{{ spec.skipPermissionFlag }}</code>
+                <select
+                  class="perm-select"
+                  :value="cliPermissionMode(spec.agentKey)"
+                  :aria-label="spec.label"
+                  @change="onPermissionSelect(spec.agentKey, $event)"
+                >
+                  <option value="inherit">{{ $t('settings.cliPermission.mode-inherit') }}</option>
+                  <option value="force-on">{{ $t('settings.cliPermission.mode-force-on') }}</option>
+                  <option value="force-off">{{ $t('settings.cliPermission.mode-force-off') }}</option>
+                </select>
+              </li>
+            </ul>
+            <p class="ap-hint">{{ $t('settings.cliPermission.flagless-note', { list: flaglessVendors }) }}</p>
+            <p class="ap-hint">{{ $t('settings.cliPermission.restart-note') }}</p>
+          </section>
           <section class="ap-section" data-settings-section="cli-agents-push">
             <h3 class="ap-title">{{ $t('settings.pushChannels.title') }}</h3>
             <p class="ap-hint">{{ $t('settings.pushChannels.hint') }}</p>
@@ -3975,6 +4054,14 @@ watch(activeTab, (tab) => {
 .cli-agent-toggle { display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer; margin: 0; }
 .cli-agent-label { font-size: var(--font-sm); font-weight: 600; }
 .cli-agent-hint { font-size: var(--font-2xs); color: var(--text-secondary); }
+/* Permission overrides: name | flag | mode picker, the flag column taking the
+   slack so the pickers line up down the list. */
+.perm-global { margin: 4px 0 10px; }
+.perm-row { gap: 10px; }
+.perm-name { flex: 0 0 96px; }
+.perm-flag { flex: 1; min-width: 0; font-size: var(--font-2xs); color: var(--text-secondary); overflow-x: auto; white-space: nowrap; }
+.perm-select { flex: 0 0 auto; font-size: var(--font-2xs); }
+.perm-row.perm-overridden { border-color: var(--accent-focus); }
 .ap-theme-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));

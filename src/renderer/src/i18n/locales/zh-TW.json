@@ -1161,6 +1161,16 @@
       "hint": "啟用、停用並排序主視窗手動生成（manual spawn）下拉選單中出現的 CLI agent，順序也會套用到 Ctrl+數字快捷鍵。至少須保留一個啟用。",
       "drag-hint": "拖曳以排序"
     },
+    "cliPermission": {
+      "title": "權限略過",
+      "hint": "多數 CLI 有一個略過權限提示的旗標，讓 agent 無人值守地執行。全域開關決定新生成的 pane 要不要帶上它；下方逐家設定可針對單一 CLI 覆寫該開關。",
+      "global-label": "預設略過權限提示（YOLO 模式）",
+      "mode-inherit": "跟隨全域",
+      "mode-force-on": "一律略過",
+      "mode-force-off": "一律不略過",
+      "flagless-note": "未列出：{list} — 這幾家 CLI 沒有權限略過旗標，因此沒有東西可切換。",
+      "restart-note": "旗標在 pane 啟動時就寫進它的命令。這裡的變更只影響之後生成的 pane；已經在跑的 pane 會保留啟動時的設定，直到重建或還原。"
+    },
     "keybindings": {
       "intro": "下方任何快捷鍵都可以重新設定。點擊鍵帽即可錄製新組合，用 + 新增第二組綁定，用 ✕ 移除。變更會立即寫入 keybindings.json，並套用到所有開啟中的視窗。",
       "search-placeholder": "搜尋命令、按鍵或情境…",
