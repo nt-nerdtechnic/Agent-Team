@@ -3,28 +3,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { i18n } from '../../i18n'
 import McpPane from '../McpPane.vue'
+import type { McpAgent, NativeMcpServer } from '../../lib/mcp-settings-editor'
 
-const agents = [
+const agents: McpAgent[] = [
   { key: 'claude', label: 'Claude Code', state: 'wired', reflects: true },
   { key: 'codex', label: 'Codex', state: 'wired', reflects: true },
   { key: 'droid', label: 'Droid', state: 'planned', reflects: true },
   { key: 'aider', label: 'Aider', state: 'unsupported', reflects: false },
 ]
 
-/** Navide's own list: what the block above this pane manages. */
-const navideServers = [
-  {
-    name: 'context7',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@upstash/context7-mcp'],
-    enabled: true,
-    status: 'connected',
-    tool_count: 2,
-  },
-]
+/** Navide's own servers — the parent owns these and passes them down. */
+function navideServers() {
+  return [
+    {
+      name: 'context7',
+      transport: 'stdio' as const,
+      command: 'npx',
+      args: ['-y', '@upstash/context7-mcp'],
+      env: { API_KEY: 'sk-live', LOG_LEVEL: 'debug' },
+      enabled: true,
+      status: 'connected' as const,
+      tool_count: 2,
+      tools: [{ name: 'resolve', description: 'resolves ids' }],
+    },
+  ]
+}
 
-const native = [
+const native: NativeMcpServer[] = [
   {
     name: 'context7',
     agent: 'claude',
@@ -33,7 +38,7 @@ const native = [
     command: 'npx',
     args: ['-y', '@upstash/context7-mcp'],
     url: '',
-    env: { API_KEY: '***', LOG_LEVEL: 'debug' },
+    env: { API_KEY: '***' },
     headers: {},
     enabled: true,
     valid: true,
@@ -55,30 +60,23 @@ const native = [
   },
 ]
 
-function mockBackend(payload: Record<string, unknown> = {}) {
-  const send = vi.fn(async (_type: string, _payload?: unknown) => ({
-    ok: true,
-    payload: { servers: navideServers, native, agents, path: '/tmp/mcp.json', revision: '1', ...payload },
-  }))
-  return { backend: { send } as never, send }
-}
-
-async function mountPane(backend: never): Promise<VueWrapper> {
-  const wrapper = mount(McpPane, { props: { backend }, global: { plugins: [i18n] } })
-  await flushPromises()
-  return wrapper
-}
-
-async function openCompareView(wrapper: VueWrapper): Promise<void> {
-  const button = wrapper.findAll('.mcp-view-switch button').find((b) => b.text() === 'Compare')
-  await button!.trigger('click')
-  await flushPromises()
+function mountPane(overrides: Record<string, unknown> = {}): VueWrapper {
+  return mount(McpPane, {
+    props: { servers: navideServers(), native, agents, ...overrides },
+    global: { plugins: [i18n] },
+  }) as VueWrapper
 }
 
 async function openCard(wrapper: VueWrapper, name: string): Promise<void> {
   const card = wrapper.findAll('.mcp-card').find((c) => c.find('strong').text() === name)
   if (!card) throw new Error(`no card named ${name}`)
   await card.trigger('click')
+  await flushPromises()
+}
+
+async function openCompareView(wrapper: VueWrapper): Promise<void> {
+  const button = wrapper.findAll('.mcp-view-switch button').find((b) => b.text() === 'Compare')
+  await button!.trigger('click')
   await flushPromises()
 }
 
@@ -98,39 +96,38 @@ describe('McpPane', () => {
     vi.restoreAllMocks()
   })
 
-  it('lists both sources from one call and files each row under where it came from', async () => {
-    const { backend, send } = mockBackend()
-    wrapper = await mountPane(backend)
+  it('lists both sources once, filing each row under where it came from', () => {
+    wrapper = mountPane()
 
-    expect(send).toHaveBeenCalledWith('mcp.list_servers', {})
+    // context7 is Navide's *and* claude's: one row, not two.
     const names = wrapper.findAll('.mcp-card strong').map((el) => el.text())
     expect(names).toEqual(['context7', 'xmind'])
-    // context7 is Navide's *and* claude's: one row, grouped under Navide.
     const groups = wrapper.findAll('.mcp-group-title').map((el) => el.text())
     expect(groups[0]).toContain('Navide')
     expect(groups[1]).toContain('Codex')
   })
 
-  it('shows every place a server is configured on its card', async () => {
-    const { backend } = mockBackend()
-    wrapper = await mountPane(backend)
+  it('shows every place a server is configured on its card', () => {
+    wrapper = mountPane()
 
     const card = wrapper.findAll('.mcp-card').find((c) => c.find('strong').text() === 'context7')
-    const places = card!.findAll('.pchip').map((el) => el.text())
-    expect(places).toEqual(['Navide', 'claude'])
+    expect(card!.findAll('.pchip').map((el) => el.text())).toEqual([
+      'Navide',
+      'claude',
+      '2 tools',
+    ])
+    expect(card!.find('.mcp-status-dot').classes()).toContain('connected')
   })
 
   it('separates "not configured" from "this CLI has no MCP" in the matrix', async () => {
-    const { backend } = mockBackend()
-    wrapper = await mountPane(backend)
+    wrapper = mountPane()
     await openCompareView(wrapper)
 
     const row = wrapper
       .findAll('tbody tr')
       .find((tr) => tr.find('.matrix-name').exists() && tr.find('.matrix-name').text() === 'context7')
-    const cells = row!.findAll('td')
     // Navide, claude, codex, droid, aider
-    expect(cells.map((cell) => cell.attributes('class'))).toEqual([
+    expect(row!.findAll('td').map((cell) => cell.attributes('class'))).toEqual([
       'here',
       'here',
       'off',
@@ -140,8 +137,7 @@ describe('McpPane', () => {
   })
 
   it('marks a natively configured but switched-off server as disabled, not absent', async () => {
-    const { backend } = mockBackend()
-    wrapper = await mountPane(backend)
+    wrapper = mountPane()
     await openCompareView(wrapper)
 
     const row = wrapper
@@ -153,52 +149,130 @@ describe('McpPane', () => {
   })
 
   it('filters by source and by search text', async () => {
-    const { backend } = mockBackend()
-    wrapper = await mountPane(backend)
+    wrapper = mountPane()
 
     const codexChip = wrapper.findAll('.mcp-chip').find((c) => c.text().startsWith('codex'))
     await codexChip!.trigger('click')
-    await flushPromises()
     expect(wrapper.findAll('.mcp-card strong').map((el) => el.text())).toEqual(['xmind'])
 
     const allChip = wrapper.findAll('.mcp-chip').find((c) => c.text().startsWith('All'))
     await allChip!.trigger('click')
     await wrapper.find('.mcp-pane-search').setValue('upstash')
-    await flushPromises()
     expect(wrapper.findAll('.mcp-card strong').map((el) => el.text())).toEqual(['context7'])
   })
 
-  it('opens one drawer showing every place, and offers no way to edit a native config', async () => {
-    const { backend } = mockBackend()
-    wrapper = await mountPane(backend)
+  it('edits one of Navide’s own servers and hands the result to the parent', async () => {
+    wrapper = mountPane()
     await openCard(wrapper, 'context7')
 
-    const drawer = wrapper.find('.mcp-drawer')
-    expect(drawer.exists()).toBe(true)
-    expect(drawer.text()).toContain('Navide')
-    expect(drawer.text()).toContain('Claude Code')
-    expect(drawer.text()).toContain('/Users/x/.claude.json')
-    // Read-only: the drawer has no inputs at all.
-    expect(drawer.findAll('input')).toHaveLength(0)
-    expect(drawer.findAll('textarea')).toHaveLength(0)
+    const command = wrapper.find('.mcp-editor input[placeholder="npx"]')
+    await command.setValue('bunx')
+    await wrapper.find('.mcp-drawer-actions.end button.primary').trigger('click')
+
+    const saved = wrapper.emitted('save')
+    expect(saved).toHaveLength(1)
+    expect((saved![0][0] as { command: string }).command).toBe('bunx')
   })
 
-  it('opens the CLI config file rather than trying to write it', async () => {
-    const { backend } = mockBackend()
-    wrapper = await mountPane(backend)
+  it('leaves the parent’s server untouched until the edit is saved', async () => {
+    const servers = navideServers()
+    wrapper = mountPane({ servers })
     await openCard(wrapper, 'context7')
 
-    const button = wrapper
-      .findAll('.mcp-drawer-actions button')
-      .find((b) => b.text() === 'Open config file')
-    await button!.trigger('click')
+    await wrapper.find('.mcp-editor input[placeholder="npx"]').setValue('bunx')
+
+    // The draft is a copy: an abandoned edit must not reach saved settings.
+    expect(servers[0].command).toBe('npx')
+    expect(wrapper.emitted('save')).toBeUndefined()
+  })
+
+  it('masks a secret env value until it is revealed', async () => {
+    wrapper = mountPane()
+    await openCard(wrapper, 'context7')
+
+    const rows = wrapper.findAll('.mcp-editor .mcp-kv-row')
+    const secretRow = rows.find((row) => (row.find('input').element as HTMLInputElement).value === 'API_KEY')
+    const valueInput = secretRow!.findAll('input')[1]
+    expect(valueInput.attributes('type')).toBe('password')
+
+    await secretRow!.findAll('button').find((b) => b.text() === 'Show')!.trigger('click')
+    expect(secretRow!.findAll('input')[1].attributes('type')).toBe('text')
+  })
+
+  it('asks the parent to remove a server rather than deleting it itself', async () => {
+    wrapper = mountPane()
+    await openCard(wrapper, 'context7')
+
+    await wrapper.findAll('.mcp-drawer-actions.end button').find((b) => b.text() === 'Delete')!.trigger('click')
+
+    expect(wrapper.emitted('remove')).toEqual([['context7']])
+  })
+
+  it('saves immediately when the enable switch is flipped', async () => {
+    wrapper = mountPane()
+    await openCard(wrapper, 'context7')
+
+    await wrapper.find('.mcp-drawer-toggle button[role="switch"]').trigger('click')
+
+    const saved = wrapper.emitted('save')
+    expect((saved![0][0] as { enabled: boolean }).enabled).toBe(false)
+  })
+
+  it('offers no way to edit a native config, only to open it', async () => {
+    wrapper = mountPane({ servers: [] })
+    await openCard(wrapper, 'xmind')
+
+    const drawer = wrapper.find('.mcp-drawer')
+    expect(drawer.find('.mcp-editor').exists()).toBe(false)
+    expect(drawer.findAll('input')).toHaveLength(0)
+    expect(drawer.text()).toContain('/Users/x/.codex/config.toml')
+
+    await drawer.findAll('button').find((b) => b.text() === 'Open config file')!.trigger('click')
+    await flushPromises()
+    expect(openPath).toHaveBeenCalledWith('/Users/x/.codex/config.toml')
+  })
+
+  it('opens the editor on a server the parent just added, and says it is done', async () => {
+    wrapper = mountPane({ selectName: 'context7' })
     await flushPromises()
 
-    expect(openPath).toHaveBeenCalledWith('/Users/x/.claude.json')
+    expect(wrapper.find('.mcp-editor').exists()).toBe(true)
+    expect(wrapper.find('.mcp-drawer-title h3').text()).toBe('context7')
+    // Without this the drawer would pop open again on every remount.
+    expect(wrapper.emitted('select-consumed')).toHaveLength(1)
+  })
+
+  it('drops the editor but keeps the row when a server is removed from Navide only', async () => {
+    // context7 is also in claude's own config, so the row survives as a
+    // read-only reflection — losing it would be the wrong answer.
+    wrapper = mountPane()
+    await openCard(wrapper, 'context7')
+    expect(wrapper.find('.mcp-editor').exists()).toBe(true)
+
+    await wrapper.setProps({ servers: [] })
+    await flushPromises()
+
+    expect(wrapper.find('.mcp-drawer').exists()).toBe(true)
+    expect(wrapper.find('.mcp-editor').exists()).toBe(false)
+    expect(wrapper.find('.mcp-drawer').text()).toContain('Claude Code')
+  })
+
+  it('closes the drawer when the removed server existed nowhere else', async () => {
+    const solo = [
+      { name: 'solo', transport: 'stdio' as const, command: 'npx', args: [], env: {}, enabled: true },
+    ]
+    wrapper = mountPane({ servers: solo, native: [] })
+    await openCard(wrapper, 'solo')
+    expect(wrapper.find('.mcp-editor').exists()).toBe(true)
+
+    await wrapper.setProps({ servers: [] })
+    await flushPromises()
+
+    expect(wrapper.find('.mcp-drawer').exists()).toBe(false)
   })
 
   it('reports a config it could not read instead of dropping it', async () => {
-    const { backend } = mockBackend({
+    wrapper = mountPane({
       servers: [],
       native: [
         {
@@ -217,61 +291,24 @@ describe('McpPane', () => {
         },
       ],
     })
-    wrapper = await mountPane(backend)
 
     expect(wrapper.find('.mcp-card-detail').text()).toContain('invalid TOML')
     await openCard(wrapper, 'config.toml')
     expect(wrapper.find('.mcp-drawer-hint.danger').text()).toContain('invalid TOML')
   })
 
-  it('says so when nothing is configured anywhere', async () => {
-    const { backend } = mockBackend({ servers: [], native: [] })
-    wrapper = await mountPane(backend)
+  it('says so when nothing is configured anywhere', () => {
+    wrapper = mountPane({ servers: [], native: [] })
 
     expect(wrapper.find('.nv-empty').exists()).toBe(true)
     expect(wrapper.findAll('.mcp-card')).toHaveLength(0)
   })
 
-  it('surfaces a failed listing without clearing what it already showed', async () => {
-    const send = vi.fn(async () => ({ ok: false, error: { message: 'backend down' } }))
-    wrapper = await mountPane({ send } as never)
+  it('asks the parent to reload rather than fetching for itself', async () => {
+    wrapper = mountPane()
 
-    expect(wrapper.find('.mcp-pane-error').text()).toBe('backend down')
-  })
+    await wrapper.find('.mcp-pane-head button').trigger('click')
 
-  it('ignores a stale reload that lands after a newer one', async () => {
-    // The parent refreshes this pane whenever it reloads its own list, so two
-    // reloads really do overlap; the older answer must not win.
-    const payloads = [
-      { servers: [], native: [], agents, path: '/tmp/mcp.json', revision: '1' },
-      { servers: navideServers, native, agents, path: '/tmp/mcp.json', revision: '2' },
-    ]
-    const resolvers: ((value: unknown) => void)[] = []
-    const send = vi.fn(
-      () =>
-        new Promise((resolve) => {
-          resolvers.push(resolve)
-        }),
-    )
-    wrapper = mount(McpPane, {
-      props: { backend: { send } as never },
-      global: { plugins: [i18n] },
-    })
-
-    // The mount already fired one; start a second without awaiting it, so both
-    // are genuinely in flight.
-    void (wrapper.vm as unknown as { reload: () => Promise<void> }).reload()
-    await flushPromises()
-    // Answer the newer request first, then let the stale one land.
-    resolvers[1]({ ok: true, payload: payloads[1] })
-    await flushPromises()
-    resolvers[0]({ ok: true, payload: payloads[0] })
-    await flushPromises()
-
-    expect(wrapper.findAll('.mcp-card strong').map((el) => el.text())).toEqual([
-      'context7',
-      'xmind',
-    ])
-    expect(wrapper.find('.mcp-pane-state.nv-loading').exists()).toBe(false)
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
   })
 })

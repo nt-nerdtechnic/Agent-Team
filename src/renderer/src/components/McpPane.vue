@@ -1,68 +1,61 @@
 <script setup lang="ts">
 /**
- * The MCP page's unified half: every MCP server on this machine, whoever
+ * The MCP page's one list: every MCP server on this machine, whoever
  * configured it.
  *
- * Two sources, like the skills library: **Navide's own** servers (the list
- * above this pane, which Navide connects to as a client) and the **native**
- * servers each CLI keeps in its own config. Reflection is strictly read-only —
- * the backend module that scans has no write path — so a CLI's own MCP setup
- * keeps working exactly as it did, whether or not Navide is running.
+ * Two sources, like the skills library. **Navide's own** servers are the ones
+ * Navide connects to as a client; they are editable here, and this is the only
+ * place they are listed — a separate list above this one showed the same
+ * server twice on one page. The **native** servers each CLI keeps in its own
+ * config are reflected read-only: the backend module that scans has no write
+ * path, so a CLI's own MCP setup keeps working exactly as it did.
+ *
+ * Presentational by design: the parent owns the server list, its revision and
+ * the save queue, so there is one source of truth and no second request to
+ * race with. Edits leave through `save` / `remove`.
  *
  * One filter bar drives two views over the same rows: cards to browse, a
  * matrix to compare where a server is set up. Clicking either opens the same
  * drawer.
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { useBackend } from '../composables/useBackend'
+import ToggleSwitch from './settings/ToggleSwitch.vue'
+import {
+  isSecretSettingKey,
+  nextRecordKey,
+  switchMcpTransportShape,
+  type McpAgent,
+  type McpTransport,
+  type NativeMcpServer,
+} from '../lib/mcp-settings-editor'
 
-type Backend = ReturnType<typeof useBackend>
-
-/** One server in a CLI's own config, as the backend reflected it. */
-interface NativeMcpServer {
+interface McpTool {
   name: string
-  /** Agent key whose config this came from. */
-  agent: string
-  transport: string
-  /** The config file it was read from. */
-  path: string
-  command: string
-  args: string[]
-  url: string
-  env: Record<string, string>
-  headers: Record<string, string>
-  enabled: boolean
-  valid: boolean
-  error: string
+  description: string
 }
 
-/** One of Navide's own servers, as `mcp.list_servers` returns it. */
-interface NavideMcpServer {
+/** One of Navide's own servers, as the parent holds it. */
+interface McpServer {
   name: string
-  transport: string
+  transport: McpTransport
   command?: string
   args?: string[]
+  env?: Record<string, string>
   url?: string
-  enabled?: boolean
-  status?: string
+  headers?: Record<string, string>
+  enabled: boolean
+  // Live fields the backend reports; never saved.
+  status?: 'connected' | 'error' | 'disabled' | 'unknown'
   tool_count?: number
-}
-
-/** One CLI vendor and what Navide can do with its MCP. */
-interface McpAgent {
-  key: string
-  label: string
-  state: 'wired' | 'planned' | 'unsupported'
-  /** Whether the scan can read this CLI's own servers at all. */
-  reflects: boolean
+  tools?: McpTool[]
 }
 
 /** One row: a server name and everywhere on this machine it is configured. */
 interface McpRow {
   key: string
   name: string
-  navide: NavideMcpServer | null
+  navide: McpServer | null
   natives: NativeMcpServer[]
   /** Which group the row is filed under in the browse view. */
   source: string
@@ -71,124 +64,39 @@ interface McpRow {
 /** The Navide column's key in the matrix; no vendor may use it. */
 const NAVIDE = '__navide__'
 
-const props = defineProps<{ backend: Backend }>()
+const props = defineProps<{
+  /** Navide's own servers — the parent's live array. */
+  servers: McpServer[]
+  native: NativeMcpServer[]
+  agents: McpAgent[]
+  loading?: boolean
+  /** Server to open the drawer on, e.g. one just added from the catalog. */
+  selectName?: string
+}>()
+
+const emit = defineEmits<{
+  /** An edited copy of one of `servers`; the parent saves it. */
+  save: [server: McpServer]
+  remove: [name: string]
+  refresh: []
+  /** `selectName` has been acted on; the parent may clear it. */
+  'select-consumed': []
+}>()
+
 const { t } = useI18n()
 
-const navideServers = ref<NavideMcpServer[]>([])
-const natives = ref<NativeMcpServer[]>([])
-const agents = ref<McpAgent[]>([])
-const loading = ref(false)
-const error = ref('')
 const query = ref('')
 const view = ref<'browse' | 'compare'>('browse')
 const sourceFilter = ref('all')
 const selectedKey = ref<string | null>(null)
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-function stringValue(value: unknown, fallback = ''): string {
-  return typeof value === 'string' ? value : fallback
-}
-
-function stringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
-}
-
-function stringMap(value: unknown): Record<string, string> {
-  if (!isRecord(value)) return {}
-  const out: Record<string, string> = {}
-  for (const [key, raw] of Object.entries(value)) out[key] = stringValue(raw)
-  return out
-}
-
-function normalizeNative(value: unknown): NativeMcpServer | null {
-  if (!isRecord(value) || typeof value.name !== 'string' || !value.name) return null
-  return {
-    name: value.name,
-    agent: stringValue(value.agent),
-    transport: stringValue(value.transport, 'unknown'),
-    path: stringValue(value.path),
-    command: stringValue(value.command),
-    args: stringList(value.args),
-    url: stringValue(value.url),
-    env: stringMap(value.env),
-    headers: stringMap(value.headers),
-    enabled: value.enabled !== false,
-    valid: value.valid !== false,
-    error: stringValue(value.error),
-  }
-}
-
-function normalizeAgent(value: unknown): McpAgent | null {
-  if (!isRecord(value) || typeof value.key !== 'string' || !value.key) return null
-  const state = stringValue(value.state, 'unsupported')
-  return {
-    key: value.key,
-    label: stringValue(value.label, value.key),
-    state: state === 'wired' || state === 'planned' ? state : 'unsupported',
-    reflects: value.reflects === true,
-  }
-}
-
-/**
- * Reloads race: the parent refreshes this pane whenever it reloads its own
- * list, and the pane has its own Refresh. Without a sequence number a slow
- * earlier response overwrites a newer one and `loading` clears on whichever
- * finishes first, so the pane would claim to be settled on stale rows.
- */
-let reloadSeq = 0
-
-async function reload(): Promise<void> {
-  const mine = ++reloadSeq
-  loading.value = true
-  error.value = ''
-  try {
-    const resp = await props.backend.send<{
-      servers?: unknown
-      native?: unknown
-      agents?: unknown
-    }>('mcp.list_servers', {})
-    if (mine !== reloadSeq) return
-    if (!resp.ok || !resp.payload) {
-      error.value = resp.error?.message ?? t('settings.mcp.agent-error-load')
-      return
-    }
-    navideServers.value = (Array.isArray(resp.payload.servers) ? resp.payload.servers : [])
-      .filter(isRecord)
-      .filter((server): server is Record<string, unknown> & { name: string } =>
-        typeof server.name === 'string' && !!server.name,
-      )
-      .map((server) => ({
-        name: server.name,
-        transport: stringValue(server.transport, 'stdio'),
-        command: stringValue(server.command),
-        args: stringList(server.args),
-        url: stringValue(server.url),
-        enabled: server.enabled !== false,
-        status: stringValue(server.status, 'unknown'),
-        tool_count: typeof server.tool_count === 'number' ? server.tool_count : 0,
-      }))
-    natives.value = (Array.isArray(resp.payload.native) ? resp.payload.native : [])
-      .map(normalizeNative)
-      .filter((entry): entry is NativeMcpServer => entry !== null)
-    agents.value = (Array.isArray(resp.payload.agents) ? resp.payload.agents : [])
-      .map(normalizeAgent)
-      .filter((entry): entry is McpAgent => entry !== null)
-    if (selectedKey.value && !rows.value.some((row) => row.key === selectedKey.value)) {
-      selectedKey.value = null
-    }
-  } catch (err) {
-    if (mine === reloadSeq) error.value = String((err as Error).message ?? err)
-  } finally {
-    if (mine === reloadSeq) loading.value = false
-  }
-}
+/** The selected Navide server, editable until saved. */
+const draft = ref<McpServer | null>(null)
+const revealed = ref<Set<string>>(new Set())
+const toolsOpen = ref(false)
 
 const agentLabels = computed(() => {
   const map = new Map<string, string>()
-  for (const agent of agents.value) map.set(agent.key, agent.label)
+  for (const agent of props.agents) map.set(agent.key, agent.label)
   return map
 })
 
@@ -204,12 +112,12 @@ const rows = computed<McpRow[]>(() => {
     }
     return row
   }
-  for (const server of navideServers.value) {
+  for (const server of props.servers) {
     const row = take(server.name)
     row.navide = server
     row.source = NAVIDE
   }
-  for (const native of natives.value) {
+  for (const native of props.native) {
     const row = take(native.name)
     row.natives.push(native)
     if (!row.source) row.source = native.agent
@@ -242,7 +150,7 @@ const visibleRows = computed(() => {
 
 /** Browse groups, Navide first then each agent in the vendor order. */
 const groupedRows = computed(() => {
-  const order = [NAVIDE, ...agents.value.map((agent) => agent.key)]
+  const order = [NAVIDE, ...props.agents.map((agent) => agent.key)]
   return order
     .map((source) => ({
       source,
@@ -262,8 +170,8 @@ const sourceChips = computed(() => {
       count: rows.value.filter((row) => row.navide).length,
     },
   ]
-  for (const agent of agents.value) {
-    const count = natives.value.filter((native) => native.agent === agent.key).length
+  for (const agent of props.agents) {
+    const count = props.native.filter((native) => native.agent === agent.key).length
     if (count > 0) chips.push({ key: agent.key, label: agent.key, count })
   }
   return chips
@@ -341,12 +249,144 @@ function navideCellGlyph(row: McpRow): string {
   return state === 'here' ? '✓' : state === 'disabled' ? '·' : ''
 }
 
+// ── Drawer ────────────────────────────────────────────────────────────────
+
 function openRow(row: McpRow): void {
-  selectedKey.value = selectedKey.value === row.key ? null : row.key
+  if (selectedKey.value === row.key) {
+    closeDrawer()
+    return
+  }
+  selectedKey.value = row.key
+  startDraft(row)
 }
 
 function closeDrawer(): void {
   selectedKey.value = null
+  draft.value = null
+  revealed.value = new Set()
+  toolsOpen.value = false
+}
+
+/**
+ * A copy, not the parent's object: an abandoned edit must leave the saved
+ * settings untouched, and the parent's array stays the source of truth until
+ * a save comes back.
+ */
+function startDraft(row: McpRow): void {
+  draft.value = row.navide ? (JSON.parse(JSON.stringify(row.navide)) as McpServer) : null
+  revealed.value = new Set()
+  toolsOpen.value = false
+}
+
+// A server added from the catalog opens straight into its editor, because the
+// entry usually needs an API key filled in before it will connect. Consuming
+// it once matters: this pane is inside a `v-if`, so a lingering value would
+// pop the drawer open again every time the user came back to the list view.
+watch(
+  () => props.selectName,
+  (name) => {
+    if (!name) return
+    const row = rows.value.find((candidate) => candidate.key === name.toLowerCase())
+    if (row) {
+      selectedKey.value = row.key
+      startDraft(row)
+    }
+    emit('select-consumed')
+  },
+  { immediate: true },
+)
+
+// Follow the selection, not the array: the parent edits its servers in place,
+// so the array's identity does not change on save or delete. An in-progress
+// edit is deliberately *not* re-seeded from a background reload — that would
+// throw away what the user is typing.
+watch(selectedRow, (row) => {
+  // No row, or a row that is no longer one of Navide's: there is nothing left
+  // to edit, even when the name still exists as a CLI's own reflection.
+  if (!row?.navide) {
+    draft.value = null
+    return
+  }
+  if (!draft.value || draft.value.name !== row.name) startDraft(row)
+})
+
+function draftEnv(): Record<string, string> {
+  if (!draft.value) return {}
+  return (draft.value.env ??= {})
+}
+
+function draftHeaders(): Record<string, string> {
+  if (!draft.value) return {}
+  return (draft.value.headers ??= {})
+}
+
+function recordEntries(record?: Record<string, string>): [string, string][] {
+  return Object.entries(record ?? {})
+}
+
+function setRecordKey(record: Record<string, string>, oldKey: string, newKey: string): void {
+  const key = newKey.trim()
+  if (!key || (key !== oldKey && key in record)) return
+  const value = record[oldKey] ?? ''
+  delete record[oldKey]
+  record[key] = value
+}
+
+function setRecordValue(record: Record<string, string>, key: string, value: string): void {
+  record[key] = value
+}
+
+function addRecordEntry(record: Record<string, string>, base: string): void {
+  record[nextRecordKey(record, base)] = ''
+}
+
+function deleteRecordEntry(record: Record<string, string>, key: string): void {
+  delete record[key]
+}
+
+function addArg(): void {
+  if (draft.value) (draft.value.args ??= []).push('')
+}
+
+function setArg(index: number, value: string): void {
+  if (draft.value) (draft.value.args ??= [])[index] = value
+}
+
+function deleteArg(index: number): void {
+  draft.value?.args?.splice(index, 1)
+}
+
+function changeTransport(transport: McpTransport): void {
+  if (draft.value) switchMcpTransportShape(draft.value, transport)
+}
+
+function secretId(kind: 'env' | 'header', key: string): string {
+  return `${kind} ${key}`
+}
+
+function secretVisible(kind: 'env' | 'header', key: string): boolean {
+  return revealed.value.has(secretId(kind, key))
+}
+
+function toggleSecret(kind: 'env' | 'header', key: string): void {
+  const id = secretId(kind, key)
+  const next = new Set(revealed.value)
+  next.has(id) ? next.delete(id) : next.add(id)
+  revealed.value = next
+}
+
+function saveDraft(): void {
+  if (draft.value) emit('save', JSON.parse(JSON.stringify(draft.value)) as McpServer)
+}
+
+function toggleEnabled(value: boolean): void {
+  if (!draft.value) return
+  draft.value.enabled = value
+  saveDraft()
+}
+
+function removeDraft(): void {
+  if (draft.value) emit('remove', draft.value.name)
 }
 
 async function openConfig(path: string): Promise<void> {
@@ -356,10 +396,6 @@ async function openConfig(path: string): Promise<void> {
 function entries(map: Record<string, string>): [string, string][] {
   return Object.entries(map)
 }
-
-onMounted(reload)
-
-defineExpose({ reload })
 </script>
 
 <template>
@@ -369,10 +405,10 @@ defineExpose({ reload })
         <h2>{{ t('settings.mcp.agent-title') }}</h2>
         <p>{{ t('settings.mcp.agent-intro') }}</p>
       </div>
-      <button type="button" :disabled="loading" @click="reload">{{ t('action.refresh') }}</button>
+      <button type="button" :disabled="loading" @click="emit('refresh')">
+        {{ t('action.refresh') }}
+      </button>
     </header>
-
-    <p v-if="error" class="mcp-pane-error" role="alert">{{ error }}</p>
 
     <div class="mcp-filterbar">
       <div class="mcp-chips" role="group" :aria-label="t('settings.mcp.filter-label')">
@@ -432,6 +468,11 @@ defineExpose({ reload })
                 @click="openRow(row)"
               >
                 <span class="mcp-card-head">
+                  <span
+                    v-if="row.navide"
+                    class="mcp-status-dot"
+                    :class="row.navide.status ?? 'unknown'"
+                  ></span>
                   <strong>{{ row.name }}</strong>
                   <span class="mcp-tag">{{ rowTransport(row) }}</span>
                 </span>
@@ -445,6 +486,9 @@ defineExpose({ reload })
                     class="pchip"
                     :class="{ off: chip.off }"
                   >{{ chip.label }}</span>
+                  <span v-if="(row.navide?.tool_count ?? 0) > 0" class="pchip tools">
+                    {{ t('settings.mcp.tool-count', { n: row.navide?.tool_count ?? 0 }) }}
+                  </span>
                 </span>
               </button>
             </div>
@@ -504,7 +548,7 @@ defineExpose({ reload })
         </section>
       </div>
 
-      <!-- Drawer: every place this server is configured, read-only. -->
+      <!-- Drawer: editable for Navide's own, read-only for every CLI's. -->
       <aside v-if="selectedRow" class="mcp-drawer" :aria-label="selectedRow.name">
         <header class="mcp-drawer-head">
           <div class="mcp-drawer-title">
@@ -519,18 +563,160 @@ defineExpose({ reload })
           >✕</button>
         </header>
 
-        <section v-if="selectedRow.navide" class="mcp-drawer-section">
+        <!-- Navide's own: the editor -->
+        <section v-if="draft" class="mcp-drawer-section mcp-editor">
           <h4>{{ t('settings.mcp.source-navide') }}</h4>
           <p class="mcp-drawer-hint">{{ t('settings.mcp.navide-scope-hint') }}</p>
-          <code v-if="selectedRow.navide.url" class="mcp-drawer-path">{{ selectedRow.navide.url }}</code>
-          <code v-else-if="selectedRow.navide.command" class="mcp-drawer-path">
-            {{ [selectedRow.navide.command, ...(selectedRow.navide.args ?? [])].join(' ') }}
-          </code>
-          <span class="mcp-drawer-meta">
-            {{ selectedRow.navide.enabled === false ? t('settings.mcp.state-off') : t('settings.mcp.status', { status: selectedRow.navide.status }) }}
-          </span>
+
+          <div class="mcp-drawer-toggle">
+            <span>
+              <strong>{{ t('settings.mcp.state-on') }}</strong>
+              <small>{{ t('settings.mcp.status', { status: selectedRow.navide?.status ?? 'unknown' }) }}</small>
+            </span>
+            <ToggleSwitch
+              :model-value="draft.enabled"
+              :aria-label="draft.enabled ? t('settings.mcp.state-off') : t('settings.mcp.state-on')"
+              @update:model-value="toggleEnabled"
+            />
+          </div>
+
+          <details v-if="selectedRow.navide?.tools?.length" class="mcp-tools" :open="toolsOpen">
+            <summary @click.prevent="toolsOpen = !toolsOpen">
+              {{ t('settings.mcp.tool-count', { n: selectedRow.navide?.tool_count ?? 0 }) }}
+            </summary>
+            <ul class="mcp-tool-list">
+              <li v-for="tool in selectedRow.navide?.tools ?? []" :key="tool.name">
+                <code>{{ tool.name }}</code>
+                <span v-if="tool.description"> — {{ tool.description }}</span>
+              </li>
+            </ul>
+          </details>
+
+          <label class="mcp-field">
+            <span>{{ t('settings.mcp.transport') }}</span>
+            <select
+              :value="draft.transport"
+              @change="changeTransport(($event.target as HTMLSelectElement).value as McpTransport)"
+            >
+              <option value="stdio">stdio</option>
+              <option value="http">HTTP</option>
+              <option value="sse">SSE</option>
+            </select>
+          </label>
+
+          <template v-if="draft.transport === 'stdio'">
+            <label class="mcp-field">
+              <span>{{ t('label.mcp-command') }}</span>
+              <input v-model="draft.command" type="text" spellcheck="false" placeholder="npx" />
+            </label>
+            <div class="mcp-field">
+              <span class="mcp-field-head">
+                {{ t('settings.mcp.arguments') }}
+                <button type="button" @click="addArg">+ {{ t('action.add') }}</button>
+              </span>
+              <div v-for="(arg, index) in draft.args ?? []" :key="index" class="mcp-kv-row">
+                <span class="mcp-kv-index">{{ index + 1 }}</span>
+                <input
+                  :value="arg"
+                  type="text"
+                  spellcheck="false"
+                  @input="setArg(index, ($event.target as HTMLInputElement).value)"
+                />
+                <button type="button" class="danger" @click="deleteArg(index)">✕</button>
+              </div>
+              <p v-if="!draft.args?.length" class="mcp-drawer-hint">
+                {{ t('settings.mcp.no-arguments') }}
+              </p>
+            </div>
+            <div class="mcp-field">
+              <span class="mcp-field-head">
+                {{ t('settings.mcp.env') }}
+                <button type="button" @click="addRecordEntry(draftEnv(), 'NEW_KEY')">
+                  + {{ t('action.add') }}
+                </button>
+              </span>
+              <div v-for="[key, value] in recordEntries(draft.env)" :key="key" class="mcp-kv-row">
+                <input
+                  :value="key"
+                  type="text"
+                  spellcheck="false"
+                  placeholder="KEY"
+                  class="mcp-kv-key"
+                  @change="setRecordKey(draftEnv(), key, ($event.target as HTMLInputElement).value)"
+                />
+                <input
+                  :value="value"
+                  :type="isSecretSettingKey(key) && !secretVisible('env', key) ? 'password' : 'text'"
+                  spellcheck="false"
+                  placeholder="value"
+                  @input="setRecordValue(draftEnv(), key, ($event.target as HTMLInputElement).value)"
+                />
+                <button
+                  v-if="isSecretSettingKey(key)"
+                  type="button"
+                  @click="toggleSecret('env', key)"
+                >{{ secretVisible('env', key) ? t('settings.mcp.hide') : t('settings.mcp.show') }}</button>
+                <button type="button" class="danger" @click="deleteRecordEntry(draftEnv(), key)">✕</button>
+              </div>
+              <p v-if="!Object.keys(draft.env ?? {}).length" class="mcp-drawer-hint">
+                {{ t('settings.mcp.no-env') }}
+              </p>
+            </div>
+          </template>
+
+          <template v-else>
+            <label class="mcp-field">
+              <span>URL</span>
+              <input
+                v-model="draft.url"
+                type="url"
+                spellcheck="false"
+                placeholder="https://example.com/mcp"
+              />
+            </label>
+            <div class="mcp-field">
+              <span class="mcp-field-head">
+                {{ t('settings.mcp.headers') }}
+                <button type="button" @click="addRecordEntry(draftHeaders(), 'Authorization')">
+                  + {{ t('action.add') }}
+                </button>
+              </span>
+              <div v-for="[key, value] in recordEntries(draft.headers)" :key="key" class="mcp-kv-row">
+                <input
+                  :value="key"
+                  type="text"
+                  spellcheck="false"
+                  placeholder="Header"
+                  class="mcp-kv-key"
+                  @change="setRecordKey(draftHeaders(), key, ($event.target as HTMLInputElement).value)"
+                />
+                <input
+                  :value="value"
+                  :type="isSecretSettingKey(key) && !secretVisible('header', key) ? 'password' : 'text'"
+                  spellcheck="false"
+                  placeholder="value"
+                  @input="setRecordValue(draftHeaders(), key, ($event.target as HTMLInputElement).value)"
+                />
+                <button
+                  v-if="isSecretSettingKey(key)"
+                  type="button"
+                  @click="toggleSecret('header', key)"
+                >{{ secretVisible('header', key) ? t('settings.mcp.hide') : t('settings.mcp.show') }}</button>
+                <button type="button" class="danger" @click="deleteRecordEntry(draftHeaders(), key)">✕</button>
+              </div>
+              <p v-if="!Object.keys(draft.headers ?? {}).length" class="mcp-drawer-hint">
+                {{ t('settings.mcp.no-headers') }}
+              </p>
+            </div>
+          </template>
+
+          <div class="mcp-drawer-actions end">
+            <button type="button" class="danger" @click="removeDraft">{{ t('action.delete') }}</button>
+            <button type="button" class="primary" @click="saveDraft">{{ t('action.save') }}</button>
+          </div>
         </section>
 
+        <!-- Every CLI that also has it: read-only reflection -->
         <section
           v-for="native in selectedRow.natives"
           :key="`${native.agent}:${native.path}`"
@@ -565,7 +751,9 @@ defineExpose({ reload })
           </div>
         </section>
 
-        <p class="mcp-drawer-hint">{{ t('settings.mcp.native-readonly-hint') }}</p>
+        <p v-if="selectedRow.natives.length" class="mcp-drawer-hint">
+          {{ t('settings.mcp.native-readonly-hint') }}
+        </p>
       </aside>
     </div>
   </section>
@@ -582,7 +770,7 @@ defineExpose({ reload })
 .mcp-pane-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .mcp-pane-head h2 { margin: 0; font-size: 15px; color: var(--text-bright); }
 .mcp-pane-head p { margin: 3px 0 0; color: var(--text-secondary); font-size: var(--font-2xs); }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-control);
@@ -593,17 +781,10 @@ button {
 }
 button:hover:not(:disabled) { background: var(--bg-elevated); color: var(--text-bright); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
-button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-emphasis); outline-offset: 2px; }
-.mcp-pane-error {
-  margin: 0;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--danger-fg) 45%, var(--border-default));
-  border-radius: var(--radius-control);
-  color: var(--danger-fg);
-  background: color-mix(in srgb, var(--danger-fg) 8%, var(--bg-subtle));
-  font-size: var(--font-2xs);
-}
-input {
+button.primary { background: var(--accent-emphasis); border-color: var(--accent-emphasis); color: var(--text-on-emphasis); }
+button.danger { color: var(--danger-fg); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent-emphasis); outline-offset: 2px; }
+input, select {
   min-width: 0;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-control);
@@ -611,7 +792,7 @@ input {
   color: var(--text-primary);
   padding: 7px 8px;
 }
-input:focus { border-color: var(--accent-emphasis); }
+input:focus, select:focus { border-color: var(--accent-emphasis); }
 
 /* ── Filter bar: one bar, both views ───────────────────────────────────── */
 .mcp-filterbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -639,7 +820,7 @@ input:focus { border-color: var(--accent-emphasis); }
 
 /* ── Body: main region + optional drawer ───────────────────────────────── */
 .mcp-pane-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-height: 0; }
-.mcp-pane-body.drawer-open { grid-template-columns: minmax(0, 1fr) minmax(280px, 360px); }
+.mcp-pane-body.drawer-open { grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); }
 .mcp-pane-main { min-width: 0; }
 .mcp-pane-state { display: flex; flex-direction: column; gap: 4px; padding: 18px 8px; color: var(--text-secondary); font-size: var(--font-2xs); text-align: center; }
 .mcp-pane-state strong { color: var(--text-bright); }
@@ -674,8 +855,12 @@ input:focus { border-color: var(--accent-emphasis); }
 .mcp-card:hover:not(:disabled) { background: var(--bg-muted); border-color: var(--border-default); }
 .mcp-card.active { border-color: var(--accent-fg, var(--border-emphasis)); background: var(--bg-muted); }
 .mcp-card.native { border-style: dashed; }
-.mcp-card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
-.mcp-card-head strong { font-size: var(--font-xs); color: var(--text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.mcp-card-head strong { flex: 1; font-size: var(--font-xs); color: var(--text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-status-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+.mcp-status-dot.connected { background: var(--success-fg); }
+.mcp-status-dot.error { background: var(--danger-fg); }
+.mcp-status-dot.disabled { background: var(--border-default); }
 .mcp-card-detail {
   font-size: var(--font-2xs);
   color: var(--text-secondary);
@@ -699,6 +884,7 @@ input:focus { border-color: var(--accent-emphasis); }
   line-height: var(--lh-base);
 }
 .pchip.off { color: var(--text-secondary); border-color: var(--border-muted); opacity: 0.75; }
+.pchip.tools { color: var(--text-secondary); border-color: var(--border-muted); font-weight: 500; }
 .mcp-tag {
   display: inline-block;
   padding: 1px 6px;
@@ -819,6 +1005,40 @@ input:focus { border-color: var(--accent-emphasis); }
 .mcp-drawer-kv dt { color: var(--text-secondary); }
 .mcp-drawer-kv dd { margin: 0; word-break: break-all; }
 .mcp-drawer-actions { display: flex; justify-content: flex-start; gap: 8px; }
+.mcp-drawer-actions.end { justify-content: flex-end; margin-top: 2px; }
+
+/* ── Drawer editor (Navide's own servers) ──────────────────────────────── */
+.mcp-editor { gap: 10px; }
+.mcp-drawer-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+}
+.mcp-drawer-toggle strong { display: block; font-size: var(--font-2xs); color: var(--text-bright); }
+.mcp-drawer-toggle small { display: block; font-size: 10.5px; color: var(--text-secondary); }
+.mcp-tools { font-size: 10.5px; }
+.mcp-tools summary { cursor: pointer; color: var(--text-secondary); }
+.mcp-tool-list { margin: 6px 0 0; padding-left: 16px; color: var(--text-secondary); }
+.mcp-field { display: flex; flex-direction: column; gap: 4px; }
+.mcp-field > span,
+.mcp-field-head {
+  font-size: var(--font-3xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+.mcp-field-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mcp-field-head button { padding: 2px 7px; font-size: var(--font-3xs); text-transform: none; letter-spacing: 0; }
+.mcp-kv-row { display: flex; align-items: center; gap: 5px; }
+.mcp-kv-row input { flex: 1; min-width: 0; font-size: var(--font-2xs); padding: 5px 7px; }
+.mcp-kv-row .mcp-kv-key { flex: 0 1 40%; }
+.mcp-kv-row button { padding: 3px 7px; font-size: var(--font-3xs); }
+.mcp-kv-index { flex: none; width: 14px; font-size: var(--font-3xs); color: var(--text-secondary); text-align: right; }
 
 @media (max-width: 900px) {
   .mcp-pane-body, .mcp-pane-body.drawer-open { grid-template-columns: 1fr; }

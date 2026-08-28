@@ -98,13 +98,12 @@ import SettingRow from './settings/SettingRow.vue'
 import ToggleSwitch from './settings/ToggleSwitch.vue'
 import { formatBytes } from '../lib/formatBytes'
 import {
-  isSecretSettingKey,
-  nextRecordKey,
   RevisionedMcpSaveQueue,
   shouldReloadMcpAfterBundleImport,
-  switchMcpTransportShape,
-  type RevisionedMcpSaveOutcome,
+  type McpAgent,
   type McpTransport,
+  type NativeMcpServer,
+  type RevisionedMcpSaveOutcome,
 } from '../lib/mcp-settings-editor'
 
 const props = defineProps<{
@@ -1548,11 +1547,8 @@ const mCustomName = ref('')
 const mCustomTransport = ref<McpTransport>('stdio')
 const mCustomCommand = ref('')
 const mCustomUrl = ref('')
-const mVisibleSecrets = ref<Set<string>>(new Set())
 const mDirty = ref(false)
 let mEditVersion = 0
-const mExpanded = ref<Set<string>>(new Set())   // servers with tools list open
-const mExpandedEnv = ref<Set<string>>(new Set()) // servers with env editor open
 
 const mFilteredCatalog = computed(() => {
   const q = mSearch.value.trim().toLowerCase()
@@ -1604,6 +1600,15 @@ function mServerForTransport(name: string, transport: McpTransport, endpoint: st
     : { name, transport, url: endpoint, headers: {}, enabled: true }
 }
 
+interface McpListResponse {
+  servers: McpServer[]
+  path?: string
+  revision: string
+  /** Reflection of every CLI's own config; read-only, added alongside. */
+  native?: NativeMcpServer[]
+  agents?: McpAgent[]
+}
+
 interface McpQueuedDraft {
   servers: Record<string, unknown>[]
   silent: boolean
@@ -1615,20 +1620,26 @@ function mMarkDirty(): void {
   mEditVersion += 1
 }
 
-/** The unified reflection pane; refreshed alongside Navide's own list. */
-const mcpPaneRef = ref<{ reload: () => Promise<void> } | null>(null)
+/** Read-only reflection of what each CLI configures for itself, and what
+ *  Navide can do with each vendor's MCP. Loaded by the same call that loads
+ *  Navide's own servers, so the pane below never issues a second request. */
+const mNative = ref<NativeMcpServer[]>([])
+const mAgents = ref<McpAgent[]>([])
+/** A just-added server the pane should open its editor on. */
+const mSelectName = ref('')
 
 async function mLoad(force = false) {
   if (!force && (mDirty.value || mAutosaveQueue.pending > 0)) return
   if (force) mDirty.value = false
   mLoading.value = true; mError.value = ''; mConflict.value = false
   try {
-    const resp = await props.backend.send<{ servers: McpServer[]; path?: string; revision: string }>('mcp.list_servers', {})
+    const resp = await props.backend.send<McpListResponse>('mcp.list_servers', {})
     if (resp.ok && resp.payload) {
       mServers.value = resp.payload.servers.map(mNormalizeServer)
       mConfigPath.value = resp.payload.path ?? ''
       mRevision.value = resp.payload.revision
-      void mcpPaneRef.value?.reload()
+      mNative.value = Array.isArray(resp.payload.native) ? resp.payload.native : []
+      mAgents.value = Array.isArray(resp.payload.agents) ? resp.payload.agents : []
     } else { mError.value = resp.error?.message ?? 'Load failed' }
   } catch (err) { mError.value = String((err as Error).message ?? err) }
   finally { mLoading.value = false }
@@ -1636,7 +1647,7 @@ async function mLoad(force = false) {
 
 async function mRefreshLive(): Promise<void> {
   try {
-    const resp = await props.backend.send<{ servers: McpServer[]; path?: string; revision: string }>('mcp.list_servers', {})
+    const resp = await props.backend.send<McpListResponse>('mcp.list_servers', {})
     if (!resp.ok || !resp.payload) {
       mError.value = resp.error?.message ?? 'Load failed'
       return
@@ -1710,8 +1721,8 @@ async function mAddFromCatalog(entry: CatalogEntry) {
   } else {
     mServers.value = mServers.value.filter((item) => item !== server)
   }
-  // Auto-expand env editor if this server needs env vars filled
-  if (entry.requiresEnv?.length) mExpandedEnv.value = new Set([...mExpandedEnv.value, entry.name])
+  // An entry that needs credentials opens straight into the pane's editor.
+  if (entry.requiresEnv?.length) mSelectName.value = entry.name
 }
 
 async function mCreateCustom() {
@@ -1736,80 +1747,33 @@ async function mCreateCustom() {
     mCustomTransport.value = 'stdio'
     mCustomCommand.value = ''
     mCustomUrl.value = ''
-    mExpandedEnv.value = new Set([...mExpandedEnv.value, name])
+    mSelectName.value = name
     mView.value = 'list'
   } else {
     mServers.value = mServers.value.filter((item) => item !== server)
   }
 }
 
+/** Apply an edited copy from the pane, then hand it to the same save queue
+ *  the catalog and custom views use — one writer, one revision. */
+async function mReplaceServer(next: McpServer) {
+  const idx = mServers.value.findIndex((server) => server.name === next.name)
+  if (idx === -1) return
+  mServers.value[idx] = mNormalizeServer(next)
+  await mSave(true)
+}
+
+async function mRemoveByName(name: string) {
+  const idx = mServers.value.findIndex((server) => server.name === name)
+  if (idx >= 0) await mRemoveServer(idx)
+}
+
 async function mRemoveServer(idx: number) {
-  const name = mServers.value[idx]?.name
+  if (mServers.value[idx]?.name === mSelectName.value) mSelectName.value = ''
   mServers.value.splice(idx, 1)
-  if (name) {
-    const s1 = new Set(mExpanded.value); s1.delete(name); mExpanded.value = s1
-    const s2 = new Set(mExpandedEnv.value); s2.delete(name); mExpandedEnv.value = s2
-  }
   await mSave(true)
 }
 
-async function mToggleEnabled(srv: McpServer) {
-  srv.enabled = !srv.enabled
-  await mSave(true)
-}
-
-function mToggleTools(name: string) {
-  const s = new Set(mExpanded.value)
-  s.has(name) ? s.delete(name) : s.add(name)
-  mExpanded.value = s
-}
-
-function mToggleEnv(name: string) {
-  const s = new Set(mExpandedEnv.value)
-  s.has(name) ? s.delete(name) : s.add(name)
-  mExpandedEnv.value = s
-}
-
-function mChangeTransport(server: McpServer, transport: McpTransport) {
-  switchMcpTransportShape(server, transport)
-  void mSave(true)
-}
-
-function mRecordEntries(record?: Record<string, string>): [string, string][] {
-  return Object.entries(record ?? {})
-}
-function mEnvRecord(server: McpServer): Record<string, string> { return (server.env ??= {}) }
-function mHeaderRecord(server: McpServer): Record<string, string> { return (server.headers ??= {}) }
-function mSetRecordKey(record: Record<string, string>, oldKey: string, newKey: string) {
-  const key = newKey.trim()
-  if (!key || (key !== oldKey && key in record)) return
-  const val = record[oldKey] ?? ''
-  delete record[oldKey]; record[key] = val
-}
-function mAddRecordEntry(record: Record<string, string>, base: string) {
-  record[nextRecordKey(record, base)] = ''
-  mMarkDirty()
-}
-function mDeleteRecordEntry(record: Record<string, string>, key: string) { delete record[key] }
-function mAddArg(server: McpServer) { (server.args ??= []).push(''); mMarkDirty() }
-function mSetArg(server: McpServer, index: number, value: string) { (server.args ??= [])[index] = value; mMarkDirty() }
-function mDeleteArg(server: McpServer, index: number) { server.args?.splice(index, 1) }
-function mSetRecordValue(record: Record<string, string>, key: string, value: string) {
-  record[key] = value
-  mMarkDirty()
-}
-function mSecretId(server: McpServer, kind: 'env' | 'header', key: string) {
-  return `${server.name}\u0000${kind}\u0000${key}`
-}
-function mSecretVisible(server: McpServer, kind: 'env' | 'header', key: string): boolean {
-  return mVisibleSecrets.value.has(mSecretId(server, kind, key))
-}
-function mToggleSecret(server: McpServer, kind: 'env' | 'header', key: string) {
-  const id = mSecretId(server, kind, key)
-  const next = new Set(mVisibleSecrets.value)
-  next.has(id) ? next.delete(id) : next.add(id)
-  mVisibleSecrets.value = next
-}
 
 async function mOpenConfig() {
   if (mConfigPath.value) await (window as any).agentTeam.openPath(mConfigPath.value)
@@ -2070,7 +2034,7 @@ watch(activeTab, (tab) => {
           <!-- ── LIST VIEW ──────────────────────────────────────────────── -->
           <template v-if="mView === 'list'">
             <div class="mcp-topbar" data-settings-section="mcp-installed">
-              <span class="mcp-page-title">{{ $t('label.installed-mcp-servers') }}</span>
+              <span class="mcp-page-title">{{ $t('settings.mcp.all-title') }}</span>
               <div class="mcp-topbar-actions">
                 <button class="mcp-action-btn" @click="mView = 'catalog'">{{ $t('action.add-mcp') }}</button>
                 <button class="mcp-action-btn" @click="mView = 'custom'">{{ $t('settings.mcp.add-custom') }}</button>
@@ -2083,7 +2047,6 @@ watch(activeTab, (tab) => {
               <span class="settings-path" :title="pathForTab('mcp')">{{ pathForTab('mcp') }}</span>
               <button class="settings-path-btn" :disabled="!settingsPaths.mcp" @click="openSettingsPath(settingsPaths.mcp)">{{ $t('action.open') }}</button>
             </div>
-            <p class="mcp-scope-hint">{{ $t('settings.mcp.installed-hint') }}</p>
             <p v-if="mError" class="err-msg" style="margin:6px 22px 0">{{ mError }}</p>
             <div v-if="mConflict" class="mcp-conflict">
               <span>{{ $t('settings.mcp.conflict') }}</span>
@@ -2091,160 +2054,18 @@ watch(activeTab, (tab) => {
             </div>
             <span v-if="mSummary" class="mcp-summary-ok">{{ mSummary }}</span>
 
-            <div class="mcp-server-list">
-              <div v-if="mLoading" class="mcp-loading">{{ $t('label.loading') }}</div>
-
-              <div v-for="(srv, idx) in mServers" :key="srv.name" class="mcp-server-card">
-                <!-- Main row -->
-                <div class="mcp-server-row">
-                  <span class="mcp-dot" :class="srv.status ?? 'unknown'"></span>
-                  <span class="mcp-server-name">{{ srv.name }}</span>
-                  <span class="mcp-transport-badge">{{ srv.transport }}</span>
-                  <span class="mcp-spacer"></span>
-                  <button class="mcp-delete-btn nv-btn nv-btn--danger" @click="mRemoveServer(idx)" title="Remove">🗑</button>
-                  <!-- Toggle switch -->
-                  <ToggleSwitch
-                    :model-value="srv.enabled"
-                    :aria-label="srv.enabled ? 'Disable' : 'Enable'"
-                    @update:model-value="mToggleEnabled(srv)"
-                  />
-                </div>
-
-                <!-- Tools row (collapsible) -->
-                <div v-if="(srv.tool_count ?? 0) > 0 || srv.status === 'connected'" class="mcp-tools-row" @click="mToggleTools(srv.name)">
-                  <span class="mcp-chevron" :class="{ open: mExpanded.has(srv.name) }">›</span>
-                  <span class="mcp-tool-count">{{ srv.tool_count ?? 0 }} tools enabled</span>
-                </div>
-                <div v-else-if="srv.status === 'error'" class="mcp-tools-row mcp-tools-error">
-                  <span class="mcp-chevron">!</span>
-                  <span>{{ $t('hint.connection-failed') }}</span>
-                </div>
-                <div v-else-if="srv.status === 'disabled'" class="mcp-tools-row mcp-tools-disabled">
-                  <span class="mcp-chevron">–</span>
-                  <span>{{ $t('label.disabled') }}</span>
-                </div>
-
-                <!-- Tool list (expanded) -->
-                <ul v-if="mExpanded.has(srv.name) && srv.tools?.length" class="mcp-tool-list">
-                  <li v-for="t in srv.tools" :key="t.name">
-                    <span class="mcp-tool-name">{{ t.name }}</span>
-                    <span v-if="t.description" class="mcp-tool-desc"> — {{ t.description }}</span>
-                  </li>
-                </ul>
-
-                <!-- Env / command editor (collapsible) -->
-                <div class="mcp-config-toggle" @click="mToggleEnv(srv.name)">
-                  <span class="mcp-chevron" :class="{ open: mExpandedEnv.has(srv.name) }">›</span>
-                  <span>{{ $t('action.settings') }}</span>
-                </div>
-                <div v-if="mExpandedEnv.has(srv.name)" class="mcp-config-form">
-                  <div class="field mcp-transport-field">
-                    <label class="lbl">{{ $t('settings.mcp.transport') }}</label>
-                    <select
-                      :value="srv.transport"
-                      @change="mChangeTransport(srv, ($event.target as HTMLSelectElement).value as McpTransport)"
-                    >
-                      <option value="stdio">stdio</option>
-                      <option value="http">HTTP</option>
-                      <option value="sse">SSE</option>
-                    </select>
-                  </div>
-
-                  <template v-if="srv.transport === 'stdio'">
-                    <div class="field">
-                      <label class="lbl">{{ $t('label.mcp-command') }}</label>
-                      <input v-model="srv.command" type="text" spellcheck="false" placeholder="npx" @input="mMarkDirty" @blur="mSave(true)" />
-                    </div>
-                    <div class="field">
-                      <label class="lbl">
-                        {{ $t('settings.mcp.arguments') }}
-                        <button class="mcp-add-env-btn" @click.stop="mAddArg(srv)">+ {{ $t('action.add') }}</button>
-                      </label>
-                      <div v-for="(arg, argIndex) in (srv.args ?? [])" :key="argIndex" class="mcp-env-row">
-                        <span class="mcp-arg-index">{{ argIndex + 1 }}</span>
-                        <input
-                          :value="arg"
-                          type="text"
-                          class="mcp-env-val"
-                          spellcheck="false"
-                          @input="mSetArg(srv, argIndex, ($event.target as HTMLInputElement).value)"
-                          @blur="mSave(true)"
-                        />
-                        <button class="mcp-delete-btn small" @click.stop="mDeleteArg(srv, argIndex); mSave(true)">✕</button>
-                      </div>
-                      <p v-if="!(srv.args?.length)" class="hint-msg">{{ $t('settings.mcp.no-arguments') }}</p>
-                    </div>
-                    <div class="field">
-                      <label class="lbl">
-                        {{ $t('settings.mcp.env') }}
-                        <button class="mcp-add-env-btn" @click.stop="mAddRecordEntry(mEnvRecord(srv), 'NEW_KEY')">+ {{ $t('action.add') }}</button>
-                      </label>
-                      <div v-for="[k, v] in mRecordEntries(srv.env)" :key="k" class="mcp-env-row">
-                        <input :value="k" @change="mSetRecordKey(mEnvRecord(srv), k, ($event.target as HTMLInputElement).value); mSave(true)" type="text" spellcheck="false" placeholder="KEY" class="mcp-env-key" />
-                        <span>=</span>
-                        <input
-                          :value="v"
-                          @input="mSetRecordValue(mEnvRecord(srv), k, ($event.target as HTMLInputElement).value)"
-                          :type="isSecretSettingKey(k) && !mSecretVisible(srv, 'env', k) ? 'password' : 'text'"
-                          spellcheck="false"
-                          placeholder="value"
-                          class="mcp-env-val"
-                          @blur="mSave(true)"
-                        />
-                        <button v-if="isSecretSettingKey(k)" class="mcp-reveal-btn" @click.stop="mToggleSecret(srv, 'env', k)">
-                          {{ mSecretVisible(srv, 'env', k) ? $t('settings.mcp.hide') : $t('settings.mcp.show') }}
-                        </button>
-                        <button class="mcp-delete-btn small" @click.stop="mDeleteRecordEntry(mEnvRecord(srv), k); mSave(true)">✕</button>
-                      </div>
-                      <p v-if="!Object.keys(srv.env ?? {}).length" class="hint-msg">{{ $t('settings.mcp.no-env') }}</p>
-                    </div>
-                  </template>
-
-                  <template v-else>
-                    <div class="field">
-                      <label class="lbl">URL</label>
-                      <input v-model="srv.url" type="url" spellcheck="false" placeholder="https://example.com/mcp" @input="mMarkDirty" @blur="mSave(true)" />
-                    </div>
-                    <div class="field">
-                      <label class="lbl">
-                        {{ $t('settings.mcp.headers') }}
-                        <button class="mcp-add-env-btn" @click.stop="mAddRecordEntry(mHeaderRecord(srv), 'Authorization')">+ {{ $t('action.add') }}</button>
-                      </label>
-                      <div v-for="[k, v] in mRecordEntries(srv.headers)" :key="k" class="mcp-env-row">
-                        <input :value="k" @change="mSetRecordKey(mHeaderRecord(srv), k, ($event.target as HTMLInputElement).value); mSave(true)" type="text" spellcheck="false" placeholder="Header" class="mcp-env-key" />
-                        <span>:</span>
-                        <input
-                          :value="v"
-                          @input="mSetRecordValue(mHeaderRecord(srv), k, ($event.target as HTMLInputElement).value)"
-                          :type="isSecretSettingKey(k) && !mSecretVisible(srv, 'header', k) ? 'password' : 'text'"
-                          spellcheck="false"
-                          placeholder="value"
-                          class="mcp-env-val"
-                          @blur="mSave(true)"
-                        />
-                        <button v-if="isSecretSettingKey(k)" class="mcp-reveal-btn" @click.stop="mToggleSecret(srv, 'header', k)">
-                          {{ mSecretVisible(srv, 'header', k) ? $t('settings.mcp.hide') : $t('settings.mcp.show') }}
-                        </button>
-                        <button class="mcp-delete-btn small" @click.stop="mDeleteRecordEntry(mHeaderRecord(srv), k); mSave(true)">✕</button>
-                      </div>
-                      <p v-if="!Object.keys(srv.headers ?? {}).length" class="hint-msg">{{ $t('settings.mcp.no-headers') }}</p>
-                    </div>
-                  </template>
-                </div>
-              </div>
-
-              <div v-if="!mLoading && mServers.length === 0" class="mcp-empty">
-                No MCP servers installed. Click "Add MCP +" to add one from the catalog.
-              </div>
-            </div>
-
-            <!-- ── Every CLI's MCP, reflected read-only ─────────────────── -->
             <McpPane
-              v-if="activeTab === 'mcp'"
-              ref="mcpPaneRef"
               class="mcp-agent-pane"
-              :backend="props.backend"
               data-settings-section="mcp-agents"
+              :servers="mServers"
+              :native="mNative"
+              :agents="mAgents"
+              :loading="mLoading"
+              :select-name="mSelectName"
+              @save="mReplaceServer"
+              @remove="mRemoveByName"
+              @refresh="mLoad(true)"
+              @select-consumed="mSelectName = ''"
             />
 
             <!-- ── EXTERNAL ACCESS ──────────────────────────────────────── -->
@@ -4519,11 +4340,6 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 
 /* ── MCP tab ──────────────────────────────────────────────────────────────── */
-.mcp-scope-hint {
-  margin: 4px 22px 0;
-  color: var(--text-secondary);
-  font-size: var(--font-2xs);
-}
 /* Sits between the server list and External access inside the scrolling
    column, so it must not be squeezed the way a flexible item would be. The
    gutter lines it up with the <h1> and the scope band above it. */
@@ -4557,106 +4373,26 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   color: var(--attention-fg); font-size: var(--font-2xs);
 }
 
-/* Server list */
-/* min-height, not 0: this is `flex: 1` over a 0 basis, so when the blocks
-   below it (the reflection pane, external access) fill the column its share of
-   the free space is 0 and the list would vanish rather than scroll. */
-.mcp-server-list { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; flex: 1; min-height: 168px; }
-.mcp-loading { color: var(--text-secondary); font-size: var(--font-xs); padding: 8px 0; }
 .mcp-empty { color: var(--text-muted); font-size: var(--font-xs); padding: 24px 0; text-align: center; }
 
 /* Server card */
-.mcp-server-card {
-  background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: var(--radius-md);
-  display: flex; flex-direction: column; overflow: hidden;
-}
 
 /* Main row: dot + name + trash + toggle */
-.mcp-server-row {
-  display: flex; align-items: center; gap: 10px;
-  padding: 12px 14px; min-height: 44px;
-}
-.mcp-spacer { flex: 1; }
-.mcp-server-name { font-weight: 700; font-size: var(--font-sm); color: var(--text-bright); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mcp-transport-badge {
-  padding: 2px 6px; border: 1px solid var(--border-default); border-radius: var(--radius-pill);
-  color: var(--text-secondary); background: var(--bg-muted); font-family: var(--font-mono);
-  font-size: 9px; text-transform: uppercase;
-}
 
 /* Status dot */
-.mcp-dot {
-  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-}
-.mcp-dot.connected { background: var(--success-fg); box-shadow: 0 0 6px color-mix(in srgb, var(--success-fg) 60%, transparent); }
-.mcp-dot.error     { background: var(--danger-fg); }
-.mcp-dot.disabled  { background: var(--text-disabled); }
-.mcp-dot.unknown   { background: var(--text-disabled); }
 
 /* Delete button */
-.mcp-delete-btn {
-  border: none; background: transparent; color: var(--text-disabled);
-  font-size: var(--font-md); cursor: pointer; padding: 2px 4px; border-radius: var(--radius-xs); line-height: 1;
-}
-.mcp-delete-btn:hover { color: var(--danger-fg); background: color-mix(in srgb, var(--danger-fg) 10%, transparent); }
-.mcp-delete-btn.small { font-size: var(--font-3xs); color: var(--text-muted); }
-.mcp-delete-btn.small:hover { color: var(--danger-fg); }
 
 /* Tools row */
-.mcp-tools-row {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 14px; border-top: 1px solid var(--border-muted);
-  font-size: var(--font-2xs); color: var(--text-secondary); cursor: pointer; user-select: none;
-}
-.mcp-tools-row:hover { background: var(--bg-elevated); }
-.mcp-tools-error { color: var(--danger-fg); cursor: default; }
-.mcp-tools-disabled { color: var(--text-disabled); cursor: default; }
-.mcp-chevron { font-size: var(--font-xs); transition: transform var(--motion-fast) var(--ease-out); display: inline-block; }
-.mcp-chevron.open { transform: rotate(90deg); }
-.mcp-tool-count { font-size: var(--font-2xs); }
 
 /* Tool list */
-.mcp-tool-list {
-  list-style: none; margin: 0; padding: 6px 14px 10px 28px;
-  border-top: 1px solid var(--bg-subtle); display: flex; flex-direction: column; gap: 3px;
-}
-.mcp-tool-list li { font-size: var(--font-2xs); color: var(--text-secondary); }
-.mcp-tool-name { color: var(--accent-bright); font-family: var(--font-mono); }
-.mcp-tool-desc { color: var(--text-muted); }
 
-/* Config form toggle */
-.mcp-config-toggle {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 14px; border-top: 1px solid var(--border-muted);
-  font-size: var(--font-2xs); color: var(--text-muted); cursor: pointer; user-select: none;
-}
-.mcp-config-toggle:hover { background: var(--bg-elevated); color: var(--text-secondary); }
-.mcp-config-form {
-  padding: 10px 14px; border-top: 1px solid var(--border-muted);
-  display: flex; flex-direction: column; gap: 8px; background: var(--bg-base);
-}
-.mcp-config-form select,
 .mcp-custom-form select {
   padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   background: var(--bg-base); color: var(--text-primary);
 }
-.mcp-transport-field { max-width: 220px; }
 
 /* Env vars editor */
-.mcp-env-row { display: flex; align-items: center; gap: 6px; }
-.mcp-env-key { width: 140px; flex-shrink: 0; font-family: var(--font-mono); font-size: var(--font-2xs); }
-.mcp-env-val { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--font-2xs); }
-.mcp-arg-index { width: 18px; color: var(--text-muted); font-family: var(--font-mono); font-size: var(--font-3xs); text-align: right; }
-.mcp-add-env-btn {
-  font-size: var(--font-3xs); padding: 2px 7px; border-radius: var(--radius-xs);
-  background: transparent; border: 1px solid var(--border-default); color: var(--text-secondary); cursor: pointer; margin-left: 6px;
-}
-.mcp-add-env-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
-.mcp-reveal-btn {
-  border: 1px solid var(--border-default); border-radius: var(--radius-xs); background: transparent;
-  color: var(--text-secondary); padding: 3px 6px; font-size: 9px; cursor: pointer;
-}
-.mcp-reveal-btn:hover { color: var(--text-bright); background: var(--bg-muted); }
 
 /* Catalog view */
 .mcp-search-wrap {
@@ -4907,7 +4643,6 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .mcp-catalog-desc,
 .mcp-catalog-hint,
 .mcp-catalog-note,
-.mcp-tool-desc,
 .upd-notes {
   color: var(--text-secondary);
   font-size: var(--font-xs);

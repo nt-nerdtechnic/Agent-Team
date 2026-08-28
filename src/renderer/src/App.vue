@@ -14259,6 +14259,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :workspace-path="pipeline.workspacePath"
       :stages="stagesApi.stages.value"
       :panes="paneViews"
+      :active-pane-id="effectiveFocusPaneId"
       :pipeline="pipelineView"
       :expanded="tokenPanelExpanded"
       :views="shellLayout.slots.right.views"
