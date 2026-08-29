@@ -44,7 +44,9 @@ Pane 時產生）、Backend 自身的內部「host」憑證（供其自有 CLI �
 限定的，因此不受這條規則約束）；每個定址到 UI 狀態（`ui_invoke`、`ui_snapshot`、
 `ui_list_actions`）或 Plan 文件（`plan_*`）的 Tool 都必須明確給定
 `workspace_path` —— 以 Pane 身分執行的呼叫端可以省略，並取得該 Pane 自己的
-Workspace。
+Workspace。沒有 Pane 也意味著沒有分頁群組：host 與外部呼叫端呼叫 `cli_send` 的
+`to: "group"` 廣播會以 `no-group` 被拒絕 —— 它既沒有自己的群組可以扇出，也沒有視
+窗可以問。請改成逐一定址，或用 `pane_id`。
 
 實作：[`plan_mcp.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py)
 （Tool）、[`plan_mcp_auth.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_auth.py)
@@ -86,7 +88,7 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 | Tool | 參數 | 功能 |
 |---|---|---|
 | `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`pane_id`（每個 `ui.pane.*` action 都吃這個鍵，也可以在下面那幾個 Pane Tool 上取代 `address`）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
-| `cli_send` | `to`、`text`、`wait_for_delivery_s=0`（上限 120）、`pane_id?` | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
+| `cli_send` | `to`（Pane 位址，或 `"group"` 表示廣播）、`text`、`wait_for_delivery_s=0`（上限 120）、`pane_id?` | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
 | `cli_check_message` | `msg_key` | 某次 `cli_send` 的結果：`{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 你自己送出、目前卡住或失敗的訊息：`{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20`（上限 200） | **僅限 CLI Pane。** 目前排給*你*、還沒送進來的訊息：`{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
@@ -137,6 +139,23 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 算的，而不是從目前這個保留起算：在 `mid-turn` 與 `typing` 之間來回跳動的訊息每次
 都會把 `held_for_s` 歸零重數，而這個欄位真正要處理的情況 —— 從頭到尾沒有任何視窗
 回報過保留原因的那一種 —— 根本沒有保留計時可讀。
+
+**廣播給自己的分頁群組。** `to: "group"` 會送給呼叫端自己那個分頁群組中的每一個
+其他 Pane，一樣限於呼叫端自己的 Workspace。它刻意不是裸行協定的 `all` —— 那一個
+指的是視窗裡的每一個 Pane，不管群組；同一個字代表兩種範圍會非常難除錯。代價也就
+是 `all` 本來就有的那個：真的取名叫 `group` 的 Pane，在這裡無法再以名稱定址。不屬
+於任何群組的 Pane 共用同一個隱含群組，因此它們互相送得到，而不是誰也送不到；從沒
+建立過群組的人送出的廣播，也不會無聲地什麼都不做。
+
+回傳的形狀不一樣 ——
+`{ok, broadcast: "group", group_id, delivered_to, recipients: [{name, pane_id, msg_key, accepted, reason?}]}`
+—— 帶著**每個收件者各一個** `msg_key`，因為每個收件者都是一則普通而獨立的訊息：
+有自己的成對 Rate Limit 額度、自己的 Idle 保留、自己的投遞回報。因此上面所說的一
+切都是逐個收件者分別適用，每個 key 也要分別交給 `cli_check_message`；
+`wait_for_delivery_s` 不適用於廣播，會被忽略。若某個收件者在視窗列出它之後、遞送
+之前消失了，它會就地以 `accepted: false` 與 `reason: "target-offline"` 回報，而不
+會拖垮整次廣播的其餘部分。`recipients` 是空的並不是失敗 —— 那代表你的群組裡沒有
+別人。
 
 `cli_inbox_summary` 是同一件事，只是不需要有 `msg_key` 才問得出來。它不接受任何
 參數，只回答關於呼叫端自己的事，並回傳你目前每一則 stale 或失敗的送出 —— 附上

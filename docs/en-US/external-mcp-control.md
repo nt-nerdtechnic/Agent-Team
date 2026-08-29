@@ -48,7 +48,11 @@ than a bare pane name — or a `pane_id`, which names one exact pane and is
 already fully qualified — and every tool that addresses UI state
 (`ui_invoke`, `ui_snapshot`, `ui_list_actions`) or a plan document
 (`plan_*`) requires an explicit `workspace_path` — a caller running as a
-pane may omit it and get that pane's own workspace.
+pane may omit it and get that pane's own workspace. Having no pane also means
+having no tab group: `cli_send`'s `to: "group"` broadcast is refused with
+`no-group` for a host or external caller, which has neither a group of its own
+to fan out to nor a window to ask about one. Address the panes individually, or
+by `pane_id`.
 
 Implementation: [`plan_mcp.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py)
 (tools), [`plan_mcp_auth.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_auth.py)
@@ -92,7 +96,7 @@ documents the addresses, the idle gate and the guard rails they share.
 | Tool | Parameters | What it does |
 |---|---|---|
 | `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `pane_id` (the key every `ui.pane.*` action takes, and an alternative to `address` on the pane tools below), `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
-| `cli_send` | `to`, `text`, `wait_for_delivery_s=0` (capped at 120), `pane_id?` | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
+| `cli_send` | `to` (a pane address, or `"group"` to broadcast), `text`, `wait_for_delivery_s=0` (capped at 120), `pane_id?` | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
 | `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | Your own sends that are stuck or failed: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20` (capped at 200) | **CLI panes only.** What is queued *for you* and has not gone in yet: `{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
@@ -152,6 +156,26 @@ address someone else, or say something to the user. It is measured from the send
 not from the current hold: a message flipping between `mid-turn` and `typing`
 restarts `held_for_s` every time, and the case this exists for — the one where no
 window ever reported a hold at all — has no hold clock to read.
+
+**Broadcasting to your own tab group.** `to: "group"` reaches every other pane
+in the caller's own tab group, in the caller's own workspace. It is deliberately
+not the bare-line protocol's `all`, which means every pane in the window
+regardless of group — one word meaning two scopes would be very hard to debug —
+and it costs what `all` already costs: a pane actually named `group` can no
+longer be addressed by name here. Panes in no group share one implicit group, so
+they reach each other rather than nobody, and a broadcast from someone who never
+made a group is not silently a no-op.
+
+The answer is a different shape —
+`{ok, broadcast: "group", group_id, delivered_to, recipients: [{name, pane_id, msg_key, accepted, reason?}]}` —
+carrying one `msg_key` **per recipient**, because each recipient is an ordinary
+independent message: its own per-pair rate-limit budget, its own idle hold, its
+own delivery report. Everything above therefore applies one recipient at a time,
+and each key is passed to `cli_check_message` separately; `wait_for_delivery_s`
+does not apply to a broadcast and is ignored. A recipient that went away between
+the window listing it and delivery is reported in place, `accepted: false` with
+`reason: "target-offline"`, rather than failing the rest of the broadcast. An
+empty `recipients` is not a failure — it means your group has nobody else in it.
 
 `cli_inbox_summary` is the same fact without a `msg_key` to ask about. It takes
 no arguments, answers about the caller and no one else, and returns every send of
