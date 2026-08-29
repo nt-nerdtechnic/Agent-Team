@@ -4953,8 +4953,23 @@ async def terminal_reattach(session: "Session", msg_id: str, msg_type: str, payl
     if cols > 0 and rows > 0:
         for tid in alive:
             session.terminals.force_redraw(tid, cols, rows)
+    # Where each survivor is actually writing its transcript. A reattaching
+    # pane has a fresh pane id, and the path its caller derives from that id
+    # names a file no one ever opened — the conversation is in the log the
+    # session opened at create time. Absent for a session started without one.
+    from .terminals import live_output_log_for
+
+    logs = {tid: live_output_log_for(tid) for tid in alive}
     await session.send_json(
-        make_response(msg_id, msg_type, {"alive": alive, "dead": dead})
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "alive": alive,
+                "dead": dead,
+                "logs": {tid: path for tid, path in logs.items() if path},
+            },
+        )
     )
 
 

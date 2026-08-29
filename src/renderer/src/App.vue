@@ -1242,14 +1242,19 @@ function spawnHistoryWorkspaceIdentity(workspacePath: string): WorkspaceIdentity
   }
 }
 
-const sessionHistory = computed(() => {
-  const workspace = spawnHistoryWorkspaceIdentity(currentWorkspace.value)
+/** Newest first, one row per session (pane id as the fallback key), filtered
+ *  to one workspace. Shared by the viewed workspace's live list and another
+ *  workspace's read-only copy so the two cannot dedupe differently. */
+function historyEntriesFor(
+  entries: readonly SpawnHistoryEntry[],
+  workspace: WorkspaceIdentity,
+): SpawnHistoryEntry[] {
   const result: SpawnHistoryEntry[] = []
   const seen = new Set<string>()
-  for (let i = spawnHistory.value.length - 1; i >= 0; i--) {
-    const entry = spawnHistory.value[i]
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]
     // Display-layer guard: never show another workspace's entries, even if
-    // one slipped into spawnHistory at runtime.
+    // one slipped into the buffer at runtime.
     if (!entryBelongsToWorkspace(entry, workspace)) continue
     const key = entry.sessionId ? `session:${entry.sessionId}` : `pane:${entry.paneId}`
     if (!seen.has(key)) {
@@ -1258,7 +1263,11 @@ const sessionHistory = computed(() => {
     }
   }
   return result
-})
+}
+
+const sessionHistory = computed(() =>
+  historyEntriesFor(spawnHistory.value, spawnHistoryWorkspaceIdentity(currentWorkspace.value))
+)
 
 let spawnHistoryWorkspace = ''
 let spawnHistoryHydrated = false
@@ -1391,6 +1400,154 @@ async function loadMoreSpawnHistory(): Promise<void> {
   }
 }
 
+// ── Another workspace's history ─────────────────────────────────────────
+// Every workspace heading carries a history button, so the modal is not
+// always looking at the workspace on screen.
+
+/** The workspace the modal is showing; '' means the one on screen. */
+const historyWorkspace = ref<string>('')
+
+/** That workspace's entries.
+ *
+ *  Deliberately NOT spawnHistory. That ref drives the persist watcher, which
+ *  writes whatever it holds back into spawnHistoryWorkspace's record — so
+ *  loading another project's entries into it would file them under the
+ *  workspace on screen. Nothing is ever persisted from this buffer: writes go
+ *  to the backend keyed by the entry's own workspace, and are mirrored here
+ *  only so the list reflects them. Liveness, paging and hydration state are
+ *  kept separate for the same reason. */
+const foreignHistory = ref<SpawnHistoryEntry[]>([])
+const foreignHistoryCanonical = ref('')
+const foreignHistoryTotal = ref(0)
+const foreignHistoryFetched = ref(0)
+let foreignHistoryLoading = false
+
+/** True while the modal shows a workspace other than the one on screen. */
+const historyIsForeign = computed(
+  () =>
+    !!historyWorkspace.value &&
+    normWs(historyWorkspace.value) !== normWs(currentWorkspace.value)
+)
+
+/** The workspace every history WRITE must name. Reading currentWorkspace
+ *  instead is how a delete run from another project's history would have hit
+ *  the one on screen — and history has no undo. */
+const historyViewWorkspace = computed(() =>
+  historyIsForeign.value ? historyWorkspace.value : currentWorkspace.value
+)
+
+const historyIdentity = computed<WorkspaceIdentity>(() =>
+  historyIsForeign.value
+    ? {
+        workspacePath: historyWorkspace.value,
+        canonicalWorkspacePath: foreignHistoryCanonical.value || undefined,
+      }
+    : spawnHistoryWorkspaceIdentity(currentWorkspace.value)
+)
+
+/** The buffer the modal's own actions patch. */
+const historyBuffer = (): SpawnHistoryEntry[] =>
+  historyIsForeign.value ? foreignHistory.value : spawnHistory.value
+
+/** What the modal renders. */
+const historyEntries = computed(() =>
+  historyIsForeign.value
+    ? historyEntriesFor(foreignHistory.value, historyIdentity.value)
+    : sessionHistory.value
+)
+
+/** Names the project when it is not the one on screen. The modal no longer
+ *  switches to it, so it has to say whose history this is. */
+const historyWorkspaceLabel = computed(() =>
+  historyIsForeign.value
+    ? (normWs(historyWorkspace.value).split('/').filter(Boolean).pop() ?? '')
+    : ''
+)
+
+function resetForeignHistory(): void {
+  historyWorkspace.value = ''
+  foreignHistory.value = []
+  foreignHistoryCanonical.value = ''
+  foreignHistoryTotal.value = 0
+  foreignHistoryFetched.value = 0
+}
+
+/** Page 0 of another workspace's history. */
+async function loadForeignHistory(path: string): Promise<void> {
+  foreignHistory.value = []
+  foreignHistoryCanonical.value = ''
+  foreignHistoryTotal.value = 0
+  foreignHistoryFetched.value = 0
+  const page = await sendQuiet<SpawnHistoryPage>('project.get_spawn_history', {
+    workspace_path: path,
+    offset: 0,
+    limit: MAX_SPAWN_HISTORY,
+  })
+  // The modal can be closed, or pointed at a different heading, mid-flight.
+  if (normWs(historyWorkspace.value) !== normWs(path)) return
+  if (!page || !Array.isArray(page.entries)) return
+  if (typeof page.canonical_workspace_path === 'string') {
+    foreignHistoryCanonical.value = page.canonical_workspace_path
+  }
+  // Same parser the viewed workspace goes through, for the same normalization.
+  const hydrated = parseSpawnHistory(
+    JSON.stringify([...page.entries].reverse()), // newest→oldest page → storage order
+    {
+      workspacePath: path,
+      canonicalWorkspacePath: foreignHistoryCanonical.value || undefined,
+    },
+  )
+  // Its panes live in this window like any other held workspace's, so the
+  // same liveness rule applies.
+  reconcileSpawnHistoryLiveness(hydrated)
+  foreignHistory.value = hydrated
+  foreignHistoryTotal.value = typeof page.total === 'number' ? page.total : page.entries.length
+  foreignHistoryFetched.value = page.entries.length
+}
+
+async function loadMoreForeignHistory(): Promise<void> {
+  const path = historyWorkspace.value
+  if (!path || foreignHistoryLoading) return
+  if (foreignHistoryFetched.value >= foreignHistoryTotal.value) return
+  foreignHistoryLoading = true
+  try {
+    const page = await sendQuiet<SpawnHistoryPage>('project.get_spawn_history', {
+      workspace_path: path,
+      offset: foreignHistoryFetched.value,
+      limit: MAX_SPAWN_HISTORY,
+    })
+    if (!page || !Array.isArray(page.entries)) return
+    if (normWs(historyWorkspace.value) !== normWs(path)) return
+    if (typeof page.total === 'number') foreignHistoryTotal.value = page.total
+    foreignHistoryFetched.value += page.entries.length
+    if (page.entries.length === 0) {
+      // Past the end (the store shrank): stop advertising more.
+      foreignHistoryTotal.value = foreignHistoryFetched.value
+      return
+    }
+    const existing = new Set(foreignHistory.value.map((e) => e.paneId))
+    const older = parseSpawnHistory(
+      JSON.stringify([...page.entries].reverse()),
+      historyIdentity.value,
+    ).filter((entry) => !!entry.paneId && !existing.has(entry.paneId))
+    reconcileSpawnHistoryLiveness(older)
+    if (older.length > 0) foreignHistory.value = [...older, ...foreignHistory.value]
+  } finally {
+    foreignHistoryLoading = false
+  }
+}
+
+const historyHasMore = computed(() =>
+  historyIsForeign.value
+    ? foreignHistoryFetched.value < foreignHistoryTotal.value
+    : spawnHistoryHasMore.value
+)
+
+async function loadMoreHistory(): Promise<void> {
+  if (historyIsForeign.value) await loadMoreForeignHistory()
+  else await loadMoreSpawnHistory()
+}
+
 /** Inline rename from the Agent History detail pane. A live pane goes through
  *  the normal pane rename flow (project.rename_pane, pane title included);
  *  removed entries patch the persisted history directly, full store + mirror
@@ -1403,13 +1560,13 @@ function onRenameHistoryEntry(entry: SpawnHistoryEntry, rawName: string): void {
   const name = rawName.trim()
   // Same reset rule as setPaneCustomName: empty or default label clears it.
   const nameToSet = name && name !== entry.agentLabel ? name : undefined
-  updateHistoryCustomName(spawnHistory.value, {
+  updateHistoryCustomName(historyBuffer(), {
     paneId: entry.paneId,
     agentKey: entry.agentKey,
     sessionId: entry.sessionId,
     sessionHomeId: entry.sessionHomeId,
   }, nameToSet)
-  const ws = entry.workspacePath || currentWorkspace.value
+  const ws = entry.workspacePath || historyViewWorkspace.value
   if (!ws) return
   backend.send('project.rename_spawn_history', {
     workspace_path: ws,
@@ -1423,12 +1580,12 @@ function onRenameHistoryEntry(entry: SpawnHistoryEntry, rawName: string): void {
  *  as onRenameHistoryEntry — the debounced set_ui_state snapshot alone could
  *  be lost on quit). Unstarring deletes the key backend-side. */
 function onToggleStarHistoryEntry(entry: SpawnHistoryEntry, starred: boolean): void {
-  const target = spawnHistory.value.find((e) => e.paneId === entry.paneId)
+  const target = historyBuffer().find((e) => e.paneId === entry.paneId)
   if (target) {
     if (starred) target.starred = true
     else delete target.starred
   }
-  const ws = entry.workspacePath || currentWorkspace.value
+  const ws = entry.workspacePath || historyViewWorkspace.value
   if (!ws) return
   backend.send('project.star_spawn_history', {
     workspace_path: ws,
@@ -1442,7 +1599,8 @@ function onToggleStarHistoryEntry(entry: SpawnHistoryEntry, starred: boolean): v
  *  modal's delete confirmation. `null` means the probe failed — the modal
  *  then confirms without the figures instead of blocking the delete. */
 async function previewHistoryDelete(target: HistoryDeleteTarget): Promise<HistoryDeletePreview | null> {
-  const ws = currentWorkspace.value
+  // The workspace the modal is SHOWING, which need not be the one on screen.
+  const ws = historyViewWorkspace.value
   if (!ws) return null
   const payload: Record<string, unknown> = {
     workspace_path: ws,
@@ -1469,7 +1627,7 @@ async function previewHistoryDelete(target: HistoryDeleteTarget): Promise<Histor
  *  the project.json mirror — and unlinks its CLI transcript log — while
  *  locally we drop it and fix the paging counters. */
 async function onDeleteHistoryEntry(entry: SpawnHistoryEntry): Promise<void> {
-  const ws = currentWorkspace.value
+  const ws = historyViewWorkspace.value
   if (!ws) return
   const resp = await sendQuiet<{ deleted: number; total: number }>('project.delete_spawn_history', {
     workspace_path: ws,
@@ -1477,6 +1635,14 @@ async function onDeleteHistoryEntry(entry: SpawnHistoryEntry): Promise<void> {
     pane_ids: [entry.paneId],
   })
   if (!resp) return
+  // Patch whichever buffer is on screen; the other one's counters are not
+  // about this store and must not move.
+  if (historyIsForeign.value) {
+    foreignHistory.value = foreignHistory.value.filter((e) => e.paneId !== entry.paneId)
+    foreignHistoryTotal.value = resp.total
+    foreignHistoryFetched.value = Math.max(0, foreignHistoryFetched.value - resp.deleted)
+    return
+  }
   spawnHistory.value = spawnHistory.value.filter((e) => e.paneId !== entry.paneId)
   spawnHistoryTotal.value = resp.total
   spawnHistoryFetched.value = Math.max(0, spawnHistoryFetched.value - resp.deleted)
@@ -1488,12 +1654,19 @@ async function onDeleteHistoryEntry(entry: SpawnHistoryEntry): Promise<void> {
  *  locally. `[]` (not null) skips hydrate's legacy-localStorage fallback and
  *  its one-time migration write. */
 async function onCleanupHistory(mode: HistoryCleanupMode, cutoffIso: string): Promise<void> {
-  const ws = currentWorkspace.value
+  const ws = historyViewWorkspace.value
   if (!ws) return
   const payload: Record<string, unknown> = { workspace_path: ws, mode }
   if (mode === 'older_than') payload.cutoff_iso = cutoffIso
   const resp = await sendQuiet<{ deleted: number; total: number }>('project.delete_spawn_history', payload)
   if (!resp) return
+  // Re-read page 0 of whichever store was cleaned. hydrateSpawnHistory is for
+  // the viewed workspace only — it moves spawnHistoryWorkspace and arms the
+  // persist watcher, which must never point at another project.
+  if (historyIsForeign.value) {
+    await loadForeignHistory(ws)
+    return
+  }
   await hydrateSpawnHistory(ws, [])
 }
 
@@ -4771,6 +4944,16 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
       loginProfileId: opts.loginProfileId,
     })
 
+    // The path above is derived from THIS pane's id, but a spawn that
+    // reattached to a surviving PTY never reached terminal.create, so nothing
+    // opened that file — the conversation is in the log the PTY opened under
+    // its original id, which the reattach reports back. Prefer it: recording
+    // the derived name would point Agent History at a file that never exists,
+    // which is exactly the "Failed to read log file … ENOENT" it used to show
+    // for every restored pane.
+    const effectiveLogFile = ref.attachedOutputLogFile || outputLogFile
+    if (effectiveLogFile !== outputLogFile) pane.outputLogFile = effectiveLogFile
+
     // The history entry was pushed before this path was known — back-fill it
     // now so Agent History preview can read the real file. This must happen
     // after spawn(): the backend creates the log file when it opens the PTY,
@@ -4778,7 +4961,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     // above, so back-filling any earlier points the preview at a file that
     // does not exist yet and the failed read sticks.
     const historyEntry = spawnHistory.value.find((e) => e.paneId === id)
-    if (historyEntry) historyEntry.outputLogFile = outputLogFile
+    if (historyEntry) historyEntry.outputLogFile = effectiveLogFile
 
     // Arm the always-on login-expired watcher for CLIs with a detection spec
     // (the interval self-cleans once the pane is gone or its terminal exited).
@@ -6213,20 +6396,24 @@ const showHistory = ref(false)
 
 /** Open the history modal for the workspace whose heading was clicked.
  *
- *  Unlike ↻, this cannot act in place: spawnHistory is hydrated for one
- *  workspace at a time (paging, liveness reconciliation and the persist
- *  watcher all key off it), and sessionHistory filters to currentWorkspace, so
- *  the button showed the viewed project's history whichever heading it was on.
- *  Switching first is what the heading itself does, and leaves that pipeline
- *  untouched. A declined switch (the workspace turned out to be open in
- *  another window) opens nothing rather than the wrong project's history. */
+ *  It answers for that workspace without switching to it: the modal reads its
+ *  own copy of that project's entries, and every write it can perform names
+ *  historyViewWorkspace rather than currentWorkspace. Opening the workspace on
+ *  screen is the ordinary path and touches none of it. */
 async function onOpenWorkspaceHistory(workspacePath?: string): Promise<void> {
-  if (workspacePath && normWs(workspacePath) !== normWs(currentWorkspace.value)) {
-    await switchToWorkspace(workspacePath)
-    if (normWs(currentWorkspace.value) !== normWs(workspacePath)) return
-  }
+  const foreign =
+    workspacePath && normWs(workspacePath) !== normWs(currentWorkspace.value) ? workspacePath : ''
+  historyWorkspace.value = foreign
   showHistory.value = true
+  if (foreign) await loadForeignHistory(foreign)
 }
+
+// Closed from the button, from Esc, or by an action that leaves the modal —
+// dropping the copy once here covers every one of them. Keeping it would show
+// a stale snapshot on the next open, before its own load lands.
+watch(showHistory, (open) => {
+  if (!open) resetForeignHistory()
+})
 const historyModalRef = ref<{ closeTopLayer?: () => boolean } | null>(null)
 const revivingHistoryPaneId = ref('')
 const unavailableHistoryPaneIds = ref<Set<string>>(new Set())
@@ -6703,7 +6890,10 @@ async function resolveHistoryLogPath(
   entry: SpawnHistoryEntry,
   api?: { findManualLog?: (workspacePath: string, filename: string) => Promise<{ ok: boolean; path: string | null }> }
 ): Promise<string | undefined> {
-  const ws = entry.workspacePath || currentWorkspace.value
+  // The workspace the modal is SHOWING, not the one on screen: the two differ
+  // whenever the history was opened from another project's heading, and
+  // searching the viewed workspace for its files would find nothing.
+  const ws = entry.workspacePath || historyViewWorkspace.value
   if (!ws) return undefined
   let logPath = entry.outputLogFile
   if (!logPath && entry.origin !== 'pipeline' && api?.findManualLog) {
@@ -6830,7 +7020,7 @@ async function onResumeHistoryAgent(entry: SpawnHistoryEntry): Promise<void> {
   try {
     const resumed = await onManualResume({
       agentKey: entry.agentKey,
-      workspacePath: entry.workspacePath || currentWorkspace.value,
+      workspacePath: entry.workspacePath || historyViewWorkspace.value,
       sessionId,
       customName: entry.customName,
       autoName: entry.autoName,
@@ -13930,6 +14120,35 @@ function paneIsCommander(p: ActivePane): boolean {
         <span class="titlebar-spacer"></span>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
+      <!-- Plugin buttons lead the cluster, so they grow LEFTWARD.
+           .titlebar-spacer is flex:1, which pins this cluster to the right
+           edge: anything appended after the gear widens the cluster and shoves
+           ↻ and the gear left, moving two built-in controls every time a
+           plugin is installed or removed. Ahead of them, the built-ins keep
+           the position they have with no plugins at all. -->
+      <div v-if="workspaceSelected && windowPluginContributions.length" class="titlebar-plugin-actions">
+        <button
+          v-for="contribution in windowPluginContributions"
+          :key="contribution.contributionKey"
+          class="titlebar-plugin-action"
+          type="button"
+          :title="contribution.title"
+          :aria-label="contribution.title"
+          @mousedown.stop
+          @click="openPluginContributionWindow(contribution)"
+        >
+          <img
+            v-if="hasPluginIcon(contribution)"
+            class="titlebar-plugin-icon"
+            :src="contribution.icon ?? ''"
+            width="12"
+            height="12"
+            alt=""
+            @error="markPluginIconFailed(contribution)"
+          />
+          <span v-else class="titlebar-plugin-fallback" aria-hidden="true">◇</span>
+        </button>
+      </div>
       <!-- Detached windows could only be merged back by closing them, which is
            indistinguishable from "done with these panes". -->
       <button
@@ -13958,29 +14177,6 @@ function paneIsCommander(p: ActivePane): boolean {
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </button>
-      <div v-if="workspaceSelected && windowPluginContributions.length" class="titlebar-plugin-actions">
-        <button
-          v-for="contribution in windowPluginContributions"
-          :key="contribution.contributionKey"
-          class="titlebar-plugin-action"
-          type="button"
-          :title="contribution.title"
-          :aria-label="contribution.title"
-          @mousedown.stop
-          @click="openPluginContributionWindow(contribution)"
-        >
-          <img
-            v-if="hasPluginIcon(contribution)"
-            class="titlebar-plugin-icon"
-            :src="contribution.icon ?? ''"
-            width="12"
-            height="12"
-            alt=""
-            @error="markPluginIconFailed(contribution)"
-          />
-          <span v-else class="titlebar-plugin-fallback" aria-hidden="true">◇</span>
-        </button>
-      </div>
     </div>
     <!-- Manifest-driven top workbench contributions. The Host keeps opaque
          instance handles in main; this renderer only supplies layout bounds. -->
@@ -14179,15 +14375,16 @@ function paneIsCommander(p: ActivePane): boolean {
     <AgentHistoryModal
       ref="historyModalRef"
       :show="showHistory"
-      :session-history="sessionHistory"
+      :session-history="historyEntries"
+      :viewing-workspace="historyWorkspaceLabel"
       :pane-count="panes.length"
       :reviving-pane-id="revivingHistoryPaneId"
       :unavailable-pane-ids="unavailableHistoryPaneIds"
       :preview-open="previewLogOpen"
       :preview-title="previewLogTitle"
       :preview-content="previewLogContent"
-      :history-has-more="spawnHistoryHasMore"
-      :load-more-history="loadMoreSpawnHistory"
+      :history-has-more="historyHasMore"
+      :load-more-history="loadMoreHistory"
       :fetch-history-log="fetchHistoryLog"
       :search-history-log-content="searchHistoryLogsContent"
       :preview-delete="previewHistoryDelete"

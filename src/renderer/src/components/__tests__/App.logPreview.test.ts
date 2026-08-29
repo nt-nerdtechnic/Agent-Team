@@ -75,13 +75,19 @@ describe('History log path back-fill ordering', () => {
   // Agent History auto-selects the newest entry during the `await nextTick()`
   // inside spawnPane, so a path written before spawn() points at a file the
   // backend has not created yet and the failed read sticks. The back-fill must
-  // therefore come after `await ref.spawn(`.
+  // therefore come after `await ref.spawn(`. Since a reattaching spawn only
+  // learns the surviving PTY's real transcript inside that call, the ordering
+  // is now load-bearing twice over.
   it('back-fills historyEntry.outputLogFile only after ref.spawn resolves', () => {
     const spawnIdx = appSource.indexOf('await ref.spawn({')
     expect(spawnIdx, 'ref.spawn call should exist').toBeGreaterThan(-1)
-    const backfillIdx = appSource.indexOf('historyEntry.outputLogFile = outputLogFile')
+    const backfillIdx = appSource.indexOf('historyEntry.outputLogFile = effectiveLogFile')
     expect(backfillIdx, 'history back-fill should exist').toBeGreaterThan(-1)
     expect(backfillIdx).toBeGreaterThan(spawnIdx)
+    // And the adopted path is only readable after spawn returns.
+    const adoptIdx = appSource.indexOf('const effectiveLogFile')
+    expect(adoptIdx).toBeGreaterThan(spawnIdx)
+    expect(adoptIdx).toBeLessThan(backfillIdx)
   })
 })
 

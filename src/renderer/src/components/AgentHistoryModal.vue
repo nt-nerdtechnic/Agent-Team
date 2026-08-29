@@ -31,6 +31,11 @@ import {
 const props = defineProps<{
   show: boolean
   sessionHistory: SpawnHistoryEntry[]
+  /** Folder name of the workspace being shown, when it is NOT the one on
+   *  screen. The modal answers for whichever heading opened it without
+   *  switching to that project, so it has to say whose history this is —
+   *  and empty means the ordinary case, the workspace on screen. */
+  viewingWorkspace?: string
   paneCount: number
   revivingPaneId: string
   unavailablePaneIds: Set<string>
@@ -578,8 +583,13 @@ async function copyLogText(): Promise<void> {
         <div class="history-modal-header">
           <div class="history-header-left">
             <span>{{ $t('label.agent-history') }}</span>
+            <span v-if="viewingWorkspace" class="ah-ws-chip">{{ viewingWorkspace }}</span>
+            <!-- Kill-all sweeps the workspace ON SCREEN, so it is not offered
+                 while looking at another project's history: it would kill the
+                 panes of a project the list does not even show, and kill is
+                 unrecoverable. -->
             <button
-              v-if="paneCount > 0"
+              v-if="paneCount > 0 && !viewingWorkspace"
               class="history-killall"
               @click="confirmKillAll = true"
               :title="$t('action.kill-all-agents')"
@@ -993,6 +1003,17 @@ async function copyLogText(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* Names the project when the modal is not showing the workspace on screen. */
+.ah-ws-chip {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 99px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
 }
 .history-killall {
   background: transparent;

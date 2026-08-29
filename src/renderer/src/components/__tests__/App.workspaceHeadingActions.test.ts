@@ -8,9 +8,10 @@ import { describe, expect, it } from 'vitest'
 // heading you clicked. ControlPane now names the workspace; these pin what
 // App does with it.
 //
-// The two are answered differently on purpose. Rebuild reads each pane's own
-// workspacePath, so it can run in place. History cannot: spawnHistory is
-// hydrated for one workspace at a time, so it switches first.
+// Both act in place now. Rebuild reads each pane's own workspacePath; history
+// keeps its own read-only copy of the named workspace's entries and names that
+// workspace on every write. The write side is pinned in
+// App.historyWorkspace.test.ts — that is where the data-loss risk lives.
 //
 // Source-scanned, like the other App.*.test.ts files: App.vue cannot be
 // mounted, since backend and terminal lifecycles start on mount.
@@ -59,20 +60,19 @@ describe('a workspace heading acts on its own workspace', () => {
     expect(appSource).toContain(':can-rebuild-all="rebuildableAllPaneCount > 0"')
   })
 
-  it('history switches to the workspace before opening', () => {
+  it('history opens the named workspace without switching to it', () => {
     const fn = body('onOpenWorkspaceHistory')
-    expect(fn).toContain('await switchToWorkspace(workspacePath)')
+    expect(fn).not.toContain('switchToWorkspace')
     expect(fn).toContain('showHistory.value = true')
-    // Already there: no switch, just open.
     expect(fn).toContain('normWs(workspacePath) !== normWs(currentWorkspace.value)')
     expect(appSource).toContain('@open-history="onOpenWorkspaceHistory"')
   })
 
-  it('opens nothing when the switch is declined', () => {
-    // switchToWorkspace can decline — the workspace turned out to be open in
-    // another window. Opening anyway would show the wrong project's history.
+  it('treats the workspace on screen as the ordinary case', () => {
+    // Opening the viewed workspace's own history must not build a foreign
+    // copy of what spawnHistory already holds, live.
     const fn = body('onOpenWorkspaceHistory')
-    expect(fn).toContain('if (normWs(currentWorkspace.value) !== normWs(workspacePath)) return')
-    expect(fn.indexOf('return')).toBeLessThan(fn.indexOf('showHistory.value = true'))
+    expect(fn).toContain("? workspacePath : ''")
+    expect(fn).toContain('if (foreign) await loadForeignHistory(foreign)')
   })
 })
