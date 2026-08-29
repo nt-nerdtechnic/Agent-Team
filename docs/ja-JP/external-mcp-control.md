@@ -287,10 +287,19 @@ Turn に対する判定ではない唯一のものです。待機が判定に至
 ウィンドウ一つにルーティングされます。
 
 Path の一致判定が効くのは Pane の識別子を持たない呼び出し元 — 外部 Client か
-Host Wiring — だけです。Navide の CLI Pane からの呼び出しは、その Pane を抱えて
-いるウィンドウへ直接届きます。Focus の有無も、そのウィンドウが今どのプロジェクト
-を開いているかも問いません。`workspace_path` は Action にそのまま渡りますが、誰が
-応答するかはもう決めません。
+Host Wiring — だけです。Navide の CLI Pane から、その Pane 自身の Workspace を
+指して呼び出した場合は、その Pane を抱えているウィンドウへ直接届きます。Focus の
+有無も、そのウィンドウが今どのプロジェクトを開いているかも問いません。別の
+プロジェクトを指した場合は意図的な別ウィンドウ宛ての呼び出しとして Broadcast の
+経路に戻り、そのプロジェクトを開いているウィンドウに届きます。
+
+ウィンドウに届くことと、`workspace_path` に対して実行されることは別です。
+「このウィンドウが今表示しているプロジェクト」に作用する Action —
+`ui.pane.create`、`ui.preview.show`、`ui.window.openGit` — は、そのウィンドウが
+別のプロジェクトへ切り替わっていた場合、黙って間違ったプロジェクトで実行される
+のではなく Error で拒否されます。読み取り専用の Op（`ui_snapshot`、
+`ui_list_actions`、`ui_diagnostics`、`ui.pane.getStatus`）はどちらでも応答し、
+そのウィンドウの実際の状態を返します。
 
 `ui_list_actions` は、下記の `ui.*` の ID だけでなく、そのウィンドウが Keybinding
 に使う Command Registry *全体*を返します。内部 ID（例: `workbench.action.*`）は

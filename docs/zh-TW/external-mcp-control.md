@@ -251,9 +251,15 @@ copilot/cursor/droid/kilo/muse/opencode 的 `turn_complete` 是 CLI 自己說回
 視窗，而不是符合 `workspace_path` 的那一個。
 
 路徑比對只適用於沒有 Pane 身分的呼叫者 —— 外部 Client 或 Host Wiring。從 Navide
-CLI Pane 發出的呼叫會直接送到掛著該 Pane 的那個視窗，不論它有沒有 Focus、當下開
-著哪一個專案，所以 Pane 永遠驅動得了自己的視窗；`workspace_path` 仍會原樣傳給
-Action，只是不再決定由誰回應。
+CLI Pane 發出、且指名該 Pane 自己 Workspace 的呼叫，會直接送到掛著該 Pane 的那個
+視窗，不論它有沒有 Focus、當下開著哪一個專案；指名另一個專案則維持廣播路徑，讓
+刻意的跨視窗呼叫仍然送得到真的開著那個專案的視窗。
+
+送達視窗不等於在 `workspace_path` 上執行。作用於「這個視窗當下顯示的專案」的
+Action —— `ui.pane.create`、`ui.preview.show`、`ui.window.openGit` —— 若該視窗已
+切換到別的專案，會回一個錯誤，而不是默默對錯的專案動手。唯讀的 Op（`ui_snapshot`、
+`ui_list_actions`、`ui_diagnostics`、`ui.pane.getStatus`）兩種情況都會回應，並如實
+描述那個視窗當下的狀態。
 
 `ui_list_actions` 回傳的是該視窗用於其 Keybinding 的*整份* Command Registry，
 不只是下面的 `ui.*` id —— 內部 id（例如 `workbench.action.*`）是為鍵盤快捷鍵而

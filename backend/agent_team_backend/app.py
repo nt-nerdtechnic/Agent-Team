@@ -283,18 +283,17 @@ async def unicast_to(session: "Session | None", event: dict[str, Any]) -> bool:
     has to filter for itself (broadcast). A False return is the caller's cue to
     fall back, not an error: the window may have dropped between the lookup and
     the send.
+
+    That miss is read off `dead` AFTER the send, not from an exception:
+    send_json never raises on a dead peer (it marks the session dead, discards
+    it and no-ops instead), so a try/except here would never fire and a request
+    sent into a window that had just closed would be reported as delivered —
+    suppressing the caller's fallback and costing it a full timeout.
     """
     if session is None or getattr(session, "dead", False):
         return False
-    try:
-        await session.send_json(event)
-    except Exception as err:  # noqa: BLE001
-        # Same defensive net as broadcast(): report the miss and let the caller
-        # decide, rather than failing the request outright.
-        log.warning("unicast_to send failed: %s", err)
-        _SESSIONS.discard(session)
-        return False
-    return True
+    await session.send_json(event)
+    return not getattr(session, "dead", False)
 
 
 async def unicast_any(event: dict[str, Any]) -> bool:

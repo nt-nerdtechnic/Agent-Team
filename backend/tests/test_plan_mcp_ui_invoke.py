@@ -470,6 +470,131 @@ async def test_a_global_action_is_never_addressed_to_the_callers_window(
     assert unicasts[0]["payload"]["addressed"] is False
 
 
+async def _answer_result(result: Any) -> None:
+    """_answer, but with the reply body the caller actually parses."""
+    for _ in range(200):
+        keys = list(plan_mcp._ui_invoke_pending.pending)
+        if keys:
+            plan_mcp.resolve_ui_invoke(keys[0], {"ok": True, "result": result, "error": None})
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("no pending ui.invoke request appeared")
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_probes_the_window_that_hosts_the_pane(
+    addressed: list[tuple[Any, dict[str, Any]]], broadcasts: list[dict[str, Any]]
+) -> None:
+    """The UI probe is the one signal that is always current, and it was still
+    broadcast — so for the very case this addressing exists for (the window
+    switched project) each probe ran into the 15s deadline inside a 1s poll
+    loop, three times over, before it gave up on the window."""
+    asker_window, subject_window = _Window(), _Window()
+    agent_messaging.register("pa", "asker", "/ws/alpha", agent_key="claude", owner=asker_window)
+    agent_messaging.register("pb", "worker", "/ws/alpha", agent_key="claude", owner=subject_window)
+    agent_messaging.set_busy("pb", True)
+
+    task = asyncio.create_task(_answer_result({"status": "idle"}))
+    result = await plan_mcp.cli_wait_idle("worker", _pane_ctx(), 5.0, "")
+    await task
+
+    assert result["idle"] is True
+    assert broadcasts == []
+    assert len(addressed) == 1
+    session, event = addressed[0]
+    assert session is subject_window
+    assert event["payload"]["action"] == "ui.pane.getStatus"
+    assert event["payload"]["addressed"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_status_asks_the_window_that_hosts_the_pane_it_is_about(
+    addressed: list[tuple[Any, dict[str, Any]]], broadcasts: list[dict[str, Any]]
+) -> None:
+    """ui.pane.getStatus is about the SUBJECT pane, so it goes to the window
+    that has that pane — not the asker's, which may not host it at all, and not
+    a broadcast, which a window that has switched project never answers."""
+    asker_window, subject_window = _Window(), _Window()
+    agent_messaging.register("pa", "asker", "/ws/alpha", agent_key="claude", owner=asker_window)
+    agent_messaging.register("pb", "worker", "/ws/alpha", agent_key="claude", owner=subject_window)
+
+    task = asyncio.create_task(_answer("status"))
+    result = await plan_mcp.cli_get_status("worker", _pane_ctx(), "")
+    await task
+
+    assert result["ok"] is True
+    assert broadcasts == []
+    assert len(addressed) == 1
+    session, event = addressed[0]
+    assert session is subject_window
+    assert event["payload"]["action"] == "ui.pane.getStatus"
+    assert event["payload"]["addressed"] is True
+
+
+class _DyingWindow:
+    """A session that goes away DURING the send, with Session.send_json's real
+    contract: it never raises on a dead peer — it marks itself dead, discards
+    itself and returns normally.
+
+    The `addressed` fixture above fakes the contract unicast_to *wants*, so it
+    cannot see a unicast_to that decides delivery from the absence of an
+    exception. This one can.
+    """
+
+    def __init__(self) -> None:
+        self.dead = False
+        self.seen: list[dict[str, Any]] = []
+
+    async def send_json(self, data: dict[str, Any]) -> None:
+        if self.dead:
+            return
+        self.dead = True
+
+
+class _LiveWindow(_DyingWindow):
+    async def send_json(self, data: dict[str, Any]) -> None:
+        self.seen.append(data)
+
+
+@pytest.mark.asyncio
+async def test_unicast_to_reports_a_peer_that_died_during_the_send() -> None:
+    """The real app.unicast_to, not the fixture: send_json swallows the failure,
+    so 'did it land' has to be read off `dead` afterwards. Returning True here
+    suppressed the broadcast fallback and cost the caller a full timeout with a
+    message blaming a window that was not even there."""
+    window = _DyingWindow()
+
+    assert await app.unicast_to(window, {"type": "ui.invoke.request"}) is False
+
+
+@pytest.mark.asyncio
+async def test_unicast_to_reports_a_live_peer_as_delivered() -> None:
+    window = _LiveWindow()
+
+    assert await app.unicast_to(window, {"type": "ui.invoke.request"}) is True
+    assert window.seen == [{"type": "ui.invoke.request"}]
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_dies_during_the_send_still_falls_back_to_broadcast(
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    """End to end over the REAL unicast_to: the owner was alive at lookup and
+    gone by the send."""
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=_DyingWindow())
+
+    task = asyncio.create_task(_answer("died-mid-send"))
+    result = await plan_mcp.ui_invoke("/ws/alpha", "editor.save", _pane_ctx(), None)
+    await task
+
+    assert result["ok"] is True
+    assert len(broadcasts) == 1
+    # And the broadcast must not still claim to be addressed: every window
+    # answers an addressed request without checking workspace_path, so one
+    # request id would collect N racing replies.
+    assert broadcasts[0]["payload"]["addressed"] is False
+
+
 @pytest.mark.asyncio
 async def test_an_addressed_timeout_blames_the_window_not_the_path(
     monkeypatch: pytest.MonkeyPatch, addressed: list[tuple[Any, dict[str, Any]]]

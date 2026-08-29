@@ -115,6 +115,122 @@ describe('useUiActionBus — ownership filtering', () => {
     expect(sent.find((s) => s.type === 'ui.invoke.result')).toBeUndefined()
   })
 
+  // Reaching this window is not the same as being able to act on the project
+  // the request names. ui.pane.create / ui.window.openGit / ui.preview.show all
+  // read the window's OWN currentWorkspace, so answering one for a workspace
+  // this window merely holds spawned the agent into (and persisted it under)
+  // the project on screen instead — ok:true on the wrong project.
+  it('refuses an addressed workspace-scoped action naming a project it is not showing', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    const ranAgainst: string[] = []
+    registerCommand('ui.pane.create', () => {
+      ranAgainst.push(currentWorkspace.value)
+      return 'pane-1'
+    })
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({
+      workspace_path: '/ws-held',
+      action: 'ui.pane.create',
+      args: { agent: 'claude' },
+      addressed: true,
+    }))
+    await flush()
+
+    expect(ranAgainst).toEqual([])
+    const reply = sent.find((s) => s.type === 'ui.invoke.result')
+    expect(reply?.payload).toMatchObject({ request_id: 'req-1', ok: false })
+    // The reply names both projects: the caller has to know which window to
+    // switch, and a bare "refused" reads as a bug in the action.
+    expect((reply?.payload as { error: string }).error).toContain('/ws-held')
+    expect((reply?.payload as { error: string }).error).toContain('/ws-a')
+  })
+
+  it('runs a workspace-scoped action addressed to the project it IS showing', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    const ranAgainst: string[] = []
+    registerCommand('ui.pane.create', () => {
+      ranAgainst.push(currentWorkspace.value)
+      return 'pane-1'
+    })
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({
+      workspace_path: '/ws-a',
+      action: 'ui.pane.create',
+      addressed: true,
+    }))
+    await flush()
+
+    expect(ranAgainst).toEqual(['/ws-a'])
+    expect(sent.find((s) => s.type === 'ui.invoke.result')?.payload).toMatchObject({ ok: true })
+  })
+
+  it('does not let a trailing slash make the shown project look like another one', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    const ran: string[] = []
+    registerCommand('ui.preview.show', () => { ran.push('x') })
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({
+      workspace_path: '/ws-a/',
+      action: 'ui.preview.show',
+      addressed: true,
+    }))
+    await flush()
+
+    expect(ran).toEqual(['x'])
+    expect(sent.find((s) => s.type === 'ui.invoke.result')?.payload).toMatchObject({ ok: true })
+  })
+
+  // The other half of the same rule: a request that does NOT act on the shown
+  // project keeps the wider ownership test, which is the whole point of
+  // addressing a pane's own window.
+  it('still answers a pane-keyed action for a workspace it is not showing', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    registerCommand('ui.pane.getStatus', () => ({ status: 'idle' }))
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({
+      workspace_path: '/ws-held',
+      action: 'ui.pane.getStatus',
+      args: { paneId: 'p1' },
+      addressed: true,
+    }))
+    await flush()
+
+    expect(sent.find((s) => s.type === 'ui.invoke.result')?.payload).toMatchObject({
+      ok: true,
+      result: { status: 'idle' },
+    })
+  })
+
+  // Not addressed means some other window may have that project on screen, so
+  // this one owes the same silence it owes any mismatch — an error reply here
+  // would race the window that can actually do the work.
+  it('stays silent on a broadcast workspace-scoped action for a held-but-not-shown project', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    const ran: string[] = []
+    registerCommand('ui.window.openGit', () => { ran.push('x') })
+    useUiActionBus({
+      backend,
+      currentWorkspace,
+      buildSnapshot: () => ({}),
+      ownsWorkspace: (p) => p === '/ws-a' || p === '/ws-held',
+    })
+
+    emit('ui.invoke.request', baseRequest({ workspace_path: '/ws-held', action: 'ui.window.openGit' }))
+    await flush()
+
+    expect(ran).toEqual([])
+    expect(sent.find((s) => s.type === 'ui.invoke.result')).toBeUndefined()
+  })
+
   it('still ignores a mismatched request that is not addressed to it', async () => {
     const { backend, emit, sent } = createMockBackend()
     const currentWorkspace = ref('/ws-a')

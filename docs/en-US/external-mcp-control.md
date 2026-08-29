@@ -294,10 +294,20 @@ workspace, it is routed to any one live Navide window instead of the one
 matching `workspace_path`.
 
 The path match applies to a caller with no pane identity — an external client
-or the host wiring. A call from a Navide CLI pane is delivered straight to the
-window hosting that pane, whether or not it is focused and whatever project it
-currently has open, so a pane can always drive its own window; `workspace_path`
-is still passed through to the action, it just no longer decides who answers.
+or the host wiring. A call from a Navide CLI pane naming that pane's own
+workspace is delivered straight to the window hosting that pane, whether or not
+it is focused and whatever project it currently has open, so a pane can always
+reach its own window; naming a different project keeps the broadcast path, so a
+deliberate cross-window call still reaches the window that has that project
+open.
+
+Reaching the window is not the same as running against `workspace_path`.
+Actions that act on "the project this window is showing" — `ui.pane.create`,
+`ui.preview.show`, `ui.window.openGit` — are refused with an error when the
+hosting window has since switched project, rather than silently acting on the
+wrong one. The read-only ops (`ui_snapshot`, `ui_list_actions`,
+`ui_diagnostics`, `ui.pane.getStatus`) answer either way and describe the
+window as it actually is.
 
 `ui_list_actions` returns the *entire* command registry the window uses for
 its keybindings, not only the `ui.*` ids below — internal ids (e.g.

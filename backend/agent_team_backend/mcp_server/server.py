@@ -1506,7 +1506,11 @@ async def cli_get_status(target: str, ctx: Context, pane_id: str = "") -> dict[s
         status["last_activity"] = last
 
     ui_result = await _ui_request(
-        pane.workspace_path, "invoke", action="ui.pane.getStatus", args={"paneId": pane.pane_id}
+        pane.workspace_path,
+        "invoke",
+        caller=_pane_caller(pane.pane_id),
+        action="ui.pane.getStatus",
+        args={"paneId": pane.pane_id},
     )
     if ui_result.get("ok") and isinstance(ui_result.get("result"), dict):
         status["ui"] = ui_result["result"]
@@ -1669,7 +1673,11 @@ async def cli_wait_idle(
             # busy says otherwise, so ask the window that can actually see the
             # pane.
             ui = await _ui_request(
-                workspace_path, "invoke", action="ui.pane.getStatus", args={"paneId": pane_id}
+                workspace_path,
+                "invoke",
+                caller=_pane_caller(pane_id),
+                action="ui.pane.getStatus",
+                args={"paneId": pane_id},
             )
             payload = ui.get("result") if ui.get("ok") else None
             if not isinstance(payload, dict):
@@ -1913,6 +1921,20 @@ def resolve_ui_invoke(request_id: str, result: dict[str, Any]) -> bool:
     return _ui_invoke_pending.resolve(request_id, result)
 
 
+def _pane_caller(pane_id: str) -> _Caller:
+    """Address a UI request at the window hosting *pane_id* itself.
+
+    For requests that are ABOUT one pane (ui.pane.getStatus) rather than about
+    the caller: only the window that has that pane can answer them, and it is
+    not necessarily the caller's own — a pane may ask about a pane in another
+    window, and a host/external caller has no window at all. Handing
+    :func:`_caller_window` the subject pane's identity resolves the right one;
+    without it these fell back to broadcast, where a window that has since
+    switched project answers nothing and each probe burns a full timeout.
+    """
+    return _Caller(kind="pane", pane_id=pane_id)
+
+
 def _caller_window(caller: "_Caller | None", workspace_path: str) -> Any | None:
     """The WS connection of the window that mirrors the calling pane.
 
@@ -2041,9 +2063,14 @@ async def _ui_request(
         "global": is_global,
         "addressed": owner is not None,
     }
-    event = make_event("ui.invoke.request", payload)
+    # The event is built inside each branch, after `addressed` has settled:
+    # make_event stores the payload by reference today, so mutating it after
+    # the fact happened to reach the wire — but a make_event that copied or
+    # serialized would have shipped addressed:true on the broadcast fallback,
+    # and every window answers an addressed request without checking
+    # workspace_path, racing N replies for one request id.
     if is_global:
-        sent = await app.unicast_any(event)
+        sent = await app.unicast_any(make_event("ui.invoke.request", payload))
         if not sent:
             _ui_invoke_pending.discard(request_id)
             return {
@@ -2052,14 +2079,14 @@ async def _ui_request(
                 "error": "no Navide window is open to handle this request",
                 "error_code": "ui_no_window",
             }
-    elif owner is not None and await app.unicast_to(owner, event):
+    elif owner is not None and await app.unicast_to(owner, make_event("ui.invoke.request", payload)):
         pass
     else:
         # The owner dropped between lookup and send: broadcast rather than fail,
         # and stop claiming the request was addressed — the timeout message
         # tells the two apart.
         payload["addressed"] = False
-        await app.broadcast(event)
+        await app.broadcast(make_event("ui.invoke.request", payload))
 
     timeout = _UI_INVOKE_SLOW_TIMEOUT_S if action in _UI_INVOKE_SLOW_ACTIONS else _UI_INVOKE_TIMEOUT_S
     result = await _ui_invoke_pending.wait(request_id, fut, timeout=timeout)
@@ -2076,8 +2103,9 @@ async def ui_list_actions(workspace_path: str, ctx: Context) -> dict[str, Any]:
     can discover what ui_invoke accepts before calling it. Errors if no
     window owns workspace_path within 15s.
 
-    Called from a CLI pane, this goes to that pane's own window whatever
-    workspace_path says — see ui_invoke.
+    Called from a CLI pane, this goes to that pane's own window when
+    workspace_path names that pane's own workspace (or is empty) — see
+    ui_invoke.
     """
     caller = _resolve_caller(ctx)
     return await _ui_request(workspace_path, "list_actions", caller=caller)
@@ -2097,10 +2125,19 @@ async def ui_invoke(
     at all) within 15s.
 
     Called from a CLI pane, the request is delivered straight to the window
-    that hosts that pane, whether or not it is focused and whatever project it
-    currently has open — a pane can always drive its own window. Only a caller
-    with no pane identity (host / external) depends on workspace_path matching
-    the workspace a window has open right now.
+    that hosts that pane — whether or not it is focused, and whatever project
+    that window currently has open — as long as workspace_path names that
+    pane's own workspace (or is empty). Naming a DIFFERENT project is a
+    deliberate call on someone else's window and keeps the broadcast path,
+    where only a window with that project open answers; a caller with no pane
+    identity (host / external) always depends on that match.
+
+    Being delivered is not the same as being run against workspace_path. The
+    actions that act on "the project this window is showing" — ui.pane.create,
+    ui.preview.show, ui.window.openGit — are refused with an error when the
+    hosting window has switched to another project, rather than silently
+    running against the wrong one. Switch that window back, or spawn the pane
+    from a window that has the project open.
     """
     caller = _resolve_caller(ctx)
     return await _ui_request(
@@ -2120,8 +2157,10 @@ async def ui_snapshot(workspace_path: str, ctx: Context) -> dict[str, Any]:
     Shape is decided by the renderer (panes, tabs, focus, etc.). Errors if no
     window owns workspace_path within 15s.
 
-    Called from a CLI pane, this snapshots that pane's own window whatever
-    workspace_path says — see ui_invoke.
+    Called from a CLI pane, this snapshots that pane's own window when
+    workspace_path names that pane's own workspace (or is empty) — see
+    ui_invoke. The snapshot then describes the project that window has open
+    right now, which is not necessarily workspace_path.
     """
     caller = _resolve_caller(ctx)
     return await _ui_request(workspace_path, "snapshot", caller=caller)
@@ -2145,8 +2184,9 @@ async def ui_diagnostics(
     re-reading old entries. `pane_id` filters to one pane; `limit` caps how
     many entries come back. Errors if no window owns workspace_path within 15s.
 
-    Called from a CLI pane, this reads that pane's own window whatever
-    workspace_path says — see ui_invoke.
+    Called from a CLI pane, this reads that pane's own window when
+    workspace_path names that pane's own workspace (or is empty) — see
+    ui_invoke.
     """
     caller = _resolve_caller(ctx)
     return await _ui_request(
@@ -2408,7 +2448,9 @@ async def preview_show(
     else:
         args["workspacePath"] = workspace_path
         args["relPath"] = rel_path
-    reply = await _ui_request(workspace_path, "invoke", action="ui.preview.show", args=args)
+    reply = await _ui_request(
+        workspace_path, "invoke", caller=caller, action="ui.preview.show", args=args
+    )
     result: dict[str, Any] = dict(reply)
     if result.get("ok") is not True:
         # The window never took it, so recording it as shown would log

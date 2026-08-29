@@ -22,7 +22,10 @@ export interface UiInvokeRequest {
   args: Record<string, unknown> | null
   global: boolean
   /** Backend sent this request to this window alone, because it hosts the pane
-   *  that asked for it. Answer it without checking workspace_path. */
+   *  that asked for it. Answer it without the ownership check — but still
+   *  refuse the actions that act on the project on screen when it is not the
+   *  one named (see WORKSPACE_SCOPED_ACTIONS), since being the right WINDOW
+   *  does not make this the right PROJECT. */
   addressed?: boolean
 }
 
@@ -48,6 +51,21 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+/** Actions that change state in ONE project and take that project from the
+ *  window's own `currentWorkspace` rather than from the request.
+ *
+ *  Ownership is "does this window hold the workspace", which is wider than
+ *  "is it the one on screen" — so an addressed (or held-but-not-showing)
+ *  request reaches a window whose currentWorkspace is a DIFFERENT project, and
+ *  these actions would then spawn the pane, open Git, or push the preview into
+ *  that other project and report ok. Wrong, not merely stale. Everything else
+ *  is either read-only (snapshot, list_actions, ui.pane.getStatus,
+ *  ui.diagnostics.read — they describe the window as it is), window-scoped
+ *  (settings), or keyed by pane id, and stays on the wider rule. */
+const WORKSPACE_SCOPED_ACTIONS = new Set(['ui.pane.create', 'ui.window.openGit', 'ui.preview.show'])
+
+const normWs = (p: string): string => p.replace(/\/+$/, '')
+
 /** Handles a single ui.invoke.request payload; exported for direct unit testing
  *  without going through a fake backend.on subscription. */
 export async function handleUiInvokeRequest(
@@ -69,12 +87,32 @@ export async function handleUiInvokeRequest(
   const mine = req.global || req.addressed || owns(req.workspace_path ?? '')
   if (!mine) return
 
+  // Reaching this window is not the same as being able to act on the project
+  // the request names: see WORKSPACE_SCOPED_ACTIONS. A broadcast one is left
+  // to the window that does have it on screen (silence, as above); an
+  // addressed one has nowhere else to go, so it is answered with the reason
+  // rather than run against the wrong project or left to time out.
+  const wrongProject =
+    req.op === 'invoke' &&
+    !req.global &&
+    !!req.action &&
+    WORKSPACE_SCOPED_ACTIONS.has(req.action) &&
+    !!req.workspace_path &&
+    normWs(req.workspace_path) !== normWs(opts.currentWorkspace.value)
+  if (wrongProject && !req.addressed) return
+
   const diagnosticSeq = currentDiagnosticSeq()
   let ok = true
   let result: unknown
   let error: string | undefined
   try {
-    if (req.op === 'invoke') {
+    if (wrongProject) {
+      ok = false
+      error =
+        `${req.action} acts on the project this window is showing, which is ` +
+        `"${opts.currentWorkspace.value}", not "${req.workspace_path}". Switch that ` +
+        `window to the project first, or call from a pane in a window that has it open.`
+    } else if (req.op === 'invoke') {
       if (!req.action) {
         ok = false
         error = 'action is required for op "invoke"'

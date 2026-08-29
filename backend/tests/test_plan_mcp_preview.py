@@ -480,3 +480,35 @@ async def test_a_push_no_window_took_is_not_broadcast(
 
     assert result["recorded"] is False
     assert [e for e in broadcasts if e["type"] == "preview.recorded"] == []
+
+
+async def test_preview_show_goes_straight_to_the_calling_panes_own_window(
+    store: PreviewLog,
+    workspace: str,
+    broadcasts: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Left on the broadcast path, a preview push from a pane whose window had
+    switched project reached nobody: only a window with that project open
+    answers a broadcast, so every call burned the full deadline."""
+    sends: list[tuple[Any, dict[str, Any]]] = []
+
+    async def fake_unicast_to(session: Any, event: dict[str, Any]) -> bool:
+        sends.append((session, event))
+        return True
+
+    monkeypatch.setattr(backend_app, "unicast_to", fake_unicast_to)
+    window = SimpleNamespace(dead=False)
+    agent_messaging.register("p1", "p1-pane", workspace, agent_key="claude", owner=window)
+
+    task = asyncio.create_task(_answer({"ok": True, "result": {"shown": True}, "error": None}))
+    result = await plan_mcp.preview_show(_pane_ctx("p1"), rel_path="src/a.ts")
+    await task
+
+    assert result["ok"] is True
+    assert [e for e in broadcasts if e["type"] == "ui.invoke.request"] == []
+    assert len(sends) == 1
+    session, event = sends[0]
+    assert session is window
+    assert event["payload"]["action"] == "ui.preview.show"
+    assert event["payload"]["addressed"] is True
