@@ -202,6 +202,55 @@ describe('ControlPane – lineage tree', () => {
     expect(lines[2].find('.lineage-spacer').exists()).toBe(true)
   })
 
+  it('reserves nothing in a flat workspace just because ANOTHER one has lineage', () => {
+    // One window can hold several projects. Asking the question once for the
+    // whole window indented every row of the flat project against a caret that
+    // lives in the other one — and a collapsed project still counted, so the
+    // caret was not even on screen.
+    wrapper = mountWith({
+      lineage: [],
+      workspaces: [
+        {
+          path: '/deep',
+          label: 'deep',
+          displayPath: '~/deep',
+          isCurrent: true,
+          collapsed: true,
+          count: 2,
+          lineage: [],
+          groups: [
+            {
+              id: '',
+              name: '',
+              rows: [
+                { id: 'root', depth: 0, hasChildren: true, collapsed: false },
+                { id: 'kid-1', depth: 1, hasChildren: false, collapsed: false }
+              ]
+            }
+          ]
+        },
+        {
+          path: '/flat',
+          label: 'flat',
+          displayPath: '~/flat',
+          isCurrent: true,
+          collapsed: false,
+          count: 1,
+          lineage: [],
+          groups: [
+            { id: '', name: '', rows: [{ id: 'kid-2', depth: 0, hasChildren: false, collapsed: false }] }
+          ]
+        }
+      ]
+    })
+    const flatRow = wrapper.findAll('.agent-line').find((l) => l.text().includes('Reviewer'))
+    expect(flatRow).toBeDefined()
+    expect(flatRow!.find('.lineage-spacer').exists()).toBe(false)
+    // The project that does have lineage still reserves the slot for its own
+    // childless rows (kid-1 is indented, so it keeps its spacer).
+    expect(wrapper.findAll('.lineage-caret')).toHaveLength(1)
+  })
+
   it('reserves nothing in a workspace whose rows have no children', () => {
     wrapper = mountWith({
       lineage: [],

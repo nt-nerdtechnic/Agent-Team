@@ -350,27 +350,6 @@ const localWorkspaceRows = computed<(WorkspaceGroupRow | null)[]>(() => {
  *  with no way back in. */
 const hasWorkspaceRows = computed(() => localWorkspaceRows.value.some((w) => w))
 
-/** Whether any row the sidebar draws can show a fold caret.
- *
- *  The caret sits in a 12px slot before the status dot, so a row that has one
- *  starts 18px further right than a row that does not — which is why a pane
- *  that happened to spawn a child stopped lining up with its childless
- *  siblings at the same depth. Reserving the slot on every row puts them back
- *  on one left edge. A list with no lineage at all reserves nothing, so a flat
- *  sidebar keeps the left edge it has always had.
- *
- *  Read from the same rows the template renders, not from `lineage`: with
- *  workspace headings on, the rows come from `workspaces` instead and `lineage`
- *  is empty, so keying off it reserved nothing on exactly the list that has
- *  the carets. */
-const lineageRail = computed(() =>
-  localWorkspaceRows.value.some((ws) =>
-    ws
-      ? ws.groups.some((g) => g.rows.some((r) => r.hasChildren))
-      : orderedPanes.value.some((r) => r.hasChildren)
-  )
-)
-
 /** A group's spine state: the same signal its tab already shows.
  *
  *  An identity palette was the first attempt — a colour per group, hashed from
@@ -388,19 +367,34 @@ function groupState(rows: readonly { pane: ActivePaneView }[]): string {
  *
  *  A single ungrouped section renders WITHOUT a heading: a workspace where
  *  nobody has made a group should look exactly as it does today, and a lone
- *  "manual" heading over everything is a label that distinguishes nothing. */
+ *  "manual" heading over everything is a label that distinguishes nothing.
+ *
+ *  `rail` says whether any row in THIS workspace can show a fold caret. The
+ *  caret sits in a 12px slot before the status dot, so a row that has one
+ *  starts 18px further right than a row that does not — which is why a pane
+ *  that happened to spawn a child stopped lining up with its childless
+ *  siblings at the same depth. Reserving the slot on every row of that
+ *  workspace puts them back on one left edge; a workspace with no lineage
+ *  reserves nothing and keeps the left edge it has always had. Answered per
+ *  workspace, not once for the window: a window holding a folded project that
+ *  has a parent/child pair would otherwise indent every row of a second, flat
+ *  project against a caret that is nowhere on screen. */
 function groupSectionsOf(
   ws: WorkspaceGroupRow | null
-): { id: string; name: string; state: string; bare: boolean; rows: ReturnType<typeof panesOf> }[] {
-  if (!ws) return [{ id: '', name: '', state: 'empty', bare: true, rows: orderedPanes.value }]
+): { id: string; name: string; state: string; bare: boolean; rail: boolean; rows: ReturnType<typeof panesOf> }[] {
+  if (!ws) {
+    const rail = orderedPanes.value.some((r) => r.hasChildren)
+    return [{ id: '', name: '', state: 'empty', bare: true, rail, rows: orderedPanes.value }]
+  }
   const byId = new Map(props.panes.map((pane) => [pane.id, pane]))
   const bare = ws.groups.length <= 1 && (ws.groups[0]?.id ?? '') === ''
+  const rail = ws.groups.some((g) => g.rows.some((r) => r.hasChildren))
   return ws.groups.map((g) => {
     const rows = g.rows.flatMap((r) => {
       const pane = byId.get(r.id)
       return pane ? [{ pane, depth: r.depth, hasChildren: r.hasChildren, collapsed: r.collapsed }] : []
     })
-    return { id: g.id, name: g.name, state: groupState(rows), bare, rows }
+    return { id: g.id, name: g.name, state: groupState(rows), bare, rail, rows }
   })
 }
 
@@ -1748,7 +1742,6 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           :contribution="pluginTab"
           :workspace-path="workspace ?? ''"
           :visible="!collapsed && sidebarTab === pluginTab.tabId"
-          :prewarm="pluginTab.pluginId === 'navide.git'"
         />
         <template v-if="legacyGitRecovery && backend && sidebarTab === 'git'">
           <div class="legacy-recovery-label" data-legacy-recovery-label>Legacy recovery</div>
@@ -2039,7 +2032,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               :title="folded ? $t('action.expand-subtree') : $t('action.collapse-subtree')"
               @click.stop="emit('toggle-collapsed', p.id)"
             >{{ folded ? '▸' : '▾' }}</button>
-            <span v-else-if="depth || lineageRail" class="lineage-spacer"></span>
+            <span v-else-if="depth || g.rail" class="lineage-spacer"></span>
             <span class="status-dot" :data-state="p.status" :title="$t(paneStatusLabelKey(p.status))"></span>
             <!-- No MCP tag beside it. `origin === 'mcp'` is still recorded and
                  still drives spawn behaviour; it just does not need a badge.
