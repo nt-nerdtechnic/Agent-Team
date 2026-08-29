@@ -68,6 +68,13 @@ describe('Welcome open-workspace dedup', () => {
     expect(items[1].find('.r-open').exists()).toBe(false)
   })
 
+  it('hides the remove button while the workspace is open', async () => {
+    await mountWelcome()
+    const items = wrapper!.findAll('.recent-item')
+    expect(items[0].find('.r-delete').exists()).toBe(false)
+    expect(items[1].find('.r-delete').exists()).toBe(true)
+  })
+
   it('treats trailing-slash paths as the same workspace', async () => {
     listOpenWorkspaces.mockResolvedValue(['/Users/test/proj-b/'])
     await mountWelcome()

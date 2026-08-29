@@ -277,6 +277,7 @@ function ctxCopyPath(): void {
               <div v-if="item.last_known_task" class="r-task">"{{ item.last_known_task }}"</div>
             </div>
             <button
+              v-if="!isOpenElsewhere(item.path)"
               class="r-delete"
               :title="$t('action.remove-from-history')"
               @click="removeItem(item, $event)"
