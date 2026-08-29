@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, utimes } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   isSystemTempPath,
@@ -53,12 +53,44 @@ describe('stabilizeDroppedPaths', () => {
 
     expect(stable).not.toBe(source)
     expect(stable.startsWith(store)).toBe(true)
-    // The filename is what the agent sees — keep it recognisable.
-    expect(stable.endsWith('Screenshot 2026-08-07.png')).toBe(true)
+    // The filename is what the agent sees — keep it recognisable, minus the
+    // whitespace that makes a re-typed path unreproducible.
+    expect(stable.endsWith('Screenshot-2026-08-07.png')).toBe(true)
 
     // This is the actual bug: macOS moves the capture out from under us.
     await rm(source)
     expect(await readFile(stable, 'utf8')).toBe('png-bytes')
+  })
+
+  it('replaces the narrow no-break space macOS puts in screenshot names', async () => {
+    // U+202F before AM/PM. It looks exactly like a space, so an agent
+    // re-emitting the path types a real space and the file is not found.
+    const source = join(sandbox, 'Screenshot 2026-08-29 at 8.35.42 AM.png')
+    await writeFile(source, 'png-bytes')
+
+    const [stable] = await stabilizeDroppedPaths([source], store)
+
+    expect(stable.endsWith('Screenshot-2026-08-29-at-8.35.42-AM.png')).toBe(true)
+    expect(await readFile(stable, 'utf8')).toBe('png-bytes')
+  })
+
+  it('strips characters a pasted path would have to escape', async () => {
+    const source = join(sandbox, "it's (a) shot&more.png")
+    await writeFile(source, 'png-bytes')
+
+    const [stable] = await stabilizeDroppedPaths([source], store)
+
+    expect(basename(stable)).toBe('it-s--a--shot-more.png')
+    expect(/[^A-Za-z0-9._+,:@%=-]/.test(basename(stable))).toBe(false)
+  })
+
+  it('keeps a CJK filename, which survives a round trip, readable', async () => {
+    const source = join(sandbox, '截圖 測試.png')
+    await writeFile(source, 'png-bytes')
+
+    const [stable] = await stabilizeDroppedPaths([source], store)
+
+    expect(stable.endsWith('截圖-測試.png')).toBe(true)
   })
 
   it('leaves paths outside temp untouched', async () => {
