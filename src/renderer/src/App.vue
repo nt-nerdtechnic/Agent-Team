@@ -5339,6 +5339,21 @@ const rebuildableAllPaneCount = computed(
   () => panesInView.value.filter((p) => p.realized && paneCanRebuild(p)).length
 )
 
+/** The same answer, per workspace, for the ↻ on every sidebar heading.
+ *
+ *  One window-wide count left every heading's button enabled or disabled by
+ *  whichever workspace was on screen — a project with nothing to rebuild
+ *  offering the button, and one with panes to rebuild refusing it. */
+const rebuildableByWorkspace = computed<Record<string, number>>(() => {
+  const out: Record<string, number> = {}
+  for (const p of panes.value) {
+    if (!p.realized || !paneCanRebuild(p)) continue
+    const key = normWs(p.workspacePath)
+    out[key] = (out[key] ?? 0) + 1
+  }
+  return out
+})
+
 // Panes report a lost PTY one at a time, as each one's reattach probe answers.
 // Batching turns N toasts into one and lets a single concurrency limit apply to
 // the whole wave instead of every pane racing to spawn at once.
@@ -5755,10 +5770,17 @@ async function restartAgentPanes(agentKey: string): Promise<void> {
   )
 }
 
-async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
+async function rebuildPanesViaResume(scope: 'tab' | 'all', workspacePath?: string): Promise<void> {
   if (rebuildingTabPanes.value) return
+  // A sidebar heading's ↻ names its own workspace; the toolbar's and the tab
+  // strip's name none, meaning the workspace on screen. Rebuild reads each
+  // pane's own workspacePath, so another project's panes rebuild in place —
+  // no switch, and nothing on screen changes under the user.
+  const pool = workspacePath
+    ? panes.value.filter((p) => normWs(p.workspacePath) === normWs(workspacePath))
+    : panesInView.value
   // Rebuild replaces pane ids, so capture the batch up front.
-  const ids = panesInView.value
+  const ids = pool
     .filter((p) => p.realized && (scope === 'all' || tabFilteredPaneIds.value.has(p.id)) && paneCanRebuild(p))
     .map((pane) => pane.id)
   if (!ids.length) return
@@ -6188,6 +6210,23 @@ async function onMenuAction(action: string): Promise<void> {
   }
 }
 const showHistory = ref(false)
+
+/** Open the history modal for the workspace whose heading was clicked.
+ *
+ *  Unlike ↻, this cannot act in place: spawnHistory is hydrated for one
+ *  workspace at a time (paging, liveness reconciliation and the persist
+ *  watcher all key off it), and sessionHistory filters to currentWorkspace, so
+ *  the button showed the viewed project's history whichever heading it was on.
+ *  Switching first is what the heading itself does, and leaves that pipeline
+ *  untouched. A declined switch (the workspace turned out to be open in
+ *  another window) opens nothing rather than the wrong project's history. */
+async function onOpenWorkspaceHistory(workspacePath?: string): Promise<void> {
+  if (workspacePath && normWs(workspacePath) !== normWs(currentWorkspace.value)) {
+    await switchToWorkspace(workspacePath)
+    if (normWs(currentWorkspace.value) !== normWs(workspacePath)) return
+  }
+  showHistory.value = true
+}
 const historyModalRef = ref<{ closeTopLayer?: () => boolean } | null>(null)
 const revivingHistoryPaneId = ref('')
 const unavailableHistoryPaneIds = ref<Set<string>>(new Set())
@@ -9028,6 +9067,7 @@ async function doCloseWorkspace(): Promise<void> {
   const remaining = workspaceOrder.value.filter((w) => normWs(w) !== normWs(closing))
   workspaceOrder.value = remaining
   persistExtraWorkspaces()
+  _forgetRunGroups(closing)
   // Show Welcome screen immediately so the button feels responsive.
   // The async cleanup (abort / kill panes) runs after the gate is lifted.
   workspaceSelected.value = false
@@ -11371,12 +11411,43 @@ const applyingRemote = ref(false)
 // the window every time.
 const runGroupsOwner = ref<string>('')
 
+/** Every held workspace's run groups, keyed by normWs(path).
+ *
+ *  runGroups only ever describes the workspace on screen. The sidebar lists
+ *  every workspace this window holds, so it had nothing to group the others'
+ *  panes by and listed them flat: switching away made a project's Run sections
+ *  disappear from the sidebar while its records sat intact on disk. This is
+ *  the window's copy of what each held workspace has persisted. The viewed
+ *  workspace still renders from runGroups — that one is live, and can be ahead
+ *  of the last save.
+ */
+const runGroupsByWorkspace = ref<Record<string, readonly RunGroup[]>>({})
+
+function _cacheRunGroups(path: string, groups: readonly RunGroup[]): void {
+  const key = normWs(path)
+  if (!key) return
+  runGroupsByWorkspace.value = { ...runGroupsByWorkspace.value, [key]: [...groups] }
+}
+
+/** Forget a workspace the window no longer holds, so taking it on again loads
+ *  its records rather than showing the list it had when it was let go. */
+function _forgetRunGroups(path: string): void {
+  const key = normWs(path)
+  if (!(key in runGroupsByWorkspace.value)) return
+  const next = { ...runGroupsByWorkspace.value }
+  delete next[key]
+  runGroupsByWorkspace.value = next
+}
+
 function _saveRunGroups(): void {
   if (applyingRemote.value || isDetachedWindow) return
   const ws = currentWorkspace.value
   if (!ws) return
   // Never write one workspace's groups into another's record.
   if (normWs(runGroupsOwner.value) !== normWs(ws)) return
+  // Every group edit funnels through here, so mirroring the write is what
+  // keeps the sidebar's copy of this workspace true after you switch away.
+  _cacheRunGroups(ws, runGroups.value)
   void sendQuiet('project.set_ui_state', {
     workspace_path: ws,
     run_groups: runGroups.value,
@@ -11484,6 +11555,8 @@ function onRunGroupsRemoteSync(raw: unknown): void {
   // merged list is now what this window holds for it.
   runGroupsOwner.value = ws
   runGroups.value = merged
+  // applyingRemote suppresses _saveRunGroups below, and with it the mirror.
+  _cacheRunGroups(ws, merged)
   activeTab.value = resolveActiveTab(merged, activeTab.value)
   currentRunGroupId.value = merged[merged.length - 1]?.id ?? ''
   void nextTick(() => {
@@ -11625,6 +11698,7 @@ function _loadRunGroups(path: string, project: NonNullable<ProjectPayload['proje
     }
   }
   currentRunGroupId.value = runGroups.value[runGroups.value.length - 1]?.id ?? ''
+  _cacheRunGroups(path, runGroups.value)
 }
 
 function createRunGroup(name?: string): RunGroup {
@@ -12122,6 +12196,26 @@ function persistExtraWorkspaces(): void {
   if (!isDetachedWindow) window.agentTeam?.reportAdoptedWorkspaces?.([...workspaceOrder.value])
 }
 
+/** Load the run groups of held workspaces this window has not viewed.
+ *
+ *  Switching to a workspace loads its groups, so the store fills itself for
+ *  everything the session has looked at. What it misses is what a restart or a
+ *  reload brings back: those are held from the first frame but never viewed,
+ *  and their panes would sit ungrouped in the sidebar until you switched to
+ *  them once. Serial and best-effort — cold boot already contends for the
+ *  backend's workers, and a workspace whose peek fails just keeps the flat
+ *  listing it has now. */
+async function prefetchHeldRunGroups(): Promise<void> {
+  if (isDetachedWindow) return
+  for (const path of [...workspaceOrder.value]) {
+    if (!path || normWs(path) === normWs(currentWorkspace.value)) continue
+    if (normWs(path) in runGroupsByWorkspace.value) continue
+    const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
+    const stored = resp?.project?.ui_run_groups
+    if (Array.isArray(stored)) _cacheRunGroups(path, stored)
+  }
+}
+
 onMounted(() => {
   if (isDetachedWindow) return
   // Two ways this window can already hold workspaces before anyone clicks:
@@ -12131,6 +12225,7 @@ onMounted(() => {
   // the registry's copy is from before the restart.
   if (workspaceOrder.value.length) {
     window.agentTeam?.reportAdoptedWorkspaces?.([...workspaceOrder.value])
+    void prefetchHeldRunGroups()
   } else {
     void (async () => {
       const restored = (await window.agentTeam?.takeRestoredAdoptedWorkspaces?.()) ?? []
@@ -12138,8 +12233,16 @@ onMounted(() => {
       // Their agents come back the same way a picked workspace's do.
       for (const path of extraWorkspaces.value) {
         const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
-        if (resp) await restoreWorkspacePanes(resp, path)
+        if (!resp) continue
+        // The reply already carries the records, so grouping a restored
+        // workspace's panes costs no extra round trip.
+        const stored = resp.project?.ui_run_groups
+        if (Array.isArray(stored)) _cacheRunGroups(path, stored)
+        await restoreWorkspacePanes(resp, path)
       }
+      // Anything the loop could not reach (a peek that timed out) gets one
+      // more try; everything it did reach is already cached and skipped.
+      await prefetchHeldRunGroups()
     })()
   }
 })
@@ -12325,6 +12428,7 @@ async function closeWorkspace(path: string): Promise<void> {
   for (const pane of doomed) await onKill(pane.id)
   workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
   persistExtraWorkspaces()
+  _forgetRunGroups(path)
   const next = new Set(collapsedWorkspaces.value)
   next.delete(path)
   collapsedWorkspaces.value = next
@@ -12367,6 +12471,7 @@ async function detachWorkspace(path: string, x: number, y: number): Promise<void
     if (normWs(currentWorkspace.value) === normWs(path)) return
   }
   workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
+  _forgetRunGroups(path)
   const next = new Set(collapsedWorkspaces.value)
   next.delete(path)
   collapsedWorkspaces.value = next
@@ -12416,10 +12521,8 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() =>
     order: workspaceOrder.value,
     panes: panes.value,
     lineage: paneLineage.value,
-    // Only the viewed workspace's groups exist here — they are persisted per
-    // workspace — so another workspace this window holds lists its panes
-    // ungrouped until you switch to it.
     runGroups: runGroups.value,
+    runGroupsByWorkspace: runGroupsByWorkspace.value,
     collapsed: collapsedWorkspaces.value,
     homeDir: homeDir.value,
   })
@@ -13922,6 +14025,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :focus-pane-id="effectiveFocusPaneId ?? undefined"
       :selected-pane-ids="selectedPaneIds"
       :can-rebuild-all="rebuildableAllPaneCount > 0"
+      :rebuildable-by-workspace="rebuildableByWorkspace"
       :rebuilding-all="rebuildingTabPanes"
       :detached-window="isDetachedWindow"
       @spawn="onManualSpawn"
@@ -13939,7 +14043,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
       @rebuild="rebuildPaneViaResume"
-      @rebuild-all="rebuildPanesViaResume('all')"
+      @rebuild-all="rebuildPanesViaResume('all', $event)"
       @restore="restorePane"
       @context-menu="(id, ev) => openPaneCtxMenu(ev, id)"
       @pipeline-start="onPipelineStart"
@@ -13956,7 +14060,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @open-settings="showSettings = true"
       @open-pipeline-manager="openPipelineManager"
       @open-git-accounts="openSettingsAccounts"
-      @open-history="showHistory = true"
+      @open-history="onOpenWorkspaceHistory"
       @switch-workspace="onSwitchWorkspace"
       @workspace-browse="onWorkspaceBrowse"
       :issue-handoffs="issueHandoffView"

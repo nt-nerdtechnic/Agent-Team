@@ -277,6 +277,11 @@ interface Props {
   /** Mirrors StageTabBar's global rebuild state so both controls invoke the
    *  same App-owned operation and present the same availability. */
   canRebuildAll?: boolean
+  /** Rebuildable pane counts keyed by workspace path (trailing slashes
+   *  trimmed). Each workspace heading's ↻ enables on its OWN workspace;
+   *  canRebuildAll above answers for the one on screen, which is what the
+   *  toolbar's copy of the button means. */
+  rebuildableByWorkspace?: Record<string, number>
   rebuildingAll?: boolean
   /** Issue dispatch/handle status — forwarded to GitPane for badges. */
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
@@ -361,6 +366,16 @@ const hasWorkspaceRows = computed(() => localWorkspaceRows.value.some((w) => w))
  */
 function groupState(rows: readonly { pane: ActivePaneView }[]): string {
   return rollupTabStatus(rows.map((r) => r.pane.status))
+}
+
+/** Does this workspace have anything its ↻ could rebuild?
+ *
+ *  The button sits on every workspace heading but read one window-wide flag,
+ *  so it took its enabled state — and its action — from whichever workspace
+ *  was on screen rather than the one it is attached to. */
+function wsCanRebuild(path: string): boolean {
+  const key = (path ?? '').replace(/\/+$/, '')
+  return (props.rebuildableByWorkspace?.[key] ?? 0) > 0
 }
 
 /** One workspace's rows, split into run groups and resolved to panes.
@@ -478,7 +493,9 @@ const emit = defineEmits<{
   (e: 'reveal-workspace-folder', path: string): void
   (e: 'interrupt', paneId: string): void
   (e: 'rebuild', paneId: string): void
-  (e: 'rebuild-all'): void
+  /** From a workspace heading: that workspace. From the toolbar: undefined,
+   *  meaning the workspace on screen. */
+  (e: 'rebuild-all', workspacePath?: string): void
   (e: 'restore', paneId: string): void
   (e: 'context-menu', paneId: string, ev: MouseEvent): void
   (e: 'pipeline-start', payload: { task: string; workspacePath: string; pipelineId?: string }): void
@@ -496,7 +513,7 @@ const emit = defineEmits<{
   (e: 'reorder-pane', fromId: string, toId: string): void
   (e: 'open-settings'): void
   (e: 'open-pipeline-manager', pipelineId?: string): void
-  (e: 'open-history'): void
+  (e: 'open-history', workspacePath?: string): void
   (e: 'switch-workspace'): void
   (e: 'workspace-browse', path: string): void
   (e: 'dispatch-issue', payload: { paneId: string; issue: IssueDetail }): void
@@ -1973,14 +1990,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <button
             class="ws-act"
             :class="{ busy: rebuildingAll }"
-            :disabled="!canRebuildAll || rebuildingAll"
+            :disabled="!wsCanRebuild(ws.path) || rebuildingAll"
             :title="$t('action.rebuild-all-cli-panes')"
             :aria-label="$t('action.rebuild-all-cli-panes')"
-            @click.stop="emit('rebuild-all')"
+            @click.stop="emit('rebuild-all', ws.path)"
           >
             <RebuildIcon />
           </button>
-          <button class="ws-act" :title="$t('label.history')" @click.stop="emit('open-history')"><HistoryIcon /></button>
+          <button class="ws-act" :title="$t('label.history')" @click.stop="emit('open-history', ws.path)"><HistoryIcon /></button>
           <!-- Opens the same CLI and role the spawn card holds, in THIS
                workspace — the menu remembers which heading opened it. -->
           <button

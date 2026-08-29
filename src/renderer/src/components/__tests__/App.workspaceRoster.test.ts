@@ -159,19 +159,27 @@ describe('several workspaces in one window', () => {
   })
 
   it('keeps the sweeping actions inside the workspace on screen', () => {
-    // Rebuild-all and kill-all hang off one workspace's heading. Reaching into
-    // another project's agents from there is a surprise at best, and kill is
-    // unrecoverable. Unchanged whenever the window holds a single workspace.
-    for (const anchor of ['const rebuildableAllPaneCount', 'async function onKillAll']) {
-      const start = appSource.indexOf(anchor)
-      expect(start, anchor).toBeGreaterThan(-1)
-      const body = appSource.slice(start, appSource.indexOf('\n}', start))
-      expect(body, anchor).toContain('panesInView.value')
-      expect(body, anchor).not.toContain('panes.value')
-    }
+    // Kill-all hangs off one workspace's heading and is unrecoverable, so it
+    // never reaches past the workspace on screen.
+    const kStart = appSource.indexOf('async function onKillAll')
+    expect(kStart).toBeGreaterThan(-1)
+    const kill = appSource.slice(kStart, appSource.indexOf('\n}', kStart))
+    expect(kill).toContain('panesInView.value')
+    expect(kill).not.toContain('panes.value')
+    // Rebuild is the one action that may name a workspace: every heading
+    // carries its own ↻, and rebuild reads each pane's own workspacePath, so
+    // another project's panes rebuild in place. Named nowhere — the toolbar,
+    // the tab strip — it still means the workspace on screen.
     const start = appSource.indexOf('async function rebuildPanesViaResume')
     const body = appSource.slice(start, appSource.indexOf('\n}', start))
-    expect(body).toContain('const ids = panesInView.value')
+    expect(body).toContain('normWs(p.workspacePath) === normWs(workspacePath)')
+    expect(body).toContain(': panesInView.value')
+    expect(body).toContain('const ids = pool')
+    // The count behind the toolbar's copy of the button stays on screen too.
+    const cStart = appSource.indexOf('const rebuildableAllPaneCount')
+    const count = appSource.slice(cStart, appSource.indexOf('\n)', cStart))
+    expect(count).toContain('panesInView.value')
+    expect(count).not.toContain('panes.value')
   })
 
   it('stops offering the all keyword once here is ambiguous', () => {
@@ -576,7 +584,7 @@ describe('several workspaces in one window', () => {
     // while the registry's copy is from before the restart.
     expect(appSource).toContain('takeRestoredAdoptedWorkspaces')
     const at = appSource.indexOf('takeRestoredAdoptedWorkspaces')
-    const around = appSource.slice(at - 700, at + 500)
+    const around = appSource.slice(at - 700, at + 900)
     expect(around).toContain('if (workspaceOrder.value.length) {')
     // And their agents come back, the same way a picked workspace's do.
     expect(around).toContain("'project.peek'")
