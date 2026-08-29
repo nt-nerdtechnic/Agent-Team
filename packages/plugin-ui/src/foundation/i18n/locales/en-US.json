@@ -1093,6 +1093,24 @@
         "verify-rate-limited": "A link was just sent. Wait a minute before asking for another.",
         "verify-required": "Verify your email address before inviting people.",
         "verified": "Verified"
+      },
+      "network": {
+        "title": "Your network",
+        "loading": "Asking the server who is signed in…",
+        "unavailable": "This machine is not linked to a network yet.",
+        "this-device": "This device",
+        "device-online": "Online",
+        "device-offline": "Offline",
+        "panes-none": "No CLI panes",
+        "panes-one": "1 CLI pane",
+        "panes": "{count} CLI panes",
+        "no-panes": "Nothing running here right now.",
+        "solo": "Only this device is signed in. Sign in on another machine to see it here.",
+        "link-offline": "The link is down, so this is the last thing the server said.",
+        "status-running": "Running",
+        "status-waiting": "Waiting",
+        "status-exited": "Exited",
+        "status-disconnected": "Disconnected"
       }
     },
     "storage": {

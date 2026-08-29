@@ -1093,6 +1093,24 @@
         "verify-rate-limited": "剛剛才寄過，請等一分鐘再試。",
         "verify-required": "請先驗證你的 email 才能邀請成員。",
         "verified": "已驗證"
+      },
+      "network": {
+        "title": "你的網路",
+        "loading": "正在向伺服器查詢登入中的裝置…",
+        "unavailable": "這台機器還沒有連上網路。",
+        "this-device": "這台裝置",
+        "device-online": "在線",
+        "device-offline": "離線",
+        "panes-none": "沒有 CLI 面板",
+        "panes-one": "1 個 CLI 面板",
+        "panes": "{count} 個 CLI 面板",
+        "no-panes": "這台目前沒有執行中的面板。",
+        "solo": "目前只有這台裝置登入。在另一台機器登入同一個帳號，它就會出現在這裡。",
+        "link-offline": "連線已中斷，以下是伺服器最後一次回報的狀態。",
+        "status-running": "執行中",
+        "status-waiting": "等待中",
+        "status-exited": "已結束",
+        "status-disconnected": "已斷線"
       }
     },
     "storage": {

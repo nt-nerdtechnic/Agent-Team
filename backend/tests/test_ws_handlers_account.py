@@ -358,3 +358,164 @@ def test_handlers_are_registered() -> None:
         "p2p.account.resend_verification",
     ):
         assert ws_handlers.lookup(name) is not None
+
+
+# ---- p2p.network.snapshot ---------------------------------------------------
+#
+# One read answers the whole "who is on my network" view: devices, and the CLI
+# panes on each. The handler adds nothing but the not-configured refusal — the
+# grouping is server_link's, and the tests below pin both halves.
+
+
+async def test_network_snapshot_passes_the_whole_shape_through(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = {
+        "state": "connected",
+        "deviceId": "dev-1",
+        "memberId": "m-1",
+        "tenantId": "tn-abc",
+        "devices": [
+            {
+                "deviceId": "dev-1",
+                "deviceName": "Neil's Mac",
+                "isLocal": True,
+                "online": True,
+                "paneCount": 1,
+                "panes": [{"sessionId": "s1", "agentKey": "claude", "status": "running"}],
+            }
+        ],
+    }
+
+    async def fake() -> dict:
+        return snapshot
+
+    monkeypatch.setattr(server_link, "network_snapshot", fake)
+    resp = await _call("p2p.network.snapshot", {})
+    assert resp["ok"] is True
+    assert resp["payload"] == snapshot
+
+
+async def test_network_snapshot_without_a_server_is_not_configured(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def none() -> None:
+        return None
+
+    monkeypatch.setattr(server_link, "network_snapshot", none)
+    resp = await _call("p2p.network.snapshot", {})
+    assert resp["ok"] is False
+    assert resp["error"]["code"] == "P2P_NOT_CONFIGURED"
+
+
+async def test_network_snapshot_answers_while_the_link_is_offline(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable link is not an error here: the machines it knew about did
+    not stop existing, and refusing would read as "you have no network"."""
+
+    async def stale() -> dict:
+        return {"state": "unreachable", "deviceId": "dev-1", "devices": []}
+
+    monkeypatch.setattr(server_link, "network_snapshot", stale)
+    resp = await _call("p2p.network.snapshot", {})
+    assert resp["ok"] is True
+    assert resp["payload"]["state"] == "unreachable"
+
+
+def _link_with(directory: list[dict], *, device_id: str = "dev-1") -> Any:
+    link = server_link.ServerLink(device_name="Neil's Mac")
+    link._device_id = device_id
+    link._directory = directory
+    link._authenticated = True
+    return link
+
+
+def test_network_snapshot_groups_panes_by_device() -> None:
+    link = _link_with(
+        [
+            {
+                "sessionId": "s1", "deviceId": "dev-1", "deviceName": "Neil's Mac",
+                "paneId": "p1", "agentKey": "claude", "title": "backend",
+                "workspace": "Agent-Team", "status": "running", "hostOnline": True,
+            },
+            {
+                "sessionId": "s2", "deviceId": "dev-1", "deviceName": "Neil's Mac",
+                "paneId": "p2", "agentKey": "codex", "title": "docs",
+                "workspace": "Agent-Team", "status": "waiting", "hostOnline": True,
+            },
+            {
+                "sessionId": "s3", "deviceId": "dev-2", "deviceName": "studio",
+                "paneId": "p3", "agentKey": "claude", "title": "web",
+                "workspace": "Navide-Server", "status": "exited", "hostOnline": False,
+            },
+        ]
+    )
+    snapshot = link.network_snapshot()
+    assert [d["deviceId"] for d in snapshot["devices"]] == ["dev-1", "dev-2"]
+    local, other = snapshot["devices"]
+    assert local["isLocal"] is True and other["isLocal"] is False
+    assert local["paneCount"] == 2 and other["paneCount"] == 1
+    assert [p["title"] for p in local["panes"]] == ["backend", "docs"]
+    assert other["panes"][0]["status"] == "exited"
+
+
+def test_network_snapshot_keeps_this_devices_own_panes() -> None:
+    """remote_roster drops them on purpose — addressing must use the live local
+    roster — but the whole point of this view is the machine the user is on."""
+    link = _link_with(
+        [
+            {
+                "sessionId": "s1", "deviceId": "dev-1", "paneId": "p1",
+                "agentKey": "claude", "title": "backend", "workspace": "Agent-Team",
+                "status": "running", "hostOnline": True,
+            }
+        ]
+    )
+    assert link.network_snapshot()["devices"][0]["panes"][0]["title"] == "backend"
+
+
+def test_network_snapshot_lists_this_device_with_nothing_running() -> None:
+    """"No devices" and "one device, no panes" are different answers, and only
+    the second one is true for a machine that has just signed in."""
+    link = _link_with([])
+    devices = link.network_snapshot()["devices"]
+    assert len(devices) == 1
+    assert devices[0]["isLocal"] is True
+    assert devices[0]["deviceName"] == "Neil's Mac"
+    assert devices[0]["paneCount"] == 0 and devices[0]["panes"] == []
+    # A live link is the only evidence the server has that this machine is here.
+    assert devices[0]["online"] is True
+
+
+def test_network_snapshot_takes_remote_presence_from_presence_changed() -> None:
+    """A device going offline changes no session row, so hostOnline alone would
+    go on reporting a machine that has left as reachable."""
+    row = {
+        "sessionId": "s3", "deviceId": "dev-2", "deviceName": "studio", "paneId": "p3",
+        "agentKey": "claude", "title": "web", "workspace": "w", "status": "running",
+        "hostOnline": True,
+    }
+    link = _link_with([row])
+    # Before any presence push, the per-session flag is all there is.
+    assert link.network_snapshot()["devices"][1]["online"] is True
+    link._on_presence_changed({"devices": [{"deviceId": "dev-1", "memberId": "m-1"}]})
+    assert link.network_snapshot()["devices"][1]["online"] is False
+
+
+def test_network_snapshot_reports_an_offline_link_rather_than_an_empty_network() -> None:
+    link = _link_with([{
+        "sessionId": "s3", "deviceId": "dev-2", "paneId": "p3", "agentKey": "claude",
+        "title": "web", "workspace": "w", "status": "running", "hostOnline": True,
+    }])
+    link._authenticated = False
+    link.last_error = "connection refused"
+    snapshot = link.network_snapshot()
+    assert snapshot["state"] == server_link.STATE_UNREACHABLE
+    assert len(snapshot["devices"]) == 2
+    # The local row cannot be online when the link carrying it is not.
+    assert snapshot["devices"][0]["online"] is False
+
+
+def test_network_snapshot_is_registered() -> None:
+    assert ws_handlers.lookup("p2p.network.snapshot") is not None

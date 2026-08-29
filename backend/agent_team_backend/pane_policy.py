@@ -30,6 +30,13 @@ precedence to disambiguate. A device that never configured a policy gets the
 empty policy at revision 0 from the server, which denies everything — so
 "never set up" and "explicitly locked down" behave identically, by design.
 
+That default is what the *caller* applies to senders from other members. It
+does not reach your own machines: the receive path lets a message through
+without consulting this module when the sender's memberId is the receiver's
+own, because signing one account in on two devices is itself the grant. This
+module is unaware of that exemption on purpose — it answers "does this policy
+allow this sender", not "should this message be delivered".
+
 This module is pure judgement. It does not fetch or cache the policy (t12),
 and it is deliberately not wired into the on-machine delivery path — that path
 does not need this layer, and attaching it there would change today's

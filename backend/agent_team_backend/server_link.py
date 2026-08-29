@@ -355,6 +355,20 @@ class ServerLink:
         # same reason the policy cache is: the Settings pane has to be able to
         # show who is on the team while the link is down.
         self._members: list[Any] | None = None
+        # The whole session directory as the server last described it, this
+        # device's own rows included. ``remote_roster`` deliberately drops the
+        # local ones — an address aimed back at this machine has to resolve
+        # against the live local roster — but the account modal's network view
+        # has to show the machine the user is sitting at beside the others, so
+        # the raw rows are kept here as well. None means "never received one",
+        # which an empty directory must not be confused with.
+        self._directory: list[dict[str, Any]] | None = None
+        # Device ids the server last reported online, or None while no
+        # presence.changed has arrived. Kept apart from the per-session
+        # ``hostOnline`` flag because the two facts arrive on different events
+        # (see ``_on_presence_changed``), and because a device with no sessions
+        # at all has no row to carry that flag.
+        self._online_devices: set[str] | None = None
         self.terminated_reason = ""
         # Why the last dial or session failed, kept so `state()` can tell a
         # server that is not answering apart from one that has not been tried
@@ -962,18 +976,24 @@ class ServerLink:
         ``remote_roster.replace``: the server's copy of them is whatever was
         last reported, while ``agent_messaging`` holds the live ones.
 
-        Note the rows carry no ``deviceName`` today: the server stores one per
-        device (from ``auth.hello``) but does not join it into the session
-        directory, so the only human-readable label available here is the
-        device id. ``remote_roster`` reads the field anyway, so a server that
-        starts sending it lights this up with no change on this side.
+        The rows may carry a ``deviceName`` (the server joins the one
+        ``auth.hello`` gave it onto every session row); they may equally not,
+        because an older server does not. Every reader here falls back to the
+        device id, which is always present.
+
+        The raw rows are also kept whole in ``_directory``, local ones included,
+        for ``network_snapshot`` — see the note on that field.
         """
         data = payload if isinstance(payload, dict) else {}
         sessions = data.get("sessions")
-        remote_roster.replace(
-            sessions if isinstance(sessions, list) else [],
-            local_device_id=self._device_id,
-        )
+        rows = sessions if isinstance(sessions, list) else []
+        remote_roster.replace(rows, local_device_id=self._device_id)
+        # Capped like the roster cache, and for the same reason: the directory
+        # is filled by other machines, so it is only as small as they are well
+        # behaved.
+        self._directory = [row for row in rows if isinstance(row, dict)][
+            : remote_roster.MAX_PANES
+        ]
 
     def _on_presence_changed(self, payload: Any) -> None:
         """Re-flag the cached panes when a device joins or leaves.
@@ -987,13 +1007,112 @@ class ServerLink:
         devices = data.get("devices")
         if not isinstance(devices, list):
             return
-        remote_roster.set_online_devices(
-            {
-                str(device.get("deviceId") or "")
-                for device in devices
-                if isinstance(device, dict)
-            }
-        )
+        online = {
+            str(device.get("deviceId") or "")
+            for device in devices
+            if isinstance(device, dict)
+        }
+        online.discard("")
+        # Kept as well as pushed down, because ``network_snapshot`` has to be
+        # able to answer for a device the directory holds no session for.
+        self._online_devices = online
+        remote_roster.set_online_devices(online)
+
+    async def ensure_directory(self) -> None:
+        """Read the directory once if this connection has not carried one yet.
+
+        Every connection fetches it at authentication time and the
+        ``sessions.changed`` push keeps it current after that, so this is only
+        ever the first read of a link whose fetch failed. It exists so the
+        network view is not blank for a whole poll interval in that case.
+        """
+        if self._directory is None and self.state() == STATE_CONNECTED:
+            await self._refresh_directory()
+
+    def network_snapshot(self) -> dict[str, Any]:
+        """Every device in this team space, and the panes running on each.
+
+        Answered from the cache whatever the link is doing, for the reason
+        ``members_state`` is: a link that dropped a second ago does not make the
+        other machines stop existing, and an empty list would read as "nobody is
+        signed in". ``state`` is the honest half.
+
+        Unlike ``remote_roster`` this keeps this device's own rows. Addressing
+        must not see them (the live local roster is the truth there), but the
+        whole point of this view is the whole network, and the machine the user
+        is sitting at is the one row they can recognise.
+        """
+        devices: dict[str, dict[str, Any]] = {}
+        local = self._device_id
+
+        def entry(device_id: str, device_name: str) -> dict[str, Any]:
+            row = devices.get(device_id)
+            if row is None:
+                row = {
+                    "deviceId": device_id,
+                    "deviceName": device_name,
+                    "isLocal": bool(local) and device_id == local,
+                    "online": False,
+                    "paneCount": 0,
+                    "panes": [],
+                }
+                devices[device_id] = row
+            elif not row["deviceName"] and device_name:
+                row["deviceName"] = device_name
+            return row
+
+        # This machine is listed even with nothing running on it: "no devices"
+        # and "one device with no panes" are different answers, and the second
+        # is the one a user who has only just signed in is looking at.
+        if local:
+            entry(local, self._device_name)
+
+        for raw in self._directory or []:
+            device_id = str(raw.get("deviceId") or "")
+            if not device_id:
+                continue
+            row = entry(device_id, str(raw.get("deviceName") or ""))
+            row["panes"].append(
+                {
+                    "sessionId": str(raw.get("sessionId") or ""),
+                    "paneId": str(raw.get("paneId") or ""),
+                    "agentKey": str(raw.get("agentKey") or ""),
+                    "title": str(raw.get("title") or ""),
+                    "workspace": str(raw.get("workspace") or ""),
+                    "workspacePath": str(raw.get("workspacePath") or ""),
+                    # Passed through as the server spelled it: the four values
+                    # it defines are translated by the UI, and one this build
+                    # has never heard of is shown raw rather than hidden.
+                    "status": str(raw.get("status") or ""),
+                    "hostOnline": bool(raw.get("hostOnline")),
+                    "startedAt": str(raw.get("startedAt") or ""),
+                }
+            )
+        for row in devices.values():
+            row["paneCount"] = len(row["panes"])
+            row["panes"].sort(key=lambda pane: (pane["workspace"], pane["title"]))
+            if row["isLocal"]:
+                # Presence is what the *server* can see, and the only thing it
+                # can see of this machine is the link being reported on here.
+                row["online"] = self.state() == STATE_CONNECTED
+            elif self._online_devices is not None:
+                row["online"] = row["deviceId"] in self._online_devices
+            else:
+                # No presence.changed has arrived yet, so the per-session flag
+                # is the only thing that has been said about this machine.
+                row["online"] = any(pane["hostOnline"] for pane in row["panes"])
+        return {
+            "state": self.state(),
+            "deviceId": local,
+            "memberId": self.member_id,
+            "tenantId": self.tenant_id,
+            # This device first, then by label: the row a user recognises is
+            # the one that should not move as other machines come and go.
+            "devices": sorted(
+                devices.values(),
+                key=lambda d: (not d["isLocal"], d["deviceName"] or d["deviceId"]),
+            ),
+        }
 
     # ---- messages ----
 
@@ -1106,15 +1225,26 @@ class ServerLink:
         workspace = str(target.get("workspace") or "")
         pane_name = str(target.get("paneName") or "")
 
+        sender_member = str(source.get("memberId") or "")
+        # Your own machines are one trust domain, so the pane policy does not
+        # stand between them: signing the same account in on a second device is
+        # what grants the reach, exactly as joining a tailnet is. The policy
+        # exists for the other case — members you invited into this network —
+        # and defaulting *those* to allow would hand an invitee command over
+        # every pane here, which is far more than "my laptop should reach my
+        # desktop". Membership is asserted by the server (it fills `from` from
+        # the authenticated sender), not by the message, so this cannot be
+        # spoofed by a peer; an empty member_id never matches.
+        own_device = bool(sender_member) and sender_member == self.member_id
         await self._ensure_policy()
         # The addressed workspace/paneName are checked, not the resolved pane's:
         # resolution happens after this. `paneName` is matched exactly by the
         # resolver, so it is already the pane's real name; only a workspace
         # written as a longer path suffix ("nest/proj" for the pane labelled
         # "proj") can read differently, and it can only fail to match a rule.
-        if not pane_policy.is_allowed(
+        if not own_device and not pane_policy.is_allowed(
             self._policy,
-            member_id=str(source.get("memberId") or ""),
+            member_id=sender_member,
             device_id=str(source.get("deviceId") or ""),
             workspace=workspace,
             pane_name=pane_name,
@@ -1425,6 +1555,20 @@ async def members_state() -> dict[str, Any]:
         "canManage": state == STATE_CONNECTED and link.member_role == "admin",
         "members": members if members is not None else [],
     }
+
+
+async def network_snapshot() -> dict[str, Any] | None:
+    """Devices and their panes in one read, or None when no server is configured.
+
+    None means what it means everywhere else in this module: this machine never
+    had a server, so there is no network to describe. Everything the view needs
+    comes back in this one call — the caller polls this and nothing else.
+    """
+    link = _link
+    if link is None:
+        return None
+    await link.ensure_directory()
+    return link.network_snapshot()
 
 
 async def members_request(msg_type: str, payload: dict[str, Any]) -> dict[str, Any] | None:

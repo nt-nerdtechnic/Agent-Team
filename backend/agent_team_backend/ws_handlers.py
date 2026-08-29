@@ -3039,6 +3039,36 @@ async def _policy_payload() -> dict:
     return state
 
 
+# The whole network in one read: which devices are signed in to this team
+# space, and which CLI panes are running on each. One call rather than a
+# directory read plus a presence read plus a member read, because the account
+# modal polls it while it is open and three round trips per tick would be three
+# chances to render a half-updated picture.
+#
+# Answered from server_link's cache, which its own subscriptions keep current
+# (sessions.changed for the rows, presence.changed for who is reachable), so a
+# poll here costs no traffic to the server at all.
+@handler("p2p.network.snapshot")
+async def p2p_network_snapshot(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    snapshot = await server_link.network_snapshot()
+    if snapshot is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so this machine has no network",
+            )
+        )
+        return
+    # A link that is down still answers, carrying `state` and the last picture
+    # the server sent: "the network you had a moment ago, and the link is
+    # offline" is the truth, while an error would read as "you have no network".
+    await session.send_json(make_response(msg_id, msg_type, snapshot))
+
+
 # Team membership: who belongs to this team space, and what they may do. It
 # lives entirely on the server — this device asks and the server decides, so
 # these handlers add no authorization of their own beyond keeping obviously

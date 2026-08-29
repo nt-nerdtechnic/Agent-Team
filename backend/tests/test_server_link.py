@@ -583,13 +583,19 @@ async def test_a_rejected_upsert_does_not_break_the_link():
 # ---- cross-device messages --------------------------------------------------
 
 
-def _pending(msg_key: str = "pa:mcp:deadbeef", *, pane_id: str = "p1") -> dict:
+def _pending(
+    msg_key: str = "pa:mcp:deadbeef", *, pane_id: str = "p1", member_id: str = "m1"
+) -> dict:
+    """A push from the server. ``member_id`` defaults to "m1", which is also the
+    receiver's own member (see FakeServer's auth.hello) — i.e. another machine of
+    the same person. Pass someone else's id to exercise the pane policy, which is
+    only consulted for senders outside your own account."""
     return {
         "msgKey": msg_key,
         "text": "please review",
         "from": {
             "deviceId": "dev-a",
-            "memberId": "m1",
+            "memberId": member_id,
             "workspace": "alpha",
             "paneName": "sender",
         },
@@ -834,12 +840,15 @@ async def test_the_same_msg_key_pushed_twice_is_injected_once(broadcasts):
 
 
 async def test_policy_denial_acks_rejected_and_never_reaches_the_renderer(broadcasts):
+    """A member you invited is subject to the policy; the empty one denies."""
     agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
     server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
     link = await _connected(server)
     try:
         conn = server.opened[0]
-        await conn.push({"type": "messages.pending", "payload": _pending()})
+        await conn.push(
+            {"type": "messages.pending", "payload": _pending(member_id="m2")}
+        )
         await _until(lambda: bool(conn.acks))
         assert conn.acks[0] == {
             "msgKey": "pa:mcp:deadbeef",
@@ -848,6 +857,77 @@ async def test_policy_denial_acks_rejected_and_never_reaches_the_renderer(broadc
         }
         # rejected, not failed: the sender must not retry a permission refusal.
         assert broadcasts == []
+    finally:
+        await link.stop()
+
+
+async def test_your_own_other_machine_is_not_subject_to_the_pane_policy(broadcasts):
+    """Signing the same account in on a second device is itself the grant.
+
+    The deny-everything policy below would refuse anyone else, and does (see the
+    test above); it must not stand between two machines of the same person, or
+    adding a laptop would mean editing a policy before it could reach anything.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push(
+            {"type": "messages.pending", "payload": _pending(member_id="m1")}
+        )
+        await _until(lambda: bool(broadcasts))
+        assert conn.acks == []  # delivered, not rejected
+    finally:
+        await link.stop()
+
+
+async def test_a_message_with_no_sender_member_is_still_policed(broadcasts):
+    """The exemption keys on an equal, non-empty member id.
+
+    A payload that arrives without one must fall through to the policy rather
+    than compare empty-to-empty and let itself in.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        payload = _pending(member_id="m1")
+        payload["from"]["memberId"] = ""
+        await conn.push({"type": "messages.pending", "payload": payload})
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["state"] == "rejected"
+        assert conn.acks[0]["reason"] == "policy-denied"
+        assert broadcasts == []
+    finally:
+        await link.stop()
+
+
+async def test_the_policy_still_admits_an_invited_member_it_allows(broadcasts):
+    """The exemption does not replace the policy: an explicit allow still works."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(
+        policy={
+            "version": 1,
+            "default": "deny",
+            "rules": [
+                {
+                    "from": {"memberId": "m2", "deviceId": "*"},
+                    "to": {"workspace": "*", "paneName": "*"},
+                    "action": "allow",
+                }
+            ],
+        }
+    )
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push(
+            {"type": "messages.pending", "payload": _pending(member_id="m2")}
+        )
+        await _until(lambda: bool(broadcasts))
+        assert conn.acks == []
     finally:
         await link.stop()
 

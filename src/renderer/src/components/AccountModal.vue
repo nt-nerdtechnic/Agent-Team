@@ -40,6 +40,37 @@ interface LinkStatus {
   emailVerified?: boolean
 }
 
+/** One CLI pane, as Navide-Server's session directory describes it. */
+interface NetworkPane {
+  sessionId: string
+  paneId: string
+  agentKey: string
+  title: string
+  workspace: string
+  workspacePath: string
+  /** running | waiting | exited | disconnected — or anything a newer server invents. */
+  status: string
+  hostOnline: boolean
+}
+
+interface NetworkDevice {
+  deviceId: string
+  deviceName: string
+  isLocal: boolean
+  online: boolean
+  paneCount: number
+  panes: NetworkPane[]
+}
+
+interface NetworkSnapshot {
+  state: LinkStatus['state']
+  deviceId: string
+  devices: NetworkDevice[]
+}
+
+/** The four the server defines; anything else is shown as the server spelled it. */
+const KNOWN_STATUSES = ['running', 'waiting', 'exited', 'disconnected']
+
 type Mode = 'login' | 'register' | 'token'
 
 const mode = ref<Mode>('login')
@@ -65,6 +96,16 @@ const resent = ref(false)
  * clears on a reconnect or on a resend that comes back already verified.
  */
 const verifyPending = ref(false)
+
+/**
+ * The team space as the server last described it: devices, and the CLI panes
+ * on each. Null until the first answer, which is why the section reserves its
+ * height rather than growing when the data lands.
+ */
+const network = ref<NetworkSnapshot | null>(null)
+/** Set only when the machine has no server at all — a link that is merely down
+ *  still answers, with the last picture the server sent. */
+const networkUnavailable = ref(false)
 
 const signedIn = computed(() => Boolean(status.value?.accountEmail))
 /** Only a positive answer earns the tick; "unknown" is not "confirmed". */
@@ -93,6 +134,59 @@ async function loadStatus(): Promise<void> {
     /* non-fatal: the status line keeps its last value */
   }
 }
+
+/**
+ * Refresh the network view.
+ *
+ * The backend keeps its own copy current from the server's `sessions.changed`
+ * and `presence.changed` pushes — a device going offline touches no session
+ * row, so both are needed and both are already subscribed to — which makes this
+ * a read of a cache rather than a request to the server. So it rides the status
+ * poll that is already running instead of adding a timer of its own.
+ */
+async function loadNetwork(): Promise<void> {
+  try {
+    const resp = await props.backend.send<NetworkSnapshot>('p2p.network.snapshot', {})
+    if (resp.ok && resp.payload) {
+      network.value = resp.payload
+      networkUnavailable.value = false
+    } else if (resp.error?.code === 'P2P_NOT_CONFIGURED') {
+      network.value = null
+      networkUnavailable.value = true
+    }
+  } catch {
+    /* non-fatal: the section keeps the last network it was shown */
+  }
+}
+
+/** Both halves of what the modal shows, on one tick of the one timer. */
+async function refresh(): Promise<void> {
+  await Promise.all([loadStatus(), loadNetwork()])
+}
+
+/** How a person would name the machine; the id is always there, the name is not. */
+function deviceLabel(device: NetworkDevice): string {
+  if (device.deviceName) return device.deviceName
+  return device.deviceId.length > 12 ? `${device.deviceId.slice(0, 12)}…` : device.deviceId
+}
+
+function statusLabel(value: string): string {
+  return KNOWN_STATUSES.includes(value) ? t(`settings.p2p.network.status-${value}`) : value
+}
+
+function paneCountLabel(count: number): string {
+  if (count === 0) return t('settings.p2p.network.panes-none')
+  if (count === 1) return t('settings.p2p.network.panes-one')
+  return t('settings.p2p.network.panes', { count })
+}
+
+const devices = computed<NetworkDevice[]>(() => network.value?.devices ?? [])
+/** The common case for a new account, and the one a blank box would fail. */
+const soloDevice = computed(() => devices.value.length === 1 && devices.value[0].isLocal)
+/** The link is down, so what is on screen is the last thing the server said. */
+const networkStale = computed(
+  () => network.value !== null && network.value.state !== 'connected'
+)
 
 /** Turn a server error code into something a person can act on. */
 function explain(code: string | undefined, fallback: string): string {
@@ -162,6 +256,10 @@ async function signOut(): Promise<void> {
     mode.value = 'login'
     verifyPending.value = false
     resent.value = false
+    // The network belonged to the account that just left; showing its last
+    // picture to whoever signs in next would be showing them someone else's
+    // machines.
+    network.value = null
     if (resp.payload?.status) status.value = resp.payload.status
     emit('changed')
   } catch (err) {
@@ -212,8 +310,8 @@ function onKeyDown(e: KeyboardEvent): void {
 
 function startPolling(): void {
   stopPolling()
-  void loadStatus()
-  timer = setInterval(() => void loadStatus(), 3000)
+  void refresh()
+  timer = setInterval(() => void refresh(), 3000)
 }
 function stopPolling(): void {
   if (timer) { clearInterval(timer); timer = null }
@@ -281,6 +379,54 @@ onUnmounted(() => {
           </button>
         </div>
         <p v-if="resent" class="hint">{{ t('settings.p2p.account.verify-resent') }}</p>
+
+        <!-- Your network: the same card/kv/hint language as the account block
+             above, one more section of the same panel. The box keeps its height
+             whether it is waiting, empty or full, so the modal does not jump
+             under the pointer when the first snapshot lands. -->
+        <section v-if="signedIn" class="net">
+          <h2 class="net-title">{{ t('settings.p2p.network.title') }}</h2>
+          <div class="card net-card">
+            <p v-if="networkUnavailable" class="hint net-note">
+              {{ t('settings.p2p.network.unavailable') }}
+            </p>
+            <p v-else-if="!network" class="hint net-note">
+              {{ t('settings.p2p.network.loading') }}
+            </p>
+            <template v-else>
+              <div v-for="device in devices" :key="device.deviceId" class="dev">
+                <div class="dev-head">
+                  <span
+                    class="dot"
+                    :class="device.online ? 'ok' : 'idle'"
+                    :title="t(device.online ? 'settings.p2p.network.device-online' : 'settings.p2p.network.device-offline')"
+                  ></span>
+                  <span class="dev-name">{{ deviceLabel(device) }}</span>
+                  <span v-if="device.isLocal" class="dev-tag">
+                    {{ t('settings.p2p.network.this-device') }}
+                  </span>
+                  <span class="dev-count">{{ paneCountLabel(device.paneCount) }}</span>
+                </div>
+                <ul v-if="device.panes.length" class="panes">
+                  <li v-for="pane in device.panes" :key="pane.sessionId" class="pane">
+                    <span class="pane-agent">{{ pane.agentKey || '—' }}</span>
+                    <span class="pane-name">{{ pane.title }}</span>
+                    <span class="pane-ws">{{ pane.workspace }}</span>
+                    <span class="pane-pill" :class="'st-' + pane.status">
+                      {{ statusLabel(pane.status) }}
+                    </span>
+                  </li>
+                </ul>
+                <p v-else class="hint net-note">{{ t('settings.p2p.network.no-panes') }}</p>
+              </div>
+            </template>
+          </div>
+          <!-- One machine is not an error state, and it is what every new
+               account looks like — so it gets the way forward, not a blank box. -->
+          <p v-if="soloDevice" class="hint">{{ t('settings.p2p.network.solo') }}</p>
+          <p v-if="networkStale" class="hint">{{ t('settings.p2p.network.link-offline') }}</p>
+        </section>
+
         <button class="btn ghost wide" :disabled="busy" @click="signOut">
           {{ t('settings.p2p.account.sign-out') }}
         </button>
@@ -455,6 +601,41 @@ input:focus {
 .verify .hint { margin: 0; flex: 1; }
 .btn.small { padding: 5px 11px; font-size: 11.5px; flex-shrink: 0; }
 .tick { color: var(--success-fg); margin-left: 5px; }
+/* Your network. Same card, same hint, same dot as the account block above —
+   only the rows inside are new. */
+.net { margin-top: 18px; }
+.net-title { margin: 0; font-size: 11.5px; font-weight: 500; color: var(--text-secondary); }
+/* Reserved height: the section is filled by a poll, and a box that grows from
+   nothing moves the sign-out button out from under the pointer. */
+.net-card { min-height: 62px; padding: 10px 14px; }
+.net-note { margin: 0; }
+.dev + .dev { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-muted); }
+.dev-head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+/* The shared .dot carries a margin for the footer status line; here the flex gap does that job. */
+.dev-head .dot { margin-right: 0; }
+.dev-name { color: var(--text-bright); font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-tag {
+  padding: 1px 5px; border-radius: var(--radius-xs); font-size: var(--font-3xs);
+  background: var(--bg-default); color: var(--text-secondary); flex-shrink: 0;
+}
+.dev-count { margin-left: auto; font-size: 11px; color: var(--text-secondary); flex-shrink: 0; }
+.panes { list-style: none; margin: 6px 0 0; padding: 0; }
+.pane {
+  display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 14px; font-size: 11.5px;
+}
+.pane-agent { color: var(--text-secondary); flex-shrink: 0; }
+.pane-name { color: var(--text-bright); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-ws {
+  color: var(--text-secondary); font-size: 11px; margin-left: auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pane-pill {
+  flex-shrink: 0; padding: 1px 6px; border-radius: var(--radius-xs); font-size: var(--font-3xs);
+  border: 1px solid transparent; background: var(--bg-default); color: var(--text-secondary);
+}
+.pane-pill.st-running { background: var(--success-fg); color: #fff; }
+.pane-pill.st-waiting { background: var(--attention-fg); color: #fff; }
+.pane-pill.st-disconnected { background: none; border-color: var(--border-default); }
 .acct-foot { padding: 14px 28px 18px; margin-top: 14px; border-top: 1px solid var(--border-muted); }
 .status { display: flex; align-items: center; margin: 0; font-size: 11.5px; color: var(--text-secondary); }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; flex-shrink: 0; }
