@@ -111,6 +111,12 @@ async function dispatch(action: Parameters<PluginGitContributionHostPort['dispat
 }
 
 .git-left-content {
+  /* The child pane fills this box with `flex: 1 1 0%`, which only takes
+     effect when this element is itself a flex container. Without it the
+     pane collapses to content height and everything below the first few
+     sections is clipped away. */
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-width: 0;
   min-height: 0;
