@@ -48,7 +48,7 @@ interface NetworkPane {
   title: string
   workspace: string
   workspacePath: string
-  /** running | waiting | exited | disconnected — or anything a newer server invents. */
+  /** running | waiting | exited | disconnected | not-opened — or anything a newer server invents. */
   status: string
   hostOnline: boolean
 }
@@ -69,7 +69,11 @@ interface NetworkSnapshot {
 }
 
 /** The four the server defines; anything else is shown as the server spelled it. */
-const KNOWN_STATUSES = ['running', 'waiting', 'exited', 'disconnected']
+// 'not-opened' is not one of the server's four: the backend substitutes it
+// into this device's own rows for a pane that was restored but never opened,
+// because only this machine can know that. Anything else unknown still falls
+// through to the raw value below.
+const KNOWN_STATUSES = ['running', 'waiting', 'exited', 'disconnected', 'not-opened']
 
 type Mode = 'login' | 'register' | 'token'
 
@@ -636,6 +640,9 @@ input:focus {
 .pane-pill.st-running { background: var(--success-fg); color: #fff; }
 .pane-pill.st-waiting { background: var(--attention-fg); color: #fff; }
 .pane-pill.st-disconnected { background: none; border-color: var(--border-default); }
+/* Same hollow treatment as disconnected: neither pane is doing anything, and
+   the eye should skip both to find the ones that are. */
+.pane-pill.st-not-opened { background: none; border-color: var(--border-default); }
 .acct-foot { padding: 14px 28px 18px; margin-top: 14px; border-top: 1px solid var(--border-muted); }
 .status { display: flex; align-items: center; margin: 0; font-size: 11.5px; color: var(--text-secondary); }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; flex-shrink: 0; }

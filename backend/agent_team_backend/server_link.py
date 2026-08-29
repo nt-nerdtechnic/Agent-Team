@@ -108,17 +108,26 @@ ROSTER_DEBOUNCE_S = 0.5
 
 #: ``sessions.upsert`` accepts exactly these three values and rejects anything
 #: else with BAD_REQUEST, so the registry's own vocabulary (busy / idle /
-#: offline) is renamed here rather than sent through. The mapping is one to one,
-#: so nothing the roster knows is lost: mid-turn is "running", waiting for input
-#: is "waiting", and a pane whose window has disconnected is "disconnected" —
-#: transient, not terminal. That distinction is the remote half of the local
-#: target-offline code: the pane is still there and expected back once its
-#: window reconnects. Reporting it as "waiting" would be indistinguishable from
-#: a healthy idle pane, and "exited" would claim the session ended when it has
-#: not.
+#: offline) is renamed here rather than sent through. Nothing the roster knows
+#: is lost by the rename: mid-turn is "running", waiting for input is "waiting",
+#: and a pane whose window has disconnected is "disconnected" — transient, not
+#: terminal. That distinction is the remote half of the local target-offline
+#: code: the pane is still there and expected back once its window reconnects.
+#: Reporting it as "waiting" would be indistinguishable from a healthy idle
+#: pane, and "exited" would claim the session ended when it has not. A restore
+#: placeholder is the second thing "disconnected" covers — see _pane_status.
 STATUS_BUSY = "running"
 STATUS_IDLE = "waiting"
 STATUS_OFFLINE = "disconnected"
+
+#: Local-only, and deliberately outside the four values above: the contract's
+#: enum has no word for "restored but never opened", and inventing one the
+#: server would reject with BAD_REQUEST is how a pane disappears from the
+#: roster entirely. It is substituted into this device's own rows in
+#: ``network_snapshot`` and never sent anywhere. The wording matches the
+#: sidebar's ``paneStatus.waiting`` ("not opened") on purpose — the same pane
+#: must not be called two different things in two places.
+STATUS_NOT_OPENED = "not-opened"
 
 #: Bounds on the inbound-message bookkeeping below. Same shape as the MCP
 #: server's ``_mcp_message_status``: a count cap plus a TTL, because nothing
@@ -226,6 +235,14 @@ def load_config() -> ServerLinkConfig:
 
 def _pane_status(entry: agent_messaging.RegisteredPane) -> str:
     if entry.offline:
+        return STATUS_OFFLINE
+    # A restore placeholder is neither of the other two: "running" claims an
+    # agent is working, "waiting" claims a message sent now would be picked up,
+    # and no CLI has been started behind it for either to be true. Its `busy`
+    # flag says true — the window reports every pane it cannot inject into as
+    # busy, which is the right answer for delivery and the wrong one for a
+    # status word — so the flag is deliberately not consulted here.
+    if not entry.realized:
         return STATUS_OFFLINE
     return STATUS_BUSY if entry.busy else STATUS_IDLE
 
@@ -1044,6 +1061,16 @@ class ServerLink:
         """
         devices: dict[str, dict[str, Any]] = {}
         local = self._device_id
+        # This machine knows more about its own panes than the server does. The
+        # roster it publishes has four words to spend and "disconnected" is the
+        # closest of them to a placeholder, but locally there is no reason to
+        # read that compromise back: the registry holds the realized flag
+        # itself. Same reason the local row's `online` is taken from the link
+        # rather than from presence below — for this one device, the server is
+        # not the better-informed party.
+        unopened_here = {
+            entry.pane_id for entry in agent_messaging.list_panes() if not entry.realized
+        }
 
         def entry(device_id: str, device_name: str) -> dict[str, Any]:
             row = devices.get(device_id)
@@ -1072,18 +1099,23 @@ class ServerLink:
             if not device_id:
                 continue
             row = entry(device_id, str(raw.get("deviceName") or ""))
+            pane_id = str(raw.get("paneId") or "")
+            status = str(raw.get("status") or "")
+            if device_id == local and pane_id in unopened_here:
+                status = STATUS_NOT_OPENED
             row["panes"].append(
                 {
                     "sessionId": str(raw.get("sessionId") or ""),
-                    "paneId": str(raw.get("paneId") or ""),
+                    "paneId": pane_id,
                     "agentKey": str(raw.get("agentKey") or ""),
                     "title": str(raw.get("title") or ""),
                     "workspace": str(raw.get("workspace") or ""),
                     "workspacePath": str(raw.get("workspacePath") or ""),
-                    # Passed through as the server spelled it: the four values
-                    # it defines are translated by the UI, and one this build
-                    # has never heard of is shown raw rather than hidden.
-                    "status": str(raw.get("status") or ""),
+                    # As the server spelled it, except for this device's own
+                    # unopened panes (above): the four values it defines are
+                    # translated by the UI, and one this build has never heard
+                    # of is shown raw rather than hidden.
+                    "status": status,
                     "hostOnline": bool(raw.get("hostOnline")),
                     "startedAt": str(raw.get("startedAt") or ""),
                 }

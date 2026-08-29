@@ -1829,6 +1829,11 @@ function mirrorMessagingHandle(pane: ActivePane): void {
       name: pane.messagingName,
       workspace_path: pane.workspacePath,
       agent_key: pane.agentKey,
+      // A cold-restore placeholder is mirrored on purpose (see the register
+      // call in restoreWorkspacePanes) so it stays addressable, but it has no
+      // CLI yet. Without this the registry can only see the busy flag, which
+      // every placeholder sets, and the network view calls it "Running".
+      realized: pane.realized === true,
       // Re-sent on every mirror (rename, reconnect), not only the first: the
       // backend forgets a pane whose window stayed away too long, and with it
       // the aliases that pane owned.

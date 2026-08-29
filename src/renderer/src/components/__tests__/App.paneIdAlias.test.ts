@@ -28,6 +28,14 @@ describe('agent_msg.register carries the pane\'s former ids', () => {
     expect(mirror).toContain('former_pane_ids: pane.formerPaneIds ?? [],')
   })
 
+  // A source assertion, like the ones around it: it checks that the payload is
+  // built, not what the backend then does with it. The behaviour — an
+  // unrealized pane published as "disconnected" rather than "running" — is
+  // covered in backend/tests/test_server_link.py.
+  it('marks a cold-restore placeholder as not realized', () => {
+    expect(mirror).toContain('realized: pane.realized === true,')
+  })
+
   it('re-sends them on a rename or reconnect, not only the first register', () => {
     // A window away past the offline grace period is forgotten along with its
     // aliases; the re-register on reconnect is what puts them back.

@@ -77,16 +77,29 @@ describe('account modal — your network', () => {
     expect(MODAL).toContain('statusLabel(pane.status)')
   })
 
-  it('translates the four server states and shows anything else raw', () => {
-    // The status vocabulary is the server's (sessions.upsert enforces it), so a
-    // value a newer server invents is passed through, never hidden.
-    expect(MODAL).toContain("const KNOWN_STATUSES = ['running', 'waiting', 'exited', 'disconnected']")
+  it('translates the states it knows and shows anything else raw', () => {
+    // Four of them are the server's vocabulary (sessions.upsert enforces it);
+    // 'not-opened' is substituted by this device's own backend for a pane that
+    // was restored but never opened, which only this machine can know. A value
+    // a newer server invents is still passed through, never hidden.
+    expect(MODAL).toContain(
+      "const KNOWN_STATUSES = ['running', 'waiting', 'exited', 'disconnected', 'not-opened']",
+    )
     expect(MODAL).toMatch(/KNOWN_STATUSES\.includes\(value\)[\s\S]{0,90}: value/)
     for (const locale of LOCALES) {
       const strings = network(locale)
-      for (const state of ['running', 'waiting', 'exited', 'disconnected']) {
+      for (const state of ['running', 'waiting', 'exited', 'disconnected', 'not-opened']) {
         expect(strings[`status-${state}`], `${locale}/status-${state}`).toBeTruthy()
       }
+    }
+  })
+
+  it('calls an unopened pane what the sidebar calls it', () => {
+    // The same pane must not be two different things in two places: the
+    // sidebar's paneStatus.waiting is the wording this has to match.
+    for (const locale of LOCALES) {
+      const messages = i18n.global.getLocaleMessage(locale) as Record<string, any>
+      expect(network(locale)['status-not-opened']).toBe(messages.paneStatus.waiting)
     }
   })
 
@@ -94,6 +107,7 @@ describe('account modal — your network', () => {
     expect(MODAL).toMatch(/\.pane-pill\.st-running \{[^}]*--success-fg/)
     expect(MODAL).toMatch(/\.pane-pill\.st-waiting \{[^}]*--attention-fg/)
     expect(MODAL).toMatch(/\.pane-pill\.st-disconnected \{[^}]*border-color/)
+    expect(MODAL).toMatch(/\.pane-pill\.st-not-opened \{[^}]*border-color/)
   })
 
   it('says something useful with only one machine signed in', () => {

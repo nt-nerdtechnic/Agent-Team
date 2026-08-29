@@ -63,6 +63,12 @@ class RegisteredPane:
     #: PTY is owned by the backend), so the entry is kept and flagged instead of
     #: deleted — "offline" and "does not exist" need different answers.
     offline_since: float | None = None
+    #: False while the pane is only a restore placeholder: the window holds the
+    #: saved pane but has not started its CLI yet. The handle is registered all
+    #: the same, so the pane stays addressable and a message for it parks until
+    #: someone opens it — but nothing is running behind it, and a caller that
+    #: reads `busy` alone cannot tell that apart from a working agent.
+    realized: bool = True
 
     @property
     def offline(self) -> bool:
@@ -90,6 +96,7 @@ class RegisteredPane:
             "agent_key": self.agent_key,
             "busy": self.busy,
             "offline": self.offline,
+            "realized": self.realized,
         }
 
 
@@ -192,6 +199,7 @@ def register(
     workspace_path: str,
     agent_key: str = "",
     owner: Any = None,
+    realized: bool = True,
 ) -> RegisteredPane:
     """Mirror one window's pane handle. Re-registering the same pane replaces
     its entry, which is how renames propagate."""
@@ -203,6 +211,10 @@ def register(
         agent_key=agent_key,
         # A re-register is a rename or a reconnect, not a state change.
         busy=previous.busy if previous else False,
+        # Read from the caller every time instead of being carried over: a
+        # window re-mirrors its panes on reconnect, and whether a placeholder
+        # has been opened since is exactly what that re-mirror is reporting.
+        realized=realized,
         # A reconnecting window re-runs agent_msg.register for every pane it
         # mirrors, which is what clears the offline flag drop_owner set:
         # offline_since starts at None on the fresh entry.

@@ -1110,7 +1110,8 @@
         "status-running": "執行中",
         "status-waiting": "等待中",
         "status-exited": "已結束",
-        "status-disconnected": "已斷線"
+        "status-disconnected": "已斷線",
+        "status-not-opened": "尚未開啟"
       }
     },
     "storage": {

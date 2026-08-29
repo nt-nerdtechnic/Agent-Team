@@ -580,6 +580,37 @@ async def test_a_rejected_upsert_does_not_break_the_link():
         await link.stop()
 
 
+async def test_a_restore_placeholder_is_published_as_disconnected_not_running():
+    """A pane the window has restored but not opened has no CLI behind it.
+
+    The window mirrors it anyway so it stays addressable, and reports it busy —
+    that flag answers "would a message sent now wait", and for a placeholder it
+    would. Publishing that as "running" told the network view eight unopened
+    panes were working agents, which is what this test exists to stop.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude", realized=False)
+    agent_messaging.set_busy("p1", True)
+    server = FakeServer()
+    link = make_link(server)
+    await link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        conn = server.opened[0]
+        published = {s["paneId"]: s for s in conn.syncs[0]["sessions"]}
+        assert published["p1"]["status"] == "disconnected"
+
+        # Opening it is a re-register: the same busy flag now means a working
+        # agent, and the status follows.
+        agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+        agent_messaging.set_busy("p1", True)
+        link.notify_roster_changed()
+        await _until(
+            lambda: any(u["paneId"] == "p1" and u["status"] == "running" for u in conn.upserts)
+        )
+    finally:
+        await link.stop()
+
+
 # ---- cross-device messages --------------------------------------------------
 
 

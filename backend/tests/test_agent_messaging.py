@@ -64,6 +64,17 @@ def test_register_replaces_existing_entry_so_renames_propagate() -> None:
     assert len(agent_messaging.list_panes()) == 1
 
 
+def test_register_defaults_to_realized_and_carries_the_flag() -> None:
+    live = agent_messaging.register("p1", "a", "/tmp/w", agent_key="claude")
+    assert live.realized is True
+    assert live.to_dict()["realized"] is True
+    placeholder = agent_messaging.register("p2", "b", "/tmp/w", agent_key="claude", realized=False)
+    assert placeholder.realized is False
+    # Realizing is a re-register, and unlike busy the flag is not carried over:
+    # it is the one thing that call exists to change.
+    assert agent_messaging.register("p2", "b", "/tmp/w", agent_key="claude").realized is True
+
+
 def test_same_name_allowed_in_different_workspaces() -> None:
     _seed_two_workspaces()
     names = [(e.workspace_path, e.name) for e in agent_messaging.list_panes()]

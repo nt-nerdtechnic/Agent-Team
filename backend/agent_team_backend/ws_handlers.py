@@ -6409,6 +6409,9 @@ async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, pay
         workspace_path,
         agent_key=str(payload.get("agent_key") or ""),
         owner=session,
+        # Absent means realized: every caller that has a live pane omits it, and
+        # a window from before this field existed only ever mirrored live panes.
+        realized=bool(payload.get("realized", True)),
     )
     # The ids this same CLI process was known by before the window rebuilt its
     # pane around it (reload, detach, group reattach). They stay resolvable, so

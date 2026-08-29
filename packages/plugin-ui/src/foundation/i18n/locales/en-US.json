@@ -1110,7 +1110,8 @@
         "status-running": "Running",
         "status-waiting": "Waiting",
         "status-exited": "Exited",
-        "status-disconnected": "Disconnected"
+        "status-disconnected": "Disconnected",
+        "status-not-opened": "not opened"
       }
     },
     "storage": {

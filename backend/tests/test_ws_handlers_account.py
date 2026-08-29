@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from agent_team_backend import app, server_link, ws_handlers
+from agent_team_backend import agent_messaging, app, server_link, ws_handlers
 
 
 class FakeWebSocket:
@@ -458,6 +458,47 @@ def test_network_snapshot_groups_panes_by_device() -> None:
     assert local["paneCount"] == 2 and other["paneCount"] == 1
     assert [p["title"] for p in local["panes"]] == ["backend", "docs"]
     assert other["panes"][0]["status"] == "exited"
+
+
+def test_network_snapshot_calls_this_devices_unopened_panes_what_they_are() -> None:
+    """A restored-but-never-opened pane is published as "disconnected" — the
+    closest of the contract's four words — but this machine does not have to
+    read that compromise back. It holds the realized flag itself, and the
+    sidebar already calls the state "not opened", so the network view says the
+    same thing. Showing it as running is what started this: the window reports
+    every pane it cannot inject into as busy, placeholders included.
+    """
+    agent_messaging._reset_for_test()
+    agent_messaging.register("p1", "scan", "/tmp/proj", agent_key="claude", realized=False)
+    agent_messaging.register("p2", "docs", "/tmp/proj", agent_key="codex")
+    try:
+        link = _link_with(
+            [
+                {
+                    "sessionId": "s1", "deviceId": "dev-1", "paneId": "p1",
+                    "agentKey": "claude", "title": "scan", "workspace": "proj",
+                    "status": "disconnected", "hostOnline": True,
+                },
+                {
+                    "sessionId": "s2", "deviceId": "dev-1", "paneId": "p2",
+                    "agentKey": "codex", "title": "docs", "workspace": "proj",
+                    "status": "waiting", "hostOnline": True,
+                },
+                {
+                    # Another machine's placeholder: the registry here knows
+                    # nothing about it, so it keeps the word the server used.
+                    "sessionId": "s3", "deviceId": "dev-2", "paneId": "p1",
+                    "agentKey": "claude", "title": "theirs", "workspace": "proj",
+                    "status": "disconnected", "hostOnline": True,
+                },
+            ]
+        )
+        local, other = link.network_snapshot()["devices"]
+        by_title = {p["title"]: p["status"] for p in local["panes"]}
+        assert by_title == {"scan": "not-opened", "docs": "waiting"}
+        assert other["panes"][0]["status"] == "disconnected"
+    finally:
+        agent_messaging._reset_for_test()
 
 
 def test_network_snapshot_keeps_this_devices_own_panes() -> None:
