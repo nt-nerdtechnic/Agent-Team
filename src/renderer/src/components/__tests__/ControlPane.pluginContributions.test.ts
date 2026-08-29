@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
 
@@ -157,6 +157,51 @@ describe('ControlPane manifest-driven plugin placement', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.findComponent({ name: 'GitPluginHostSlot' }).exists()).toBe(true)
     expect(wrapper.get('[data-legacy-recovery-label]').text()).toBe('Legacy recovery')
+    wrapper.unmount()
+  })
+
+  it('asks the Host to retry v2 when Git is opened in recovery, then lands on the restored tab', async () => {
+    const retryGitV2 = vi.fn().mockResolvedValue({ ok: true })
+    Object.assign(window, { agentTeam: { retryGitV2 } })
+    const wrapper = mountPane([], {
+      backend: { status: { value: 'connected' } },
+      workspace: '/workspace',
+      legacyGitRecovery: true,
+    })
+
+    await wrapper.get('[data-legacy-git-tab]').trigger('click')
+    expect(retryGitV2).toHaveBeenCalledTimes(1)
+
+    // The Host answers in two steps: recovery clears first, the refreshed
+    // contribution catalog arrives after. Bouncing to Agents in between would
+    // drop the user somewhere they never asked for.
+    await wrapper.setProps({ legacyGitRecovery: false } as never)
+    expect(sessionStorage.getItem('agentTeam.sidebarTab')).toBe('git')
+
+    await wrapper.setProps({
+      pluginContributions: [contribution({
+        pluginId: 'navide.git',
+        contributionKey: 'navide.git.left',
+        title: 'Git',
+      })],
+    } as never)
+    expect(sessionStorage.getItem('agentTeam.sidebarTab')).toBe('plugin:navide.git.left')
+
+    Reflect.deleteProperty(window, 'agentTeam')
+    wrapper.unmount()
+  })
+
+  it('leaves recovery for Agents when the exit was not a retry we asked for', async () => {
+    const wrapper = mountPane([], {
+      backend: { status: { value: 'connected' } },
+      workspace: '/workspace',
+      legacyGitRecovery: true,
+    })
+    await wrapper.get('[data-legacy-git-tab]').trigger('click')
+    expect(sessionStorage.getItem('agentTeam.sidebarTab')).toBe('git')
+
+    await wrapper.setProps({ legacyGitRecovery: false } as never)
+    expect(sessionStorage.getItem('agentTeam.sidebarTab')).toBe('agents')
     wrapper.unmount()
   })
 

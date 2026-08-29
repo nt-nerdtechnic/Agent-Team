@@ -915,6 +915,38 @@ describe('loadInstalledPlugins official receipt gate', () => {
     expect(mgr.getDescriptor('navide.git')?.packageVersion).toBe('2.0.0')
   })
 
+  it('restores the factory package after legacy recovery, which the plain load refuses', () => {
+    writeV2Plugin('factory-git', { id: 'navide.git', frontend: true })
+    const mgr = new FrontendPluginManager()
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git').loaded).toBe(true)
+    // Recovery replaces the descriptor but leaves the package registered, so
+    // the plain factory load has no way back — this was why a downgraded
+    // session could only reach v2 again by restarting the App.
+    mgr.replaceBuiltinForRecovery(descriptor('navide.git'))
+    expect(mgr.getDescriptor('navide.git')?.packageVersion).toBeUndefined()
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git')).toMatchObject({
+      loaded: false,
+      reason: 'installed package is active',
+    })
+
+    expect(mgr.restoreFactoryAfterRecovery(join(root, 'factory-git'), 'navide.git')).toMatchObject({
+      restored: true,
+      activation: { pluginId: 'navide.git', packageVersion: '1.0.0' },
+    })
+    expect(mgr.getDescriptor('navide.git')?.packageVersion).toBe('1.0.0')
+  })
+
+  it('refuses to restore a factory package that is not in legacy recovery', () => {
+    writeV2Plugin('factory-git', { id: 'navide.git', frontend: true })
+    const mgr = new FrontendPluginManager()
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git').loaded).toBe(true)
+
+    expect(mgr.restoreFactoryAfterRecovery(join(root, 'factory-git'), 'navide.git')).toEqual({
+      restored: false,
+      reason: 'plugin is not in legacy recovery',
+    })
+  })
+
   it('rejects a factory package whose manifest claims another identity', () => {
     writeV2Plugin('factory-git', { id: 'acme.git', frontend: true })
     const mgr = new FrontendPluginManager()

@@ -776,9 +776,40 @@ const sidebarTab = ref<SidebarTab>(
 )
 watch(sidebarTab, (v) => { try { sessionStorage.setItem(_TAB_KEY, v) } catch { /* ignore */ } })
 
+// Opening Git while the session sits in legacy recovery is the user's natural
+// retry: the downgrade is usually a transient activation failure, and the Host
+// answers with a bounded budget of v2 attempts.
+let awaitingGitV2Tab = false
+let gitV2RetryInFlight = false
+function requestGitV2Retry(): void {
+  const retry = window.agentTeam?.retryGitV2
+  if (!retry || gitV2RetryInFlight) return
+  gitV2RetryInFlight = true
+  awaitingGitV2Tab = true
+  void retry()
+    .then((result) => { if (!result?.ok) awaitingGitV2Tab = false })
+    .catch(() => { awaitingGitV2Tab = false })
+    .finally(() => { gitV2RetryInFlight = false })
+}
+
 watch(legacyGitRecovery, (enabled) => {
-  if (!enabled && sidebarTab.value === 'git') sidebarTab.value = 'agents'
+  if (enabled || sidebarTab.value !== 'git') return
+  const restored = gitPluginTab.value?.tabId
+  if (restored) {
+    awaitingGitV2Tab = false
+    sidebarTab.value = restored
+    return
+  }
+  // A retry we asked for lands on the v2 tab below, once the contribution
+  // catalog refresh arrives; only an unrelated exit drops back to Agents.
+  if (!awaitingGitV2Tab) sidebarTab.value = 'agents'
 }, { immediate: true })
+
+watch(gitPluginTab, (tab) => {
+  if (!tab || !awaitingGitV2Tab) return
+  awaitingGitV2Tab = false
+  showSidebarTab(tab.tabId)
+})
 
 watch(pluginTabs, (tabs) => {
   if (isPluginTab(sidebarTab.value) && !tabs.some((tab) => tab.tabId === sidebarTab.value)) {
@@ -878,6 +909,7 @@ function selectSidebarTab(tab: SidebarTab): void {
     : tab
   if (!target) return
   showSidebarTab(target)
+  if (tab === 'git' && legacyGitRecovery.value) requestGitV2Retry()
   // Surfacing a tab while the slot is collapsed has to reopen it, or Cmd+1..5
   // and the programmatic entry points would only move a highlight on the rail.
   // Collapsing is the parent's state, so ask rather than set — the same one-way

@@ -52,12 +52,15 @@ describe('generic plugin placement boot wiring', () => {
     expect(mainSource).toContain("loadWindow(win, { window: 'main', ...params, ...mainBootParams })")
   })
 
-  it('accepts a recovery notification as a sticky renderer state', () => {
+  it('tracks the recovery notification in both directions', () => {
     expect(appSource).toMatch(
       /const legacyGitRecovery = ref\(new URLSearchParams\(window\.location\.search\)\.get\(['"]legacy_git_recovery['"]\) === ['"]1['"]\)/
     )
     expect(appSource).toContain('onGitRecoveryChanged')
-    expect(appSource).toContain('legacyGitRecovery.value = true')
+    // Leaving recovery (Extensions restores the bundled v2 package) must reach
+    // the open window too; latching on true stranded it on the legacy panel.
+    expect(appSource).toContain('legacyGitRecovery.value = change.legacy')
+    expect(appSource).not.toContain('if (change.legacy) legacyGitRecovery.value = true')
     expect(appSource).toContain('stopGitRecoveryChanged?.()')
     expect(appSource).toContain(':legacy-git-recovery="legacyGitRecovery"')
   })
