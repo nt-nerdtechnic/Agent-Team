@@ -104,4 +104,26 @@ describe('createGuestAttachHooks', () => {
     expect(manager.attachGuestContribution).not.toHaveBeenCalled()
     expect(g.close).toHaveBeenCalledTimes(1)
   })
+
+  it('drops the webPreferences the tag contributed before applying the Host values', () => {
+    const hooks = createGuestAttachHooks(target())
+    // Electron merges these in before will-attach-webview runs; `partition`
+    // would put the guest on a session outside the Host's request filtering.
+    const prefs: MutableWebPreferences = {
+      partition: 'persist:evil',
+      plugins: true,
+      allowpopups: true,
+      enableBlinkFeatures: 'Something',
+      experimentalFeatures: true,
+      javascript: false,
+    }
+    hooks.onWillAttach(event(), prefs, { src: APPROVED })
+
+    for (const key of ['partition', 'plugins', 'allowpopups', 'enableBlinkFeatures', 'experimentalFeatures', 'javascript']) {
+      expect(prefs[key]).toBeUndefined()
+    }
+    // …and the Host's own values are still what the guest gets.
+    expect(prefs.preload).toBe('/preload/plugin-preload.js')
+    expect(prefs.sandbox).toBe(true)
+  })
 })

@@ -174,7 +174,7 @@ describe('PluginRegionHost', () => {
     expect(closeContribution).toHaveBeenCalledWith({ contributionKey: 'acme.files.left' })
   })
 
-  it('re-asserts the theme once the guest exists, then follows every switch', async () => {
+  it('re-asserts the theme only once the guest can receive it, then follows every switch', async () => {
     const prepare = vi.fn(async () => ({ ok: true, url: URL_A }))
     const { hostThemeChanged } = stubPlugins(prepare)
     const wrapper = mount(PluginRegionHost, {
@@ -182,9 +182,12 @@ describe('PluginRegionHost', () => {
     })
     await flushPromises()
 
-    // The entry query is only a first-paint hint; this window adopts its stored
-    // theme during boot and adopting is not a change, so a guest that mounted
-    // mid-adoption would otherwise keep the wrong theme forever.
+    // Nothing may be pushed before dom-ready: at that point Vue has not even
+    // rendered the <webview>, so the contribution has no guest and the push
+    // reaches nobody while still broadcasting to every other plugin.
+    expect(hostThemeChanged).not.toHaveBeenCalled()
+
+    await wrapper.find('webview').trigger('dom-ready')
     expect(hostThemeChanged).toHaveBeenCalledWith('dark-github')
 
     hostThemeChanged.mockClear()
@@ -198,5 +201,78 @@ describe('PluginRegionHost', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     // The observer is disconnected with the component.
     expect(hostThemeChanged).not.toHaveBeenCalled()
+  })
+
+  it('closes the Host instance when a prepare is still in flight at unmount', async () => {
+    let resolveLate!: (value: { ok: boolean; url: string }) => void
+    const stalled = new Promise<{ ok: boolean; url: string }>((resolve) => { resolveLate = resolve })
+    const prepare = vi.fn(() => stalled)
+    const { closeContribution } = stubPlugins(prepare as ReturnType<typeof vi.fn>)
+    const wrapper = mount(PluginRegionHost, {
+      props: { contribution, workspacePath: '/ws', visible: true },
+    })
+    wrapper.unmount()
+    expect(closeContribution).toHaveBeenCalledWith({ contributionKey: 'acme.files.left' })
+
+    // The response lands after teardown; it must not resurrect the instance.
+    resolveLate({ ok: true, url: URL_A })
+    await flushPromises()
+    expect(closeContribution).toHaveBeenCalledTimes(1)
+  })
+
+  it('prepares a hidden contribution so it is live before its tab is opened', async () => {
+    const prepare = vi.fn(async () => ({ ok: true, url: URL_A }))
+    stubPlugins(prepare)
+    const wrapper = mount(PluginRegionHost, {
+      props: { contribution, workspacePath: '/ws', visible: false },
+    })
+    await flushPromises()
+
+    // A guest created inside a display:none subtree still attaches and runs, so
+    // a background contribution (Git's changes badge) is live from the start.
+    expect(prepare).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('webview').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('retries a failed prepare when its tab is opened', async () => {
+    const prepare = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, error: 'backend is not ready' })
+      .mockResolvedValueOnce({ ok: true, url: URL_A })
+    stubPlugins(prepare)
+    const wrapper = mount(PluginRegionHost, {
+      props: { contribution, workspacePath: '/ws', visible: false },
+    })
+    await flushPromises()
+    expect(wrapper.find('webview').exists()).toBe(false)
+
+    // Opening the tab is the user's natural retry; a contribution that came up
+    // while the backend was still starting must not stay unavailable forever.
+    await wrapper.setProps({ visible: true })
+    await flushPromises()
+    expect(prepare).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('webview').attributes('src')).toBe(URL_A)
+    wrapper.unmount()
+  })
+
+  it('releases the Host instance when the window drops its workspace', async () => {
+    const prepare = vi.fn(async () => ({ ok: true, url: URL_A }))
+    const { closeContribution } = stubPlugins(prepare)
+    const wrapper = mount(PluginRegionHost, {
+      props: { contribution, workspacePath: '/ws', visible: true },
+    })
+    await flushPromises()
+    closeContribution.mockClear()
+
+    await wrapper.setProps({ workspacePath: '' })
+    await flushPromises()
+
+    // Back at the workspace picker: the element is gone, but the Host-side
+    // instance keeps its backend subscriptions until it is told to close.
+    expect(wrapper.find('webview').exists()).toBe(false)
+    expect(closeContribution).toHaveBeenCalledWith({ contributionKey: 'acme.files.left' })
+    expect(prepare).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
   })
 })

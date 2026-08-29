@@ -142,6 +142,11 @@ interface PendingGuest {
   readonly capabilityContext: HostCapabilityContext | null
   readonly isV2Identity: boolean
   timer: ReturnType<typeof setTimeout> | null
+  /** Set once a guest has attached. The reservation is deliberately kept: a
+   *  `<webview>` that the DOM merely *moves* is detached and re-attached by
+   *  Electron with the same src, and a consumed one-time reservation would
+   *  refuse that re-attach — leaving a blank panel with no way back. */
+  attached: boolean
 }
 
 export interface PluginViewHandle {
@@ -3261,9 +3266,9 @@ export class FrontendPluginManager {
     }
   }
 
-  private forgetInstance(instanceId: string, view?: WebContentsView): RunningPlugin | undefined {
+  private forgetInstance(instanceId: string): RunningPlugin | undefined {
     const plugin = this.running.get(instanceId)
-    if (!plugin || (view && plugin.view.nativeView !== view)) return undefined
+    if (!plugin) return undefined
     this.settleActivation(instanceId)
     plugin.detachHostResize?.()
     plugin.detachHostResize = null
@@ -3533,10 +3538,28 @@ export class FrontendPluginManager {
     // Defensive cleanup: if the view's webContents dies through any path other
     // than destroy() (renderer crash, Electron teardown), drop the record so
     // the next open() recreates instead of loading into a destroyed view.
+    //
+    // Guarded on identity because a `<webview>` the DOM moves is detached and
+    // re-attached: the detached guest's `destroyed` arrives *after* the
+    // replacement has been wired onto the same instance id, and would
+    // otherwise tear down the live panel and report a spurious activation
+    // failure for a plugin that is running fine.
     contents.once('destroyed', () => {
+      if (this.running.get(instanceId)?.view.webContents !== contents) return
       this.failActivation(instanceId, 'plugin renderer exited before readiness')
       const plugin = this.forgetInstance(instanceId)
       if (plugin) this.detachView(plugin)
+    })
+
+    // A renderer that crashes (OOM on a large diff, say) leaves its webContents
+    // alive, so neither `destroyed` nor `did-fail-load` fires and the record
+    // stays "ready" while the surface shows a crash page. An in-window
+    // contribution is long-lived, so without this the panel is dead for the
+    // rest of the window's life.
+    contents.on('render-process-gone', () => {
+      if (this.running.get(instanceId)?.view.webContents !== contents) return
+      this.failActivation(instanceId, 'plugin renderer process gone')
+      this.destroyInstance(instanceId)
     })
 
     contents.on(
@@ -4129,6 +4152,7 @@ export class FrontendPluginManager {
       this.destroyInstance(existing.instanceId)
       this.contributionInstances.delete(registryKey)
     }
+    this.releaseGuestReservations(registryKey)
 
     const token = randomUUID()
     const query = `${options.query}&nv_guest=${token}`
@@ -4144,6 +4168,7 @@ export class FrontendPluginManager {
       capabilityContext: capabilityContext ?? null,
       isV2Identity: hasV2DescriptorIdentity(descriptor),
       timer: null,
+      attached: false,
     }
     // A guest that never attaches (renderer error, unmount mid-flight) must not
     // pin an identity forever.
@@ -4151,6 +4176,27 @@ export class FrontendPluginManager {
     pending.timer.unref?.()
     this.pendingGuests.set(token, pending)
     return { ok: true, url: `${pathToFileURL(entryFile).toString()}${query}` }
+  }
+
+  /** Drop every reservation held for one contribution slot. Called when the
+   *  slot is re-prepared or closed: without this a reservation whose guest
+   *  never rendered would pin its host window and capability context until the
+   *  30s timer fired. */
+  private releaseGuestReservations(registryKey: string): void {
+    for (const [token, pending] of this.pendingGuests) {
+      if (pending.registryKey !== registryKey) continue
+      if (pending.timer) clearTimeout(pending.timer)
+      this.pendingGuests.delete(token)
+    }
+  }
+
+  /** Drop every reservation held for a window that is going away. */
+  releaseGuestReservationsForWindow(hostWindow: BrowserWindow): void {
+    for (const [token, pending] of this.pendingGuests) {
+      if (pending.hostWindow !== hostWindow) continue
+      if (pending.timer) clearTimeout(pending.timer)
+      this.pendingGuests.delete(token)
+    }
   }
 
   private pendingGuestFor(src: string): PendingGuest | null {
@@ -4180,8 +4226,34 @@ export class FrontendPluginManager {
   attachGuestContribution(src: string, guest: WebContents): boolean {
     const pending = this.pendingGuestFor(src)
     if (!pending) return false
-    if (pending.timer) clearTimeout(pending.timer)
-    this.pendingGuests.delete(pending.token)
+    // Pairing a guest with a reservation by event order alone rests on an
+    // Electron-internal detail. Verify the guest really belongs to the window
+    // the reservation was made for, so a future async step between the two
+    // events cannot bind a guest to another contribution's identity.
+    const embedder = (guest as WebContents & { hostWebContents?: WebContents }).hostWebContents
+    if (
+      embedder &&
+      (pending.hostWindow.isDestroyed() || embedder !== pending.hostWindow.webContents)
+    ) {
+      return false
+    }
+    if (pending.timer) {
+      clearTimeout(pending.timer)
+      pending.timer = null
+    }
+    // Re-attach of the same element: retire the record bound to the guest that
+    // Electron just detached before wiring the replacement onto the same
+    // instance id, so storage and grants carry over.
+    const previous = this.running.get(pending.instanceId)
+    if (previous) {
+      const timer = this.pendingActivations.get(pending.instanceId)
+      if (timer) clearTimeout(timer)
+      this.pendingActivations.delete(pending.instanceId)
+      previous.detachHostClosed?.()
+      this.bySender.delete(previous.senderId)
+      this.running.delete(pending.instanceId)
+    }
+    pending.attached = true
     const record = this.buildRecord({
       instanceId: pending.instanceId,
       descriptor: pending.descriptor,
@@ -4356,6 +4428,7 @@ export class FrontendPluginManager {
     const key = this.contributionInstanceKey(hostWindow, contributionKey)
     const handle = this.contributionInstances.get(key)
     this.contributionInstances.delete(key)
+    this.releaseGuestReservations(key)
     if (handle) this.destroyInstance(handle.instanceId)
     return { ok: true }
   }

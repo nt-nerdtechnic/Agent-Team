@@ -63,6 +63,9 @@ describe('GitLeftApp', () => {
     // mount.ts only stamps data-theme once from the entry query; that snapshot
     // is stale as soon as the user switches theme.
     expect(loadTheme).toHaveBeenCalledTimes(1)
+    // No backend fallback: passing one makes loadTheme write the theme back to
+    // the shared store, which the Host mirrors — see themeCallSites.test.ts.
+    expect(loadTheme).toHaveBeenCalledWith()
 
     settingsListeners.forEach((cb) => cb(['agent-team:theme']))
     expect(loadTheme).toHaveBeenCalledTimes(2)

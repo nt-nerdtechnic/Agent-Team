@@ -10,7 +10,9 @@
 // Identity stays with the Host: prepareContribution returns only a URL holding
 // a one-time token, and main overrides the guest's webPreferences on attach.
 // Measured, not assumed: `display: none` keeps a guest's webContents alive and
-// running, which is what lets a hidden Git tab keep its changes badge current.
+// running — both when applied after attach and when the guest is created
+// inside an already-hidden subtree — which is what lets a hidden Git tab keep
+// its changes badge current.
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 export interface PluginRegionContribution {
@@ -28,25 +30,43 @@ const props = defineProps<{
   contribution: PluginRegionContribution
   workspacePath: string
   visible: boolean
-  /** Retained for call-site compatibility. A guest is created as soon as the
-   *  element renders, so an in-window contribution is always warm. */
-  prewarm?: boolean
 }>()
 
 const src = ref<string | null>(null)
 const error = ref<string | null>(null)
 let generation = 0
 let themeObserver: MutationObserver | null = null
+/** True once a Host-side instance may exist for this contribution key. */
+let opened = false
 
 function currentTheme(): string {
   return document.documentElement.getAttribute('data-theme') ?? ''
+}
+
+function closeContribution(): void {
+  if (!opened) return
+  opened = false
+  void window.agentTeam?.plugins?.closeContribution({
+    contributionKey: props.contribution.contributionKey,
+  })
 }
 
 async function prepare(): Promise<void> {
   const mine = ++generation
   src.value = null
   error.value = null
-  if (!props.workspacePath) return
+  if (!props.workspacePath) {
+    // Removing the element destroys the guest, but the Host-side instance —
+    // its backend subscriptions and capability context — outlives it unless we
+    // say so. Reached whenever the window falls back to no workspace.
+    closeContribution()
+    return
+  }
+  // The Host allocates an instance (and destroys the previous one for this
+  // key) as soon as it is asked, so it holds state from the request onward —
+  // not from the response. Anything that gives up in between still has to
+  // release it.
+  opened = true
   try {
     const result = await window.agentTeam?.plugins?.prepareContribution({
       contributionKey: props.contribution.contributionKey,
@@ -55,7 +75,8 @@ async function prepare(): Promise<void> {
       // has to be told the theme. Read it off the element we are actually
       // rendering with rather than letting main resolve it from the settings
       // mirror, which can lag this window. Theme is cosmetic metadata, not an
-      // authority the Host derives anything from.
+      // authority the Host derives anything from. This is the first-paint
+      // value; `dom-ready` re-asserts it once the guest can receive events.
       theme: currentTheme(),
     })
     // A workspace change or unmount may have overtaken this request.
@@ -65,20 +86,25 @@ async function prepare(): Promise<void> {
       return
     }
     src.value = result.url
-    // The entry query is only a first-paint hint: this window adopts its stored
-    // theme during boot, and adopting is not a change, so nothing would ever
-    // correct a guest that mounted mid-adoption. Re-assert once the guest has
-    // a document of its own.
-    pushTheme()
   } catch (cause) {
     if (mine !== generation) return
     error.value = cause instanceof Error ? cause.message : String(cause)
   }
 }
 
+/** Send the theme this window is rendering with to the Host, which routes it to
+ *  the guests as read-only metadata. Fired from the guest's own `dom-ready`
+ *  (its first moment able to receive anything) and on every later switch. */
+let lastPushedTheme: string | null = null
+
 function pushTheme(): void {
   const theme = currentTheme()
-  if (theme) window.agentTeam?.plugins?.hostThemeChanged?.(theme)
+  // The Host broadcast reaches every plugin, and one observer runs per
+  // contribution, so an unfiltered push would fan out once per contribution
+  // for a single switch. Only report an actual change.
+  if (!theme || theme === lastPushedTheme) return
+  lastPushedTheme = theme
+  window.agentTeam?.plugins?.hostThemeChanged?.(theme)
 }
 
 onMounted(() => {
@@ -97,15 +123,25 @@ watch(
   { immediate: true }
 )
 
+watch(
+  () => props.visible,
+  (visible) => {
+    // A failed prepare used to be permanent: the old bounds-driven sync retried
+    // on every resize tick, this one only re-runs on workspace changes. Opening
+    // the tab is the user's natural retry, so treat it as one — a contribution
+    // that came up while the backend was still starting recovers instead of
+    // showing "unavailable" until the window is restarted.
+    if (visible && !src.value && props.workspacePath) void prepare()
+  }
+)
+
 onBeforeUnmount(() => {
   themeObserver?.disconnect()
   themeObserver = null
-  // Removing the element destroys the guest; this only clears the Host-side
-  // registry entry so the next mount starts clean.
+  // Drop the generation so an in-flight prepare cannot resurrect this instance
+  // after the Host has been told to close it.
   generation += 1
-  void window.agentTeam?.plugins?.closeContribution({
-    contributionKey: props.contribution.contributionKey,
-  })
+  closeContribution()
 })
 </script>
 
@@ -118,7 +154,12 @@ onBeforeUnmount(() => {
     <div v-if="error" class="plugin-region-host__error" role="status">
       {{ contribution.title }} unavailable
     </div>
-    <webview v-else-if="src" class="plugin-region-host__view" :src="src" />
+    <webview
+      v-else-if="src"
+      class="plugin-region-host__view"
+      :src="src"
+      @dom-ready="pushTheme"
+    />
   </div>
 </template>
 

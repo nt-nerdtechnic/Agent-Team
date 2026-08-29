@@ -326,24 +326,10 @@ declare global {
           workspace_path: string
           theme?: string
         }) => Promise<{ ok: boolean; url?: string; error?: string }>
-        openContribution: (args: {
-          contributionKey: string
-          workspace_path: string
-          bounds: { x: number; y: number; width: number; height: number }
-        }) => Promise<{ ok: boolean; error?: string }>
-        ensureContribution: (args: {
-          contributionKey: string
-          workspace_path: string
-        }) => Promise<{ ok: boolean; error?: string }>
         openContributionWindow: (args: {
           contributionKey: string
           workspace_path: string
         }) => Promise<{ ok: boolean; error?: string }>
-        updateContribution: (args: {
-          contributionKey: string
-          bounds?: { x: number; y: number; width: number; height: number }
-          visible: boolean
-        }) => Promise<{ ok: boolean }>
         closeContribution: (args: { contributionKey: string }) => Promise<{ ok: boolean }>
         onContributionsChanged: (handler: () => void) => () => void
         marketplaceSearch: (query?: string) => Promise<MarketplaceListResponse>

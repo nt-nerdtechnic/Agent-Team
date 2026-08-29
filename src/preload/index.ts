@@ -657,27 +657,11 @@ contextBridge.exposeInMainWorld('agentTeam', {
       theme?: string
     }): Promise<{ ok: boolean; url?: string; error?: string }> =>
       ipcRenderer.invoke('plugins:prepareContribution', args),
-    openContribution: (args: {
-      contributionKey: string
-      workspace_path: string
-      bounds: { x: number; y: number; width: number; height: number }
-    }): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('plugins:openContribution', args),
-    ensureContribution: (args: {
-      contributionKey: string
-      workspace_path: string
-    }): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('plugins:ensureContribution', args),
     openContributionWindow: (args: {
       contributionKey: string
       workspace_path: string
     }): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('plugins:openContributionWindow', args),
-    updateContribution: (args: {
-      contributionKey: string
-      bounds?: { x: number; y: number; width: number; height: number }
-      visible: boolean
-    }): Promise<{ ok: boolean }> => ipcRenderer.invoke('plugins:updateContribution', args),
     closeContribution: (args: { contributionKey: string }): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('plugins:closeContribution', args),
     onContributionsChanged: (handler: () => void): (() => void) => {

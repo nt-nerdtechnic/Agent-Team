@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, powerMonitor, safeStorage, session, shell, type IpcMainInvokeEvent } from 'electron'
-import { createGuestAttachHooks } from './plugins/pluginGuestAttach'
+import { createGuestAttachHooks, type MutableWebPreferences } from './plugins/pluginGuestAttach'
 import { join, dirname } from 'node:path'
 import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
@@ -351,11 +351,16 @@ async function createWindow(
   {
     const guestHooks = createGuestAttachHooks(frontendPluginManager)
     win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
-      guestHooks.onWillAttach(event, webPreferences, params)
+      // Electron types WebPreferences without an index signature; the hook needs
+      // one to clear the keys the <webview> tag contributed.
+      guestHooks.onWillAttach(event, webPreferences as MutableWebPreferences, params)
     })
     win.webContents.on('did-attach-webview', (_event, guest) => {
       guestHooks.onDidAttach(guest)
     })
+    // A reservation whose guest never rendered would otherwise hold this window
+    // and its resolved capability context until the 30s timer fired.
+    win.on('closed', () => frontendPluginManager.releaseGuestReservationsForWindow(win))
   }
   mainWindow = win
   const winId = win.id // captured — win.id is not readable after destroy
@@ -1939,12 +1944,23 @@ function trustedPluginRegionHost(event: IpcMainInvokeEvent): BrowserWindow | nul
 /** Generic Manifest view-region lifecycle. The renderer supplies only the
  * stable contribution key and layout geometry; FrontendPluginManager keeps
  * the opaque instance handle in main. */
+/** Theme ids the app ships (mirrors useTheme's VALID_IDS). */
+const HOST_THEME_IDS = new Set([
+  'dark-github',
+  'dark-midnight',
+  'dark-forest',
+  'light',
+  'high-contrast',
+])
+
 // The window that is painting is the only reliable source for its own theme:
 // the settings mirror can lag it, and adopting a stored theme at boot is not a
 // change, so it produces no backend broadcast. Let the host re-assert it.
 ipcMain.on('plugins:hostThemeChanged', (event, theme: unknown) => {
   if (!trustedPluginRegionHost(event)) return
-  if (typeof theme !== 'string' || !theme) return
+  // Only the theme ids the app ships: this value reaches every plugin as
+  // Host-owned metadata, so it should not be free-form text.
+  if (typeof theme !== 'string' || !HOST_THEME_IDS.has(theme)) return
   frontendPluginManager.dispatchHostSettingsChanged({
     settings: { 'agent-team:theme': JSON.stringify(theme) },
   })
@@ -1970,49 +1986,6 @@ ipcMain.handle('plugins:prepareContribution', async (event, args: Record<string,
   })
 })
 
-ipcMain.handle('plugins:openContribution', async (event, args: Record<string, unknown>) => {
-  const hostWindow = trustedPluginRegionHost(event)
-  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
-  const workspacePath = hostWindow
-    ? registeredGitLeftWorkspace(
-        hostWindow,
-        args?.workspace_path,
-        mainWindowWorkspaces,
-        normalizeWorkspacePath,
-      )
-    : null
-  const bounds = pluginBoundsFrom(args?.bounds)
-  if (!hostWindow || !contributionKey || !workspacePath || !bounds) return { ok: false }
-  await prepareCatalogContribution(contributionKey)
-  return frontendPluginManager.openContribution(hostWindow, contributionKey, {
-    bounds,
-    workspacePath,
-    query: catalogContributionQuery(contributionKey, workspacePath),
-  })
-})
-
-/** Prewarm a contribution without assigning it visible geometry. This is used
- * by the first-party Git slot so backend change events reach a live instance
- * even while the user is on another sidebar tab. */
-ipcMain.handle('plugins:ensureContribution', async (event, args: Record<string, unknown>) => {
-  const hostWindow = trustedPluginRegionHost(event)
-  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
-  const workspacePath = hostWindow
-    ? registeredGitLeftWorkspace(
-      hostWindow,
-      args?.workspace_path,
-      mainWindowWorkspaces,
-      normalizeWorkspacePath,
-    )
-    : null
-  if (!hostWindow || !contributionKey || !workspacePath) return { ok: false }
-  await prepareCatalogContribution(contributionKey)
-  return frontendPluginManager.ensureContribution(hostWindow, contributionKey, {
-    workspacePath,
-    query: catalogContributionQuery(contributionKey, workspacePath),
-  })
-})
-
 /** Open a catalog window contribution in a dedicated BrowserWindow. Only the
  * trusted main renderer may request this; the opaque plugin instance remains
  * entirely in the main process. */
@@ -2028,19 +2001,6 @@ ipcMain.handle('plugins:openContributionWindow', async (event, args: Record<stri
   )
   if (!contributionKey || !workspacePath) return { ok: false }
   return openCatalogContributionWindow(contributionKey, workspacePath)
-})
-
-ipcMain.handle('plugins:updateContribution', (event, args: Record<string, unknown>) => {
-  const hostWindow = trustedPluginRegionHost(event)
-  const contributionKey = typeof args?.contributionKey === 'string' ? args.contributionKey : ''
-  const bounds = pluginBoundsFrom(args?.bounds)
-  if (!hostWindow || !contributionKey || (args.visible === true && !bounds)) return { ok: false }
-  return frontendPluginManager.updateContribution(
-    hostWindow,
-    contributionKey,
-    bounds,
-    args.visible === true,
-  )
 })
 
 ipcMain.handle('plugins:closeContribution', (event, args: Record<string, unknown>) => {

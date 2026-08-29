@@ -141,4 +141,28 @@ describe('Manifest v2 settings origin', () => {
       vi.useRealTimers()
     }
   })
+
+  it('lets a backend that declares no ownedKeys write anything', async () => {
+    // The residual risk behind the "plugin surfaces never pass a backend
+    // fallback to loadTheme" convention: `canWriteKey` is unconditional when a
+    // surface declares no ownedKeys, so a future surface that skips the
+    // declaration loses the barrier that stops a theme write-back loop. Pinned
+    // so the behaviour is a decision rather than an accident.
+    window.history.replaceState({}, '', '/?v2=1')
+    vi.resetModules()
+    const settings = await import('./settings')
+    const status = ref<'connected' | 'disconnected'>('connected')
+    const setMany = vi.fn(async () => undefined)
+    settings.initSettingsBackend({
+      status,
+      // No ownedKeys and no readOnlyKeys declared.
+      getAll: vi.fn(async () => ({})),
+      setMany,
+      onChanged: () => () => undefined,
+    })
+    await settings.settingsReady()
+
+    settings.settingsSet('agent-team:theme', JSON.stringify('light'))
+    expect(settings.settingsGet('agent-team:theme', null)).toBe(JSON.stringify('light'))
+  })
 })

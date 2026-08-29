@@ -25,6 +25,30 @@ export interface GuestWebContents {
   close(): void
 }
 
+/** Tag-sourced webPreferences Electron merges in *before* `will-attach-webview`
+ *  runs, which our own assignments below do not cover. `partition` matters most:
+ *  it would put a guest on a session other than the default one, outside the
+ *  request filtering the Host installs there. Dropped rather than overridden —
+ *  a plugin surface has no reason to ask for any of them. */
+const TAG_SOURCED_KEYS = [
+  'partition',
+  'plugins',
+  'allowpopups',
+  'allowRunningInsecureContent',
+  'experimentalFeatures',
+  'enableBlinkFeatures',
+  'disableBlinkFeatures',
+  'javascript',
+  'images',
+  'textAreasAreResizable',
+  'webgl',
+  'nodeIntegrationInWorker',
+  'contextIsolation',
+  'sandbox',
+  'webSecurity',
+  'preload',
+] as const
+
 export interface MutableWebPreferences {
   preload?: string
   contextIsolation?: boolean
@@ -34,6 +58,7 @@ export interface MutableWebPreferences {
   backgroundThrottling?: boolean
   webSecurity?: boolean
   additionalArguments?: string[]
+  [key: string]: unknown
 }
 
 export interface GuestAttachHooks {
@@ -59,6 +84,9 @@ export function createGuestAttachHooks(manager: GuestAttachTarget): GuestAttachH
         return
       }
       approvedSrc = src
+      // Clear what the tag contributed before writing the Host's values, so the
+      // result is what this function states and not a merge with the element.
+      for (const key of TAG_SOURCED_KEYS) delete prefs[key]
       prefs.preload = approved.preload
       prefs.contextIsolation = true
       prefs.nodeIntegration = false
