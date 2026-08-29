@@ -1639,8 +1639,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           v-if="t.id === 'git' && gitPluginTab && hasPluginIcon(gitPluginTab)"
           class="plugin-tab-icon"
           :src="gitPluginTab.icon ?? ''"
-          width="18"
-          height="18"
+          width="15"
+          height="15"
           alt=""
           @error="markPluginIconFailed(gitPluginTab)"
         />
@@ -1662,8 +1662,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           v-if="hasPluginIcon(pluginTab)"
           class="plugin-tab-icon"
           :src="pluginTab.icon ?? ''"
-          width="18"
-          height="18"
+          width="15"
+          height="15"
           alt=""
           @error="markPluginIconFailed(pluginTab)"
         />
@@ -1692,8 +1692,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             v-if="hasPluginIcon(gitPluginTab)"
             class="plugin-tab-icon"
             :src="gitPluginTab.icon ?? ''"
-            width="18"
-            height="18"
+            width="15"
+            height="15"
             alt=""
             @error="markPluginIconFailed(gitPluginTab)"
           />
@@ -1714,8 +1714,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           v-if="hasPluginIcon(pluginTab)"
           class="plugin-tab-icon"
           :src="pluginTab.icon ?? ''"
-          width="18"
-          height="18"
+          width="15"
+          height="15"
           alt=""
           @error="markPluginIconFailed(pluginTab)"
         />
@@ -2476,10 +2476,15 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   color: var(--text-bright);
   background: var(--bg-muted);
 }
+/* Smaller than the 18px SVGs beside it on purpose. Those are drawn with
+   padding inside their own viewBox, while a plugin ships artwork that fills
+   its bitmap edge to edge, so matching the box makes the plugin icon read as
+   the largest thing in the rail. This trims it to the SVGs' apparent size;
+   `contain` keeps non-square artwork from stretching. */
 .plugin-tab-icon {
   display: block;
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   object-fit: contain;
 }
 .tab-spacer { flex: 1; }

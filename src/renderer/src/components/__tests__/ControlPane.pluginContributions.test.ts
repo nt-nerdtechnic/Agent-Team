@@ -106,8 +106,11 @@ describe('ControlPane manifest-driven plugin placement', () => {
     const icon = wrapper.get('.plugin-tab-icon')
     expect(icon.element.tagName).toBe('IMG')
     expect(icon.attributes('src')).toBe('data:image/png;base64,icon-data')
-    expect(icon.attributes('width')).toBe('18')
-    expect(icon.attributes('height')).toBe('18')
+    // Deliberately under the 18px of the SVGs beside it: those carry padding
+    // inside their viewBox, plugin artwork fills its bitmap, so equal boxes
+    // make the plugin icon the largest thing in the rail.
+    expect(icon.attributes('width')).toBe('15')
+    expect(icon.attributes('height')).toBe('15')
     expect(icon.attributes('alt')).toBe('')
     wrapper.unmount()
   })

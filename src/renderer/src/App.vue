@@ -621,6 +621,21 @@ function pluginContributionsAt(location: Exclude<PluginRegionLocation, 'left' | 
 
 const windowPluginContributions = computed(() => pluginContributionsByLocation.value.window)
 
+// The titlebar shows these as icons, matching the gear beside them. A plugin
+// whose icon file is missing or unreadable falls back to a glyph rather than
+// to its title: a word-shaped button next to icon-shaped ones reads as a
+// different kind of control, which is what made the Git one look bolted on.
+const failedPluginIcons = ref<Set<string>>(new Set())
+const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): string =>
+  `${entry.contributionKey} ${entry.icon ?? ''}`
+const hasPluginIcon = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): boolean =>
+  Boolean(entry.icon) && !failedPluginIcons.value.has(pluginIconFailureKey(entry))
+function markPluginIconFailed(entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): void {
+  const failures = new Set(failedPluginIcons.value)
+  failures.add(pluginIconFailureKey(entry))
+  failedPluginIcons.value = failures
+}
+
 async function openPluginContributionWindow(contribution: PluginRegionContribution): Promise<void> {
   const workspacePath = currentWorkspace.value.trim()
   if (!workspacePath) return
@@ -13847,10 +13862,20 @@ function paneIsCommander(p: ActivePane): boolean {
           class="titlebar-plugin-action"
           type="button"
           :title="contribution.title"
+          :aria-label="contribution.title"
           @mousedown.stop
           @click="openPluginContributionWindow(contribution)"
         >
-          {{ contribution.title }}
+          <img
+            v-if="hasPluginIcon(contribution)"
+            class="titlebar-plugin-icon"
+            :src="contribution.icon ?? ''"
+            width="12"
+            height="12"
+            alt=""
+            @error="markPluginIconFailed(contribution)"
+          />
+          <span v-else class="titlebar-plugin-fallback" aria-hidden="true">◇</span>
         </button>
       </div>
     </div>
@@ -15182,19 +15207,42 @@ function paneIsCommander(p: ActivePane): boolean {
   -webkit-app-region: no-drag;
   flex-shrink: 0;
 }
+/* Same shape as .titlebar-gear: these sit in the same row and open the same
+   kind of thing, so they read as one set of icon buttons rather than a
+   bordered pill wedged between two bare glyphs. */
 .titlebar-plugin-action {
   -webkit-app-region: no-drag;
-  border: 1px solid var(--border-muted);
-  border-radius: 5px;
-  background: var(--bg-inset);
-  color: var(--text-secondary);
+  flex-shrink: 0;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
-  font-size: 11px;
-  padding: 4px 8px;
+  transition: background 0.15s, color 0.15s;
 }
 .titlebar-plugin-action:hover {
   background: var(--bg-hover);
   color: var(--text-bright);
+}
+/* Same reasoning as .plugin-tab-icon in ControlPane: the gear beside this is
+   a 14px SVG with padding inside its viewBox, while plugin artwork fills its
+   bitmap edge to edge, so an equal box makes the plugin icon look bigger than
+   everything around it. */
+.titlebar-plugin-icon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  object-fit: contain;
+  border-radius: 3px;
+}
+.titlebar-plugin-fallback {
+  font-size: 12px;
+  line-height: 1;
 }
 
 /* ── Status Bar ──────────────────────────────────────────────────────────────── */
