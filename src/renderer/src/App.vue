@@ -256,6 +256,7 @@ import navideMark from './assets/navide-mark.png'
 // first-run onboarding) — defer them off the main shell's first-paint bundle.
 const CompletionModal = defineAsyncComponent(() => import('./components/CompletionModal.vue'))
 const SettingsModal = defineAsyncComponent(() => import('./components/SettingsModal.vue'))
+const AccountModal = defineAsyncComponent(() => import('./components/AccountModal.vue'))
 const OnboardingWizard = defineAsyncComponent(() => import('./components/OnboardingWizard.vue'))
 const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
@@ -4103,7 +4104,10 @@ let stopGitRecoveryChanged: (() => void) | null = null
 onMounted(() => {
   stopGitContributionActions = window.agentTeam?.onGitContributionAction?.(onGitContributionAction) ?? null
   stopGitRecoveryChanged = window.agentTeam?.onGitRecoveryChanged?.((change) => {
-    if (change.legacy) legacyGitRecovery.value = true
+    // Both directions: the Host also reports recovery being *left* (Extensions
+    // restores the bundled v2 package). Latching on true left an open window
+    // showing the "Legacy recovery" panel for the rest of its life.
+    legacyGitRecovery.value = change.legacy
   }) ?? null
   void refreshPluginContributions()
   stopPluginContributionChanges = window.agentTeam?.plugins?.onContributionsChanged?.(() => {
@@ -6201,6 +6205,47 @@ const pipeline = reactive<PipelineRun>({
 
 const showCompletionModal = ref(false)
 const showSettings = ref(false)
+
+// Account modal (titlebar "Sign in"). The titlebar mirrors the link status so
+// a signed-in user sees who they are without opening anything; it is polled
+// cheaply (5 s, only while this window is focused) because the backend has no
+// link-state broadcast, and refreshed at once when the modal reports a change.
+const showAccount = ref(false)
+const accountModalEverOpened = ref(false)
+interface P2pAccountView {
+  state: 'unconfigured' | 'connecting' | 'connected' | 'unreachable' | 'unauthorized'
+  hasToken: boolean
+  accountEmail?: string
+  displayName?: string
+}
+const p2pAccount = ref<P2pAccountView | null>(null)
+const p2pAccountLabel = computed(() => {
+  const a = p2pAccount.value
+  if (!a) return ''
+  return a.accountEmail || a.displayName || (a.hasToken ? i18n.global.t('account.token-linked') : '')
+})
+const p2pAccountDotClass = computed(() => {
+  const state = p2pAccount.value?.state
+  if (state === 'connected') return 'ok'
+  if (state === 'unauthorized') return 'err'
+  if (state === 'unreachable') return 'warn'
+  return 'idle'
+})
+async function loadP2pAccount(): Promise<void> {
+  try {
+    const resp = await backend.send<{ status: P2pAccountView }>('p2p.link.status', {})
+    if (resp.ok && resp.payload?.status) p2pAccount.value = resp.payload.status
+  } catch { /* non-fatal: the titlebar keeps its last value */ }
+}
+function openAccountModal(): void {
+  accountModalEverOpened.value = true
+  showAccount.value = true
+}
+onMounted(() => {
+  void loadP2pAccount()
+  const timer = window.setInterval(() => { if (document.hasFocus()) void loadP2pAccount() }, 5000)
+  onUnmounted(() => window.clearInterval(timer))
+})
 // Pipeline Manager modal. Unlike the other modals it is mounted lazily but never
 // unmounted again (v-if on pmEverOpened + v-show on showPipelineManager): its
 // embedded AiCliDock must keep owning its PTY, and unmounting would let the
@@ -6349,6 +6394,10 @@ async function onUpdateBadgeClick(): Promise<void> {
 async function onMenuAction(action: string): Promise<void> {
   if (action === 'open-settings') {
     showSettings.value = true
+    return
+  }
+  if (action === 'open-account') {
+    openAccountModal()
     return
   }
   if (action === 'show-shortcuts') {
@@ -6538,6 +6587,7 @@ registerCommand('workbench.action.closeModal', () => {
   // it is the same one the component's own footer Cancel and Esc handler make.
   else if (showRestoreScopeModal.value) settleRestoreScope(null)
   else if (showSettings.value) showSettings.value = false
+  else if (showAccount.value) showAccount.value = false
   else if (showDebug.value) showDebug.value = false
   else if (showPipelineManager.value) {
     // The modal owns nested confirm dialogs — let it close its own top layer first.
@@ -6795,9 +6845,10 @@ useUiActionBus({
 function mainModalOpen(): boolean {
   return showSettings.value || showCompletionModal.value || showRestoreScopeModal.value ||
     showPipelineManager.value || showDebug.value || showHistory.value || previewLogOpen.value ||
-    reconnectPickerOpen.value || !!cliInstallRequest.value || !!whatsNewEntry.value
+    reconnectPickerOpen.value || !!cliInstallRequest.value || !!whatsNewEntry.value ||
+    showAccount.value
 }
-watch([showSettings, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug, showHistory], () => setContext('modalOpen', mainModalOpen()))
+watch([showSettings, showAccount, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug, showHistory], () => setContext('modalOpen', mainModalOpen()))
 
 /** The sidebar agent list shows panes from every tab; focusing one that lives
  *  in another tab must also activate that tab, or the pane stays v-show-hidden. */
@@ -14171,6 +14222,21 @@ function paneIsCommander(p: ActivePane): boolean {
         @click="onSwitchWorkspace"
         :title="$t('action.switch-workspace')"
       >↺</button>
+      <!-- Account: sits immediately before the gear so the gear keeps its
+           edge position (see the plugin-cluster note above). -->
+      <button
+        class="titlebar-account"
+        type="button"
+        @mousedown.stop
+        @click="openAccountModal"
+        :title="p2pAccountLabel || $t('action.sign-in')"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+          <circle cx="12" cy="7" r="4"/>
+        </svg>
+        <span v-if="p2pAccountLabel" class="titlebar-account-dot" :class="p2pAccountDotClass"></span>
+      </button>
       <button class="titlebar-gear" @mousedown.stop @click="showSettings = true" title="Settings (⌘,)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -14341,6 +14407,13 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="showSettings = false; settingsInitialTab = 'general'"
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"
+    />
+    <AccountModal
+      v-if="accountModalEverOpened"
+      :open="showAccount"
+      :backend="backend"
+      @close="showAccount = false"
+      @changed="() => void loadP2pAccount()"
     />
     <ResourceManagerModal
       v-if="resourceManagerEverOpened"
@@ -15530,6 +15603,44 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-hover);
   color: var(--text-bright);
 }
+/* Sign-in / account button: the gear's shape, widened by a short label so a
+   signed-in user sees who they are without opening anything. */
+/* Icon-only, same box as .titlebar-gear so the cluster reads as one row of
+   equal icons; the link state is a small badge on the icon's corner and the
+   account text lives in the tooltip. */
+.titlebar-account {
+  -webkit-app-region: no-drag;
+  position: relative;
+  flex-shrink: 0;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.titlebar-account:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+.titlebar-account-dot {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  box-shadow: 0 0 0 1.5px var(--bg-base);
+}
+.titlebar-account-dot.ok { background: var(--success-fg); }
+.titlebar-account-dot.err { background: var(--danger-fg); }
+.titlebar-account-dot.warn { background: var(--attention-fg); }
 /* Same reasoning as .plugin-tab-icon in ControlPane: the gear beside this is
    a 14px SVG with padding inside its viewBox, while plugin artwork fills its
    bitmap edge to edge, so an equal box makes the plugin icon look bigger than

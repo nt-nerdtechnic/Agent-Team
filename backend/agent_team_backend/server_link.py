@@ -42,6 +42,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import platform
 import time
 from dataclasses import dataclass
@@ -58,6 +59,18 @@ log = logging.getLogger("agent_team_backend.server_link")
 #: which keeps this whole module inert. It lives in ui_settings rather than a
 #: private store so the Settings UI can write it through the existing
 #: ``ui.settings.set`` handler without new plumbing.
+# The one address every install talks to. Hard-coded on purpose: the server is
+# a service this product operates, not a field each user configures — a typo'd
+# address produced a link that silently never dialled, and there was no correct
+# value for the user to discover on their own.
+#
+# NAVIDE_SERVER_URL overrides it for local development (point at ws://localhost:8787/ws)
+# and for the verification scripts. Nothing in the UI writes it.
+DEFAULT_SERVER_URL = "wss://server.navide.dev/ws"
+SERVER_URL_ENV = "NAVIDE_SERVER_URL"
+
+# Kept only so an install carrying the old user-entered address can have it
+# ignored and cleared; nothing reads it as a source any more.
 SERVER_URL_SETTING = "agentTeam.p2p.serverUrl"
 # The signed-in email, kept in plain ui_settings rather than the vault: it is
 # not a credential, and the Settings pane needs it to say *which* account is
@@ -167,10 +180,14 @@ def _vault():
 
 
 def server_url() -> str:
-    from . import app
+    """The address this install connects to: the built-in one unless overridden.
 
-    value = app.ui_settings_store.get().get(SERVER_URL_SETTING)
-    return value.strip() if isinstance(value, str) else ""
+    A previously stored per-user address is deliberately NOT consulted — an
+    install upgrading from the configurable era must move to the real service,
+    not keep dialling whatever was typed in months ago.
+    """
+    override = os.environ.get(SERVER_URL_ENV, "")
+    return override.strip() or DEFAULT_SERVER_URL
 
 
 def account_email() -> str:
@@ -326,6 +343,12 @@ class ServerLink:
         # once one machine can hold several accounts over its lifetime.
         self.tenant_id = ""
         self.display_name = ""
+        # Whether the account's e-mail address has been confirmed, from
+        # auth.hello. A soft gate: an unverified account signs in and works
+        # normally, it is only flagged (and may not invite anyone). Refreshed
+        # on every reconnect and by a resend reply, because the confirming
+        # click happens in a browser this process never sees.
+        self.email_verified = False
         # The team roster as the server last sent it, from team.members.list or
         # the team.members.changed push. None means "never fetched", which an
         # empty list must not be confused with. Kept across reconnects for the
@@ -621,6 +644,7 @@ class ServerLink:
         self.member_role = str(payload.get("role") or "")
         self.tenant_id = str(payload.get("tenantId") or "")
         self.display_name = str(payload.get("displayName") or "")
+        self.email_verified = bool(payload.get("emailVerified"))
         log.info(
             "navide-server link authenticated as member %s (%s) for device %s",
             self.member_id or "unknown",
@@ -796,6 +820,38 @@ class ServerLink:
                 # since a cache pinned to the wrong revision would ignore the
                 # very push that would have corrected it.
                 await self._refresh_policy()
+        return reply
+
+    async def resend_verification(self) -> dict[str, Any]:
+        """Ask the server to re-send this account's verification mail.
+
+        Same shape as ``set_policy``: the server's reply frame, or a locally
+        minted error frame naming the link state. The server rate-limits and
+        owns the token, so this side neither retries nor invents a cooldown —
+        RATE_LIMITED is an answer to show, not one to swallow.
+        """
+        if self._ws is None or not self._authenticated:
+            return self._unavailable()
+        try:
+            reply = await self._request("auth.verify.resend", {})
+        except Exception as err:  # noqa: BLE001
+            log.warning("navide-server auth.verify.resend failed: %s", err)
+            return {
+                "ok": False,
+                "error": {
+                    "code": LINK_OFFLINE,
+                    "message": (
+                        f"the navide-server link failed mid-request ({err}); it "
+                        f"reconnects on its own, so retry shortly"
+                    ),
+                },
+            }
+        if reply.get("ok"):
+            payload = reply.get("payload")
+            if isinstance(payload, dict) and payload.get("emailVerified"):
+                # The user confirmed in a browser since this link authenticated;
+                # adopt it now rather than making them wait for a reconnect.
+                self.email_verified = True
         return reply
 
     async def _on_policy_changed(self, payload: Any) -> None:
@@ -1267,6 +1323,7 @@ async def status() -> dict[str, Any]:
             "tenantId": getattr(link, "tenant_id", ""),
             "displayName": getattr(link, "display_name", ""),
             "role": link.member_role,
+            "emailVerified": bool(getattr(link, "email_verified", False)),
         }
     config = await asyncio.to_thread(load_config)
     return {
@@ -1283,6 +1340,9 @@ async def status() -> dict[str, Any]:
         "tenantId": "",
         "displayName": "",
         "role": "",
+        # No link means no account to judge; the UI only shows the verification
+        # notice for an account it can actually see.
+        "emailVerified": False,
     }
 
 
@@ -1376,6 +1436,17 @@ async def members_request(msg_type: str, payload: dict[str, Any]) -> dict[str, A
     if _link is None:
         return None
     return await _link.members_request(msg_type, payload)
+
+
+async def resend_verification() -> dict[str, Any] | None:
+    """Re-send the account verification mail, or None with no server configured.
+
+    None means what it means everywhere else in this module: this machine never
+    had a server, so there is no account anywhere to verify.
+    """
+    if _link is None:
+        return None
+    return await _link.resend_verification()
 
 
 def roster_changed() -> None:

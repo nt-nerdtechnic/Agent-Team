@@ -651,7 +651,8 @@
     "collapse-subtree": "收合子項",
     "detach-group": "拖出成獨立視窗",
     "reattach-group": "收回主視窗",
-    "expand-all-folders": "展開所有專案"
+    "expand-all-folders": "展開所有專案",
+    "sign-in": "登入"
   },
   "settings": {
     "search": {
@@ -1004,17 +1005,12 @@
     },
     "p2p": {
       "title": "跨裝置傳訊",
-      "hint": "把這台機器連上 Navide-Server，這裡的 agent 就能傳訊息給你其他裝置上的 agent。兩個欄位都留空的話，任何東西都不會離開這台機器。",
-      "server-url": "伺服器網址",
-      "server-url-placeholder": "wss://navide.example.com/ws",
+      "hint": "把這台機器連上 Navide-Server，這裡的 agent 就能傳訊息給你其他裝置上的 agent。登入之前，任何東西都不會離開這台機器。",
       "token": "存取權杖",
       "token-placeholder": "貼上伺服器核發的權杖",
-      "token-stored": "已儲存權杖 — 留空即保留原本的",
       "token-hint": "存放於系統金鑰鏈，不會再顯示出來。",
-      "save": "儲存並連線",
-      "clear": "中斷連線",
       "device-id": "本機裝置",
-      "state-unconfigured": "尚未設定",
+      "state-unconfigured": "尚未登入",
       "state-connecting": "連線中…",
       "state-connected": "已連線",
       "state-unreachable": "無法連上伺服器",
@@ -1080,12 +1076,23 @@
         "password-placeholder": "至少 8 個字元",
         "display-name": "顯示名稱",
         "tenant-name": "網路名稱",
-        "tenant-hint": "建立帳號後你會擁有自己的私有網路，只有登入同一個帳號的機器才看得見彼此。",
+        "tenant-hint": "註冊會建立一個只屬於你的私有網路，只有登入同一個帳號的機器看得到彼此。顯示名稱與網路名稱由 email 自動產生。",
         "optional": "選填",
         "role": "角色",
         "submit-login": "登入",
         "submit-register": "建立帳號",
-        "sign-out": "登出"
+        "sign-out": "登出",
+        "tenant": "網路",
+        "submit-token": "以權杖連結",
+        "hint-titlebar": "登入、貼上權杖或登出，請使用標題列的帳號按鈕。",
+        "open-window": "登入或建立帳號…",
+        "advanced": "進階：直接貼上 Token",
+        "verify-sent": "驗證信已寄到 {email}，點開信中的連結即可完成驗證。",
+        "verify-resend": "重新寄送",
+        "verify-resent": "已寄出，請查看信箱；連結 24 小時內有效。",
+        "verify-rate-limited": "剛剛才寄過，請等一分鐘再試。",
+        "verify-required": "請先驗證你的 email 才能邀請成員。",
+        "verified": "已驗證"
       }
     },
     "storage": {
@@ -2833,5 +2840,17 @@
     "disk-failed": "掃描沒有成功。",
     "reclaimable-hint": "{count} 個可回收",
     "unnamed-pane": "終端機"
+  },
+  "account": {
+    "title": "Navide 帳號",
+    "tagline": "登入後即可將這台機器與你的其他裝置連起來。",
+    "no-recovery": "目前還沒有密碼重設功能——請妥善保存你的密碼。",
+    "err-unsupported": "這台伺服器尚未支援帳號功能，可能需要更新。",
+    "err-email-taken": "這個 email 已經註冊過了，請改用登入。",
+    "err-rejected": "email 或密碼不正確。",
+    "err-offline": "目前連不上伺服器，請檢查網路後再試一次。",
+    "err-generic": "發生錯誤，請再試一次。",
+    "token-stored": "這台機器已儲存權杖",
+    "token-linked": "已用權杖連結"
   }
 }

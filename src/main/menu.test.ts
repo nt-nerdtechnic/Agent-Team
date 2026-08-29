@@ -82,6 +82,7 @@ function makeHooks(): AppMenuHooks & { calls: string[] } {
     onNewWindow: () => calls.push('new-window'),
     onOpenPipelineManager: () => calls.push('pipeline-manager'),
     onOpenResourceManager: () => calls.push('resource-manager'),
+    onOpenAccount: () => calls.push('account'),
     onOpenRepo: () => calls.push('open-repo'),
     onReportIssue: () => calls.push('report-issue'),
     onShowShortcuts: () => calls.push('show-shortcuts')
@@ -181,6 +182,13 @@ describe('installApplicationMenu', () => {
   it('Window has Resource Manager wired to its hook', () => {
     fire(itemIn(submenuOf('Window'), 'Resource Manager'))
     expect(hooks.calls).toEqual(['resource-manager'])
+  })
+
+  it('Window has Navide Account wired to its hook', () => {
+    // Signing in must be reachable without finding Settings first — it is the
+    // first thing a new user does.
+    fire(itemIn(submenuOf('Window'), 'Navide Account'))
+    expect(hooks.calls).toEqual(['account'])
   })
 
   // role: 'copy' copies the DOM selection, which a terminal pane never has, so

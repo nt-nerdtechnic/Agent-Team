@@ -2745,34 +2745,31 @@ async def p2p_link_status(session: "Session", msg_id: str, msg_type: str, payloa
 
 @handler("p2p.link.configure")
 async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    """Persist the server URL and/or the access token, then reconnect.
+    """Store or clear the access token, then reconnect.
 
-    Both fields are optional and absence means "leave it alone", so the UI can
-    save a new URL without making the user retype a token it is never allowed
-    to show them. An empty string is not absence: it is how the user clears a
-    field, which is what takes the link back to doing nothing at all.
+    The server address used to be part of this call. It is now built into the
+    build (server_link.DEFAULT_SERVER_URL) because there is exactly one service
+    to talk to and a typo'd address produced a link that silently never dialled.
+    A `serverUrl` sent by an older renderer is accepted and ignored rather than
+    rejected, so a stale window cannot fail every save.
+
+    An absent token means "leave it alone" so a caller can reconnect without
+    retyping a credential it is never allowed to see; an empty string is not
+    absence — it is how the user clears it, which takes the link back to inert.
     """
     from . import app
 
-    url = payload.get("serverUrl")
     token = payload.get("token")
-    if url is not None and not isinstance(url, str):
-        await session.send_json(
-            make_error(msg_id, msg_type, "BAD_REQUEST", "serverUrl must be a string")
-        )
-        return
     if token is not None and not isinstance(token, str):
         await session.send_json(
             make_error(msg_id, msg_type, "BAD_REQUEST", "token must be a string")
         )
         return
 
-    delta: dict = {}
-    if url is not None:
-        cleaned = url.strip()
-        delta = app.ui_settings_store.set(
-            {server_link.SERVER_URL_SETTING: cleaned or None}
-        )
+    # An install upgrading from the configurable era still carries the address
+    # its user typed. Nothing reads it any more, so drop it rather than leave a
+    # value that looks like it is in effect.
+    delta = app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
     if token is not None:
         try:
             await vault_to_thread(server_link.set_access_token, token)
@@ -2787,9 +2784,6 @@ async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, pay
         make_response(msg_id, msg_type, {"status": await server_link.status()})
     )
     if delta:
-        # Same reason as ui.settings.set: other windows cache ui_settings. The
-        # sender is not excluded because it wrote through this handler rather
-        # than through its own settings cache, so it needs the delta too.
         await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
 
 
@@ -2807,15 +2801,16 @@ async def _account_call(
 ) -> None:
     from . import app
 
-    url = payload.get("serverUrl")
     email = payload.get("email")
     password = payload.get("password")
-    for name, value in (("serverUrl", url), ("email", email), ("password", password)):
+    for name, value in (("email", email), ("password", password)):
         if not isinstance(value, str) or not value.strip():
             await session.send_json(
                 make_error(msg_id, msg_type, "BAD_REQUEST", f"{name} is required")
             )
             return
+    # The address is the build's, not the caller's — see p2p.link.configure.
+    url = await asyncio.to_thread(server_link.server_url)
 
     request: dict = {"email": email.strip(), "password": password}
     if verb == "auth.register":
@@ -2825,7 +2820,7 @@ async def _account_call(
                 request[optional] = value.strip()
 
     try:
-        result = await server_link.account_request(url.strip(), verb, request)
+        result = await server_link.account_request(url, verb, request)
     except server_link.AccountError as err:
         # Keep the server's own code (EMAIL_TAKEN, AUTH_REJECTED, BAD_REQUEST):
         # the UI tells these apart to decide whether to offer "sign in instead"
@@ -2850,7 +2845,9 @@ async def _account_call(
 
     delta = app.ui_settings_store.set(
         {
-            server_link.SERVER_URL_SETTING: url.strip(),
+            # Only the signed-in identity is stored; the address is built in and
+            # any stale user-entered one is cleared on the way past.
+            server_link.SERVER_URL_SETTING: None,
             server_link.ACCOUNT_EMAIL_SETTING: str(result.get("email") or email).strip(),
         }
     )
@@ -2876,6 +2873,14 @@ async def _account_call(
                     "tenantId": result.get("tenantId"),
                     "tenantName": result.get("tenantName"),
                     "role": result.get("role"),
+                    # Soft gate: a fresh account is unverified and still fully
+                    # usable. Carried here as well as in `status` because the
+                    # link has only just been told to reconnect — its own
+                    # auth.hello answer may not have landed yet, and the modal
+                    # has to show the "check your mail" notice now, not in
+                    # three seconds.
+                    "emailVerified": bool(result.get("emailVerified")),
+                    "verificationSent": bool(result.get("verificationSent")),
                 },
             },
         )
@@ -2892,6 +2897,57 @@ async def p2p_account_register(session: "Session", msg_id: str, msg_type: str, p
 @handler("p2p.account.login")
 async def p2p_account_login(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     await _account_call(session, msg_id, msg_type, payload, "auth.login")
+
+
+@handler("p2p.account.resend_verification")
+async def p2p_account_resend_verification(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Ask the server for a fresh verification mail for the signed-in account.
+
+    Unlike register and login this one rides the existing authenticated link:
+    the server decides *which* account from the connection, so there is nothing
+    for the caller to name and no way to ask for someone else's mail.
+
+    The server's own codes come straight through — RATE_LIMITED in particular
+    means "you already asked in the last minute", which is a thing to show, not
+    a thing to retry.
+    """
+    reply = await server_link.resend_verification()
+    if reply is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so there is no account to verify",
+            )
+        )
+        return
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_VERIFY_RESEND_FAILED"),
+                str(error.get("message") or "the navide-server refused the request"),
+            )
+        )
+        return
+    result = reply.get("payload")
+    result = result if isinstance(result, dict) else {}
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "emailVerified": bool(result.get("emailVerified")),
+                "verificationSent": bool(result.get("verificationSent")),
+                "status": await server_link.status(),
+            },
+        )
+    )
 
 
 @handler("p2p.account.logout")

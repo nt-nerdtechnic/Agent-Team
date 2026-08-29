@@ -1323,16 +1323,17 @@ def test_config_round_trips_through_settings_and_the_vault(tmp_path, monkeypatch
     )
     monkeypatch.setattr(app, "credential_vault", vault)
     try:
-        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: "  ws://localhost:8787/ws  "})
+        monkeypatch.setenv(server_link.SERVER_URL_ENV, "  ws://localhost:8787/ws  ")
         server_link.set_access_token("  tok-abc  ")
         assert server_link.load_config() == CONFIG
         assert server_link.load_config().configured
 
+        # Only the token half can be missing now: the address always resolves.
         server_link.set_access_token(None)
         assert server_link.load_config() == ServerLinkConfig(url=CONFIG.url)
         assert not server_link.load_config().configured
     finally:
-        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
+        pass
 
 
 def test_app_secret_file_backend_is_private(tmp_path):
@@ -1412,9 +1413,9 @@ def module_link(monkeypatch):
     yield state, server
 
 
-async def test_reconfigure_dials_once_the_settings_are_filled_in(module_link):
-    """The gap a Settings UI walks straight into: start() runs at boot, so a
-    configuration saved afterwards has to be picked up without a restart."""
+async def test_reconfigure_dials_once_the_settings_are_filled_in(module_link, monkeypatch):
+    """The gap signing in walks straight into: start() runs at boot, so a
+    credential stored afterwards has to be picked up without a restart."""
     state, server = module_link
     await server_link.start()
     try:
@@ -1422,9 +1423,9 @@ async def test_reconfigure_dials_once_the_settings_are_filled_in(module_link):
         assert server.opened == []
         assert (await server_link.status())["state"] == server_link.STATE_UNCONFIGURED
 
-        # The URL a connected link reports comes from ui_settings, not from the
-        # loader the fixture fakes — that is where the Settings pane wrote it.
-        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: CONFIG.url})
+        # The URL a connected link reports comes from the build (or the dev
+        # override), never from a user-entered setting.
+        monkeypatch.setenv(server_link.SERVER_URL_ENV, CONFIG.url)
         state["config"] = CONFIG
         await server_link.reconfigure()
         await _until(lambda: bool(server.opened and server.opened[0].syncs))
@@ -1435,7 +1436,6 @@ async def test_reconfigure_dials_once_the_settings_are_filled_in(module_link):
         assert status["hasToken"] is True
     finally:
         await server_link.stop()
-        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
 
 
 async def test_reconfigure_replaces_the_link_rather_than_adding_one(module_link):
@@ -1574,11 +1574,11 @@ def _ws_session() -> "app.Session":
     return app.Session(FakeWebSocket())  # type: ignore[arg-type]
 
 
-async def test_configure_handler_writes_both_halves_and_reconnects(
+async def test_configure_handler_stores_the_token_and_reconnects(
     module_link, tmp_path, monkeypatch
 ):
-    """One call has to land the URL in ui_settings, the token in the vault, and
-    a dialling link — the three things a user cannot do from the UI otherwise."""
+    """One call lands the token in the vault and leaves a dialling link. The URL
+    half is gone: it is built in, so there is nothing for the caller to set."""
     state, server = module_link
     vault = CredentialVault(
         root=tmp_path / "vault", real_home=tmp_path / "home", platform="linux"
@@ -1586,6 +1586,7 @@ async def test_configure_handler_writes_both_halves_and_reconnects(
     monkeypatch.setattr(app, "credential_vault", vault)
     # The handler writes through the real config path; the link reads the
     # fixture's, so `state` is followed along by hand.
+    monkeypatch.setenv(server_link.SERVER_URL_ENV, CONFIG.url)
     monkeypatch.setattr(
         server_link,
         "load_config",
@@ -1598,13 +1599,15 @@ async def test_configure_handler_writes_both_halves_and_reconnects(
             {
                 "id": "c1",
                 "type": "p2p.link.configure",
-                "payload": {"serverUrl": "  ws://localhost:8787/ws  ", "token": "tok-abc"},
+                # serverUrl from an older renderer is accepted and ignored.
+                "payload": {"serverUrl": "  ws://typo/ws  ", "token": "tok-abc"},
             },
         )
         reply = session.websocket.sent[0]
         assert reply["type"] == "p2p.link.configure.result"
         assert reply["ok"] is True
         assert vault.read_app_secret(server_link.ACCESS_TOKEN_SECRET) == "tok-abc"
+        # The typo'd address was ignored; the build's own value is in effect.
         assert server_link.server_url() == CONFIG.url
         await _until(lambda: bool(server.opened and server.opened[0].syncs))
 
@@ -1634,7 +1637,7 @@ async def test_configure_handler_leaves_the_token_alone_when_absent(
     try:
         await app.handle_message(
             session,
-            {"id": "c1", "type": "p2p.link.configure", "payload": {"serverUrl": "ws://x/ws"}},
+            {"id": "c1", "type": "p2p.link.configure", "payload": {}},
         )
         assert session.websocket.sent[0]["ok"] is True
         assert vault.read_app_secret(server_link.ACCESS_TOKEN_SECRET) == "tok-abc"
@@ -1651,15 +1654,52 @@ async def test_configure_handler_leaves_the_token_alone_when_absent(
         app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
 
 
-async def test_configure_handler_rejects_a_non_string_url():
+async def test_configure_handler_ignores_a_serverurl_from_an_older_renderer():
+    """A stale window still sends the field. Rejecting would make every save
+    from that window fail over a value that no longer has any effect."""
     session = _ws_session()
     await app.handle_message(
         session,
         {"id": "c1", "type": "p2p.link.configure", "payload": {"serverUrl": 42}},
     )
+    assert session.websocket.sent[0]["ok"] is True
+
+
+async def test_configure_handler_rejects_a_non_string_token():
+    session = _ws_session()
+    await app.handle_message(
+        session,
+        {"id": "c1", "type": "p2p.link.configure", "payload": {"token": 42}},
+    )
     reply = session.websocket.sent[0]
     assert reply["ok"] is False
     assert reply["error"]["code"] == "BAD_REQUEST"
+
+
+# ---- the address is the build's ---------------------------------------------
+
+
+def test_server_url_is_built_in(monkeypatch):
+    monkeypatch.delenv(server_link.SERVER_URL_ENV, raising=False)
+    assert server_link.server_url() == server_link.DEFAULT_SERVER_URL
+    assert server_link.DEFAULT_SERVER_URL.startswith("wss://")
+
+
+def test_env_overrides_the_built_in_address(monkeypatch):
+    """The escape hatch development and the verify scripts run through."""
+    monkeypatch.setenv(server_link.SERVER_URL_ENV, "  ws://localhost:8787/ws  ")
+    assert server_link.server_url() == "ws://localhost:8787/ws"
+
+
+def test_a_stored_user_entered_address_is_ignored(monkeypatch):
+    """An install upgrading from the configurable era carries whatever its user
+    typed. It must move to the real service, not keep dialling that value."""
+    monkeypatch.delenv(server_link.SERVER_URL_ENV, raising=False)
+    app.ui_settings_store.set({server_link.SERVER_URL_SETTING: "ws://stale-typo/ws"})
+    try:
+        assert server_link.server_url() == server_link.DEFAULT_SERVER_URL
+    finally:
+        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
 
 
 # ---- the policy editor's handlers -------------------------------------------

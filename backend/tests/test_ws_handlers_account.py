@@ -65,6 +65,9 @@ GOOD_ACCOUNT = {
     "email": "neil@example.com",
     "role": "admin",
     "token": "tok-long-lived",
+    # Soft gate: a fresh account is unverified and still fully usable.
+    "emailVerified": False,
+    "verificationSent": True,
 }
 
 
@@ -92,6 +95,7 @@ def env(monkeypatch: pytest.MonkeyPatch):
     async def fake_broadcast(_event: Any) -> None:
         return None
 
+    monkeypatch.setenv(server_link.SERVER_URL_ENV, "ws://s/ws")
     monkeypatch.setattr(app, "ui_settings_store", settings)
     monkeypatch.setattr(app, "broadcast", fake_broadcast)
     monkeypatch.setattr(server_link, "account_request", fake_account_request)
@@ -106,7 +110,8 @@ def env(monkeypatch: pytest.MonkeyPatch):
     }
 
 
-LOGIN = {"serverUrl": " ws://s/ws ", "email": " neil@example.com ", "password": "passw0rd!"}
+# The address is the build's, so it is no longer part of the call.
+LOGIN = {"email": " neil@example.com ", "password": "passw0rd!"}
 
 
 # ---- happy path -------------------------------------------------------------
@@ -117,7 +122,7 @@ async def test_login_stores_token_and_reconnects(env) -> None:
     assert resp["ok"] is True
     assert env["tokens"] == ["tok-long-lived"]
     assert env["reconfigured"] == [1]
-    # url and email are trimmed on the way in; the account row echoes the server
+    # The address came from the build, not from the caller.
     url, verb, sent = env["requests"][0]
     assert (url, verb) == ("ws://s/ws", "auth.login")
     assert sent["email"] == "neil@example.com"
@@ -128,13 +133,22 @@ async def test_login_never_echoes_the_password(env) -> None:
     assert "passw0rd!" not in repr(resp)
 
 
-async def test_login_persists_url_and_email_but_not_token(env) -> None:
+async def test_login_persists_the_email_but_not_the_token(env) -> None:
     await _call("p2p.account.login", dict(LOGIN))
     stored = env["settings"].get()
-    assert stored[server_link.SERVER_URL_SETTING] == "ws://s/ws"
     assert stored[server_link.ACCOUNT_EMAIL_SETTING] == "neil@example.com"
+    # The address is built in, so nothing user-entered is kept for it.
+    assert server_link.SERVER_URL_SETTING not in stored
     # The long-lived credential belongs in the vault, never in plain settings.
     assert "tok-long-lived" not in repr(stored)
+
+
+async def test_login_clears_a_stale_user_entered_address(env) -> None:
+    """An install upgrading from the configurable era still carries one. Leaving
+    it would show a value that looks like it is in effect but is never read."""
+    env["settings"].set({server_link.SERVER_URL_SETTING: "ws://stale/ws"})
+    await _call("p2p.account.login", dict(LOGIN))
+    assert server_link.SERVER_URL_SETTING not in env["settings"].get()
 
 
 async def test_register_forwards_optional_names(env) -> None:
@@ -164,7 +178,7 @@ async def test_login_answers_with_status_and_account(env) -> None:
 # ---- refusals before anything is sent ---------------------------------------
 
 
-@pytest.mark.parametrize("missing", ["serverUrl", "email", "password"])
+@pytest.mark.parametrize("missing", ["email", "password"])
 async def test_required_fields(env, missing: str) -> None:
     payload = dict(LOGIN)
     payload[missing] = "   "
@@ -233,12 +247,12 @@ async def test_logout_clears_credential_and_email(env) -> None:
     assert server_link.ACCOUNT_EMAIL_SETTING not in env["settings"].get()
 
 
-async def test_logout_keeps_the_server_url(env) -> None:
+async def test_logout_leaves_the_address_reachable(env) -> None:
+    """Signing out is "not right now", not "never again": the next sign-in must
+    not need an address from the user. It is built in, so it always resolves."""
     await _call("p2p.account.login", dict(LOGIN))
     await _call("p2p.account.logout", {})
-    # Signing out is "not right now", not "never again" — making the user retype
-    # the address every time is the friction that gets a feature abandoned.
-    assert env["settings"].get()[server_link.SERVER_URL_SETTING] == "ws://s/ws"
+    assert server_link.server_url() == "ws://s/ws"
 
 
 async def test_logout_reconnects_so_the_link_drops(env) -> None:
@@ -248,6 +262,99 @@ async def test_logout_reconnects_so_the_link_drops(env) -> None:
     assert env["reconfigured"] == [1]
 
 
+# ---- e-mail verification ----------------------------------------------------
+#
+# The gate is soft: an unverified account signs in and works. What has to reach
+# the renderer is the *flag* — the notice and its Resend button are the only
+# things standing between a mistyped address and an account nobody can recover.
+
+
+async def test_register_reports_the_unverified_flag_and_that_mail_went_out(env) -> None:
+    resp = await _call("p2p.account.register", dict(LOGIN))
+    account = resp["payload"]["account"]
+    assert account["emailVerified"] is False
+    assert account["verificationSent"] is True
+
+
+async def test_account_reply_never_carries_a_verification_token(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leaked verify token is a one-click flip of emailVerified. The server
+    strips it; this side must not reintroduce it by copying the reply wholesale."""
+
+    async def leaky(url: str, msg_type: str, payload: dict) -> dict:
+        return {**GOOD_ACCOUNT, "verifyToken": "should-never-be-relayed"}
+
+    monkeypatch.setattr(server_link, "account_request", leaky)
+    resp = await _call("p2p.account.register", dict(LOGIN))
+    assert "should-never-be-relayed" not in repr(resp)
+    assert "verifyToken" not in resp["payload"]["account"]
+
+
+async def test_resend_forwards_and_reports_the_flag(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+
+    async def fake_resend() -> dict:
+        calls.append(1)
+        return {"ok": True, "payload": {"emailVerified": False, "verificationSent": True}}
+
+    monkeypatch.setattr(server_link, "resend_verification", fake_resend)
+    resp = await _call("p2p.account.resend_verification", {})
+    assert resp["ok"] is True and calls == [1]
+    assert resp["payload"]["emailVerified"] is False
+    assert resp["payload"]["verificationSent"] is True
+    # The refreshed link status rides along so the modal need not poll for it.
+    assert resp["payload"]["status"]["state"] == "connected"
+
+
+async def test_resend_keeps_the_servers_own_code(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """RATE_LIMITED is an answer to show ("you just asked"), not one to retry.
+    Collapsing it into a generic failure would hide the one actionable part."""
+
+    async def limited() -> dict:
+        return {"ok": False, "error": {"code": "RATE_LIMITED", "message": "wait 42s"}}
+
+    monkeypatch.setattr(server_link, "resend_verification", limited)
+    resp = await _call("p2p.account.resend_verification", {})
+    assert resp["ok"] is False
+    assert resp["error"]["code"] == "RATE_LIMITED"
+    assert resp["error"]["message"] == "wait 42s"
+
+
+async def test_resend_without_a_server_is_not_configured(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def none() -> None:
+        return None
+
+    monkeypatch.setattr(server_link, "resend_verification", none)
+    resp = await _call("p2p.account.resend_verification", {})
+    assert resp["error"]["code"] == "P2P_NOT_CONFIGURED"
+
+
+async def test_resend_offline_link_is_a_link_error(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def offline() -> dict:
+        return {"ok": False, "error": {"code": server_link.LINK_OFFLINE, "message": "down"}}
+
+    monkeypatch.setattr(server_link, "resend_verification", offline)
+    resp = await _call("p2p.account.resend_verification", {})
+    assert resp["error"]["code"] == server_link.LINK_OFFLINE
+
+
+def test_link_status_reports_the_verification_flag() -> None:
+    """The renderer decides whether to nag from this one field, so it has to be
+    present in both shapes — including the one with no link at all."""
+    import asyncio
+
+    unconfigured = asyncio.run(server_link.status())
+    assert unconfigured["emailVerified"] is False
+
+
 def test_handlers_are_registered() -> None:
-    for name in ("p2p.account.register", "p2p.account.login", "p2p.account.logout"):
+    for name in (
+        "p2p.account.register",
+        "p2p.account.login",
+        "p2p.account.logout",
+        "p2p.account.resend_verification",
+    ):
         assert ws_handlers.lookup(name) is not None

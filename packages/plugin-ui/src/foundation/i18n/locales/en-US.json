@@ -651,7 +651,8 @@
     "collapse-subtree": "Collapse subtree",
     "detach-group": "Open in its own window",
     "reattach-group": "Merge back",
-    "expand-all-folders": "Expand all folders"
+    "expand-all-folders": "Expand all folders",
+    "sign-in": "Sign in"
   },
   "settings": {
     "search": {
@@ -1004,17 +1005,12 @@
     },
     "p2p": {
       "title": "Cross-device messaging",
-      "hint": "Link this machine to a Navide-Server so agents here can send messages to agents running on your other devices. Leave both fields empty and nothing leaves this machine.",
-      "server-url": "Server URL",
-      "server-url-placeholder": "wss://navide.example.com/ws",
+      "hint": "Link this machine to a Navide-Server so agents here can send messages to agents running on your other devices. Until you sign in, nothing leaves this machine.",
       "token": "Access token",
       "token-placeholder": "Paste the token issued by your server",
-      "token-stored": "A token is stored — leave empty to keep it",
       "token-hint": "Kept in the system keychain and never shown again.",
-      "save": "Save and connect",
-      "clear": "Disconnect",
       "device-id": "This device",
-      "state-unconfigured": "Not configured",
+      "state-unconfigured": "Not signed in",
       "state-connecting": "Connecting…",
       "state-connected": "Connected",
       "state-unreachable": "Cannot reach the server",
@@ -1080,12 +1076,23 @@
         "password-placeholder": "At least 8 characters",
         "display-name": "Display name",
         "tenant-name": "Network name",
-        "tenant-hint": "Creating an account gives you your own private network. Only machines signed in to it can see each other.",
+        "tenant-hint": "Creating an account gives you your own private network — only machines signed in to it can see each other. Your display name and network name are derived from your email.",
         "optional": "Optional",
         "role": "Role",
         "submit-login": "Sign in",
         "submit-register": "Create account",
-        "sign-out": "Sign out"
+        "sign-out": "Sign out",
+        "tenant": "Network",
+        "submit-token": "Link with token",
+        "hint-titlebar": "Sign in, paste a token or sign out from the account button in the titlebar.",
+        "open-window": "Sign in or create an account…",
+        "advanced": "Advanced: paste a token",
+        "verify-sent": "We sent a verification link to {email}. Open it to confirm this address.",
+        "verify-resend": "Resend",
+        "verify-resent": "Sent. Check your inbox — the link is good for 24 hours.",
+        "verify-rate-limited": "A link was just sent. Wait a minute before asking for another.",
+        "verify-required": "Verify your email address before inviting people.",
+        "verified": "Verified"
       }
     },
     "storage": {
@@ -2833,5 +2840,17 @@
     "disk-failed": "The scan could not run.",
     "reclaimable-hint": "{count} reclaimable",
     "unnamed-pane": "Terminal"
+  },
+  "account": {
+    "title": "Navide Account",
+    "tagline": "Sign in to link this machine with your other devices.",
+    "no-recovery": "There is no password reset yet — keep your password somewhere safe.",
+    "err-unsupported": "This server does not support accounts yet. It may need updating.",
+    "err-email-taken": "That email is already registered. Try signing in instead.",
+    "err-rejected": "Email or password is not correct.",
+    "err-offline": "Cannot reach the server right now. Check your connection and try again.",
+    "err-generic": "Something went wrong. Please try again.",
+    "token-stored": "A token is stored on this machine",
+    "token-linked": "Linked with a token"
   }
 }
