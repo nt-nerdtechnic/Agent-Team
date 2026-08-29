@@ -184,6 +184,7 @@ import {
   resolveActiveTab,
   resolveManualSpawnGroupId,
   runGroupCreatedAt,
+  groupPeers,
 } from './lib/runGroups'
 import {
   ALL_SCOPE_RESTORE_CONCURRENCY,
@@ -6727,6 +6728,22 @@ registerCommand('ui.pane.focus', (args) => {
   if (!paneId) throw new Error(`ui.pane.focus requires ${PANE_ID_HINT}`)
   onFocusPane(paneId)
 })
+registerCommand('ui.groupPeers', (args) => {
+  const paneId = (args as { paneId?: string } | undefined)?.paneId
+  if (!paneId) throw new Error(`ui.groupPeers requires ${PANE_ID_HINT}`)
+  const sender = panes.value.find((p) => p.id === paneId)
+  if (!sender) throw new Error(`ui.groupPeers: pane "${paneId}" not found`)
+  // Group membership is UI state the backend never learns (agent_msg.register
+  // carries no group), so a group-scoped broadcast has to ask the window that
+  // owns the sender. Unassigned panes share the synthetic 'manual' group, so
+  // they broadcast to each other rather than to nobody.
+  const peers = groupPeers(panes.value, paneId) ?? []
+  return {
+    group_id: sender.runGroupId ?? '',
+    peers: peers.map((p) => ({ pane_id: p.id, name: p.messagingName as string })),
+  }
+})
+
 registerCommand('ui.pane.getStatus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
   if (!paneId) throw new Error(`ui.pane.getStatus requires ${PANE_ID_HINT}`)

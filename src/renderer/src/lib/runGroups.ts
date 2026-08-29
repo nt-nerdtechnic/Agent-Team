@@ -41,3 +41,42 @@ export function parseLegacyRunGroups(
     return []
   }
 }
+
+/** A pane, as much of one as group scoping needs. */
+export interface GroupPeerPane {
+  id: string
+  runGroupId?: string
+  workspacePath?: string
+  messagingName?: string
+}
+
+/** The panes a group-scoped broadcast from `senderId` should reach.
+ *
+ *  Same tab group and same workspace, sender excluded, and only panes that can
+ *  actually receive — a pane with no messaging handle (a plain terminal) is not
+ *  addressable at all. Panes in no group share the synthetic manual group, so
+ *  unassigned panes reach each other rather than nobody, which is what makes
+ *  "broadcast to my group" mean something for a user who never made a group.
+ *
+ *  Returns null when the sender itself is not here: that is a different answer
+ *  from "your group is empty", and the caller reports it differently. */
+export function groupPeers<T extends GroupPeerPane>(
+  panes: readonly T[],
+  senderId: string,
+): T[] | null {
+  const sender = panes.find((p) => p.id === senderId)
+  if (!sender) return null
+  const group = sender.runGroupId ?? ''
+  const workspace = normalizeWorkspace(sender.workspacePath)
+  return panes.filter(
+    (p) =>
+      p.id !== senderId &&
+      !!p.messagingName &&
+      (p.runGroupId ?? '') === group &&
+      normalizeWorkspace(p.workspacePath) === workspace,
+  )
+}
+
+function normalizeWorkspace(path: string | undefined): string {
+  return (path ?? '').replace(/\/+$/, '')
+}
