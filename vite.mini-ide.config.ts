@@ -28,6 +28,7 @@ const APP_VERSION: string = JSON.parse(
 // outside this root into src/ — fine for a build (no dev-server fs restriction).
 const pluginRoot = resolve(__dirname, 'src/renderer/plugins/mini-ide')
 const capabilityBackend = resolve(pluginRoot, 'capabilityBackend')
+const capabilityShell = resolve(pluginRoot, 'capabilityShell')
 const outDir = resolve(__dirname, 'dist-plugins/mini-ide')
 
 // Emit manifest.json into the bundle so the SAME output serves as the app's
@@ -68,6 +69,9 @@ export default defineConfig({
     //   ../../composables/useBackend  ./useBackend  ../useBackend
     alias: [
       { find: /^(?:\.\.?\/)+(?:composables\/)?useBackend$/, replacement: capabilityBackend },
+      // Same swap for the privileged shell actions: a plugin view has no
+      // `window.agentTeam`, so hostShell's calls must go through the broker.
+      { find: /^(?:\.\.?\/)+(?:composables\/)?hostShell$/, replacement: capabilityShell },
       { find: '@navide/plugin-ui/shared', replacement: resolve(__dirname, 'packages/plugin-ui/src/shared/index.ts') },
       { find: '@navide/plugin-ui/styles.css', replacement: resolve(__dirname, 'packages/plugin-ui/src/foundation/styles.css') },
       { find: '@navide/plugin-ui/foundation', replacement: resolve(__dirname, 'packages/plugin-ui/src/foundation/index.ts') },
