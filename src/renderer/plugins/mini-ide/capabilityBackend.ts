@@ -150,6 +150,17 @@ const EXPLICIT: Record<string, CapabilityRef> = {
   // the plugin origin has no bootstrap snapshot, so without this mapping the
   // cache stays empty and useTheme falls back to the default dark theme.
   'ui.settings.get': { ns: 'ui', method: 'settings_get' },
+  // Shell-level UI actions the embedded GitPane reaches through its host port
+  // (hostSurfacePorts' createHostGitWindowUiPort sends these as WS types).
+  // They are HOST_CAPABILITIES — the broker runs them in the main process
+  // rather than dispatching to the backend, which has no handler for them.
+  // Without these entries every one of them answers UNMAPPED_CAPABILITY, and
+  // the pane's "Reveal in Finder" / "Open in editor" menu items do nothing.
+  'ui.reveal_path': { ns: 'ui', method: 'reveal_path' },
+  'ui.open_external': { ns: 'ui', method: 'open_external' },
+  'ui.open_in_editor': { ns: 'ui', method: 'open_in_editor' },
+  'ui.open_workspace': { ns: 'ui', method: 'open_workspace' },
+  'ui.pick_folder': { ns: 'ui', method: 'pick_folder' },
 }
 
 /**

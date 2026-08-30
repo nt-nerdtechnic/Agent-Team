@@ -145,6 +145,10 @@ contextBridge.exposeInMainWorld('agentTeam', {
   onBackendChanged: (cb: (info: BackendInfo) => void): void => {
     ipcRenderer.on('backend:changed', (_event, info: BackendInfo) => cb(info))
   },
+  // Ask the Host to leave legacy Git recovery and re-activate the bundled v2
+  // package. Called when the user opens the Git tab, which is the natural
+  // retry for a downgrade caused by a transient activation failure.
+  retryGitV2: (): Promise<{ ok: boolean; reason?: string }> => ipcRenderer.invoke('git:retryV2'),
   onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void): (() => void) => {
     const listener = (_event: unknown, payload: unknown): void => {
       if (isGitRecoveryChanged(payload)) cb(payload)

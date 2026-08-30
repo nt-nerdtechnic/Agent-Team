@@ -34,6 +34,7 @@ function build(over: Partial<Parameters<typeof buildWorkspaceGroups>[0]> = {}) {
     panes: [],
     lineage: [],
     runGroups: [],
+    runGroupsByWorkspace: {},
     collapsed: new Set<string>(),
     homeDir: HOME,
     ...over,
@@ -130,6 +131,66 @@ describe('buildWorkspaceGroups', () => {
     expect(rows[0].groups[0].rows.map((r) => r.id)).toEqual(['a'])
   })
 
+  it('groups a held workspace the window is not looking at', () => {
+    // Groups are persisted per workspace. Reading only the viewed one's list
+    // made every other workspace's panes fall into the ungrouped catch-all, so
+    // switching away flattened a project's Run sections in the sidebar.
+    const rows = build({
+      here: A,
+      order: [A, B],
+      panes: [pane('b1', B, 'g1'), pane('b2', B, 'g2')],
+      lineage: [row('b1'), row('b2')],
+      runGroups: [],
+      runGroupsByWorkspace: { [B]: [{ id: 'g1', name: 'Run 1' }, { id: 'g2', name: 'Run 2' }] },
+    })
+    const beta = rows.find((r) => r.path === B)!
+    expect(beta.groups.map((g) => [g.id, g.name])).toEqual([
+      ['g1', 'Run 1'],
+      ['g2', 'Run 2'],
+    ])
+  })
+
+  it('falls back to one flat section for a held workspace not loaded yet', () => {
+    // A peek that has not answered must not lose the panes off the sidebar.
+    const rows = build({
+      here: A,
+      order: [A, B],
+      panes: [pane('b1', B, 'g1')],
+      lineage: [row('b1')],
+      runGroupsByWorkspace: {},
+    })
+    const beta = rows.find((r) => r.path === B)!
+    expect(beta.groups).toHaveLength(1)
+    expect(beta.groups[0].id).toBe('')
+    expect(beta.groups[0].rows.map((r) => r.id)).toEqual(['b1'])
+  })
+
+  it('splits the viewed workspace by the live list, not the stored copy', () => {
+    // The tab bar edits runGroups; the store only catches up on save. A rename
+    // in flight has to show the new name, not the one last written to disk.
+    const rows = build({
+      here: A,
+      order: [A],
+      panes: [pane('a', A, 'g1')],
+      lineage: [row('a')],
+      runGroups: [{ id: 'g1', name: 'renamed' }],
+      runGroupsByWorkspace: { [A]: [{ id: 'g1', name: 'stale' }] },
+    })
+    expect(rows[0].groups[0].name).toBe('renamed')
+  })
+
+  it('matches a stored workspace key that carries a trailing slash', () => {
+    const rows = build({
+      here: A,
+      order: [A, `${B}/`],
+      panes: [pane('b1', B, 'g1')],
+      lineage: [row('b1')],
+      runGroupsByWorkspace: { [B]: [{ id: 'g1', name: 'Run 1' }] },
+    })
+    const beta = rows.find((r) => r.path === `${B}/`)!
+    expect(beta.groups.map((g) => g.name)).toEqual(['Run 1'])
+  })
+
   it('is one ungrouped section when nobody has made a group', () => {
     // Which is what makes an untouched workspace render exactly as before.
     const rows = build({ panes: [pane('a', A)], lineage: [row('a')] })
@@ -217,15 +278,22 @@ describe('buildWorkspaceGroups', () => {
   })
 
   it('splits a fallback row into run groups like any other row', () => {
+    // Its own groups, not the viewed workspace's: a row is split by the list
+    // belonging to the workspace it names. Reading `runGroups` here would put
+    // this project's tab names on another project's panes, and only ever match
+    // by coincidence of ids.
     const rows = build({
       here: A,
       order: [A],
       panes: [pane('x', C, 'g1'), pane('y', C)],
       lineage: [row('x'), row('y')],
-      runGroups: [{ id: 'g1', name: 'one' }],
+      runGroups: [{ id: 'g1', name: 'the viewed workspace' }],
+      runGroupsByWorkspace: { [C]: [{ id: 'g1', name: 'one' }] },
     })
-    expect(rows.find((r) => r.path === C)?.groups.map((g) => [g.id, g.rows.map((r) => r.id)]))
+    const gamma = rows.find((r) => r.path === C)
+    expect(gamma?.groups.map((g) => [g.id, g.rows.map((r) => r.id)]))
       .toEqual([['g1', ['x']], ['', ['y']]])
+    expect(gamma?.groups[0].name).toBe('one')
   })
 
   it('does not list a workspace twice for panes it already holds', () => {

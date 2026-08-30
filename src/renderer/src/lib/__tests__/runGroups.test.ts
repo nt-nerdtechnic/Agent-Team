@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  groupPeers,
   parseLegacyRunGroups,
   resolveActiveTab,
   resolveManualSpawnGroupId,
@@ -103,5 +104,57 @@ describe('parseLegacyRunGroups', () => {
   it('yields [] (not null) for corrupt or non-array data', () => {
     expect(parseLegacyRunGroups('{not json')).toEqual([])
     expect(parseLegacyRunGroups('{"id":"rg-1"}')).toEqual([])
+  })
+})
+
+
+describe('groupPeers', () => {
+  const pane = (
+    id: string,
+    over: Partial<{ runGroupId: string; workspacePath: string; messagingName: string }> = {},
+  ) => ({ id, workspacePath: '/ws/a', messagingName: id, ...over })
+
+  it('reaches the sender group-mates and nobody else', () => {
+    const panes = [
+      pane('me', { runGroupId: 'rg-1' }),
+      pane('mate', { runGroupId: 'rg-1' }),
+      pane('other-group', { runGroupId: 'rg-2' }),
+      pane('other-ws', { runGroupId: 'rg-1', workspacePath: '/ws/b' }),
+    ]
+    expect(groupPeers(panes, 'me')?.map((p) => p.id)).toEqual(['mate'])
+  })
+
+  it('never includes the sender itself', () => {
+    const panes = [pane('me', { runGroupId: 'rg-1' })]
+    expect(groupPeers(panes, 'me')).toEqual([])
+  })
+
+  it('skips panes that cannot receive at all', () => {
+    // A plain terminal pane has no messaging handle, so it is not addressable.
+    const panes = [
+      pane('me', { runGroupId: 'rg-1' }),
+      { id: 'terminal', workspacePath: '/ws/a', runGroupId: 'rg-1' },
+    ]
+    expect(groupPeers(panes, 'me')).toEqual([])
+  })
+
+  it('lets unassigned panes reach each other', () => {
+    // Otherwise "broadcast to my group" would mean nothing for a user who never
+    // made a group — a silent surprise rather than a useful default.
+    const panes = [pane('me'), pane('also-loose'), pane('grouped', { runGroupId: 'rg-1' })]
+    expect(groupPeers(panes, 'me')?.map((p) => p.id)).toEqual(['also-loose'])
+  })
+
+  it('treats a trailing slash on a workspace path as the same workspace', () => {
+    const panes = [
+      pane('me', { workspacePath: '/ws/a/' }),
+      pane('mate', { workspacePath: '/ws/a' }),
+    ]
+    expect(groupPeers(panes, 'me')?.map((p) => p.id)).toEqual(['mate'])
+  })
+
+  it('answers null when the sender is not here at all', () => {
+    // Distinct from an empty group: the caller reports the two differently.
+    expect(groupPeers([pane('someone')], 'ghost')).toBeNull()
   })
 })

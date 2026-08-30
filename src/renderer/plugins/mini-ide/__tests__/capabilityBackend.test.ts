@@ -54,6 +54,12 @@ const MINI_IDE_SENT_TYPES = [
   'ai.review.start', 'ai.review.stop', 'analyzer.models',
   // ui / settings (set + the connect-time reconcile read in lib/settings.ts)
   'ui.settings.set', 'ui.settings.get',
+  // ui / shell actions the embedded GitPane sends through its host ui port
+  // (createHostGitWindowUiPort). These are host capabilities, not backend
+  // handlers — the backend has none, so an unmapped type here means the pane's
+  // reveal/open menu items silently do nothing.
+  'ui.reveal_path', 'ui.open_external', 'ui.open_in_editor', 'ui.open_workspace',
+  'ui.pick_folder',
   // issues (GitPane → useIssues, gh/glab CRUD)
   'issues.provider', 'issues.list', 'issues.get', 'issues.create', 'issues.comment',
   'issues.set_state',
@@ -89,6 +95,7 @@ describe('TYPE_TO_CAP coverage', () => {
     // Settings reconcile read — without this the plugin's settings cache stays
     // empty on connect and the theme falls back to the dark default.
     expect(resolveCapability('ui.settings.get')).toEqual({ ns: 'ui', method: 'settings_get' })
+    expect(resolveCapability('ui.reveal_path')).toEqual({ ns: 'ui', method: 'reveal_path' })
     // Branch-Diff AI code review requests ride the chat namespace, matching the
     // chat-gated ai.review.* result events in CAP_EVENTS.
     expect(resolveCapability('ai.review.start')).toEqual({ ns: 'chat', method: 'review_start' })

@@ -557,9 +557,20 @@ describe('GitWindowApp — Editorial Calm wiring', () => {
     await row!.find('button[title="Lock"]').trigger('click')
     await flushPromises()
     expect(callsOf('git.lock_worktree')[0]!.payload).toMatchObject({ worktree_path: '/tmp/wt-feature' })
-    await row!.find('button[title="Reveal in Finder"]').trigger('click')
-    await flushPromises()
-    expect(callsOf('ui.reveal_path')[0]!.payload).toMatchObject({ path: '/tmp/wt-feature' })
+    // Reveal goes through the preload bridge, NOT a WS type: the backend has
+    // no `ui.reveal_path` handler, so sending it there resolved ok:false and
+    // the reveal silently did nothing.
+    const originalAgentTeam = window.agentTeam
+    const revealPath = vi.fn(async () => ({ ok: true }))
+    window.agentTeam = { revealPath } as unknown as typeof window.agentTeam
+    try {
+      await row!.find('button[title="Reveal in Finder"]').trigger('click')
+      await flushPromises()
+      expect(revealPath).toHaveBeenCalledWith('/tmp/wt-feature')
+      expect(callsOf('ui.reveal_path')).toHaveLength(0)
+    } finally {
+      window.agentTeam = originalAgentTeam
+    }
   })
 
   it('opens the remote URL through the ui.open_external host capability', async () => {

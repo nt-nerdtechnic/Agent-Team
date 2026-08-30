@@ -660,6 +660,124 @@ async def _send_to_device(
     }
 
 
+#: Reserved `to:` value that fans a message out to the sender's own tab group.
+#: Deliberately NOT the bare-line protocol's "all"/"*": that one means every
+#: pane in the window, and one word meaning two scopes would be very hard to
+#: debug. A pane actually named "group" therefore cannot be addressed by name —
+#: the same trade-off "all" already carries.
+GROUP_TARGET = "group"
+
+
+def _is_group_target(to: str) -> bool:
+    return (to or "").strip().lower() == GROUP_TARGET
+
+
+async def _send_to_group(caller: "_Caller", me: str, text: str) -> dict[str, Any]:
+    """Deliver *text* to every other pane in the sender's own tab group.
+
+    Groups are UI state the backend never learns — ``agent_msg.register``
+    carries no group id — so the recipient set is asked of the window that owns
+    the sender, and each recipient is then delivered to through the ordinary
+    single-message path. That is what keeps a broadcast's per-recipient
+    rate-limit budget, idle hold and delivery report identical to a direct send.
+    """
+    from agent_team_backend import agent_messaging
+
+    sender = agent_messaging.get(me)
+    if sender is None:
+        return {
+            "ok": False,
+            "error": "your pane is no longer registered — reopen it to broadcast",
+            "error_code": "unknown-target",
+        }
+
+    ui = await _ui_request(
+        sender.workspace_path,
+        "invoke",
+        caller=_pane_caller(me),
+        action="ui.groupPeers",
+        args={"paneId": me},
+    )
+    if not ui.get("ok"):
+        return {
+            "ok": False,
+            "error": ui.get("error") or "the window owning your pane did not answer",
+            "error_code": ui.get("error_code") or "ui_action_timeout",
+        }
+
+    result = ui.get("result") or {}
+    peers = result.get("peers") or []
+    recipients: list[dict[str, Any]] = []
+    for peer in peers:
+        pane_id = str((peer or {}).get("pane_id") or "")
+        name = str((peer or {}).get("name") or "")
+        entry = agent_messaging.current(pane_id) if pane_id else None
+        if entry is None or entry.offline:
+            # The window listed it a moment ago; it went away in between. Say so
+            # per recipient rather than failing the whole broadcast.
+            recipients.append(
+                {"name": name, "pane_id": pane_id, "accepted": False, "reason": "target-offline"}
+            )
+            continue
+        msg_key = await _dispatch_delivery(
+            entry, text, caller=caller, me=me, cross_workspace=False
+        )
+        recipients.append(
+            {"name": entry.name, "pane_id": entry.pane_id, "msg_key": msg_key, "accepted": True}
+        )
+    return {
+        "ok": True,
+        "broadcast": GROUP_TARGET,
+        "group_id": str(result.get("group_id") or ""),
+        "delivered_to": sum(1 for r in recipients if r["accepted"]),
+        "recipients": recipients,
+    }
+
+
+async def _dispatch_delivery(
+    entry: Any, text: str, *, caller: "_Caller", me: str, cross_workspace: bool
+) -> str:
+    """Hand one message to the windows and record it; returns its msg_key.
+
+    Shared by the single-target send and the group broadcast, which differ only
+    in how they pick recipients — every message is delivered, rate-limited, held
+    and reported exactly alike whichever way it was addressed.
+    """
+    from agent_team_backend import agent_messaging, app
+    from agent_team_backend.ipc import make_event
+
+    sender = agent_messaging.get(me) if me else None
+    msg_key = f"{me or caller.kind}:mcp:{secrets.token_hex(8)}"
+    await app.broadcast(
+        make_event(
+            "agent_msg.deliver",
+            {
+                "msg_key": msg_key,
+                "target_pane_id": entry.pane_id,
+                "target_workspace_path": entry.workspace_path,
+                "target_name": entry.name,
+                "target_agent_key": entry.agent_key,
+                "from_pane_id": me,
+                "from_display": agent_messaging.sender_display(
+                    me, "an external client" if caller.kind == "external" else "a host client"
+                ),
+                "from_workspace_path": sender.workspace_path if sender else "",
+                "from_agent_key": sender.agent_key if sender else "",
+                "cross_workspace": cross_workspace,
+                "content": text,
+                # The frontend applies the per-pair rate limit when it sends;
+                # a message that entered here never passed through that, so the
+                # receiving window has to apply it instead. Without this, two
+                # agents replying to each other through cli_send have no loop
+                # guard at all.
+                "rate_limit": True,
+            },
+        )
+    )
+    _record_message_sent(msg_key, entry.qualified_name, me or caller.kind, text)
+    return msg_key
+
+
 @server.tool()
 async def cli_send(
     to: str,
@@ -677,6 +795,19 @@ async def cli_send(
     text is delivered verbatim and submitted for the receiving agent to act on,
     once that pane is idle; it is queued if the pane is mid-turn. An unknown or
     ambiguous target is refused rather than guessed.
+
+    `to: "group"` broadcasts instead: every other pane in YOUR OWN tab group,
+    in your own workspace. Deliberately narrower than the bare-line protocol's
+    `all`, which means every pane in the window regardless of group. Panes in no
+    group share one implicit group, so they reach each other rather than nobody.
+    A caller with no pane identity has no group and is refused ("no-group").
+    The answer is a different shape — {ok, broadcast, group_id, delivered_to,
+    recipients: [{name, pane_id, msg_key, accepted, reason?}]} — with ONE
+    msg_key per recipient, because each is an ordinary independent message:
+    its own rate-limit budget, its own idle hold, its own delivery report. Pass
+    each key to cli_check_message separately; `wait_for_delivery_s` does not
+    apply to a broadcast and is ignored. An empty `recipients` means your group
+    has nobody else in it — not a failure.
 
     `pane_id` addresses one exact pane and makes `to` unnecessary — copy it from
     cli_list_targets. Reach for it when a name cannot say which pane you mean:
@@ -744,6 +875,15 @@ async def cli_send(
         return {"ok": False, "error": "text is empty"}
     me = caller.pane_id if caller.kind == "pane" else ""
     target_id = (pane_id or "").strip()
+    if not target_id and _is_group_target(to):
+        if caller.kind != "pane":
+            return {
+                "ok": False,
+                "error": 'a caller with no pane identity has no group to broadcast to — '
+                'address panes individually, or by pane_id',
+                "error_code": "no-group",
+            }
+        return await _send_to_group(caller, me, text)
     # An id is already as qualified as an address gets, so the rule that a
     # caller with no workspace of its own must name one does not apply to it.
     if not target_id and caller.kind != "pane" and "/" not in (to or ""):
@@ -794,35 +934,9 @@ async def cli_send(
     if me and result.pane.pane_id == me:
         return {"ok": False, "error": "that is your own pane"}
 
-    sender = agent_messaging.get(me) if me else None
-    msg_key = f"{me or caller.kind}:mcp:{secrets.token_hex(8)}"
-    await app.broadcast(
-        make_event(
-            "agent_msg.deliver",
-            {
-                "msg_key": msg_key,
-                "target_pane_id": result.pane.pane_id,
-                "target_workspace_path": result.pane.workspace_path,
-                "target_name": result.pane.name,
-                "target_agent_key": result.pane.agent_key,
-                "from_pane_id": me,
-                "from_display": agent_messaging.sender_display(
-                    me, "an external client" if caller.kind == "external" else "a host client"
-                ),
-                "from_workspace_path": sender.workspace_path if sender else "",
-                "from_agent_key": sender.agent_key if sender else "",
-                "cross_workspace": result.cross_workspace,
-                "content": text,
-                # The frontend applies the per-pair rate limit when it sends;
-                # a message that entered here never passed through that, so the
-                # receiving window has to apply it instead. Without this, two
-                # agents replying to each other through cli_send have no loop
-                # guard at all.
-                "rate_limit": True,
-            },
-        )
+    msg_key = await _dispatch_delivery(
+        result.pane, text, caller=caller, me=me, cross_workspace=result.cross_workspace
     )
-    _record_message_sent(msg_key, result.pane.qualified_name, me or caller.kind, text)
     return await _with_delivery_wait(
         {
             "ok": True,
@@ -1798,6 +1912,18 @@ async def cli_send_and_wait(
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     me = caller.pane_id if caller.kind == "pane" else ""
+    if not (pane_id or "").strip() and _is_group_target(to):
+        # Without this the group keyword would be resolved as a pane name and
+        # come back "unknown target", which reads like a typo rather than like
+        # the real answer: waiting is per-turn, and a broadcast has no single
+        # turn to wait for.
+        return {
+            "ok": False,
+            "error": 'cli_send_and_wait cannot broadcast — "group" reaches several '
+            "panes and there is no one turn to wait for. Use cli_send with "
+            'to="group", then cli_wait_idle on the recipients you care about',
+            "error_code": "broadcast-unsupported",
+        }
     # Same gate as cli_send, applied before the resolve below so an unqualified
     # address gets the same answer here as it would there.
     resolved, failure = _resolve_pane_target(caller, me, to, pane_id)

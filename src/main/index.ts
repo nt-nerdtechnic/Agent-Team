@@ -89,11 +89,23 @@ import {
 } from './permissions'
 import { resolveBackendDataDir, readUiSettingsText, UI_SETTINGS_FILE } from './ui-settings-bootstrap'
 import { PlanWindowRegistry } from './plan-windows'
+import { warnMain } from './main-log'
 import {
   GitAccountsStore,
   type GitAccountCrypto,
   type GitAccountInput
 } from './gitAccountsStore'
+
+// Dev isolation: give a `npm run dev` instance its own Electron userData so its
+// renderer localStorage (layout, settings) doesn't clobber the packaged app's
+// when both run at once. Must be set before the app is ready / userData is read
+// — and module-level state below (plugin capability grants, factory opt-outs,
+// the installed-plugin scan, plugin storage lifecycle) resolves userData
+// eagerly, so this has to run before any of it. The backend's state dir is
+// isolated separately (see backend.ts). Packaged builds are untouched.
+if (!app.isPackaged) {
+  app.setPath('userData', `${app.getPath('userData')}-dev`)
+}
 
 if (process.platform === 'darwin') {
   app.dock.setIcon(nativeImage.createFromPath(join(__dirname, '../../resources/icon.png')))
@@ -616,11 +628,11 @@ frontendPluginManager.setCapabilityGrantResolver((pluginId, packageVersion) =>
   pluginCapabilityGrants.get(pluginId, packageVersion)
 )
 const factoryGitActivations = installedPluginLoad.activationCatalog.slice(0, 0)
+const factoryGitDir = (): string => app.isPackaged
+  ? join(process.resourcesPath, 'plugins', 'navide-git')
+  : join(__dirname, '../../dist-plugins/navide-git')
 function loadFactoryGitPackage() {
-  const factoryGitDir = app.isPackaged
-    ? join(process.resourcesPath, 'plugins', 'navide-git')
-    : join(__dirname, '../../dist-plugins/navide-git')
-  const factoryGit = frontendPluginManager.loadFactoryPlugin(factoryGitDir, 'navide.git')
+  const factoryGit = frontendPluginManager.loadFactoryPlugin(factoryGitDir(), 'navide.git')
   if (!factoryGit.loaded) return factoryGit
   const descriptor = frontendPluginManager.getDescriptor(factoryGit.pluginId)
   const policy = descriptor?.capabilityPolicy
@@ -651,9 +663,9 @@ if (shouldAttemptFactoryGit({
   if (selection.mode === 'v2') factoryGitActivations.push(selection.activation)
   else if (selection.mode === 'legacy') {
     gitRecoveryEnabled = true
-    console.warn(`[main] bundled navide.git v2 failed; using legacy recovery: ${selection.v2Reason}`)
+    warnMain(`[main] bundled navide.git v2 failed; using legacy recovery: ${selection.v2Reason}`)
   } else {
-    console.warn(
+    warnMain(
       `[main] bundled navide.git is unavailable: ${selection.v2Reason}; ${selection.legacyReason}`
     )
   }
@@ -668,6 +680,11 @@ frontendPluginManager.setActivationFailureHandler((failure) => {
       resourcesPath: process.resourcesPath,
     }),
     onActivated: () => {
+      // The only record of *why* the session downgraded. Without it a user
+      // reporting the "Legacy recovery" panel left nothing to diagnose from.
+      warnMain(
+        `[main] navide.git v2 activation failed (${failure.reason}); switched to legacy recovery`
+      )
       gitRecoveryEnabled = true
       for (const [key, hostWindow] of contributionWindows) {
         if (key.startsWith('navide.git.') && !hostWindow.isDestroyed()) hostWindow.close()
@@ -680,7 +697,7 @@ frontendPluginManager.setActivationFailureHandler((failure) => {
     },
   })
   if (!recovered && failure.pluginId === 'navide.git') {
-    console.warn(
+    warnMain(
       `[main] failed navide.git v2 activation could not switch to legacy recovery: ${failure.reason}`
     )
   }
@@ -718,6 +735,51 @@ const applyPluginActivationChange = ({
     }
   }
 }
+/** Re-activate the App-bundled v2 package, from a cold start or from legacy
+ *  recovery. Recovery keeps the package registered, so the plain factory load
+ *  refuses to run again and needs the recovery-specific seam. */
+function activateFactoryGitPackage():
+  | { loaded: true; activation: (typeof approvedInstalledPluginActivations)[number] }
+  | { loaded: false; reason: string } {
+  if (!gitRecoveryEnabled) return loadFactoryGitPackage()
+  const restored = frontendPluginManager.restoreFactoryAfterRecovery(factoryGitDir(), 'navide.git')
+  return restored.restored
+    ? { loaded: true, activation: restored.activation }
+    : { loaded: false, reason: restored.reason }
+}
+
+// A failed v2 activation is usually transient: a readiness handshake that
+// missed its budget under load, or a guest torn down before it reported ready.
+// The downgrade used to last the whole session, with no way back but a
+// restart. Opening the Git tab is the user's natural retry, so spend a small
+// budget of v2 attempts there before the session settles on legacy Git.
+const GIT_V2_RECOVERY_RETRIES = 2
+let gitV2RetriesLeft = GIT_V2_RECOVERY_RETRIES
+function retryGitV2AfterRecovery(): { ok: boolean; reason?: string } {
+  if (!gitRecoveryEnabled) return { ok: true }
+  if (gitRecoveryForced) return { ok: false, reason: 'NAVIDE_GIT_RECOVERY=legacy is forcing legacy recovery' }
+  if (pluginFactoryOptOuts.has('navide.git')) return { ok: false, reason: 'factory package is opted out' }
+  if (gitV2RetriesLeft <= 0) return { ok: false, reason: 'no v2 attempt left this session' }
+  gitV2RetriesLeft -= 1
+  const restored = activateFactoryGitPackage()
+  if (!restored.loaded) {
+    warnMain(`[main] navide.git v2 retry failed: ${restored.reason}`)
+    return { ok: false, reason: restored.reason }
+  }
+  gitRecoveryEnabled = false
+  applyPluginActivationChange({ pluginId: 'navide.git', activation: restored.activation })
+  for (const hostWindow of mainWindows) {
+    if (hostWindow.isDestroyed() || detachedWindowIds.has(hostWindow.id)) continue
+    hostWindow.webContents.send('git:recoveryChanged', { legacy: false })
+  }
+  warnMain(`[main] navide.git v2 restored after legacy recovery; ${gitV2RetriesLeft} retry left`)
+  return { ok: true }
+}
+ipcMain.handle('git:retryV2', (event) => {
+  if (!isTrustedPluginManagementSender(event, mainWindows)) return { ok: false, reason: 'untrusted sender' }
+  return retryGitV2AfterRecovery()
+})
+
 const pluginTrustRefresh = registerPluginIpc(
   frontendPluginManager,
   pluginsRoot(),
@@ -749,7 +811,7 @@ const pluginTrustRefresh = registerPluginIpc(
       if (existsSync(join(pluginsRoot(), pluginId))) {
         throw new Error('an installed package already owns this plugin id')
       }
-      const restored = loadFactoryGitPackage()
+      const restored = activateFactoryGitPackage()
       if (!restored.loaded) throw new Error(restored.reason)
       pluginFactoryOptOuts.remove(pluginId)
       gitRecoveryEnabled = false
@@ -2899,15 +2961,6 @@ if (gpuDisabled) {
   )
 }
 
-// Dev isolation: give a `npm run dev` instance its own Electron userData so its
-// renderer localStorage (layout, settings) doesn't clobber the packaged app's
-// when both run at once. Must be set before the app is ready / userData is read.
-// The backend's state dir is isolated separately (see backend.ts). Packaged
-// builds are untouched.
-if (!app.isPackaged) {
-  app.setPath('userData', `${app.getPath('userData')}-dev`)
-}
-
 // Chrome DevTools Protocol (CDP) debug toggle (Settings > MCP > External
 // access). Must be applied before the app is ready — Electron only honors
 // --remote-debugging-port set at this point. readCdpDebugConfig resolves any
@@ -3046,7 +3099,7 @@ app.whenReady().then(async () => {
       resourcesPath: process.resourcesPath,
     })
     if (!recovery.registered) {
-      console.warn(`[main] NAVIDE_GIT_RECOVERY=legacy but legacy Git bundle is unavailable: ${recovery.reason}`)
+      warnMain(`[main] NAVIDE_GIT_RECOVERY=legacy but legacy Git bundle is unavailable: ${recovery.reason}`)
     }
   }
   // The plugin-view dev entry is opt-in via AGENT_TEAM_PLUGIN_DEV=1 so the
@@ -3096,6 +3149,7 @@ app.whenReady().then(async () => {
     onNewWindow: () => void createWindow(),
     onOpenPipelineManager: () => requestPipelineManager(),
     onOpenResourceManager: () => requestResourceManager(),
+    onOpenAccount: () => sendMenuAction('open-account'),
     onOpenRepo: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide'),
     onReportIssue: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide/issues'),
     onShowShortcuts: () => sendMenuAction('show-shortcuts'),

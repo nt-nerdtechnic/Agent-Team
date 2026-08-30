@@ -56,7 +56,10 @@ export interface TerminalDockPort {
   input(sessionId: string, data: string, timeoutMs?: number): Promise<PortResponse>
   create(request: TerminalCreateRequest, timeoutMs: number): Promise<PortResponse<TerminalCreateResult>>
   cancelCreate(paneId: string, createGeneration: string): Promise<PortResponse>
-  reattach(sessionIds: string[], cols: number, rows: number): Promise<PortResponse<{ alive: string[]; dead: string[] }>>
+  /** `logs` maps a surviving session id to the transcript it is actually
+   *  appending to — the file opened when that PTY was created, which a pane
+   *  reattaching under a new id cannot derive from its own id. */
+  reattach(sessionIds: string[], cols: number, rows: number): Promise<PortResponse<{ alive: string[]; dead: string[]; logs?: Record<string, string> }>>
   resize(sessionId: string, cols: number, rows: number): Promise<PortResponse>
   interrupt(sessionId: string): Promise<PortResponse>
   kill(sessionId: string, force: boolean): Promise<PortResponse>

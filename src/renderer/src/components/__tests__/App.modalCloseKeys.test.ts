@@ -21,6 +21,7 @@ const MODALS: Array<[string, string]> = [
   ['!!whatsNewEntry.value', 'dismissWhatsNew()'],
   ['showRestoreScopeModal.value', 'settleRestoreScope(null)'],
   ['showSettings.value', 'showSettings.value = false'],
+  ['showAccount.value', 'showAccount.value = false'],
   ['showDebug.value', 'showDebug.value = false'],
   ['showPipelineManager.value', 'pmRef.value?.closeTopLayer?.()'],
   ['showHistory.value', 'historyModalRef.value?.closeTopLayer?.()'],

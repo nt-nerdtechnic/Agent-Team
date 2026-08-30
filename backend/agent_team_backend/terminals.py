@@ -169,6 +169,19 @@ def _forget_live_log(session_id: str) -> None:
         _live_output_logs.pop(session_id, None)
 
 
+def live_output_log_for(session_id: str) -> str:
+    """The transcript path this PTY session is actually appending to.
+
+    A pane that reattaches to a live PTY never calls create(), so no log is
+    opened for it and the path its caller computed from the new pane id names
+    a file that will never exist. The conversation is in the file the session
+    opened when it was first created — this is how a reattaching pane finds it
+    instead of inventing a name nothing writes to.
+    """
+    with _live_output_logs_lock:
+        return _live_output_logs.get(session_id, "")
+
+
 def live_output_log_paths() -> set[str]:
     """Paths of the transcript logs live panes are writing into right now.
 

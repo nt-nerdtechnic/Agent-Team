@@ -94,6 +94,18 @@ Parser 套用的規則：
 一個其他 Pane。每個收件者都會拿到一則普通而獨立的訊息 —— 有自己的佇列位置、
 Rate Limit 額度與記錄列。廣播絕不跨越 Workspace。
 
+MCP 呼叫端還有第二種、範圍更窄的廣播：`cli_send` 的 `to: "group"` 會把訊息扇出給
+**寄件者自己那個分頁群組**中的每一個其他 Pane，一樣限於寄件者的 Workspace。這兩
+種範圍刻意用兩個不同的字 —— `all` 是整個視窗、不看群組，`group` 停在群組邊界；同
+一個字代表兩種範圍會非常難除錯。它的代價與 `all` 本來就有的代價相同：真的取名叫
+`group` 的 Pane，從此無法透過 `cli_send` 以名稱定址。不屬於任何群組的 Pane 共用同
+一個隱含群組，因此它們互相送得到，而不是誰也送不到 —— 對從沒建立過群組的人來說，
+「廣播給我的群組」不會無聲地什麼都不做。每個收件者同樣是一則普通而獨立的訊息，因
+此群組廣播回傳的是**每個收件者各一個** `msg_key`，而不是整次送出共用一個；形狀見
+[外部 MCP 控制](external-mcp-control.md)。群組是 Backend 從來不知道的 UI 狀態 ——
+`agent_msg.register` 不帶群組 id —— 所以 MCP Server 會去問擁有寄件者的那個視窗誰
+與它同群組，再走一般的單則訊息路徑逐一遞送。
+
 ### 另一個 Workspace
 
 以 `<folder>/<pane>` 對另一個 Workspace 視窗中的 Pane 定址：
@@ -619,6 +631,7 @@ Agent 不必有 Messages 面板可看，也能讀到同一個原因 ——
 | `unknown-workspace` / `ambiguous-workspace` | 一個沒有對應到任何開啟中 Workspace、或對應到多個的 `<folder>/<pane>` 位址 |
 | `unknown-target-in-workspace` / `ambiguous-target` | Workspace 解析成功，但 Pane 名稱沒有 —— 或是對應到兩個 |
 | `unknown-pane-id` | 一個在這台機器上指不到任何 Pane 的 `pane_id` —— 去 `cli_list_targets` 讀一個新的 |
+| `no-group` | 沒有 Pane、因此也沒有群組的呼叫端，要求 `cli_send` 廣播給群組 |
 
 ---
 

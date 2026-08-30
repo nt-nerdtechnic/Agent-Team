@@ -3095,6 +3095,15 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
   // opts.resumeKey (the stable CLI session id) — the paneId is regenerated on
   // restore and would never match.
   let persistKey = paneId
+  // The transcript this pane's PTY is actually writing to.
+  //
+  // spawn()'s caller derives a path from the NEW pane id and hands it over,
+  // but a spawn that reattaches never reaches terminal.create, so nothing ever
+  // opens that file: the conversation stays in the log the surviving PTY
+  // opened under its original id. The backend reports that path on reattach
+  // and it is adopted here, so the caller can record what exists rather than
+  // what it guessed.
+  const attachedOutputLogFile = ref('')
   // Previous PTY id snapshotted at spawn() time (before tryReattach can clear
   // it) — sent as replaces_terminal_id so the backend reaps the predecessor.
   let replacesPtyId = ''
@@ -3641,6 +3650,9 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
         rememberSessionId('')  // stale id — fall through to a fresh spawn
         return false
       }
+      // Adopt the survivor's real transcript path; '' when it was started
+      // without one, and the caller then keeps whatever it derived.
+      attachedOutputLogFile.value = resp.payload.logs?.[prev] ?? ''
     } catch {
       return false  // backend unreachable; let the caller decide (it will spawn)
     }
@@ -4437,6 +4449,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     mount,
     spawn,
     tryReattach,
+    attachedOutputLogFile,
     interrupt,
     kill,
     focus,

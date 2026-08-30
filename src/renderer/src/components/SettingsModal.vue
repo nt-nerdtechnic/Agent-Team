@@ -1039,83 +1039,7 @@ interface P2pLinkStatus {
 /** "Connecting" has to resolve on its own, so the section re-asks while it is
  *  on screen rather than freezing on whatever the save call answered. */
 const P2P_POLL_MS = 3000
-const p2pServerUrl = ref('')
-/** Write-only. The backend never sends a stored token back, so an empty box
- *  means "keep what is stored", not "there is none". */
-const p2pTokenInput = ref('')
 const p2pStatus = ref<P2pLinkStatus | null>(null)
-const p2pBusy = ref(false)
-const p2pError = ref('')
-
-// Sign-in. Registering creates this user's own tenant (a private network of
-// their machines) plus its first admin; signing in exchanges the password for
-// the long-lived device token. The password is sent once and never stored:
-// what lands in the vault is the token, which is exactly what a hand-pasted
-// credential already was — so the "token" tab stays as a peer, not a fallback,
-// for machines with no account (CI, servers) and for everyone already using one.
-type P2pMode = 'login' | 'register' | 'token'
-const p2pMode = ref<P2pMode>('login')
-const p2pEmail = ref('')
-const p2pPassword = ref('')
-const p2pDisplayName = ref('')
-const p2pTenantName = ref('')
-
-/** Signed in *as an account*, as opposed to holding a hand-pasted token. */
-const p2pSignedIn = computed(() => Boolean(p2pStatus.value?.accountEmail))
-
-function resetP2pAccountForm(): void {
-  p2pPassword.value = ''
-  p2pDisplayName.value = ''
-  p2pTenantName.value = ''
-}
-
-async function submitP2pAccount(verb: 'login' | 'register'): Promise<void> {
-  p2pBusy.value = true
-  p2pError.value = ''
-  try {
-    const payload: Record<string, unknown> = {
-      serverUrl: p2pServerUrl.value,
-      email: p2pEmail.value,
-      password: p2pPassword.value,
-    }
-    if (verb === 'register') {
-      if (p2pDisplayName.value.trim()) payload.displayName = p2pDisplayName.value
-      if (p2pTenantName.value.trim()) payload.tenantName = p2pTenantName.value
-    }
-    const resp = await props.backend.send<{ status: P2pLinkStatus }>(`p2p.account.${verb}`, payload)
-    if (!resp.ok) {
-      p2pError.value = resp.error?.message ?? 'Sign-in failed'
-      return
-    }
-    // The password has served its purpose the moment a token comes back.
-    resetP2pAccountForm()
-    if (resp.payload?.status) p2pStatus.value = resp.payload.status
-  } catch (err) {
-    p2pError.value = err instanceof Error ? err.message : String(err)
-  } finally {
-    p2pBusy.value = false
-  }
-}
-
-async function p2pLogout(): Promise<void> {
-  p2pBusy.value = true
-  p2pError.value = ''
-  try {
-    const resp = await props.backend.send<{ status: P2pLinkStatus }>('p2p.account.logout', {})
-    if (!resp.ok) {
-      p2pError.value = resp.error?.message ?? 'Sign-out failed'
-      return
-    }
-    resetP2pAccountForm()
-    p2pMode.value = 'login'
-    if (resp.payload?.status) p2pStatus.value = resp.payload.status
-  } catch (err) {
-    p2pError.value = err instanceof Error ? err.message : String(err)
-  } finally {
-    p2pBusy.value = false
-  }
-}
-let p2pUrlSeeded = false
 let p2pTimer: ReturnType<typeof setInterval> | null = null
 
 async function loadP2pStatus(): Promise<void> {
@@ -1123,43 +1047,7 @@ async function loadP2pStatus(): Promise<void> {
     const resp = await props.backend.send<{ status: P2pLinkStatus }>('p2p.link.status', {})
     if (!resp.ok || !resp.payload?.status) return
     p2pStatus.value = resp.payload.status
-    // Seeded once: the poll must not overwrite a URL the user is halfway
-    // through typing.
-    if (!p2pUrlSeeded) {
-      p2pServerUrl.value = resp.payload.status.serverUrl
-      p2pUrlSeeded = true
-    }
   } catch { /* non-fatal — the status line keeps its last value */ }
-}
-
-async function applyP2pLink(payload: Record<string, unknown>): Promise<void> {
-  p2pBusy.value = true
-  p2pError.value = ''
-  try {
-    const resp = await props.backend.send<{ status: P2pLinkStatus }>('p2p.link.configure', payload)
-    if (!resp.ok) {
-      p2pError.value = resp.error?.message ?? 'Failed to apply the cross-device settings'
-      return
-    }
-    p2pTokenInput.value = ''
-    if (resp.payload?.status) p2pStatus.value = resp.payload.status
-  } catch (err) {
-    p2pError.value = err instanceof Error ? err.message : String(err)
-  } finally {
-    p2pBusy.value = false
-  }
-}
-
-async function saveP2pLink(): Promise<void> {
-  const payload: Record<string, unknown> = { serverUrl: p2pServerUrl.value }
-  if (p2pTokenInput.value) payload.token = p2pTokenInput.value
-  await applyP2pLink(payload)
-}
-
-async function clearP2pLink(): Promise<void> {
-  p2pServerUrl.value = ''
-  p2pTokenInput.value = ''
-  await applyP2pLink({ serverUrl: '', token: '' })
 }
 
 const p2pState = computed(() => p2pStatus.value?.state ?? 'unconfigured')
@@ -1319,6 +1207,13 @@ const inviteEmail = ref('')
 const inviteRole = ref<MemberRole>('member')
 /** memberId whose disable is waiting for confirmation. */
 const memberRevoking = ref('')
+/** The server refused an invite because this account's e-mail is unconfirmed.
+ *  Inviting is the one action the soft gate closes — an unverified address is
+ *  the one path that could pull other people into a network — so this is the
+ *  one place Settings has to offer a way out instead of a bare error code. */
+const membersUnverified = ref(false)
+const membersResending = ref(false)
+const membersResent = ref(false)
 
 const membersList = computed<TeamMember[]>(() => p2pMembers.value?.members ?? [])
 const membersCanManage = computed(() => p2pMembers.value?.canManage === true && !membersBusy.value)
@@ -1349,9 +1244,17 @@ async function membersWrite(
   try {
     const resp = await props.backend.send<{ result: Record<string, unknown>; state: P2pMembersState }>(type, payload)
     if (!resp.ok || !resp.payload) {
-      membersError.value = resp.error?.message ?? 'The server refused the change'
+      if (resp.error?.code === 'EMAIL_UNVERIFIED') {
+        // Not a failure to report as one: the notice below says what to do and
+        // carries the button that does it.
+        membersUnverified.value = true
+        membersResent.value = false
+      } else {
+        membersError.value = resp.error?.message ?? 'The server refused the change'
+      }
       return null
     }
+    membersUnverified.value = false
     p2pMembers.value = resp.payload.state
     return resp.payload
   } catch (err) {
@@ -1375,6 +1278,30 @@ async function inviteMember(): Promise<void> {
   inviteRole.value = 'member'
   memberInviteCopied.value = false
   memberInvite.value = written.result as unknown as InviteResult
+}
+
+async function resendVerificationMail(): Promise<void> {
+  if (membersResending.value) return
+  membersResending.value = true
+  membersError.value = ''
+  membersResent.value = false
+  try {
+    const resp = await props.backend.send<{ emailVerified: boolean }>('p2p.account.resend_verification', {})
+    if (!resp.ok) {
+      membersError.value =
+        resp.error?.code === 'RATE_LIMITED'
+          ? t('settings.p2p.account.verify-rate-limited')
+          : (resp.error?.message ?? 'The server refused the change')
+      return
+    }
+    // Confirmed in a browser since this link signed in: the gate is already open.
+    if (resp.payload?.emailVerified) membersUnverified.value = false
+    else membersResent.value = true
+  } catch (err) {
+    membersError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    membersResending.value = false
+  }
 }
 
 async function copyInviteToken(): Promise<void> {
@@ -2906,157 +2833,19 @@ watch(activeTab, (tab) => {
             <SettingsCard>
               <div class="s-fullrow" data-settings-section="general-p2p">
                 <p class="ap-hint">{{ $t('settings.p2p.hint') }}</p>
-                <div class="field">
-                  <label class="lbl" for="p2p-server-url">{{ $t('settings.p2p.server-url') }}</label>
-                  <input
-                    id="p2p-server-url"
-                    v-model="p2pServerUrl"
-                    type="text"
-                    spellcheck="false"
-                    autocomplete="off"
-                    :disabled="p2pBusy || p2pSignedIn"
-                    :placeholder="$t('settings.p2p.server-url-placeholder')"
-                  />
-                </div>
 
-                <!-- Signed in as an account: the credential is the server's to
-                     revoke, so this side only shows who it belongs to. -->
-                <div v-if="p2pSignedIn" class="p2p-account">
-                  <div class="p2p-account-row">
-                    <span class="lbl">{{ $t('settings.p2p.account.email') }}</span>
-                    <span>{{ p2pStatus?.accountEmail }}</span>
-                  </div>
-                  <div v-if="p2pStatus?.displayName" class="p2p-account-row">
-                    <span class="lbl">{{ $t('settings.p2p.account.display-name') }}</span>
-                    <span>{{ p2pStatus.displayName }}</span>
-                  </div>
-                  <div v-if="p2pStatus?.role" class="p2p-account-row">
-                    <span class="lbl">{{ $t('settings.p2p.account.role') }}</span>
-                    <span>{{ p2pStatus.role }}</span>
-                  </div>
-                  <div class="row-g gap p2p-actions">
-                    <button class="ap-reset" :disabled="p2pBusy" @click="p2pLogout">
-                      {{ $t('settings.p2p.account.sign-out') }}
-                    </button>
-                  </div>
-                </div>
-
-                <template v-else>
-                  <div class="p2p-tabs" role="tablist">
-                    <button
-                      v-for="mode in (['login', 'register', 'token'] as const)"
-                      :key="mode"
-                      type="button"
-                      role="tab"
-                      class="p2p-tab"
-                      :class="{ on: p2pMode === mode }"
-                      :aria-selected="p2pMode === mode"
-                      :disabled="p2pBusy"
-                      @click="p2pMode = mode"
-                    >
-                      {{ $t('settings.p2p.account.tab-' + mode) }}
-                    </button>
-                  </div>
-
-                  <!-- Sign in / register. Both take the same two fields; only
-                       registering asks for the names it will label the new
-                       tenant with. -->
-                  <template v-if="p2pMode !== 'token'">
-                    <div class="field">
-                      <label class="lbl" for="p2p-email">{{ $t('settings.p2p.account.email') }}</label>
-                      <input
-                        id="p2p-email"
-                        v-model="p2pEmail"
-                        type="email"
-                        spellcheck="false"
-                        autocomplete="username"
-                        :disabled="p2pBusy"
-                        placeholder="you@example.com"
-                      />
-                    </div>
-                    <div class="field">
-                      <label class="lbl" for="p2p-password">{{ $t('settings.p2p.account.password') }}</label>
-                      <input
-                        id="p2p-password"
-                        v-model="p2pPassword"
-                        type="password"
-                        spellcheck="false"
-                        :autocomplete="p2pMode === 'register' ? 'new-password' : 'current-password'"
-                        :disabled="p2pBusy"
-                        :placeholder="$t('settings.p2p.account.password-placeholder')"
-                        @keyup.enter="submitP2pAccount(p2pMode === 'register' ? 'register' : 'login')"
-                      />
-                    </div>
-                    <template v-if="p2pMode === 'register'">
-                      <div class="field">
-                        <label class="lbl" for="p2p-display-name">
-                          {{ $t('settings.p2p.account.display-name') }}
-                        </label>
-                        <input
-                          id="p2p-display-name"
-                          v-model="p2pDisplayName"
-                          type="text"
-                          autocomplete="off"
-                          :disabled="p2pBusy"
-                          :placeholder="$t('settings.p2p.account.optional')"
-                        />
-                      </div>
-                      <div class="field">
-                        <label class="lbl" for="p2p-tenant-name">
-                          {{ $t('settings.p2p.account.tenant-name') }}
-                        </label>
-                        <input
-                          id="p2p-tenant-name"
-                          v-model="p2pTenantName"
-                          type="text"
-                          autocomplete="off"
-                          :disabled="p2pBusy"
-                          :placeholder="$t('settings.p2p.account.optional')"
-                        />
-                        <p class="ap-hint">{{ $t('settings.p2p.account.tenant-hint') }}</p>
-                      </div>
-                    </template>
-                    <div class="row-g gap p2p-actions">
-                      <button
-                        class="ap-reset"
-                        :disabled="p2pBusy"
-                        @click="submitP2pAccount(p2pMode === 'register' ? 'register' : 'login')"
-                      >
-                        {{ $t('settings.p2p.account.' + (p2pMode === 'register' ? 'submit-register' : 'submit-login')) }}
-                      </button>
-                    </div>
-                  </template>
-
-                  <!-- Pasting a token directly: unchanged, and deliberately kept
-                       for machines that have no account to sign in with. -->
-                  <template v-else>
-                    <div class="field p2p-field">
-                      <label class="lbl" for="p2p-token">{{ $t('settings.p2p.token') }}</label>
-                      <input
-                        id="p2p-token"
-                        v-model="p2pTokenInput"
-                        type="password"
-                        spellcheck="false"
-                        autocomplete="off"
-                        :disabled="p2pBusy"
-                        :placeholder="p2pStatus?.hasToken ? $t('settings.p2p.token-stored') : $t('settings.p2p.token-placeholder')"
-                      />
-                      <p class="ap-hint">{{ $t('settings.p2p.token-hint') }}</p>
-                    </div>
-                    <div class="row-g gap p2p-actions">
-                      <button class="ap-reset" :disabled="p2pBusy" @click="saveP2pLink">{{ $t('settings.p2p.save') }}</button>
-                      <button class="ap-reset" :disabled="p2pBusy" @click="clearP2pLink">{{ $t('settings.p2p.clear') }}</button>
-                    </div>
-                  </template>
-                </template>
-
+                <!-- Read-only: signing in, pasting a token and signing out all
+                     live in the titlebar's account modal, so the form is
+                     maintained once. -->
                 <p class="p2p-status">
                   <span class="p2p-dot" :class="p2pDotClass"></span>
                   <span>{{ $t('settings.p2p.state-' + p2pState) }}</span>
                 </p>
+                <p v-if="p2pStatus?.accountEmail" class="p2p-detail">{{ $t('settings.p2p.account.email') }}: {{ p2pStatus.accountEmail }}</p>
+                <p v-if="p2pStatus?.serverUrl" class="p2p-detail">{{ p2pStatus.serverUrl }}</p>
                 <p v-if="p2pStatus?.detail" class="p2p-detail">{{ p2pStatus.detail }}</p>
                 <p v-if="p2pStatus?.deviceId" class="p2p-detail">{{ $t('settings.p2p.device-id') }}: {{ p2pStatus.deviceId }}</p>
-                <p v-if="p2pError" class="err-msg">{{ p2pError }}</p>
+                <p class="ap-hint p2p-titlebar-hint">{{ $t('settings.p2p.account.hint-titlebar') }}</p>
               </div>
             </SettingsCard>
 
@@ -3279,6 +3068,15 @@ watch(activeTab, (tab) => {
                 </div>
 
                 <p v-if="membersNotice" class="summary-ok">{{ membersNotice }}</p>
+                <template v-if="membersUnverified">
+                  <p class="policy-readonly">{{ $t('settings.p2p.account.verify-required') }}</p>
+                  <div class="row-g gap p2p-actions">
+                    <button class="ap-reset" :disabled="membersResending" @click="resendVerificationMail">
+                      {{ $t('settings.p2p.account.verify-resend') }}
+                    </button>
+                  </div>
+                  <p v-if="membersResent" class="ap-hint">{{ $t('settings.p2p.account.verify-resent') }}</p>
+                </template>
                 <p v-if="membersError" class="err-msg">{{ membersError }}</p>
               </div>
             </SettingsCard>
@@ -4262,16 +4060,8 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .p2p-tab:hover:not(:disabled) { color: var(--text-bright); }
 .p2p-tab.on { color: var(--text-bright); border-bottom-color: var(--accent-focus); font-weight: 500; }
 .p2p-tab:disabled { opacity: 0.5; cursor: default; }
-.p2p-account { margin-top: 12px; }
-.p2p-account-row {
-  display: flex; justify-content: space-between; gap: 12px;
-  padding: 5px 0; font-size: var(--font-xs); border-bottom: 1px solid var(--border-muted);
-}
-.p2p-account-row:last-of-type { border-bottom: 0; }
-.p2p-account-row .lbl { color: var(--text-secondary); }
-.p2p-field { margin-top: 10px; }
-.p2p-field .ap-hint { margin: 4px 0 0; }
 .p2p-actions { margin-top: 12px; }
+.p2p-titlebar-hint { margin: 10px 0 0; }
 .p2p-status { display: flex; align-items: center; margin: 12px 0 0; font-size: 11.5px; color: var(--text-bright); }
 .p2p-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
 .p2p-dot.ok { background: var(--success-fg); }

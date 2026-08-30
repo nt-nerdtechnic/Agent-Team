@@ -277,6 +277,11 @@ interface Props {
   /** Mirrors StageTabBar's global rebuild state so both controls invoke the
    *  same App-owned operation and present the same availability. */
   canRebuildAll?: boolean
+  /** Rebuildable pane counts keyed by workspace path (trailing slashes
+   *  trimmed). Each workspace heading's ↻ enables on its OWN workspace;
+   *  canRebuildAll above answers for the one on screen, which is what the
+   *  toolbar's copy of the button means. */
+  rebuildableByWorkspace?: Record<string, number>
   rebuildingAll?: boolean
   /** Issue dispatch/handle status — forwarded to GitPane for badges. */
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
@@ -361,6 +366,16 @@ const hasWorkspaceRows = computed(() => localWorkspaceRows.value.some((w) => w))
  */
 function groupState(rows: readonly { pane: ActivePaneView }[]): string {
   return rollupTabStatus(rows.map((r) => r.pane.status))
+}
+
+/** Does this workspace have anything its ↻ could rebuild?
+ *
+ *  The button sits on every workspace heading but read one window-wide flag,
+ *  so it took its enabled state — and its action — from whichever workspace
+ *  was on screen rather than the one it is attached to. */
+function wsCanRebuild(path: string): boolean {
+  const key = (path ?? '').replace(/\/+$/, '')
+  return (props.rebuildableByWorkspace?.[key] ?? 0) > 0
 }
 
 /** One workspace's rows, split into run groups and resolved to panes.
@@ -478,7 +493,9 @@ const emit = defineEmits<{
   (e: 'reveal-workspace-folder', path: string): void
   (e: 'interrupt', paneId: string): void
   (e: 'rebuild', paneId: string): void
-  (e: 'rebuild-all'): void
+  /** From a workspace heading: that workspace. From the toolbar: undefined,
+   *  meaning the workspace on screen. */
+  (e: 'rebuild-all', workspacePath?: string): void
   (e: 'restore', paneId: string): void
   (e: 'context-menu', paneId: string, ev: MouseEvent): void
   (e: 'pipeline-start', payload: { task: string; workspacePath: string; pipelineId?: string }): void
@@ -496,7 +513,7 @@ const emit = defineEmits<{
   (e: 'reorder-pane', fromId: string, toId: string): void
   (e: 'open-settings'): void
   (e: 'open-pipeline-manager', pipelineId?: string): void
-  (e: 'open-history'): void
+  (e: 'open-history', workspacePath?: string): void
   (e: 'switch-workspace'): void
   (e: 'workspace-browse', path: string): void
   (e: 'dispatch-issue', payload: { paneId: string; issue: IssueDetail }): void
@@ -759,9 +776,40 @@ const sidebarTab = ref<SidebarTab>(
 )
 watch(sidebarTab, (v) => { try { sessionStorage.setItem(_TAB_KEY, v) } catch { /* ignore */ } })
 
+// Opening Git while the session sits in legacy recovery is the user's natural
+// retry: the downgrade is usually a transient activation failure, and the Host
+// answers with a bounded budget of v2 attempts.
+let awaitingGitV2Tab = false
+let gitV2RetryInFlight = false
+function requestGitV2Retry(): void {
+  const retry = window.agentTeam?.retryGitV2
+  if (!retry || gitV2RetryInFlight) return
+  gitV2RetryInFlight = true
+  awaitingGitV2Tab = true
+  void retry()
+    .then((result) => { if (!result?.ok) awaitingGitV2Tab = false })
+    .catch(() => { awaitingGitV2Tab = false })
+    .finally(() => { gitV2RetryInFlight = false })
+}
+
 watch(legacyGitRecovery, (enabled) => {
-  if (!enabled && sidebarTab.value === 'git') sidebarTab.value = 'agents'
+  if (enabled || sidebarTab.value !== 'git') return
+  const restored = gitPluginTab.value?.tabId
+  if (restored) {
+    awaitingGitV2Tab = false
+    sidebarTab.value = restored
+    return
+  }
+  // A retry we asked for lands on the v2 tab below, once the contribution
+  // catalog refresh arrives; only an unrelated exit drops back to Agents.
+  if (!awaitingGitV2Tab) sidebarTab.value = 'agents'
 }, { immediate: true })
+
+watch(gitPluginTab, (tab) => {
+  if (!tab || !awaitingGitV2Tab) return
+  awaitingGitV2Tab = false
+  showSidebarTab(tab.tabId)
+})
 
 watch(pluginTabs, (tabs) => {
   if (isPluginTab(sidebarTab.value) && !tabs.some((tab) => tab.tabId === sidebarTab.value)) {
@@ -861,6 +909,7 @@ function selectSidebarTab(tab: SidebarTab): void {
     : tab
   if (!target) return
   showSidebarTab(target)
+  if (tab === 'git' && legacyGitRecovery.value) requestGitV2Retry()
   // Surfacing a tab while the slot is collapsed has to reopen it, or Cmd+1..5
   // and the programmatic entry points would only move a highlight on the rail.
   // Collapsing is the parent's state, so ask rather than set — the same one-way
@@ -1639,8 +1688,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           v-if="t.id === 'git' && gitPluginTab && hasPluginIcon(gitPluginTab)"
           class="plugin-tab-icon"
           :src="gitPluginTab.icon ?? ''"
-          width="18"
-          height="18"
+          width="15"
+          height="15"
           alt=""
           @error="markPluginIconFailed(gitPluginTab)"
         />
@@ -1662,8 +1711,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           v-if="hasPluginIcon(pluginTab)"
           class="plugin-tab-icon"
           :src="pluginTab.icon ?? ''"
-          width="18"
-          height="18"
+          width="15"
+          height="15"
           alt=""
           @error="markPluginIconFailed(pluginTab)"
         />
@@ -1692,8 +1741,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             v-if="hasPluginIcon(gitPluginTab)"
             class="plugin-tab-icon"
             :src="gitPluginTab.icon ?? ''"
-            width="18"
-            height="18"
+            width="15"
+            height="15"
             alt=""
             @error="markPluginIconFailed(gitPluginTab)"
           />
@@ -1714,8 +1763,8 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           v-if="hasPluginIcon(pluginTab)"
           class="plugin-tab-icon"
           :src="pluginTab.icon ?? ''"
-          width="18"
-          height="18"
+          width="15"
+          height="15"
           alt=""
           @error="markPluginIconFailed(pluginTab)"
         />
@@ -1973,14 +2022,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <button
             class="ws-act"
             :class="{ busy: rebuildingAll }"
-            :disabled="!canRebuildAll || rebuildingAll"
+            :disabled="!wsCanRebuild(ws.path) || rebuildingAll"
             :title="$t('action.rebuild-all-cli-panes')"
             :aria-label="$t('action.rebuild-all-cli-panes')"
-            @click.stop="emit('rebuild-all')"
+            @click.stop="emit('rebuild-all', ws.path)"
           >
             <RebuildIcon />
           </button>
-          <button class="ws-act" :title="$t('label.history')" @click.stop="emit('open-history')"><HistoryIcon /></button>
+          <button class="ws-act" :title="$t('label.history')" @click.stop="emit('open-history', ws.path)"><HistoryIcon /></button>
           <!-- Opens the same CLI and role the spawn card holds, in THIS
                workspace — the menu remembers which heading opened it. -->
           <button
@@ -2476,10 +2525,15 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   color: var(--text-bright);
   background: var(--bg-muted);
 }
+/* Smaller than the 18px SVGs beside it on purpose. Those are drawn with
+   padding inside their own viewBox, while a plugin ships artwork that fills
+   its bitmap edge to edge, so matching the box makes the plugin icon read as
+   the largest thing in the rail. This trims it to the SVGs' apparent size;
+   `contain` keeps non-square artwork from stretching. */
 .plugin-tab-icon {
   display: block;
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   object-fit: contain;
 }
 .tab-spacer { flex: 1; }

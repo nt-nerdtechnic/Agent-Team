@@ -53,7 +53,9 @@ class FsError(Exception):
     """Raised on invalid or unsafe filesystem operations."""
 
 
-def _resolve_safe(workspace_path: str, rel_path: str) -> Path:
+def _resolve_safe(
+    workspace_path: str, rel_path: str, *, allow_internal_root: bool = False
+) -> Path:
     """Resolve ``rel_path`` under the workspace root, rejecting any escape.
 
     Guards against ``..`` traversal, absolute-path escapes, symlink escapes
@@ -72,6 +74,15 @@ def _resolve_safe(workspace_path: str, rel_path: str) -> Path:
     if target != root and root not in target.parents:
         raise FsError("path escapes workspace")
 
+    # Listing the workspace's OWN internal dir is allowed so the file tree can
+    # show it. The exemption is keyed on the root, not on the directory name:
+    # a caller that names `<ws>/.agent-team` as its root does not match this
+    # (its `internal_root` would be one level deeper), so the guard below still
+    # rejects it — that route is how a caller could otherwise enumerate the
+    # internal state. Nothing under the dir opens up either; every child except
+    # the allowed subtrees fails the guard on its own path.
+    if allow_internal_root and target == root / PROJECT_DIR_NAME:
+        return target
     _reject_protected_internal_dir(target)
     return target
 
@@ -138,11 +149,14 @@ def _entry(root: Path, parent: Path, name: str, is_dir: bool) -> dict[str, Any]:
 def list_dir(workspace_path: str, rel_path: str = "", show_hidden: bool = False) -> dict[str, Any]:
     """List a single directory level (lazy; never recurses).
 
-    Dirs first, then files, each alphabetical. ``.agent-team`` is always
-    excluded. Dotfiles are excluded unless ``show_hidden`` is True.
+    Dirs first, then files, each alphabetical. Dotfiles are excluded unless
+    ``show_hidden`` is True — including ``.agent-team``, which is surfaced as a
+    normal hidden dir but shows only its user-facing ``plans/`` and
+    ``reports/`` subtrees; the rest of its contents (the live SQLite database,
+    logs, migration leftovers) stay unlistable and unopenable.
     """
     try:
-        target = _resolve_safe(workspace_path, rel_path)
+        target = _resolve_safe(workspace_path, rel_path, allow_internal_root=True)
     except FsError as exc:
         return {"ok": False, "error": str(exc)}
     if not target.is_dir():
@@ -158,10 +172,11 @@ def list_dir(workspace_path: str, rel_path: str = "", show_hidden: bool = False)
         if len(scan) > _MAX_DIR_ENTRIES:
             scan = scan[:_MAX_DIR_ENTRIES]
             truncated = True
+        internal_root = root / PROJECT_DIR_NAME
         for de in scan:
             name = de.name
-            if name == PROJECT_DIR_NAME and target == root:
-                continue  # internal dir — never surfaced
+            if target == internal_root and name not in _ALLOWED_AGENT_TEAM_SUBDIRS:
+                continue  # internal state — only the user-facing subtrees show
             if name.startswith(".") and not show_hidden:
                 continue
             entries.append(_entry(root, target, name, de.is_dir()))

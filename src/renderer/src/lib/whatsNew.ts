@@ -36,6 +36,51 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.93',
+    title: {
+      'zh-TW': 'Git 插件 Manifest v2 遷移、MCP 核心模組化、插件主題即時同步與 UI 控制增強',
+      'en-US': 'Git Plugin Manifest v2 Runtime, Modular MCP Core, Plugin Theme Sync & UI Control',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          'Git 插件 Manifest v2 架構遷移：全面切換至 Manifest v2 插件沙盒運行時，支援持久化儲存分區與獨立 Host/Plugin 傳輸適配層。',
+        'en-US':
+          'Git Plugin Manifest v2 Migration: fully cut over to Manifest v2 isolated sandbox runtime with durable storage partitioning and decoupled transport adapters.',
+      },
+      {
+        'zh-TW':
+          'MCP 核心伺服器模組化解耦：將 MCP 伺服器核心抽離至獨立模組，計畫（Plan）工具改由插件透過標準擴充點註冊。',
+        'en-US':
+          'Modular MCP Server Architecture: decoupled the core MCP server into dedicated modules with plan tools registered cleanly via plugin extension points.',
+      },
+      {
+        'zh-TW':
+          '插件 WebView 即時主題同步：主進程在 Guest WebView 附加時自動同步 Host 主題與外觀變更，徹底解耦 Preload 全局橋接。',
+        'en-US':
+          'Plugin WebView Theme Synchronization: main process automatically syncs host theme states and switch events to guest webviews upon attachment.',
+      },
+      {
+        'zh-TW':
+          '外部 MCP UI 快照與目標工作區過濾：ui_snapshot 與 ui_diagnostics 工具支援精準指定目標工作區路徑，強化多視窗自動化控制。',
+        'en-US':
+          'Target Workspace Filtering for UI MCP: ui_snapshot and ui_diagnostics tools now support targeting specific workspace paths across multi-window setups.',
+      },
+      {
+        'zh-TW':
+          '側邊欄工作區拖曳與層級縮排優化：完善多工作區拖曳分離為獨立視窗的手勢反饋，並修復子面板折疊導軌與縮排對齊。',
+        'en-US':
+          'Sidebar Workspace Drag-Out & Lineage Rails: enhanced gestures for dragging workspaces into standalone windows and resolved lineage rail indentation alignment.',
+      },
+      {
+        'zh-TW':
+          'Git 左側面板佈局與剪貼簿路徑安全修復：修復左側面板 Flex 容器排版防止區塊裁切，並淨化拖放檔案名稱避免輸入重試遺失。',
+        'en-US':
+          'Git Panel Flex Layout & Drag-Drop Path Sanitization: fixed column flex layout preventing clipped panel sections and sanitized dropped file paths.',
+      },
+    ],
+  },
+  {
     version: '0.1.92',
     title: {
       'zh-TW': '終端 @ 提及選單、原生 MCP/Memory 管理、Prompt Skills 與縮放重排優化',

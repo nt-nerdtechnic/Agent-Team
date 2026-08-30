@@ -580,16 +580,53 @@ async def test_a_rejected_upsert_does_not_break_the_link():
         await link.stop()
 
 
+async def test_a_restore_placeholder_is_published_as_disconnected_not_running():
+    """A pane the window has restored but not opened has no CLI behind it.
+
+    The window mirrors it anyway so it stays addressable, and reports it busy —
+    that flag answers "would a message sent now wait", and for a placeholder it
+    would. Publishing that as "running" told the network view eight unopened
+    panes were working agents, which is what this test exists to stop.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude", realized=False)
+    agent_messaging.set_busy("p1", True)
+    server = FakeServer()
+    link = make_link(server)
+    await link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        conn = server.opened[0]
+        published = {s["paneId"]: s for s in conn.syncs[0]["sessions"]}
+        assert published["p1"]["status"] == "disconnected"
+
+        # Opening it is a re-register: the same busy flag now means a working
+        # agent, and the status follows.
+        agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+        agent_messaging.set_busy("p1", True)
+        link.notify_roster_changed()
+        await _until(
+            lambda: any(u["paneId"] == "p1" and u["status"] == "running" for u in conn.upserts)
+        )
+    finally:
+        await link.stop()
+
+
 # ---- cross-device messages --------------------------------------------------
 
 
-def _pending(msg_key: str = "pa:mcp:deadbeef", *, pane_id: str = "p1") -> dict:
+def _pending(
+    msg_key: str = "pa:mcp:deadbeef", *, pane_id: str = "p1", member_id: str = "m1"
+) -> dict:
+    """A push from the server. ``member_id`` defaults to "m1", which is also the
+    receiver's own member (see FakeServer's auth.hello) — i.e. another machine of
+    the same person. Pass someone else's id to exercise the pane policy, which is
+    only consulted for senders outside your own account."""
     return {
         "msgKey": msg_key,
         "text": "please review",
         "from": {
             "deviceId": "dev-a",
-            "memberId": "m1",
+            "memberId": member_id,
             "workspace": "alpha",
             "paneName": "sender",
         },
@@ -834,12 +871,15 @@ async def test_the_same_msg_key_pushed_twice_is_injected_once(broadcasts):
 
 
 async def test_policy_denial_acks_rejected_and_never_reaches_the_renderer(broadcasts):
+    """A member you invited is subject to the policy; the empty one denies."""
     agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
     server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
     link = await _connected(server)
     try:
         conn = server.opened[0]
-        await conn.push({"type": "messages.pending", "payload": _pending()})
+        await conn.push(
+            {"type": "messages.pending", "payload": _pending(member_id="m2")}
+        )
         await _until(lambda: bool(conn.acks))
         assert conn.acks[0] == {
             "msgKey": "pa:mcp:deadbeef",
@@ -847,7 +887,172 @@ async def test_policy_denial_acks_rejected_and_never_reaches_the_renderer(broadc
             "reason": "policy-denied",
         }
         # rejected, not failed: the sender must not retry a permission refusal.
+        # The refusal is announced to this machine's own windows (the knock
+        # list), which is the point of that surface — but the message itself
+        # must never reach the delivery path.
+        assert [e for e in broadcasts if e["type"] == "agent_msg.deliver"] == []
+        assert [e["type"] for e in broadcasts] == ["p2p.access_requests.changed"]
+    finally:
+        await link.stop()
+
+
+async def test_a_blocked_device_is_refused_even_when_it_is_your_own(broadcasts):
+    """The ordering that makes a block worth having.
+
+    Every other mechanism here grants: rules grant, and sharing your member id
+    grants unconditionally. A laptop of yours that walked off can only be shut
+    out by something that runs ahead of that grant, which is why the block list
+    is consulted before the own-device shortcut and not after it.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(
+        policy={
+            "version": 1,
+            "default": "allow",
+            "rules": [],
+            "blocked": [{"deviceId": "dev-a", "reason": "stolen"}],
+        }
+    )
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        # member_id defaults to m1 — the receiver's own member. Even that, and
+        # even under default:allow, does not get past a block.
+        await conn.push({"type": "messages.pending", "payload": _pending()})
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["state"] == "rejected"
         assert broadcasts == []
+        # A blocked sender leaves no knock: the point of a block is that this
+        # machine stops being asked about that device.
+        assert link.access_requests() == []
+    finally:
+        await link.stop()
+
+
+async def test_a_blocked_sender_is_told_the_same_thing_an_unauthorized_one_is(broadcasts):
+    """Naming the block on the wire would hand the sender an oracle — the same
+    reason authorization runs before pane resolution in this path."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(
+        policy={"version": 1, "default": "deny", "rules": [], "blocked": [{"memberId": "m2"}]}
+    )
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push({"type": "messages.pending", "payload": _pending(member_id="m2")})
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["reason"] == "policy-denied"
+    finally:
+        await link.stop()
+
+
+async def test_a_refused_member_leaves_a_knock_the_receiver_can_see(broadcasts):
+    """Before this, a denied message told the sender and told the person whose
+    machine refused it nothing at all."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push({"type": "messages.pending", "payload": _pending(member_id="m2")})
+        await _until(lambda: bool(link.access_requests()))
+        knock = link.access_requests()[0]
+        assert knock["memberId"] == "m2"
+        assert knock["deviceId"] == "dev-a"
+        assert (knock["workspace"], knock["paneName"]) == ("proj-a", "reviewer")
+        assert knock["attempts"] == 1
+
+        # A second attempt refreshes the row rather than adding one.
+        await conn.push(
+            {"type": "messages.pending", "payload": _pending("pa:mcp:second", member_id="m2")}
+        )
+        await _until(lambda: link.access_requests()[0]["attempts"] == 2)
+        assert len(link.access_requests()) == 1
+    finally:
+        await link.stop()
+
+
+async def test_your_own_machine_leaves_no_knock(broadcasts):
+    """It was never refused, so there is nothing to decide about it."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push({"type": "messages.pending", "payload": _pending()})
+        await _until(lambda: bool(broadcasts))
+        assert link.access_requests() == []
+    finally:
+        await link.stop()
+
+
+async def test_your_own_other_machine_is_not_subject_to_the_pane_policy(broadcasts):
+    """Signing the same account in on a second device is itself the grant.
+
+    The deny-everything policy below would refuse anyone else, and does (see the
+    test above); it must not stand between two machines of the same person, or
+    adding a laptop would mean editing a policy before it could reach anything.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push(
+            {"type": "messages.pending", "payload": _pending(member_id="m1")}
+        )
+        await _until(lambda: bool(broadcasts))
+        assert conn.acks == []  # delivered, not rejected
+    finally:
+        await link.stop()
+
+
+async def test_a_message_with_no_sender_member_is_still_policed(broadcasts):
+    """The exemption keys on an equal, non-empty member id.
+
+    A payload that arrives without one must fall through to the policy rather
+    than compare empty-to-empty and let itself in.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        payload = _pending(member_id="m1")
+        payload["from"]["memberId"] = ""
+        await conn.push({"type": "messages.pending", "payload": payload})
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["state"] == "rejected"
+        assert conn.acks[0]["reason"] == "policy-denied"
+        assert [e for e in broadcasts if e["type"] == "agent_msg.deliver"] == []
+    finally:
+        await link.stop()
+
+
+async def test_the_policy_still_admits_an_invited_member_it_allows(broadcasts):
+    """The exemption does not replace the policy: an explicit allow still works."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(
+        policy={
+            "version": 1,
+            "default": "deny",
+            "rules": [
+                {
+                    "from": {"memberId": "m2", "deviceId": "*"},
+                    "to": {"workspace": "*", "paneName": "*"},
+                    "action": "allow",
+                }
+            ],
+        }
+    )
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push(
+            {"type": "messages.pending", "payload": _pending(member_id="m2")}
+        )
+        await _until(lambda: bool(broadcasts))
+        assert conn.acks == []
     finally:
         await link.stop()
 
@@ -1323,16 +1528,17 @@ def test_config_round_trips_through_settings_and_the_vault(tmp_path, monkeypatch
     )
     monkeypatch.setattr(app, "credential_vault", vault)
     try:
-        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: "  ws://localhost:8787/ws  "})
+        monkeypatch.setenv(server_link.SERVER_URL_ENV, "  ws://localhost:8787/ws  ")
         server_link.set_access_token("  tok-abc  ")
         assert server_link.load_config() == CONFIG
         assert server_link.load_config().configured
 
+        # Only the token half can be missing now: the address always resolves.
         server_link.set_access_token(None)
         assert server_link.load_config() == ServerLinkConfig(url=CONFIG.url)
         assert not server_link.load_config().configured
     finally:
-        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
+        pass
 
 
 def test_app_secret_file_backend_is_private(tmp_path):
@@ -1412,9 +1618,9 @@ def module_link(monkeypatch):
     yield state, server
 
 
-async def test_reconfigure_dials_once_the_settings_are_filled_in(module_link):
-    """The gap a Settings UI walks straight into: start() runs at boot, so a
-    configuration saved afterwards has to be picked up without a restart."""
+async def test_reconfigure_dials_once_the_settings_are_filled_in(module_link, monkeypatch):
+    """The gap signing in walks straight into: start() runs at boot, so a
+    credential stored afterwards has to be picked up without a restart."""
     state, server = module_link
     await server_link.start()
     try:
@@ -1422,9 +1628,9 @@ async def test_reconfigure_dials_once_the_settings_are_filled_in(module_link):
         assert server.opened == []
         assert (await server_link.status())["state"] == server_link.STATE_UNCONFIGURED
 
-        # The URL a connected link reports comes from ui_settings, not from the
-        # loader the fixture fakes — that is where the Settings pane wrote it.
-        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: CONFIG.url})
+        # The URL a connected link reports comes from the build (or the dev
+        # override), never from a user-entered setting.
+        monkeypatch.setenv(server_link.SERVER_URL_ENV, CONFIG.url)
         state["config"] = CONFIG
         await server_link.reconfigure()
         await _until(lambda: bool(server.opened and server.opened[0].syncs))
@@ -1435,7 +1641,6 @@ async def test_reconfigure_dials_once_the_settings_are_filled_in(module_link):
         assert status["hasToken"] is True
     finally:
         await server_link.stop()
-        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
 
 
 async def test_reconfigure_replaces_the_link_rather_than_adding_one(module_link):
@@ -1574,11 +1779,11 @@ def _ws_session() -> "app.Session":
     return app.Session(FakeWebSocket())  # type: ignore[arg-type]
 
 
-async def test_configure_handler_writes_both_halves_and_reconnects(
+async def test_configure_handler_stores_the_token_and_reconnects(
     module_link, tmp_path, monkeypatch
 ):
-    """One call has to land the URL in ui_settings, the token in the vault, and
-    a dialling link — the three things a user cannot do from the UI otherwise."""
+    """One call lands the token in the vault and leaves a dialling link. The URL
+    half is gone: it is built in, so there is nothing for the caller to set."""
     state, server = module_link
     vault = CredentialVault(
         root=tmp_path / "vault", real_home=tmp_path / "home", platform="linux"
@@ -1586,6 +1791,7 @@ async def test_configure_handler_writes_both_halves_and_reconnects(
     monkeypatch.setattr(app, "credential_vault", vault)
     # The handler writes through the real config path; the link reads the
     # fixture's, so `state` is followed along by hand.
+    monkeypatch.setenv(server_link.SERVER_URL_ENV, CONFIG.url)
     monkeypatch.setattr(
         server_link,
         "load_config",
@@ -1598,13 +1804,15 @@ async def test_configure_handler_writes_both_halves_and_reconnects(
             {
                 "id": "c1",
                 "type": "p2p.link.configure",
-                "payload": {"serverUrl": "  ws://localhost:8787/ws  ", "token": "tok-abc"},
+                # serverUrl from an older renderer is accepted and ignored.
+                "payload": {"serverUrl": "  ws://typo/ws  ", "token": "tok-abc"},
             },
         )
         reply = session.websocket.sent[0]
         assert reply["type"] == "p2p.link.configure.result"
         assert reply["ok"] is True
         assert vault.read_app_secret(server_link.ACCESS_TOKEN_SECRET) == "tok-abc"
+        # The typo'd address was ignored; the build's own value is in effect.
         assert server_link.server_url() == CONFIG.url
         await _until(lambda: bool(server.opened and server.opened[0].syncs))
 
@@ -1634,7 +1842,7 @@ async def test_configure_handler_leaves_the_token_alone_when_absent(
     try:
         await app.handle_message(
             session,
-            {"id": "c1", "type": "p2p.link.configure", "payload": {"serverUrl": "ws://x/ws"}},
+            {"id": "c1", "type": "p2p.link.configure", "payload": {}},
         )
         assert session.websocket.sent[0]["ok"] is True
         assert vault.read_app_secret(server_link.ACCESS_TOKEN_SECRET) == "tok-abc"
@@ -1651,15 +1859,52 @@ async def test_configure_handler_leaves_the_token_alone_when_absent(
         app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
 
 
-async def test_configure_handler_rejects_a_non_string_url():
+async def test_configure_handler_ignores_a_serverurl_from_an_older_renderer():
+    """A stale window still sends the field. Rejecting would make every save
+    from that window fail over a value that no longer has any effect."""
     session = _ws_session()
     await app.handle_message(
         session,
         {"id": "c1", "type": "p2p.link.configure", "payload": {"serverUrl": 42}},
     )
+    assert session.websocket.sent[0]["ok"] is True
+
+
+async def test_configure_handler_rejects_a_non_string_token():
+    session = _ws_session()
+    await app.handle_message(
+        session,
+        {"id": "c1", "type": "p2p.link.configure", "payload": {"token": 42}},
+    )
     reply = session.websocket.sent[0]
     assert reply["ok"] is False
     assert reply["error"]["code"] == "BAD_REQUEST"
+
+
+# ---- the address is the build's ---------------------------------------------
+
+
+def test_server_url_is_built_in(monkeypatch):
+    monkeypatch.delenv(server_link.SERVER_URL_ENV, raising=False)
+    assert server_link.server_url() == server_link.DEFAULT_SERVER_URL
+    assert server_link.DEFAULT_SERVER_URL.startswith("wss://")
+
+
+def test_env_overrides_the_built_in_address(monkeypatch):
+    """The escape hatch development and the verify scripts run through."""
+    monkeypatch.setenv(server_link.SERVER_URL_ENV, "  ws://localhost:8787/ws  ")
+    assert server_link.server_url() == "ws://localhost:8787/ws"
+
+
+def test_a_stored_user_entered_address_is_ignored(monkeypatch):
+    """An install upgrading from the configurable era carries whatever its user
+    typed. It must move to the real service, not keep dialling that value."""
+    monkeypatch.delenv(server_link.SERVER_URL_ENV, raising=False)
+    app.ui_settings_store.set({server_link.SERVER_URL_SETTING: "ws://stale-typo/ws"})
+    try:
+        assert server_link.server_url() == server_link.DEFAULT_SERVER_URL
+    finally:
+        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
 
 
 # ---- the policy editor's handlers -------------------------------------------

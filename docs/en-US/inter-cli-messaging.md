@@ -102,6 +102,22 @@ pane **in the same workspace window**. Each recipient gets an ordinary
 independent message — its own queue slot, rate-limit budget, and log row.
 Broadcast never crosses a workspace.
 
+`cli_send` adds a second, narrower broadcast for MCP callers: `to: "group"`
+fans the message out to every other pane in the **sender's own tab group**,
+still inside the sender's workspace. The two scopes deliberately get two
+different words — `all` is window-wide and ignores groups, `group` stops at the
+group boundary, and one word meaning both would be very hard to debug. It costs
+what `all` already costs: a pane actually named `group` can no longer be
+addressed by name through `cli_send`. Panes that belong to no group share one
+implicit group, so they reach each other rather than nobody — "broadcast to my
+group" is never silently a no-op for someone who never made a group. Each
+recipient is again an ordinary independent message, which is why a group
+broadcast answers with one `msg_key` **per recipient** rather than one for the
+send; [External MCP control](external-mcp-control.md) has the shape. Groups are
+UI state the backend never learns — `agent_msg.register` carries no group id —
+so the MCP server asks the window that owns the sender which panes share its
+group, then delivers to each one down the ordinary single-message path.
+
 ### Another workspace
 
 Address a pane in another workspace window as `<folder>/<pane>`:
@@ -711,6 +727,7 @@ still never persisted.
 | `unknown-workspace` / `ambiguous-workspace` | A `<folder>/<pane>` address that matched no open workspace, or several |
 | `unknown-target-in-workspace` / `ambiguous-target` | The workspace resolved, but the pane name did not — or matched twice |
 | `unknown-pane-id` | A `pane_id` that names no pane on this machine — read a fresh one from `cli_list_targets` |
+| `no-group` | `cli_send` was asked to broadcast to a group by a caller that has no pane, and therefore no group |
 
 ---
 

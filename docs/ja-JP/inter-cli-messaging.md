@@ -107,6 +107,22 @@ Window 内**の他のすべての Pane にメッセージを配信します。�
 したメッセージを受け取り、それぞれ独自の Queue Slot、Rate Limit の予算、Log 行
 を持ちます。Broadcast が Workspace を越えることはありません。
 
+MCP の呼び出し元には、もう一段狭い Broadcast があります。`cli_send` の
+`to: "group"` は、**送信者自身の Tab Group** に属する他のすべての Pane にメッセージ
+を配信します（送信者の Workspace 内であることは同じです）。二つの範囲には意図的に
+別の語を割り当てています。`all` は Group を無視して Window 全体、`group` は Group
+の境界で止まります。一つの語が二つの範囲を意味すると、Debug が非常に困難になるから
+です。代償は `all` がもともと抱えているものと同じで、実際に `group` という名前の
+Pane は `cli_send` から名前で指定できなくなります。どの Group にも属さない Pane は
+一つの暗黙の Group を共有するため、互いに届きます——誰にも届かないのではありません。
+Group を一度も作っていない人にとって「自分の Group に Broadcast する」が黙って何も
+しない操作になることはありません。各受信者は同じく通常の独立したメッセージなので、
+Group Broadcast が返す `msg_key` は送信ごとに一つではなく**受信者ごとに一つ**です。
+形は [外部 MCP 制御](external-mcp-control.md) を参照してください。Group は Backend
+が決して知ることのない UI State であり——`agent_msg.register` は Group id を運びません
+——そのため MCP Server は送信者を所有する Window にどの Pane が同じ Group かを尋ね、
+そのうえで通常の単一メッセージ経路で一つずつ配信します。
+
 ### 別の Workspace
 
 別の Workspace Window にある Pane は `<folder>/<pane>` の形式で指定します。
@@ -712,6 +728,7 @@ MCP の `cli_send` から、あるいは別の Machine から中継されたも�
 | `unknown-workspace` / `ambiguous-workspace` | `<folder>/<pane>` アドレスが、開いている Workspace のどれにも一致しなかった、または複数に一致した |
 | `unknown-target-in-workspace` / `ambiguous-target` | Workspace は解決したが、Pane 名が一致しなかった、または 2 つに一致した |
 | `unknown-pane-id` | このマシンのどの Pane も指さない `pane_id` — `cli_list_targets` から新しいものを読み直す |
+| `no-group` | Pane を持たず、したがって Group も持たない呼び出し元が `cli_send` に Group Broadcast を求めた |
 
 ---
 

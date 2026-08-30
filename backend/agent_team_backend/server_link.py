@@ -42,6 +42,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import platform
 import time
 from dataclasses import dataclass
@@ -49,7 +50,7 @@ from typing import Any, Callable
 
 import websockets
 
-from . import agent_messaging, device_identity, pane_policy, remote_roster
+from . import agent_messaging, device_identity, device_trust, pane_policy, remote_roster
 
 log = logging.getLogger("agent_team_backend.server_link")
 
@@ -58,6 +59,18 @@ log = logging.getLogger("agent_team_backend.server_link")
 #: which keeps this whole module inert. It lives in ui_settings rather than a
 #: private store so the Settings UI can write it through the existing
 #: ``ui.settings.set`` handler without new plumbing.
+# The one address every install talks to. Hard-coded on purpose: the server is
+# a service this product operates, not a field each user configures — a typo'd
+# address produced a link that silently never dialled, and there was no correct
+# value for the user to discover on their own.
+#
+# NAVIDE_SERVER_URL overrides it for local development (point at ws://localhost:8787/ws)
+# and for the verification scripts. Nothing in the UI writes it.
+DEFAULT_SERVER_URL = "wss://server.navide.dev/ws"
+SERVER_URL_ENV = "NAVIDE_SERVER_URL"
+
+# Kept only so an install carrying the old user-entered address can have it
+# ignored and cleared; nothing reads it as a source any more.
 SERVER_URL_SETTING = "agentTeam.p2p.serverUrl"
 # The signed-in email, kept in plain ui_settings rather than the vault: it is
 # not a credential, and the Settings pane needs it to say *which* account is
@@ -95,17 +108,26 @@ ROSTER_DEBOUNCE_S = 0.5
 
 #: ``sessions.upsert`` accepts exactly these three values and rejects anything
 #: else with BAD_REQUEST, so the registry's own vocabulary (busy / idle /
-#: offline) is renamed here rather than sent through. The mapping is one to one,
-#: so nothing the roster knows is lost: mid-turn is "running", waiting for input
-#: is "waiting", and a pane whose window has disconnected is "disconnected" —
-#: transient, not terminal. That distinction is the remote half of the local
-#: target-offline code: the pane is still there and expected back once its
-#: window reconnects. Reporting it as "waiting" would be indistinguishable from
-#: a healthy idle pane, and "exited" would claim the session ended when it has
-#: not.
+#: offline) is renamed here rather than sent through. Nothing the roster knows
+#: is lost by the rename: mid-turn is "running", waiting for input is "waiting",
+#: and a pane whose window has disconnected is "disconnected" — transient, not
+#: terminal. That distinction is the remote half of the local target-offline
+#: code: the pane is still there and expected back once its window reconnects.
+#: Reporting it as "waiting" would be indistinguishable from a healthy idle
+#: pane, and "exited" would claim the session ended when it has not. A restore
+#: placeholder is the second thing "disconnected" covers — see _pane_status.
 STATUS_BUSY = "running"
 STATUS_IDLE = "waiting"
 STATUS_OFFLINE = "disconnected"
+
+#: Local-only, and deliberately outside the four values above: the contract's
+#: enum has no word for "restored but never opened", and inventing one the
+#: server would reject with BAD_REQUEST is how a pane disappears from the
+#: roster entirely. It is substituted into this device's own rows in
+#: ``network_snapshot`` and never sent anywhere. The wording matches the
+#: sidebar's ``paneStatus.waiting`` ("not opened") on purpose — the same pane
+#: must not be called two different things in two places.
+STATUS_NOT_OPENED = "not-opened"
 
 #: Bounds on the inbound-message bookkeeping below. Same shape as the MCP
 #: server's ``_mcp_message_status``: a count cap plus a TTL, because nothing
@@ -167,10 +189,14 @@ def _vault():
 
 
 def server_url() -> str:
-    from . import app
+    """The address this install connects to: the built-in one unless overridden.
 
-    value = app.ui_settings_store.get().get(SERVER_URL_SETTING)
-    return value.strip() if isinstance(value, str) else ""
+    A previously stored per-user address is deliberately NOT consulted — an
+    install upgrading from the configurable era must move to the real service,
+    not keep dialling whatever was typed in months ago.
+    """
+    override = os.environ.get(SERVER_URL_ENV, "")
+    return override.strip() or DEFAULT_SERVER_URL
 
 
 def account_email() -> str:
@@ -209,6 +235,14 @@ def load_config() -> ServerLinkConfig:
 
 def _pane_status(entry: agent_messaging.RegisteredPane) -> str:
     if entry.offline:
+        return STATUS_OFFLINE
+    # A restore placeholder is neither of the other two: "running" claims an
+    # agent is working, "waiting" claims a message sent now would be picked up,
+    # and no CLI has been started behind it for either to be true. Its `busy`
+    # flag says true — the window reports every pane it cannot inject into as
+    # busy, which is the right answer for delivery and the wrong one for a
+    # status word — so the flag is deliberately not consulted here.
+    if not entry.realized:
         return STATUS_OFFLINE
     return STATUS_BUSY if entry.busy else STATUS_IDLE
 
@@ -312,6 +346,11 @@ class ServerLink:
         # control plane being reachable at the moment a message lands.
         self._policy: Any = None
         self._policy_revision: int | None = None
+        # Who knocked and was refused. In memory only: a knock is a prompt for
+        # a person sitting there now, not a record to keep, and persisting it
+        # would mean deciding where — the policy document belongs to the
+        # server, and this is nobody's business but this machine's.
+        self._access_requests = device_trust.AccessRequests()
         self._tasks: set[asyncio.Task] = set()
         self._device_id = ""
         self.member_id = ""
@@ -326,12 +365,32 @@ class ServerLink:
         # once one machine can hold several accounts over its lifetime.
         self.tenant_id = ""
         self.display_name = ""
+        # Whether the account's e-mail address has been confirmed, from
+        # auth.hello. A soft gate: an unverified account signs in and works
+        # normally, it is only flagged (and may not invite anyone). Refreshed
+        # on every reconnect and by a resend reply, because the confirming
+        # click happens in a browser this process never sees.
+        self.email_verified = False
         # The team roster as the server last sent it, from team.members.list or
         # the team.members.changed push. None means "never fetched", which an
         # empty list must not be confused with. Kept across reconnects for the
         # same reason the policy cache is: the Settings pane has to be able to
         # show who is on the team while the link is down.
         self._members: list[Any] | None = None
+        # The whole session directory as the server last described it, this
+        # device's own rows included. ``remote_roster`` deliberately drops the
+        # local ones — an address aimed back at this machine has to resolve
+        # against the live local roster — but the account modal's network view
+        # has to show the machine the user is sitting at beside the others, so
+        # the raw rows are kept here as well. None means "never received one",
+        # which an empty directory must not be confused with.
+        self._directory: list[dict[str, Any]] | None = None
+        # Device ids the server last reported online, or None while no
+        # presence.changed has arrived. Kept apart from the per-session
+        # ``hostOnline`` flag because the two facts arrive on different events
+        # (see ``_on_presence_changed``), and because a device with no sessions
+        # at all has no row to carry that flag.
+        self._online_devices: set[str] | None = None
         self.terminated_reason = ""
         # Why the last dial or session failed, kept so `state()` can tell a
         # server that is not answering apart from one that has not been tried
@@ -621,6 +680,7 @@ class ServerLink:
         self.member_role = str(payload.get("role") or "")
         self.tenant_id = str(payload.get("tenantId") or "")
         self.display_name = str(payload.get("displayName") or "")
+        self.email_verified = bool(payload.get("emailVerified"))
         log.info(
             "navide-server link authenticated as member %s (%s) for device %s",
             self.member_id or "unknown",
@@ -798,6 +858,38 @@ class ServerLink:
                 await self._refresh_policy()
         return reply
 
+    async def resend_verification(self) -> dict[str, Any]:
+        """Ask the server to re-send this account's verification mail.
+
+        Same shape as ``set_policy``: the server's reply frame, or a locally
+        minted error frame naming the link state. The server rate-limits and
+        owns the token, so this side neither retries nor invents a cooldown —
+        RATE_LIMITED is an answer to show, not one to swallow.
+        """
+        if self._ws is None or not self._authenticated:
+            return self._unavailable()
+        try:
+            reply = await self._request("auth.verify.resend", {})
+        except Exception as err:  # noqa: BLE001
+            log.warning("navide-server auth.verify.resend failed: %s", err)
+            return {
+                "ok": False,
+                "error": {
+                    "code": LINK_OFFLINE,
+                    "message": (
+                        f"the navide-server link failed mid-request ({err}); it "
+                        f"reconnects on its own, so retry shortly"
+                    ),
+                },
+            }
+        if reply.get("ok"):
+            payload = reply.get("payload")
+            if isinstance(payload, dict) and payload.get("emailVerified"):
+                # The user confirmed in a browser since this link authenticated;
+                # adopt it now rather than making them wait for a reconnect.
+                self.email_verified = True
+        return reply
+
     async def _on_policy_changed(self, payload: Any) -> None:
         """The server says this device's policy moved. Re-fetch only if the
         revision differs from the cached one — the event is a nudge, not the
@@ -906,18 +998,24 @@ class ServerLink:
         ``remote_roster.replace``: the server's copy of them is whatever was
         last reported, while ``agent_messaging`` holds the live ones.
 
-        Note the rows carry no ``deviceName`` today: the server stores one per
-        device (from ``auth.hello``) but does not join it into the session
-        directory, so the only human-readable label available here is the
-        device id. ``remote_roster`` reads the field anyway, so a server that
-        starts sending it lights this up with no change on this side.
+        The rows may carry a ``deviceName`` (the server joins the one
+        ``auth.hello`` gave it onto every session row); they may equally not,
+        because an older server does not. Every reader here falls back to the
+        device id, which is always present.
+
+        The raw rows are also kept whole in ``_directory``, local ones included,
+        for ``network_snapshot`` — see the note on that field.
         """
         data = payload if isinstance(payload, dict) else {}
         sessions = data.get("sessions")
-        remote_roster.replace(
-            sessions if isinstance(sessions, list) else [],
-            local_device_id=self._device_id,
-        )
+        rows = sessions if isinstance(sessions, list) else []
+        remote_roster.replace(rows, local_device_id=self._device_id)
+        # Capped like the roster cache, and for the same reason: the directory
+        # is filled by other machines, so it is only as small as they are well
+        # behaved.
+        self._directory = [row for row in rows if isinstance(row, dict)][
+            : remote_roster.MAX_PANES
+        ]
 
     def _on_presence_changed(self, payload: Any) -> None:
         """Re-flag the cached panes when a device joins or leaves.
@@ -931,13 +1029,167 @@ class ServerLink:
         devices = data.get("devices")
         if not isinstance(devices, list):
             return
-        remote_roster.set_online_devices(
-            {
-                str(device.get("deviceId") or "")
-                for device in devices
-                if isinstance(device, dict)
-            }
+        online = {
+            str(device.get("deviceId") or "")
+            for device in devices
+            if isinstance(device, dict)
+        }
+        online.discard("")
+        # Kept as well as pushed down, because ``network_snapshot`` has to be
+        # able to answer for a device the directory holds no session for.
+        self._online_devices = online
+        remote_roster.set_online_devices(online)
+
+    async def ensure_directory(self) -> None:
+        """Read the directory once if this connection has not carried one yet.
+
+        Every connection fetches it at authentication time and the
+        ``sessions.changed`` push keeps it current after that, so this is only
+        ever the first read of a link whose fetch failed. It exists so the
+        network view is not blank for a whole poll interval in that case.
+        """
+        if self._directory is None and self.state() == STATE_CONNECTED:
+            await self._refresh_directory()
+
+    def _device_name_for(self, device_id: str) -> str:
+        """The label the directory knows this device by, or "" — a knock from a
+        machine the directory has not mentioned yet still has to be showable."""
+        for raw in self._directory or []:
+            if str(raw.get("deviceId") or "") == device_id:
+                return str(raw.get("deviceName") or "")
+        return ""
+
+    async def _announce_access_requests(self) -> None:
+        """Tell every window that the knock list changed.
+
+        Broadcast rather than addressed: the list belongs to the machine, not
+        to a workspace, and whichever window has the account view open is the
+        one that should light up.
+        """
+        from . import app
+        from .ipc import make_event
+
+        await app.broadcast(
+            make_event("p2p.access_requests.changed", {"requests": self._access_requests.list()})
         )
+
+    def access_requests(self) -> list[dict[str, Any]]:
+        return self._access_requests.list()
+
+    def forget_access_request(self, key: str) -> bool:
+        return self._access_requests.forget(key)
+
+    def forget_access_requests_for_device(self, device_id: str) -> int:
+        return self._access_requests.forget_device(device_id)
+
+    def network_snapshot(self) -> dict[str, Any]:
+        """Every device in this team space, and the panes running on each.
+
+        Answered from the cache whatever the link is doing, for the reason
+        ``members_state`` is: a link that dropped a second ago does not make the
+        other machines stop existing, and an empty list would read as "nobody is
+        signed in". ``state`` is the honest half.
+
+        Unlike ``remote_roster`` this keeps this device's own rows. Addressing
+        must not see them (the live local roster is the truth there), but the
+        whole point of this view is the whole network, and the machine the user
+        is sitting at is the one row they can recognise.
+        """
+        devices: dict[str, dict[str, Any]] = {}
+        local = self._device_id
+        # This machine knows more about its own panes than the server does. The
+        # roster it publishes has four words to spend and "disconnected" is the
+        # closest of them to a placeholder, but locally there is no reason to
+        # read that compromise back: the registry holds the realized flag
+        # itself. Same reason the local row's `online` is taken from the link
+        # rather than from presence below — for this one device, the server is
+        # not the better-informed party.
+        unopened_here = {
+            entry.pane_id for entry in agent_messaging.list_panes() if not entry.realized
+        }
+
+        def entry(device_id: str, device_name: str) -> dict[str, Any]:
+            row = devices.get(device_id)
+            if row is None:
+                row = {
+                    "deviceId": device_id,
+                    "deviceName": device_name,
+                    "isLocal": bool(local) and device_id == local,
+                    "online": False,
+                    "paneCount": 0,
+                    "panes": [],
+                }
+                devices[device_id] = row
+            elif not row["deviceName"] and device_name:
+                row["deviceName"] = device_name
+            return row
+
+        # This machine is listed even with nothing running on it: "no devices"
+        # and "one device with no panes" are different answers, and the second
+        # is the one a user who has only just signed in is looking at.
+        if local:
+            entry(local, self._device_name)
+
+        for raw in self._directory or []:
+            device_id = str(raw.get("deviceId") or "")
+            if not device_id:
+                continue
+            row = entry(device_id, str(raw.get("deviceName") or ""))
+            pane_id = str(raw.get("paneId") or "")
+            status = str(raw.get("status") or "")
+            if device_id == local and pane_id in unopened_here:
+                status = STATUS_NOT_OPENED
+            row["panes"].append(
+                {
+                    "sessionId": str(raw.get("sessionId") or ""),
+                    "paneId": pane_id,
+                    "agentKey": str(raw.get("agentKey") or ""),
+                    "title": str(raw.get("title") or ""),
+                    "workspace": str(raw.get("workspace") or ""),
+                    "workspacePath": str(raw.get("workspacePath") or ""),
+                    # As the server spelled it, except for this device's own
+                    # unopened panes (above): the four values it defines are
+                    # translated by the UI, and one this build has never heard
+                    # of is shown raw rather than hidden.
+                    "status": status,
+                    "hostOnline": bool(raw.get("hostOnline")),
+                    "startedAt": str(raw.get("startedAt") or ""),
+                }
+            )
+        for row in devices.values():
+            row["paneCount"] = len(row["panes"])
+            row["panes"].sort(key=lambda pane: (pane["workspace"], pane["title"]))
+            if row["isLocal"]:
+                # Presence is what the *server* can see, and the only thing it
+                # can see of this machine is the link being reported on here.
+                row["online"] = self.state() == STATE_CONNECTED
+            elif self._online_devices is not None:
+                row["online"] = row["deviceId"] in self._online_devices
+            else:
+                # No presence.changed has arrived yet, so the per-session flag
+                # is the only thing that has been said about this machine.
+                row["online"] = any(pane["hostOnline"] for pane in row["panes"])
+        return {
+            "state": self.state(),
+            "deviceId": local,
+            "memberId": self.member_id,
+            "tenantId": self.tenant_id,
+            # Folded into the same read as the devices for the reason given
+            # above them: this view is polled while it is open, and a separate
+            # round trip per list would be another chance to draw a picture
+            # that is half one moment and half the next. Both are local state —
+            # the ledger is in memory here, the block list is in the policy
+            # this machine already holds — so neither costs the server
+            # anything.
+            "accessRequests": self._access_requests.list(),
+            "blocked": device_trust.blocked_entries(self._policy),
+            # This device first, then by label: the row a user recognises is
+            # the one that should not move as other machines come and go.
+            "devices": sorted(
+                devices.values(),
+                key=lambda d: (not d["isLocal"], d["deviceName"] or d["deviceId"]),
+            ),
+        }
 
     # ---- messages ----
 
@@ -1050,26 +1302,61 @@ class ServerLink:
         workspace = str(target.get("workspace") or "")
         pane_name = str(target.get("paneName") or "")
 
+        sender_member = str(source.get("memberId") or "")
+        sender_device = str(source.get("deviceId") or "")
         await self._ensure_policy()
+        # Three rings, not one condition: your own machines are one trust
+        # domain and never consult the rules, a blocked device is refused ahead
+        # of everything including that shortcut, and everyone else is what the
+        # rule set is actually for. See device_trust for why each boundary sits
+        # where it does. Membership is asserted by the server (it fills `from`
+        # from the authenticated sender), not by the message, so a peer cannot
+        # claim to be us.
+        trust_ring = device_trust.ring(
+            self._policy,
+            member_id=sender_member,
+            device_id=sender_device,
+            own_member_id=self.member_id,
+        )
         # The addressed workspace/paneName are checked, not the resolved pane's:
         # resolution happens after this. `paneName` is matched exactly by the
         # resolver, so it is already the pane's real name; only a workspace
         # written as a longer path suffix ("nest/proj" for the pane labelled
         # "proj") can read differently, and it can only fail to match a rule.
-        if not pane_policy.is_allowed(
-            self._policy,
-            member_id=str(source.get("memberId") or ""),
-            device_id=str(source.get("deviceId") or ""),
-            workspace=workspace,
-            pane_name=pane_name,
-        ):
+        refused = trust_ring == device_trust.RING_BLOCKED or (
+            trust_ring != device_trust.RING_SELF
+            and not pane_policy.is_allowed(
+                self._policy,
+                member_id=sender_member,
+                device_id=sender_device,
+                workspace=workspace,
+                pane_name=pane_name,
+            )
+        )
+        if refused:
             log.warning(
-                "pane policy denied message %s from device %s to %s/%s",
+                "refused message %s from device %s to %s/%s (%s)",
                 msg_key,
-                source.get("deviceId"),
+                sender_device,
                 workspace,
                 pane_name,
+                trust_ring,
             )
+            if trust_ring != device_trust.RING_BLOCKED:
+                # A knock worth showing someone. Blocked senders are left out
+                # on purpose — see AccessRequests.
+                self._access_requests.record(
+                    member_id=sender_member,
+                    device_id=sender_device,
+                    device_name=self._device_name_for(sender_device),
+                    workspace=workspace,
+                    pane_name=pane_name,
+                )
+                await self._announce_access_requests()
+            # One wire reason for both, deliberately: telling a sender that it
+            # is blocked rather than merely unauthorized hands it an oracle,
+            # which is the same reason authorization runs before resolution
+            # here. The distinction is kept locally, where it is useful.
             await self._ack(msg_key, "rejected", reason="policy-denied")
             return
 
@@ -1267,6 +1554,7 @@ async def status() -> dict[str, Any]:
             "tenantId": getattr(link, "tenant_id", ""),
             "displayName": getattr(link, "display_name", ""),
             "role": link.member_role,
+            "emailVerified": bool(getattr(link, "email_verified", False)),
         }
     config = await asyncio.to_thread(load_config)
     return {
@@ -1283,6 +1571,9 @@ async def status() -> dict[str, Any]:
         "tenantId": "",
         "displayName": "",
         "role": "",
+        # No link means no account to judge; the UI only shows the verification
+        # notice for an account it can actually see.
+        "emailVerified": False,
     }
 
 
@@ -1320,6 +1611,20 @@ async def policy_state() -> dict[str, Any]:
         "deviceId": link._device_id,
         "memberId": link.member_id,
     }
+
+
+def access_requests() -> list[dict[str, Any]]:
+    """Refused knocks, or an empty list when no server was ever configured —
+    a machine with no link cannot have been knocked on."""
+    return [] if _link is None else _link.access_requests()
+
+
+def forget_access_request(key: str) -> bool:
+    return False if _link is None else _link.forget_access_request(key)
+
+
+def forget_access_requests_for_device(device_id: str) -> int:
+    return 0 if _link is None else _link.forget_access_requests_for_device(device_id)
 
 
 async def set_policy(policy: Any) -> dict[str, Any] | None:
@@ -1367,6 +1672,20 @@ async def members_state() -> dict[str, Any]:
     }
 
 
+async def network_snapshot() -> dict[str, Any] | None:
+    """Devices and their panes in one read, or None when no server is configured.
+
+    None means what it means everywhere else in this module: this machine never
+    had a server, so there is no network to describe. Everything the view needs
+    comes back in this one call — the caller polls this and nothing else.
+    """
+    link = _link
+    if link is None:
+        return None
+    await link.ensure_directory()
+    return link.network_snapshot()
+
+
 async def members_request(msg_type: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Forward a membership write, or None when no server is configured.
 
@@ -1376,6 +1695,17 @@ async def members_request(msg_type: str, payload: dict[str, Any]) -> dict[str, A
     if _link is None:
         return None
     return await _link.members_request(msg_type, payload)
+
+
+async def resend_verification() -> dict[str, Any] | None:
+    """Re-send the account verification mail, or None with no server configured.
+
+    None means what it means everywhere else in this module: this machine never
+    had a server, so there is no account anywhere to verify.
+    """
+    if _link is None:
+        return None
+    return await _link.resend_verification()
 
 
 def roster_changed() -> None:

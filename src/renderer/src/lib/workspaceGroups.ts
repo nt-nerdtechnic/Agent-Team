@@ -31,11 +31,18 @@ export interface WorkspaceGroupInput {
   panes: readonly { id: string; workspacePath: string; runGroupId?: string }[]
   /** The whole window's lineage, in render order. */
   lineage: readonly LineageRow[]
-  /** The run groups of the workspace on screen, in tab order. Groups are
-   *  per-workspace — they are persisted under currentWorkspace — so only the
-   *  viewed workspace's are known here; the others list their panes ungrouped
-   *  until you switch to them. */
+  /** The run groups of the workspace on screen, in tab order. This is the
+   *  live list the tab bar edits, so it can sit ahead of what was persisted. */
   runGroups: readonly { id: string; name: string }[]
+  /** Every OTHER held workspace's run groups, keyed by path with trailing
+   *  slashes trimmed.
+   *
+   *  Groups are persisted per workspace, and this used to hold only the viewed
+   *  one's, so the sidebar had nothing to group any other workspace's panes by
+   *  and listed them flat: a project's Run sections vanished the moment you
+   *  switched away, though its records were intact on disk. The window loads
+   *  each held workspace's list and keeps it here. */
+  runGroupsByWorkspace: Readonly<Record<string, readonly { id: string; name: string }[]>>
   collapsed: ReadonlySet<string>
   homeDir: string
 }
@@ -88,7 +95,8 @@ export function workspaceParentPath(path: string, homeDir: string): string {
  *  order from what is on screen makes the list reshuffle on every switch.
  */
 export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroupRow[] {
-  const { here, order, panes, lineage, runGroups, collapsed, homeDir } = input
+  const { here, order, panes, lineage, runGroups, runGroupsByWorkspace, collapsed, homeDir } =
+    input
   const rows: WorkspaceGroupRow[] = []
 
   // A pane records the workspace it was started in, and an MCP child inherits
@@ -109,7 +117,11 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
    *  Empty groups are dropped. A group with no panes is a tab, not a section —
    *  a heading with nothing under it is a dead row that cannot be collapsed
    *  into anything. */
-  const sectionsFor = (rows: readonly LineageRow[]): PaneGroupSection[] => {
+  const sectionsFor = (path: string, rows: readonly LineageRow[]): PaneGroupSection[] => {
+    // The viewed workspace splits by the live list the tab bar edits; every
+    // other held one by the copy loaded when the window took it on.
+    const groupsOf =
+      norm(path) === norm(here) ? runGroups : (runGroupsByWorkspace[norm(path)] ?? [])
     const byGroup = new Map<string, LineageRow[]>()
     for (const r of rows) {
       const gid = paneGroup.get(r.id) ?? ''
@@ -118,7 +130,7 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
       else byGroup.set(gid, [r])
     }
     const out: PaneGroupSection[] = []
-    for (const g of runGroups) {
+    for (const g of groupsOf) {
       const own = byGroup.get(g.id)
       if (own?.length) out.push({ id: g.id, name: g.name, rows: own })
     }
@@ -128,7 +140,7 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
     // while its panes lived on. Its rows still belong on screen, so they land
     // with the ungrouped rather than vanishing.
     for (const [gid, own] of byGroup) {
-      if (gid === '' || runGroups.some((g) => g.id === gid)) continue
+      if (gid === '' || groupsOf.some((g) => g.id === gid)) continue
       const tail = out.find((sec) => sec.id === '')
       if (tail) tail.rows.push(...own)
       else out.push({ id: '', name: '', rows: own })
@@ -138,7 +150,7 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
 
   const pushRow = (path: string): void => {
     const own = lineageFor(path)
-    const groups = sectionsFor(own)
+    const groups = sectionsFor(path, own)
     rows.push({
       path,
       label: basename(path),

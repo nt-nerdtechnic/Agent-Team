@@ -184,6 +184,7 @@ import {
   resolveActiveTab,
   resolveManualSpawnGroupId,
   runGroupCreatedAt,
+  groupPeers,
 } from './lib/runGroups'
 import {
   ALL_SCOPE_RESTORE_CONCURRENCY,
@@ -256,6 +257,7 @@ import navideMark from './assets/navide-mark.png'
 // first-run onboarding) — defer them off the main shell's first-paint bundle.
 const CompletionModal = defineAsyncComponent(() => import('./components/CompletionModal.vue'))
 const SettingsModal = defineAsyncComponent(() => import('./components/SettingsModal.vue'))
+const AccountModal = defineAsyncComponent(() => import('./components/AccountModal.vue'))
 const OnboardingWizard = defineAsyncComponent(() => import('./components/OnboardingWizard.vue'))
 const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
@@ -620,6 +622,21 @@ function pluginContributionsAt(location: Exclude<PluginRegionLocation, 'left' | 
 }
 
 const windowPluginContributions = computed(() => pluginContributionsByLocation.value.window)
+
+// The titlebar shows these as icons, matching the gear beside them. A plugin
+// whose icon file is missing or unreadable falls back to a glyph rather than
+// to its title: a word-shaped button next to icon-shaped ones reads as a
+// different kind of control, which is what made the Git one look bolted on.
+const failedPluginIcons = ref<Set<string>>(new Set())
+const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): string =>
+  `${entry.contributionKey} ${entry.icon ?? ''}`
+const hasPluginIcon = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): boolean =>
+  Boolean(entry.icon) && !failedPluginIcons.value.has(pluginIconFailureKey(entry))
+function markPluginIconFailed(entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): void {
+  const failures = new Set(failedPluginIcons.value)
+  failures.add(pluginIconFailureKey(entry))
+  failedPluginIcons.value = failures
+}
 
 async function openPluginContributionWindow(contribution: PluginRegionContribution): Promise<void> {
   const workspacePath = currentWorkspace.value.trim()
@@ -1227,14 +1244,19 @@ function spawnHistoryWorkspaceIdentity(workspacePath: string): WorkspaceIdentity
   }
 }
 
-const sessionHistory = computed(() => {
-  const workspace = spawnHistoryWorkspaceIdentity(currentWorkspace.value)
+/** Newest first, one row per session (pane id as the fallback key), filtered
+ *  to one workspace. Shared by the viewed workspace's live list and another
+ *  workspace's read-only copy so the two cannot dedupe differently. */
+function historyEntriesFor(
+  entries: readonly SpawnHistoryEntry[],
+  workspace: WorkspaceIdentity,
+): SpawnHistoryEntry[] {
   const result: SpawnHistoryEntry[] = []
   const seen = new Set<string>()
-  for (let i = spawnHistory.value.length - 1; i >= 0; i--) {
-    const entry = spawnHistory.value[i]
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]
     // Display-layer guard: never show another workspace's entries, even if
-    // one slipped into spawnHistory at runtime.
+    // one slipped into the buffer at runtime.
     if (!entryBelongsToWorkspace(entry, workspace)) continue
     const key = entry.sessionId ? `session:${entry.sessionId}` : `pane:${entry.paneId}`
     if (!seen.has(key)) {
@@ -1243,7 +1265,11 @@ const sessionHistory = computed(() => {
     }
   }
   return result
-})
+}
+
+const sessionHistory = computed(() =>
+  historyEntriesFor(spawnHistory.value, spawnHistoryWorkspaceIdentity(currentWorkspace.value))
+)
 
 let spawnHistoryWorkspace = ''
 let spawnHistoryHydrated = false
@@ -1376,6 +1402,154 @@ async function loadMoreSpawnHistory(): Promise<void> {
   }
 }
 
+// ── Another workspace's history ─────────────────────────────────────────
+// Every workspace heading carries a history button, so the modal is not
+// always looking at the workspace on screen.
+
+/** The workspace the modal is showing; '' means the one on screen. */
+const historyWorkspace = ref<string>('')
+
+/** That workspace's entries.
+ *
+ *  Deliberately NOT spawnHistory. That ref drives the persist watcher, which
+ *  writes whatever it holds back into spawnHistoryWorkspace's record — so
+ *  loading another project's entries into it would file them under the
+ *  workspace on screen. Nothing is ever persisted from this buffer: writes go
+ *  to the backend keyed by the entry's own workspace, and are mirrored here
+ *  only so the list reflects them. Liveness, paging and hydration state are
+ *  kept separate for the same reason. */
+const foreignHistory = ref<SpawnHistoryEntry[]>([])
+const foreignHistoryCanonical = ref('')
+const foreignHistoryTotal = ref(0)
+const foreignHistoryFetched = ref(0)
+let foreignHistoryLoading = false
+
+/** True while the modal shows a workspace other than the one on screen. */
+const historyIsForeign = computed(
+  () =>
+    !!historyWorkspace.value &&
+    normWs(historyWorkspace.value) !== normWs(currentWorkspace.value)
+)
+
+/** The workspace every history WRITE must name. Reading currentWorkspace
+ *  instead is how a delete run from another project's history would have hit
+ *  the one on screen — and history has no undo. */
+const historyViewWorkspace = computed(() =>
+  historyIsForeign.value ? historyWorkspace.value : currentWorkspace.value
+)
+
+const historyIdentity = computed<WorkspaceIdentity>(() =>
+  historyIsForeign.value
+    ? {
+        workspacePath: historyWorkspace.value,
+        canonicalWorkspacePath: foreignHistoryCanonical.value || undefined,
+      }
+    : spawnHistoryWorkspaceIdentity(currentWorkspace.value)
+)
+
+/** The buffer the modal's own actions patch. */
+const historyBuffer = (): SpawnHistoryEntry[] =>
+  historyIsForeign.value ? foreignHistory.value : spawnHistory.value
+
+/** What the modal renders. */
+const historyEntries = computed(() =>
+  historyIsForeign.value
+    ? historyEntriesFor(foreignHistory.value, historyIdentity.value)
+    : sessionHistory.value
+)
+
+/** Names the project when it is not the one on screen. The modal no longer
+ *  switches to it, so it has to say whose history this is. */
+const historyWorkspaceLabel = computed(() =>
+  historyIsForeign.value
+    ? (normWs(historyWorkspace.value).split('/').filter(Boolean).pop() ?? '')
+    : ''
+)
+
+function resetForeignHistory(): void {
+  historyWorkspace.value = ''
+  foreignHistory.value = []
+  foreignHistoryCanonical.value = ''
+  foreignHistoryTotal.value = 0
+  foreignHistoryFetched.value = 0
+}
+
+/** Page 0 of another workspace's history. */
+async function loadForeignHistory(path: string): Promise<void> {
+  foreignHistory.value = []
+  foreignHistoryCanonical.value = ''
+  foreignHistoryTotal.value = 0
+  foreignHistoryFetched.value = 0
+  const page = await sendQuiet<SpawnHistoryPage>('project.get_spawn_history', {
+    workspace_path: path,
+    offset: 0,
+    limit: MAX_SPAWN_HISTORY,
+  })
+  // The modal can be closed, or pointed at a different heading, mid-flight.
+  if (normWs(historyWorkspace.value) !== normWs(path)) return
+  if (!page || !Array.isArray(page.entries)) return
+  if (typeof page.canonical_workspace_path === 'string') {
+    foreignHistoryCanonical.value = page.canonical_workspace_path
+  }
+  // Same parser the viewed workspace goes through, for the same normalization.
+  const hydrated = parseSpawnHistory(
+    JSON.stringify([...page.entries].reverse()), // newest→oldest page → storage order
+    {
+      workspacePath: path,
+      canonicalWorkspacePath: foreignHistoryCanonical.value || undefined,
+    },
+  )
+  // Its panes live in this window like any other held workspace's, so the
+  // same liveness rule applies.
+  reconcileSpawnHistoryLiveness(hydrated)
+  foreignHistory.value = hydrated
+  foreignHistoryTotal.value = typeof page.total === 'number' ? page.total : page.entries.length
+  foreignHistoryFetched.value = page.entries.length
+}
+
+async function loadMoreForeignHistory(): Promise<void> {
+  const path = historyWorkspace.value
+  if (!path || foreignHistoryLoading) return
+  if (foreignHistoryFetched.value >= foreignHistoryTotal.value) return
+  foreignHistoryLoading = true
+  try {
+    const page = await sendQuiet<SpawnHistoryPage>('project.get_spawn_history', {
+      workspace_path: path,
+      offset: foreignHistoryFetched.value,
+      limit: MAX_SPAWN_HISTORY,
+    })
+    if (!page || !Array.isArray(page.entries)) return
+    if (normWs(historyWorkspace.value) !== normWs(path)) return
+    if (typeof page.total === 'number') foreignHistoryTotal.value = page.total
+    foreignHistoryFetched.value += page.entries.length
+    if (page.entries.length === 0) {
+      // Past the end (the store shrank): stop advertising more.
+      foreignHistoryTotal.value = foreignHistoryFetched.value
+      return
+    }
+    const existing = new Set(foreignHistory.value.map((e) => e.paneId))
+    const older = parseSpawnHistory(
+      JSON.stringify([...page.entries].reverse()),
+      historyIdentity.value,
+    ).filter((entry) => !!entry.paneId && !existing.has(entry.paneId))
+    reconcileSpawnHistoryLiveness(older)
+    if (older.length > 0) foreignHistory.value = [...older, ...foreignHistory.value]
+  } finally {
+    foreignHistoryLoading = false
+  }
+}
+
+const historyHasMore = computed(() =>
+  historyIsForeign.value
+    ? foreignHistoryFetched.value < foreignHistoryTotal.value
+    : spawnHistoryHasMore.value
+)
+
+async function loadMoreHistory(): Promise<void> {
+  if (historyIsForeign.value) await loadMoreForeignHistory()
+  else await loadMoreSpawnHistory()
+}
+
 /** Inline rename from the Agent History detail pane. A live pane goes through
  *  the normal pane rename flow (project.rename_pane, pane title included);
  *  removed entries patch the persisted history directly, full store + mirror
@@ -1388,13 +1562,13 @@ function onRenameHistoryEntry(entry: SpawnHistoryEntry, rawName: string): void {
   const name = rawName.trim()
   // Same reset rule as setPaneCustomName: empty or default label clears it.
   const nameToSet = name && name !== entry.agentLabel ? name : undefined
-  updateHistoryCustomName(spawnHistory.value, {
+  updateHistoryCustomName(historyBuffer(), {
     paneId: entry.paneId,
     agentKey: entry.agentKey,
     sessionId: entry.sessionId,
     sessionHomeId: entry.sessionHomeId,
   }, nameToSet)
-  const ws = entry.workspacePath || currentWorkspace.value
+  const ws = entry.workspacePath || historyViewWorkspace.value
   if (!ws) return
   backend.send('project.rename_spawn_history', {
     workspace_path: ws,
@@ -1408,12 +1582,12 @@ function onRenameHistoryEntry(entry: SpawnHistoryEntry, rawName: string): void {
  *  as onRenameHistoryEntry — the debounced set_ui_state snapshot alone could
  *  be lost on quit). Unstarring deletes the key backend-side. */
 function onToggleStarHistoryEntry(entry: SpawnHistoryEntry, starred: boolean): void {
-  const target = spawnHistory.value.find((e) => e.paneId === entry.paneId)
+  const target = historyBuffer().find((e) => e.paneId === entry.paneId)
   if (target) {
     if (starred) target.starred = true
     else delete target.starred
   }
-  const ws = entry.workspacePath || currentWorkspace.value
+  const ws = entry.workspacePath || historyViewWorkspace.value
   if (!ws) return
   backend.send('project.star_spawn_history', {
     workspace_path: ws,
@@ -1427,7 +1601,8 @@ function onToggleStarHistoryEntry(entry: SpawnHistoryEntry, starred: boolean): v
  *  modal's delete confirmation. `null` means the probe failed — the modal
  *  then confirms without the figures instead of blocking the delete. */
 async function previewHistoryDelete(target: HistoryDeleteTarget): Promise<HistoryDeletePreview | null> {
-  const ws = currentWorkspace.value
+  // The workspace the modal is SHOWING, which need not be the one on screen.
+  const ws = historyViewWorkspace.value
   if (!ws) return null
   const payload: Record<string, unknown> = {
     workspace_path: ws,
@@ -1454,7 +1629,7 @@ async function previewHistoryDelete(target: HistoryDeleteTarget): Promise<Histor
  *  the project.json mirror — and unlinks its CLI transcript log — while
  *  locally we drop it and fix the paging counters. */
 async function onDeleteHistoryEntry(entry: SpawnHistoryEntry): Promise<void> {
-  const ws = currentWorkspace.value
+  const ws = historyViewWorkspace.value
   if (!ws) return
   const resp = await sendQuiet<{ deleted: number; total: number }>('project.delete_spawn_history', {
     workspace_path: ws,
@@ -1462,6 +1637,14 @@ async function onDeleteHistoryEntry(entry: SpawnHistoryEntry): Promise<void> {
     pane_ids: [entry.paneId],
   })
   if (!resp) return
+  // Patch whichever buffer is on screen; the other one's counters are not
+  // about this store and must not move.
+  if (historyIsForeign.value) {
+    foreignHistory.value = foreignHistory.value.filter((e) => e.paneId !== entry.paneId)
+    foreignHistoryTotal.value = resp.total
+    foreignHistoryFetched.value = Math.max(0, foreignHistoryFetched.value - resp.deleted)
+    return
+  }
   spawnHistory.value = spawnHistory.value.filter((e) => e.paneId !== entry.paneId)
   spawnHistoryTotal.value = resp.total
   spawnHistoryFetched.value = Math.max(0, spawnHistoryFetched.value - resp.deleted)
@@ -1473,12 +1656,19 @@ async function onDeleteHistoryEntry(entry: SpawnHistoryEntry): Promise<void> {
  *  locally. `[]` (not null) skips hydrate's legacy-localStorage fallback and
  *  its one-time migration write. */
 async function onCleanupHistory(mode: HistoryCleanupMode, cutoffIso: string): Promise<void> {
-  const ws = currentWorkspace.value
+  const ws = historyViewWorkspace.value
   if (!ws) return
   const payload: Record<string, unknown> = { workspace_path: ws, mode }
   if (mode === 'older_than') payload.cutoff_iso = cutoffIso
   const resp = await sendQuiet<{ deleted: number; total: number }>('project.delete_spawn_history', payload)
   if (!resp) return
+  // Re-read page 0 of whichever store was cleaned. hydrateSpawnHistory is for
+  // the viewed workspace only — it moves spawnHistoryWorkspace and arms the
+  // persist watcher, which must never point at another project.
+  if (historyIsForeign.value) {
+    await loadForeignHistory(ws)
+    return
+  }
   await hydrateSpawnHistory(ws, [])
 }
 
@@ -1640,6 +1830,11 @@ function mirrorMessagingHandle(pane: ActivePane): void {
       name: pane.messagingName,
       workspace_path: pane.workspacePath,
       agent_key: pane.agentKey,
+      // A cold-restore placeholder is mirrored on purpose (see the register
+      // call in restoreWorkspacePanes) so it stays addressable, but it has no
+      // CLI yet. Without this the registry can only see the busy flag, which
+      // every placeholder sets, and the network view calls it "Running".
+      realized: pane.realized === true,
       // Re-sent on every mirror (rename, reconnect), not only the first: the
       // backend forgets a pane whose window stayed away too long, and with it
       // the aliases that pane owned.
@@ -3915,7 +4110,10 @@ let stopGitRecoveryChanged: (() => void) | null = null
 onMounted(() => {
   stopGitContributionActions = window.agentTeam?.onGitContributionAction?.(onGitContributionAction) ?? null
   stopGitRecoveryChanged = window.agentTeam?.onGitRecoveryChanged?.((change) => {
-    if (change.legacy) legacyGitRecovery.value = true
+    // Both directions: the Host also reports recovery being *left* (Extensions
+    // restores the bundled v2 package). Latching on true left an open window
+    // showing the "Legacy recovery" panel for the rest of its life.
+    legacyGitRecovery.value = change.legacy
   }) ?? null
   void refreshPluginContributions()
   stopPluginContributionChanges = window.agentTeam?.plugins?.onContributionsChanged?.(() => {
@@ -4756,6 +4954,16 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
       loginProfileId: opts.loginProfileId,
     })
 
+    // The path above is derived from THIS pane's id, but a spawn that
+    // reattached to a surviving PTY never reached terminal.create, so nothing
+    // opened that file — the conversation is in the log the PTY opened under
+    // its original id, which the reattach reports back. Prefer it: recording
+    // the derived name would point Agent History at a file that never exists,
+    // which is exactly the "Failed to read log file … ENOENT" it used to show
+    // for every restored pane.
+    const effectiveLogFile = ref.attachedOutputLogFile || outputLogFile
+    if (effectiveLogFile !== outputLogFile) pane.outputLogFile = effectiveLogFile
+
     // The history entry was pushed before this path was known — back-fill it
     // now so Agent History preview can read the real file. This must happen
     // after spawn(): the backend creates the log file when it opens the PTY,
@@ -4763,7 +4971,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     // above, so back-filling any earlier points the preview at a file that
     // does not exist yet and the failed read sticks.
     const historyEntry = spawnHistory.value.find((e) => e.paneId === id)
-    if (historyEntry) historyEntry.outputLogFile = outputLogFile
+    if (historyEntry) historyEntry.outputLogFile = effectiveLogFile
 
     // Arm the always-on login-expired watcher for CLIs with a detection spec
     // (the interval self-cleans once the pane is gone or its terminal exited).
@@ -5324,6 +5532,21 @@ const rebuildableAllPaneCount = computed(
   () => panesInView.value.filter((p) => p.realized && paneCanRebuild(p)).length
 )
 
+/** The same answer, per workspace, for the ↻ on every sidebar heading.
+ *
+ *  One window-wide count left every heading's button enabled or disabled by
+ *  whichever workspace was on screen — a project with nothing to rebuild
+ *  offering the button, and one with panes to rebuild refusing it. */
+const rebuildableByWorkspace = computed<Record<string, number>>(() => {
+  const out: Record<string, number> = {}
+  for (const p of panes.value) {
+    if (!p.realized || !paneCanRebuild(p)) continue
+    const key = normWs(p.workspacePath)
+    out[key] = (out[key] ?? 0) + 1
+  }
+  return out
+})
+
 // Panes report a lost PTY one at a time, as each one's reattach probe answers.
 // Batching turns N toasts into one and lets a single concurrency limit apply to
 // the whole wave instead of every pane racing to spawn at once.
@@ -5740,10 +5963,17 @@ async function restartAgentPanes(agentKey: string): Promise<void> {
   )
 }
 
-async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
+async function rebuildPanesViaResume(scope: 'tab' | 'all', workspacePath?: string): Promise<void> {
   if (rebuildingTabPanes.value) return
+  // A sidebar heading's ↻ names its own workspace; the toolbar's and the tab
+  // strip's name none, meaning the workspace on screen. Rebuild reads each
+  // pane's own workspacePath, so another project's panes rebuild in place —
+  // no switch, and nothing on screen changes under the user.
+  const pool = workspacePath
+    ? panes.value.filter((p) => normWs(p.workspacePath) === normWs(workspacePath))
+    : panesInView.value
   // Rebuild replaces pane ids, so capture the batch up front.
-  const ids = panesInView.value
+  const ids = pool
     .filter((p) => p.realized && (scope === 'all' || tabFilteredPaneIds.value.has(p.id)) && paneCanRebuild(p))
     .map((pane) => pane.id)
   if (!ids.length) return
@@ -5981,6 +6211,47 @@ const pipeline = reactive<PipelineRun>({
 
 const showCompletionModal = ref(false)
 const showSettings = ref(false)
+
+// Account modal (titlebar "Sign in"). The titlebar mirrors the link status so
+// a signed-in user sees who they are without opening anything; it is polled
+// cheaply (5 s, only while this window is focused) because the backend has no
+// link-state broadcast, and refreshed at once when the modal reports a change.
+const showAccount = ref(false)
+const accountModalEverOpened = ref(false)
+interface P2pAccountView {
+  state: 'unconfigured' | 'connecting' | 'connected' | 'unreachable' | 'unauthorized'
+  hasToken: boolean
+  accountEmail?: string
+  displayName?: string
+}
+const p2pAccount = ref<P2pAccountView | null>(null)
+const p2pAccountLabel = computed(() => {
+  const a = p2pAccount.value
+  if (!a) return ''
+  return a.accountEmail || a.displayName || (a.hasToken ? i18n.global.t('account.token-linked') : '')
+})
+const p2pAccountDotClass = computed(() => {
+  const state = p2pAccount.value?.state
+  if (state === 'connected') return 'ok'
+  if (state === 'unauthorized') return 'err'
+  if (state === 'unreachable') return 'warn'
+  return 'idle'
+})
+async function loadP2pAccount(): Promise<void> {
+  try {
+    const resp = await backend.send<{ status: P2pAccountView }>('p2p.link.status', {})
+    if (resp.ok && resp.payload?.status) p2pAccount.value = resp.payload.status
+  } catch { /* non-fatal: the titlebar keeps its last value */ }
+}
+function openAccountModal(): void {
+  accountModalEverOpened.value = true
+  showAccount.value = true
+}
+onMounted(() => {
+  void loadP2pAccount()
+  const timer = window.setInterval(() => { if (document.hasFocus()) void loadP2pAccount() }, 5000)
+  onUnmounted(() => window.clearInterval(timer))
+})
 // Pipeline Manager modal. Unlike the other modals it is mounted lazily but never
 // unmounted again (v-if on pmEverOpened + v-show on showPipelineManager): its
 // embedded AiCliDock must keep owning its PTY, and unmounting would let the
@@ -6131,6 +6402,10 @@ async function onMenuAction(action: string): Promise<void> {
     showSettings.value = true
     return
   }
+  if (action === 'open-account') {
+    openAccountModal()
+    return
+  }
   if (action === 'show-shortcuts') {
     // Same destination as Cmd+K Cmd+S: two entry points labelled "Keyboard
     // Shortcuts" must not show two different lists.
@@ -6173,6 +6448,27 @@ async function onMenuAction(action: string): Promise<void> {
   }
 }
 const showHistory = ref(false)
+
+/** Open the history modal for the workspace whose heading was clicked.
+ *
+ *  It answers for that workspace without switching to it: the modal reads its
+ *  own copy of that project's entries, and every write it can perform names
+ *  historyViewWorkspace rather than currentWorkspace. Opening the workspace on
+ *  screen is the ordinary path and touches none of it. */
+async function onOpenWorkspaceHistory(workspacePath?: string): Promise<void> {
+  const foreign =
+    workspacePath && normWs(workspacePath) !== normWs(currentWorkspace.value) ? workspacePath : ''
+  historyWorkspace.value = foreign
+  showHistory.value = true
+  if (foreign) await loadForeignHistory(foreign)
+}
+
+// Closed from the button, from Esc, or by an action that leaves the modal —
+// dropping the copy once here covers every one of them. Keeping it would show
+// a stale snapshot on the next open, before its own load lands.
+watch(showHistory, (open) => {
+  if (!open) resetForeignHistory()
+})
 const historyModalRef = ref<{ closeTopLayer?: () => boolean } | null>(null)
 const revivingHistoryPaneId = ref('')
 const unavailableHistoryPaneIds = ref<Set<string>>(new Set())
@@ -6297,6 +6593,7 @@ registerCommand('workbench.action.closeModal', () => {
   // it is the same one the component's own footer Cancel and Esc handler make.
   else if (showRestoreScopeModal.value) settleRestoreScope(null)
   else if (showSettings.value) showSettings.value = false
+  else if (showAccount.value) showAccount.value = false
   else if (showDebug.value) showDebug.value = false
   else if (showPipelineManager.value) {
     // The modal owns nested confirm dialogs — let it close its own top layer first.
@@ -6431,6 +6728,22 @@ registerCommand('ui.pane.focus', (args) => {
   if (!paneId) throw new Error(`ui.pane.focus requires ${PANE_ID_HINT}`)
   onFocusPane(paneId)
 })
+registerCommand('ui.groupPeers', (args) => {
+  const paneId = (args as { paneId?: string } | undefined)?.paneId
+  if (!paneId) throw new Error(`ui.groupPeers requires ${PANE_ID_HINT}`)
+  const sender = panes.value.find((p) => p.id === paneId)
+  if (!sender) throw new Error(`ui.groupPeers: pane "${paneId}" not found`)
+  // Group membership is UI state the backend never learns (agent_msg.register
+  // carries no group), so a group-scoped broadcast has to ask the window that
+  // owns the sender. Unassigned panes share the synthetic 'manual' group, so
+  // they broadcast to each other rather than to nobody.
+  const peers = groupPeers(panes.value, paneId) ?? []
+  return {
+    group_id: sender.runGroupId ?? '',
+    peers: peers.map((p) => ({ pane_id: p.id, name: p.messagingName as string })),
+  }
+})
+
 registerCommand('ui.pane.getStatus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
   if (!paneId) throw new Error(`ui.pane.getStatus requires ${PANE_ID_HINT}`)
@@ -6554,9 +6867,10 @@ useUiActionBus({
 function mainModalOpen(): boolean {
   return showSettings.value || showCompletionModal.value || showRestoreScopeModal.value ||
     showPipelineManager.value || showDebug.value || showHistory.value || previewLogOpen.value ||
-    reconnectPickerOpen.value || !!cliInstallRequest.value || !!whatsNewEntry.value
+    reconnectPickerOpen.value || !!cliInstallRequest.value || !!whatsNewEntry.value ||
+    showAccount.value
 }
-watch([showSettings, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug, showHistory], () => setContext('modalOpen', mainModalOpen()))
+watch([showSettings, showAccount, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug, showHistory], () => setContext('modalOpen', mainModalOpen()))
 
 /** The sidebar agent list shows panes from every tab; focusing one that lives
  *  in another tab must also activate that tab, or the pane stays v-show-hidden. */
@@ -6649,7 +6963,10 @@ async function resolveHistoryLogPath(
   entry: SpawnHistoryEntry,
   api?: { findManualLog?: (workspacePath: string, filename: string) => Promise<{ ok: boolean; path: string | null }> }
 ): Promise<string | undefined> {
-  const ws = entry.workspacePath || currentWorkspace.value
+  // The workspace the modal is SHOWING, not the one on screen: the two differ
+  // whenever the history was opened from another project's heading, and
+  // searching the viewed workspace for its files would find nothing.
+  const ws = entry.workspacePath || historyViewWorkspace.value
   if (!ws) return undefined
   let logPath = entry.outputLogFile
   if (!logPath && entry.origin !== 'pipeline' && api?.findManualLog) {
@@ -6776,7 +7093,7 @@ async function onResumeHistoryAgent(entry: SpawnHistoryEntry): Promise<void> {
   try {
     const resumed = await onManualResume({
       agentKey: entry.agentKey,
-      workspacePath: entry.workspacePath || currentWorkspace.value,
+      workspacePath: entry.workspacePath || historyViewWorkspace.value,
       sessionId,
       customName: entry.customName,
       autoName: entry.autoName,
@@ -9013,6 +9330,7 @@ async function doCloseWorkspace(): Promise<void> {
   const remaining = workspaceOrder.value.filter((w) => normWs(w) !== normWs(closing))
   workspaceOrder.value = remaining
   persistExtraWorkspaces()
+  _forgetRunGroups(closing)
   // Show Welcome screen immediately so the button feels responsive.
   // The async cleanup (abort / kill panes) runs after the gate is lifted.
   workspaceSelected.value = false
@@ -11356,12 +11674,43 @@ const applyingRemote = ref(false)
 // the window every time.
 const runGroupsOwner = ref<string>('')
 
+/** Every held workspace's run groups, keyed by normWs(path).
+ *
+ *  runGroups only ever describes the workspace on screen. The sidebar lists
+ *  every workspace this window holds, so it had nothing to group the others'
+ *  panes by and listed them flat: switching away made a project's Run sections
+ *  disappear from the sidebar while its records sat intact on disk. This is
+ *  the window's copy of what each held workspace has persisted. The viewed
+ *  workspace still renders from runGroups — that one is live, and can be ahead
+ *  of the last save.
+ */
+const runGroupsByWorkspace = ref<Record<string, readonly RunGroup[]>>({})
+
+function _cacheRunGroups(path: string, groups: readonly RunGroup[]): void {
+  const key = normWs(path)
+  if (!key) return
+  runGroupsByWorkspace.value = { ...runGroupsByWorkspace.value, [key]: [...groups] }
+}
+
+/** Forget a workspace the window no longer holds, so taking it on again loads
+ *  its records rather than showing the list it had when it was let go. */
+function _forgetRunGroups(path: string): void {
+  const key = normWs(path)
+  if (!(key in runGroupsByWorkspace.value)) return
+  const next = { ...runGroupsByWorkspace.value }
+  delete next[key]
+  runGroupsByWorkspace.value = next
+}
+
 function _saveRunGroups(): void {
   if (applyingRemote.value || isDetachedWindow) return
   const ws = currentWorkspace.value
   if (!ws) return
   // Never write one workspace's groups into another's record.
   if (normWs(runGroupsOwner.value) !== normWs(ws)) return
+  // Every group edit funnels through here, so mirroring the write is what
+  // keeps the sidebar's copy of this workspace true after you switch away.
+  _cacheRunGroups(ws, runGroups.value)
   void sendQuiet('project.set_ui_state', {
     workspace_path: ws,
     run_groups: runGroups.value,
@@ -11469,6 +11818,8 @@ function onRunGroupsRemoteSync(raw: unknown): void {
   // merged list is now what this window holds for it.
   runGroupsOwner.value = ws
   runGroups.value = merged
+  // applyingRemote suppresses _saveRunGroups below, and with it the mirror.
+  _cacheRunGroups(ws, merged)
   activeTab.value = resolveActiveTab(merged, activeTab.value)
   currentRunGroupId.value = merged[merged.length - 1]?.id ?? ''
   void nextTick(() => {
@@ -11610,6 +11961,7 @@ function _loadRunGroups(path: string, project: NonNullable<ProjectPayload['proje
     }
   }
   currentRunGroupId.value = runGroups.value[runGroups.value.length - 1]?.id ?? ''
+  _cacheRunGroups(path, runGroups.value)
 }
 
 function createRunGroup(name?: string): RunGroup {
@@ -12107,6 +12459,26 @@ function persistExtraWorkspaces(): void {
   if (!isDetachedWindow) window.agentTeam?.reportAdoptedWorkspaces?.([...workspaceOrder.value])
 }
 
+/** Load the run groups of held workspaces this window has not viewed.
+ *
+ *  Switching to a workspace loads its groups, so the store fills itself for
+ *  everything the session has looked at. What it misses is what a restart or a
+ *  reload brings back: those are held from the first frame but never viewed,
+ *  and their panes would sit ungrouped in the sidebar until you switched to
+ *  them once. Serial and best-effort — cold boot already contends for the
+ *  backend's workers, and a workspace whose peek fails just keeps the flat
+ *  listing it has now. */
+async function prefetchHeldRunGroups(): Promise<void> {
+  if (isDetachedWindow) return
+  for (const path of [...workspaceOrder.value]) {
+    if (!path || normWs(path) === normWs(currentWorkspace.value)) continue
+    if (normWs(path) in runGroupsByWorkspace.value) continue
+    const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
+    const stored = resp?.project?.ui_run_groups
+    if (Array.isArray(stored)) _cacheRunGroups(path, stored)
+  }
+}
+
 onMounted(() => {
   if (isDetachedWindow) return
   // Two ways this window can already hold workspaces before anyone clicks:
@@ -12116,6 +12488,7 @@ onMounted(() => {
   // the registry's copy is from before the restart.
   if (workspaceOrder.value.length) {
     window.agentTeam?.reportAdoptedWorkspaces?.([...workspaceOrder.value])
+    void prefetchHeldRunGroups()
   } else {
     void (async () => {
       const restored = (await window.agentTeam?.takeRestoredAdoptedWorkspaces?.()) ?? []
@@ -12123,8 +12496,16 @@ onMounted(() => {
       // Their agents come back the same way a picked workspace's do.
       for (const path of extraWorkspaces.value) {
         const resp = await sendQuiet<ProjectPayload>('project.peek', { workspace_path: path })
-        if (resp) await restoreWorkspacePanes(resp, path)
+        if (!resp) continue
+        // The reply already carries the records, so grouping a restored
+        // workspace's panes costs no extra round trip.
+        const stored = resp.project?.ui_run_groups
+        if (Array.isArray(stored)) _cacheRunGroups(path, stored)
+        await restoreWorkspacePanes(resp, path)
       }
+      // Anything the loop could not reach (a peek that timed out) gets one
+      // more try; everything it did reach is already cached and skipped.
+      await prefetchHeldRunGroups()
     })()
   }
 })
@@ -12310,6 +12691,7 @@ async function closeWorkspace(path: string): Promise<void> {
   for (const pane of doomed) await onKill(pane.id)
   workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
   persistExtraWorkspaces()
+  _forgetRunGroups(path)
   const next = new Set(collapsedWorkspaces.value)
   next.delete(path)
   collapsedWorkspaces.value = next
@@ -12352,6 +12734,7 @@ async function detachWorkspace(path: string, x: number, y: number): Promise<void
     if (normWs(currentWorkspace.value) === normWs(path)) return
   }
   workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
+  _forgetRunGroups(path)
   const next = new Set(collapsedWorkspaces.value)
   next.delete(path)
   collapsedWorkspaces.value = next
@@ -12401,10 +12784,8 @@ const workspaceGroups = computed<WorkspaceGroupRow[]>(() =>
     order: workspaceOrder.value,
     panes: panes.value,
     lineage: paneLineage.value,
-    // Only the viewed workspace's groups exist here — they are persisted per
-    // workspace — so another workspace this window holds lists its panes
-    // ungrouped until you switch to it.
     runGroups: runGroups.value,
+    runGroupsByWorkspace: runGroupsByWorkspace.value,
     collapsed: collapsedWorkspaces.value,
     homeDir: homeDir.value,
   })
@@ -13812,6 +14193,35 @@ function paneIsCommander(p: ActivePane): boolean {
         <span class="titlebar-spacer"></span>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
+      <!-- Plugin buttons lead the cluster, so they grow LEFTWARD.
+           .titlebar-spacer is flex:1, which pins this cluster to the right
+           edge: anything appended after the gear widens the cluster and shoves
+           ↻ and the gear left, moving two built-in controls every time a
+           plugin is installed or removed. Ahead of them, the built-ins keep
+           the position they have with no plugins at all. -->
+      <div v-if="workspaceSelected && windowPluginContributions.length" class="titlebar-plugin-actions">
+        <button
+          v-for="contribution in windowPluginContributions"
+          :key="contribution.contributionKey"
+          class="titlebar-plugin-action"
+          type="button"
+          :title="contribution.title"
+          :aria-label="contribution.title"
+          @mousedown.stop
+          @click="openPluginContributionWindow(contribution)"
+        >
+          <img
+            v-if="hasPluginIcon(contribution)"
+            class="titlebar-plugin-icon"
+            :src="contribution.icon ?? ''"
+            width="12"
+            height="12"
+            alt=""
+            @error="markPluginIconFailed(contribution)"
+          />
+          <span v-else class="titlebar-plugin-fallback" aria-hidden="true">◇</span>
+        </button>
+      </div>
       <!-- Detached windows could only be merged back by closing them, which is
            indistinguishable from "done with these panes". -->
       <button
@@ -13834,25 +14244,27 @@ function paneIsCommander(p: ActivePane): boolean {
         @click="onSwitchWorkspace"
         :title="$t('action.switch-workspace')"
       >↺</button>
+      <!-- Account: sits immediately before the gear so the gear keeps its
+           edge position (see the plugin-cluster note above). -->
+      <button
+        class="titlebar-account"
+        type="button"
+        @mousedown.stop
+        @click="openAccountModal"
+        :title="p2pAccountLabel || $t('action.sign-in')"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+          <circle cx="12" cy="7" r="4"/>
+        </svg>
+        <span v-if="p2pAccountLabel" class="titlebar-account-dot" :class="p2pAccountDotClass"></span>
+      </button>
       <button class="titlebar-gear" @mousedown.stop @click="showSettings = true" title="Settings (⌘,)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </button>
-      <div v-if="workspaceSelected && windowPluginContributions.length" class="titlebar-plugin-actions">
-        <button
-          v-for="contribution in windowPluginContributions"
-          :key="contribution.contributionKey"
-          class="titlebar-plugin-action"
-          type="button"
-          :title="contribution.title"
-          @mousedown.stop
-          @click="openPluginContributionWindow(contribution)"
-        >
-          {{ contribution.title }}
-        </button>
-      </div>
     </div>
     <!-- Manifest-driven top workbench contributions. The Host keeps opaque
          instance handles in main; this renderer only supplies layout bounds. -->
@@ -13897,6 +14309,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :focus-pane-id="effectiveFocusPaneId ?? undefined"
       :selected-pane-ids="selectedPaneIds"
       :can-rebuild-all="rebuildableAllPaneCount > 0"
+      :rebuildable-by-workspace="rebuildableByWorkspace"
       :rebuilding-all="rebuildingTabPanes"
       :detached-window="isDetachedWindow"
       @spawn="onManualSpawn"
@@ -13914,7 +14327,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
       @rebuild="rebuildPaneViaResume"
-      @rebuild-all="rebuildPanesViaResume('all')"
+      @rebuild-all="rebuildPanesViaResume('all', $event)"
       @restore="restorePane"
       @context-menu="(id, ev) => openPaneCtxMenu(ev, id)"
       @pipeline-start="onPipelineStart"
@@ -13931,7 +14344,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @open-settings="showSettings = true"
       @open-pipeline-manager="openPipelineManager"
       @open-git-accounts="openSettingsAccounts"
-      @open-history="showHistory = true"
+      @open-history="onOpenWorkspaceHistory"
       @switch-workspace="onSwitchWorkspace"
       @workspace-browse="onWorkspaceBrowse"
       :issue-handoffs="issueHandoffView"
@@ -14017,6 +14430,13 @@ function paneIsCommander(p: ActivePane): boolean {
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"
     />
+    <AccountModal
+      v-if="accountModalEverOpened"
+      :open="showAccount"
+      :backend="backend"
+      @close="showAccount = false"
+      @changed="() => void loadP2pAccount()"
+    />
     <ResourceManagerModal
       v-if="resourceManagerEverOpened"
       :open="showResourceManager"
@@ -14050,15 +14470,16 @@ function paneIsCommander(p: ActivePane): boolean {
     <AgentHistoryModal
       ref="historyModalRef"
       :show="showHistory"
-      :session-history="sessionHistory"
+      :session-history="historyEntries"
+      :viewing-workspace="historyWorkspaceLabel"
       :pane-count="panes.length"
       :reviving-pane-id="revivingHistoryPaneId"
       :unavailable-pane-ids="unavailableHistoryPaneIds"
       :preview-open="previewLogOpen"
       :preview-title="previewLogTitle"
       :preview-content="previewLogContent"
-      :history-has-more="spawnHistoryHasMore"
-      :load-more-history="loadMoreSpawnHistory"
+      :history-has-more="historyHasMore"
+      :load-more-history="loadMoreHistory"
       :fetch-history-log="fetchHistoryLog"
       :search-history-log-content="searchHistoryLogsContent"
       :preview-delete="previewHistoryDelete"
@@ -15182,19 +15603,80 @@ function paneIsCommander(p: ActivePane): boolean {
   -webkit-app-region: no-drag;
   flex-shrink: 0;
 }
+/* Same shape as .titlebar-gear: these sit in the same row and open the same
+   kind of thing, so they read as one set of icon buttons rather than a
+   bordered pill wedged between two bare glyphs. */
 .titlebar-plugin-action {
   -webkit-app-region: no-drag;
-  border: 1px solid var(--border-muted);
-  border-radius: 5px;
-  background: var(--bg-inset);
-  color: var(--text-secondary);
+  flex-shrink: 0;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
-  font-size: 11px;
-  padding: 4px 8px;
+  transition: background 0.15s, color 0.15s;
 }
 .titlebar-plugin-action:hover {
   background: var(--bg-hover);
   color: var(--text-bright);
+}
+/* Sign-in / account button: the gear's shape, widened by a short label so a
+   signed-in user sees who they are without opening anything. */
+/* Icon-only, same box as .titlebar-gear so the cluster reads as one row of
+   equal icons; the link state is a small badge on the icon's corner and the
+   account text lives in the tooltip. */
+.titlebar-account {
+  -webkit-app-region: no-drag;
+  position: relative;
+  flex-shrink: 0;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.titlebar-account:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+.titlebar-account-dot {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  box-shadow: 0 0 0 1.5px var(--bg-base);
+}
+.titlebar-account-dot.ok { background: var(--success-fg); }
+.titlebar-account-dot.err { background: var(--danger-fg); }
+.titlebar-account-dot.warn { background: var(--attention-fg); }
+/* Same reasoning as .plugin-tab-icon in ControlPane: the gear beside this is
+   a 14px SVG with padding inside its viewBox, while plugin artwork fills its
+   bitmap edge to edge, so an equal box makes the plugin icon look bigger than
+   everything around it. */
+.titlebar-plugin-icon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  object-fit: contain;
+  border-radius: 3px;
+}
+.titlebar-plugin-fallback {
+  font-size: 12px;
+  line-height: 1;
 }
 
 /* ── Status Bar ──────────────────────────────────────────────────────────────── */

@@ -13,12 +13,14 @@ function-level ``from . import app``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -26,6 +28,7 @@ from pydantic import ValidationError
 
 from . import (
     agent_messaging,
+    device_trust,
     executions_service,
     native_mcp,
     native_memory,
@@ -2745,34 +2748,31 @@ async def p2p_link_status(session: "Session", msg_id: str, msg_type: str, payloa
 
 @handler("p2p.link.configure")
 async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    """Persist the server URL and/or the access token, then reconnect.
+    """Store or clear the access token, then reconnect.
 
-    Both fields are optional and absence means "leave it alone", so the UI can
-    save a new URL without making the user retype a token it is never allowed
-    to show them. An empty string is not absence: it is how the user clears a
-    field, which is what takes the link back to doing nothing at all.
+    The server address used to be part of this call. It is now built into the
+    build (server_link.DEFAULT_SERVER_URL) because there is exactly one service
+    to talk to and a typo'd address produced a link that silently never dialled.
+    A `serverUrl` sent by an older renderer is accepted and ignored rather than
+    rejected, so a stale window cannot fail every save.
+
+    An absent token means "leave it alone" so a caller can reconnect without
+    retyping a credential it is never allowed to see; an empty string is not
+    absence — it is how the user clears it, which takes the link back to inert.
     """
     from . import app
 
-    url = payload.get("serverUrl")
     token = payload.get("token")
-    if url is not None and not isinstance(url, str):
-        await session.send_json(
-            make_error(msg_id, msg_type, "BAD_REQUEST", "serverUrl must be a string")
-        )
-        return
     if token is not None and not isinstance(token, str):
         await session.send_json(
             make_error(msg_id, msg_type, "BAD_REQUEST", "token must be a string")
         )
         return
 
-    delta: dict = {}
-    if url is not None:
-        cleaned = url.strip()
-        delta = app.ui_settings_store.set(
-            {server_link.SERVER_URL_SETTING: cleaned or None}
-        )
+    # An install upgrading from the configurable era still carries the address
+    # its user typed. Nothing reads it any more, so drop it rather than leave a
+    # value that looks like it is in effect.
+    delta = app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
     if token is not None:
         try:
             await vault_to_thread(server_link.set_access_token, token)
@@ -2787,9 +2787,6 @@ async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, pay
         make_response(msg_id, msg_type, {"status": await server_link.status()})
     )
     if delta:
-        # Same reason as ui.settings.set: other windows cache ui_settings. The
-        # sender is not excluded because it wrote through this handler rather
-        # than through its own settings cache, so it needs the delta too.
         await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
 
 
@@ -2807,15 +2804,16 @@ async def _account_call(
 ) -> None:
     from . import app
 
-    url = payload.get("serverUrl")
     email = payload.get("email")
     password = payload.get("password")
-    for name, value in (("serverUrl", url), ("email", email), ("password", password)):
+    for name, value in (("email", email), ("password", password)):
         if not isinstance(value, str) or not value.strip():
             await session.send_json(
                 make_error(msg_id, msg_type, "BAD_REQUEST", f"{name} is required")
             )
             return
+    # The address is the build's, not the caller's — see p2p.link.configure.
+    url = await asyncio.to_thread(server_link.server_url)
 
     request: dict = {"email": email.strip(), "password": password}
     if verb == "auth.register":
@@ -2825,7 +2823,7 @@ async def _account_call(
                 request[optional] = value.strip()
 
     try:
-        result = await server_link.account_request(url.strip(), verb, request)
+        result = await server_link.account_request(url, verb, request)
     except server_link.AccountError as err:
         # Keep the server's own code (EMAIL_TAKEN, AUTH_REJECTED, BAD_REQUEST):
         # the UI tells these apart to decide whether to offer "sign in instead"
@@ -2850,7 +2848,9 @@ async def _account_call(
 
     delta = app.ui_settings_store.set(
         {
-            server_link.SERVER_URL_SETTING: url.strip(),
+            # Only the signed-in identity is stored; the address is built in and
+            # any stale user-entered one is cleared on the way past.
+            server_link.SERVER_URL_SETTING: None,
             server_link.ACCOUNT_EMAIL_SETTING: str(result.get("email") or email).strip(),
         }
     )
@@ -2876,6 +2876,14 @@ async def _account_call(
                     "tenantId": result.get("tenantId"),
                     "tenantName": result.get("tenantName"),
                     "role": result.get("role"),
+                    # Soft gate: a fresh account is unverified and still fully
+                    # usable. Carried here as well as in `status` because the
+                    # link has only just been told to reconnect — its own
+                    # auth.hello answer may not have landed yet, and the modal
+                    # has to show the "check your mail" notice now, not in
+                    # three seconds.
+                    "emailVerified": bool(result.get("emailVerified")),
+                    "verificationSent": bool(result.get("verificationSent")),
                 },
             },
         )
@@ -2892,6 +2900,57 @@ async def p2p_account_register(session: "Session", msg_id: str, msg_type: str, p
 @handler("p2p.account.login")
 async def p2p_account_login(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     await _account_call(session, msg_id, msg_type, payload, "auth.login")
+
+
+@handler("p2p.account.resend_verification")
+async def p2p_account_resend_verification(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Ask the server for a fresh verification mail for the signed-in account.
+
+    Unlike register and login this one rides the existing authenticated link:
+    the server decides *which* account from the connection, so there is nothing
+    for the caller to name and no way to ask for someone else's mail.
+
+    The server's own codes come straight through — RATE_LIMITED in particular
+    means "you already asked in the last minute", which is a thing to show, not
+    a thing to retry.
+    """
+    reply = await server_link.resend_verification()
+    if reply is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so there is no account to verify",
+            )
+        )
+        return
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_VERIFY_RESEND_FAILED"),
+                str(error.get("message") or "the navide-server refused the request"),
+            )
+        )
+        return
+    result = reply.get("payload")
+    result = result if isinstance(result, dict) else {}
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "emailVerified": bool(result.get("emailVerified")),
+                "verificationSent": bool(result.get("verificationSent")),
+                "status": await server_link.status(),
+            },
+        )
+    )
 
 
 @handler("p2p.account.logout")
@@ -2939,7 +2998,7 @@ async def p2p_policy_set(session: "Session", msg_id: str, msg_type: str, payload
     sends back the rules it was shown plus its edit.
     """
     policy = payload.get("policy")
-    problem = pane_policy.validate(policy)
+    problem = pane_policy.validate(policy) or device_trust.validate_blocked(policy)
     if problem:
         await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", problem))
         return
@@ -2969,6 +3028,214 @@ async def p2p_policy_set(session: "Session", msg_id: str, msg_type: str, payload
     await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
 
 
+@handler("p2p.access_requests.list")
+async def p2p_access_requests_list(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Who knocked and was refused. Read-only, and answered from memory."""
+    await session.send_json(
+        make_response(msg_id, msg_type, {"requests": server_link.access_requests()})
+    )
+
+
+@handler("p2p.access_requests.approve")
+async def p2p_access_requests_approve(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Turn one refused knock into an ordinary allow rule.
+
+    Deliberately not a second authorization store: after this there is still
+    exactly one answer to "may that sender drive that pane", and it is the rule
+    set the policy editor shows. Approving is a shortcut for writing the rule a
+    person would otherwise have to compose by hand from four opaque ids.
+
+    The grant is as narrow as the knock was — this member, this device, this
+    workspace, this pane. Widening it to a wildcard is an edit the user makes
+    in the editor, where they can see what they are widening.
+    """
+    key = str(payload.get("key") or "")
+    request = next((r for r in server_link.access_requests() if r["key"] == key), None)
+    if request is None:
+        await session.send_json(
+            make_error(msg_id, msg_type, "NOT_FOUND", "that request is no longer waiting")
+        )
+        return
+
+    def add_rule(policy: dict) -> None:
+        rule = {
+            "from": {"memberId": request["memberId"], "deviceId": request["deviceId"]},
+            "to": {"workspace": request["workspace"], "paneName": request["paneName"]},
+            "action": "allow",
+        }
+        if rule not in policy["rules"]:
+            policy["rules"].append(rule)
+
+    problem = await _write_policy(session, msg_id, msg_type, add_rule)
+    if problem:
+        return
+    server_link.forget_access_request(key)
+    await _announce_requests()
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+@handler("p2p.access_requests.dismiss")
+async def p2p_access_requests_dismiss(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Clear a knock without granting anything. The sender is told nothing —
+    dismissing is not a decision about them, it is one about this list."""
+    forgotten = server_link.forget_access_request(str(payload.get("key") or ""))
+    if forgotten:
+        await _announce_requests()
+    await session.send_json(make_response(msg_id, msg_type, {"forgotten": forgotten}))
+
+
+@handler("p2p.trust.block")
+async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Refuse a device outright, ahead of every rule.
+
+    Takes a deviceId, a memberId, or both — see device_trust.is_blocked for why
+    they are alternatives rather than a pair. Blocking also clears whatever that
+    device had waiting in the knock list: the point of a block is that this
+    machine stops being asked about it.
+    """
+    device_id = str(payload.get("deviceId") or "").strip()
+    member_id = str(payload.get("memberId") or "").strip()
+    if not device_id and not member_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "block needs a deviceId or a memberId")
+        )
+        return
+    entry = {
+        "deviceId": device_id,
+        "memberId": member_id,
+        "deviceName": str(payload.get("deviceName") or ""),
+        "reason": str(payload.get("reason") or ""),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    def add_block(policy: dict) -> None:
+        blocked = policy.setdefault("blocked", [])
+        for existing in blocked:
+            if isinstance(existing, dict) and (
+                (device_id and existing.get("deviceId") == device_id)
+                or (member_id and not device_id and existing.get("memberId") == member_id)
+            ):
+                return
+        blocked.append(entry)
+
+    if await _write_policy(session, msg_id, msg_type, add_block):
+        return
+    if device_id and server_link.forget_access_requests_for_device(device_id):
+        await _announce_requests()
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+@handler("p2p.trust.unblock")
+async def p2p_trust_unblock(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Lift a block. It grants nothing on its own — the device goes back to
+    being decided by the rules, which deny by default."""
+    device_id = str(payload.get("deviceId") or "").strip()
+    member_id = str(payload.get("memberId") or "").strip()
+
+    def drop_block(policy: dict) -> None:
+        policy["blocked"] = [
+            entry
+            for entry in policy.get("blocked", [])
+            if not (
+                isinstance(entry, dict)
+                and (
+                    (device_id and entry.get("deviceId") == device_id)
+                    or (member_id and entry.get("memberId") == member_id)
+                )
+            )
+        ]
+
+    if await _write_policy(session, msg_id, msg_type, drop_block):
+        return
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+async def _announce_requests() -> None:
+    from . import app
+
+    await app.broadcast(
+        make_event("p2p.access_requests.changed", {"requests": server_link.access_requests()})
+    )
+
+
+async def _write_policy(session: "Session", msg_id: str, msg_type: str, mutate) -> bool:
+    """Read the cached policy, apply *mutate*, write the whole document back.
+
+    Read-modify-write because the server's only write is a replace — it stores
+    the document verbatim and never merges. It starts from the cache rather
+    than a fresh fetch for the same reason authorization does: the decision must
+    not depend on the control plane answering at that instant.
+
+    Returns True when it already answered the caller with an error.
+    """
+    state = await server_link.policy_state()
+    if not state.get("editable"):
+        # `editable` is the link's own honest answer: the policy lives on the
+        # server, so an unconfigured or offline machine can read its cached
+        # rules and must not pretend to have saved a change to them.
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED"
+                if state.get("state") == server_link.STATE_UNCONFIGURED
+                else "P2P_LINK_OFFLINE",
+                "this device has no writable policy right now",
+            )
+        )
+        return True
+    policy = state.get("policy")
+    if not isinstance(policy, dict):
+        # No policy yet is the normal state of a device nobody has configured;
+        # the base document is the one the server hands out at revision 0.
+        policy = {"version": 1, "default": "deny", "rules": []}
+    else:
+        policy = json.loads(json.dumps(policy))
+    policy.setdefault("version", 1)
+    policy.setdefault("default", "deny")
+    if not isinstance(policy.get("rules"), list):
+        policy["rules"] = []
+    # The document is stored verbatim by the server and can therefore hold
+    # whatever some other client wrote into it. The read side forgives that —
+    # device_trust skips a row it cannot parse — but the mutators below append
+    # to and filter these lists, and a string or a number here would raise
+    # inside a handler rather than deny anything. Normalising once is what
+    # keeps every caller from having to.
+    if "blocked" in policy and not isinstance(policy.get("blocked"), list):
+        from . import app as _app
+
+        _app.log.warning(
+            "policy blocked was %s, not a list; replacing it", type(policy["blocked"]).__name__
+        )
+        policy["blocked"] = []
+
+    mutate(policy)
+
+    problem = pane_policy.validate(policy) or device_trust.validate_blocked(policy)
+    if problem:
+        await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", problem))
+        return True
+    reply = await server_link.set_policy(policy)
+    if reply is None or not reply.get("ok"):
+        error = (reply or {}).get("error") if isinstance((reply or {}).get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_POLICY_WRITE_FAILED"),
+                str(error.get("message") or "the navide-server rejected the policy"),
+            )
+        )
+        return True
+    return False
+
+
 async def _policy_payload() -> dict:
     """The policy plus the devices a rule could name, in one answer.
 
@@ -2981,6 +3248,36 @@ async def _policy_payload() -> dict:
     state = await server_link.policy_state()
     state["devices"] = remote_roster.list_devices()
     return state
+
+
+# The whole network in one read: which devices are signed in to this team
+# space, and which CLI panes are running on each. One call rather than a
+# directory read plus a presence read plus a member read, because the account
+# modal polls it while it is open and three round trips per tick would be three
+# chances to render a half-updated picture.
+#
+# Answered from server_link's cache, which its own subscriptions keep current
+# (sessions.changed for the rows, presence.changed for who is reachable), so a
+# poll here costs no traffic to the server at all.
+@handler("p2p.network.snapshot")
+async def p2p_network_snapshot(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    snapshot = await server_link.network_snapshot()
+    if snapshot is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so this machine has no network",
+            )
+        )
+        return
+    # A link that is down still answers, carrying `state` and the last picture
+    # the server sent: "the network you had a moment ago, and the link is
+    # offline" is the truth, while an error would read as "you have no network".
+    await session.send_json(make_response(msg_id, msg_type, snapshot))
 
 
 # Team membership: who belongs to this team space, and what they may do. It
@@ -4953,8 +5250,23 @@ async def terminal_reattach(session: "Session", msg_id: str, msg_type: str, payl
     if cols > 0 and rows > 0:
         for tid in alive:
             session.terminals.force_redraw(tid, cols, rows)
+    # Where each survivor is actually writing its transcript. A reattaching
+    # pane has a fresh pane id, and the path its caller derives from that id
+    # names a file no one ever opened — the conversation is in the log the
+    # session opened at create time. Absent for a session started without one.
+    from .terminals import live_output_log_for
+
+    logs = {tid: live_output_log_for(tid) for tid in alive}
     await session.send_json(
-        make_response(msg_id, msg_type, {"alive": alive, "dead": dead})
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "alive": alive,
+                "dead": dead,
+                "logs": {tid: path for tid, path in logs.items() if path},
+            },
+        )
     )
 
 
@@ -6308,6 +6620,9 @@ async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, pay
         workspace_path,
         agent_key=str(payload.get("agent_key") or ""),
         owner=session,
+        # Absent means realized: every caller that has a live pane omits it, and
+        # a window from before this field existed only ever mirrored live panes.
+        realized=bool(payload.get("realized", True)),
     )
     # The ids this same CLI process was known by before the window rebuilt its
     # pane around it (reload, detach, group reattach). They stay resolvable, so

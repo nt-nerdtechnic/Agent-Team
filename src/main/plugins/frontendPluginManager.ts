@@ -4344,6 +4344,49 @@ export class FrontendPluginManager {
     this.registerDescriptor(descriptor, { builtin: true })
   }
 
+  /** Undo {@link replaceBuiltinForRecovery}: drop the recovery builtin and
+   *  re-register the Manifest v2 descriptor scanned from the App-bundled
+   *  package directory.
+   *
+   *  Recovery leaves the package registered in `installedPackages`, so
+   *  {@link loadFactoryPlugin} refuses to run a second time ('installed
+   *  package is active'). Without this seam a session that fell back to legacy
+   *  Git could only reach v2 again by restarting the App — the Extensions
+   *  restore button threw instead of restoring. */
+  restoreFactoryAfterRecovery(
+    packageDir: string,
+    expectedPluginId: string,
+  ):
+    | { restored: true; activation: PluginActivationCatalogEntry }
+    | { restored: false; reason: string } {
+    if (!this.builtinFallbacks.has(expectedPluginId)) {
+      return { restored: false, reason: 'plugin is not in legacy recovery' }
+    }
+    const scanned = loadPluginDir(packageDir)
+    if (scanned.error) return { restored: false, reason: scanned.error }
+    const { activation, descriptor } = scanned
+    if (!activation || !descriptor) {
+      return { restored: false, reason: 'factory package must use Manifest v2' }
+    }
+    if (activation.pluginId !== expectedPluginId || descriptor.id !== expectedPluginId) {
+      return {
+        restored: false,
+        reason: `expected factory plugin '${expectedPluginId}', received '${activation.pluginId}'`,
+      }
+    }
+    if (descriptor.capabilityPolicy?.kind !== 'manifest-v2') {
+      return { restored: false, reason: 'factory package has no Manifest v2 policy' }
+    }
+    activation.provenance = 'factory-bundled'
+    this.builtinFallbacks.delete(expectedPluginId)
+    this.stopAiSessionsForPlugin(expectedPluginId)
+    this.destroyPluginInstances(expectedPluginId)
+    this.clearTerminalRoutes(expectedPluginId)
+    this.descriptors.delete(expectedPluginId)
+    this.registerDescriptor(descriptor, { official: true })
+    return { restored: true, activation }
+  }
+
   /** Look up a registered descriptor by id. */
   getDescriptor(id: string): PluginLaunchDescriptor | undefined {
     return this.descriptors.get(id)

@@ -536,6 +536,12 @@ async def main() -> int:
         check(len(delivered(dup_key)) == 1, "重複的 msgKey 只注入一次", delivered(dup_key))
 
         print("\n== 10. 政策拒絕／允許的真實往返 ==")
+        # Two things are checked here, and they are opposites on purpose:
+        #   * a deny-everything policy does NOT stand between two machines of
+        #     the same person (A and B are both signed in as this run's admin) —
+        #     signing one account in on a second device is itself the grant;
+        #   * it DOES stand between different members of the same network, so
+        #     this section invites one and sends from there.
         deny_set = await link_a._request(
             "policy.set",
             {
@@ -559,27 +565,77 @@ async def main() -> int:
             await until(lambda: link_b._policy_revision == 2, "B 的政策升到 revision 2"),
             "policy.changed 讓 B 換上新政策",
         )
-        denied_key = f"verify:{RUN}:denied"
-        denied_send = await link_a.send_message(
-            to=TO_B, sender=SENDER, text="should be refused", msg_key=denied_key
+        # --- your own second machine is exempt, even under deny-everything ---
+        own_key = f"verify:{RUN}:own-device"
+        own_send = await link_a.send_message(
+            to=TO_B, sender=SENDER, text="from my other machine", msg_key=own_key
         )
         check(
-            isinstance(denied_send, dict) and denied_send.get("ok") is True,
-            "server 仍接受送出（政策是收端的事，不是 server 的）",
-            denied_send,
+            isinstance(own_send, dict) and own_send.get("ok") is True,
+            "server 接受送出（政策是收端的事，不是 server 的）",
+            own_send,
         )
         check(
-            await until(
-                lambda: any(m.get("msgKey") == denied_key for m in rec_a.acked), "A 收到拒絕的 acked"
-            ),
-            "拒絕會回報給發送端",
+            await until(lambda: len(delivered(own_key)) == 1, "B 注入了自己另一台機器送來的訊息"),
+            "同一個帳號的兩台裝置不受 pane 政策約束（登入即授權）",
+            delivered(own_key),
         )
-        denied_ack = next((m for m in rec_a.acked if m.get("msgKey") == denied_key), {})
-        # rejected, not failed: an agent that cannot tell them apart retries a
-        # permission refusal forever.
-        check(denied_ack.get("state") == "rejected", "acked 是 rejected 不是 failed", denied_ack)
-        check(denied_ack.get("reason") == "policy-denied", "acked 帶 reason=policy-denied", denied_ack)
-        check(delivered(denied_key) == [], "被拒的訊息完全沒有廣播給 renderer", delivered(denied_key))
+        check(
+            not any(m.get("msgKey") == own_key for m in rec_a.acked),
+            "沒有被拒的 acked（豁免不是靠政策放行）",
+        )
+        link_b.note_delivery_result(own_key, True, json.dumps({"key": "ok"}))
+
+        # --- a different member of the same network IS policed ---
+        other_invite = await link_a.members_request(
+            "team.members.invite",
+            {"displayName": f"policy-probe-{RUN}", "role": "member"},
+        )
+        other_payload = (
+            other_invite.get("payload") if isinstance(other_invite.get("payload"), dict) else {}
+        )
+        other_token = str(other_payload.get("token") or "")
+        check(bool(other_token), "（前置）邀請一位同租戶成員來測政策", other_invite)
+        link_c, rec_c = await open_link(f"{DEVICE_A}-other-member", "C", token=other_token)
+        try:
+            check(
+                link_c.member_id and link_c.member_id != link_a.member_id,
+                "C 是另一個成員（不是 A 的另一台裝置）",
+                {"a": link_a.member_id, "c": link_c.member_id},
+            )
+            denied_key = f"verify:{RUN}:denied"
+            denied_send = await link_c.send_message(
+                to=TO_B,
+                sender=dict(SENDER, workspace=WORKSPACE_LABEL),
+                text="should be refused",
+                msg_key=denied_key,
+            )
+            check(
+                isinstance(denied_send, dict) and denied_send.get("ok") is True,
+                "server 仍接受送出（政策是收端的事，不是 server 的）",
+                denied_send,
+            )
+            check(
+                await until(
+                    lambda: any(m.get("msgKey") == denied_key for m in rec_c.acked),
+                    "C 收到拒絕的 acked",
+                ),
+                "拒絕會回報給發送端",
+            )
+            denied_ack = next((m for m in rec_c.acked if m.get("msgKey") == denied_key), {})
+            # rejected, not failed: an agent that cannot tell them apart retries a
+            # permission refusal forever.
+            check(denied_ack.get("state") == "rejected", "acked 是 rejected 不是 failed", denied_ack)
+            check(
+                denied_ack.get("reason") == "policy-denied",
+                "acked 帶 reason=policy-denied",
+                denied_ack,
+            )
+            check(
+                delivered(denied_key) == [], "被拒的訊息完全沒有廣播給 renderer", delivered(denied_key)
+            )
+        finally:
+            await link_c.stop()
 
         allow_set = await link_a._request(
             "policy.set", {"deviceId": DEVICE_B, "policy": allow_a_policy(link_a.member_id)}

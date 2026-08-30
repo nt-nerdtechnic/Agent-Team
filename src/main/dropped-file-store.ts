@@ -49,6 +49,29 @@ export function isSystemTempPath(target: string, tempRoot = tmpdir()): boolean {
   })
 }
 
+/**
+ * Rewrites a basename so the pasted path is a single unambiguous token.
+ *
+ * The path we hand back gets typed into a CLI pane, read by an agent, and then
+ * often re-emitted by that agent into a tool call — and a name it cannot
+ * reproduce byte-for-byte dies there. macOS screenshot names carry U+202F
+ * NARROW NO-BREAK SPACE before `AM`/`PM`, which is visually identical to a
+ * space, so the re-typed path points at a file that does not exist. Ordinary
+ * spaces are the same hazard one step earlier: Unicode-aware tokenizers split
+ * on them even when the shell would not.
+ *
+ * So drop every character that needs escaping or careful reproduction. This is
+ * the convention saveClipboardImage already uses for its generated names; the
+ * drag path just never got it. Non-ASCII is kept — a CJK filename survives a
+ * round trip fine and staying recognisable matters — minus its whitespace,
+ * which the first pass has already taken.
+ *
+ * Only ever applied to our own copy, never to a file the user owns.
+ */
+function sanitizedName(name: string): string {
+  return name.replace(/\s+/gu, '-').replace(/[^A-Za-z0-9._+,:@%=\u002D\u0080-\uFFFF]/g, '-')
+}
+
 /** `name.png` → `name-2.png`, `name-2.png` → `name-3.png`. */
 function nextCandidate(name: string, attempt: number): string {
   const ext = extname(name)
@@ -56,12 +79,12 @@ function nextCandidate(name: string, attempt: number): string {
 }
 
 /**
- * Copies `source` into `destDir` under its original basename, suffixing on
- * collision so a second screenshot never overwrites the first.
+ * Copies `source` into `destDir` under a sanitized form of its basename,
+ * suffixing on collision so a second screenshot never overwrites the first.
  */
 async function copyIntoStore(source: string, destDir: string): Promise<string> {
   await mkdir(destDir, { recursive: true })
-  const name = basename(source)
+  const name = sanitizedName(basename(source))
   // COPYFILE_EXCL: fail rather than clobber an existing copy, so the retry
   // loop is race-free against a concurrent drop of the same filename.
   for (let attempt = 1; attempt <= 50; attempt++) {

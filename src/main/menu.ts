@@ -62,6 +62,8 @@ export interface AppMenuHooks {
   onOpenPipelineManager?: () => void
   /** Window menu: open the Resource Manager window (CPU + memory per CLI). */
   onOpenResourceManager?: () => void
+  /** Window menu: open the account window (sign in / create an account). */
+  onOpenAccount?: () => void
   /** Help menu: open the Navide GitHub repo. */
   onOpenRepo?: () => void
   /** Help menu: open the GitHub issues page. */
@@ -302,6 +304,8 @@ export function installApplicationMenu(
     {
       label: 'Window',
       submenu: [
+        { label: 'Navide Account', click: () => hooks.onOpenAccount?.() },
+        { type: 'separator' },
         { label: 'Pipeline Manager', click: () => hooks.onOpenPipelineManager?.() },
         { label: 'Resource Manager', click: () => hooks.onOpenResourceManager?.() },
         { type: 'separator' },

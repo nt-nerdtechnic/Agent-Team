@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useBackend } from './composables/useBackend'
 import { createHostGitTransport } from './composables/hostGitTransport'
 import { createHostGitSettingsPort, createHostGitSurfacePorts, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
+import { revealPath } from './composables/hostShell'
 import ExplorerPane from './components/ExplorerPane.vue'
 import SearchPane from './components/SearchPane.vue'
 import GitPane from './components/GitPane.vue'
@@ -666,7 +667,7 @@ async function ctxCopyRelPath(key: string): Promise<void> {
 async function ctxRevealInFinder(key: string): Promise<void> {
   closeTabCtxMenu()
   const f = findTab(key)
-  if (f?.kind === 'file' && fileWs(f)) await window.agentTeam?.revealPath(absPathOf(f))
+  if (f?.kind === 'file' && fileWs(f)) await revealPath(absPathOf(f))
 }
 
 // ── EditorPane ref tracking (for command delegation) ─────────────────────────
@@ -897,7 +898,7 @@ registerCommand('workbench.action.revealInExplorer', () => {
 registerCommand('workbench.action.revealFileInOS', async () => {
   const f = activeFile.value
   if (f?.kind !== 'file') return
-  await window.agentTeam?.revealPath(absPathOf(f))
+  await revealPath(absPathOf(f))
 })
 registerCommand('workbench.action.newWindow', async () => {
   await window.agentTeam?.openEditorWindow({ workspace_path: workspacePath })

@@ -50,7 +50,11 @@ Credential（Navide が claude/codex の Pane を Spawn するときに発行）
 がすでに完全修飾である `pane_id`）を必要とし、UI State を指定する Tool
 （`ui_invoke`、`ui_snapshot`、`ui_list_actions`）や Plan Document を指定する Tool
 （`plan_*`）は明示的な `workspace_path` を必要とします。Pane として動作する
-呼び出し元はこれを省略でき、その場合その Pane 自身の Workspace が使われます。
+呼び出し元はこれを省略でき、その場合その Pane 自身の Workspace が使われます。Pane
+を持たないということは Tab Group も持たないということでもあり、host と外部の呼び出
+し元による `cli_send` の `to: "group"` Broadcast は `no-group` として拒否されます。
+配信先となる自分の Group もなければ、それを尋ねる Window もないからです。Pane を
+個別に、あるいは `pane_id` で指定してください。
 
 実装: [`plan_mcp.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py)
 （Tool）、[`plan_mcp_auth.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_auth.py)
@@ -94,7 +98,7 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 | Tool | パラメータ | 動作 |
 |---|---|---|
 | `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`pane_id`（すべての `ui.pane.*` アクションが取るキーであり、下の Pane 系 Tool では `address` の代わりにもなる）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
-| `cli_send` | `to`, `text`, `wait_for_delivery_s=0`（上限 120）, `pane_id?` | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返し、待機を指定した場合はその結末も返す |
+| `cli_send` | `to`（Pane のアドレス、または Broadcast を表す `"group"`）, `text`, `wait_for_delivery_s=0`（上限 120）, `pane_id?` | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返し、待機を指定した場合はその結末も返す |
 | `cli_check_message` | `msg_key` | 一つの `cli_send` の結末: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 自分の送信のうち滞留中または失敗しているもの: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20`（上限 200） | **CLI Pane 専用。** *自分宛*に Queue され、まだ入っていないもの: `{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
@@ -153,6 +157,27 @@ Timeout した `cli_send` の待機に現れ、メッセージが決着したあ
 間を行き来するメッセージは毎回 `held_for_s` を振り出しに戻しますし、この仕組みが
 本来対象としているケース——どのウィンドウも Hold を一度も報告しなかったケース——には、
 読むべき Hold の時計自体がありません。
+
+**自分の Tab Group への Broadcast。** `to: "group"` は、呼び出し元自身の Tab Group
+に属する他のすべての Pane に、呼び出し元自身の Workspace 内で届きます。これは意図
+的に、素の行 Protocol の `all` ではありません。`all` は Group を問わず Window 内の
+すべての Pane を意味し、一つの語が二つの範囲を意味すると Debug が非常に困難になる
+からです。代償は `all` がもともと抱えているものと同じで、実際に `group` という名前
+の Pane はここから名前で指定できなくなります。どの Group にも属さない Pane は一つ
+の暗黙の Group を共有するため、互いに届きます——誰にも届かないのではありません。
+Group を一度も作っていない人の Broadcast が、黙って何もしない操作になることはあり
+ません。
+
+返る形は異なります——
+`{ok, broadcast: "group", group_id, delivered_to, recipients: [{name, pane_id, msg_key, accepted, reason?}]}`
+——`msg_key` は**受信者ごとに一つ**です。各受信者は通常の独立したメッセージであり、
+それぞれ独自のペア単位 Rate Limit の予算、独自の Idle Hold、独自の配信レポートを
+持つからです。したがってここまでの話はすべて受信者ごとに個別に当てはまり、各 Key
+はそれぞれ `cli_check_message` に渡します。`wait_for_delivery_s` は Broadcast には
+適用されず、無視されます。Window が列挙してから配信するまでの間にいなくなった受信
+者は、Broadcast 全体を失敗させるのではなく、その場で `accepted: false` と
+`reason: "target-offline"` として報告されます。`recipients` が空でも失敗ではありま
+せん——自分の Group に他に誰もいない、という意味です。
 
 `cli_inbox_summary` は、尋ねるための `msg_key` を持たない場合の同じ事実です。引数を
 取らず、呼び出し元自身についてだけ答え、現在 stale または失敗している自分の送信を

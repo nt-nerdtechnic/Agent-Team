@@ -57,6 +57,7 @@ declare global {
       restartBackend: () => Promise<BackendInfo>
       stopBackend: () => Promise<{ ok: boolean }>
       onBackendChanged: (cb: (info: BackendInfo) => void) => void
+      retryGitV2: () => Promise<{ ok: boolean; reason?: string }>
       onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void) => () => void
       onMenuAction: (cb: (action: string) => void) => void
       onSystemResumed: (cb: () => void) => () => void

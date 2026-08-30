@@ -25,7 +25,7 @@ const planTools: ToolRow[] = [
 
 const cliTools: ToolRow[] = [
   { name: 'cli_list_targets', what: '有哪些 CLI pane 在線上、位址怎麼寫、對方是否忙碌' },
-  { name: 'cli_send', what: '把任意指令送給指定的 pane（同工作區或跨工作區視窗），回傳查詢用的 msg_key' },
+  { name: 'cli_send', what: '把任意指令送給指定的 pane（同工作區或跨工作區視窗），回傳查詢用的 msg_key；位址填 group 則廣播給自己分頁群組裡的其他 pane' },
   { name: 'cli_send_and_wait', what: '送出指令並等對方把這回合做完，順便帶回它最後說了什麼' },
   { name: 'cli_check_message', what: '用 msg_key 查一則送出的訊息後來如何：排隊中、已送達、或失敗與原因（只留最近一小時）' },
   { name: 'cli_open_agent', what: '開一個新的 CLI pane 並指派任務，完成後它會回報' },
@@ -158,6 +158,16 @@ const comparison: CompareRow[] = [
         平常還是用名字比較好讀；pane 換了新的 CLI 重開之後 id 會換一個，
         遇到 <code>unknown-pane-id</code> 重新查一次即可。跨裝置的 pane 沒有本機 id，
         只能用名字定址。
+      </p>
+      <p class="mh-note">
+        <code>cli_send</code> 的位址填 <code>group</code>，不是去找名叫 group 的 pane，而是廣播給
+        <strong>自己所在分頁群組</strong>裡的其他 pane（同工作區）。這跟裸行協定的
+        <code>all</code> 不一樣：<code>all</code> 是整個視窗、不分群組。沒有分到任何
+        群組的 pane 共用同一個隱含群組，所以它們彼此送得到，而不是誰也送不到。
+        回傳的形狀也不一樣：<code>recipients</code> 裡每個收件者各有一個
+        <code>msg_key</code>，要分別拿去 <code>cli_check_message</code> 查；空的
+        <code>recipients</code> 代表你的群組裡沒有別人，不是失敗。代價與
+        <code>all</code> 相同：真的取名叫 group 的 pane 從此無法用名字定址。
       </p>
 
       <h3 class="mh-h3">哪些 CLI 接得到</h3>

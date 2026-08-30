@@ -1,3 +1,4 @@
+import { revealPath as shellRevealPath } from './hostShell'
 import type { GitTransport } from '../../../shared/gitCompatibility'
 import type { useBackend } from './useBackend'
 import type {
@@ -89,8 +90,14 @@ export function createHostGitWindowUiPort(backend: HostBackend): GitWindowUiPort
     async openExternal(url: string): Promise<void> {
       await requireOk(backend.send('ui.open_external', { url }))
     },
+    // Not `backend.send('ui.reveal_path')`: that type has no backend handler
+    // (ws_handlers.py serves only ui.settings.*), so in a real editor window it
+    // answered ok:false and requireOk threw — and GitPane's two context-menu
+    // callers await it bare, turning that throw into a silent rejection. Route
+    // it through hostShell, which the mini-IDE build aliases to the capability
+    // shim, so both hosts land on shell.showItemInFolder.
     async revealPath(path: string): Promise<void> {
-      await requireOk(backend.send('ui.reveal_path', { path }))
+      await shellRevealPath(path)
     },
     async pickFolder(defaultPath?: string): Promise<string | null> {
       const payload = await requireOk<{ ok: boolean; path: string | null }>(backend.send('ui.pick_folder', {
