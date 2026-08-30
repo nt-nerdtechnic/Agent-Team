@@ -7,6 +7,7 @@ be running for these to pass, and none of them touches the real Keychain.
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 
 import pytest
@@ -673,6 +674,177 @@ async def test_outbound_send_goes_over_the_link():
                 "from": {"workspace": "alpha", "paneName": "sender", "paneId": "pa"},
             }
         ]
+    finally:
+        await link.stop()
+
+
+# ---- end-to-end encryption ---------------------------------------------------
+
+
+def _seed_peer_key(device_id: str, public_key: str) -> None:
+    """Put one keyed device in the roster, which is how keys are distributed."""
+    remote_roster.replace(
+        [
+            {
+                "sessionId": f"s-{device_id}",
+                "deviceId": device_id,
+                "deviceName": "far box",
+                "workspace": "beta",
+                "title": "builder",
+                "paneId": "pb",
+                "agentKey": "codex",
+                "status": "running",
+                "hostOnline": True,
+                "devicePublicKey": public_key,
+            }
+        ],
+        local_device_id="dev-local",
+    )
+
+
+@pytest.fixture
+def peer_key(tmp_path, monkeypatch):
+    """A second machine's keypair: its own data dir, so its own key file."""
+    from agent_team_backend import device_crypto
+
+    here = os.environ.get("AGENT_TEAM_DATA_DIR")
+    peer_home = tmp_path / "peer"
+    peer_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(peer_home))
+    key = device_crypto.public_key()
+    if here:
+        monkeypatch.setenv("AGENT_TEAM_DATA_DIR", here)
+    remote_roster._reset_for_test()
+    yield key
+    remote_roster._reset_for_test()
+
+
+async def test_hello_publishes_this_devices_public_key():
+    """Sent on every hello, not only the first: the server keeps the last key it
+    was told, and a build that stopped sending one would leave peers encrypting
+    to a key this machine no longer holds."""
+    from agent_team_backend import device_crypto
+
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        hello = server.opened[0].hellos[0]
+        assert hello["publicKey"] == device_crypto.public_key()
+    finally:
+        await link.stop()
+
+
+async def test_a_message_to_a_keyed_device_leaves_as_ciphertext(peer_key):
+    """The whole point of the change: the relay stores what it cannot read."""
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        _seed_peer_key("dev-b", peer_key)
+        reply = await link.send_message(
+            to={"deviceId": "dev-b", "workspace": "beta", "paneName": "builder"},
+            sender=None,
+            text="deploy the payment fix",
+            msg_key="pa:mcp:enc",
+        )
+        assert reply["ok"] is True
+        sent = server.opened[0].sends[0]
+        assert "text" not in sent, "a plaintext copy alongside the cipher is a downgrade"
+        assert sent["cipher"]
+        assert "deploy" not in sent["cipher"]
+    finally:
+        await link.stop()
+
+
+async def test_a_device_with_no_published_key_still_gets_plaintext():
+    """An un-upgraded peer can only read plaintext, and refusing to talk to it
+    would break every existing pair the day this ships."""
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        remote_roster._reset_for_test()
+        reply = await link.send_message(
+            to={"deviceId": "dev-old", "workspace": "beta", "paneName": "builder"},
+            sender=None,
+            text="ship it",
+            msg_key="pa:mcp:plain",
+        )
+        assert reply["ok"] is True
+        assert server.opened[0].sends[0]["text"] == "ship it"
+        assert "cipher" not in server.opened[0].sends[0]
+    finally:
+        await link.stop()
+
+
+async def test_a_peer_that_had_a_key_never_falls_back_to_plaintext(peer_key):
+    """Without this the encryption would be advisory: anything that made a key
+    disappear — a stale roster, a server that dropped the field, a peer on an
+    older build — would quietly turn ciphertext back into cleartext."""
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        _seed_peer_key("dev-b", peer_key)
+        await link.send_message(
+            to={"deviceId": "dev-b", "workspace": "beta", "paneName": "builder"},
+            sender=None,
+            text="first, encrypted",
+            msg_key="pa:mcp:one",
+        )
+        # The key vanishes from the roster.
+        remote_roster._reset_for_test()
+        reply = await link.send_message(
+            to={"deviceId": "dev-b", "workspace": "beta", "paneName": "builder"},
+            sender=None,
+            text="second, must not go out in the clear",
+            msg_key="pa:mcp:two",
+        )
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == server_link.LINK_ENCRYPTION_FAILED
+        assert len(server.opened[0].sends) == 1, "nothing more may reach the wire"
+    finally:
+        await link.stop()
+
+
+async def test_an_incoming_sealed_message_is_opened_and_delivered(broadcasts):
+    """The receiving half: what the sender sealed for this device's key reaches
+    the pane as ordinary text."""
+    from agent_team_backend import device_crypto
+
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        payload = _pending()
+        payload.pop("text")
+        payload["cipher"] = device_crypto.seal(
+            "please review",
+            recipient_public_key=device_crypto.public_key(),
+            from_device="dev-a",
+            to_device=link._device_id,
+        )
+        await server.opened[0].push({"type": "messages.pending", "payload": payload})
+        await _until(lambda: any(e["type"] == "agent_msg.deliver" for e in broadcasts))
+        delivered = next(e for e in broadcasts if e["type"] == "agent_msg.deliver")
+        assert delivered["payload"]["content"] == "please review"
+    finally:
+        await link.stop()
+
+
+async def test_a_message_that_will_not_open_is_refused_not_typed_in(broadcasts):
+    """Delivering the ciphertext as if it were text would type a wall of base64
+    into somebody's CLI. Rejected, not failed: a retry fails identically."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        payload = _pending()
+        payload.pop("text")
+        payload["cipher"] = "bm90LWEtcmVhbC1zZWFsZWQtYm94"
+        await conn.push({"type": "messages.pending", "payload": payload})
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["state"] == "rejected"
+        assert conn.acks[0]["reason"] == "undecryptable"
+        assert [e for e in broadcasts if e["type"] == "agent_msg.deliver"] == []
     finally:
         await link.stop()
 

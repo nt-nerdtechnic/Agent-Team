@@ -50,7 +50,7 @@ from typing import Any, Callable
 
 import websockets
 
-from . import agent_messaging, device_identity, device_trust, pane_policy, remote_roster
+from . import agent_messaging, device_crypto, device_identity, device_trust, pane_policy, remote_roster
 
 log = logging.getLogger("agent_team_backend.server_link")
 
@@ -147,6 +147,11 @@ MESSAGE_MEMORY_TTL_S = 3600.0
 #: LINK_OFFLINE is transient (the reconnect loop is working on it);
 #: LINK_UNAUTHORIZED is terminal (the credential was rejected or revoked, and
 #: retrying can only produce the same answer until the user signs in again).
+#: Answered when a message could not be sealed for a peer that has published a
+#: key before. Deliberately a link-level code and not a server one: the message
+#: never left this machine, and the caller must not read it as "the far end
+#: refused" — nothing over there has heard of it.
+LINK_ENCRYPTION_FAILED = "p2p-encryption-failed"
 LINK_OFFLINE = "LINK_OFFLINE"
 LINK_UNAUTHORIZED = "LINK_UNAUTHORIZED"
 
@@ -351,6 +356,10 @@ class ServerLink:
         # would mean deciding where — the policy document belongs to the
         # server, and this is nobody's business but this machine's.
         self._access_requests = device_trust.AccessRequests()
+        # Devices this link has ever sealed a message for. Only ever grows
+        # within a process, and that is the point: it is what makes a
+        # disappearing key an error rather than a silent downgrade.
+        self._encrypted_peers: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
         self._device_id = ""
         self.member_id = ""
@@ -660,6 +669,11 @@ class ServerLink:
                 "client": CLIENT_NAME,
                 "deviceId": self._device_id,
                 "deviceName": self._device_name,
+                # Published on every hello, not only the first: the server keeps
+                # the last key it was told, and a build that stopped sending one
+                # would leave peers encrypting to a key this machine no longer
+                # holds. Cheap to re-send, expensive to get wrong.
+                "publicKey": await asyncio.to_thread(device_crypto.public_key),
             },
         )
         if not reply.get("ok"):
@@ -1193,6 +1207,39 @@ class ServerLink:
 
     # ---- messages ----
 
+    def _sealed_for(self, to_device: str, text: str) -> dict[str, Any]:
+        """What to put on the wire for one recipient: ``cipher`` or ``text``.
+
+        Two rules, and the second is the one that matters:
+
+        *Encrypt whenever the recipient has published a key.* The key travels
+        with the session directory, so "has a key" and "is visible to me" are
+        the same condition.
+
+        *Never go back to plaintext for a device that once had one.* Without
+        this the encryption would be advisory: anything that could make a key
+        disappear — a stale roster, a server that omitted the field, a peer
+        reconnecting from an older build — would silently turn ciphertext back
+        into cleartext, and nothing on either end would say so. Once a peer has
+        been seen with a key, a message that cannot be sealed is refused
+        instead.
+        """
+        key = remote_roster.public_key_for(to_device)
+        if key:
+            self._encrypted_peers.add(to_device)
+            return {
+                "cipher": device_crypto.seal(
+                    text,
+                    recipient_public_key=key,
+                    from_device=self._device_id,
+                    to_device=to_device,
+                )
+            }
+        if to_device in self._encrypted_peers:
+            raise device_crypto.CryptoError("this device published a key before and none is known now")
+        # Never seen a key: an un-upgraded peer, which can only read plaintext.
+        return {"text": text}
+
     async def send_message(
         self,
         *,
@@ -1212,7 +1259,25 @@ class ServerLink:
         """
         if self._ws is None or not self._authenticated:
             return self._unavailable()
-        payload: dict[str, Any] = {"to": to, "text": text, "msgKey": msg_key}
+        to_device = str(to.get("deviceId") or "")
+        try:
+            body = self._sealed_for(to_device, text)
+        except device_crypto.CryptoError as err:
+            # Refused rather than downgraded. A message that silently went out
+            # as plaintext because sealing failed would be the one case the
+            # user has no way to notice.
+            log.warning("refusing to send unencrypted to %s: %s", to_device, err)
+            return {
+                "ok": False,
+                "error": {
+                    "code": LINK_ENCRYPTION_FAILED,
+                    "message": (
+                        "this message could not be encrypted for that device, and "
+                        "Navide does not fall back to sending it in the clear"
+                    ),
+                },
+            }
+        payload: dict[str, Any] = {"to": to, "msgKey": msg_key, **body}
         if sender:
             payload["from"] = sender
         try:
@@ -1373,8 +1438,32 @@ class ServerLink:
             await self._ack(msg_key, "failed", reason=result.code or "unknown-target")
             return
 
+        # Decrypt only after the pane resolved: a message this machine was not
+        # going to deliver anyway is one it has no reason to open, and doing the
+        # work in the other order would make "did it decrypt" observable through
+        # timing on messages that were never going to land.
+        cipher = str(data.get("cipher") or "")
+        if cipher:
+            try:
+                text = await asyncio.to_thread(
+                    device_crypto.open_sealed,
+                    cipher,
+                    from_device=str(source.get("deviceId") or ""),
+                    to_device=self._device_id,
+                )
+            except device_crypto.CryptoError:
+                # Not "failed" — a retry would fail identically. The sender is
+                # told the message was refused, and nothing goes to the pane:
+                # delivering the ciphertext as if it were text would type a wall
+                # of base64 into somebody's CLI.
+                log.warning("could not open the sealed message %s; refusing it", msg_key)
+                await self._ack(msg_key, "rejected", reason="undecryptable")
+                return
+        else:
+            text = str(data.get("text") or "")
+
         self._inbound[msg_key]["pane_id"] = result.pane.pane_id
-        await self._deliver(msg_key, result.pane, source, str(data.get("text") or ""))
+        await self._deliver(msg_key, result.pane, source, text)
 
     async def _deliver(
         self,

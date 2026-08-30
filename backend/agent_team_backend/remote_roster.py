@@ -63,6 +63,11 @@ class RemotePane:
     agent_key: str
     status: str
     host_online: bool
+    #: That device's message public key, as the server distributes it. Empty
+    #: when the far machine has never published one — which is what an
+    #: un-upgraded peer looks like, and the only case where a message may still
+    #: leave here as plaintext. See server_link._sealed_for.
+    device_public_key: str = ""
 
     @property
     def device_label(self) -> str:
@@ -144,6 +149,7 @@ def _pane_from_row(row: dict[str, Any]) -> RemotePane | None:
         agent_key=_text(row.get("agentKey")),
         status=_text(row.get("status")),
         host_online=bool(row.get("hostOnline")),
+        device_public_key=_text(row.get("devicePublicKey")),
     )
 
 
@@ -195,6 +201,22 @@ def set_online_devices(device_ids: set[str]) -> None:
     """
     for pane in _PANES.values():
         pane.host_online = pane.device_id in device_ids
+
+
+def public_key_for(device_id: str) -> str:
+    """That device's message public key, or "" when the roster has never seen
+    one for it.
+
+    Read from the roster rather than from a key store because the roster *is*
+    how keys are distributed — the server sends them alongside the sessions,
+    the same way Tailscale hands out node keys with the netmap. A device with
+    no sessions is therefore also a device nobody can encrypt to, which is not
+    a gap: without a session there is no pane to address either.
+    """
+    for pane in _PANES.values():
+        if pane.device_id == device_id and pane.device_public_key:
+            return pane.device_public_key
+    return ""
 
 
 def list_panes() -> list[RemotePane]:
