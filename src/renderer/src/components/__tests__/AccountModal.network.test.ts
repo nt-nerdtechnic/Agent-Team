@@ -21,6 +21,7 @@ import { i18n } from '@navide/plugin-ui/foundation'
 const LOCALES = ['en-US', 'zh-TW'] as const
 const here = dirname(fileURLToPath(import.meta.url))
 const MODAL = readFileSync(resolve(here, '../AccountModal.vue'), 'utf8')
+const APP = readFileSync(resolve(here, '../../App.vue'), 'utf8')
 
 function network(locale: (typeof LOCALES)[number]): Record<string, string> {
   const messages = i18n.global.getLocaleMessage(locale) as Record<string, any>
@@ -108,6 +109,89 @@ describe('account modal — your network', () => {
     expect(MODAL).toMatch(/\.pane-pill\.st-waiting \{[^}]*--attention-fg/)
     expect(MODAL).toMatch(/\.pane-pill\.st-disconnected \{[^}]*border-color/)
     expect(MODAL).toMatch(/\.pane-pill\.st-not-opened \{[^}]*border-color/)
+  })
+
+  // ---- the trust surface ----------------------------------------------------
+
+  it('shows the knock list only when something is waiting', () => {
+    // An empty box here would read as a feature to configure; the absence of a
+    // request is the normal state.
+    expect(MODAL).toContain('v-if="signedIn && accessRequests.length"')
+    expect(MODAL).toContain('v-if="signedIn && blocked.length"')
+  })
+
+  it('puts the decision above the network it is about', () => {
+    // The only part of the panel waiting on the user goes first.
+    const requests = MODAL.indexOf("settings.p2p.trust.requests-title")
+    const net = MODAL.indexOf("settings.p2p.network.title")
+    expect(requests).toBeGreaterThan(-1)
+    expect(requests).toBeLessThan(net)
+  })
+
+  it('offers all three answers to a knock', () => {
+    for (const action of ['approveRequest(req)', 'dismissRequest(req)', 'blockRequest(req)']) {
+      expect(MODAL).toContain(action)
+    }
+    expect(MODAL).toContain('unblock(entry)')
+  })
+
+  it('cannot act on two knocks at once', () => {
+    // Every one of these writes the whole policy document, so a second click
+    // landing mid-write would be a read-modify-write race against ourselves.
+    expect(MODAL).toMatch(/if \(deciding\.value\) return/)
+    expect(MODAL.match(/:disabled="!!deciding"/g)?.length).toBe(4)
+  })
+
+  it('re-reads after every decision, so a row leaves only when it really did', () => {
+    expect(MODAL).toMatch(/await props\.backend\.send\(type, args\)[\s\S]{0,60}await loadNetwork\(\)/)
+  })
+
+  it('reads the trust state from the snapshot it already polls', () => {
+    // Not a second timer and not a subscription: one read, so the panel cannot
+    // draw half of one moment and half of the next.
+    expect(MODAL).toContain('network.value?.accessRequests ?? []')
+    expect(MODAL).toContain('network.value?.blocked ?? []')
+    expect(MODAL.match(/'p2p\.network\./g)?.length).toBe(1)
+  })
+
+  it('gives a remote agent no way to approve itself', () => {
+    // The hole this closes is the one RustDesk defends against by swallowing
+    // clicks in its accept window that land right after a remote-injected
+    // click: a peer that can drive the UI can otherwise grant itself access.
+    // Here the defence is structural rather than timing-based — the trust
+    // decisions are backend messages the modal sends, never `ui.*` commands,
+    // and `ui_invoke` can only reach a registered command. Registering one of
+    // these would hand every CLI agent on this machine, local or relayed in,
+    // the ability to approve a device on the user's behalf.
+    const commands = [...APP.matchAll(/registerCommand\('([^']+)'/g)].map((m) => m[1])
+    expect(commands.length).toBeGreaterThan(0)
+    for (const name of commands) {
+      expect(name).not.toMatch(/trust|access_request|approve|unblock/i)
+    }
+    // ...and the modal reaches them the only way that stays out of that registry.
+    for (const type of [
+      'p2p.access_requests.approve',
+      'p2p.access_requests.dismiss',
+      'p2p.trust.block',
+      'p2p.trust.unblock',
+    ]) {
+      expect(MODAL).toContain(type)
+      expect(APP).not.toContain(type)
+    }
+  })
+
+  it('has every trust string it shows, in both locales', () => {
+    const keys = new Set<string>()
+    const re = /[$]?t\(\s*'settings\.p2p\.trust\.([a-z0-9]+(?:-[a-z0-9]+)*)'/g
+    for (const m of MODAL.matchAll(re)) keys.add(m[1])
+    expect(keys.size).toBeGreaterThan(0)
+    for (const locale of LOCALES) {
+      const messages = i18n.global.getLocaleMessage(locale) as Record<string, any>
+      const trust = messages?.settings?.p2p?.trust as Record<string, string>
+      for (const key of keys) {
+        expect(trust?.[key], `${locale}/settings.p2p.trust.${key}`).toBeTruthy()
+      }
+    }
   })
 
   it('says something useful with only one machine signed in', () => {

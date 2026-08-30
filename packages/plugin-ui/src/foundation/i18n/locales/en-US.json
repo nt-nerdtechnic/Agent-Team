@@ -1112,6 +1112,18 @@
         "status-exited": "Exited",
         "status-disconnected": "Disconnected",
         "status-not-opened": "not opened"
+      },
+      "trust": {
+        "requests-title": "Waiting for you",
+        "requests-hint": "Approving writes a rule for exactly this pane. Nothing else on this machine is granted.",
+        "wants": "wants to reach {pane} in {workspace}",
+        "attempts": "{count} attempts",
+        "approve": "Approve",
+        "dismiss": "Dismiss",
+        "block": "Block",
+        "blocked-title": "Blocked",
+        "blocked-hint": "A block is refused ahead of every rule, including your own other machines.",
+        "unblock": "Unblock"
       }
     },
     "storage": {

@@ -1112,6 +1112,18 @@
         "status-exited": "已結束",
         "status-disconnected": "已斷線",
         "status-not-opened": "尚未開啟"
+      },
+      "trust": {
+        "requests-title": "等你決定",
+        "requests-hint": "核准只會為這一個 pane 寫一條規則，這台機器上的其他 pane 不會被授權。",
+        "wants": "想要連到 {workspace} 的 {pane}",
+        "attempts": "嘗試 {count} 次",
+        "approve": "核准",
+        "dismiss": "略過",
+        "block": "封鎖",
+        "blocked-title": "已封鎖",
+        "blocked-hint": "封鎖優先於所有規則，連你自己的其他機器也一樣擋。",
+        "unblock": "解除封鎖"
       }
     },
     "storage": {

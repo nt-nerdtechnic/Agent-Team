@@ -460,6 +460,37 @@ def test_network_snapshot_groups_panes_by_device() -> None:
     assert other["panes"][0]["status"] == "exited"
 
 
+def test_network_snapshot_carries_the_trust_state_in_the_same_read() -> None:
+    """Who knocked and who is refused, alongside who is here.
+
+    One read, not three: this view is polled while it is open, and separate
+    round trips would let it draw a picture that is half one moment and half
+    the next. Both lists are local state, so folding them in costs the server
+    nothing.
+    """
+    agent_messaging._reset_for_test()
+    try:
+        link = _link_with([])
+        link._policy = {
+            "version": 1,
+            "default": "deny",
+            "rules": [],
+            "blocked": [{"deviceId": "dev-gone", "reason": "stolen"}],
+        }
+        link._access_requests.record(
+            member_id="m-them",
+            device_id="dev-theirs",
+            device_name="their box",
+            workspace="proj",
+            pane_name="reviewer",
+        )
+        snapshot = link.network_snapshot()
+        assert [b["deviceId"] for b in snapshot["blocked"]] == ["dev-gone"]
+        assert [r["paneName"] for r in snapshot["accessRequests"]] == ["reviewer"]
+    finally:
+        agent_messaging._reset_for_test()
+
+
 def test_network_snapshot_calls_this_devices_unopened_panes_what_they_are() -> None:
     """A restored-but-never-opened pane is published as "disconnected" — the
     closest of the contract's four words — but this machine does not have to

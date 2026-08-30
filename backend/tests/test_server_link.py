@@ -887,7 +887,101 @@ async def test_policy_denial_acks_rejected_and_never_reaches_the_renderer(broadc
             "reason": "policy-denied",
         }
         # rejected, not failed: the sender must not retry a permission refusal.
+        # The refusal is announced to this machine's own windows (the knock
+        # list), which is the point of that surface — but the message itself
+        # must never reach the delivery path.
+        assert [e for e in broadcasts if e["type"] == "agent_msg.deliver"] == []
+        assert [e["type"] for e in broadcasts] == ["p2p.access_requests.changed"]
+    finally:
+        await link.stop()
+
+
+async def test_a_blocked_device_is_refused_even_when_it_is_your_own(broadcasts):
+    """The ordering that makes a block worth having.
+
+    Every other mechanism here grants: rules grant, and sharing your member id
+    grants unconditionally. A laptop of yours that walked off can only be shut
+    out by something that runs ahead of that grant, which is why the block list
+    is consulted before the own-device shortcut and not after it.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(
+        policy={
+            "version": 1,
+            "default": "allow",
+            "rules": [],
+            "blocked": [{"deviceId": "dev-a", "reason": "stolen"}],
+        }
+    )
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        # member_id defaults to m1 — the receiver's own member. Even that, and
+        # even under default:allow, does not get past a block.
+        await conn.push({"type": "messages.pending", "payload": _pending()})
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["state"] == "rejected"
         assert broadcasts == []
+        # A blocked sender leaves no knock: the point of a block is that this
+        # machine stops being asked about that device.
+        assert link.access_requests() == []
+    finally:
+        await link.stop()
+
+
+async def test_a_blocked_sender_is_told_the_same_thing_an_unauthorized_one_is(broadcasts):
+    """Naming the block on the wire would hand the sender an oracle — the same
+    reason authorization runs before pane resolution in this path."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(
+        policy={"version": 1, "default": "deny", "rules": [], "blocked": [{"memberId": "m2"}]}
+    )
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push({"type": "messages.pending", "payload": _pending(member_id="m2")})
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["reason"] == "policy-denied"
+    finally:
+        await link.stop()
+
+
+async def test_a_refused_member_leaves_a_knock_the_receiver_can_see(broadcasts):
+    """Before this, a denied message told the sender and told the person whose
+    machine refused it nothing at all."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push({"type": "messages.pending", "payload": _pending(member_id="m2")})
+        await _until(lambda: bool(link.access_requests()))
+        knock = link.access_requests()[0]
+        assert knock["memberId"] == "m2"
+        assert knock["deviceId"] == "dev-a"
+        assert (knock["workspace"], knock["paneName"]) == ("proj-a", "reviewer")
+        assert knock["attempts"] == 1
+
+        # A second attempt refreshes the row rather than adding one.
+        await conn.push(
+            {"type": "messages.pending", "payload": _pending("pa:mcp:second", member_id="m2")}
+        )
+        await _until(lambda: link.access_requests()[0]["attempts"] == 2)
+        assert len(link.access_requests()) == 1
+    finally:
+        await link.stop()
+
+
+async def test_your_own_machine_leaves_no_knock(broadcasts):
+    """It was never refused, so there is nothing to decide about it."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push({"type": "messages.pending", "payload": _pending()})
+        await _until(lambda: bool(broadcasts))
+        assert link.access_requests() == []
     finally:
         await link.stop()
 
@@ -930,7 +1024,7 @@ async def test_a_message_with_no_sender_member_is_still_policed(broadcasts):
         await _until(lambda: bool(conn.acks))
         assert conn.acks[0]["state"] == "rejected"
         assert conn.acks[0]["reason"] == "policy-denied"
-        assert broadcasts == []
+        assert [e for e in broadcasts if e["type"] == "agent_msg.deliver"] == []
     finally:
         await link.stop()
 

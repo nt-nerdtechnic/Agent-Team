@@ -13,12 +13,14 @@ function-level ``from . import app``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -26,6 +28,7 @@ from pydantic import ValidationError
 
 from . import (
     agent_messaging,
+    device_trust,
     executions_service,
     native_mcp,
     native_memory,
@@ -2995,7 +2998,7 @@ async def p2p_policy_set(session: "Session", msg_id: str, msg_type: str, payload
     sends back the rules it was shown plus its edit.
     """
     policy = payload.get("policy")
-    problem = pane_policy.validate(policy)
+    problem = pane_policy.validate(policy) or device_trust.validate_blocked(policy)
     if problem:
         await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", problem))
         return
@@ -3023,6 +3026,214 @@ async def p2p_policy_set(session: "Session", msg_id: str, msg_type: str, payload
         )
         return
     await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+@handler("p2p.access_requests.list")
+async def p2p_access_requests_list(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Who knocked and was refused. Read-only, and answered from memory."""
+    await session.send_json(
+        make_response(msg_id, msg_type, {"requests": server_link.access_requests()})
+    )
+
+
+@handler("p2p.access_requests.approve")
+async def p2p_access_requests_approve(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Turn one refused knock into an ordinary allow rule.
+
+    Deliberately not a second authorization store: after this there is still
+    exactly one answer to "may that sender drive that pane", and it is the rule
+    set the policy editor shows. Approving is a shortcut for writing the rule a
+    person would otherwise have to compose by hand from four opaque ids.
+
+    The grant is as narrow as the knock was — this member, this device, this
+    workspace, this pane. Widening it to a wildcard is an edit the user makes
+    in the editor, where they can see what they are widening.
+    """
+    key = str(payload.get("key") or "")
+    request = next((r for r in server_link.access_requests() if r["key"] == key), None)
+    if request is None:
+        await session.send_json(
+            make_error(msg_id, msg_type, "NOT_FOUND", "that request is no longer waiting")
+        )
+        return
+
+    def add_rule(policy: dict) -> None:
+        rule = {
+            "from": {"memberId": request["memberId"], "deviceId": request["deviceId"]},
+            "to": {"workspace": request["workspace"], "paneName": request["paneName"]},
+            "action": "allow",
+        }
+        if rule not in policy["rules"]:
+            policy["rules"].append(rule)
+
+    problem = await _write_policy(session, msg_id, msg_type, add_rule)
+    if problem:
+        return
+    server_link.forget_access_request(key)
+    await _announce_requests()
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+@handler("p2p.access_requests.dismiss")
+async def p2p_access_requests_dismiss(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Clear a knock without granting anything. The sender is told nothing —
+    dismissing is not a decision about them, it is one about this list."""
+    forgotten = server_link.forget_access_request(str(payload.get("key") or ""))
+    if forgotten:
+        await _announce_requests()
+    await session.send_json(make_response(msg_id, msg_type, {"forgotten": forgotten}))
+
+
+@handler("p2p.trust.block")
+async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Refuse a device outright, ahead of every rule.
+
+    Takes a deviceId, a memberId, or both — see device_trust.is_blocked for why
+    they are alternatives rather than a pair. Blocking also clears whatever that
+    device had waiting in the knock list: the point of a block is that this
+    machine stops being asked about it.
+    """
+    device_id = str(payload.get("deviceId") or "").strip()
+    member_id = str(payload.get("memberId") or "").strip()
+    if not device_id and not member_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "block needs a deviceId or a memberId")
+        )
+        return
+    entry = {
+        "deviceId": device_id,
+        "memberId": member_id,
+        "deviceName": str(payload.get("deviceName") or ""),
+        "reason": str(payload.get("reason") or ""),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    def add_block(policy: dict) -> None:
+        blocked = policy.setdefault("blocked", [])
+        for existing in blocked:
+            if isinstance(existing, dict) and (
+                (device_id and existing.get("deviceId") == device_id)
+                or (member_id and not device_id and existing.get("memberId") == member_id)
+            ):
+                return
+        blocked.append(entry)
+
+    if await _write_policy(session, msg_id, msg_type, add_block):
+        return
+    if device_id and server_link.forget_access_requests_for_device(device_id):
+        await _announce_requests()
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+@handler("p2p.trust.unblock")
+async def p2p_trust_unblock(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Lift a block. It grants nothing on its own — the device goes back to
+    being decided by the rules, which deny by default."""
+    device_id = str(payload.get("deviceId") or "").strip()
+    member_id = str(payload.get("memberId") or "").strip()
+
+    def drop_block(policy: dict) -> None:
+        policy["blocked"] = [
+            entry
+            for entry in policy.get("blocked", [])
+            if not (
+                isinstance(entry, dict)
+                and (
+                    (device_id and entry.get("deviceId") == device_id)
+                    or (member_id and entry.get("memberId") == member_id)
+                )
+            )
+        ]
+
+    if await _write_policy(session, msg_id, msg_type, drop_block):
+        return
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+async def _announce_requests() -> None:
+    from . import app
+
+    await app.broadcast(
+        make_event("p2p.access_requests.changed", {"requests": server_link.access_requests()})
+    )
+
+
+async def _write_policy(session: "Session", msg_id: str, msg_type: str, mutate) -> bool:
+    """Read the cached policy, apply *mutate*, write the whole document back.
+
+    Read-modify-write because the server's only write is a replace — it stores
+    the document verbatim and never merges. It starts from the cache rather
+    than a fresh fetch for the same reason authorization does: the decision must
+    not depend on the control plane answering at that instant.
+
+    Returns True when it already answered the caller with an error.
+    """
+    state = await server_link.policy_state()
+    if not state.get("editable"):
+        # `editable` is the link's own honest answer: the policy lives on the
+        # server, so an unconfigured or offline machine can read its cached
+        # rules and must not pretend to have saved a change to them.
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED"
+                if state.get("state") == server_link.STATE_UNCONFIGURED
+                else "P2P_LINK_OFFLINE",
+                "this device has no writable policy right now",
+            )
+        )
+        return True
+    policy = state.get("policy")
+    if not isinstance(policy, dict):
+        # No policy yet is the normal state of a device nobody has configured;
+        # the base document is the one the server hands out at revision 0.
+        policy = {"version": 1, "default": "deny", "rules": []}
+    else:
+        policy = json.loads(json.dumps(policy))
+    policy.setdefault("version", 1)
+    policy.setdefault("default", "deny")
+    if not isinstance(policy.get("rules"), list):
+        policy["rules"] = []
+    # The document is stored verbatim by the server and can therefore hold
+    # whatever some other client wrote into it. The read side forgives that —
+    # device_trust skips a row it cannot parse — but the mutators below append
+    # to and filter these lists, and a string or a number here would raise
+    # inside a handler rather than deny anything. Normalising once is what
+    # keeps every caller from having to.
+    if "blocked" in policy and not isinstance(policy.get("blocked"), list):
+        from . import app as _app
+
+        _app.log.warning(
+            "policy blocked was %s, not a list; replacing it", type(policy["blocked"]).__name__
+        )
+        policy["blocked"] = []
+
+    mutate(policy)
+
+    problem = pane_policy.validate(policy) or device_trust.validate_blocked(policy)
+    if problem:
+        await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", problem))
+        return True
+    reply = await server_link.set_policy(policy)
+    if reply is None or not reply.get("ok"):
+        error = (reply or {}).get("error") if isinstance((reply or {}).get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_POLICY_WRITE_FAILED"),
+                str(error.get("message") or "the navide-server rejected the policy"),
+            )
+        )
+        return True
+    return False
 
 
 async def _policy_payload() -> dict:

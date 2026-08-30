@@ -50,7 +50,7 @@ from typing import Any, Callable
 
 import websockets
 
-from . import agent_messaging, device_identity, pane_policy, remote_roster
+from . import agent_messaging, device_identity, device_trust, pane_policy, remote_roster
 
 log = logging.getLogger("agent_team_backend.server_link")
 
@@ -346,6 +346,11 @@ class ServerLink:
         # control plane being reachable at the moment a message lands.
         self._policy: Any = None
         self._policy_revision: int | None = None
+        # Who knocked and was refused. In memory only: a knock is a prompt for
+        # a person sitting there now, not a record to keep, and persisting it
+        # would mean deciding where — the policy document belongs to the
+        # server, and this is nobody's business but this machine's.
+        self._access_requests = device_trust.AccessRequests()
         self._tasks: set[asyncio.Task] = set()
         self._device_id = ""
         self.member_id = ""
@@ -1046,6 +1051,37 @@ class ServerLink:
         if self._directory is None and self.state() == STATE_CONNECTED:
             await self._refresh_directory()
 
+    def _device_name_for(self, device_id: str) -> str:
+        """The label the directory knows this device by, or "" — a knock from a
+        machine the directory has not mentioned yet still has to be showable."""
+        for raw in self._directory or []:
+            if str(raw.get("deviceId") or "") == device_id:
+                return str(raw.get("deviceName") or "")
+        return ""
+
+    async def _announce_access_requests(self) -> None:
+        """Tell every window that the knock list changed.
+
+        Broadcast rather than addressed: the list belongs to the machine, not
+        to a workspace, and whichever window has the account view open is the
+        one that should light up.
+        """
+        from . import app
+        from .ipc import make_event
+
+        await app.broadcast(
+            make_event("p2p.access_requests.changed", {"requests": self._access_requests.list()})
+        )
+
+    def access_requests(self) -> list[dict[str, Any]]:
+        return self._access_requests.list()
+
+    def forget_access_request(self, key: str) -> bool:
+        return self._access_requests.forget(key)
+
+    def forget_access_requests_for_device(self, device_id: str) -> int:
+        return self._access_requests.forget_device(device_id)
+
     def network_snapshot(self) -> dict[str, Any]:
         """Every device in this team space, and the panes running on each.
 
@@ -1138,6 +1174,15 @@ class ServerLink:
             "deviceId": local,
             "memberId": self.member_id,
             "tenantId": self.tenant_id,
+            # Folded into the same read as the devices for the reason given
+            # above them: this view is polled while it is open, and a separate
+            # round trip per list would be another chance to draw a picture
+            # that is half one moment and half the next. Both are local state —
+            # the ledger is in memory here, the block list is in the policy
+            # this machine already holds — so neither costs the server
+            # anything.
+            "accessRequests": self._access_requests.list(),
+            "blocked": device_trust.blocked_entries(self._policy),
             # This device first, then by label: the row a user recognises is
             # the one that should not move as other machines come and go.
             "devices": sorted(
@@ -1258,36 +1303,60 @@ class ServerLink:
         pane_name = str(target.get("paneName") or "")
 
         sender_member = str(source.get("memberId") or "")
-        # Your own machines are one trust domain, so the pane policy does not
-        # stand between them: signing the same account in on a second device is
-        # what grants the reach, exactly as joining a tailnet is. The policy
-        # exists for the other case — members you invited into this network —
-        # and defaulting *those* to allow would hand an invitee command over
-        # every pane here, which is far more than "my laptop should reach my
-        # desktop". Membership is asserted by the server (it fills `from` from
-        # the authenticated sender), not by the message, so this cannot be
-        # spoofed by a peer; an empty member_id never matches.
-        own_device = bool(sender_member) and sender_member == self.member_id
+        sender_device = str(source.get("deviceId") or "")
         await self._ensure_policy()
+        # Three rings, not one condition: your own machines are one trust
+        # domain and never consult the rules, a blocked device is refused ahead
+        # of everything including that shortcut, and everyone else is what the
+        # rule set is actually for. See device_trust for why each boundary sits
+        # where it does. Membership is asserted by the server (it fills `from`
+        # from the authenticated sender), not by the message, so a peer cannot
+        # claim to be us.
+        trust_ring = device_trust.ring(
+            self._policy,
+            member_id=sender_member,
+            device_id=sender_device,
+            own_member_id=self.member_id,
+        )
         # The addressed workspace/paneName are checked, not the resolved pane's:
         # resolution happens after this. `paneName` is matched exactly by the
         # resolver, so it is already the pane's real name; only a workspace
         # written as a longer path suffix ("nest/proj" for the pane labelled
         # "proj") can read differently, and it can only fail to match a rule.
-        if not own_device and not pane_policy.is_allowed(
-            self._policy,
-            member_id=sender_member,
-            device_id=str(source.get("deviceId") or ""),
-            workspace=workspace,
-            pane_name=pane_name,
-        ):
+        refused = trust_ring == device_trust.RING_BLOCKED or (
+            trust_ring != device_trust.RING_SELF
+            and not pane_policy.is_allowed(
+                self._policy,
+                member_id=sender_member,
+                device_id=sender_device,
+                workspace=workspace,
+                pane_name=pane_name,
+            )
+        )
+        if refused:
             log.warning(
-                "pane policy denied message %s from device %s to %s/%s",
+                "refused message %s from device %s to %s/%s (%s)",
                 msg_key,
-                source.get("deviceId"),
+                sender_device,
                 workspace,
                 pane_name,
+                trust_ring,
             )
+            if trust_ring != device_trust.RING_BLOCKED:
+                # A knock worth showing someone. Blocked senders are left out
+                # on purpose — see AccessRequests.
+                self._access_requests.record(
+                    member_id=sender_member,
+                    device_id=sender_device,
+                    device_name=self._device_name_for(sender_device),
+                    workspace=workspace,
+                    pane_name=pane_name,
+                )
+                await self._announce_access_requests()
+            # One wire reason for both, deliberately: telling a sender that it
+            # is blocked rather than merely unauthorized hands it an oracle,
+            # which is the same reason authorization runs before resolution
+            # here. The distinction is kept locally, where it is useful.
             await self._ack(msg_key, "rejected", reason="policy-denied")
             return
 
@@ -1542,6 +1611,20 @@ async def policy_state() -> dict[str, Any]:
         "deviceId": link._device_id,
         "memberId": link.member_id,
     }
+
+
+def access_requests() -> list[dict[str, Any]]:
+    """Refused knocks, or an empty list when no server was ever configured —
+    a machine with no link cannot have been knocked on."""
+    return [] if _link is None else _link.access_requests()
+
+
+def forget_access_request(key: str) -> bool:
+    return False if _link is None else _link.forget_access_request(key)
+
+
+def forget_access_requests_for_device(device_id: str) -> int:
+    return 0 if _link is None else _link.forget_access_requests_for_device(device_id)
 
 
 async def set_policy(policy: Any) -> dict[str, Any] | None:

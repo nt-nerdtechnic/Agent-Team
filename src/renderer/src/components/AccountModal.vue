@@ -62,10 +62,32 @@ interface NetworkDevice {
   panes: NetworkPane[]
 }
 
+/** A device that tried to reach a pane here and was refused. */
+interface AccessRequest {
+  key: string
+  memberId: string
+  deviceId: string
+  deviceName: string
+  workspace: string
+  paneName: string
+  attempts: number
+}
+
+/** A device or member refused ahead of every rule. */
+interface BlockedEntry {
+  deviceId: string
+  memberId: string
+  deviceName: string
+  reason: string
+}
+
 interface NetworkSnapshot {
   state: LinkStatus['state']
   deviceId: string
   devices: NetworkDevice[]
+  /** Absent on a backend that predates the trust surface. */
+  accessRequests?: AccessRequest[]
+  blocked?: BlockedEntry[]
 }
 
 /** The four the server defines; anything else is shown as the server spelled it. */
@@ -185,6 +207,60 @@ function paneCountLabel(count: number): string {
 }
 
 const devices = computed<NetworkDevice[]>(() => network.value?.devices ?? [])
+const accessRequests = computed<AccessRequest[]>(() => network.value?.accessRequests ?? [])
+const blocked = computed<BlockedEntry[]>(() => network.value?.blocked ?? [])
+
+/** Which knock is mid-decision, so a double click cannot act twice. */
+const deciding = ref('')
+
+/**
+ * Act on one knock, then re-read.
+ *
+ * Every one of these writes the policy document, and the snapshot is what the
+ * section is drawn from — so the refresh is not a nicety, it is how the row
+ * leaves the screen. Failures keep the row: a rule that was not written must
+ * not look like one that was.
+ */
+async function decide(key: string, type: string, args: Record<string, unknown>): Promise<void> {
+  if (deciding.value) return
+  deciding.value = key
+  try {
+    await props.backend.send(type, args)
+    await loadNetwork()
+  } catch {
+    /* the row stays, and the next poll shows whatever is really true */
+  } finally {
+    deciding.value = ''
+  }
+}
+
+function approveRequest(req: AccessRequest): void {
+  void decide(req.key, 'p2p.access_requests.approve', { key: req.key })
+}
+
+function dismissRequest(req: AccessRequest): void {
+  void decide(req.key, 'p2p.access_requests.dismiss', { key: req.key })
+}
+
+function blockRequest(req: AccessRequest): void {
+  void decide(req.key, 'p2p.trust.block', {
+    deviceId: req.deviceId,
+    deviceName: req.deviceName,
+  })
+}
+
+function unblock(entry: BlockedEntry): void {
+  void decide(entry.deviceId || entry.memberId, 'p2p.trust.unblock', {
+    deviceId: entry.deviceId,
+    memberId: entry.memberId,
+  })
+}
+
+/** How a person recognises a blocked row: the name if the directory ever knew
+ *  one, else whichever id the block was written against. */
+function blockedLabel(entry: BlockedEntry): string {
+  return entry.deviceName || entry.deviceId || entry.memberId
+}
 /** The common case for a new account, and the one a blank box would fail. */
 const soloDevice = computed(() => devices.value.length === 1 && devices.value[0].isLocal)
 /** The link is down, so what is on screen is the last thing the server said. */
@@ -384,6 +460,38 @@ onUnmounted(() => {
         </div>
         <p v-if="resent" class="hint">{{ t('settings.p2p.account.verify-resent') }}</p>
 
+        <!-- Someone knocked and was refused. Above the network on purpose:
+             it is the only part of this panel that is waiting on a decision,
+             and it appears only when there is one to make. -->
+        <section v-if="signedIn && accessRequests.length" class="net">
+          <h2 class="net-title">{{ t('settings.p2p.trust.requests-title') }}</h2>
+          <div class="card net-card">
+            <div v-for="req in accessRequests" :key="req.key" class="req">
+              <div class="req-head">
+                <span class="dev-name">{{ req.deviceName || req.deviceId }}</span>
+                <span v-if="req.attempts > 1" class="dev-count">
+                  {{ t('settings.p2p.trust.attempts', { count: req.attempts }) }}
+                </span>
+              </div>
+              <p class="req-what">
+                {{ t('settings.p2p.trust.wants', { workspace: req.workspace, pane: req.paneName }) }}
+              </p>
+              <div class="req-acts">
+                <button class="btn small" :disabled="!!deciding" @click="approveRequest(req)">
+                  {{ t('settings.p2p.trust.approve') }}
+                </button>
+                <button class="btn ghost small" :disabled="!!deciding" @click="dismissRequest(req)">
+                  {{ t('settings.p2p.trust.dismiss') }}
+                </button>
+                <button class="btn ghost small danger" :disabled="!!deciding" @click="blockRequest(req)">
+                  {{ t('settings.p2p.trust.block') }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <p class="hint">{{ t('settings.p2p.trust.requests-hint') }}</p>
+        </section>
+
         <!-- Your network: the same card/kv/hint language as the account block
              above, one more section of the same panel. The box keeps its height
              whether it is waiting, empty or full, so the modal does not jump
@@ -429,6 +537,27 @@ onUnmounted(() => {
                account looks like — so it gets the way forward, not a blank box. -->
           <p v-if="soloDevice" class="hint">{{ t('settings.p2p.network.solo') }}</p>
           <p v-if="networkStale" class="hint">{{ t('settings.p2p.network.link-offline') }}</p>
+        </section>
+
+        <!-- Only when something is blocked: an empty list here would read as a
+             feature the user has to configure, and it is the opposite — the
+             absence of a block is the normal state. -->
+        <section v-if="signedIn && blocked.length" class="net">
+          <h2 class="net-title">{{ t('settings.p2p.trust.blocked-title') }}</h2>
+          <div class="card net-card">
+            <div v-for="entry in blocked" :key="entry.deviceId || entry.memberId" class="req">
+              <div class="req-head">
+                <span class="dev-name">{{ blockedLabel(entry) }}</span>
+                <span v-if="entry.reason" class="dev-count">{{ entry.reason }}</span>
+              </div>
+              <div class="req-acts">
+                <button class="btn ghost small" :disabled="!!deciding" @click="unblock(entry)">
+                  {{ t('settings.p2p.trust.unblock') }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <p class="hint">{{ t('settings.p2p.trust.blocked-hint') }}</p>
         </section>
 
         <button class="btn ghost wide" :disabled="busy" @click="signOut">
@@ -640,6 +769,16 @@ input:focus {
 .pane-pill.st-running { background: var(--success-fg); color: #fff; }
 .pane-pill.st-waiting { background: var(--attention-fg); color: #fff; }
 .pane-pill.st-disconnected { background: none; border-color: var(--border-default); }
+/* A knock is a row that owes an answer, so it gets a little more room than a
+   pane line and its own separator — the same card, one step louder. */
+.req { padding: 8px 0; border-bottom: 1px solid var(--border-muted); }
+.req:last-child { border-bottom: none; }
+.req:first-child { padding-top: 0; }
+.req-head { display: flex; align-items: baseline; gap: 8px; }
+.req-what { margin: 3px 0 7px; font-size: 12px; color: var(--fg-muted); }
+.req-acts { display: flex; gap: 6px; }
+.btn.small { padding: 2px 10px; font-size: 12px; }
+.btn.ghost.small.danger { color: var(--danger-fg); }
 /* Same hollow treatment as disconnected: neither pane is doing anything, and
    the eye should skip both to find the ones that are. */
 .pane-pill.st-not-opened { background: none; border-color: var(--border-default); }
