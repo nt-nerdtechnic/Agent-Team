@@ -6,6 +6,7 @@ import { useExplorer, type FsEntry } from '../composables/useExplorer'
 import { useGit } from '../composables/useGit'
 import { createHostGitTransport } from '../composables/hostGitTransport'
 import { createHostGitCredentialPort } from '../composables/hostSurfacePorts'
+import { revealPath } from '../composables/hostShell'
 import { useNotify } from '@navide/plugin-ui/foundation'
 
 import { usePreview } from '../preview/usePreview'
@@ -421,7 +422,7 @@ async function doDelete(entry: FsEntry): Promise<void> {
 }
 
 async function reveal(entry: FsEntry): Promise<void> {
-  await window.agentTeam?.revealPath(absPath(entry.rel_path))
+  await revealPath(absPath(entry.rel_path))
 }
 
 async function copyPath(entry: FsEntry): Promise<void> {

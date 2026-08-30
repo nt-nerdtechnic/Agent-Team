@@ -32,10 +32,28 @@ def test_list_rejects_absolute_escape(tmp_path: Path) -> None:
     assert res["ok"] is False
 
 
-def test_internal_dir_is_protected(tmp_path: Path) -> None:
+def test_internal_dir_lists_but_hides_its_state(tmp_path: Path) -> None:
+    """The dir itself is listable so the file tree can show plans/reports.
+
+    Everything else in it — the live SQLite database, logs, migration
+    leftovers — must not surface: naming a file there is the first half of
+    opening or deleting it.
+    """
     res = fs_service.list_dir(_ws(tmp_path), ".agent-team")
-    assert res["ok"] is False
-    assert "protected" in res["error"].lower()
+    assert res["ok"] is True
+    assert [e["name"] for e in res["entries"]] == []  # project.json stays out
+
+
+def test_internal_dir_contents_stay_unreadable(tmp_path: Path) -> None:
+    """Listing the dir grants nothing below it."""
+    ws = _ws(tmp_path)
+    for res in (
+        fs_service.read_file(ws, ".agent-team/project.json"),
+        fs_service.write_file(ws, ".agent-team/evil.json", "x"),
+        fs_service.list_dir(ws, ".agent-team/nested"),
+    ):
+        assert res["ok"] is False
+        assert "protected" in res["error"].lower()
 
 
 def test_no_workspace(tmp_path: Path) -> None:
@@ -93,10 +111,29 @@ def test_plans_subtree_delete_allowed(tmp_path: Path, monkeypatch) -> None:
     assert not (tmp_path / ".agent-team" / "plans" / "my-plan.html").exists()
 
 
-def test_agent_team_root_still_protected_with_plans(tmp_path: Path) -> None:
-    res = fs_service.list_dir(_ws_with_plans(tmp_path), ".agent-team")
-    assert res["ok"] is False
-    assert "protected" in res["error"].lower()
+def test_internal_dir_cannot_be_deleted_or_renamed(tmp_path: Path) -> None:
+    """Now that it shows in the tree, the destructive menu items must refuse.
+
+    Listing is the only thing the exemption grants; every mutation path
+    resolves without it and still hits the guard.
+    """
+    ws = _ws(tmp_path)
+    for res in (
+        fs_service.delete(ws, ".agent-team"),
+        fs_service.rename(ws, ".agent-team", "team"),
+    ):
+        assert res["ok"] is False
+        assert "protected" in res["error"].lower()
+    assert (tmp_path / ".agent-team").is_dir()
+
+
+def test_agent_team_root_lists_only_the_user_facing_subtrees(tmp_path: Path) -> None:
+    ws = _ws_with_plans(tmp_path)
+    (tmp_path / ".agent-team" / "reports").mkdir()
+    (tmp_path / ".agent-team" / "navide.db").write_text("sqlite", encoding="utf-8")
+    res = fs_service.list_dir(ws, ".agent-team")
+    assert res["ok"] is True
+    assert sorted(e["name"] for e in res["entries"]) == ["plans", "reports"]
 
 
 def test_agent_team_sibling_still_protected(tmp_path: Path) -> None:
@@ -158,13 +195,19 @@ def test_list_hides_dotfiles_by_default(tmp_path: Path) -> None:
     assert ".agent-team" not in names     # always excluded
 
 
-def test_list_show_hidden_includes_dotfiles_but_not_internal(tmp_path: Path) -> None:
+def test_list_show_hidden_includes_dotfiles_and_the_internal_dir(tmp_path: Path) -> None:
     res = fs_service.list_dir(_ws(tmp_path), "", show_hidden=True)
     names = [e["name"] for e in res["entries"]]
     assert ".env" in names
-    assert ".agent-team" not in names     # internal dir still hidden
+    assert ".agent-team" in names  # surfaced so plans/ and reports/ are reachable
     env = next(e for e in res["entries"] if e["name"] == ".env")
     assert env["is_hidden"] is True
+
+
+def test_internal_dir_follows_the_show_hidden_toggle(tmp_path: Path) -> None:
+    """It is an ordinary dotfile now, not a special case."""
+    res = fs_service.list_dir(_ws(tmp_path), "", show_hidden=False)
+    assert ".agent-team" not in [e["name"] for e in res["entries"]]
 
 
 def test_list_dirs_before_files(tmp_path: Path) -> None:
