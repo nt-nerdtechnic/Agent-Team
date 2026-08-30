@@ -7,12 +7,21 @@ be running for these to pass, and none of them touches the real Keychain.
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import json
 
 import pytest
 
-from agent_team_backend import agent_messaging, app, remote_roster, server_link
+from agent_team_backend import (
+    agent_messaging,
+    app,
+    device_identity,
+    device_signing,
+    remote_roster,
+    server_link,
+    trust_store,
+)
 from agent_team_backend.credential_vault import CredentialVault, CredentialVaultError
 from agent_team_backend.server_link import ServerLink, ServerLinkConfig
 
@@ -22,8 +31,13 @@ CONFIG = ServerLinkConfig(url="ws://localhost:8787/ws", token="tok-abc")
 @pytest.fixture(autouse=True)
 def _clean_registry():
     agent_messaging._reset_for_test()
+    # The directory now seeds a peer (a device with no signing key in the
+    # roster is a device this machine refuses), and the roster is module state,
+    # so without this a later test would see a peer no test in it created.
+    remote_roster._reset_for_test()
     yield
     agent_messaging._reset_for_test()
+    remote_roster._reset_for_test()
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +68,68 @@ def _bad_request(message: dict, text: str) -> dict:
         "ok": False,
         "error": {"code": "BAD_REQUEST", "message": text},
     }
+
+
+class Peer:
+    """Another device, with a signing key of its own.
+
+    Cross-device messages carry a signature the receiver checks against a key it
+    pinned, so a fake server that only relays text can no longer stand in for a
+    peer: it has to *be* one. Which is the point — a test whose "sender" holds
+    no private key is a test that would still pass if the receiver checked
+    nothing.
+    """
+
+    def __init__(self, device_id: str = "dev-a", *, name: str = "peer-box") -> None:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        self.device_id = device_id
+        self.name = name
+        self._private = Ed25519PrivateKey.generate()
+        self.sign_key = base64.b64encode(
+            self._private.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
+
+    def sign(self, *, msg_key: str, to_device: str, kind: str, body: str) -> str:
+        payload = device_signing.message_payload(
+            msg_key=msg_key,
+            from_device=self.device_id,
+            to_device=to_device,
+            kind=kind,
+            body=body,
+        )
+        return base64.b64encode(
+            self._private.sign(
+                device_signing._MESSAGE_CONTEXT + b"\x00" + device_signing._canonical(payload)
+            )
+        ).decode("ascii")
+
+    def session_row(self, **overrides) -> dict:
+        """How the directory describes this device, keys included — the channel
+        a first pin's candidate key travels on."""
+        row = {
+            "sessionId": f"s-{self.device_id}",
+            "deviceId": self.device_id,
+            "deviceName": self.name,
+            "workspace": "alpha",
+            "workspacePath": f"/tmp/{self.device_id}",
+            "title": "sender",
+            "paneId": "rp1",
+            "agentKey": "claude",
+            "status": "running",
+            "hostOnline": True,
+            "deviceSignPublicKey": self.sign_key,
+        }
+        row.update(overrides)
+        return row
+
+
+#: The peer every inbound-message test receives from.
+PEER = Peer()
 
 
 #: The real server's enum. Enforced here because a fake that accepts anything
@@ -232,6 +308,21 @@ class FakeConnection:
         return item
 
 
+def _self_signed(policy, *, seq: int = 0):
+    """Wrap a policy in this device's own signature, as ``set_policy`` does.
+
+    ``seq`` 0 is the resting state of a machine that has never written one, so a
+    seeded policy is accepted without pretending a write happened.
+    """
+    if not isinstance(policy, dict):
+        return policy
+    document = {k: v for k, v in policy.items() if k != server_link.POLICY_SIGNATURE_FIELD}
+    signature = device_signing.sign_policy(
+        device_id=device_identity.device_id(), seq=seq, document=document
+    )
+    return {**document, server_link.POLICY_SIGNATURE_FIELD: {"seq": seq, "sig": signature}}
+
+
 #: Allows every sender, so a test that is not about the policy is not about the
 #: policy. `is_allowed` denies anything it cannot read, including None.
 ALLOW_ALL_POLICY = {
@@ -250,11 +341,17 @@ class FakeServer:
         self.connections = [FakeConnection(responder, self) for _ in range(count)]
         self.opened: list[FakeConnection] = []
         self.urls: list[str] = []
-        self.policy = ALLOW_ALL_POLICY if policy is None else policy
+        # Signed as the device would sign it: the receiver refuses a policy it
+        # cannot verify, so a fake that served a bare document would be testing
+        # the deny path in every test that is not about the policy at all.
+        self.policy = _self_signed(ALLOW_ALL_POLICY if policy is None else policy)
         self.policy_revision = 1
         #: What sessions.directory answers with — the whole team space, this
         #: device's own rows included, exactly as the real server sends it.
-        self.directory: list[dict] = []
+        #: The peer is in it by default because that is the channel a signing
+        #: key travels on: a device the directory never mentions is one this
+        #: machine has no key for and therefore refuses.
+        self.directory: list[dict] = [PEER.session_row()]
         #: The team roster, as team.members.list answers it. Never carries a
         #: token: the real server filters it out of every read, which is what
         #: makes the invite reply the only place one ever appears.
@@ -616,32 +713,65 @@ async def test_a_restore_placeholder_is_published_as_disconnected_not_running():
 
 
 def _pending(
-    msg_key: str = "pa:mcp:deadbeef", *, pane_id: str = "p1", member_id: str = "m1"
+    msg_key: str = "pa:mcp:deadbeef",
+    *,
+    pane_id: str = "p1",
+    member_id: str = "m1",
+    text: str = "please review",
+    cipher: str = "",
+    peer: Peer = PEER,
+    sign: bool = True,
 ) -> dict:
-    """A push from the server. ``member_id`` defaults to "m1", which is also the
-    receiver's own member (see FakeServer's auth.hello) — i.e. another machine of
-    the same person. Pass someone else's id to exercise the pane policy, which is
-    only consulted for senders outside your own account."""
-    return {
+    """A push from the server, signed by *peer* the way a real device signs.
+
+    ``member_id`` defaults to "m1", which is also the receiver's own member (see
+    FakeServer's auth.hello) — i.e. another machine of the same person. Pass
+    someone else's id to exercise the pane policy, which is only consulted for
+    senders outside your own account. Note that the member id is deliberately
+    *not* covered by the signature: it is the server's word, and what decides
+    whether a sender counts as one of your own machines is the member recorded
+    against the pinned key, never this field.
+
+    ``sign=False`` is the unauthenticated case — what a relay writing its own
+    messages can produce, and what an un-upgraded peer sends.
+    """
+    body_kind = "cipher" if cipher else "text"
+    body = cipher or text
+    payload = {
         "msgKey": msg_key,
-        "text": "please review",
+        body_kind: body,
         "from": {
-            "deviceId": "dev-a",
+            "deviceId": peer.device_id,
             "memberId": member_id,
             "workspace": "alpha",
             "paneName": "sender",
         },
         "to": {"workspace": "proj-a", "paneName": "reviewer", "paneId": pane_id},
     }
+    if sign:
+        payload["sig"] = peer.sign(
+            msg_key=msg_key,
+            to_device=device_identity.device_id(),
+            kind=body_kind,
+            body=body,
+        )
+    return payload
 
 
 @pytest.fixture
 def broadcasts(monkeypatch):
-    """Every event the link hands to the on-machine delivery path."""
+    """Every *delivery* the link hands to the on-machine path.
+
+    Filtered rather than raw: the link also broadcasts trust notices (a device
+    seen for the first time, a pinned key that changed), and a raw capture would
+    make every count here depend on how many of those a test happened to
+    provoke. Those are asserted where they belong, in test_server_link_trust.
+    """
     events: list[dict] = []
 
     async def fake_broadcast(event: dict, **_kwargs) -> None:
-        events.append(event)
+        if event.get("type") == "agent_msg.deliver":
+            events.append(event)
 
     monkeypatch.setattr(app, "broadcast", fake_broadcast)
     return events
@@ -666,7 +796,10 @@ async def test_outbound_send_goes_over_the_link():
         )
         assert reply["ok"] is True
         assert reply["payload"]["state"] == "pending"
-        assert server.opened[0].sends == [
+        sent = server.opened[0].sends
+        assert len(sent) == 1
+        signature = sent[0].pop("sig")
+        assert sent == [
             {
                 "to": {"deviceId": "dev-b", "workspace": "beta", "paneName": "builder"},
                 "text": "ship it",
@@ -674,6 +807,18 @@ async def test_outbound_send_goes_over_the_link():
                 "from": {"workspace": "alpha", "paneName": "sender", "paneId": "pa"},
             }
         ]
+        # The signature is the whole point of the frame carrying one: it has to
+        # verify against *this* device's published key, over the body actually
+        # sent and the pair of device ids it was addressed between.
+        assert device_signing.verify_message(
+            signature,
+            public_key_b64=device_signing.public_key(),
+            msg_key="pa:mcp:1",
+            from_device=link._device_id,
+            to_device="dev-b",
+            kind="text",
+            body="ship it",
+        )
     finally:
         await link.stop()
 
@@ -813,13 +958,13 @@ async def test_an_incoming_sealed_message_is_opened_and_delivered(broadcasts):
     server = FakeServer()
     link = await _connected(server)
     try:
-        payload = _pending()
-        payload.pop("text")
-        payload["cipher"] = device_crypto.seal(
-            "please review",
-            recipient_public_key=device_crypto.public_key(),
-            from_device="dev-a",
-            to_device=link._device_id,
+        payload = _pending(
+            cipher=device_crypto.seal(
+                "please review",
+                recipient_public_key=device_crypto.public_key(),
+                from_device=PEER.device_id,
+                to_device=link._device_id,
+            )
         )
         await server.opened[0].push({"type": "messages.pending", "payload": payload})
         await _until(lambda: any(e["type"] == "agent_msg.deliver" for e in broadcasts))
@@ -837,9 +982,7 @@ async def test_a_message_that_will_not_open_is_refused_not_typed_in(broadcasts):
     link = await _connected(server)
     try:
         conn = server.opened[0]
-        payload = _pending()
-        payload.pop("text")
-        payload["cipher"] = "bm90LWEtcmVhbC1zZWFsZWQtYm94"
+        payload = _pending(cipher="bm90LWEtcmVhbC1zZWFsZWQtYm94")
         await conn.push({"type": "messages.pending", "payload": payload})
         await _until(lambda: bool(conn.acks))
         assert conn.acks[0]["state"] == "rejected"
@@ -1063,7 +1206,10 @@ async def test_policy_denial_acks_rejected_and_never_reaches_the_renderer(broadc
         # list), which is the point of that surface — but the message itself
         # must never reach the delivery path.
         assert [e for e in broadcasts if e["type"] == "agent_msg.deliver"] == []
-        assert [e["type"] for e in broadcasts] == ["p2p.access_requests.changed"]
+        # The refusal is announced to this machine's own windows — the knock
+        # list is the point of that surface — but the message itself never
+        # reaches the delivery path.
+        assert [r["memberId"] for r in link.access_requests()] == ["m2"]
     finally:
         await link.stop()
 
@@ -1284,7 +1430,19 @@ async def test_writing_the_policy_publishes_it_and_adopts_the_new_revision():
 
         assert reply["ok"] is True
         assert conn.policy_sets[0]["deviceId"] == link._device_id
-        assert conn.policy_sets[0]["policy"] == document
+        # What leaves is the document plus this device's own signature over it.
+        # The server stores that verbatim, which is exactly what it did before —
+        # the difference is that it can no longer hand back something else.
+        written = conn.policy_sets[0]["policy"]
+        envelope = written.pop(server_link.POLICY_SIGNATURE_FIELD)
+        assert written == document
+        assert device_signing.verify_policy(
+            envelope["sig"],
+            public_key_b64=device_signing.public_key(),
+            device_id=link._device_id,
+            seq=envelope["seq"],
+            document=document,
+        )
         # Adopted locally, so the editor re-reading right after the save is not
         # shown the policy it just replaced.
         assert link.policy_snapshot() == {"policy": document, "revision": 2}
@@ -2136,7 +2294,9 @@ async def test_policy_get_and_set_round_trip_through_the_handlers(module_link):
         # second round trip can show it the policy it just replaced.
         assert reply["payload"]["policy"] == document
         assert reply["payload"]["revision"] == 2
-        assert server.opened[0].policy_sets[0]["policy"] == document
+        written = dict(server.opened[0].policy_sets[0]["policy"])
+        written.pop(server_link.POLICY_SIGNATURE_FIELD)
+        assert written == document
     finally:
         await server_link.stop()
         remote_roster._reset_for_test()

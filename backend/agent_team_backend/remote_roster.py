@@ -68,6 +68,11 @@ class RemotePane:
     #: un-upgraded peer looks like, and the only case where a message may still
     #: leave here as plaintext. See server_link._sealed_for.
     device_public_key: str = ""
+    #: That device's *signing* public key, from the same channel. Only ever a
+    #: candidate for a first pin: once ``trust_store`` has pinned a device, this
+    #: field is compared against the pin and never replaces it, so a server that
+    #: swaps it makes the device unreachable rather than impersonable.
+    device_sign_public_key: str = ""
 
     @property
     def device_label(self) -> str:
@@ -150,6 +155,7 @@ def _pane_from_row(row: dict[str, Any]) -> RemotePane | None:
         status=_text(row.get("status")),
         host_online=bool(row.get("hostOnline")),
         device_public_key=_text(row.get("devicePublicKey")),
+        device_sign_public_key=_text(row.get("deviceSignPublicKey")),
     )
 
 
@@ -216,6 +222,21 @@ def public_key_for(device_id: str) -> str:
     for pane in _PANES.values():
         if pane.device_id == device_id and pane.device_public_key:
             return pane.device_public_key
+    return ""
+
+
+def sign_public_key_for(device_id: str) -> str:
+    """That device's signing public key as the directory currently reports it,
+    or "" when it reports none.
+
+    Read from the same channel as the message key, and worth just as little on
+    its own: this is what the *server* says, so it is only ever a candidate for
+    a first pin. Once ``trust_store`` holds a pin, verification uses the pin and
+    this value's only job is to say whether the far side's key has changed.
+    """
+    for pane in _PANES.values():
+        if pane.device_id == device_id and pane.device_sign_public_key:
+            return pane.device_sign_public_key
     return ""
 
 

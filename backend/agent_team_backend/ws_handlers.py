@@ -36,6 +36,7 @@ from . import (
     remote_roster,
     server_link,
     storage_service,
+    trust_store,
 )
 from .cli_vendors.codex import command_with_resume_id as codex_command_with_resume_id
 from .cli_vendors.registry import VENDORS as CLI_VENDORS
@@ -3090,6 +3091,50 @@ async def p2p_access_requests_dismiss(
     await session.send_json(make_response(msg_id, msg_type, {"forgotten": forgotten}))
 
 
+@handler("p2p.trust.notices.list")
+async def p2p_trust_notices_list(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Devices seen for the first time, and pinned devices whose key changed."""
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {"notices": trust_store.notices(), "locked": trust_store.locked_reason()},
+        )
+    )
+
+
+@handler("p2p.trust.notices.dismiss")
+async def p2p_trust_notices_dismiss(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Clear one notice — a first sighting only.
+
+    A changed key is not a notification to acknowledge; it is a refusal that is
+    currently in force, and a button that made it go away would reduce "somebody
+    may be standing in for that machine" to one click. That click is the one an
+    attacker who deleted this machine's key material is counting on, because the
+    natural next move is to pair again and make everything work. So the answer
+    here is a refusal, and the notice stays until the two fingerprints have been
+    compared somewhere this program is not.
+    """
+    dismissed = trust_store.dismiss_notice(str(payload.get("key") or ""))
+    if not dismissed:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "FORBIDDEN",
+                "a changed device key cannot be dismissed; compare the two "
+                "fingerprints with the other machine's owner first",
+            )
+        )
+        return
+    await _announce_trust_notices()
+    await session.send_json(make_response(msg_id, msg_type, {"dismissed": True}))
+
+
 @handler("p2p.trust.block")
 async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Refuse a device outright, ahead of every rule.
@@ -3154,6 +3199,20 @@ async def p2p_trust_unblock(session: "Session", msg_id: str, msg_type: str, payl
     if await _write_policy(session, msg_id, msg_type, drop_block):
         return
     await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+async def _announce_trust_notices() -> None:
+    """Same shape the link broadcasts on its own paths, so a window has one
+    event to listen for whether the notice came from a message that was refused
+    or from a person clearing one here."""
+    from . import app
+
+    await app.broadcast(
+        make_event(
+            "p2p.trust_notices.changed",
+            {"notices": trust_store.notices(), "locked": trust_store.locked_reason()},
+        )
+    )
 
 
 async def _announce_requests() -> None:

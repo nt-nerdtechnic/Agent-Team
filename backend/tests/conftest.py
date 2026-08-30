@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -13,8 +14,17 @@ import pytest
 # migration that import moves real JSON stores into navide.db (renaming the
 # sources). Point app-data at a throwaway dir BEFORE the import so collecting
 # tests can never migrate the developer's real app data.
-os.environ.setdefault(
-    "AGENT_TEAM_DATA_DIR", tempfile.mkdtemp(prefix="agent-team-tests-")
+# Overwritten, not setdefault: the sentence above says these tests can *never*
+# touch the developer's real app data, and setdefault cannot deliver that — it
+# steps aside for whatever the environment already says, which is exactly the
+# case where the promise matters. This is not hypothetical: on 2026-08-30 the
+# server-link verification script had the same setdefault and wrote a
+# cross-device trust marker into a real install, whose only symptom was that
+# every cross-device message stopped, indistinguishable from someone having
+# deleted the trust state on purpose.
+os.environ["AGENT_TEAM_DATA_DIR"] = os.environ.get(
+    "AGENT_TEAM_TESTS_DATA_DIR"
+) or tempfile.mkdtemp(prefix="agent-team-tests-"
 )
 
 from agent_team_backend import app, ws_handlers
@@ -74,15 +84,62 @@ def _isolated_skills_home(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolated_credential_vault(tmp_path, monkeypatch):
     """Tests must NEVER touch the real home or the real Keychain: swap the
-    app-wide vault for one rooted in tmp with a security runner that always
-    reports 'not found' (the security CLI's exit code 44 — anything else
-    means a transient failure and makes strict capture reads raise)."""
+    app-wide vault for one rooted in tmp, backed by an in-process stand-in for
+    ``security``.
+
+    It used to answer 44 ("could not be found") to everything, which reads as a
+    signed-out Keychain and is right for reads — but it also made every *write*
+    fail, which no test noticed until something started storing state there. So
+    it now behaves like the item store it is imitating: reads of an item nobody
+    wrote still answer 44 (the state strict capture reads must be able to tell
+    apart from a transient failure), and a write is a write."""
+    items: dict[str, str] = {}
+
+    def runner(args: list[str], input_text: str | None = None) -> tuple[int, str]:
+        argv = list(args)
+        if argv[:1] == ["-i"]:
+            argv = shlex.split(input_text or "")
+        if not argv:
+            return 44, ""
+        command = argv[0]
+        service = argv[argv.index("-s") + 1] if "-s" in argv else ""
+        if command == "add-generic-password":
+            items[service] = argv[argv.index("-w") + 1] if "-w" in argv else ""
+            return 0, ""
+        if command == "find-generic-password":
+            if service not in items:
+                return 44, "The specified item could not be found in the keychain."
+            return 0, items[service] + "\n"
+        if command == "delete-generic-password":
+            return (0, "") if items.pop(service, None) is not None else (44, "")
+        return 44, ""
+
     vault = CredentialVault(
         root=tmp_path / "vault-root",
         real_home=tmp_path / "vault-home",
-        security_runner=lambda args, input_text=None: (44, ""),
+        security_runner=runner,
     )
     monkeypatch.setattr(app, "credential_vault", vault)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_trust_store():
+    """The cross-device trust record spans two stores on purpose (see
+    trust_store): the state in the vault, which the fixture above replaces per
+    test, and the "initialised" marker in navide.db, which is a process-wide
+    singleton opened at import. Without clearing the marker the second test to
+    ask for it would find a marker with no state — which is exactly the locked
+    state the module exists to enforce — and every later test would be refused
+    for a reason belonging to an earlier one."""
+    from agent_team_backend import device_signing, trust_store
+
+    # Reset on the way in only. On the way out a test's own monkeypatching may
+    # still be in force (one of them swaps pathlib.Path for the Windows flavour
+    # to exercise a non-POSIX branch), and a teardown that touched the data dir
+    # would fail there for reasons belonging to this fixture. Resetting first is
+    # what provides the isolation; resetting again afterwards adds nothing.
+    trust_store._reset_for_test()
+    device_signing._reset_for_test()
 
 
 @pytest.fixture(autouse=True)

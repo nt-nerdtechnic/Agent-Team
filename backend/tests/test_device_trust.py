@@ -22,29 +22,38 @@ def _policy(**extra):
 
 
 def test_my_own_device_is_its_own_ring() -> None:
-    """Signing one account in twice is the grant; no rule stands between them."""
+    """Signing one account in twice is the grant; no rule stands between them.
+
+    ``own_device`` is now a verdict the caller reaches from a signature checked
+    against a key it pinned — see server_link._authenticate_sender — rather than
+    two member ids compared here. It used to be the latter, and both of those
+    ids were written by the server, so a relay that put the same string in both
+    landed in this ring and skipped authorization entirely.
+    """
     assert (
-        device_trust.ring(_policy(), member_id=ME, device_id=MY_LAPTOP, own_member_id=ME)
+        device_trust.ring(_policy(), member_id=ME, device_id=MY_LAPTOP, own_device=True)
         == device_trust.RING_SELF
     )
 
 
 def test_another_member_is_left_to_the_rules() -> None:
     assert (
-        device_trust.ring(_policy(), member_id=THEIRS, device_id=THEIR_BOX, own_member_id=ME)
+        device_trust.ring(_policy(), member_id=THEIRS, device_id=THEIR_BOX, own_device=False)
         == device_trust.RING_MEMBER
     )
 
 
-def test_an_empty_member_id_is_never_me() -> None:
-    """A message with no attested sender must not fall into the trusted ring —
-    that ring skips authorization entirely."""
+def test_a_matching_member_id_is_no_longer_enough_to_be_me() -> None:
+    """The regression line for C1, at this layer.
+
+    The member id in a message is the server's word for who sent it, and the
+    server also answers ``auth.hello``, so it can make the two agree whenever it
+    likes. This function must therefore have no way to be talked into
+    ``RING_SELF`` by ids alone — including the id this machine believes is its
+    own.
+    """
     assert (
-        device_trust.ring(_policy(), member_id="", device_id=THEIR_BOX, own_member_id=ME)
-        == device_trust.RING_MEMBER
-    )
-    assert (
-        device_trust.ring(_policy(), member_id=ME, device_id=MY_LAPTOP, own_member_id="")
+        device_trust.ring(_policy(), member_id=ME, device_id=MY_LAPTOP, own_device=False)
         == device_trust.RING_MEMBER
     )
 
@@ -55,7 +64,7 @@ def test_a_block_beats_the_own_device_shortcut() -> None:
     your member id."""
     policy = _policy(blocked=[{"deviceId": MY_LAPTOP, "reason": "stolen"}])
     assert (
-        device_trust.ring(policy, member_id=ME, device_id=MY_LAPTOP, own_member_id=ME)
+        device_trust.ring(policy, member_id=ME, device_id=MY_LAPTOP, own_device=True)
         == device_trust.RING_BLOCKED
     )
 
@@ -65,7 +74,7 @@ def test_blocking_a_member_covers_every_device_they_use() -> None:
     working the moment the blocked person opened a different machine."""
     policy = _policy(blocked=[{"memberId": THEIRS}])
     assert (
-        device_trust.ring(policy, member_id=THEIRS, device_id="dev-new", own_member_id=ME)
+        device_trust.ring(policy, member_id=THEIRS, device_id="dev-new", own_device=False)
         == device_trust.RING_BLOCKED
     )
 
@@ -75,7 +84,7 @@ def test_unreadable_policy_lands_in_the_ring_that_decides_nothing() -> None:
     the decision to pane_policy, which denies by default."""
     for junk in (None, [], "blocked", 7, {"blocked": "everyone"}, {"blocked": [7, None]}):
         assert (
-            device_trust.ring(junk, member_id=THEIRS, device_id=THEIR_BOX, own_member_id=ME)
+            device_trust.ring(junk, member_id=THEIRS, device_id=THEIR_BOX, own_device=False)
             == device_trust.RING_MEMBER
         )
 

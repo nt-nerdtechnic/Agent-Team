@@ -10,12 +10,18 @@ from typing import Any
 
 import pytest
 
-from agent_team_backend import app, device_trust, server_link, ws_handlers
+from agent_team_backend import app, device_trust, server_link, trust_store, ws_handlers
 
 pytestmark = pytest.mark.asyncio
 
 THEIRS = "m-theirs"
 THEIR_BOX = "dev-their-box"
+
+#: Two distinct, well-formed signing keys (base64 of 32 bytes). Their contents
+#: are irrelevant here: nothing in these tests verifies a signature, they only
+#: have to differ and to be something ``fingerprint`` can name.
+_A_KEY = "TFRxJmv2VwcQ0Ck6dQ0kzR8bSMKh1kJm0m1bXbT1RH8="
+_B_KEY = "S2ognBz4wA6tOoZO2xLZzFHo7fBLBmB1lJ0Yl4W1JVI="
 
 
 class FakeWebSocket:
@@ -228,7 +234,7 @@ async def test_a_written_block_is_one_the_enforcement_side_reads(link) -> None:
     assert device_trust.validate_blocked(written) == ""
     assert (
         device_trust.ring(
-            written, member_id=THEIRS, device_id="dev-anything", own_member_id="m-mine"
+            written, member_id=THEIRS, device_id="dev-anything", own_device=False
         )
         == device_trust.RING_BLOCKED
     )
@@ -271,3 +277,71 @@ async def test_a_policy_that_cannot_be_written_is_refused_before_it_is_sent(link
     reply = await _call("p2p.trust.block", {"deviceId": THEIR_BOX})
     assert reply["ok"] is False
     assert link.writes == []
+
+
+# ---- trust notices ----------------------------------------------------------
+
+
+async def test_the_notice_list_is_readable_through_the_dispatcher() -> None:
+    """Registration is the thing being tested here as much as the answer: a
+    handler nobody routed to fails on this line rather than the first time
+    somebody opens the account view."""
+    trust_store.load()
+    trust_store.pin_device("dev-new", sign_key=_A_KEY, member_id="m-mine")
+    reply = await _call("p2p.trust.notices.list", {})
+    assert reply["ok"] is True
+    assert [n["kind"] for n in reply["payload"]["notices"]] == [
+        trust_store.NOTICE_FIRST_SEEN
+    ]
+    assert reply["payload"]["locked"] == ""
+
+
+async def test_dismissing_a_first_sighting_walks_the_whole_handler(monkeypatch) -> None:
+    """Including the broadcast, which is where an undefined name would hide: it
+    runs only after a successful dismissal, so a test that stopped at the reply
+    would never reach it."""
+    events: list[dict] = []
+
+    async def capture(event: dict, **_kwargs) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+    trust_store.load()
+    trust_store.pin_device("dev-new", sign_key=_A_KEY, member_id="m-mine")
+    key = trust_store.notices()[0]["key"]
+
+    reply = await _call("p2p.trust.notices.dismiss", {"key": key})
+    assert reply["ok"] is True
+    assert trust_store.notices() == []
+    assert [e["type"] for e in events] == ["p2p.trust_notices.changed"]
+    assert events[0]["payload"]["notices"] == []
+
+
+async def test_a_changed_key_cannot_be_clicked_away(monkeypatch) -> None:
+    """The refusal is in force, not waiting to be acknowledged. Making it go
+    away in one click is the move an attacker who wiped this machine's key
+    material is counting on, because re-pairing is the natural reaction."""
+    events: list[dict] = []
+
+    async def capture(event: dict, **_kwargs) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+    trust_store.load()
+    trust_store.pin_device("dev-new", sign_key=_A_KEY, member_id="m-mine")
+    trust_store.note_key_change(
+        "dev-new", pinned_key=_A_KEY, offered_key=_B_KEY, member_id="m-mine"
+    )
+    changed = next(
+        n for n in trust_store.notices() if n["kind"] == trust_store.NOTICE_KEY_CHANGED
+    )
+
+    reply = await _call("p2p.trust.notices.dismiss", {"key": changed["key"]})
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "FORBIDDEN"
+    assert any(
+        n["kind"] == trust_store.NOTICE_KEY_CHANGED for n in trust_store.notices()
+    )
+    assert events == [], "nothing changed, so nothing is announced"
+
+

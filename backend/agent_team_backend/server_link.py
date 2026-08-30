@@ -50,7 +50,16 @@ from typing import Any, Callable
 
 import websockets
 
-from . import agent_messaging, device_crypto, device_identity, device_trust, pane_policy, remote_roster
+from . import (
+    agent_messaging,
+    device_crypto,
+    device_identity,
+    device_signing,
+    device_trust,
+    pane_policy,
+    remote_roster,
+    trust_store,
+)
 
 log = logging.getLogger("agent_team_backend.server_link")
 
@@ -151,7 +160,26 @@ MESSAGE_MEMORY_TTL_S = 3600.0
 #: key before. Deliberately a link-level code and not a server one: the message
 #: never left this machine, and the caller must not read it as "the far end
 #: refused" — nothing over there has heard of it.
+#: Where the receiver's own signature over its own policy lives. Inside the
+#: document rather than beside it, so the server's contract is unchanged: it
+#: still stores one opaque JSON object verbatim and still never interprets it.
+POLICY_SIGNATURE_FIELD = "_sig"
+
 LINK_ENCRYPTION_FAILED = "p2p-encryption-failed"
+#: Refused because this machine cannot read its own trust record. Distinct from
+#: an encryption failure: nothing is wrong with the message, this machine is
+#: simply not in a state where it can tell one sender from another.
+LINK_TRUST_UNAVAILABLE = "p2p-trust-unavailable"
+
+#: The one word every unauthenticated inbound message is refused with. Kept
+#: single on purpose, exactly as "policy-denied" covers both blocked and merely
+#: unauthorized: telling a sender *which* of "no signature", "unknown key" and
+#: "wrong key" applied would let the relay map out this machine's pin table.
+REASON_UNAUTHENTICATED = "unauthenticated"
+#: The field of a message the signature covers. Signed alongside the digest so
+#: a ciphertext cannot be re-presented as plaintext under a valid signature.
+BODY_CIPHER = "cipher"
+BODY_TEXT = "text"
 LINK_OFFLINE = "LINK_OFFLINE"
 LINK_UNAUTHORIZED = "LINK_UNAUTHORIZED"
 
@@ -356,10 +384,20 @@ class ServerLink:
         # would mean deciding where — the policy document belongs to the
         # server, and this is nobody's business but this machine's.
         self._access_requests = device_trust.AccessRequests()
-        # Devices this link has ever sealed a message for. Only ever grows
-        # within a process, and that is the point: it is what makes a
-        # disappearing key an error rather than a silent downgrade.
-        self._encrypted_peers: set[str] = set()
+        # Devices this link has ever sealed a message for now live in
+        # ``trust_store``, which outlives the process. Held here it was a
+        # promise that expired on every backend restart — and a restart is a
+        # daily event, not something the relay had to arrange.
+        #
+        # Why cross-device traffic is refused outright, when it is. See
+        # ``trust_store``: an initialised machine whose trust record cannot be
+        # read has lost its pins, its policy high-water mark and its
+        # no-downgrade list at once, and every one of those fails *silently* if
+        # the answer is to start over.
+        self._trust_locked = ""
+        # The member id pinned for *this link's* credential. Never the one the
+        # last auth.hello asserted: that is the value C1 moved.
+        self._own_member = ""
         self._tasks: set[asyncio.Task] = set()
         self._device_id = ""
         self.member_id = ""
@@ -674,6 +712,11 @@ class ServerLink:
                 # would leave peers encrypting to a key this machine no longer
                 # holds. Cheap to re-send, expensive to get wrong.
                 "publicKey": await asyncio.to_thread(device_crypto.public_key),
+                # The signing half, published on the same channel and for the
+                # same reason. What the server does with it is distribute a
+                # *candidate*: peers pin the first one they verify a message
+                # against and stop reading this field afterwards.
+                "signPublicKey": await asyncio.to_thread(device_signing.public_key),
             },
         )
         if not reply.get("ok"):
@@ -690,7 +733,7 @@ class ServerLink:
             )
         payload = reply.get("payload")
         payload = payload if isinstance(payload, dict) else {}
-        self.member_id = str(payload.get("memberId") or "")
+        await self._adopt_member(config, str(payload.get("memberId") or ""))
         self.member_role = str(payload.get("role") or "")
         self.tenant_id = str(payload.get("tenantId") or "")
         self.display_name = str(payload.get("displayName") or "")
@@ -701,6 +744,45 @@ class ServerLink:
             payload.get("displayName") or "",
             payload.get("deviceId") or "",
         )
+
+    async def _adopt_member(self, config: ServerLinkConfig, claimed: str) -> None:
+        """Settle who this machine is, from the pin rather than from the reply.
+
+        ``auth.hello`` answers with a member id and that answer used to *be*
+        this machine's identity, which made it the anchor a relay could move:
+        name any id, then push a message whose ``from.memberId`` is the same id,
+        and the delivery path read it as one of the user's own machines and
+        skipped the policy. Pinning it per credential leaves the server able to
+        say it once and never able to change its mind.
+
+        The claimed id is still kept on ``member_id`` when the store cannot
+        answer, because the Settings pane shows it and a blank there reads as
+        "not signed in". It is not what any trust decision reads — see
+        ``_own_device``, which consults the pin.
+        """
+        self.member_id = claimed
+        self._own_member = ""
+        try:
+            self.member_id = await asyncio.to_thread(
+                trust_store.adopt_own_member, config.url, config.token, claimed
+            )
+            # Held on the link rather than read back from the store: the pin is
+            # per credential, and the store may hold several. Blank until a pin
+            # is settled, which is what keeps `_own_device` from ever answering
+            # yes on a machine whose identity is in doubt.
+            self._own_member = self.member_id
+            self._trust_locked = ""
+        except trust_store.TrustStoreLocked as err:
+            # The link stays up: the account view, the roster and the team
+            # management calls do not depend on any of this, and dropping the
+            # connection would hide the reason. Message traffic is what stops.
+            self._trust_locked = str(err)
+            log.error("cross-device traffic is refused on this machine: %s", err)
+            await self._announce_trust_notices()
+        except Exception as err:  # noqa: BLE001
+            self._trust_locked = f"the device trust store could not be opened ({err})"
+            log.error("cross-device traffic is refused on this machine: %s", err)
+            await self._announce_trust_notices()
 
     # ---- roster reporting ----
 
@@ -814,9 +896,92 @@ class ServerLink:
         payload = reply.get("payload")
         payload = payload if isinstance(payload, dict) else {}
         raw_revision = payload.get("revision")
-        self._policy = payload.get("policy")
+        # The revision is adopted whatever the document turns out to be: it is
+        # only the "have I already fetched this one" hint, and leaving it unset
+        # after a document that failed to verify would re-fetch the same bad
+        # document on every push.
         self._policy_revision = raw_revision if isinstance(raw_revision, int) else 0
+        self._policy = await asyncio.to_thread(self._verified_policy, payload.get("policy"))
         log.info("navide-server pane policy is at revision %s", self._policy_revision)
+
+    def _verified_policy(self, raw: Any) -> Any:
+        """The policy this machine will enforce, or None when there is none.
+
+        The server stores this document and hands it back, which means the
+        server chooses *which* document comes back — and ``pane_policy`` reads
+        whatever it is given. It reads it very carefully (an unknown version
+        fails closed, a malformed rule is skipped rather than voiding the rest),
+        but every one of those checks is about a *malformed* policy. None of
+        them notices a well-formed policy this machine never wrote, and
+        ``{"version":1,"default":"allow","rules":[]}`` is well formed.
+
+        So the document carries a signature this device made with its own key,
+        over its own sequence number. Two things are checked and the second is
+        the one that needed thinking about:
+
+        *The signature verifies against our own signing key.* Nobody else can
+        produce it, the server included — it has never held the private half.
+
+        *The sequence is not behind the highest one we ever signed.* Not the
+        server's ``revision``: that number is issued by the server, so using it
+        for monotonicity would be asking the party with a motive to roll the
+        policy back to certify that it had not.
+
+        Anything that does not pass is not a policy. Returning None rather than
+        the previous cache is deliberate — ``pane_policy.is_allowed(None)``
+        denies everything, which is the state a device that never wrote a policy
+        is already in, and the system handles it.
+        """
+        if self._trust_locked:
+            return None
+        seq = trust_store.policy_seq(self._device_id)
+        if not isinstance(raw, dict):
+            if seq:
+                trust_store.note_policy_unverified(
+                    "the server returned no policy document", device_id=self._device_id
+                )
+            return None
+        document = {key: value for key, value in raw.items() if key != POLICY_SIGNATURE_FIELD}
+        envelope = raw.get(POLICY_SIGNATURE_FIELD)
+        if not isinstance(envelope, dict):
+            # A device that has never written a policy gets the server's empty
+            # deny-everything stand-in, which carries no signature and is not an
+            # attack. Once this machine *has* signed one, an unsigned document
+            # in its place is a replacement, and says so.
+            if seq:
+                trust_store.note_policy_unverified(
+                    "the stored policy carries no signature", device_id=self._device_id
+                )
+            return None
+        offered = envelope.get("seq")
+        if isinstance(offered, bool) or not isinstance(offered, int):
+            trust_store.note_policy_unverified(
+                "the stored policy has no usable sequence", device_id=self._device_id
+            )
+            return None
+        if offered < seq:
+            trust_store.note_policy_unverified(
+                "the stored policy is older than the last one written here",
+                device_id=self._device_id,
+                seq=offered,
+            )
+            return None
+        if not device_signing.verify_policy(
+            str(envelope.get("sig") or ""),
+            public_key_b64=device_signing.public_key(),
+            device_id=self._device_id,
+            seq=offered,
+            document=document,
+        ):
+            trust_store.note_policy_unverified(
+                "the stored policy was not signed by this machine",
+                device_id=self._device_id,
+                seq=offered,
+            )
+            return None
+        trust_store.note_policy_seq(self._device_id, offered)
+        trust_store.clear_policy_notice()
+        return document
 
     def policy_snapshot(self) -> dict[str, Any]:
         """The cached policy and the revision it came at, for the editor UI.
@@ -828,6 +993,38 @@ class ServerLink:
         """
         return {"policy": self._policy, "revision": self._policy_revision}
 
+    def _signed_policy(self, policy: Any) -> Any:
+        """Wrap *policy* in this device's own signature. Blocking (Keychain).
+
+        The sequence is reserved — and written down — before the document goes
+        out, so a write that fails burns a number instead of leaving one that
+        could be reused. Reusing one would let the server replay whichever older
+        document shared it, which is the whole check.
+        """
+        document = policy
+        if isinstance(policy, dict):
+            document = {k: v for k, v in policy.items() if k != POLICY_SIGNATURE_FIELD}
+        seq = trust_store.reserve_policy_seq(self._device_id)
+        signature = device_signing.sign_policy(
+            device_id=self._device_id, seq=seq, document=document
+        )
+        return {**document, POLICY_SIGNATURE_FIELD: {"seq": seq, "sig": signature}}
+
+    def _trust_refusal(self) -> dict[str, Any]:
+        """Why this machine will not carry cross-device traffic right now."""
+        return {
+            "ok": False,
+            "error": {
+                "code": LINK_TRUST_UNAVAILABLE,
+                "message": (
+                    "Navide cannot read this machine's cross-device trust record, so "
+                    "it cannot tell one device from another; cross-device messages "
+                    "are refused until that is resolved"
+                    + (f" ({self._trust_locked})" if self._trust_locked else "")
+                ),
+            },
+        }
+
     async def set_policy(self, policy: Any) -> dict[str, Any]:
         """Write this device's policy to the server and adopt the new revision.
 
@@ -838,9 +1035,16 @@ class ServerLink:
         """
         if self._ws is None or not self._authenticated:
             return self._unavailable()
+        if self._trust_locked:
+            return self._trust_refusal()
+        try:
+            signed = await asyncio.to_thread(self._signed_policy, policy)
+        except Exception as err:  # noqa: BLE001
+            log.warning("could not sign the pane policy: %s", err)
+            return self._trust_refusal()
         try:
             reply = await self._request(
-                "policy.set", {"deviceId": self._device_id, "policy": policy}
+                "policy.set", {"deviceId": self._device_id, "policy": signed}
             )
         except Exception as err:  # noqa: BLE001
             log.warning("navide-server policy.set failed: %s", err)
@@ -865,6 +1069,7 @@ class ServerLink:
                 # policy it just replaced.
                 self._policy = policy
                 self._policy_revision = revision
+                trust_store.clear_policy_notice()
             else:
                 # No revision to pin the cache to — re-read rather than guess,
                 # since a cache pinned to the wrong revision would ignore the
@@ -1197,6 +1402,13 @@ class ServerLink:
             # anything.
             "accessRequests": self._access_requests.list(),
             "blocked": device_trust.blocked_entries(self._policy),
+            # Two things a person has to be told, folded into the same read:
+            # a device seen for the first time (a narrative — this is what got
+            # pinned) and a pinned device whose key has changed (a refusal in
+            # force, with both fingerprints, because "they reinstalled" and
+            # "somebody is standing in for them" look identical from here).
+            "trustNotices": trust_store.notices(),
+            "trustLocked": self._trust_locked,
             # This device first, then by label: the row a user recognises is
             # the one that should not move as other machines come and go.
             "devices": sorted(
@@ -1207,7 +1419,7 @@ class ServerLink:
 
     # ---- messages ----
 
-    def _sealed_for(self, to_device: str, text: str) -> dict[str, Any]:
+    async def _sealed_for(self, to_device: str, text: str) -> dict[str, Any]:
         """What to put on the wire for one recipient: ``cipher`` or ``text``.
 
         Two rules, and the second is the one that matters:
@@ -1226,8 +1438,7 @@ class ServerLink:
         """
         key = remote_roster.public_key_for(to_device)
         if key:
-            self._encrypted_peers.add(to_device)
-            return {
+            sealed = {
                 "cipher": device_crypto.seal(
                     text,
                     recipient_public_key=key,
@@ -1235,7 +1446,18 @@ class ServerLink:
                     to_device=to_device,
                 )
             }
-        if to_device in self._encrypted_peers:
+            # Recorded after sealing and on disk, not before and in memory: the
+            # record is what makes the *next* send refuse a vanished key, and a
+            # record that did not survive a restart made that refusal a promise
+            # the relay only had to wait out.
+            try:
+                await asyncio.to_thread(trust_store.note_encrypted_peer, to_device)
+            except Exception as err:  # noqa: BLE001
+                raise device_crypto.CryptoError(
+                    f"this device could not record that {to_device} is encrypted ({err})"
+                ) from err
+            return sealed
+        if trust_store.is_encrypted_peer(to_device):
             raise device_crypto.CryptoError("this device published a key before and none is known now")
         # Never seen a key: an un-upgraded peer, which can only read plaintext.
         return {"text": text}
@@ -1259,9 +1481,11 @@ class ServerLink:
         """
         if self._ws is None or not self._authenticated:
             return self._unavailable()
+        if self._trust_locked:
+            return self._trust_refusal()
         to_device = str(to.get("deviceId") or "")
         try:
-            body = self._sealed_for(to_device, text)
+            body = await self._sealed_for(to_device, text)
         except device_crypto.CryptoError as err:
             # Refused rather than downgraded. A message that silently went out
             # as plaintext because sealing failed would be the one case the
@@ -1277,7 +1501,24 @@ class ServerLink:
                     ),
                 },
             }
-        payload: dict[str, Any] = {"to": to, "msgKey": msg_key, **body}
+        kind = BODY_CIPHER if BODY_CIPHER in body else BODY_TEXT
+        try:
+            signature = await asyncio.to_thread(
+                device_signing.sign_message,
+                msg_key=msg_key,
+                from_device=self._device_id,
+                to_device=to_device,
+                kind=kind,
+                body=body[kind],
+            )
+        except device_signing.SigningError as err:
+            # Refused rather than sent unsigned, for the same reason a message
+            # that cannot be sealed is refused rather than sent in the clear:
+            # the far side would reject it anyway, and an unsigned message that
+            # somehow got through would be one nobody could attribute.
+            log.warning("refusing to send an unsigned message to %s: %s", to_device, err)
+            return self._trust_refusal()
+        payload: dict[str, Any] = {"to": to, "msgKey": msg_key, "sig": signature, **body}
         if sender:
             payload["from"] = sender
         try:
@@ -1345,6 +1586,138 @@ class ServerLink:
         self._inbound[msg_key] = {"created_at": now, "pane_id": "", "acked": False}
         return True
 
+    async def _authenticate_sender(
+        self, data: dict[str, Any], *, msg_key: str, device_id: str, member_id: str
+    ) -> bool | None:
+        """Whether this message really came from *device_id*, and whether that
+        device is one of ours. None means it did not, and must be refused.
+
+        The chain this closes: the relay filled ``from`` and it filled the
+        answer to ``auth.hello``, so it could write the same member id into both
+        and the delivery path read the result as one of the user's own machines
+        — which skips the pane policy outright. Encryption did not help, because
+        a sealed box authenticates nobody: the recipient's public key is what
+        seals it, and the relay is who hands that key out.
+
+        So a message must carry a signature over
+        ``(msgKey, fromDevice, toDevice, which body field, digest of it)``, and
+        it is checked against the key this machine **pinned** for that device —
+        not against the key the directory is advertising today. Once a device is
+        pinned, changing what the directory says about it makes that device
+        unreachable, which is the failure that can be seen, rather than
+        impersonable, which is the one that cannot.
+
+        First contact is trust-on-first-use, and that is a real limit rather
+        than a formality: the first key offered for a device this machine has
+        never heard of is believed, so a relay that gets in before the real
+        device does gets pinned in its place. What pinning buys is that it only
+        gets one attempt per device id, it cannot revise it afterwards, and the
+        attempt leaves a notice with a fingerprint on it. Closing the rest needs
+        a person to compare fingerprints out of band, which is the surface this
+        version does not build.
+        """
+        signature = str(data.get("sig") or "")
+        cipher = str(data.get("cipher") or "")
+        kind = BODY_CIPHER if cipher else BODY_TEXT
+        body = cipher if cipher else str(data.get("text") or "")
+        if not device_id or not signature:
+            log.warning("refusing message %s: it carries no sender signature", msg_key)
+            return None
+
+        pin = trust_store.pin_for(device_id)
+        advertised = remote_roster.sign_public_key_for(device_id)
+        if pin is not None:
+            key = str(pin.get("signKey") or "")
+            if advertised and advertised != key:
+                # Recorded before the refusal, not after: the refusal is what
+                # the sender sees, and this is the only thing the *receiver*
+                # ever gets to see about it.
+                await asyncio.to_thread(
+                    trust_store.note_key_change,
+                    device_id,
+                    pinned_key=key,
+                    offered_key=advertised,
+                    member_id=member_id,
+                )
+                await self._announce_trust_notices()
+                log.error(
+                    "device %s now offers a different signing key; refusing message %s",
+                    device_id,
+                    msg_key,
+                )
+                return None
+        else:
+            key = advertised
+            if not key:
+                log.warning(
+                    "refusing message %s: no signing key is known for device %s",
+                    msg_key,
+                    device_id,
+                )
+                return None
+
+        if not device_signing.verify_message(
+            signature,
+            public_key_b64=key,
+            msg_key=msg_key,
+            from_device=device_id,
+            to_device=self._device_id,
+            kind=kind,
+            body=body,
+        ):
+            log.warning("refusing message %s: its signature does not verify", msg_key)
+            return None
+
+        if pin is None:
+            # Pinned only now, after the signature checked out, so the relay
+            # cannot seed this map with keys nobody holds by naming device ids.
+            try:
+                pin = await asyncio.to_thread(
+                    lambda: trust_store.pin_device(
+                        device_id,
+                        sign_key=key,
+                        member_id=member_id,
+                        own_member_id=self._own_member,
+                    )
+                )
+            except trust_store.TrustStoreFull as err:
+                log.error("refusing message %s: %s", msg_key, err)
+                return None
+            except Exception as err:  # noqa: BLE001
+                log.error("refusing message %s: could not pin device %s (%s)", msg_key, device_id, err)
+                return None
+            await self._announce_trust_notices()
+
+        return self._own_device(pin)
+
+    def _own_device(self, pin: dict[str, Any]) -> bool:
+        """Whether a pinned device belongs to this account.
+
+        Read from the pin's member id rather than from the message's, and
+        compared against the member id pinned for *this* credential rather than
+        against whatever the last ``auth.hello`` said. Both halves used to come
+        from the relay; now neither does, and neither can be revised once taken.
+        """
+        pinned = str(pin.get("memberId") or "")
+        return bool(self._own_member) and pinned == self._own_member
+
+    async def _announce_trust_notices(self) -> None:
+        """Tell every window that the trust notices changed.
+
+        Broadcast for the same reason the knock list is: a key that changed
+        belongs to the machine, not to a workspace, and whichever window has the
+        account view open is the one that should say so.
+        """
+        from . import app
+        from .ipc import make_event
+
+        await app.broadcast(
+            make_event(
+                "p2p.trust_notices.changed",
+                {"notices": trust_store.notices(), "locked": self._trust_locked},
+            )
+        )
+
     async def _on_message_pending(self, payload: Any) -> None:
         """A message for a pane on this machine.
 
@@ -1361,6 +1734,13 @@ class ServerLink:
         if not self._note_inbound(msg_key):
             log.info("navide-server re-sent message %s; ignoring the duplicate", msg_key)
             return
+        if self._trust_locked:
+            # Nothing here can be told apart from anything else while the pins
+            # are unreadable, and "deliver it anyway" is the one answer that
+            # would make losing them costless.
+            log.error("refusing message %s: %s", msg_key, self._trust_locked)
+            await self._ack(msg_key, "rejected", reason="trust-unavailable")
+            return
 
         source = data.get("from") if isinstance(data.get("from"), dict) else {}
         target = data.get("to") if isinstance(data.get("to"), dict) else {}
@@ -1369,19 +1749,33 @@ class ServerLink:
 
         sender_member = str(source.get("memberId") or "")
         sender_device = str(source.get("deviceId") or "")
+
+        # Authenticity before authorization. Everything below this line reads
+        # fields the relay writes; the signature is what says the relay only
+        # *carried* them. A message that does not verify never reaches a trust
+        # ring, a policy lookup, or the knock ledger — the last of those
+        # matters too, or an unauthenticated sender could fill the receiver's
+        # screen with knocks from names it invented.
+        own_device = await self._authenticate_sender(
+            data, msg_key=msg_key, device_id=sender_device, member_id=sender_member
+        )
+        if own_device is None:
+            await self._ack(msg_key, "rejected", reason=REASON_UNAUTHENTICATED)
+            return
         await self._ensure_policy()
         # Three rings, not one condition: your own machines are one trust
         # domain and never consult the rules, a blocked device is refused ahead
         # of everything including that shortcut, and everyone else is what the
         # rule set is actually for. See device_trust for why each boundary sits
-        # where it does. Membership is asserted by the server (it fills `from`
-        # from the authenticated sender), not by the message, so a peer cannot
-        # claim to be us.
+        # where it does. `own_device` is settled above from a signature checked
+        # against a pinned key — never from the member id in the message, which
+        # the relay writes, and never from the one in auth.hello, which it also
+        # writes.
         trust_ring = device_trust.ring(
             self._policy,
             member_id=sender_member,
             device_id=sender_device,
-            own_member_id=self.member_id,
+            own_device=own_device,
         )
         # The addressed workspace/paneName are checked, not the resolved pane's:
         # resolution happens after this. `paneName` is matched exactly by the

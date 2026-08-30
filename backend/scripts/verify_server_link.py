@@ -67,15 +67,37 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Everything below writes to app-data, and since the trust store landed that
+# includes real device pins and real policy sequence numbers — in navide.db and
+# in the login Keychain. A verification run that burned this machine's policy
+# sequence would leave the *actual* install unable to verify its own policy, so
+# the whole run is pointed at a throwaway directory. Set before the import
+# because ``app`` opens navide.db at module scope. Overriding rather than
+# defaulting on purpose: an operator who happens to have the variable pointing
+# at their real data dir must not be taken at their word here.
+_DATA_DIR = tempfile.mkdtemp(prefix="navide-verify-data-")
+os.environ["AGENT_TEAM_DATA_DIR"] = _DATA_DIR
+
 from agent_team_backend import (  # noqa: E402
     agent_messaging,
     app,
     device_identity,
+    device_signing,
     remote_roster,
     server_link,
+    trust_store,
 )
+from agent_team_backend.credential_vault import CredentialVault  # noqa: E402
 from agent_team_backend import server_link  # noqa: E402
 from agent_team_backend.server_link import ServerLink, ServerLinkConfig  # noqa: E402
+
+# The other half of the isolation: the trust store's document lives in the
+# credential vault, which on macOS is the login Keychain. Rooted in the
+# throwaway directory and forced onto the file backend so a verification run
+# never adds, updates or deletes a real Keychain item.
+app.credential_vault = CredentialVault(
+    root=Path(_DATA_DIR) / "vault", real_home=Path(_DATA_DIR) / "home", platform="linux"
+)
 
 URL = os.environ.get("NAVIDE_WS") or "ws://localhost:8787/ws"
 TOKEN = os.environ.get("NAVIDE_ADMIN_TOKEN") or "dev-token"
@@ -124,6 +146,21 @@ def allow_a_policy(member_id: str, device_id: str = DEVICE_A) -> dict[str, Any]:
         ],
     }
 
+async def write_policy(writer: ServerLink, owner: ServerLink, document: dict[str, Any]) -> dict:
+    """Store *document* as *owner*'s policy, signed by *owner*.
+
+    The signature is what makes the document a policy at all: an unsigned one is
+    read as "no policy" and denies everything (see ``_verified_policy``). Note
+    who does what here — *owner* signs, *writer* transmits. That split is the
+    point of the design and is exactly the shape a hostile relay is in: it can
+    hold and hand back the document, it cannot author one. It also keeps this
+    script's real check intact, which is that ``owner`` learns about the change
+    from the ``policy.changed`` push rather than from its own write.
+    """
+    signed = await asyncio.to_thread(owner._signed_policy, document)
+    return await writer._request("policy.set", {"deviceId": owner._device_id, "policy": signed})
+
+
 _passed = 0
 _failed = 0
 
@@ -156,6 +193,32 @@ def _device_id() -> str:
 
 
 device_identity.device_id = _device_id  # type: ignore[assignment]
+
+
+# ---- the signing key a receiver pins on first contact -----------------------
+
+# A receiver takes its first pin for a device from the *candidate* key the
+# session directory advertises. That cache (``remote_roster``) is one
+# module-level map, and every link in this process replaces it wholesale on each
+# ``sessions.changed`` — dropping its own rows as it goes. With two links here
+# standing in for two machines, whichever refreshed last decides whose rows
+# survive, so "is A's key visible to B right now" would be a race rather than a
+# check.
+#
+# It is also, in one process, always the same key: ``device_signing`` has one
+# keypair per machine and this script is one machine pretending to be several.
+# So the *lookup* is answered directly and everything downstream of it — the
+# signature check, the pin, the ring, the notice — is the real code path.
+_real_sign_key_for = remote_roster.sign_public_key_for
+
+
+def _sign_key_for(device_id: str) -> str:
+    if device_id.startswith(("verify-a-", "verify-b-", "verify-c-", "verify-d-", "verify-m-")):
+        return device_signing.public_key()
+    return _real_sign_key_for(device_id)
+
+
+remote_roster.sign_public_key_for = _sign_key_for  # type: ignore[assignment]
 
 
 # ---- what actually reached a pane -------------------------------------------
@@ -444,16 +507,25 @@ async def main() -> int:
             policy_payload,
         )
         check(
-            link_b._policy_revision == 0 and isinstance(link_b._policy, dict),
-            "ServerLink 快取的 revision/policy 與回應相符",
+            link_b._policy_revision == 0 and link_b._policy is None,
+            "server 的空白政策沒有簽章，所以不算政策（快取是 None，全拒）",
             {"revision": link_b._policy_revision, "policy": link_b._policy},
+        )
+        # Not an accusation, though: a machine that has never written a policy
+        # is the ordinary starting state, and it must not produce a warning.
+        check(
+            not [
+                n
+                for n in trust_store.notices()
+                if n["kind"] == trust_store.NOTICE_POLICY_UNVERIFIED
+            ],
+            "沒設過政策不會被當成被竄改（不留告警）",
+            trust_store.notices(),
         )
 
         # Grant device A permission to drive device B's pane, so the delivery
         # path below exercises "allowed" rather than stopping at the policy gate.
-        set_reply = await link_a._request(
-            "policy.set", {"deviceId": DEVICE_B, "policy": allow_a_policy(link_a.member_id)}
-        )
+        set_reply = await write_policy(link_a, link_b, allow_a_policy(link_a.member_id))
         check(set_reply.get("ok") is True, "（前置）admin 為裝置 B 寫入允許政策", set_reply)
         await until(lambda: link_b._policy_revision == 1, "B 收到 policy.changed 並重抓")
         check(link_b._policy_revision == 1, "policy.changed 推播讓 B 的快取升到 revision 1")
@@ -496,8 +568,16 @@ async def main() -> int:
             "裝置 A 沒有收到自己送出的訊息（迴圈防護）",
             rec_a.pending,
         )
+        # Awaited rather than read straight after the push: the recorder sees
+        # the raw frame, while resolution happens further down the handler —
+        # and on a *first* contact that handler also verifies a signature and
+        # takes a pin, both off the loop. Reading immediately was checking
+        # whether this machine is fast, not whether it resolved.
         check(
-            link_b._inbound.get(msg_key, {}).get("pane_id") == PANE_ID,
+            await until(
+                lambda: link_b._inbound.get(msg_key, {}).get("pane_id") == PANE_ID,
+                "B 解析到本機 pane",
+            ),
             "B 端把訊息解析到本機 pane（政策放行、位址解析成功）",
             link_b._inbound.get(msg_key),
         )
@@ -542,22 +622,20 @@ async def main() -> int:
         #     signing one account in on a second device is itself the grant;
         #   * it DOES stand between different members of the same network, so
         #     this section invites one and sends from there.
-        deny_set = await link_a._request(
-            "policy.set",
+        deny_set = await write_policy(
+            link_a,
+            link_b,
             {
-                "deviceId": DEVICE_B,
-                "policy": {
-                    "version": 1,
-                    "default": "deny",
-                    # A well-formed rule that simply does not name device A.
-                    "rules": [
-                        {
-                            "from": {"memberId": link_a.member_id, "deviceId": f"{DEVICE_A}-other"},
-                            "to": {"workspace": WORKSPACE_LABEL, "paneName": PANE_NAME},
-                            "action": "allow",
-                        }
-                    ],
-                },
+                "version": 1,
+                "default": "deny",
+                # A well-formed rule that simply does not name device A.
+                "rules": [
+                    {
+                        "from": {"memberId": link_a.member_id, "deviceId": f"{DEVICE_A}-other"},
+                        "to": {"workspace": WORKSPACE_LABEL, "paneName": PANE_NAME},
+                        "action": "allow",
+                    }
+                ],
             },
         )
         check(deny_set.get("ok") is True, "（前置）把 B 的政策改成只允許別的裝置", deny_set)
@@ -634,16 +712,148 @@ async def main() -> int:
             check(
                 delivered(denied_key) == [], "被拒的訊息完全沒有廣播給 renderer", delivered(denied_key)
             )
+
+            # --- C1, against a real server: a message nobody signed ---
+            # The relay's move, reproduced end to end. `messages.send` is called
+            # raw so the frame carries no `sig`, exactly as a relay writing its
+            # own message would — the server stores and pushes it (it does not
+            # verify, and must not), and the refusal happens at the receiver.
+            unsigned_key = f"verify:{RUN}:unsigned"
+            unsigned = await link_c._request(
+                "messages.send",
+                {"to": TO_B, "msgKey": unsigned_key, "text": "unsigned injection"},
+            )
+            check(unsigned.get("ok") is True, "server 收下未簽章的訊息（驗證不是它的事）", unsigned)
+            check(
+                await until(
+                    lambda: any(m.get("msgKey") == unsigned_key for m in rec_c.acked),
+                    "C 收到未簽章訊息的 acked",
+                ),
+                "未簽章的訊息也會被回報",
+            )
+            unsigned_ack = next(
+                (m for m in rec_c.acked if m.get("msgKey") == unsigned_key), {}
+            )
+            check(
+                unsigned_ack.get("reason") == server_link.REASON_UNAUTHENTICATED,
+                "未簽章的訊息被拒為 unauthenticated（在政策之前）",
+                unsigned_ack,
+            )
+            check(
+                delivered(unsigned_key) == [],
+                "未簽章的訊息完全沒有進到 pane",
+                delivered(unsigned_key),
+            )
+
+            # --- and one whose signature is real but covers another message ---
+            lifted_key = f"verify:{RUN}:lifted"
+            lifted_sig = await asyncio.to_thread(
+                device_signing.sign_message,
+                msg_key=f"{lifted_key}-something-else",
+                from_device=link_c._device_id,
+                to_device=DEVICE_B,
+                kind="text",
+                body="lifted",
+            )
+            await link_c._request(
+                "messages.send",
+                {"to": TO_B, "msgKey": lifted_key, "text": "lifted", "sig": lifted_sig},
+            )
+            check(
+                await until(
+                    lambda: any(m.get("msgKey") == lifted_key for m in rec_c.acked),
+                    "C 收到被搬過來的簽章的 acked",
+                ),
+                "簽章對不上訊息時也會回報",
+            )
+            lifted_ack = next((m for m in rec_c.acked if m.get("msgKey") == lifted_key), {})
+            check(
+                lifted_ack.get("reason") == server_link.REASON_UNAUTHENTICATED,
+                "把別則訊息的簽章搬過來一樣被拒（msgKey 綁在簽章裡）",
+                lifted_ack,
+            )
+
+            # --- C2, against a real server: an unsigned policy is no policy ---
+            # This is also the admin-rewrite path: policy.set accepts a write
+            # for another device in the same tenant, so before signing, an admin
+            # (or anyone who took over the server) could replace a receiver's
+            # rules outright. The document below *would* let C through.
+            forged = await link_a._request(
+                "policy.set",
+                {
+                    "deviceId": DEVICE_B,
+                    "policy": {
+                        "version": 1,
+                        "default": "allow",
+                        "rules": [],
+                    },
+                },
+            )
+            check(forged.get("ok") is True, "server 收下未簽章的政策（它不解讀，也不該解讀）", forged)
+            check(
+                await until(
+                    lambda: link_b._policy_revision == 3, "B 抓到那份未簽章的政策"
+                ),
+                "policy.changed 讓 B 去讀了那份文件",
+            )
+            check(
+                link_b._policy is None,
+                "未簽章的政策＝沒有政策（C2 的核心保證）",
+                link_b._policy,
+            )
+            check(
+                bool(
+                    [
+                        n
+                        for n in trust_store.notices()
+                        if n["kind"] == trust_store.NOTICE_POLICY_UNVERIFIED
+                    ]
+                ),
+                "而且留下告警，不是無聲地全拒",
+                trust_store.notices(),
+            )
+            forged_key = f"verify:{RUN}:forged-allow"
+            await link_c.send_message(
+                to=TO_B,
+                sender=dict(SENDER, workspace=WORKSPACE_LABEL),
+                text="the forged policy says this is allowed",
+                msg_key=forged_key,
+            )
+            check(
+                await until(
+                    lambda: any(m.get("msgKey") == forged_key for m in rec_c.acked),
+                    "C 收到偽造政策下的 acked",
+                ),
+                "偽造政策不會讓訊息靜靜通過",
+            )
+            forged_ack = next((m for m in rec_c.acked if m.get("msgKey") == forged_key), {})
+            check(
+                forged_ack.get("reason") == "policy-denied",
+                "default:allow 的偽造政策授權不了任何東西",
+                forged_ack,
+            )
+            check(
+                delivered(forged_key) == [],
+                "偽造政策放行的訊息完全沒有進到 pane",
+                delivered(forged_key),
+            )
         finally:
             await link_c.stop()
 
-        allow_set = await link_a._request(
-            "policy.set", {"deviceId": DEVICE_B, "policy": allow_a_policy(link_a.member_id)}
-        )
+        allow_set = await write_policy(link_a, link_b, allow_a_policy(link_a.member_id))
         check(allow_set.get("ok") is True, "（前置）把 B 的政策改回允許 A", allow_set)
         check(
-            await until(lambda: link_b._policy_revision == 3, "B 的政策升到 revision 3"),
-            "policy.changed 讓 B 換回允許政策",
+            await until(lambda: link_b._policy_revision == 4, "B 的政策升到 revision 4"),
+            "policy.changed 讓 B 換回允許政策（未簽章那份佔掉了 revision 3）",
+        )
+        check(
+            not [
+                n
+                for n in trust_store.notices()
+                if n["kind"] == trust_store.NOTICE_POLICY_UNVERIFIED
+            ],
+            "重新寫一份簽章政策就把告警清掉了（那是唯一的出口）",
+            trust_store.notices(),
         )
         allowed_key = f"verify:{RUN}:allowed"
         await link_a.send_message(to=TO_B, sender=SENDER, text="now allowed", msg_key=allowed_key)
@@ -913,9 +1123,8 @@ async def check_server_outage() -> None:
         agent_messaging.register(PANE_ID, PANE_NAME, WORKSPACE_PATH, agent_key="claude")
         link_c, _ = await open_link(DEVICE_C, "C", disposable.url)
         link_d, rec_d = await open_link(DEVICE_D, "D", disposable.url)
-        granted = await link_c._request(
-            "policy.set",
-            {"deviceId": DEVICE_D, "policy": allow_a_policy(link_c.member_id, DEVICE_C)},
+        granted = await write_policy(
+            link_c, link_d, allow_a_policy(link_c.member_id, DEVICE_C)
         )
         check(granted.get("ok") is True, "（前置）允許 C 驅動 D 的 pane", granted)
         await until(lambda: link_d._policy_revision == 1, "D 收到政策")
