@@ -180,6 +180,30 @@ describe('account modal — your network', () => {
     }
   })
 
+  // ---- rate limiting --------------------------------------------------------
+
+  it('does not tell a throttled sign-in that a mail was sent', () => {
+    // RATE_LIMITED now arrives from two places. The verification-resend
+    // sentence ("a link was just sent") would send someone throttled for
+    // repeated sign-in attempts looking through an inbox for something nobody
+    // sent, so the mail wording is reachable only from the resend call site.
+    expect(MODAL).toMatch(/where === 'resend'[\s\S]{0,80}verify-rate-limited/)
+    expect(MODAL).toContain("explain(resp.error, resp.error?.message ?? t('account.err-generic'), 'resend')")
+  })
+
+  it('says how long the wait is, using what the server reported', () => {
+    // "Try again later" with no number is the kind of message people retry
+    // against pointlessly; the server already sends retryAfterMs.
+    expect(MODAL).toContain('error?.details?.retryAfterMs')
+    expect(MODAL).toContain("t('account.err-rate-limited', { seconds })")
+    expect(MODAL).toContain("t('account.err-rate-limited-soon')")
+    for (const locale of LOCALES) {
+      const messages = i18n.global.getLocaleMessage(locale) as Record<string, any>
+      expect(messages.account['err-rate-limited'], `${locale}/err-rate-limited`).toContain('{seconds}')
+      expect(messages.account['err-rate-limited-soon'], `${locale}/soon`).toBeTruthy()
+    }
+  })
+
   it('has every trust string it shows, in both locales', () => {
     const keys = new Set<string>()
     const re = /[$]?t\(\s*'settings\.p2p\.trust\.([a-z0-9]+(?:-[a-z0-9]+)*)'/g

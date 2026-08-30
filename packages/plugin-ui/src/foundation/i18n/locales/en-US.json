@@ -2883,6 +2883,8 @@
     "err-unsupported": "This server does not support accounts yet. It may need updating.",
     "err-email-taken": "That email is already registered. Try signing in instead.",
     "err-rejected": "Email or password is not correct.",
+    "err-rate-limited": "Too many attempts. Try again in {seconds}s.",
+    "err-rate-limited-soon": "Too many attempts. Try again shortly.",
     "err-offline": "Cannot reach the server right now. Check your connection and try again.",
     "err-generic": "Something went wrong. Please try again.",
     "token-stored": "A token is stored on this machine",

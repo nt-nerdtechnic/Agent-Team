@@ -2883,6 +2883,8 @@
     "err-unsupported": "這台伺服器尚未支援帳號功能，可能需要更新。",
     "err-email-taken": "這個 email 已經註冊過了，請改用登入。",
     "err-rejected": "email 或密碼不正確。",
+    "err-rate-limited": "嘗試次數過多，請 {seconds} 秒後再試。",
+    "err-rate-limited-soon": "嘗試次數過多，請稍後再試。",
     "err-offline": "目前連不上伺服器，請檢查網路後再試一次。",
     "err-generic": "發生錯誤，請再試一次。",
     "token-stored": "這台機器已儲存權杖",

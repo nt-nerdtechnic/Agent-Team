@@ -269,7 +269,21 @@ const networkStale = computed(
 )
 
 /** Turn a server error code into something a person can act on. */
-function explain(code: string | undefined, fallback: string): string {
+/**
+ * Turn a server error into something a person can act on.
+ *
+ * `where` matters for one code only: RATE_LIMITED now comes from two very
+ * different places. Asking for another verification mail too soon is "a link
+ * was just sent"; being throttled after repeated sign-in attempts is not, and
+ * showing the mail sentence there would send the user looking through an inbox
+ * for something nobody sent.
+ */
+function explain(
+  error: { code?: string; message?: string; details?: Record<string, unknown> } | null | undefined,
+  fallback: string,
+  where: 'auth' | 'resend' = 'auth',
+): string {
+  const code = error?.code
   // The deployed server may predate account support, in which case it answers
   // UNKNOWN_TYPE. Showing that raw reads as "this dialog is broken".
   if (code === 'UNKNOWN_TYPE') return t('account.err-unsupported')
@@ -278,7 +292,15 @@ function explain(code: string | undefined, fallback: string): string {
   if (code === 'LINK_OFFLINE') return t('account.err-offline')
   // The server owns the cooldown and the gate; both are answers to show, not
   // failures to retry.
-  if (code === 'RATE_LIMITED') return t('settings.p2p.account.verify-rate-limited')
+  if (code === 'RATE_LIMITED') {
+    if (where === 'resend') return t('settings.p2p.account.verify-rate-limited')
+    // The server says how long it will keep refusing; "try again later" without
+    // a number is the kind of message people retry against pointlessly.
+    const seconds = Math.ceil(Number(error?.details?.retryAfterMs ?? 0) / 1000)
+    return seconds > 0
+      ? t('account.err-rate-limited', { seconds })
+      : t('account.err-rate-limited-soon')
+  }
   if (code === 'EMAIL_UNVERIFIED') return t('settings.p2p.account.verify-required')
   return fallback
 }
@@ -301,7 +323,7 @@ async function submit(): Promise<void> {
       )
     }
     if (!resp.ok) {
-      error.value = explain(resp.error?.code, resp.error?.message ?? t('account.err-generic'))
+      error.value = explain(resp.error, resp.error?.message ?? t('account.err-generic'))
       return
     }
     // The password has served its purpose the moment a token comes back.
@@ -360,7 +382,7 @@ async function resendVerification(): Promise<void> {
       {}
     )
     if (!resp.ok) {
-      error.value = explain(resp.error?.code, resp.error?.message ?? t('account.err-generic'))
+      error.value = explain(resp.error, resp.error?.message ?? t('account.err-generic'), 'resend')
       return
     }
     if (resp.payload?.status) status.value = resp.payload.status
