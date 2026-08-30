@@ -39,6 +39,25 @@ export function deriveAutoName(material: string): string {
     .trim()
   if (!cleaned) return ''
 
+  // A path is a poor title: it is long, it is mostly directories nobody needs
+  // to read, and it names the machine's layout rather than the work. Observed
+  // in the wild as a pane called `/Users/someone/Downloads/report.pdf`, which
+  // is also how someone's home directory and account name ended up on every
+  // other machine in the network. The last segment is what a person calls that
+  // file, so it is what the pane gets called.
+  //
+  // Only a *bare* path is treated this way — something that is a path and
+  // nothing else. A sentence that happens to mention one ("修 src/main 的 bug")
+  // keeps its words: a slash a person typed is a slash they meant, and a name
+  // carrying one is still addressable from its own window — sendMessage matches
+  // the whole name before it reads the slash as a separator. What it is not is
+  // addressable from *another* workspace, where the address is `<folder>/<pane>`
+  // and rpartition splits at the wrong slash. That trade is fine for a name
+  // someone chose. It was not fine for one nobody chose, which is what this
+  // branch is for.
+  const bare = /^[~/]?(?:[^\s/]+\/)+([^\s/]+)$/.exec(cleaned)
+  if (bare?.[1]) return bare[1]
+
   // Strip the filler up front so every branch benefits, not just the truncating
   // one — a short "請幫我修 bug" is exactly the case the filler lists target.
   const flat = stripFiller(cleaned.replace(/\s+/g, ' ').trim())

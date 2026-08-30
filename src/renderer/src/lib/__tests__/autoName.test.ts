@@ -84,3 +84,25 @@ describe('deriveAutoName', () => {
     expect(deriveAutoName(material)).toBe('')
   })
 })
+
+describe('a path is not a title', () => {
+  // Observed on a real machine: a pane called
+  // `/Users/someone/Downloads/查詢醫師背景資料方法.pdf`. Two things wrong with
+  // that at once — it reads as noise, and it published someone's home
+  // directory and account name to every other machine in the network.
+  it('uses the last segment of a bare path', () => {
+    expect(deriveAutoName('/Users/nt.neil/Downloads/查詢醫師背景資料方法.pdf')).toBe(
+      '查詢醫師背景資料方法.pdf',
+    )
+    expect(deriveAutoName('~/Desktop/Agent-Team/README.md')).toBe('README.md')
+    expect(deriveAutoName('backend/agent_team_backend/app.py')).toBe('app.py')
+  })
+
+  it('leaves a sentence that merely mentions a path alone', () => {
+    // Only something that is a path and nothing else is treated as one; the
+    // slashes in a sentence are made safe by normalizeMessagingName instead.
+    const title = deriveAutoName('修 src/main 的 bug')
+    expect(title).toContain('bug')
+    expect(title).not.toBe('main')
+  })
+})
