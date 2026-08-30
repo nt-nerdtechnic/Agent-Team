@@ -45,6 +45,17 @@ def backend_port_file() -> Path:
     return app_data_dir() / "backend-port"
 
 
+def backend_ws_token_file() -> Path:
+    """Path to the one-shot credential the local ``/ws`` endpoint requires.
+
+    Deliberately a *separate* file from ``backend-port``. The port is written
+    world-readable on purpose — Claude Code hooks resolve it with a plain
+    ``cat`` from a shell this process does not control — while this one must
+    not be. Two facts with two different audiences do not belong in one file.
+    """
+    return app_data_dir() / "backend-ws-token"
+
+
 def setup_file_logging(level: str = "info") -> Path:
     """Attach a rotating file handler to the agent_team_backend logger tree.
 

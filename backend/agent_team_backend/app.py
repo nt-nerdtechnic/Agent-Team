@@ -29,6 +29,7 @@ from uvicorn.protocols.utils import ClientDisconnected
 from . import __version__
 from . import agent_messaging
 from . import hook_drain
+from . import ws_auth
 from . import loop_watchdog
 from . import mem_probe
 from . import push_delivery
@@ -2211,6 +2212,25 @@ async def claude_rewake_hook(request: Request) -> Response:
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket) -> None:
+    # Refused before accept(), so a caller without the credential never reaches
+    # the dispatch loop — and `terminal.create`, which takes a command and an
+    # env straight from the caller, lives in that loop. Binding to 127.0.0.1
+    # keeps the network out but not the browser: a WebSocket handshake is not
+    # subject to the same-origin policy, so any page the user visits can scan
+    # the ephemeral range and talk to us. It cannot read a file, which is what
+    # the token is. See ws_auth.
+    refusal = ws_auth.check(
+        websocket.query_params.get("t") or "",
+        websocket.headers.get("origin") or "",
+    )
+    if refusal:
+        log.warning("refused a ws handshake: %s", refusal)
+        # Accept-then-close rather than a bare close: a browser is told nothing
+        # useful either way, and an app client gets a close code it can show
+        # instead of an opaque network error.
+        await websocket.accept()
+        await websocket.close(code=ws_auth.WS_UNAUTHORIZED)
+        return
     await websocket.accept()
     log.info("ws client connected")
     session = Session(websocket)

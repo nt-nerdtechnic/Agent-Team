@@ -1124,7 +1124,34 @@
         "block": "Block",
         "blocked-title": "Blocked",
         "blocked-hint": "A block is refused ahead of every rule, including your own other machines.",
-        "unblock": "Unblock"
+        "unblock": "Unblock",
+        "notices-title": "Device identity",
+        "notice-ack": "Got it",
+        "first-seen": "First time seeing {device}",
+        "first-seen-own": "Treated as your own machine",
+        "first-seen-own-body": "Messages from it skip your rules entirely. If you did not just add a machine, this is worth asking about.",
+        "key-changed": "{device} is using a different key",
+        "key-changed-body": "Messages from it are being refused. This can mean the other machine was reinstalled — or that something is impersonating it. From here the two look the same.",
+        "fp-pinned": "Known",
+        "fp-offered": "Offered",
+        "key-changed-what-to-do": "Compare these two with the other machine's owner before doing anything else. There is no button here on purpose.",
+        "policy-unverified": "Your rules could not be verified",
+        "policy-unverified-body": "Nothing is being accepted from other devices until they are. Open the rules and save them once — that signs them again.",
+        "locked-title": "Cross-device is stopped",
+        "locked-body": "This machine had trust state and no longer does. Nothing is sent or accepted until that is understood. Starting over is exactly what deleting that state would achieve, so there is no button for it."
+      },
+      "link": {
+        "pause": "Turn off",
+        "resume": "Turn on",
+        "paused": "Off",
+        "paused-body": "This machine is not talking to the network. Your account and settings are kept.",
+        "server": "Server",
+        "this-device": "This device",
+        "state-unconfigured": "Not set up",
+        "state-connecting": "Connecting…",
+        "state-connected": "Connected",
+        "state-unreachable": "Cannot reach the server",
+        "state-unauthorized": "Sign-in was refused"
       }
     },
     "storage": {

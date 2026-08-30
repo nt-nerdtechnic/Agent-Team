@@ -2740,11 +2740,55 @@ async def ui_settings_set(session: "Session", msg_id: str, msg_type: str, payloa
 # make the link dial, because server_link.start() only runs at boot. These two
 # handlers exist so the whole configuration is one write followed by one
 # reconnect, and so the token only ever travels toward the vault.
+#: Where the pause switch lives. In ui_settings rather than in the link itself:
+#: the link is rebuilt on every reconnect and forgets anything it holds, while
+#: this has to survive a restart — a switch that quietly turns itself back on is
+#: worse than no switch, because the user believes they are disconnected.
+LINK_PAUSED_SETTING = "agentTeam.p2p.linkPaused"
+
+
+def _link_paused() -> bool:
+    from . import app
+
+    return bool(app.ui_settings_store.get().get(LINK_PAUSED_SETTING))
+
+
 @handler("p2p.link.status")
 async def p2p_link_status(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    await session.send_json(
-        make_response(msg_id, msg_type, {"status": await server_link.status()})
-    )
+    status = await server_link.status()
+    # Reported alongside the link's own state rather than folded into it: paused
+    # is a thing the *user* did, and showing it as "unconfigured" or
+    # "unreachable" would blame the network for a switch they flipped.
+    status["paused"] = _link_paused()
+    await session.send_json(make_response(msg_id, msg_type, {"status": status}))
+
+
+@handler("p2p.link.set_paused")
+async def p2p_link_set_paused(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Turn the cross-device link off without forgetting the account.
+
+    Signing out was the only way to stop this machine talking to the server, and
+    it throws away the credential — so "I want this off for now" cost the user
+    their account on this device. Pausing keeps everything and stops the socket.
+
+    The stop is real: the link is torn down, not merely marked. A switch that
+    left the connection open while claiming to be off would be a lie told by the
+    one surface whose whole job is telling the truth about the connection.
+    """
+    from . import app
+
+    paused = bool(payload.get("paused"))
+    app.ui_settings_store.set({LINK_PAUSED_SETTING: paused})
+    if paused:
+        await server_link.stop()
+    else:
+        await server_link.start()
+    status = await server_link.status()
+    status["paused"] = paused
+    await app.broadcast(make_event("p2p.link.changed", {"status": status}))
+    await session.send_json(make_response(msg_id, msg_type, {"status": status}))
 
 
 @handler("p2p.link.configure")

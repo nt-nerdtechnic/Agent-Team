@@ -1124,7 +1124,34 @@
         "block": "封鎖",
         "blocked-title": "已封鎖",
         "blocked-hint": "封鎖優先於所有規則，連你自己的其他機器也一樣擋。",
-        "unblock": "解除封鎖"
+        "unblock": "解除封鎖",
+        "notices-title": "裝置身分",
+        "notice-ack": "知道了",
+        "first-seen": "第一次見到 {device}",
+        "first-seen-own": "視為你自己的機器",
+        "first-seen-own-body": "它送來的訊息完全不經過你的規則。如果你剛才並沒有新增機器，這件事值得問清楚。",
+        "key-changed": "{device} 換了一把金鑰",
+        "key-changed-body": "它送來的訊息正在被拒收。這可能表示對方重裝了——也可能表示有人在冒充它。從這裡看，兩者長得一模一樣。",
+        "fp-pinned": "已知",
+        "fp-offered": "對方提供",
+        "key-changed-what-to-do": "先跟對方機器的持有人核對這兩串，再決定要不要處理。這裡刻意不放按鈕。",
+        "policy-unverified": "你的規則驗證不過",
+        "policy-unverified-body": "在驗證通過之前，其他裝置送來的東西一律不收。打開規則重新儲存一次即可——那會重新簽章。",
+        "locked-title": "跨裝置已停止",
+        "locked-body": "這台機器原本有信任狀態，現在沒有了。在弄清楚之前，不送出也不接收任何東西。「重新開始」正是刪掉那份狀態的人想要的結果，所以這裡沒有那個按鈕。"
+      },
+      "link": {
+        "pause": "關閉",
+        "resume": "開啟",
+        "paused": "已關閉",
+        "paused-body": "這台機器沒有在跟網路通訊。帳號與設定都保留著。",
+        "server": "伺服器",
+        "this-device": "這台裝置",
+        "state-unconfigured": "尚未設定",
+        "state-connecting": "連線中…",
+        "state-connected": "已連線",
+        "state-unreachable": "連不到伺服器",
+        "state-unauthorized": "登入被拒絕"
       }
     },
     "storage": {

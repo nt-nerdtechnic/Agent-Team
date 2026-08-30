@@ -38,6 +38,39 @@ interface LinkStatus {
   role?: string
   /** Soft gate: an unverified account works normally, it is only flagged. */
   emailVerified?: boolean
+  /**
+   * The user turned this link off. Reported beside `state`, never folded into
+   * it: pausing is something a person did, and showing it as "unreachable"
+   * would blame the network for their own switch.
+   */
+  paused?: boolean
+}
+
+/**
+ * Something about a peer's identity that the user has to be told.
+ *
+ * Three kinds, and the difference between the first two is the whole point:
+ * meeting a device for the first time is a statement, while a device whose key
+ * changed is a refusal in progress — and a key change looks exactly like an
+ * impersonation attempt, because in the data they are the same event.
+ */
+interface TrustNotice {
+  key: string
+  kind: 'device-first-seen' | 'device-key-changed' | 'policy-unverified'
+  deviceId: string
+  at: number
+  memberId?: string
+  /** first-seen */
+  fingerprint?: string
+  /** first-seen: this device landed in the "my own machines" ring. */
+  own?: boolean
+  /** key-changed: both halves, so a person can compare them out of band. */
+  pinnedFingerprint?: string
+  offeredFingerprint?: string
+  /** policy-unverified */
+  reason?: string
+  seq?: number
+  expected?: number
 }
 
 /** One CLI pane, as Navide-Server's session directory describes it. */
@@ -88,6 +121,14 @@ interface NetworkSnapshot {
   /** Absent on a backend that predates the trust surface. */
   accessRequests?: AccessRequest[]
   blocked?: BlockedEntry[]
+  trustNotices?: TrustNotice[]
+  /**
+   * Non-empty means this machine has lost the trust state it once had, and all
+   * cross-device traffic is stopped in both directions until it is understood.
+   * There is deliberately no button to clear it: starting over is exactly what
+   * an attacker who deleted that state wants next.
+   */
+  trustLocked?: string
 }
 
 /** The four the server defines; anything else is shown as the server spelled it. */
@@ -188,6 +229,51 @@ async function loadNetwork(): Promise<void> {
 /** Both halves of what the modal shows, on one tick of the one timer. */
 async function refresh(): Promise<void> {
   await Promise.all([loadStatus(), loadNetwork()])
+}
+
+const trustNotices = computed<TrustNotice[]>(() => network.value?.trustNotices ?? [])
+const trustLocked = computed(() => network.value?.trustLocked ?? '')
+const paused = computed(() => status.value?.paused === true)
+
+/** Which switch or notice is mid-flight, so a double click cannot act twice. */
+const pending = ref('')
+
+/**
+ * Turn the cross-device link off, or back on.
+ *
+ * Signing out was the only way to stop this machine talking to the server, and
+ * it throws the credential away — so "off for now" cost the user their account
+ * on this device. This keeps everything and closes the socket.
+ */
+async function togglePaused(): Promise<void> {
+  if (pending.value) return
+  pending.value = 'link'
+  try {
+    const resp = await props.backend.send<{ status: LinkStatus }>('p2p.link.set_paused', {
+      paused: !paused.value,
+    })
+    if (resp.ok && resp.payload?.status) status.value = resp.payload.status
+    await refresh()
+  } catch {
+    /* the switch shows whatever the next poll reports, which is the truth */
+  } finally {
+    pending.value = ''
+  }
+}
+
+/** Clear a first-seen notice. The backend refuses this for a changed key, and
+ *  the template does not offer the button there — see the section comment. */
+async function dismissNotice(notice: TrustNotice): Promise<void> {
+  if (pending.value) return
+  pending.value = notice.key
+  try {
+    await props.backend.send('p2p.trust.notices.dismiss', { key: notice.key })
+    await loadNetwork()
+  } catch {
+    /* left on screen; nothing was decided */
+  } finally {
+    pending.value = ''
+  }
 }
 
 /** How a person would name the machine; the id is always there, the name is not. */
@@ -482,6 +568,75 @@ onUnmounted(() => {
         </div>
         <p v-if="resent" class="hint">{{ t('settings.p2p.account.verify-resent') }}</p>
 
+        <!-- The link has lost trust state it once had. First, above everything,
+             and with no button: "start over" is precisely what an attacker who
+             deleted that state is waiting for. -->
+        <section v-if="signedIn && trustLocked" class="net">
+          <div class="card locked-card">
+            <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
+            <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>
+            <p class="hint">{{ trustLocked }}</p>
+          </div>
+        </section>
+
+        <!-- Identity news. A first sighting is a statement; a changed key is a
+             refusal happening right now, and the two look identical in the data
+             — which is why they are told apart here rather than merged. -->
+        <section v-if="signedIn && trustNotices.length" class="net">
+          <h2 class="net-title">{{ t('settings.p2p.trust.notices-title') }}</h2>
+          <div class="card net-card">
+            <div v-for="n in trustNotices" :key="n.key" class="req">
+              <template v-if="n.kind === 'device-key-changed'">
+                <div class="req-head">
+                  <span class="dev-name danger-text">
+                    {{ t('settings.p2p.trust.key-changed', { device: n.deviceId }) }}
+                  </span>
+                </div>
+                <p class="req-what">{{ t('settings.p2p.trust.key-changed-body') }}</p>
+                <dl class="fp">
+                  <dt>{{ t('settings.p2p.trust.fp-pinned') }}</dt>
+                  <dd><code>{{ n.pinnedFingerprint }}</code></dd>
+                  <dt>{{ t('settings.p2p.trust.fp-offered') }}</dt>
+                  <dd><code>{{ n.offeredFingerprint }}</code></dd>
+                </dl>
+                <!-- No dismiss: the backend refuses it, and a button that
+                     always failed would read as a bug rather than as a rule. -->
+                <p class="hint">{{ t('settings.p2p.trust.key-changed-what-to-do') }}</p>
+              </template>
+
+              <template v-else-if="n.kind === 'policy-unverified'">
+                <div class="req-head">
+                  <span class="dev-name danger-text">
+                    {{ t('settings.p2p.trust.policy-unverified') }}
+                  </span>
+                </div>
+                <p class="req-what">{{ t('settings.p2p.trust.policy-unverified-body') }}</p>
+                <p v-if="n.reason" class="hint">{{ n.reason }}</p>
+              </template>
+
+              <template v-else>
+                <div class="req-head">
+                  <span class="dev-name">
+                    {{ t('settings.p2p.trust.first-seen', { device: n.deviceId }) }}
+                  </span>
+                  <span v-if="n.own" class="dev-tag">
+                    {{ t('settings.p2p.trust.first-seen-own') }}
+                  </span>
+                </div>
+                <p class="req-what">
+                  <code>{{ n.fingerprint }}</code>
+                </p>
+                <p v-if="n.own" class="hint">{{ t('settings.p2p.trust.first-seen-own-body') }}</p>
+                <div class="req-acts">
+                  <button class="btn ghost small" :disabled="!!pending" @click="dismissNotice(n)">
+                    {{ t('settings.p2p.trust.notice-ack') }}
+                  </button>
+                </div>
+              </template>
+            </div>
+          </div>
+        </section>
+
         <!-- Someone knocked and was refused. Above the network on purpose:
              it is the only part of this panel that is waiting on a decision,
              and it appears only when there is one to make. -->
@@ -520,6 +675,33 @@ onUnmounted(() => {
              under the pointer when the first snapshot lands. -->
         <section v-if="signedIn" class="net">
           <h2 class="net-title">{{ t('settings.p2p.network.title') }}</h2>
+
+          <!-- The switch and what it is doing, in one row. The state text is
+               the link's own answer, not a guess: paused says the user did
+               this, every other value says what the connection is actually
+               doing, and `detail` carries the reason when there is one. A
+               connection surface that rounded any of that off would be the one
+               place in the app lying about the thing it exists to report. -->
+          <div class="card link-card">
+            <div class="link-row">
+              <span class="dot" :class="paused ? 'idle' : (network?.state === 'connected' ? 'ok' : 'warn')"></span>
+              <span class="link-state">
+                {{ paused ? t('settings.p2p.link.paused') : t(`settings.p2p.link.state-${network?.state ?? 'unconfigured'}`) }}
+              </span>
+              <button class="btn ghost small link-btn" :disabled="!!pending" @click="togglePaused">
+                {{ paused ? t('settings.p2p.link.resume') : t('settings.p2p.link.pause') }}
+              </button>
+            </div>
+            <p v-if="paused" class="hint">{{ t('settings.p2p.link.paused-body') }}</p>
+            <p v-else-if="status?.detail" class="hint">{{ status.detail }}</p>
+            <dl class="kv link-kv">
+              <dt>{{ t('settings.p2p.link.server') }}</dt>
+              <dd><code>{{ status?.serverUrl }}</code></dd>
+              <dt>{{ t('settings.p2p.link.this-device') }}</dt>
+              <dd><code>{{ status?.deviceId }}</code></dd>
+            </dl>
+          </div>
+
           <div class="card net-card">
             <p v-if="networkUnavailable" class="hint net-note">
               {{ t('settings.p2p.network.unavailable') }}
@@ -793,6 +975,23 @@ input:focus {
 .pane-pill.st-disconnected { background: none; border-color: var(--border-default); }
 /* A knock is a row that owes an answer, so it gets a little more room than a
    pane line and its own separator — the same card, one step louder. */
+/* The switch row: one line that answers "is it on, what is it doing, and can
+   I change that" without the eye having to travel. */
+.link-card { margin-bottom: 10px; }
+.link-row { display: flex; align-items: center; gap: 8px; }
+.link-state { font-weight: 600; }
+.link-btn { margin-left: auto; }
+.link-kv { margin-top: 8px; }
+.link-kv code { font-size: 11px; word-break: break-all; }
+.dot.warn { background: var(--attention-fg); }
+.danger-text { color: var(--danger-fg); }
+/* Fingerprints sit in their own grid so the two halves line up character by
+   character — the whole point is that a person can compare them. */
+.fp { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 6px 0; font-size: 12px; }
+.fp dt { color: var(--fg-muted); }
+.fp dd { margin: 0; }
+.fp code { font-size: 12px; letter-spacing: 0.04em; }
+.locked-card { border-color: var(--danger-fg); }
 .req { padding: 8px 0; border-bottom: 1px solid var(--border-muted); }
 .req:last-child { border-bottom: none; }
 .req:first-child { padding-top: 0; }

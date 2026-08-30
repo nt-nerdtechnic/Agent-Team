@@ -10,6 +10,7 @@ import uvicorn
 
 from . import __version__
 from .app import app as _fastapi_app
+from . import ws_auth
 from .applog import backend_port_file, setup_file_logging
 
 
@@ -49,6 +50,13 @@ def main() -> int:
         log.info("wrote backend port to %s", port_path)
     except OSError as err:
         log.warning("could not write port-file: %s", err)
+
+    # The credential for that port. Separate file, 0600, minted fresh each run:
+    # the port above is written world-readable on purpose (a shell hook resolves
+    # it with `cat`), and a secret must not inherit that. Unlike the port this
+    # is not best-effort — a backend that cannot write it would accept nobody,
+    # and failing here says so instead of leaving that to every client.
+    ws_auth.issue_token()
 
     # Use the already-imported app object so PyInstaller can detect this
     # dependency statically (string-based import is invisible to the bundler).

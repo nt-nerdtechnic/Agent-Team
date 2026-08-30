@@ -204,6 +204,93 @@ describe('account modal — your network', () => {
     }
   })
 
+  // ---- the switch and what it discloses ---------------------------------------
+
+  it('turns the link off without throwing the account away', () => {
+    // Signing out was the only way to stop this machine talking to the server,
+    // and it discards the credential — so "off for now" cost the user their
+    // account on this device.
+    expect(MODAL).toContain("'p2p.link.set_paused'")
+    expect(MODAL).toContain('paused: !paused.value')
+  })
+
+  it('shows paused as its own thing, not as a connection failure', () => {
+    // Pausing is something a person did. Rendering it as "unreachable" would
+    // blame the network for their own switch.
+    expect(MODAL).toMatch(/paused \? t\('settings\.p2p\.link\.paused'\)/)
+    expect(MODAL).toContain('status.value?.paused === true')
+  })
+
+  it('reports the link state and reason the backend gave, not a summary', () => {
+    expect(MODAL).toContain('settings.p2p.link.state-')
+    expect(MODAL).toContain('status.detail')
+    for (const locale of LOCALES) {
+      const link = (i18n.global.getLocaleMessage(locale) as Record<string, any>).settings.p2p.link
+      for (const state of [
+        'unconfigured',
+        'connecting',
+        'connected',
+        'unreachable',
+        'unauthorized',
+      ]) {
+        expect(link[`state-${state}`], `${locale}/state-${state}`).toBeTruthy()
+      }
+    }
+  })
+
+  // ---- trust notices -----------------------------------------------------------
+
+  it('tells a first sighting apart from a changed key', () => {
+    // In the data these are the same event; only the pinning makes them
+    // different, and only one of them is a refusal happening right now.
+    expect(MODAL).toContain("n.kind === 'device-key-changed'")
+    expect(MODAL).toContain("n.kind === 'policy-unverified'")
+  })
+
+  it('offers no button on a changed key, and shows both fingerprints', () => {
+    // The backend refuses to dismiss these, so a button here would always fail
+    // and read as a bug rather than as a rule. Comparing the two fingerprints
+    // out of band is the only real answer, so both are on screen.
+    const changed = MODAL.slice(
+      MODAL.indexOf("n.kind === 'device-key-changed'"),
+      MODAL.indexOf("n.kind === 'policy-unverified'"),
+    )
+    expect(changed).toContain('n.pinnedFingerprint')
+    expect(changed).toContain('n.offeredFingerprint')
+    expect(changed).not.toContain('dismissNotice')
+  })
+
+  it('flags a new device that landed in the own-machines ring', () => {
+    // That ring skips the rules entirely, so it is the one first sighting that
+    // is not merely informational.
+    expect(MODAL).toContain('n.own')
+    expect(MODAL).toContain('settings.p2p.trust.first-seen-own')
+  })
+
+  it('gives no way to clear a trust lock', () => {
+    // Starting over is precisely what deleting that state was meant to achieve.
+    // Sliced from the section's own markup, not from the first mention of
+    // `trustLocked` — that is the type declaration, and a slice starting there
+    // sweeps in every button between it and the template.
+    const start = MODAL.indexOf('settings.p2p.trust.locked-title')
+    expect(start).toBeGreaterThan(-1)
+    const locked = MODAL.slice(start, MODAL.indexOf('</section>', start))
+    expect(locked).toContain('settings.p2p.trust.locked-body')
+    expect(locked).not.toMatch(/<button/)
+  })
+
+  it('has every link string it shows, in both locales', () => {
+    const keys = new Set<string>()
+    for (const m of MODAL.matchAll(/[$]?t\(\s*'settings\.p2p\.link\.([a-z0-9]+(?:-[a-z0-9]+)*)'/g)) {
+      keys.add(m[1])
+    }
+    expect(keys.size).toBeGreaterThan(0)
+    for (const locale of LOCALES) {
+      const link = (i18n.global.getLocaleMessage(locale) as Record<string, any>).settings.p2p.link
+      for (const key of keys) expect(link?.[key], `${locale}/link.${key}`).toBeTruthy()
+    }
+  })
+
   it('has every trust string it shows, in both locales', () => {
     const keys = new Set<string>()
     const re = /[$]?t\(\s*'settings\.p2p\.trust\.([a-z0-9]+(?:-[a-z0-9]+)*)'/g
