@@ -35,7 +35,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_team_backend import app
-from agent_team_backend.terminals import TerminalSession
+from agent_team_backend.terminals import TerminalSession, _claim_ctty
 
 # All tests here are async even where nothing is awaited: app.Session builds the
 # TerminalService lazily and its constructor needs a running event loop, so a
@@ -54,10 +54,7 @@ SIGNAL_WAIT_S = 3.0
 # (CPython warns about exactly this). Passes standalone, fails in the suite —
 # so it must exec.
 _CHILD = """
-import fcntl, os, signal, termios, time
-# start_new_session leaves us a session leader with no controlling terminal;
-# claim the slave so the kernel will deliver SIGWINCH here.
-fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+import os, signal, time
 signal.signal(signal.SIGWINCH, lambda *_: os.write(1, b"W"))
 os.write(1, b"R")
 end = time.monotonic() + 30
@@ -69,8 +66,11 @@ while time.monotonic() < end:
 def _spawn_winch_counter() -> tuple[subprocess.Popen, int]:
     """Start a process on a real PTY that emits one byte per SIGWINCH received.
 
-    The controlling terminal is what makes the kernel deliver SIGWINCH at all;
-    without it this test would pass for the wrong reason.
+    The controlling terminal is what makes the kernel deliver SIGWINCH at all,
+    so this spawns through the same _claim_ctty production uses. It used to
+    claim the ctty inside the child instead, which meant the test asserted a
+    guarantee the shipped spawn path did not actually have — force_redraw was a
+    no-op in production for as long as that workaround stood.
     """
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -78,6 +78,7 @@ def _spawn_winch_counter() -> tuple[subprocess.Popen, int]:
         stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
         start_new_session=True,
         close_fds=True,
+        preexec_fn=_claim_ctty,
     )
     os.close(slave_fd)
     # drain_output() reads the master until EAGAIN; on a blocking fd with an

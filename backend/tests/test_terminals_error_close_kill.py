@@ -44,7 +44,10 @@ async def test_error_close_escalates_to_sigkill_for_term_trapping_child() -> Non
     session = svc.create(
         pane_id="p1",
         agent_key=None,
-        command=["sh", "-c", 'trap "" TERM; sleep 30'],
+        # HUP is trapped alongside TERM: with a controlling terminal the
+        # closing master hangs the child up, which would put it down before
+        # the SIGKILL escalation this test exists to cover ever runs.
+        command=["sh", "-c", 'trap "" TERM HUP; sleep 30'],
         cwd="/",
     )
     # Give the shell a moment to install the TERM trap before signalling.

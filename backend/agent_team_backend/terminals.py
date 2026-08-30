@@ -394,6 +394,48 @@ def _kill_breakaway(pids: "list[int] | tuple[int, ...]") -> None:
             pass
 
 
+def _claim_ctty() -> None:
+    """Give the child a controlling terminal. Runs between fork() and exec().
+
+    start_new_session=True only calls setsid(): the child leads a new session
+    with NO controlling terminal, and dup2'ing the slave onto fd 0/1/2 does not
+    claim one. Without a ctty the kernel never gives the tty a foreground
+    process group, so it delivers neither SIGINT (^C) nor SIGWINCH (resize),
+    job control stays off, and /dev/tty is ENXIO — which is why sudo in a pane
+    refused with "a terminal is required to read the password" while `tty` and
+    `[ -t 0 ]` both looked healthy (those only check isatty()).
+
+    setsid() has already run by this point, so we are a session leader and the
+    ioctl is legal. Keep this minimal: only async-signal-safe work is valid
+    after fork(), so no logging and no allocation beyond the call itself.
+    """
+    try:
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    except OSError:
+        # Degrade to the historical no-ctty behaviour rather than fail the
+        # spawn: an exception here propagates through Popen's errpipe and
+        # would make every pane unopenable. A pane without sudo and job
+        # control still beats no pane at all.
+        pass
+
+
+def _foreground_pgid(master_fd: int, fallback_pgid: int) -> int:
+    """The process group the tty considers foreground, or fallback_pgid.
+
+    With a ctty in play the PTY child is an interactive login shell whose job
+    control is live, so it puts the CLI in a process group of its OWN and makes
+    that group foreground. Signalling only the shell's group would then leave
+    the CLI untouched — it would die later by SIGHUP when the master closes,
+    with no chance to flush its transcript, which is exactly what resume
+    depends on. Ask the tty who is actually in front instead.
+    """
+    try:
+        fg = os.tcgetpgrp(master_fd)
+    except OSError:
+        return fallback_pgid
+    return fg if fg > 0 else fallback_pgid
+
+
 class TerminalService:
     def __init__(
         self,
@@ -491,6 +533,11 @@ class TerminalService:
                 env=final_env,
                 close_fds=True,
                 start_new_session=True,
+                # setsid() alone leaves the child without a controlling
+                # terminal; claim the slave so the kernel will deliver ^C,
+                # SIGWINCH and hangups, and so /dev/tty resolves. See
+                # _claim_ctty.
+                preexec_fn=_claim_ctty,
             )
         except Exception:
             os.close(master)
@@ -837,17 +884,27 @@ class TerminalService:
         # workspace switch would otherwise stall unrelated requests (e.g. the
         # Welcome screen's workspace.list_recent) past their 10s timeout.
         descendants = await asyncio.to_thread(_descendant_pids, session.proc.pid)
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        # Read the foreground group BEFORE _close() shuts the master fd.
+        fg_pgid = _foreground_pgid(session.master_fd, 0)
         try:
             pgid = os.getpgid(session.proc.pid)
-            if force:
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                os.killpg(pgid, signal.SIGTERM)
+            os.killpg(pgid, sig)
         except ProcessLookupError:
             # Group already gone — closing the PTY master HUPs the child, so
             # it often dies before the SIGTERM lands. The escalation task
             # still runs to reap it and drop its crash-recovery record.
             pgid = 0
+        if fg_pgid > 0 and fg_pgid != pgid:
+            # The PTY child is a login shell, and with job control live it puts
+            # the CLI in a group of its own — the shell's group no longer
+            # covers it. Signal the foreground group too, or the CLI would
+            # first hear about this as the SIGHUP from the close below and lose
+            # the chance to flush the transcript that resume depends on.
+            try:
+                os.killpg(fg_pgid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
 
         self._close(session, reason="killed")
 
@@ -1050,11 +1107,19 @@ class TerminalService:
                 # Child already gone — still close so the session is removed
                 # and its registry entry is dropped.
                 self._close(session, reason="shutdown")
-        for _, pgid in targets:
+        for session, pgid in targets:
             try:
                 os.killpg(pgid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
+            # Job control puts the CLI in its own group; the shell's pgid does
+            # not reach it. See the same guard in kill().
+            fg_pgid = _foreground_pgid(session.master_fd, 0)
+            if fg_pgid > 0 and fg_pgid != pgid:
+                try:
+                    os.killpg(fg_pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
         deadline = self._loop.time() + grace
         # ASYNC110 suppressed: bounded poll with awaited sleeps, as above.
         while (  # noqa: ASYNC110

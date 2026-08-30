@@ -403,13 +403,23 @@ async def test_kill_escalates_term_trapping_child_and_unregisters() -> None:
     session = svc.create(
         pane_id="p1",
         agent_key=None,
-        command=["sh", "-c", 'trap "" TERM; sleep 300'],
+        # HUP trapped too — see test_terminals_error_close_kill.py.
+        command=["sh", "-c", 'trap "" TERM HUP; sleep 300'],
         cwd="/",
     )
     await _wait_registry_has(session.proc.pid)
     # Give the shell a moment to install the TERM trap before signalling.
     await asyncio.sleep(0.3)
     await svc.kill(session.id)
-    # Entry must survive while the child is still alive under SIGTERM.
-    session.proc.wait(timeout=10)
+    # Entry must survive while the child is still alive under SIGTERM; the
+    # SIGKILL escalation then reaps it. Poll on the loop rather than calling
+    # proc.wait(): that blocks synchronously and would starve _escalate_kill,
+    # which runs as a task on this very loop -- the SIGKILL would never be sent.
+    for _ in range(200):
+        await asyncio.sleep(0.05)
+        if session.proc.poll() is not None:
+            break
+    assert session.proc.poll() is not None, (
+        "child survived the SIGKILL escalation"
+    )
     await _wait_registry_empty()
