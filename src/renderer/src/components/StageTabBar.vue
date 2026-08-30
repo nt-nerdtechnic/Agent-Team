@@ -269,11 +269,16 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
 /* Two colours plus grey, no animation: a pulsing dot per tab is exactly the
    pattern that cost measurable WindowServer time before. Colours are the same
    tokens the pane badges use, so idle means the same thing everywhere. */
+/* Geometry matches .ws-grp-key in ControlPane, deliberately: this dot and the
+   sidebar's group key are two views of ONE value — both read the same
+   rollupTabStatus() for the same group — so they should not look like two
+   different kinds of indicator. (The pane row's .status-dot stays a circle;
+   that one is a different signal with eight states of its own.) */
 .tab-dot {
   flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
   background: var(--border-default);
 }
 .tab-dot[data-state='active'] { background: var(--success-fg); }
