@@ -107,6 +107,10 @@ def resolve_plan_root(workspace_path: str) -> str:
     Returns ``workspace_path`` unchanged when there is no repository within the
     bound, when the path is not a directory, or when the walk reaches the user's
     home directory — a dotfiles repo at ``~`` must never become a plan root.
+
+    The packaged Issue 21 test child carries a standalone copy of this resolver
+    because it is built without importing the application backend package. The
+    backend test suite keeps both implementations in parity.
     """
     if not workspace_path:
         return workspace_path

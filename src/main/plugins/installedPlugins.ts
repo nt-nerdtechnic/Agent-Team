@@ -163,6 +163,7 @@ export function manifestToDescriptor(
     return {
       id: manifest.id,
       packageVersion: manifest.version,
+      packageDir: pluginDir,
       requires: manifestCapabilities(manifest),
       capabilityPolicy: manifestCapabilityPolicy(manifest),
       devUrl: '',
@@ -173,6 +174,7 @@ export function manifestToDescriptor(
   }
   return {
     id: manifest.id,
+    packageDir: pluginDir,
     requires: manifest.requires,
     capabilityPolicy: manifestCapabilityPolicy(manifest),
     devUrl: '',
@@ -305,6 +307,9 @@ export function verifyOfficialInstall(
 export interface ScannedPlugin {
   /** The plugin's on-disk directory. */
   dir: string
+  /** Validated manifest version, including legacy manifests whose launch
+   *  descriptor intentionally remains plugin-id keyed. */
+  manifestVersion?: string
   /** Package-level inventory data derived from the validated manifest. */
   packageSummary?: InstalledPluginPackageSummary
   /** The parsed descriptor, when the manifest was valid. */
@@ -348,6 +353,7 @@ export function loadPluginDir(dir: string): ScannedPlugin {
       const descriptor = manifest.contributes ? manifestToDescriptor(manifest, dir) : undefined
       return {
         dir,
+        manifestVersion: manifest.version,
         packageSummary: manifestToInstalledPackageSummary(manifest),
         descriptor,
         activation,
@@ -355,6 +361,7 @@ export function loadPluginDir(dir: string): ScannedPlugin {
     }
     return {
       dir,
+      manifestVersion: manifest.version,
       packageSummary: manifestToInstalledPackageSummary(manifest),
       descriptor: manifestToDescriptor(manifest, dir),
     }

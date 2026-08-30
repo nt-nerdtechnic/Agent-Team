@@ -36,6 +36,7 @@ export default defineConfig({
       'src/renderer/plugins/**/*.{test,spec}.ts',
       'src/main/**/*.{test,spec}.ts',
       'src/shared/**/*.{test,spec}.ts',
+      'tests/**/*.{test,spec}.ts',
       'packages/plugin-sdk/src/**/*.{test,spec}.ts',
       'packages/plugin-ui/src/**/*.{test,spec}.ts',
       'plugins/navide-git/src/**/*.{test,spec}.ts',

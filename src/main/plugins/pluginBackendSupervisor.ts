@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptions } from 'node:child_process'
 import { TextDecoder } from 'node:util'
+import { isAllowedBackendTimeout } from './pluginBackendLimits'
 
 /** Private Electron-main seam for Backend Wire v1 conformance tests. */
 export const MCP_PROTOCOL_REVISION = '2026-07-28'
@@ -32,9 +33,13 @@ export interface BackendRuntimeContext {
 export interface BackendPluginLaunchSpec {
   pluginId: string
   packageVersion: string
+  /** Host-only canonical package root used to bind the selected descriptor. */
+  packageDir: string
   entryFile: string
   protocolVersion: 1
   activation: 'startup'
+  /** Host-projected package method allowlist; never supplied by the child. */
+  approvedMethods: readonly string[]
   /** Host-projected package event allowlist; never supplied by the child. */
   approvedEvents: readonly string[]
 }
@@ -52,6 +57,7 @@ export type BackendPluginErrorCode =
   | 'INVALID_ACTIVATION'
   | 'INVALID_RUNTIME'
   | 'INVALID_ARGUMENT'
+  | 'RESOURCE_LIMIT'
   | 'NOT_READY'
   | 'TIMEOUT'
   | 'USER_CANCELLED'
@@ -64,6 +70,7 @@ const ERROR_MESSAGES: Record<BackendPluginErrorCode, string> = {
   INVALID_ACTIVATION: 'Backend plugin activation is invalid.',
   INVALID_RUNTIME: 'Backend runtime is invalid.',
   INVALID_ARGUMENT: 'Backend call arguments are invalid.',
+  RESOURCE_LIMIT: 'Backend resource limit reached.',
   NOT_READY: 'Backend plugin is not ready.',
   TIMEOUT: 'Backend plugin call timed out.',
   USER_CANCELLED: 'Backend plugin call was cancelled.',
@@ -512,7 +519,7 @@ function isRuntimeContext(value: unknown): value is BackendRuntimeContext {
 }
 
 function isMethodName(value: unknown): value is string {
-  return typeof value === 'string' && /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$/u.test(value)
+  return typeof value === 'string' && /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u.test(value)
 }
 
 function serverInfo(value: unknown): BackendServerInfo | undefined {
@@ -764,6 +771,7 @@ export function createAuthenticatedBackendRuntime(
 export class PluginBackendSupervisor {
   private readonly spawnProcess: NonNullable<PluginBackendSupervisorOptions['spawnProcess']>
   private readonly environment: Readonly<Record<string, string>>
+  private readonly approvedMethods: readonly string[]
   private readonly approvedEvents: readonly string[]
   private readonly clientCapabilities: { [key: string]: JsonValue }
   private readonly clientInfo?: { name: string; version: string }
@@ -796,10 +804,13 @@ export class PluginBackendSupervisor {
       activation.pluginId.length === 0 ||
       typeof activation.packageVersion !== 'string' ||
       activation.packageVersion.length === 0 ||
+      typeof activation.packageDir !== 'string' ||
+      activation.packageDir.length === 0 ||
       typeof activation.entryFile !== 'string' ||
       activation.entryFile.length === 0 ||
       activation.protocolVersion !== 1 ||
       activation.activation !== 'startup' ||
+      !isApprovedMethodList(activation.approvedMethods) ||
       !isApprovedEventList(activation.approvedEvents) ||
       !options ||
       !isEnvironmentMap(options.environment)
@@ -808,9 +819,11 @@ export class PluginBackendSupervisor {
     }
     this.activation = Object.freeze({
       ...activation,
+      approvedMethods: Object.freeze([...activation.approvedMethods]),
       approvedEvents: Object.freeze([...activation.approvedEvents]),
     })
     this.environment = Object.freeze({ ...options.environment })
+    this.approvedMethods = this.activation.approvedMethods
     this.approvedEvents = this.activation.approvedEvents
     this.spawnProcess = options.spawnProcess ?? defaultSpawnProcess
     this.clientCapabilities = options.clientCapabilities ?? {}
@@ -830,7 +843,7 @@ export class PluginBackendSupervisor {
           typeof this.clientInfo.version !== 'string' ||
           this.clientInfo.version.length === 0)) ||
       !isPositiveFiniteNumber(this.healthTimeoutMs) ||
-      !isPositiveFiniteNumber(this.callTimeoutMs) ||
+      !isAllowedBackendTimeout(this.callTimeoutMs) ||
       !isPositiveFiniteNumber(this.shutdownTimeoutMs) ||
       !isPositiveFiniteNumber(this.maxFrameBytes)
     ) {
@@ -934,12 +947,12 @@ export class PluginBackendSupervisor {
       events.length === 0 ||
       events.some((event) => !this.approvedEvents.includes(event)) ||
       typeof listener !== 'function' ||
-      (options.timeoutMs !== undefined && !isPositiveFiniteNumber(options.timeoutMs))
+      (options.timeoutMs !== undefined && !isAllowedBackendTimeout(options.timeoutMs))
     ) {
       throw new BackendPluginError('INVALID_ARGUMENT')
     }
     if (this.subscriptions.size >= MAX_ACTIVE_SUBSCRIPTIONS) {
-      throw new BackendPluginError('INVALID_ARGUMENT')
+      throw new BackendPluginError('RESOURCE_LIMIT')
     }
     if (options.signal?.aborted) {
       throw new BackendPluginError('USER_CANCELLED')
@@ -1487,7 +1500,11 @@ export class PluginBackendSupervisor {
     if (this.state !== 'ready') {
       throw this.failure ?? new BackendPluginError(this.state === 'closed' ? 'PLUGIN_STOPPING' : 'NOT_READY')
     }
-    if (!isMethodName(name) || !isJsonValue(args)) throw new BackendPluginError('INVALID_ARGUMENT')
+    if (
+      !isMethodName(name) ||
+      !this.approvedMethods.includes(name) ||
+      !isJsonValue(args)
+    ) throw new BackendPluginError('INVALID_ARGUMENT')
     const id = this.nextRequestId()
     const response = await this.sendRequest(
       {
@@ -1534,7 +1551,7 @@ export class PluginBackendSupervisor {
       return Promise.reject(new BackendPluginError('BACKEND_UNAVAILABLE'))
     }
     const timeoutMs = options.timeoutMs ?? this.callTimeoutMs
-    if (!isPositiveFiniteNumber(timeoutMs)) {
+    if (!isAllowedBackendTimeout(timeoutMs)) {
       return Promise.reject(new BackendPluginError('INVALID_ARGUMENT'))
     }
     if (options.signal?.aborted) {
@@ -1737,6 +1754,12 @@ function isViewRuntime(value: BackendRuntimeContext): boolean {
     typeof value.hostWindowId === 'string' &&
     value.hostWindowId.length > 0
   )
+}
+
+function isApprovedMethodList(value: unknown): value is readonly string[] {
+  return Array.isArray(value) &&
+    new Set(value).size === value.length &&
+    value.every((method) => isMethodName(method))
 }
 
 function isApprovedEventList(value: unknown): value is readonly string[] {

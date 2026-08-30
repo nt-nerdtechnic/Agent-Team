@@ -77,6 +77,18 @@ import {
   buildPluginContributionCatalog,
   type PluginContributionCatalogEntry,
 } from './pluginContributionCatalog'
+import { canonicalBackendPackageDir, PluginBackendHost } from './pluginBackendHost'
+import {
+  isAllowedBackendTimeout,
+  MAX_BACKEND_CALLS_PER_INSTANCE,
+  MAX_BACKEND_SUBSCRIPTIONS_PER_INSTANCE,
+} from './pluginBackendLimits'
+import {
+  BackendPluginError,
+  type BackendPluginLaunchSpec,
+  type BackendPluginSubscription,
+  type JsonValue,
+} from './pluginBackendSupervisor'
 
 /** Everything the manager needs to launch one plugin view. */
 export interface PluginLaunchDescriptor {
@@ -85,6 +97,8 @@ export interface PluginLaunchDescriptor {
   /** Canonical package version for Manifest v2 descriptors. Legacy descriptors
    *  omit this field because their loader identity is plugin-id keyed. */
   packageVersion?: string
+  /** Host-verified package root used for exact backend activation identity. */
+  packageDir?: string
   /** Capabilities the plugin's manifest declares (drives broker scoping). */
   requires: string[]
   /** Access-aware policy for Manifest v2; omitted descriptors retain V1 behavior. */
@@ -216,6 +230,10 @@ interface RunningPlugin {
   hostWindow: BrowserWindow
   /** Host-owned workspace path; never sourced from plugin payloads. */
   workspacePath: string | null
+  /** SHA-256 workspace identity actually bound to the package backend. Null
+   *  while the optional backend route is unavailable, so callers can fall
+   *  back to the legacy adapter. */
+  backendWorkspaceId: string | null
   /** Query string the entry was last loaded with (drives reload-on-change). */
   query: string
   /** webContents.id captured at creation (not readable after destroy). */
@@ -330,6 +348,13 @@ interface EarlyAiEventBuffer {
   events: Array<{ type: 'terminal.output' | 'terminal.exit'; payload: unknown }>
 }
 
+interface PendingBackendSubscription {
+  controller: AbortController
+  subscription: BackendPluginSubscription | null
+  unregister: (() => void) | null
+  cancelled: boolean
+}
+
 const IPC_CALL = 'plugin:cap:call'
 const IPC_CAST = 'plugin:cap:cast'
 const IPC_HOST_CALL = 'plugin:host:call'
@@ -337,6 +362,34 @@ const IPC_EVENT = 'plugin:cap:event'
 const IPC_READY = 'plugin:ready'
 const IPC_HIDE_SELF = 'plugin:hideSelf'
 const IPC_OPEN_TARGET = 'plugin:openTarget'
+const IPC_BACKEND_CALL = 'plugin:backend:call'
+const IPC_BACKEND_CANCEL = 'plugin:backend:cancel'
+const IPC_BACKEND_SUBSCRIBE = 'plugin:backend:subscribe'
+const IPC_BACKEND_EVENT = 'plugin:backend:event'
+const IPC_BACKEND_STATUS = 'plugin:backend:status'
+const PLUGIN_BACKEND_TEMP_ENV_KEYS = ['TMPDIR', 'TEMP', 'TMP'] as const
+const BACKEND_IDENTITY_KEYS = new Set([
+  'pluginId',
+  'packageVersion',
+  'workspaceId',
+  'instanceId',
+  'contributionKey',
+  'hostWindowId',
+  'runtime',
+])
+
+/** Keep the packaged one-file backend able to extract itself without passing
+ * the Electron process environment across the plugin trust boundary. */
+export function createPluginBackendChildEnvironment(): Readonly<Record<string, string>> {
+  const environment: Record<string, string> = {}
+  for (const key of PLUGIN_BACKEND_TEMP_ENV_KEYS) {
+    const value = process.env[key]
+    if (typeof value === 'string' && value.length > 0 && !value.includes('\u0000')) {
+      environment[key] = value
+    }
+  }
+  return Object.freeze(environment)
+}
 const TERMINAL_OWNED_WS_TYPES = new Set([
   'terminal.input',
   'terminal.log_sent',
@@ -687,6 +740,16 @@ function validateV2CapabilityContext(
 }
 
 export class FrontendPluginManager {
+  /** Package-local Backend Wire children receive only Host-approved temp paths. */
+  private readonly pluginBackendHost = new PluginBackendHost({
+    environment: createPluginBackendChildEnvironment(),
+  })
+  private readonly pendingBackendCalls = new Map<string, Map<string, AbortController>>()
+  private readonly pendingBackendSubscriptions = new Map<
+    string,
+    Map<string, PendingBackendSubscription>
+  >()
+  private backendActivationCount = 0
   /** Host-generated instance id → running view. */
   private readonly running = new Map<string, RunningPlugin>()
   /** Plugin id → instances opened through the legacy adapter; a v2 descriptor may still be here. */
@@ -820,6 +883,21 @@ export class FrontendPluginManager {
     if (!nonEmptyString(workspacePath)) return null
     const normalized = resolve(workspacePath)
     return createHash('sha256').update(normalized).digest('hex')
+  }
+
+  private hasPlansBackendView(
+    descriptor: PluginLaunchDescriptor,
+    workspacePath: string | null | undefined,
+  ): boolean {
+    return descriptor.id === 'navide.plans' &&
+      nonEmptyString(descriptor.packageVersion) &&
+      nonEmptyString(descriptor.packageDir) &&
+      nonEmptyString(workspacePath) &&
+      this.pluginBackendHost.activationFor(
+        descriptor.id,
+        descriptor.packageVersion,
+        descriptor.packageDir,
+      ) !== undefined
   }
 
   private issueGitCredentialOwner(plugin: RunningPlugin): GitCredentialOwner | null {
@@ -1783,6 +1861,86 @@ export class FrontendPluginManager {
     return this.runGitHostAction(reqId, action, args as Record<string, unknown>, plugin)
   }
 
+  private exactBackendPayload(
+    payload: unknown,
+    allowed: ReadonlySet<string>,
+  ): Record<string, unknown> | null {
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null
+    const record = payload as Record<string, unknown>
+    const keys = Object.keys(record)
+    if (keys.some((key) => BACKEND_IDENTITY_KEYS.has(key) || !allowed.has(key))) return null
+    return record
+  }
+
+  private backendError(reqId: string, error: unknown): CapabilityResponse {
+    if (!(error instanceof BackendPluginError)) {
+      return buildError(reqId, 'BACKEND_ERROR', 'Backend plugin request failed.')
+    }
+    switch (error.code) {
+      case 'INVALID_ARGUMENT':
+        return buildError(reqId, 'INVALID_ARGUMENT', 'Backend call arguments are invalid.')
+      case 'RESOURCE_LIMIT':
+        return buildError(reqId, 'RESOURCE_LIMIT', 'Backend resource limit reached.')
+      case 'TIMEOUT':
+        return buildError(reqId, 'TIMEOUT', 'Backend plugin call timed out.')
+      case 'USER_CANCELLED':
+        return buildError(reqId, 'USER_CANCELLED', 'Backend plugin call was cancelled.')
+      case 'PLUGIN_STOPPING':
+        return buildError(reqId, 'PLUGIN_STOPPING', 'Backend plugin is stopping.')
+      case 'PLUGIN_ERROR':
+        return buildError(reqId, 'BACKEND_ERROR', 'Plugin request failed.')
+      default:
+        return buildError(reqId, 'BACKEND_UNAVAILABLE', 'Backend plugin is unavailable.')
+    }
+  }
+
+  /** Keep the package-local Plans resolver inside its sender-bound workspace.
+   *  The child receives the renderer's path as an operation argument, but the
+   *  authorization decision compares its canonical hash with the Host-bound
+   *  workspace id before any child dispatch occurs. */
+  private backendCallScopeError(
+    plugin: RunningPlugin,
+    reqId: string,
+    name: unknown,
+    args: unknown,
+  ): CapabilityResponse | null {
+    if (plugin.id !== PLANS_PLUGIN_ID || name !== 'plans.resolve_root') return null
+    if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+      return buildError(reqId, 'INVALID_ARGUMENT', 'Plans backend arguments are invalid.')
+    }
+    const workspacePath = (args as Record<string, unknown>).workspace_path
+    if (!nonEmptyString(workspacePath)) {
+      return buildError(reqId, 'INVALID_ARGUMENT', 'Plans workspace path is invalid.')
+    }
+    const boundWorkspaceId = plugin.backendWorkspaceId
+    if (!boundWorkspaceId) return null
+    const requestedWorkspaceId = this.workspaceIdForPath(workspacePath)
+    if (requestedWorkspaceId !== boundWorkspaceId) {
+      return buildError(
+        reqId,
+        'WORKSPACE_SCOPE_VIOLATION',
+        'Plans backend workspace is outside the bound workspace.',
+      )
+    }
+    return null
+  }
+
+  private cancelBackendRecord(instanceId: string, id: string): void {
+    const calls = this.pendingBackendCalls.get(instanceId)
+    const call = calls?.get(id)
+    if (call) {
+      calls!.delete(id)
+      if (calls!.size === 0) this.pendingBackendCalls.delete(instanceId)
+      call.abort()
+      return
+    }
+    const subscriptions = this.pendingBackendSubscriptions.get(instanceId)
+    const pending = subscriptions?.get(id)
+    if (!pending) return
+    pending.cancelled = true
+    pending.unregister?.()
+  }
+
   /** Register the broker IPC handlers exactly once. Safe to call repeatedly. */
   registerIpc(): void {
     if (this.ipcReady) return
@@ -1971,6 +2129,179 @@ export class FrontendPluginManager {
     ipcMain.handle(IPC_HOST_CALL, async (event, payload: unknown): Promise<CapabilityResponse> =>
       this.handleHostCall(event.sender.id, payload)
     )
+
+    ipcMain.handle(IPC_BACKEND_CALL, async (event, payload: unknown): Promise<CapabilityResponse> => {
+      const plugin = this.instanceForSender(event.sender.id)
+      const record = this.exactBackendPayload(
+        payload,
+        new Set(['reqId', 'name', 'args', 'timeoutMs']),
+      )
+      const reqId =
+        typeof payload === 'object' && payload !== null && !Array.isArray(payload) &&
+        typeof (payload as Record<string, unknown>).reqId === 'string'
+          ? (payload as Record<string, unknown>).reqId as string
+          : ''
+      if (!plugin) return buildError(reqId, 'BAD_REQUEST', 'unknown plugin sender')
+      if (
+        !record ||
+        !nonEmptyString(record.reqId) ||
+        !nonEmptyString(record.name) ||
+        !Object.prototype.hasOwnProperty.call(record, 'args')
+      ) {
+        return buildError(reqId, 'BAD_REQUEST', 'malformed backend call')
+      }
+      if (record.timeoutMs !== undefined && !isAllowedBackendTimeout(record.timeoutMs)) {
+        return buildError(reqId, 'INVALID_ARGUMENT', 'backend timeout is invalid')
+      }
+      const scopeError = this.backendCallScopeError(
+        plugin,
+        record.reqId,
+        record.name,
+        record.args,
+      )
+      if (scopeError) return scopeError
+      const calls = this.pendingBackendCalls.get(plugin.instanceId) ?? new Map<string, AbortController>()
+      if (calls.has(record.reqId)) {
+        return buildError(record.reqId, 'BAD_REQUEST', 'backend request id is already pending')
+      }
+      if (calls.size >= MAX_BACKEND_CALLS_PER_INSTANCE) {
+        return buildError(record.reqId, 'RESOURCE_LIMIT', 'backend call limit reached')
+      }
+      this.pendingBackendCalls.set(plugin.instanceId, calls)
+      const controller = new AbortController()
+      calls.set(record.reqId, controller)
+      try {
+        const result = await this.pluginBackendHost.call(
+          plugin.instanceId,
+          record.name,
+          record.args as JsonValue,
+          { signal: controller.signal, ...(record.timeoutMs === undefined ? {} : { timeoutMs: record.timeoutMs }) },
+        )
+        return buildSuccess(record.reqId, result)
+      } catch (error) {
+        return this.backendError(record.reqId, error)
+      } finally {
+        if (calls.get(record.reqId) === controller) calls.delete(record.reqId)
+        if (calls.size === 0 && this.pendingBackendCalls.get(plugin.instanceId) === calls) {
+          this.pendingBackendCalls.delete(plugin.instanceId)
+        }
+      }
+    })
+
+    ipcMain.on(IPC_BACKEND_CANCEL, (event, payload: unknown) => {
+      const plugin = this.instanceForSender(event.sender.id)
+      if (!plugin) return
+      const record = this.exactBackendPayload(payload, new Set(['reqId', 'subscriptionId']))
+      if (!record) return
+      const keys = Object.keys(record)
+      if (keys.length !== 1) return
+      const id = keys[0] === 'reqId' ? record.reqId : record.subscriptionId
+      if (!nonEmptyString(id)) return
+      this.cancelBackendRecord(plugin.instanceId, id)
+    })
+
+    ipcMain.handle(IPC_BACKEND_SUBSCRIBE, async (event, payload: unknown): Promise<CapabilityResponse> => {
+      const plugin = this.instanceForSender(event.sender.id)
+      const record = this.exactBackendPayload(payload, new Set(['subscriptionId', 'event']))
+      const subscriptionId =
+        typeof payload === 'object' && payload !== null && !Array.isArray(payload) &&
+        typeof (payload as Record<string, unknown>).subscriptionId === 'string'
+          ? (payload as Record<string, unknown>).subscriptionId as string
+          : ''
+      if (
+        !plugin ||
+        !record ||
+        Object.keys(record).length !== 2 ||
+        !nonEmptyString(record.subscriptionId) ||
+        !nonEmptyString(record.event)
+      ) return buildError(subscriptionId, 'BAD_REQUEST', 'malformed backend subscription')
+      const eventName = record.event as string
+      const subscriptions = this.pendingBackendSubscriptions.get(plugin.instanceId) ??
+        new Map<string, PendingBackendSubscription>()
+      if (subscriptions.has(subscriptionId)) {
+        return buildError(subscriptionId, 'BAD_REQUEST', 'backend subscription id is already pending')
+      }
+      if (subscriptions.size >= MAX_BACKEND_SUBSCRIPTIONS_PER_INSTANCE) {
+        return buildError(subscriptionId, 'RESOURCE_LIMIT', 'backend subscription limit reached')
+      }
+      this.pendingBackendSubscriptions.set(plugin.instanceId, subscriptions)
+      const pending: PendingBackendSubscription = {
+        controller: new AbortController(),
+        subscription: null,
+        unregister: null,
+        cancelled: false,
+      }
+      subscriptions.set(subscriptionId, pending)
+      const dispose = (): void => {
+        if (subscriptions.get(subscriptionId) !== pending) return
+        subscriptions.delete(subscriptionId)
+        if (subscriptions.size === 0) this.pendingBackendSubscriptions.delete(plugin.instanceId)
+        pending.cancelled = true
+        pending.controller.abort()
+        pending.subscription?.dispose('cancelled')
+        pending.subscription = null
+      }
+      pending.unregister = this.registerInstanceSubscription(plugin.instanceId, dispose)
+      let subscription: BackendPluginSubscription | null = null
+      try {
+        subscription = await this.pluginBackendHost.subscribe(
+          plugin.instanceId,
+          eventName,
+          (eventPayload) => {
+            const current = this.running.get(plugin.instanceId)
+            if (
+              pending.cancelled ||
+              current !== plugin ||
+              current.senderId !== event.sender.id ||
+              current.view.webContents.isDestroyed()
+            ) return
+            current.view.webContents.send(IPC_BACKEND_EVENT, {
+              subscriptionId,
+              event: eventName,
+              payload: eventPayload,
+            })
+          },
+          { signal: pending.controller.signal },
+        )
+        if (pending.cancelled || subscriptions.get(subscriptionId) !== pending) {
+          subscription.dispose('cancelled')
+          return buildError(subscriptionId, 'USER_CANCELLED', 'Backend plugin subscription was cancelled.')
+        }
+        pending.subscription = subscription
+        void subscription.settled.then((result) => {
+          if (
+            pending.cancelled ||
+            subscriptions.get(subscriptionId) !== pending
+          ) return
+          if (result.reason !== 'cancelled' && result.reason !== 'view-destroyed') {
+            const response = result.error
+              ? this.backendError(subscriptionId, result.error)
+              : buildError(subscriptionId, 'BACKEND_UNAVAILABLE', 'Backend plugin subscription ended.')
+            const current = this.running.get(plugin.instanceId)
+            if (
+              current === plugin &&
+              current.senderId === event.sender.id &&
+              !current.view.webContents.isDestroyed()
+            ) {
+              current.view.webContents.send(IPC_BACKEND_STATUS, {
+                subscriptionId,
+                ok: false,
+                error: response.error,
+              })
+            }
+          }
+          pending.unregister?.()
+        })
+        await subscription.acknowledged
+        if (pending.cancelled || subscriptions.get(subscriptionId) !== pending) {
+          return buildError(subscriptionId, 'USER_CANCELLED', 'Backend plugin subscription was cancelled.')
+        }
+        return buildSuccess(subscriptionId, null)
+      } catch (error) {
+        pending.unregister?.()
+        return this.backendError(subscriptionId, error)
+      }
+    })
 
     // Fire-and-forget capability channel (nav.castCapability) — see handleCast.
     ipcMain.on(IPC_CAST, (event, payload: unknown) => {
@@ -3276,6 +3607,17 @@ export class FrontendPluginManager {
     plugin.detachHostClosed = null
     this.cancelPendingAiStarts(plugin)
     this.releaseTerminalOwnership(plugin)
+    const backendCalls = this.pendingBackendCalls.get(instanceId)
+    this.pendingBackendCalls.delete(instanceId)
+    for (const controller of backendCalls?.values() ?? []) controller.abort()
+    const backendSubscriptions = this.pendingBackendSubscriptions.get(instanceId)
+    for (const pending of backendSubscriptions?.values() ?? []) {
+      pending.cancelled = true
+      pending.controller.abort()
+      // PluginBackendHost owns live subscription disposal during unbind.
+      pending.subscription = null
+    }
+    this.pluginBackendHost.unbindView(instanceId)
     this.releaseInstanceSubscriptions(instanceId)
     this.discardGitPathGrants(instanceId)
     this.releaseGitCredentialOwnersForInstance(instanceId)
@@ -3490,6 +3832,7 @@ export class FrontendPluginManager {
       view: input.surface,
       hostWindow: input.hostWindow,
       workspacePath: input.workspacePath,
+      backendWorkspaceId: null,
       query: input.query,
       senderId: input.surface.webContents.id,
       fill: input.fill,
@@ -3520,6 +3863,43 @@ export class FrontendPluginManager {
     }
     if (openedViaLegacyAdapter) this.legacyInstances.set(descriptor.id, instanceId)
     this.bySender.set(record.senderId, instanceId)
+
+    const activation = nonEmptyString(descriptor.packageVersion) && nonEmptyString(descriptor.packageDir)
+      ? this.pluginBackendHost.activationFor(
+          descriptor.id,
+          descriptor.packageVersion,
+          descriptor.packageDir,
+        )
+      : undefined
+    if (
+      this.hasPlansBackendView(descriptor, record.workspacePath) &&
+      record.workspacePath &&
+      activation
+    ) {
+      const workspaceId = this.workspaceIdForPath(record.workspacePath)
+      if (workspaceId) {
+        try {
+          this.pluginBackendHost.bindView({
+            pluginId: descriptor.id,
+            packageVersion: activation.packageVersion,
+            workspaceId,
+            instanceId,
+            contributionKey: 'navide.plans.window',
+            hostWindowId: String(hostWindow.id),
+          }, descriptor.packageDir!)
+          record.backendWorkspaceId = workspaceId
+        } catch (error) {
+          // A package backend is an optional route during the migration. Keep
+          // the running record intact so the Plans shim can fall back to its
+          // legacy adapter when binding loses a race with teardown/recovery.
+          console.warn(
+            `[plugin-backend] Plans view ${instanceId} could not bind: ${
+              error instanceof Error ? error.message : 'invalid backend runtime'
+            }`,
+          )
+        }
+      }
+    }
 
     // A plugin needing the backend gets the shared transport connected now (if
     // the backend url is already known) so server-push events reach it without
@@ -3651,7 +4031,12 @@ export class FrontendPluginManager {
         // on the Page Visibility API inside plugin views.
         backgroundThrottling: false,
         // Injected so the preload can stamp calls with an authoritative plugin id.
-        additionalArguments: [`--plugin-id=${descriptor.id}`],
+        additionalArguments: [
+          `--plugin-id=${descriptor.id}`,
+          ...(this.hasPlansBackendView(descriptor, opts.workspacePath)
+            ? ['--plugin-backend=1']
+            : []),
+        ],
       },
     })
 
@@ -3797,11 +4182,10 @@ export class FrontendPluginManager {
     if (query) this.sendOpenTarget(plugin, queryToParams(query))
   }
 
-  /** Host-only/deferred integration seam: register an event/backend
-   *  subscription under one exact view instance. The returned function
-   *  unregisters and disposes it exactly once; instance teardown invokes the
-   *  same wrapper for any remaining subscription. No production v2 producer is
-   *  wired through this seam yet. */
+  /** Host-only integration seam: register an event/backend subscription under
+   *  one exact view instance. The returned function unregisters and disposes
+   *  it exactly once; instance teardown invokes the same wrapper for any
+   *  remaining subscription. */
   registerInstanceSubscription(instanceId: string, dispose: () => void): () => void {
     if (!this.running.has(instanceId)) {
       try {
@@ -3877,6 +4261,62 @@ export class FrontendPluginManager {
       )
     }
     this.descriptors.set(descriptor.id, descriptor)
+  }
+
+  /** Register one Host-approved package-local backend activation. */
+  registerBackendActivation(activation: BackendPluginLaunchSpec): void {
+    const descriptor = this.descriptors.get(activation.pluginId)
+    if (!descriptor) {
+      throw new BackendPluginError(
+        'INVALID_ACTIVATION',
+        'Backend activation has no selected package descriptor.',
+      )
+    }
+    const descriptorPackageDir = canonicalBackendPackageDir(descriptor.packageDir)
+    const activationPackageDir = canonicalBackendPackageDir(activation.packageDir)
+    if (
+      descriptor.id !== activation.pluginId ||
+      descriptor.packageVersion !== activation.packageVersion ||
+      !descriptorPackageDir ||
+      !activationPackageDir ||
+      descriptorPackageDir !== activationPackageDir
+    ) {
+      throw new BackendPluginError(
+        'INVALID_ACTIVATION',
+        'Backend activation does not match the selected package descriptor.',
+      )
+    }
+    activation = { ...activation, packageDir: descriptorPackageDir }
+    const existing = this.pluginBackendHost.activationForPlugin(activation.pluginId)
+    if (existing) {
+      throw new BackendPluginError(
+        'INVALID_ACTIVATION',
+        existing.packageVersion === activation.packageVersion
+          ? 'Backend package version is already registered.'
+          : 'Backend plugin id is already registered with a different package version.',
+      )
+    }
+    this.pluginBackendHost.register(activation)
+    this.backendActivationCount++
+  }
+
+  hasBackendActivity(): boolean {
+    return this.backendActivationCount > 0 ||
+      this.pendingBackendCalls.size > 0 ||
+      this.pendingBackendSubscriptions.size > 0
+  }
+
+  async closeBackendPlugins(): Promise<void> {
+    for (const calls of this.pendingBackendCalls.values()) {
+      for (const controller of calls.values()) controller.abort()
+    }
+    for (const subscriptions of this.pendingBackendSubscriptions.values()) {
+      for (const pending of subscriptions.values()) pending.unregister?.()
+    }
+    this.pendingBackendCalls.clear()
+    this.pendingBackendSubscriptions.clear()
+    this.backendActivationCount = 0
+    await this.pluginBackendHost.close()
   }
 
   /**
@@ -4900,11 +5340,14 @@ export function bundledPlansDir(source: BundledMiniIdeSource): string {
 }
 
 /**
- * Register the app-bundled Plans surface as a builtin descriptor at startup,
+ * Register the app-bundled Plans frontend as a builtin descriptor at startup,
  * mirroring {@link registerBundledMiniIde} exactly (same precedence order and
- * fail-closed validation). Never throws: a missing dir, invalid manifest,
- * spoofed id, or missing entry file returns `registered: false` with a reason
- * (caller logs), so a corrupt bundle degrades instead of crashing startup.
+ * fail-closed validation). Issue 21 deliberately does not register the
+ * packaged backend fixture here: normal application startup keeps Plans on
+ * the legacy adapter until the production artifact gate is complete. A
+ * missing dir, invalid manifest, spoofed id, or missing entry file returns
+ * `registered: false` with a reason (caller logs), so a corrupt bundle
+ * degrades instead of crashing startup.
  */
 export function registerBundledPlans(
   manager: FrontendPluginManager,

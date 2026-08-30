@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TYPE_TO_CAP, resolveCapability, useBackend } from '../capabilityBackend'
+import { PluginBackendError } from '@navide/plugin-sdk'
 import { PLANS_PLUGIN_REQUIRES } from '../../../../shared/pluginCapabilities'
 import type { useBackend as realUseBackend } from '../../../src/composables/useBackend'
 
@@ -154,6 +155,126 @@ describe('useBackend shim send()', () => {
     expect(resp.type).toBe('fs.read_file')
   })
 
+  it('routes the Plans root operation through the public package backend client', async () => {
+    const callBackend = vi.fn((reqId: string) =>
+      Promise.resolve({ reqId, ok: true, result: { ok: true, root: '/repo' } })
+    )
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      callBackend,
+      cancelBackend: vi.fn(),
+      subscribeBackend: vi.fn(() => ({
+        ready: Promise.resolve(),
+        settled: Promise.resolve(),
+        dispose: vi.fn(),
+      })),
+      on: vi.fn(() => () => {}),
+      ready: vi.fn(),
+    }
+
+    const backend = useBackend()
+    const resp = await backend.send<{ ok: boolean; root: string }>(
+      'plans.resolve_root',
+      { workspace_path: '/repo' },
+      2500,
+    )
+
+    expect(callBackend).toHaveBeenCalledWith(
+      expect.any(String),
+      'plans.resolve_root',
+      { workspace_path: '/repo' },
+      2500,
+    )
+    expect(callCapability).not.toHaveBeenCalled()
+    expect(resp.ok).toBe(true)
+    expect(resp.payload).toEqual({ ok: true, root: '/repo' })
+  })
+
+  it('falls back to the legacy Plans route when the package child is unavailable', async () => {
+    callCapability.mockResolvedValue({ reqId: 'legacy-root', ok: true, result: { root: '/repo' } })
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      callBackend: vi.fn(() => Promise.reject(
+        new PluginBackendError('BACKEND_UNAVAILABLE', 'backend is not active'),
+      )),
+      cancelBackend: vi.fn(),
+      subscribeBackend: vi.fn(() => ({
+        ready: Promise.resolve(),
+        settled: Promise.resolve(),
+        dispose: vi.fn(),
+      })),
+      on: vi.fn(() => () => {}),
+      ready: vi.fn(),
+    }
+
+    const backend = useBackend()
+    await expect(backend.send('plans.resolve_root', { workspace_path: '/repo' }))
+      .resolves.toMatchObject({ ok: true, payload: { root: '/repo' } })
+    expect(callCapability).toHaveBeenCalledWith('plans', 'resolve_root', {
+      workspace_path: '/repo',
+    })
+  })
+
+  it('falls back when the package view is no longer bound by the Host', async () => {
+    callCapability.mockResolvedValue({ reqId: 'legacy-root', ok: true, result: { root: '/repo' } })
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      callBackend: vi.fn(() => Promise.reject(
+        new PluginBackendError('INVALID_RUNTIME', 'view is no longer bound'),
+      )),
+      cancelBackend: vi.fn(),
+      subscribeBackend: vi.fn(() => ({
+        ready: Promise.resolve(),
+        settled: Promise.resolve(),
+        dispose: vi.fn(),
+      })),
+      on: vi.fn(() => () => {}),
+      ready: vi.fn(),
+    }
+
+    const backend = useBackend()
+    await expect(backend.send('plans.resolve_root', { workspace_path: '/repo' }))
+      .resolves.toMatchObject({ ok: true, payload: { root: '/repo' } })
+    expect(callCapability).toHaveBeenCalledWith('plans', 'resolve_root', {
+      workspace_path: '/repo',
+    })
+  })
+
+  it('returns a package resource-limit error without falling back to legacy Plans', async () => {
+    const callBackend = vi.fn(() => Promise.reject(
+      new PluginBackendError('RESOURCE_LIMIT', 'too many calls'),
+    ))
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      callBackend,
+      cancelBackend: vi.fn(),
+      subscribeBackend: vi.fn(() => ({
+        ready: Promise.resolve(),
+        settled: Promise.resolve(),
+        dispose: vi.fn(),
+      })),
+      on: vi.fn(() => () => {}),
+      ready: vi.fn(),
+    }
+
+    const response = await useBackend().send('plans.resolve_root', { workspace_path: '/repo' })
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code: 'RESOURCE_LIMIT', message: 'too many calls' },
+    })
+    expect(callCapability).not.toHaveBeenCalled()
+  })
+
+  it('returns a timeout envelope for the legacy Plans route', async () => {
+    callCapability.mockReturnValue(new Promise(() => undefined))
+    const backend = useBackend()
+
+    const response = await backend.send('plans.resolve_root', { workspace_path: '/repo' }, 5)
+
+    expect(response).toMatchObject({ ok: false, error: { code: 'TIMEOUT' } })
+  })
+
   it('returns UNMAPPED_CAPABILITY without calling the broker for an unmapped type', async () => {
     const backend = useBackend()
     const resp = await backend.send('git.status', {})
@@ -187,6 +308,121 @@ describe('useBackend shim send()', () => {
     expect(
       (window as unknown as { nav: { on: ReturnType<typeof vi.fn> } }).nav.on
     ).toHaveBeenCalledWith('plans.changed', cb)
+  })
+
+  it('keeps the legacy watcher while the package event route is active', async () => {
+    const legacyDisposer = vi.fn()
+    const on = vi.fn(() => legacyDisposer)
+    const subscribeBackend = vi.fn(() => ({
+      ready: Promise.resolve(),
+      settled: Promise.resolve(),
+      dispose: vi.fn(),
+    }))
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      callBackend: vi.fn(),
+      cancelBackend: vi.fn(),
+      subscribeBackend,
+      on,
+      ready: vi.fn(),
+    }
+
+    const backend = useBackend()
+    const cb = vi.fn()
+    const dispose = backend.on('plans.changed', cb)
+    expect(on).toHaveBeenCalledWith('plans.changed', cb)
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(legacyDisposer).not.toHaveBeenCalled()
+    dispose()
+    expect(legacyDisposer).toHaveBeenCalledOnce()
+
+    expect(subscribeBackend).toHaveBeenCalledWith('plans.changed', cb)
+  })
+
+  it('keeps the legacy event route after an active package subscription ends', async () => {
+    let rejectSettled!: (error: unknown) => void
+    const settled = new Promise<void>((_resolve, reject) => {
+      rejectSettled = reject
+    })
+    const legacyDisposer = vi.fn()
+    const legacyOn = vi.fn(() => legacyDisposer)
+    const subscribeBackend = vi.fn(() => ({
+      ready: Promise.resolve(),
+      settled,
+      dispose: vi.fn(),
+    }))
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      callBackend: vi.fn(),
+      cancelBackend: vi.fn(),
+      subscribeBackend,
+      on: legacyOn,
+      ready: vi.fn(),
+    }
+
+    const backend = useBackend()
+    const cb = vi.fn()
+    const dispose = backend.on('plans.changed', cb)
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(legacyOn).toHaveBeenCalledWith('plans.changed', cb)
+    expect(legacyDisposer).not.toHaveBeenCalled()
+
+    rejectSettled(new PluginBackendError('BACKEND_UNAVAILABLE', 'backend exited'))
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(legacyOn).toHaveBeenCalledTimes(2)
+
+    dispose()
+    expect(legacyDisposer).toHaveBeenCalledOnce()
+  })
+
+  it('falls back to nav.on when package event subscription cannot be established', async () => {
+    const legacyDisposer = vi.fn()
+    const legacyOn = vi.fn(() => legacyDisposer)
+    const subscribeBackend = vi.fn(() => ({
+      ready: Promise.reject(new PluginBackendError('BACKEND_UNAVAILABLE', 'backend is not active')),
+      settled: Promise.resolve(),
+      dispose: vi.fn(),
+    }))
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      callBackend: vi.fn(),
+      cancelBackend: vi.fn(),
+      subscribeBackend,
+      on: legacyOn,
+      ready: vi.fn(),
+    }
+
+    const backend = useBackend()
+    const cb = vi.fn()
+    const dispose = backend.on('plans.changed', cb)
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+    expect(legacyOn).toHaveBeenCalledWith('plans.changed', cb)
+    dispose()
+    expect(legacyDisposer).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the legacy watcher when package subscription throws synchronously', () => {
+    const legacyDisposer = vi.fn()
+    const legacyOn = vi.fn(() => legacyDisposer)
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      callBackend: vi.fn(),
+      cancelBackend: vi.fn(),
+      subscribeBackend: vi.fn(() => {
+        throw new PluginBackendError('INVALID_RUNTIME', 'view is no longer bound')
+      }),
+      on: legacyOn,
+      ready: vi.fn(),
+    }
+
+    const backend = useBackend()
+    const cb = vi.fn()
+    const dispose = backend.on('plans.changed', cb)
+
+    expect(legacyOn).toHaveBeenCalledWith('plans.changed', cb)
+    dispose()
+    expect(legacyDisposer).toHaveBeenCalledOnce()
   })
 })
 

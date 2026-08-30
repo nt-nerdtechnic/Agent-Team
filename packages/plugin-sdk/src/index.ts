@@ -94,6 +94,183 @@ export interface PluginContext {
   }
 }
 
+export interface PluginBackendCallOptions {
+  readonly signal?: AbortSignal
+  readonly timeoutMs?: number
+}
+
+export interface PluginBackendSubscription extends Disposable {
+  /** Resolves after the Host has accepted the event subscription. */
+  readonly ready: Promise<void>
+  /** Rejects when the Host/backend ends the subscription unexpectedly. */
+  readonly settled: Promise<void>
+}
+
+/**
+ * Public package-local backend surface. The implementation is supplied by the
+ * Host runtime; package code never receives IPC, stdio, HTTP, or executable
+ * handles.
+ */
+export interface PluginBackendClient {
+  call<Result extends JsonValue>(
+    name: string,
+    args: JsonValue,
+    options?: PluginBackendCallOptions
+  ): Promise<Result>
+  subscribe<Payload extends JsonValue>(
+    event: string,
+    listener: (payload: Payload) => void
+  ): PluginBackendSubscription
+}
+
+export class PluginBackendError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'PluginBackendError'
+  }
+}
+
+interface RuntimeBackendResponse {
+  reqId: string
+  ok: boolean
+  result?: JsonValue
+  error?: { code: string; message?: string }
+}
+
+interface RuntimeBackendSubscription {
+  readonly ready: Promise<void>
+  readonly settled: Promise<void>
+  dispose(): void
+}
+
+interface RuntimeBackendBridge {
+  callBackend(
+    reqId: string,
+    name: string,
+    args: JsonValue,
+    timeoutMs?: number,
+  ): Promise<RuntimeBackendResponse>
+  cancelBackend(reqId: string): void
+  subscribeBackend(
+    event: string,
+    listener: (payload: JsonValue) => void,
+  ): RuntimeBackendSubscription
+}
+
+function runtimeBackendBridge(): RuntimeBackendBridge {
+  const bridge = (globalThis as unknown as { nav?: Partial<RuntimeBackendBridge> }).nav
+  if (
+    !bridge ||
+    typeof bridge.callBackend !== 'function' ||
+    typeof bridge.cancelBackend !== 'function' ||
+    typeof bridge.subscribeBackend !== 'function'
+  ) {
+    throw new PluginBackendError('BACKEND_UNAVAILABLE', 'Plugin backend runtime is unavailable.')
+  }
+  return bridge as RuntimeBackendBridge
+}
+
+function runtimeRequestId(): string {
+  if (typeof globalThis.crypto?.randomUUID !== 'function') {
+    throw new PluginBackendError('BACKEND_UNAVAILABLE', 'Plugin backend runtime is unavailable.')
+  }
+  return globalThis.crypto.randomUUID()
+}
+
+/** Create the runtime adapter backed by the Host-owned private preload bridge. */
+export function createPluginBackendClient(): PluginBackendClient {
+  return Object.freeze({
+    call<Result extends JsonValue>(
+      name: string,
+      args: JsonValue,
+      options: PluginBackendCallOptions = {},
+    ): Promise<Result> {
+      const bridge = runtimeBackendBridge()
+      const reqId = runtimeRequestId()
+      return new Promise<Result>((resolve, reject) => {
+        let settled = false
+        const cleanup = (): void => {
+          options.signal?.removeEventListener('abort', abort)
+        }
+        const abort = (): void => {
+          if (settled) return
+          settled = true
+          cleanup()
+          bridge.cancelBackend(reqId)
+          reject(new PluginBackendError('USER_CANCELLED', 'Plugin backend call was cancelled.'))
+        }
+        const settle = (action: () => void): void => {
+          if (settled) return
+          settled = true
+          cleanup()
+          action()
+        }
+        if (options.signal?.aborted) {
+          abort()
+          return
+        }
+        options.signal?.addEventListener('abort', abort, { once: true })
+        let request: Promise<RuntimeBackendResponse>
+        try {
+          request = bridge.callBackend(reqId, name, args, options.timeoutMs)
+        } catch (error) {
+          settle(() => reject(error))
+          return
+        }
+        void request.then((response) => {
+          settle(() => {
+            if (!response || response.reqId !== reqId || typeof response.ok !== 'boolean') {
+              reject(new PluginBackendError('PROTOCOL_ERROR', 'Plugin backend returned an invalid response.'))
+              return
+            }
+            if (!response.ok) {
+              reject(new PluginBackendError(
+                response.error?.code ?? 'BACKEND_UNAVAILABLE',
+                response.error?.message ?? 'Plugin backend request failed.'
+              ))
+              return
+            }
+            resolve(response.result as Result)
+          })
+        }).catch((error: unknown) => {
+          settle(() => reject(error))
+        })
+      })
+    },
+    subscribe<Payload extends JsonValue>(
+      event: string,
+      listener: (payload: Payload) => void,
+    ): PluginBackendSubscription {
+      if (!event || typeof listener !== 'function') {
+        throw new PluginBackendError('INVALID_ARGUMENT', 'Plugin backend subscription is invalid.')
+      }
+      const registration = runtimeBackendBridge().subscribeBackend(
+        event,
+        listener as (payload: JsonValue) => void,
+      )
+      const asPluginBackendError = (error: unknown): PluginBackendError => {
+        if (error instanceof PluginBackendError) return error
+        const record = error as { code?: unknown }
+        const code = typeof record?.code === 'string' ? record.code : 'BACKEND_UNAVAILABLE'
+        const message = error instanceof Error
+          ? error.message
+          : 'Plugin backend subscription failed.'
+        return new PluginBackendError(code, message)
+      }
+      const ready = registration.ready.catch((error: unknown) => {
+        throw asPluginBackendError(error)
+      })
+      const settled = registration.settled.catch((error: unknown) => {
+        throw asPluginBackendError(error)
+      })
+      return Object.freeze({ ready, settled, dispose: registration.dispose })
+    },
+  })
+}
+
 export interface PluginSettingsStore {
   get(key: string): Promise<JsonValue | undefined>
   set(key: string, value: JsonValue): Promise<void>

@@ -836,11 +836,9 @@ const approvedBackendPluginCatalog = () =>
 // code/GPU caches, electron-updater downloads). Never user state.
 registerStorageIpc()
 
-// Mini-IDE and Plans remain on their established bundled v1 delivery path
-// until the B6/B7 production migrations replace those paths. Verified
-// installed copies retain the precedence implemented by the registration
-// helpers; this compatibility wiring must not be removed as part of Git's B4
-// cutover.
+// Mini-IDE keeps its bundled v1 delivery path. Plans also remains on its
+// legacy backend adapter until the production packaged-backend artifact gate
+// is complete; Issue 21's packaged child is injected only by integration tests.
 const bundledMiniIde = registerBundledMiniIde(frontendPluginManager, {
   isPackaged: app.isPackaged,
   resourcesPath: process.resourcesPath,
@@ -3288,6 +3286,7 @@ app.on('window-all-closed', () => {
 // still-starting backend is killed outright rather than stopped cleanly.
 const BACKEND_SPAWN_WAIT_MS = 3000
 const BACKEND_STOP_WAIT_MS = 6000
+const PLUGIN_BACKEND_STOP_WAIT_MS = 6000
 
 async function teardownBackendAndQuit(): Promise<void> {
   // A user-initiated quit is a clean exit — nothing to restore next launch.
@@ -3313,6 +3312,10 @@ async function teardownBackendAndQuit(): Promise<void> {
   // takes that one down.
   abandonPendingBackends()
   if (b) await withDeadline(b.stop(), BACKEND_STOP_WAIT_MS)
+  await withDeadline(
+    frontendPluginManager.closeBackendPlugins(),
+    PLUGIN_BACKEND_STOP_WAIT_MS,
+  )
   app.quit()
 }
 
@@ -3347,7 +3350,7 @@ app.on('before-quit', async (e) => {
   // A user-initiated quit is a clean exit — nothing to restore next launch.
   // Must run before the early return below (backend may already be gone).
   windowRegistry.markCleanExit()
-  if (!backend && !backendStarting) return
+  if (!backend && !backendStarting && !frontendPluginManager.hasBackendActivity()) return
   e.preventDefault()
   void teardownBackendAndQuit()
 })

@@ -7,10 +7,12 @@
 // `send(type, payload)` through the host capability broker (`window.nav`):
 //
 //   pane.send(type, payload)
-//     → TYPE_TO_CAP[type] = { ns, method }
-//     → window.nav.callCapability(ns, method, payload)   (IPC → main broker)
-//     → main broker enforces manifest.requires + dispatches to the backend WS
-//     ← CapabilityResponse, remapped to the WsResponse shape pane code expects
+//     → package-local Plans calls use @navide/plugin-sdk
+//     → Host authenticates the view and dispatches the packaged Backend Wire child
+//     ← SDK result, remapped to the WsResponse shape pane code expects
+//
+// Legacy capability calls remain the adapter for the other Plans operations
+// until the production core bridge is delivered by the later migration issue.
 //
 // The plugin build aliases `composables/useBackend` to this module (see
 // vite.plans.config.ts), so PlanWindowApp's `import { useBackend }` and every
@@ -20,7 +22,21 @@
 // host surface is `window.nav`.
 
 import { ref, type Ref } from 'vue'
+import {
+  createPluginBackendClient,
+  PluginBackendError,
+  type JsonValue,
+  type PluginBackendClient,
+} from '@navide/plugin-sdk'
 import type { AutoRestartInfo, BackendStatus, WsResponse } from '../../src/composables/useBackend'
+
+const PACKAGE_BACKEND_FALLBACK_CODES = new Set([
+  'BACKEND_UNAVAILABLE',
+  'INVALID_RUNTIME',
+  'NOT_READY',
+  'PLUGIN_STOPPING',
+])
+const DEFAULT_CAPABILITY_TIMEOUT_MS = 10_000
 
 // ── window.nav (injected by src/preload/plugin-preload.ts) ───────────────────
 interface CapabilityResponse {
@@ -36,6 +52,22 @@ interface NavBridge {
   castCapability?(ns: string, method: string, args?: unknown): void
   on(type: string, cb: (data: unknown) => void): () => void
   ready(): void
+}
+
+function packageBackendClient(): PluginBackendClient | null {
+  const bridge = navBridge() as NavBridge & Record<string, unknown>
+  if (
+    typeof bridge.callBackend !== 'function' ||
+    typeof bridge.cancelBackend !== 'function' ||
+    typeof bridge.subscribeBackend !== 'function'
+  ) {
+    return null
+  }
+  try {
+    return createPluginBackendClient()
+  } catch {
+    return null
+  }
 }
 
 // Deliberately NOT a `declare global` Window augmentation: the other plugin
@@ -223,13 +255,34 @@ export function useBackend(): {
   async function send<T = unknown>(
     type: string,
     payload: Record<string, unknown> = {},
-    _timeoutMs?: number
+    timeoutMs?: number
   ): Promise<WsResponse<T>> {
     const cap = resolveCapability(type)
     if (!cap) {
       return errorWsResponse<T>(type, 'UNMAPPED_CAPABILITY', `no capability mapping for '${type}'`)
     }
     try {
+      if (type === 'plans.resolve_root') {
+        const packageBackend = packageBackendClient()
+        if (packageBackend) {
+          try {
+            const result = await packageBackend.call<JsonValue>(
+              type,
+              payload as unknown as JsonValue,
+              timeoutMs === undefined ? undefined : { timeoutMs },
+            )
+            return toWsResponse<T>(type, { reqId: '', ok: true, result })
+          } catch (error) {
+            // An installed package may retain descriptor precedence without
+            // the bundled spike backend. Keep the old Plans route as the
+            // rollback path whenever the package child is unavailable.
+            if (
+              error instanceof PluginBackendError &&
+              !PACKAGE_BACKEND_FALLBACK_CODES.has(error.code)
+            ) throw error
+          }
+        }
+      }
       const bridge = navBridge()
       // One-way fast path (terminal.input / terminal.log_sent): cast and
       // resolve immediately with a synthetic ok — no per-keystroke round-trip.
@@ -237,9 +290,33 @@ export function useBackend(): {
         bridge.castCapability(cap.ns, cap.method, payload)
         return { id: '', type, ok: true, payload: null, error: null, timestamp: nowIso() }
       }
-      const resp = await bridge.callCapability(cap.ns, cap.method, payload)
-      return toWsResponse<T>(type, resp)
+      const deadlineMs = timeoutMs ?? DEFAULT_CAPABILITY_TIMEOUT_MS
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const outcome = await Promise.race([
+          bridge.callCapability(cap.ns, cap.method, payload).then((response) => ({
+            kind: 'response' as const,
+            response,
+          })),
+          new Promise<{ kind: 'timeout' }>((resolve) => {
+            timer = setTimeout(() => resolve({ kind: 'timeout' }), deadlineMs)
+          }),
+        ])
+        if (outcome.kind === 'timeout') {
+          return errorWsResponse<T>(
+            type,
+            'TIMEOUT',
+            `capability call '${type}' timed out after ${deadlineMs}ms`,
+          )
+        }
+        return toWsResponse<T>(type, outcome.response)
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
     } catch (err) {
+      if (err instanceof PluginBackendError) {
+        return errorWsResponse(type, err.code, err.message)
+      }
       return errorWsResponse<T>(
         type,
         'BROKER_ERROR',
@@ -249,6 +326,31 @@ export function useBackend(): {
   }
 
   function on(type: string, cb: (payload: unknown) => void): () => void {
+    if (type === 'plans.changed') {
+      const packageBackend = packageBackendClient()
+      if (packageBackend) {
+        try {
+          const subscription = packageBackend.subscribe<JsonValue>(
+            type,
+            cb as (payload: JsonValue) => void,
+          )
+          // The packaged B5 child emits this event for its own roundtrip but
+          // does not yet own the core file watcher. Keep the established
+          // watcher subscription for the lifetime of the view until Issue 22
+          // supplies an equivalent package-owned watcher port.
+          const fallbackDisposer = navBridge().on(type, cb)
+          void subscription.ready.catch(() => undefined)
+          void subscription.settled.catch(() => undefined)
+          return () => {
+            subscription.dispose()
+            fallbackDisposer()
+          }
+        } catch {
+          // A package subscription failure is local to the optional route;
+          // keep the established legacy watcher available.
+        }
+      }
+    }
     return navBridge().on(type, cb)
   }
 

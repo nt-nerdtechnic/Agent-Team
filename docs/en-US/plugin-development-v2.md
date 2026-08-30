@@ -1,13 +1,15 @@
 # Plugin Developer Spec v2
 
-> **Status: target draft; Issues 03 and 16 contract enforcement are implemented.** The current runtime uses manifest
+> **Status: target draft; Issues 03, 16, and the bounded Issue 21 Plans spike are implemented.** The current runtime uses manifest
 > v1 and is documented in [Plugin development guide](plugin-development.md).
 > This document is the author-facing contract that the v2 migration must
 > implement before third-party publishing opens.
 >
 > Issue 03 adds strict Manifest v2 grant parsing, catalog validation, and the
-> Host authorization/planning seam. Actual backend child-process lifecycle
-> remains deferred to its owning follow-up issue. Issue 03 completes the
+> Host authorization/planning seam. Issue 21 adds one bundled Plans
+> package-local operation through the public SDK, authenticated Host router,
+> and self-contained Python Backend Wire child. Full backend child lifecycle
+> and core-service ports remain deferred to their owning follow-up issues. Issue 03 completes the
 > parser, catalog, authorization planner, and Host enforcement seams.
 > Issue 16 adds the durable storage adapter and Host-only lifecycle seams to
 > Electron main. Production grant/consent and runtime-context production are
@@ -17,8 +19,10 @@
 >
 > Issue 06 adds the public package boundary and the external frontend workflow.
 > The checked-in SDK CLI currently supports `validate` and frontend-only
-> `package`; `init`, `dev`, backend packaging, signing, publishing, and runtime
-> transport remain deferred to their owning issues.
+> `package`; `init`, `dev`, third-party backend packaging, signing, publishing,
+> and general runtime activation remain deferred to their owning issues. The
+> first-party Issue 21 build script packages only the bundled Plans spike and
+> is not the public author workflow.
 >
 > **Migration decision:** Plan B (the B0-B9 checkpoint path) was approved on
 > 2026-08-13. Plans A and C are not active implementation alternatives.
@@ -211,7 +215,7 @@ protocol.
 | Source development | Authors may use `.py` files, a virtual environment, and any Python build/test layout. | None. Source layout is not an installed interface. |
 | `navide-plugin dev` | The author-owned development tool may launch the local Python interpreter or a temporary build. It must expose the same protocol-compatible child process used by the packaged backend. | Developer Mode receives a development launch descriptor; this exception is unsigned, local-only, and cannot be published or auto-updated. |
 | `navide-plugin package` | Python, its required modules, and the plugin code are bundled into a target-specific executable by an author-selected tool such as PyInstaller or Nuitka. | `backend.entry` names the resulting executable inside the archive. |
-| Install and runtime target | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The Electron main process now has an internal Issue 07 conformance seam that can spawn an approved entry directly without a shell and communicate through Backend Wire v1. Approved catalog startup wiring and the complete plugin lifecycle remain later runtime work; Issue 05 still emits the fail-closed activation catalog but does not activate third-party v2 backends. |
+| Install and runtime target | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The Electron main process has an internal Backend Wire v1 supervisor and Host router. Issue 21 exercises one bundled Plans executable directly without a shell; it does not activate installed third-party backends or complete the general package lifecycle. |
 
 Manifest validation rejects recognizable source or script suffixes. Package
 validation also rejects empty backend entries, POSIX entries without executable
@@ -306,9 +310,17 @@ interface PluginBackendClient {
   subscribe<Payload extends JsonValue>(
     event: string,
     listener: (payload: Payload) => void,
-  ): Disposable
+  ): Disposable & { ready: Promise<void>; settled: Promise<void> }
 }
 ```
+
+`ready` resolves after the Host has accepted the subscription. A package view
+may retain an existing event fallback until its package owns the equivalent
+event source, and must dispose the returned subscription when its view is
+destroyed. `settled` rejects if an accepted subscription ends because the
+backend becomes unavailable, so the view can restore that fallback event
+route. The bounded Plans spike keeps the core file-watcher route active because
+the packaged child does not yet own a watcher; Issue 22 supplies that port.
 
 The production adapter maps that Interface to MCP base methods plus one
 Navide-owned event notification:
@@ -357,9 +369,10 @@ and Host routes never cross the SDK Interface.
 The normative Backend Wire v1 schema and accepted/rejected fixture corpus are
 published under `docs/plugin-contracts/` and validated together with the
 Manifest v2 corpus. This contract enables backend-only and combined package
-description and installation. Issue 07 adds a private Electron-main
-supervisor/stdio conformance seam for health and unary calls; it is not a
-public SDK surface and does not activate the installed catalog. Future AI
+description and installation. Issues 07 and 08 add the private Electron-main
+supervisor/stdio and subscription lifecycle seams; Issue 21 connects one
+bundled Plans operation and event through the public SDK and Host router. These
+are not a public installed-backend activation workflow. Future AI
 integration is a separate adapter: it may
 expose an explicit allowlist of schema-described package methods as MCP tools.
 No package method is AI-callable by default, and adopting this wire profile

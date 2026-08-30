@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -204,6 +206,55 @@ def test_resolve_plan_root_respects_the_ascent_bound(tmp_path: Path) -> None:
     deep.mkdir(parents=True)
 
     assert resolve_plan_root(str(deep)) == str(deep)
+
+
+def test_packaged_resolver_matches_core_resolver(tmp_path: Path, monkeypatch) -> None:
+    """The packaged child and core backend must agree on root resolution."""
+    fixture_path = (
+        Path(__file__).parents[2]
+        / "src"
+        / "main"
+        / "plugins"
+        / "test-fixtures"
+        / "plans-backend-wire.py"
+    )
+    spec = importlib.util.spec_from_file_location("plans_backend_wire", fixture_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    packaged_resolve: Callable[[str], str] = module._resolve_plan_root
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    nested = repo / "a" / "b"
+    nested.mkdir(parents=True)
+    deep = repo / "a" / "b" / "c" / "d" / "e" / "f" / "g"
+    deep.mkdir(parents=True)
+    gitfile_repo = tmp_path / "gitfile-repo"
+    gitfile_repo.mkdir()
+    (gitfile_repo / ".git").write_text("gitdir: ../modules/repo", encoding="utf-8")
+    (gitfile_repo / "pkg").mkdir()
+    home = tmp_path / "home"
+    (home / ".git").mkdir(parents=True)
+    (home / "projects" / "plain").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("x", encoding="utf-8")
+
+    cases = [
+        "",
+        str(tmp_path / "missing"),
+        str(file_path),
+        str(tmp_path / "plain"),
+        str(repo),
+        str(nested),
+        str(gitfile_repo / "pkg"),
+        str(home / "projects" / "plain"),
+        str(deep),
+    ]
+    (tmp_path / "plain").mkdir()
+    for workspace_path in cases:
+        assert packaged_resolve(workspace_path) == resolve_plan_root(workspace_path)
 
 
 # ── Nested plan roots ───────────────────────────────────────────────────────

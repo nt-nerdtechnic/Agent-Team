@@ -28,7 +28,7 @@ function isClientMeta(value) {
 }
 
 function isEventName(value) {
-  return typeof value === 'string' && /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$/.test(value)
+  return typeof value === 'string' && /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/.test(value)
 }
 
 function isRuntime(value) {
@@ -159,7 +159,7 @@ function isCallRequest(frame) {
     exactKeys(frame.params, ['_meta', 'name', 'arguments', 'runtime']) &&
     isClientMeta(frame.params._meta) &&
     typeof frame.params.name === 'string' &&
-    /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$/.test(frame.params.name) &&
+    /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/.test(frame.params.name) &&
     isRuntime(frame.params.runtime)
 }
 
@@ -276,6 +276,22 @@ function handle(frame) {
   }
 
   const { name, arguments: args } = frame.params
+  if (name === 'plans.resolve_root') {
+    const workspacePath = isRecord(args) && typeof args.workspace_path === 'string'
+      ? args.workspace_path
+      : ''
+    if (!workspacePath) {
+      writeProtocolError(frame.id)
+      return
+    }
+    response(frame.id, { ok: true, root: workspacePath })
+    for (const subscription of subscriptions.values()) {
+      if (subscription.acknowledged && subscription.events.includes('plans.changed')) {
+        emitSubscriptionEvent(subscription.id, 'plans.changed', { workspace_path: workspacePath })
+      }
+    }
+    return
+  }
   if (name === 'fixture.echo') {
     response(frame.id, { arguments: args, runtime: frame.params.runtime })
     return

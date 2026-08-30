@@ -10,6 +10,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useBackend } from './composables/useBackend'
+import { resolvePlanRoot as resolvePlanRootOperation } from '../plugins/plans/resolvePlanRoot'
 import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
 import { initSettingsBackend, onSettingsChanged } from '@navide/plugin-ui/shared'
 import { useTheme } from '@navide/plugin-ui/foundation'
@@ -55,10 +56,7 @@ initKeybindingsPort(createHostKeybindingsPort())
 const planRoot = ref(workspacePath)
 async function resolvePlanRoot(): Promise<void> {
   try {
-    const res = await backend.send<{ ok: boolean; root?: string }>('plans.resolve_root', {
-      workspace_path: workspacePath,
-    })
-    if (res.payload?.ok && res.payload.root) planRoot.value = res.payload.root
+    planRoot.value = await resolvePlanRootOperation(backend, workspacePath)
   } catch {
     // Keep the workspace as the root: unchanged from the pre-resolution behaviour.
   }

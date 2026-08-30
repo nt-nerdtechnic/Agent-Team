@@ -40,6 +40,12 @@ All notable released changes to Navide will be documented in this file. The form
   child-process health/unary conformance coverage, explicit child environment
   isolation, bounded cancellation tombstones, and subscription lifecycle
   conformance; production catalog activation remains deferred.
+- Add test-only integration evidence for the bounded Issue 21 Plans
+  packaged-child round trip: a public SDK backend client, sender-authenticated
+  Host router, self-contained Python fixture child, and `plans.resolve_root` /
+  `plans.changed` call-event path. The fixture is not a production artifact;
+  the full third-party backend lifecycle and remaining Plans operations stay on
+  their owning migration issues.
 - Require a verified Registry signature from a signer authorized by the
   App-pinned Registry root before a Manifest v2 marketplace package can be
   installed, including packages whose signed listing metadata has been

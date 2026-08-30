@@ -574,6 +574,20 @@ describe('backendResponseToCapability', () => {
     expect(cap.ok).toBe(false)
     expect(cap.error).toEqual({ code: 'BACKEND_ERROR', message: 'no such file' })
   })
+
+  it('preserves a stable resource-limit code from the backend', () => {
+    const cap = backendResponseToCapability('r1', resp({
+      ok: false,
+      payload: null,
+      error: { code: 'RESOURCE_LIMIT', message: 'too many calls' },
+    }))
+
+    expect(cap).toEqual({
+      reqId: 'r1',
+      ok: false,
+      error: { code: 'RESOURCE_LIMIT', message: 'too many calls' },
+    })
+  })
 })
 
 describe('terminalSessionsFromResponse', () => {

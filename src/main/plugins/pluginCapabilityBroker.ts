@@ -43,6 +43,7 @@ export type CapabilityErrorCode =
   | 'UNKNOWN'
   | 'BAD_REQUEST'
   | 'BACKEND_ERROR'
+  | 'RESOURCE_LIMIT'
   | 'CAPABILITY_DENIED'
   | 'METHOD_NOT_FOUND'
   | 'INVALID_ARGUMENT'
@@ -801,7 +802,8 @@ export function backendResponseToCapability(
   resp: WsResponse
 ): CapabilityResponse {
   if (resp.ok) return buildSuccess(reqId, resp.payload)
-  return buildError(reqId, 'BACKEND_ERROR', resp.error?.message ?? 'backend request failed')
+  const code = resp.error?.code === 'RESOURCE_LIMIT' ? 'RESOURCE_LIMIT' : 'BACKEND_ERROR'
+  return buildError(reqId, code, resp.error?.message ?? 'backend request failed')
 }
 
 // ── Terminal PTY routing + output micro-batching ─────────────────────────────

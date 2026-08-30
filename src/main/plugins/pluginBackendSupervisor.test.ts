@@ -21,10 +21,33 @@ const fixture = fileURLToPath(new URL('./test-fixtures/backend-wire-child.mjs', 
 const activation: BackendPluginLaunchSpec = {
   pluginId: 'acme.backend',
   packageVersion: '1.2.3',
+  packageDir: process.cwd(),
   entryFile: fixture,
   protocolVersion: 1,
   activation: 'startup',
-  approvedEvents: ['fixture.changed'],
+  approvedMethods: [
+    'fixture.cancelcount',
+    'fixture.close',
+    'fixture.delay',
+    'fixture.duplicateevent',
+    'fixture.duplicatekeys',
+    'fixture.echo',
+    'fixture.emit',
+    'fixture.exit',
+    'fixture.forgedruntime',
+    'fixture.forgedevent',
+    'fixture.lateresponse',
+    'fixture.multiline',
+    'fixture.unknownmethod',
+    'fixture.unknownnotification',
+    'fixture.badversion',
+    'fixture.progress',
+    'fixture.protocolerror',
+    'fixture.publicerror',
+    'fixture.stderr',
+    'plans.resolve_root',
+  ],
+  approvedEvents: ['fixture.changed', 'plans.changed'],
 }
 
 const runtime: BackendRuntimeContext = {
@@ -122,6 +145,16 @@ describe('PluginBackendSupervisor', () => {
       },
       runtime,
     })
+  })
+
+  it('rejects a method that is not in the Host activation allowlist', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.notallowed', null)
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
   })
 
   it('acknowledges a subscription before delivering the requested event', async () => {
@@ -356,7 +389,7 @@ describe('PluginBackendSupervisor', () => {
     await Promise.all(subscriptions.map((subscription) => subscription.acknowledged))
 
     expect(() => client.subscribe(['fixture.changed'], () => undefined)).toThrowError(
-      new BackendPluginError('INVALID_ARGUMENT')
+      new BackendPluginError('RESOURCE_LIMIT')
     )
 
     subscriptions.forEach((subscription) => subscription.dispose())
