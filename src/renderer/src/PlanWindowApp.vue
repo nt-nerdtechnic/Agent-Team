@@ -54,10 +54,17 @@ initKeybindingsPort(createHostKeybindingsPort())
 // it must be settled before the first document opens — the preview components
 // load once and do not re-resolve a changed workspace.
 const planRoot = ref(workspacePath)
+let pendingPlansChangedRoot: string | null = null
 async function resolvePlanRoot(): Promise<void> {
   try {
-    planRoot.value = await resolvePlanRootOperation(backend, workspacePath)
+    const resolvedRoot = await resolvePlanRootOperation(backend, workspacePath)
+    planRoot.value = resolvedRoot
+    if (pendingPlansChangedRoot === resolvedRoot) {
+      planPreviewRefresh.value++
+    }
+    pendingPlansChangedRoot = null
   } catch {
+    pendingPlansChangedRoot = null
     // Keep the workspace as the root: unchanged from the pre-resolution behaviour.
   }
 }
@@ -410,10 +417,16 @@ onMounted(() => {
   // preview in place so the scroll position is preserved.
   offPlansChanged = backend.on('plans.changed', (payload) => {
     const p = payload as { workspace_path?: unknown } | null
+    const changedWorkspace = p?.workspace_path
+    if (typeof changedWorkspace !== 'string') return
     // The watcher reports the path it was started on — the resolved root once
-    // any plan surface has listed this workspace.
-    if (p && (p.workspace_path === workspacePath || p.workspace_path === planRoot.value)) {
+    // any plan surface has listed this workspace. The packaged resolver sends
+    // its response and event back-to-back, so retain one unmatched root until
+    // the response continuation publishes planRoot.
+    if (changedWorkspace === workspacePath || changedWorkspace === planRoot.value) {
       planPreviewRefresh.value++
+    } else {
+      pendingPlansChangedRoot = changedWorkspace
     }
   })
   // Auto-open the plan this window was launched for, once the root its path is

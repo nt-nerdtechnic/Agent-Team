@@ -61,6 +61,15 @@ jobs:
       - name: Frontend tests
         run: pnpm test:run
 
+      - name: Packaged Plans integration gate
+        run: pnpm run test:packaged-plans
+
+      - name: Verify production Plans bundle excludes fixture
+        run: |
+          pnpm run build:plans
+          test -f dist-plugins/plans/index.html
+          test ! -e dist-plugins/plans/backend/navide-plans
+
       - name: Backend tests
         run: uv --project backend run pytest backend/tests
 

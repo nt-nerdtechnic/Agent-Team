@@ -1,6 +1,11 @@
+// @vitest-environment happy-dom
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { defineComponent, h } from 'vue'
+import PlanWindowApp from '../../src/renderer/src/PlanWindowApp.vue'
+import { i18n } from '@navide/plugin-ui/foundation'
 
 type IpcEvent = { sender: { id: number } }
 type IpcHandler = (event: IpcEvent, payload?: unknown) => unknown
@@ -76,6 +81,7 @@ vi.mock('electron', () => {
   }
 
   const ipcRendererListeners = new Map<string, IpcListener>()
+  const invocations: Array<{ channel: string; payload: unknown }> = []
   const ipcRenderer = {
     on(channel: string, listener: IpcListener): void {
       ipcRendererListeners.set(channel, listener)
@@ -84,6 +90,7 @@ vi.mock('electron', () => {
       if (ipcRendererListeners.get(channel) === listener) ipcRendererListeners.delete(channel)
     },
     invoke(channel: string, payload: unknown): Promise<unknown> {
+      invocations.push({ channel, payload })
       const handler = ipcHandlers.get(channel)
       if (!handler) return Promise.reject(new Error(`missing IPC handler: ${channel}`))
       return Promise.resolve(handler({ sender: { id: senderId } }, payload))
@@ -135,11 +142,78 @@ vi.mock('electron', () => {
       ipcListeners,
       exposed,
       views,
+      invocations,
       setSender(id: number): void {
         senderId = id
       },
     },
   }
+})
+
+const coreWsMock = vi.hoisted(() => {
+  class FakeNodeWebSocket {
+    static readonly OPEN = 1
+    static readonly CONNECTING = 0
+    static readonly CLOSED = 3
+    static readonly instances: FakeNodeWebSocket[] = []
+    readonly sent: string[] = []
+    readyState = FakeNodeWebSocket.CONNECTING
+    private readonly listeners = new Map<string, Array<(event: unknown) => void>>()
+
+    constructor(readonly url: string) {
+      FakeNodeWebSocket.instances.push(this)
+    }
+
+    addEventListener(type: string, listener: (event: unknown) => void): void {
+      const listeners = this.listeners.get(type) ?? []
+      listeners.push(listener)
+      this.listeners.set(type, listeners)
+    }
+
+    send(data: string): void {
+      this.sent.push(data)
+      const request = JSON.parse(data) as { id: string; type: string }
+      queueMicrotask(() => {
+        this.emit('message', {
+          data: JSON.stringify({
+            id: request.id,
+            type: request.type,
+            ok: true,
+            payload: { settings: {} },
+            error: null,
+            timestamp: new Date().toISOString(),
+          }),
+        })
+      })
+    }
+
+    close(): void {
+      if (this.readyState === FakeNodeWebSocket.CLOSED) return
+      this.readyState = FakeNodeWebSocket.CLOSED
+      this.emit('close', {})
+    }
+
+    open(): void {
+      this.readyState = FakeNodeWebSocket.OPEN
+      this.emit('open', {})
+    }
+
+    private emit(type: string, event: unknown): void {
+      for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event)
+    }
+  }
+
+  return { FakeNodeWebSocket }
+})
+
+vi.mock('ws', () => ({ WebSocket: coreWsMock.FakeNodeWebSocket }))
+
+// The production Plans build aliases this import to capabilityBackend. Mirror
+// that build-time alias here so the mounted production component uses the real
+// package SDK/IPC path instead of opening the core WebSocket client.
+vi.mock('../../src/renderer/src/composables/useBackend', async () => {
+  const plansBackend = await import('../../src/renderer/plugins/plans/capabilityBackend')
+  return { useBackend: plansBackend.useBackend }
 })
 
 import * as electron from 'electron'
@@ -148,8 +222,8 @@ import {
   PLANS_PLUGIN_ID,
   type PluginLaunchDescriptor,
 } from '../../src/main/plugins/frontendPluginManager'
-import { useBackend } from '../../src/renderer/plugins/plans/capabilityBackend'
-import { resolvePlanRoot } from '../../src/renderer/plugins/plans/resolvePlanRoot'
+import { PLANS_PLUGIN_REQUIRES } from '../../src/shared/pluginCapabilities'
+import { createPluginBackendClient } from '@navide/plugin-sdk'
 
 interface FakeWebContentsViewLike {
   webContents: { id: number }
@@ -221,6 +295,7 @@ const mock = (electron as unknown as {
   __mock: {
     exposed: Record<string, unknown>
     views: FakeWebContentsViewLike[]
+    invocations: Array<{ channel: string; payload: unknown }>
     setSender(id: number): void
   }
 }).__mock
@@ -240,10 +315,17 @@ describe('Plans packaged backend composition', () => {
   const originalArgv = [...process.argv]
   const originalWindow = (globalThis as unknown as { window?: unknown }).window
   const originalNav = (globalThis as unknown as { nav?: unknown }).nav
+  const originalWindowNav = (window as unknown as { nav?: unknown }).nav
+  const originalLocation = window.location.href
+  const mountedApps: Array<{ unmount(): void }> = []
 
   afterEach(async () => {
+    while (mountedApps.length) mountedApps.pop()!.unmount()
     await Promise.all(managers.splice(0).map((manager) => manager.closeBackendPlugins()))
     process.argv.splice(0, process.argv.length, ...originalArgv)
+    window.history.replaceState({}, '', originalLocation)
+    if (originalWindowNav === undefined) delete (window as unknown as { nav?: unknown }).nav
+    else Object.defineProperty(window, 'nav', { value: originalWindowNav, configurable: true })
     if (originalWindow === undefined) delete (globalThis as unknown as { window?: unknown }).window
     else Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true })
     if (originalNav === undefined) delete (globalThis as unknown as { nav?: unknown }).nav
@@ -255,7 +337,8 @@ describe('Plans packaged backend composition', () => {
     async () => {
       const manager = new FrontendPluginManager()
       managers.push(manager)
-      const workspacePath = process.cwd()
+      const workspacePath = join(process.cwd(), 'src')
+      const expectedPlanRoot = process.cwd()
       const packageVersion = '0.1.92'
       const view = {
         id: 'window',
@@ -263,13 +346,13 @@ describe('Plans packaged backend composition', () => {
         kind: 'custom' as const,
         location: 'window' as const,
         title: 'Plans',
-        entryFile: join(workspacePath, 'src/renderer/plugins/plans/index.html'),
+        entryFile: join(expectedPlanRoot, 'src/renderer/plugins/plans/index.html'),
       }
       const descriptor: PluginLaunchDescriptor = {
         id: PLANS_PLUGIN_ID,
         packageVersion,
-        packageDir: workspacePath,
-        requires: [],
+        packageDir: expectedPlanRoot,
+        requires: [...PLANS_PLUGIN_REQUIRES],
         devUrl: '',
         entryFile: view.entryFile,
         views: [view],
@@ -278,7 +361,7 @@ describe('Plans packaged backend composition', () => {
       manager.registerBackendActivation({
         pluginId: PLANS_PLUGIN_ID,
         packageVersion,
-        packageDir: workspacePath,
+        packageDir: expectedPlanRoot,
         entryFile: packagedFixture,
         protocolVersion: 1,
         activation: 'startup',
@@ -291,13 +374,20 @@ describe('Plans packaged backend composition', () => {
         hostWindow: hostWindow as never,
         bounds: 'fill',
         workspacePath,
-        query: `?workspace_path=${encodeURIComponent(workspacePath)}`,
+        query: `?window=plans&workspace_path=${encodeURIComponent(workspacePath)}&rel_path=${encodeURIComponent('.agent-team/plans/integration.html')}`,
       })
       const mountedView = mock.views.at(-1)
       expect(mountedView?.options.webPreferences?.additionalArguments).toContain('--plugin-backend=1')
       expect(hostWindow.children).toHaveLength(1)
       const webContents = (hostWindow.children[0] as FakeWebContentsViewLike).webContents
       mock.setSender(webContents.id)
+      // PlanWindowApp also reconciles legacy UI settings on mount. Keep that
+      // unrelated shared transport healthy without replacing the package-local
+      // Backend Wire path under test.
+      manager.setBackendWsUrl('ws://plans-core-test')
+      const coreSocket = coreWsMock.FakeNodeWebSocket.instances.at(-1)
+      expect(coreSocket?.url).toBe('ws://plans-core-test')
+      coreSocket?.open()
 
       process.argv.splice(
         0,
@@ -309,22 +399,79 @@ describe('Plans packaged backend composition', () => {
       await import('../../src/preload/plugin-preload')
       const nav = mock.exposed.nav
       expect(nav).toBeDefined()
+      window.history.replaceState(
+        {},
+        '',
+        `/?window=plans&workspace_path=${encodeURIComponent(workspacePath)}&rel_path=${encodeURIComponent('.agent-team/plans/integration.html')}`,
+      )
       Object.defineProperty(globalThis, 'window', {
-        value: { location: { search: `?workspace_path=${encodeURIComponent(workspacePath)}` }, nav },
+        value: window,
         configurable: true,
       })
+      Object.defineProperty(window, 'nav', { value: nav, configurable: true })
       Object.defineProperty(globalThis, 'nav', { value: nav, configurable: true })
 
-      const planBackend = useBackend()
       let resolveChanged!: (payload: unknown) => void
       const changed = new Promise<unknown>((resolve) => {
         resolveChanged = resolve
       })
-      const dispose = planBackend.on('plans.changed', resolveChanged)
-      await expect(resolvePlanRoot(planBackend, workspacePath)).resolves.toBe(workspacePath)
-      await expect(changed).resolves.toEqual({ workspace_path: workspacePath })
-      dispose()
-      manager.destroyInstance(handle.instanceId)
+      const sdkSubscription = createPluginBackendClient().subscribe(
+        'plans.changed',
+        resolveChanged,
+      )
+      await sdkSubscription.ready
+      mock.invocations.length = 0
+      // Settings reconciliation currently reports failures through warn while
+      // capability plumbing can report errors, so monitor both channels.
+      const consoleError = vi.spyOn(console, 'error')
+      const consoleWarn = vi.spyOn(console, 'warn')
+      try {
+        const app = mount(PlanWindowApp, {
+          global: {
+            plugins: [i18n],
+            // The real PlanWindowApp is mounted. Only the unrelated terminal
+            // surface is stubbed because xterm requires a native layout engine.
+            stubs: {
+              AiCliDock: true,
+              PlanDocPreview: defineComponent({
+                name: 'PlanDocPreview',
+                props: ['workspacePath', 'relPath', 'backend', 'refresh'],
+                setup(props) {
+                  return () => h('div', {
+                    class: 'integration-plan-preview',
+                    'data-workspace-path': props.workspacePath,
+                    'data-refresh': String(props.refresh),
+                  })
+                },
+              }),
+            },
+          },
+        })
+        mountedApps.push(app)
+        await flushPromises()
+        expect(app.find('.plan-window').exists()).toBe(true)
+        expect(mock.invocations).toContainEqual(expect.objectContaining({
+          channel: 'plugin:backend:call',
+          payload: expect.objectContaining({
+            name: 'plans.resolve_root',
+            args: { workspace_path: workspacePath },
+          }),
+        }))
+        await expect(changed).resolves.toEqual({ workspace_path: expectedPlanRoot })
+        await flushPromises()
+        const preview = app.find('.integration-plan-preview')
+        expect(preview.attributes('data-workspace-path')).toBe(expectedPlanRoot)
+        expect(preview.attributes('data-refresh')).toBe('1')
+        const diagnostics = [...consoleError.mock.calls, ...consoleWarn.mock.calls]
+          .map((args) => args.map(String).join(' '))
+          .join('\n')
+        expect(diagnostics).not.toMatch(/capability .*not granted|\[settings\] reconcile failed/i)
+      } finally {
+        consoleError.mockRestore()
+        consoleWarn.mockRestore()
+        sdkSubscription.dispose()
+        manager.destroyInstance(handle.instanceId)
+      }
     },
   )
 })

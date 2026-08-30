@@ -13,5 +13,5 @@
       "@navide/plugin-ui/foundation/*": ["packages/plugin-ui/src/foundation/*"]
     }
   },
-  "include": ["tests/integration/**/*.ts", "src/renderer/src/env.d.ts"]
+  "include": ["tests/integration/**/*.ts", "src/renderer/src/env.d.ts", "src/renderer/src/vue.d.ts"]
 }
