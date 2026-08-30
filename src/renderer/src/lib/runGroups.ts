@@ -14,6 +14,25 @@ export function resolveManualSpawnGroupId(groups: { id: string }[], activeTab: s
   return groups.some((group) => group.id === activeTab) ? activeTab : ''
 }
 
+/** The group a manual spawn should land in, when something asked for one.
+ *
+ *  The sidebar's per-group ＋ can name a group outright — the stage tab bar
+ *  cannot, since it only ever opens into the tab it is showing. An asked-for id
+ *  is still checked against the groups actually loaded here: run groups are
+ *  per-workspace and only the viewed workspace's are held, so stamping a pane
+ *  with an id no tab lists would leave it on no tab at all, which looks exactly
+ *  like the spawn having failed. Anything unasked-for or unknown falls back to
+ *  the active tab's rule.
+ */
+export function resolveSpawnGroupId(
+  groups: { id: string }[],
+  activeTab: string,
+  askedGroupId = ''
+): string {
+  if (askedGroupId && groups.some((group) => group.id === askedGroupId)) return askedGroupId
+  return resolveManualSpawnGroupId(groups, activeTab)
+}
+
 /** The creation time to give a group record being rebuilt from the id its panes
  *  still carry. Ids are minted as `rg-<epoch ms>`, so the original time is in
  *  the id: recovering it keeps a rebuilt group where it belongs in the order

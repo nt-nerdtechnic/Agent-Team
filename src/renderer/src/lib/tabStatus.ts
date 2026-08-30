@@ -31,6 +31,15 @@ export function rollupTabStatus(statuses: readonly string[]): TabRunState {
   return realized ? 'idle' : 'empty'
 }
 
+/** i18n key for what a group's rolled-up dot is saying. Kept as a key, like
+ *  paneStatusLabelKey, so each caller resolves it in its own $t scope.
+ *
+ *  The dot was the one thing on a group row with no words attached to it:
+ *  three colours and nothing anywhere that said what they meant. */
+export function runGroupStateLabelKey(state: TabRunState): string {
+  return `label.run-group-${state}`
+}
+
 /** The fields a rendered tab is made of. Structural typing keeps this file free
  *  of a Vue import — StageTabBar's TabItem satisfies it. */
 interface RenderedTab {

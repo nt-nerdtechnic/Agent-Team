@@ -183,6 +183,7 @@ import {
   parseLegacyRunGroups,
   resolveActiveTab,
   resolveManualSpawnGroupId,
+  resolveSpawnGroupId,
   runGroupCreatedAt,
   groupPeers,
 } from './lib/runGroups'
@@ -5015,10 +5016,15 @@ async function onManualSpawn(payload: SpawnPayload): Promise<string | null> {
   // bound for another workspace with an id from THIS one's set gives it a
   // group no tab over there lists — the pane lands in the sidebar and on no
   // tab at all, which is indistinguishable from the spawn having failed.
+  //
+  // A payload may also name a group outright — the sidebar's per-group ＋ knows
+  // which group the user pointed at, which the active tab cannot express. It is
+  // checked against the loaded set for the same reason as above: an id that no
+  // tab here lists would strand the pane on no tab at all.
   const target = payload.workspacePath || currentWorkspace.value
   const onScreen = normWs(target) === normWs(currentWorkspace.value)
   const spawnGroupId = onScreen
-    ? resolveManualSpawnGroupId(runGroups.value, activeTab.value)
+    ? resolveSpawnGroupId(runGroups.value, activeTab.value, payload.runGroupId ?? '')
     : ''
   const paneId = await spawnPane({
     agentKey: payload.agentKey,
