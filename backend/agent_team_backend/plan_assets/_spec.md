@@ -7,7 +7,7 @@ the contract. Read once, then copy `_template.html` to start a plan.
 ## Two carriers, one model
 
 A plan carries the same fields (`name`, `overview`, `stage`, `approvedAt`,
-`todos`, `reviewNotes`, `executions`) and gets the same features (stage
+`archivedAt`, `todos`, `reviewNotes`, `executions`) and gets the same features (stage
 lifecycle, approval gate, review notes, section edit, dispatch, history) in
 either carrier — the app reads/writes both through one store:
 
@@ -54,6 +54,12 @@ Field rules:
 - `schemaVersion`: literal `1`.
 - `stage`: `draft | in-review | approved | in-progress | done | abandoned`.
 - `approvedAt`: ISO-8601 string, set when stage becomes `approved`; else `null`.
+- `archivedAt` (optional): ISO-8601 string, set when the document is archived.
+  Archiving is *not* a stage — it answers "do I still want to see this in the
+  list", while `stage` answers "where is this in its lifecycle". The Plans pane
+  shows archived documents in their own section and its "Archive all done"
+  button stamps every `done` document that has none. Absent or `null` means not
+  archived.
 - `todos[].status`: `pending | in-progress | done | skipped`. No other values.
 - `todos[].id`: stable kebab-case; never renumber existing ids.
 - `reviewNotes[].author`: `user` or `ai`. `resolved` flips to `true` only after
