@@ -40,6 +40,12 @@ _PLAN_META_RE = re.compile(
 # island itself still stores whatever the caller passed.
 PLAN_STAGES = frozenset({"draft", "in-review", "approved", "in-progress", "done", "abandoned"})
 TODO_STATUSES = frozenset({"pending", "in-progress", "done", "skipped"})
+#: Who a todo is waiting on. "agent" is the default and is never written — an
+#: absent key means the agent will do it. "user" marks the things nobody else
+#: can: a manual verification, a decision, a credential only they hold. Without
+#: this, a finished document whose last item is "verify on a real machine" is
+#: indistinguishable from an untouched plan.
+TODO_OWNERS = frozenset({"agent", "user"})
 
 # Header stage pill: `<span class="pill STAGE">STAGE</span>` (first occurrence).
 _STAGE_PILL_RE = re.compile(

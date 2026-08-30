@@ -61,6 +61,12 @@ Field rules:
   button stamps every `done` document that has none. Absent or `null` means not
   archived.
 - `todos[].status`: `pending | in-progress | done | skipped`. No other values.
+- `todos[].owner` (optional): `user` when only the user can do it — a manual
+  verification, a decision, a credential only they hold. Absent means the agent
+  will do it, which is the default and is never written out. This is what tells
+  a finished document that is waiting on one verification apart from a plan
+  nobody has started; the listing counts unfinished user-owned todos so
+  "what is waiting on me" can be answered without opening every document.
 - `todos[].id`: stable kebab-case; never renumber existing ids.
 - `reviewNotes[].author`: `user` or `ai`. `resolved` flips to `true` only after
   the note is addressed; put the response in `reply`.

@@ -175,6 +175,19 @@ export function htmlPlanProgress(todos: HtmlPlanTodo[]): HtmlPlanProgress {
   }
 }
 
+/** How many unfinished todos are waiting on the user rather than on an agent.
+ *
+ *  `owner: 'user'` marks the things nobody else can do — a manual verification,
+ *  a decision, a credential only they hold. Nobody comes back to tick those off,
+ *  so without surfacing the count a finished write-up blocked on one check looks
+ *  exactly like a plan nobody has started. `owner` is an optional field carried
+ *  through PlanTodo's index signature, so older documents simply count zero. */
+export function htmlPlanAwaitingUser(todos: HtmlPlanTodo[]): number {
+  return todos.filter(
+    (t) => (t as { owner?: unknown }).owner === 'user' && t.status !== 'done' && t.status !== 'skipped',
+  ).length
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
