@@ -189,8 +189,16 @@ def _save_plan(
         raise FsError(str(result.get("error") or "write failed"))
 
 
-def _normalize_todos(todos: list[str | dict[str, str]]) -> list[dict[str, str]]:
-    """Validate the plan_create todos param into [{id, content, status}]."""
+def _normalize_todos(
+    todos: list[str | dict[str, str]], status: str = "pending"
+) -> list[dict[str, str]]:
+    """Validate the plan_create todos param into [{id, content, status}].
+
+    `status` is what every todo starts at. A document created straight at
+    "done" is a record of work already finished, so its todos are its sections,
+    not things anyone is going to tick off later — leaving them pending would
+    render as "0/8 done" on a document that is complete.
+    """
     normalized: list[dict[str, str]] = []
     seen: set[str] = set()
     for index, item in enumerate(todos):
@@ -210,15 +218,15 @@ def _normalize_todos(todos: list[str | dict[str, str]]) -> list[dict[str, str]]:
         if todo_id in seen:
             raise FsError(f"duplicate todo id: {todo_id}")
         seen.add(todo_id)
-        normalized.append({"id": todo_id, "content": content, "status": "pending"})
+        normalized.append({"id": todo_id, "content": content, "status": status})
     return normalized
 
 
 def _todos_markup(todos: list[dict[str, str]]) -> str:
     """Render todo <li> rows in the template's shape (ids pre-validated)."""
     return "\n        ".join(
-        f'<li data-status="pending" data-todo-id="{todo["id"]}">\n'
-        f'          <span class="st">pending</span>\n'
+        f'<li data-status="{todo["status"]}" data-todo-id="{todo["id"]}">\n'
+        f'          <span class="st">{todo["status"]}</span>\n'
         f"          <span>{html_escape(todo['content'])}</span>\n"
         f"        </li>"
         for todo in todos
@@ -226,13 +234,20 @@ def _todos_markup(todos: list[dict[str, str]]) -> str:
 
 
 def _create_plan_sync(
-    workspace_path: str, name: str, overview: str, todos: list[str | dict[str, str]]
+    workspace_path: str,
+    name: str,
+    overview: str,
+    todos: list[str | dict[str, str]],
+    stage: str = "draft",
 ) -> dict[str, Any]:
     name = name.strip()
     if not name:
         raise FsError("plan name must be non-empty")
+    stage = (stage or "draft").strip() or "draft"
+    if stage not in PLAN_STAGES:
+        raise FsError(f"invalid stage: {stage!r} (valid: {', '.join(sorted(PLAN_STAGES))})")
     overview = overview.strip()
-    normalized = _normalize_todos(todos)
+    normalized = _normalize_todos(todos, "done" if stage == "done" else "pending")
     root = _plans_root(workspace_path)
     template = root / TEMPLATE_FILENAME
     if not template.is_file():
@@ -260,18 +275,28 @@ def _create_plan_sync(
     # Sweep every remaining {{…}} placeholder (Goals/Risks/etc. prose the
     # caller does not supply) so no template scaffolding leaks into the plan.
     content = _PLACEHOLDER_RE.sub("TBD", content)
+    # Stages past the approval gate imply the gate was passed, and the visible
+    # badge is written from the meta, so both have to be set here rather than
+    # left for a follow-up plan_update_stage call.
+    approved_at = (
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if stage in ("approved", "in-progress", "done")
+        else None
+    )
     meta = {
         "schemaVersion": 1,
         "name": name,
         "overview": overview,
-        "stage": "draft",
-        "approvedAt": None,
+        "stage": stage,
+        "approvedAt": approved_at,
         "todos": normalized,
         "reviewNotes": [],
     }
+    content = content.replace('<span class="pill draft">draft</span>',
+                              f'<span class="pill {stage}">{stage}</span>')
     content = write_plan_meta(content, meta)
     _save_plan(workspace_path, filename, content)
-    return {"rel_path": _plan_rel_path(filename), "name": name, "stage": "draft"}
+    return {"rel_path": _plan_rel_path(filename), "name": name, "stage": stage}
 
 
 def _update_stage_sync(workspace_path: str, rel_path: str, stage: str) -> dict[str, Any]:
@@ -370,15 +395,25 @@ async def plan_create(
     todos: list[str | dict[str, str]],
     ctx: Context,
     workspace_path: str = "",
+    stage: str = "draft",
 ) -> dict[str, Any]:
     """Create a new plan document in the workspace's .agent-team/plans/ directory.
 
     The file is copied from the provisioned _template.html (auto-provisioned
-    if missing), named <kebab-slug>_<6-hex>.html per the plan spec, and starts
-    at stage "draft". Each todos item is either a plain string (the todo
-    content; id auto-assigned as t1, t2, ...) or a {"id": "<kebab-case>",
-    "content": "..."} object; every todo starts as "pending". name/overview/
-    todos are written to both the plan-meta island and the visible markup.
+    if missing), named <kebab-slug>_<6-hex>.html per the plan spec. Each todos
+    item is either a plain string (the todo content; id auto-assigned as t1,
+    t2, ...) or a {"id": "<kebab-case>", "content": "..."} object.
+    name/overview/todos are written to both the plan-meta island and the
+    visible markup.
+
+    `stage` is where the document starts, "draft" by default — a plan you are
+    about to have approved. Pass "done" for a document that RECORDS work
+    already finished (a report, an audit, an inventory): it is not waiting for
+    anyone, and its todos are its sections, so they are created "done" too.
+    Using "in-review" for a finished report is the common mistake — that stage
+    means "blocked until the user approves it", which a report never is.
+    Stages at or past the approval gate ("approved", "in-progress", "done")
+    also stamp approvedAt, so no follow-up plan_update_stage call is needed.
     Returns {rel_path, name, stage}, plus "warning" when workspace_path does
     not match any pane's workspace — the plan is on disk but Navide's plan
     view will not find it; re-create it under the warned-about workspace.
@@ -388,7 +423,9 @@ async def plan_create(
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
-    result = await asyncio.to_thread(_create_plan_sync, workspace_path, name, overview, todos)
+    result = await asyncio.to_thread(
+        _create_plan_sync, workspace_path, name, overview, todos, stage
+    )
     warning = await asyncio.to_thread(workspace_mismatch_warning, workspace_path)
     if warning:
         result["warning"] = warning

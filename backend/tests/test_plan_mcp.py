@@ -392,6 +392,93 @@ def fake_terminals(monkeypatch: pytest.MonkeyPatch) -> _FakeTerminalService:
     return fake
 
 
+async def test_plan_create_at_done_records_finished_work(workspace: Path) -> None:
+    """A report is not a plan waiting for approval. Creating it straight at
+    "done" is what stops finished write-ups from piling up in "in-review",
+    which is the stage that means "blocked until the user approves"."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Delivery Report",
+            "overview": "What shipped.",
+            "todos": ["What changed", "How it was verified"],
+            "stage": "done",
+        },
+    )
+    assert not result.isError
+    data = result.structuredContent
+    assert data["stage"] == "done"
+
+    html = (workspace / data["rel_path"]).read_text(encoding="utf-8")
+    meta = parse_plan_meta(html)
+    assert meta["stage"] == "done"
+    # Its todos are its sections, not things anyone will tick off later —
+    # leaving them pending would render a finished document as "0/2 done".
+    assert [t["status"] for t in meta["todos"]] == ["done", "done"]
+    assert meta["approvedAt"] is not None
+    # The visible badge is what the user actually sees; meta alone is not enough.
+    assert '<span class="pill done">done</span>' in html
+    assert '<span class="pill draft">draft</span>' not in html
+    assert 'data-status="done"' in html
+
+
+async def test_plan_create_still_defaults_to_draft(workspace: Path) -> None:
+    """The default must not move: every existing caller omits the argument."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Ordinary Plan",
+            "overview": "To be approved.",
+            "todos": ["Do the thing"],
+        },
+    )
+    data = result.structuredContent
+    assert data["stage"] == "draft"
+    meta = parse_plan_meta((workspace / data["rel_path"]).read_text(encoding="utf-8"))
+    assert meta["approvedAt"] is None
+    assert [t["status"] for t in meta["todos"]] == ["pending"]
+
+
+async def test_plan_create_at_in_review_does_not_stamp_approval(workspace: Path) -> None:
+    """in-review is before the gate: nothing has been approved yet."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Proposal",
+            "overview": "For review.",
+            "todos": ["Phase one"],
+            "stage": "in-review",
+        },
+    )
+    meta = parse_plan_meta(
+        (workspace / result.structuredContent["rel_path"]).read_text(encoding="utf-8")
+    )
+    assert meta["stage"] == "in-review"
+    assert meta["approvedAt"] is None
+    assert [t["status"] for t in meta["todos"]] == ["pending"]
+
+
+async def test_plan_create_rejects_an_unknown_stage(workspace: Path) -> None:
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Bad",
+            "overview": "x",
+            "todos": ["y"],
+            "stage": "finished",
+        },
+    )
+    assert result.isError
+    assert "invalid stage" in result.content[0].text
+
+
 async def test_plan_create_from_a_subdirectory_lands_in_the_repo_root(
     workspace: Path,
 ) -> None:
