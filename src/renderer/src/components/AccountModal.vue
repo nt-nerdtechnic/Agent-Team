@@ -136,7 +136,20 @@ interface NetworkSnapshot {
 // into this device's own rows for a pane that was restored but never opened,
 // because only this machine can know that. Anything else unknown still falls
 // through to the raw value below.
-const KNOWN_STATUSES = ['running', 'waiting', 'exited', 'disconnected', 'not-opened']
+/** The wire vocabulary is the sidebar's badge vocabulary, with two words that
+ *  do not line up — so they are translated here rather than left to look right
+ *  by accident:
+ *
+ *  - `not-opened` is this device's word for a cold-restore placeholder. The
+ *    sidebar has always filed that under `waiting`, whose label already reads
+ *    "not opened"; the wire needed a distinct token because `waiting` was taken.
+ *  - `waiting` on the wire means the reporting machine only knows the delivery
+ *    flag — a build too old to send a badge word, or a window that has not
+ *    finished its first tick. `idle` is the nearest word that is actually true.
+ *
+ *  Everything else is passed through unchanged, which is the point: one pane
+ *  must not be called two different things in two places. */
+const WIRE_TO_BADGE: Record<string, string> = { 'not-opened': 'waiting', waiting: 'idle' }
 
 type Mode = 'login' | 'register' | 'token'
 
@@ -283,7 +296,12 @@ function deviceLabel(device: NetworkDevice): string {
 }
 
 function statusLabel(value: string): string {
-  return KNOWN_STATUSES.includes(value) ? t(`settings.p2p.network.status-${value}`) : value
+  const key = `paneStatus.${WIRE_TO_BADGE[value] ?? value}`
+  // A machine running a build newer than this one can send a word we have no
+  // label for. Showing the raw word is better than showing the key, and far
+  // better than hiding the pane.
+  const label = t(key)
+  return label === key ? value : label
 }
 
 function paneCountLabel(count: number): string {
@@ -970,9 +988,19 @@ input:focus {
   flex-shrink: 0; padding: 1px 6px; border-radius: var(--radius-xs); font-size: var(--font-3xs);
   border: 1px solid transparent; background: var(--bg-default); color: var(--text-secondary);
 }
+/* Three groups, so the eye sorts them before it reads them: solid means the
+   pane wants something from you, hollow means it does not, red means it is
+   broken. `awaiting` is the loud one on purpose — a pane holding a prompt open
+   is the whole reason to look at another machine's list. */
 .pane-pill.st-running { background: var(--success-fg); color: #fff; }
+.pane-pill.st-awaiting { background: var(--attention-fg); color: #fff; }
 .pane-pill.st-waiting { background: var(--attention-fg); color: #fff; }
+.pane-pill.st-idle,
+.pane-pill.st-starting,
 .pane-pill.st-disconnected { background: none; border-color: var(--border-default); }
+.pane-pill.st-error,
+.pane-pill.st-stopped,
+.pane-pill.st-exited { background: none; border-color: var(--danger-fg); color: var(--danger-fg); }
 /* A knock is a row that owes an answer, so it gets a little more room than a
    pane line and its own separator — the same card, one step louder. */
 /* The switch row: one line that answers "is it on, what is it doing, and can

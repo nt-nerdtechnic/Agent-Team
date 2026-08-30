@@ -131,6 +131,8 @@
       "stage-in-progress": "進行中",
       "stage-done": "已完成",
       "stage-abandoned": "已放棄",
+      "awaiting-you": "{count} 件待你",
+      "awaiting-you-title": "只有你能完成的項目——實機驗收、決定、或只有你才有的憑證",
       "progress-done": "{done}/{total} 已完成",
       "stage-draft": "草稿",
       "review-notes": "審查留言",
@@ -1107,12 +1109,7 @@
         "panes": "{count} 個 CLI 面板",
         "no-panes": "這台目前沒有執行中的面板。",
         "solo": "目前只有這台裝置登入。在另一台機器登入同一個帳號，它就會出現在這裡。",
-        "link-offline": "連線已中斷，以下是伺服器最後一次回報的狀態。",
-        "status-running": "執行中",
-        "status-waiting": "等待中",
-        "status-exited": "已結束",
-        "status-disconnected": "已斷線",
-        "status-not-opened": "尚未開啟"
+        "link-offline": "連線已中斷，以下是伺服器最後一次回報的狀態。"
       },
       "trust": {
         "requests-title": "等你決定",

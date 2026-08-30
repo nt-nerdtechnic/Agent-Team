@@ -40,14 +40,23 @@ log = logging.getLogger("agent_team_backend.remote_roster")
 #: startedAt), so the oldest ones survive rather than an arbitrary set.
 MAX_PANES = 500
 
-#: The server's ``status`` vocabulary, as ``sessions.upsert`` enforces it:
-#: running / waiting / exited / disconnected. Only these two are interpreted —
-#: the raw word is reported alongside, so a value this build has never heard of
-#: is passed through rather than hidden.
+#: The server's ``status`` vocabulary, as ``sessions.upsert`` enforces it: the
+#: sending window's own badge words (idle / starting / running / awaiting /
+#: exited / error / stopped), plus ``disconnected`` which only the directory
+#: knows, plus ``waiting`` from a machine too old to send a badge word. Only the
+#: values named below are interpreted — the raw word is reported alongside, so a
+#: value this build has never heard of is passed through rather than hidden.
+#:
+#: ``awaiting`` is deliberately *not* busy: a pane holding a prompt open is the
+#: opposite of working, and it is the one state a person looking at another
+#: machine most needs to pick out. It used to arrive here as "running", because
+#: the old sender had no word for it.
 STATUS_BUSY = "running"
-#: Both mean "addressable, but a message would not land right now": the owning
-#: window disconnected, or the session ended.
-STATUS_UNREACHABLE = frozenset({"disconnected", "exited"})
+#: All mean "addressable, but a message would not land right now": the owning
+#: window disconnected, the session ended, or the CLI behind it died. The last
+#: two are new words — before them a crashed pane arrived as "waiting", which
+#: claims the opposite.
+STATUS_UNREACHABLE = frozenset({"disconnected", "exited", "error", "stopped"})
 
 
 @dataclass

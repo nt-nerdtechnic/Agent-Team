@@ -275,8 +275,24 @@ def _pane_status(entry: agent_messaging.RegisteredPane) -> str:
     # flag says true — the window reports every pane it cannot inject into as
     # busy, which is the right answer for delivery and the wrong one for a
     # status word — so the flag is deliberately not consulted here.
+    #
+    # That mismatch used to apply to every pane, not just placeholders: `busy`
+    # was the *only* signal this function had, so seven sidebar states collapsed
+    # into two words and a crashed pane read as "waiting" — the one word that
+    # promises a message would be picked up. `display_status` is the window's
+    # own badge word, reported alongside `busy` for exactly this.
     if not entry.realized:
         return STATUS_OFFLINE
+    # The window's own badge word, when it reported one. Passed through rather
+    # than re-derived: the whole point is that the same pane is called the same
+    # thing here and in the sidebar, and any mapping in between is a second
+    # place for the two to drift apart.
+    if entry.display_status:
+        return entry.display_status
+    # Nothing reported yet — a window that has not finished its first tick, or
+    # an older build that only knows `busy`. Deliberately still the legacy word:
+    # "waiting" here means "we only know the delivery flag", which is a smaller
+    # claim than "idle" and is the honest one to make.
     return STATUS_BUSY if entry.busy else STATUS_IDLE
 
 

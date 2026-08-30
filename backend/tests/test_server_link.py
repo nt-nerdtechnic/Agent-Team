@@ -709,6 +709,74 @@ async def test_a_restore_placeholder_is_published_as_disconnected_not_running():
         await link.stop()
 
 
+async def test_the_published_status_is_the_word_the_sidebar_is_showing():
+    """The network view must call a pane what its own window calls it.
+
+    Before this, the only signal reaching here was `busy`, so seven sidebar
+    states collapsed into two words. The sharp case is the last assertion: a
+    pane whose CLI died is not busy, so it published as "waiting" — the one
+    word that promises a message sent now would be picked up.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    agent_messaging.set_busy("p1", False, "idle")
+    server = FakeServer()
+    link = make_link(server)
+    await link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        conn = server.opened[0]
+
+        def published(badge: str) -> bool:
+            """A pane reaches the server through whichever channel is due — the
+            opening sync or a later upsert — so both are searched."""
+            rows = list(conn.upserts) + [
+                row for sync in conn.syncs for row in sync["sessions"]
+            ]
+            return any(r["paneId"] == "p1" and r["status"] == badge for r in rows)
+
+        assert published("idle")
+        for badge, busy in (("awaiting", False), ("starting", True), ("error", False)):
+            agent_messaging.set_busy("p1", busy, badge)
+            link.notify_roster_changed()
+            await _until(lambda badge=badge: published(badge))
+    finally:
+        await link.stop()
+
+
+async def test_a_window_that_reports_no_badge_word_falls_back_to_the_busy_flag():
+    """What an un-upgraded window looks like. It never sends a status word, so
+    the old derivation has to keep working — otherwise upgrading the backend
+    alone would blank the status of every pane on the machine."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    agent_messaging.set_busy("p1", True)  # no badge word, as an old build sends
+    server = FakeServer()
+    link = make_link(server)
+    await link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        published = {s["paneId"]: s for s in server.opened[0].syncs[0]["sessions"]}
+        assert published["p1"]["status"] == "running"
+    finally:
+        await link.stop()
+
+
+async def test_a_placeholder_stays_disconnected_whatever_word_arrives():
+    """The two local overrides win over the reported word, and must: a window
+    can still be reporting the badge of the pane it had before a cold restore,
+    and `offline` is something only this side knows."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude", realized=False)
+    agent_messaging.set_busy("p1", True, "running")
+    server = FakeServer()
+    link = make_link(server)
+    await link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        published = {s["paneId"]: s for s in server.opened[0].syncs[0]["sessions"]}
+        assert published["p1"]["status"] == "disconnected"
+    finally:
+        await link.stop()
+
+
 # ---- cross-device messages --------------------------------------------------
 
 

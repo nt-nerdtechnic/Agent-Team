@@ -131,6 +131,8 @@
       "stage-in-progress": "In Progress",
       "stage-done": "Done",
       "stage-abandoned": "Abandoned",
+      "awaiting-you": "{count} for you",
+      "awaiting-you-title": "Unfinished items only you can clear — a manual check, a decision, a credential nobody else holds",
       "progress-done": "{done}/{total} done",
       "stage-draft": "Draft",
       "review-notes": "Review Notes",
@@ -1107,12 +1109,7 @@
         "panes": "{count} CLI panes",
         "no-panes": "Nothing running here right now.",
         "solo": "Only this device is signed in. Sign in on another machine to see it here.",
-        "link-offline": "The link is down, so this is the last thing the server said.",
-        "status-running": "Running",
-        "status-waiting": "Waiting",
-        "status-exited": "Exited",
-        "status-disconnected": "Disconnected",
-        "status-not-opened": "not opened"
+        "link-offline": "The link is down, so this is the last thing the server said."
       },
       "trust": {
         "requests-title": "Waiting for you",

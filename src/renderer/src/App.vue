@@ -1796,16 +1796,41 @@ function registerPaneMessaging(pane: ActivePane, preferredName?: string): void {
   mirrorMessagingHandle(pane)
 }
 
-/** Tell the registry whether a pane can take work right now, so cli_list_targets
- *  can report it. Derived from the same judgement that gates delivery, so "busy"
- *  always means "a message sent now would wait" — a flag that disagreed with
- *  that would be worse than none. Deduped: only changes cross the wire. */
-const paneBusyReported = new Map<string, boolean>()
-function reportPaneBusy(paneId: string, busy: boolean): void {
-  if (paneBusyReported.get(paneId) === busy) return
-  paneBusyReported.set(paneId, busy)
+/** The word this pane's sidebar badge is showing. One function because the
+ *  badge and the registry must never disagree: the network view on another
+ *  machine renders whatever we report here beside the very same pane, and two
+ *  copies of this expression is how they drift. Returns '' for a cold-restore
+ *  placeholder — nothing is running behind it, and the backend has its own word
+ *  for that (`not-opened`) which it substitutes rather than trusting ours. */
+function paneDisplayStatus(pane: ActivePane): DisplayStatus | '' {
+  if (!pane.realized) return ''
+  const ref = paneRefs[pane.id]
+  return (
+    (ref?.displayStatus as DisplayStatus | undefined) ??
+    (ref?.status as DisplayStatus | undefined) ??
+    'starting'
+  )
+}
+
+/** Tell the registry what a pane is doing, so cli_list_targets and the network
+ *  view can report it.
+ *
+ *  Two facts, sent together on purpose. `busy` is derived from the same
+ *  judgement that gates delivery, so it always means "a message sent now would
+ *  wait" — a flag that disagreed with that would be worse than none. `status`
+ *  is the badge word, which answers a different question and often disagrees:
+ *  a pane with a half-typed draft is busy but idle, a crashed one is neither.
+ *  Sending them in one call keeps the registry from pairing this tick's flag
+ *  with the last tick's word.
+ *
+ *  Deduped on the pair: only changes cross the wire. */
+const paneBusyReported = new Map<string, string>()
+function reportPaneBusy(paneId: string, busy: boolean, status: string): void {
+  const mark = `${busy}\u0000${status}`
+  if (paneBusyReported.get(paneId) === mark) return
+  paneBusyReported.set(paneId, mark)
   backend
-    .send('agent_msg.set_busy', { pane_id: paneId, busy })
+    .send('agent_msg.set_busy', { pane_id: paneId, busy, status })
     .catch(() => { /* advisory only */ })
 }
 
@@ -1815,7 +1840,7 @@ function reportPaneBusy(paneId: string, busy: boolean): void {
 function syncPaneBusy(): void {
   for (const pane of panes.value) {
     if (!pane.messagingName) continue
-    reportPaneBusy(pane.id, !isPaneIdleForMessaging(pane.id))
+    reportPaneBusy(pane.id, !isPaneIdleForMessaging(pane.id), paneDisplayStatus(pane))
   }
 }
 
@@ -2738,11 +2763,7 @@ function syncViews(): void {
       roleLabel: roleLabel(p.roleKey),
       stageId: p.stageId,
       command: p.command,
-      status: p.realized
-        ? (ref?.displayStatus as DisplayStatus | undefined) ??
-          (ref?.status as DisplayStatus | undefined) ??
-          'starting'
-        : 'waiting',
+      status: paneDisplayStatus(p) || 'waiting',
       error: ref?.error as string | undefined,
       injectionStatus: p.injectionStatus,
       preparationStatus: p.preparationStatus,

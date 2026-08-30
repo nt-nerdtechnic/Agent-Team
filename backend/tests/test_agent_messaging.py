@@ -1266,3 +1266,47 @@ async def test_hold_update_needs_a_msg_key() -> None:
     await app.handle_message(session, {"id": "h4", "type": "agent_msg.hold_update", "payload": {}})
 
     assert session.websocket.sent[0]["error"]["code"] == "BAD_REQUEST"  # type: ignore[attr-defined]
+
+
+def test_the_badge_word_and_the_busy_flag_are_recorded_together():
+    """They answer different questions and disagree in both directions, so the
+    registry keeps both rather than deriving one from the other."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj", agent_key="claude")
+
+    # A half-typed draft: cannot take an injection, but nothing is working.
+    assert agent_messaging.set_busy("p1", True, "idle") is True
+    entry = agent_messaging.list_panes()[0]
+    assert (entry.busy, entry.display_status) == (True, "idle")
+
+    # A crashed CLI: free to take a message, and that message goes nowhere.
+    assert agent_messaging.set_busy("p1", False, "error") is True
+    entry = agent_messaging.list_panes()[0]
+    assert (entry.busy, entry.display_status) == (False, "error")
+
+
+def test_a_report_with_no_badge_word_leaves_the_last_one_alone():
+    """An older window sends only `busy`. Treating that as "the status is now
+    unknown" would blank a word that is still true and make the network view
+    flicker back to the legacy fallback once a second."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj", agent_key="claude")
+    agent_messaging.set_busy("p1", False, "awaiting")
+    agent_messaging.set_busy("p1", True)
+    assert agent_messaging.list_panes()[0].display_status == "awaiting"
+
+
+def test_reporting_the_same_pair_twice_is_not_a_change():
+    """The caller dedupes on this answer; a always-changed reply would push a
+    roster update to the server every second for every pane."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj", agent_key="claude")
+    assert agent_messaging.set_busy("p1", True, "running") is True
+    assert agent_messaging.set_busy("p1", True, "running") is False
+
+
+def test_a_rename_keeps_the_badge_word():
+    """Re-registering is a rename or a reconnect, not a state change — the same
+    reason `busy` is carried over."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj", agent_key="claude")
+    agent_messaging.set_busy("p1", False, "awaiting")
+    agent_messaging.register("p1", "reviewer-renamed", "/tmp/proj", agent_key="claude")
+    assert agent_messaging.list_panes()[0].display_status == "awaiting"
+

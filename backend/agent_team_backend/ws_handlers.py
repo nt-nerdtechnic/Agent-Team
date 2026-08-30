@@ -6774,10 +6774,18 @@ async def agent_msg_unregister(session: "Session", msg_id: str, msg_type: str, p
 
 @handler("agent_msg.set_busy")
 async def agent_msg_set_busy(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    """The owning window reports whether a pane's agent is mid-turn, so
-    cli_list_targets can tell a caller that a target is working."""
+    """The owning window reports what a pane is doing: whether its agent is
+    mid-turn (so cli_list_targets can tell a caller the target is working) and
+    the word its own sidebar badge is showing (so the network view can call the
+    pane the same thing this window does)."""
     pane_id = str(payload.get("pane_id") or "")
-    changed = bool(pane_id) and agent_messaging.set_busy(pane_id, bool(payload.get("busy")))
+    # Absent means "this window does not report a status word", which is what an
+    # older build looks like; an empty string would blank the last one we had.
+    raw_status = payload.get("status")
+    display_status = None if raw_status is None else str(raw_status)
+    changed = bool(pane_id) and agent_messaging.set_busy(
+        pane_id, bool(payload.get("busy")), display_status
+    )
     if changed:
         server_link.roster_changed()
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "changed": changed}))

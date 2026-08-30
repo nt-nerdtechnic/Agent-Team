@@ -78,36 +78,97 @@ describe('account modal — your network', () => {
     expect(MODAL).toContain('statusLabel(pane.status)')
   })
 
-  it('translates the states it knows and shows anything else raw', () => {
-    // Four of them are the server's vocabulary (sessions.upsert enforces it);
-    // 'not-opened' is substituted by this device's own backend for a pane that
-    // was restored but never opened, which only this machine can know. A value
-    // a newer server invents is still passed through, never hidden.
-    expect(MODAL).toContain(
-      "const KNOWN_STATUSES = ['running', 'waiting', 'exited', 'disconnected', 'not-opened']",
-    )
-    expect(MODAL).toMatch(/KNOWN_STATUSES\.includes\(value\)[\s\S]{0,90}: value/)
+  it('has every state word the wire can carry', () => {
+    // The wire vocabulary: the sidebar's own badge words (sessions.upsert
+    // enforces the list), plus `disconnected` which only the directory knows,
+    // plus `not-opened` which this device substitutes for a pane that was
+    // restored but never opened, plus `waiting` from a machine too old to send
+    // a badge word. Every one of them has to render as something.
+    const WIRE = [
+      'running', 'idle', 'starting', 'awaiting', 'exited', 'error', 'stopped',
+      'disconnected', 'not-opened', 'waiting',
+    ]
     for (const locale of LOCALES) {
-      const strings = network(locale)
-      for (const state of ['running', 'waiting', 'exited', 'disconnected', 'not-opened']) {
-        expect(strings[`status-${state}`], `${locale}/status-${state}`).toBeTruthy()
+      const messages = i18n.global.getLocaleMessage(locale) as Record<string, any>
+      for (const state of WIRE) {
+        const badge = state === 'not-opened' ? 'waiting' : state === 'waiting' ? 'idle' : state
+        expect(messages.paneStatus[badge], `${locale}/paneStatus.${badge}`).toBeTruthy()
       }
     }
   })
 
-  it('calls an unopened pane what the sidebar calls it', () => {
-    // The same pane must not be two different things in two places: the
-    // sidebar's paneStatus.waiting is the wording this has to match.
+  it('shows a word from a newer build raw rather than hiding the pane', () => {
+    // A machine on a build newer than this one can report a state this one has
+    // no label for. Falling back to the raw word keeps the pane visible and
+    // legible; the failure this guards against is a blank pill, or worse, a
+    // dotted i18n key shown to a person.
+    expect(MODAL).toMatch(/const label = t\(key\)[\s\S]{0,60}label === key \? value : label/)
+  })
+
+  it('calls a pane what the sidebar calls it, by reading the same words', () => {
+    // The invariant is unchanged — one pane must not be two different things in
+    // two places — but it is now structural rather than kept in step by hand.
+    // This used to be two vocabularies (`settings.p2p.network.status-*` here,
+    // `paneStatus.*` in the sidebar) with a test asserting they matched; they
+    // did not, and could not, because they were maintained separately: the
+    // sidebar said "idle", this said "Waiting", for the same pane.
+    expect(MODAL).toMatch(/`paneStatus\.\$\{WIRE_TO_BADGE\[value\] \?\? value\}`/)
+
+    // The regression line. Reintroducing a private copy of the vocabulary is
+    // exactly how the two drifted apart the first time, and it would pass every
+    // other test in this file.
+    expect(MODAL).not.toContain('settings.p2p.network.status-')
     for (const locale of LOCALES) {
-      const messages = i18n.global.getLocaleMessage(locale) as Record<string, any>
-      expect(network(locale)['status-not-opened']).toBe(messages.paneStatus.waiting)
+      const strings = network(locale)
+      const copies = Object.keys(strings).filter((k) => k.startsWith('status-'))
+      expect(copies, `${locale} still carries a second status vocabulary`).toEqual([])
     }
+  })
+
+  it('reports the badge word from the same expression the sidebar renders', () => {
+    // The two ends of this feature live in different processes, and the only
+    // thing keeping them honest is that one function answers for both. Two
+    // copies of the expression is how the sidebar came to say "running" while
+    // the network view said "not opened" about the same pane.
+    const uses = [...APP.matchAll(/paneDisplayStatus\(/g)].length
+    expect(uses, 'paneDisplayStatus should be declared once and called twice').toBe(3)
+    expect(APP).toMatch(/reportPaneBusy\(pane\.id, [^,]+, paneDisplayStatus\(pane\)\)/)
+    expect(APP).toMatch(/status: paneDisplayStatus\(p\) \|\| 'waiting'/)
+
+    // Both facts in one message: the registry must never hold this tick's flag
+    // beside the last tick's word.
+    expect(APP).toMatch(/'agent_msg\.set_busy', \{ pane_id: paneId, busy, status \}/)
+  })
+
+  it('translates the two wire words that are not badge words', () => {
+    // `not-opened` and `waiting` are the only two that need a mapping, and both
+    // are load-bearing: without the first a cold-restore placeholder renders
+    // raw, and without the second a pane on an un-upgraded machine would be
+    // labelled "not opened" — which is a different claim entirely.
+    expect(MODAL).toContain(
+      "const WIRE_TO_BADGE: Record<string, string> = { 'not-opened': 'waiting', waiting: 'idle' }",
+    )
   })
 
   it('colours the pills by state', () => {
     expect(MODAL).toMatch(/\.pane-pill\.st-running \{[^}]*--success-fg/)
     expect(MODAL).toMatch(/\.pane-pill\.st-waiting \{[^}]*--attention-fg/)
     expect(MODAL).toMatch(/\.pane-pill\.st-disconnected \{[^}]*border-color/)
+    // A pane holding a prompt open is the reason to look at another machine's
+    // list at all, so it is loud rather than hollow.
+    expect(MODAL).toMatch(/\.pane-pill\.st-awaiting \{[^}]*--attention-fg/)
+    // A state with no rule of its own renders as the default pill, which reads
+    // as "nothing to see here" — the wrong answer for a pane whose CLI died.
+    for (const dead of ['error', 'stopped', 'exited']) {
+      expect(MODAL, `st-${dead} has no colour rule`).toMatch(
+        new RegExp(`\\.pane-pill\\.st-${dead}[^{]*\\{[^}]*--danger-fg|\\.pane-pill\\.st-${dead},`),
+      )
+    }
+    for (const quiet of ['idle', 'starting']) {
+      expect(MODAL, `st-${quiet} has no colour rule`).toMatch(
+        new RegExp(`\\.pane-pill\\.st-${quiet}[,\\s]`),
+      )
+    }
     expect(MODAL).toMatch(/\.pane-pill\.st-not-opened \{[^}]*border-color/)
   })
 
