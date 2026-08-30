@@ -115,11 +115,15 @@ ROSTER_SWEEP_S = 30.0
 #: pane it mirrors, which would otherwise be one upsert per pane per nudge.
 ROSTER_DEBOUNCE_S = 0.5
 
-#: ``sessions.upsert`` accepts exactly these three values and rejects anything
-#: else with BAD_REQUEST, so the registry's own vocabulary (busy / idle /
-#: offline) is renamed here rather than sent through. Nothing the roster knows
-#: is lost by the rename: mid-turn is "running", waiting for input is "waiting",
-#: and a pane whose window has disconnected is "disconnected" — transient, not
+#: The fallback vocabulary, used only when the owning window has not reported a
+#: badge word — see ``_pane_status``. It used to be the *whole* vocabulary: the
+#: enum ``sessions.upsert`` enforces had four values, so the seven states a
+#: sidebar can show were renamed down into two here, and a pane whose CLI had
+#: died was published as "waiting". The enum is wider now and the badge word is
+#: passed through, which leaves these three as the answer to a smaller question:
+#: what to say when all we know is the delivery flag. Mid-turn is "running",
+#: anything else is "waiting", and a pane whose window has disconnected is
+#: "disconnected" — transient, not
 #: terminal. That distinction is the remote half of the local target-offline
 #: code: the pane is still there and expected back once its window reconnects.
 #: Reporting it as "waiting" would be indistinguishable from a healthy idle
