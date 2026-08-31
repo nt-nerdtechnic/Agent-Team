@@ -310,12 +310,13 @@ describe('useBackend shim send()', () => {
     ).toHaveBeenCalledWith('plans.changed', cb)
   })
 
-  it('keeps the legacy watcher while the package event route is active', async () => {
+  it('uses the package watcher without duplicating the legacy route after acceptance', async () => {
     const legacyDisposer = vi.fn()
-    const on = vi.fn(() => legacyDisposer)
+    const on = vi.fn((_type: string, _callback: (payload: unknown) => void) => legacyDisposer)
+    const settled = new Promise<void>(() => undefined)
     const subscribeBackend = vi.fn(() => ({
       ready: Promise.resolve(),
-      settled: Promise.resolve(),
+      settled,
       dispose: vi.fn(),
     }))
     ;(window as unknown as { nav: unknown }).nav = {
@@ -330,11 +331,11 @@ describe('useBackend shim send()', () => {
     const backend = useBackend()
     const cb = vi.fn()
     const dispose = backend.on('plans.changed', cb)
-    expect(on).toHaveBeenCalledWith('plans.changed', cb)
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(on.mock.calls.some(([type]) => type === 'plans.changed')).toBe(false)
     expect(legacyDisposer).not.toHaveBeenCalled()
     dispose()
-    expect(legacyDisposer).toHaveBeenCalledOnce()
+    expect(legacyDisposer).not.toHaveBeenCalled()
 
     expect(subscribeBackend).toHaveBeenCalledWith('plans.changed', cb)
   })
@@ -345,7 +346,7 @@ describe('useBackend shim send()', () => {
       rejectSettled = reject
     })
     const legacyDisposer = vi.fn()
-    const legacyOn = vi.fn(() => legacyDisposer)
+    const legacyOn = vi.fn((_type: string, _callback: (payload: unknown) => void) => legacyDisposer)
     const subscribeBackend = vi.fn(() => ({
       ready: Promise.resolve(),
       settled,
@@ -364,12 +365,48 @@ describe('useBackend shim send()', () => {
     const cb = vi.fn()
     const dispose = backend.on('plans.changed', cb)
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
-    expect(legacyOn).toHaveBeenCalledWith('plans.changed', cb)
+    expect(legacyOn.mock.calls.some(([type]) => type === 'plans.changed')).toBe(false)
     expect(legacyDisposer).not.toHaveBeenCalled()
 
     rejectSettled(new PluginBackendError('BACKEND_UNAVAILABLE', 'backend exited'))
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(legacyOn).toHaveBeenCalledWith('plans.changed', cb)
     expect(legacyOn).toHaveBeenCalledTimes(2)
+
+    dispose()
+    expect(legacyDisposer).toHaveBeenCalledOnce()
+  })
+
+  it('installs the legacy watcher when an accepted package subscription closes', async () => {
+    let resolveSettled!: () => void
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve
+    })
+    const legacyDisposer = vi.fn()
+    const legacyOn = vi.fn((_type: string, _callback: (payload: unknown) => void) => legacyDisposer)
+    const subscribeBackend = vi.fn(() => ({
+      ready: Promise.resolve(),
+      settled,
+      dispose: vi.fn(),
+    }))
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      callBackend: vi.fn(),
+      cancelBackend: vi.fn(),
+      subscribeBackend,
+      on: legacyOn,
+      ready: vi.fn(),
+    }
+
+    const backend = useBackend()
+    const cb = vi.fn()
+    const dispose = backend.on('plans.changed', cb)
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(legacyOn.mock.calls.some(([type]) => type === 'plans.changed')).toBe(false)
+
+    resolveSettled()
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(legacyOn).toHaveBeenCalledWith('plans.changed', cb)
 
     dispose()
     expect(legacyDisposer).toHaveBeenCalledOnce()

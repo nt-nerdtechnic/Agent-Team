@@ -900,7 +900,7 @@ registerStorageIpc()
 
 // Mini-IDE keeps its bundled v1 delivery path. Plans also remains on its
 // legacy backend adapter until the production packaged-backend artifact gate
-// is complete; Issue 21's packaged child is injected only by integration tests.
+// is complete; Issue 22's packaged child is injected only by integration tests.
 const bundledMiniIde = registerBundledMiniIde(frontendPluginManager, {
   isPackaged: app.isPackaged,
   resourcesPath: process.resourcesPath,

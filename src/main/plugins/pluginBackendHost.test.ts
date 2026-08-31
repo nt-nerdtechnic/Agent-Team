@@ -10,18 +10,21 @@ import type {
   PluginBackendSupervisorOptions,
 } from './pluginBackendSupervisor'
 import { PluginBackendSupervisor } from './pluginBackendSupervisor'
+import { createProductionPlansBridgeDispatcher } from './plansBridge'
 import {
   MAX_BACKEND_CALLS_PER_INSTANCE,
+  MAX_BACKEND_CHILDREN,
   MAX_BACKEND_SUBSCRIPTIONS_PER_INSTANCE,
   MAX_BACKEND_TIMEOUT_MS,
 } from './pluginBackendLimits'
 
 const fixture = fileURLToPath(new URL('./test-fixtures/backend-wire-child.mjs', import.meta.url))
 const packagedFixture = join(process.cwd(), 'dist-test-fixtures/plans/backend/navide-plans')
+const packagedGoFixture = join(process.cwd(), 'dist-test-fixtures/plans/backend/navide-plans-go')
 const packagedFixtureEnabled = process.env.NAVIDE_TEST_PACKAGED_PLANS === '1'
-if (packagedFixtureEnabled && !existsSync(packagedFixture)) {
+if (packagedFixtureEnabled && (!existsSync(packagedFixture) || !existsSync(packagedGoFixture))) {
   throw new Error(
-    `NAVIDE_TEST_PACKAGED_PLANS=1 requires the packaged fixture at ${packagedFixture}; run pnpm run build:plans:fixture first.`,
+    `NAVIDE_TEST_PACKAGED_PLANS=1 requires packaged fixtures at ${packagedFixture} and ${packagedGoFixture}; run pnpm run build:plans:fixture first.`,
   )
 }
 const packagedBackendEnvironment: Record<string, string> = {}
@@ -38,6 +41,7 @@ const activation: BackendPluginLaunchSpec = {
   activation: 'startup',
   approvedMethods: ['fixture.delay', 'fixture.echo', 'fixture.emit', 'fixture.exit', 'plans.resolve_root'],
   approvedEvents: ['fixture.changed', 'plans.changed'],
+  approvedBridgePorts: ['filesystem'],
 }
 
 const runtime = {
@@ -54,6 +58,7 @@ function makeHost(entryFile = fixture): PluginBackendHost {
     // PyInstaller --onefile needs a writable temp directory for extraction;
     // keep the test launcher aligned with the Host's minimal environment.
     environment: { ...packagedBackendEnvironment, NAVIDE_FIXTURE: 'backend-wire' },
+    bridgeDispatcher: createProductionPlansBridgeDispatcher(),
     spawnProcess: (nextEntryFile, spawnOptions) =>
       spawn(nextEntryFile === fixture ? process.execPath : nextEntryFile, nextEntryFile === fixture ? [nextEntryFile] : [], {
         ...spawnOptions,
@@ -64,6 +69,7 @@ function makeHost(entryFile = fixture): PluginBackendHost {
     createSupervisor: (nextActivation) => {
       return new PluginBackendSupervisor({ ...nextActivation, entryFile }, options)
     },
+    resolvePlanRoot: async ({ workspacePath }) => workspacePath,
   }
   return new PluginBackendHost(hostOptions)
 }
@@ -80,7 +86,7 @@ describe('PluginBackendHost', () => {
     const host = makeHost()
     hosts.push(host)
     host.register(activation)
-    host.bindView(runtime, activation.packageDir)
+    host.bindView(runtime, activation.packageDir, process.cwd())
 
     await expect(host.call('view-1', 'fixture.echo', {
       value: 42,
@@ -94,11 +100,122 @@ describe('PluginBackendHost', () => {
     })
   })
 
+  it('creates an independent supervisor and root binding for each view', async () => {
+    const supervisors: Array<{
+      clientFor: ReturnType<typeof vi.fn>
+      close: ReturnType<typeof vi.fn>
+    }> = []
+    const createSupervisor = vi.fn((
+      _activation: BackendPluginLaunchSpec,
+      _options: PluginBackendSupervisorOptions,
+    ) => {
+      const client = {
+        call: vi.fn(async () => null as never),
+        subscribe: vi.fn(() => ({
+          acknowledged: Promise.resolve(),
+          settled: Promise.resolve({ reason: 'cancelled' as const }),
+          dispose: vi.fn(),
+        })),
+      }
+      const supervisor = {
+        start: vi.fn(async () => ({
+          value: null,
+          serverInfo: { name: 'controlled', version: '1.0.0' },
+        })),
+        clientFor: vi.fn(() => client),
+        close: vi.fn(async () => undefined),
+      }
+      supervisors.push(supervisor)
+      return supervisor as unknown as PluginBackendSupervisor
+    })
+    const host = new PluginBackendHost({
+      createSupervisor,
+      resolvePlanRoot: async ({ workspacePath }) => workspacePath,
+    })
+    hosts.push(host)
+    host.register(activation)
+    host.bindView(runtime, activation.packageDir, process.cwd())
+    host.bindView({ ...runtime, instanceId: 'view-2', hostWindowId: 'window-2' }, activation.packageDir, process.cwd())
+
+    await expect(host.call('view-1', 'fixture.echo', null)).resolves.toBeNull()
+    await expect(host.call('view-2', 'fixture.echo', null)).resolves.toBeNull()
+    expect(createSupervisor).toHaveBeenCalledTimes(2)
+    expect(supervisors[0]).not.toBe(supervisors[1])
+    const firstOptions = createSupervisor.mock.calls[0]?.[1]
+    const secondOptions = createSupervisor.mock.calls[1]?.[1]
+    expect(firstOptions?.authorizedPlanRoot)
+      .not.toBe(secondOptions?.authorizedPlanRoot)
+  })
+
+  it('caps bound child process slots and releases a failed root binding', async () => {
+    const createSupervisor = vi.fn(() => ({
+      start: vi.fn(async () => ({
+        value: null,
+        serverInfo: { name: 'controlled', version: '1.0.0' },
+      })),
+      clientFor: vi.fn(() => ({ call: vi.fn(async () => null as never), subscribe: vi.fn() })),
+      close: vi.fn(async () => undefined),
+    }) as unknown as PluginBackendSupervisor)
+    const resolvePlanRoot = vi.fn(async () => tmpdir())
+    const host = new PluginBackendHost({ createSupervisor, resolvePlanRoot })
+    hosts.push(host)
+    host.register(activation)
+    await expect(host.bindView(runtime, activation.packageDir, process.cwd()))
+      .rejects.toMatchObject({ code: 'INVALID_RUNTIME' })
+
+    const cappedHost = new PluginBackendHost({
+      createSupervisor,
+      resolvePlanRoot: async ({ workspacePath }) => workspacePath,
+    })
+    hosts.push(cappedHost)
+    cappedHost.register(activation)
+    for (let index = 0; index < MAX_BACKEND_CHILDREN; index += 1) {
+      cappedHost.bindView({
+        ...runtime,
+        instanceId: `view-${index}`,
+        hostWindowId: `window-${index}`,
+      }, activation.packageDir, process.cwd())
+    }
+    expect(() => cappedHost.bindView({
+      ...runtime,
+      instanceId: 'view-over-cap',
+      hostWindowId: 'window-over-cap',
+    }, activation.packageDir, process.cwd())).toThrowError(
+      expect.objectContaining({ code: 'RESOURCE_LIMIT' }),
+    )
+  })
+
+  it('rejects a filesystem binding without a Host root resolver', async () => {
+    const createSupervisor = vi.fn(() => undefined as unknown as PluginBackendSupervisor)
+    const host = new PluginBackendHost({ createSupervisor })
+    hosts.push(host)
+    host.register(activation)
+
+    await expect(host.bindView(runtime, activation.packageDir, process.cwd()))
+      .rejects.toMatchObject({ code: 'INVALID_RUNTIME' })
+    expect(createSupervisor).not.toHaveBeenCalled()
+  })
+
+  it('binds a non-filesystem activation without a Host root resolver', async () => {
+    const supervisor = {
+      close: vi.fn(async () => undefined),
+    } as unknown as PluginBackendSupervisor
+    const createSupervisor = vi.fn(() => supervisor)
+    const host = new PluginBackendHost({ createSupervisor })
+    hosts.push(host)
+    const nonFilesystemActivation = { ...activation, approvedBridgePorts: [] }
+    host.register(nonFilesystemActivation)
+
+    await expect(host.bindView(runtime, nonFilesystemActivation.packageDir, process.cwd()))
+      .resolves.toBeUndefined()
+    expect(createSupervisor).toHaveBeenCalledOnce()
+  })
+
   it('routes the Plans root operation and event through the non-Python fixture', async () => {
     const host = makeHost()
     hosts.push(host)
     host.register(activation)
-    host.bindView(runtime, activation.packageDir)
+    host.bindView(runtime, activation.packageDir, process.cwd())
 
     let resolveEvent!: (payload: unknown) => void
     const eventReceived = new Promise<unknown>((resolve) => {
@@ -117,7 +234,7 @@ describe('PluginBackendHost', () => {
     const host = makeHost()
     hosts.push(host)
     host.register(activation)
-    host.bindView(runtime, activation.packageDir)
+    host.bindView(runtime, activation.packageDir, process.cwd())
 
     await expect(host.call('other-view', 'fixture.echo', null))
       .rejects.toMatchObject({ code: 'INVALID_RUNTIME' })
@@ -163,7 +280,7 @@ describe('PluginBackendHost', () => {
     const host = makeHost()
     hosts.push(host)
     host.register(activation)
-    host.bindView(runtime, activation.packageDir)
+    host.bindView(runtime, activation.packageDir, process.cwd())
 
     await expect(host.call('view-1', 'fixture.echo', null, {
       timeoutMs: MAX_BACKEND_TIMEOUT_MS + 1,
@@ -196,10 +313,11 @@ describe('PluginBackendHost', () => {
     } as unknown as PluginBackendSupervisor
     const host = new PluginBackendHost({
       createSupervisor: () => controlledSupervisor,
+      resolvePlanRoot: async ({ workspacePath }) => workspacePath,
     })
     hosts.push(host)
     host.register(activation)
-    host.bindView(runtime, activation.packageDir)
+    host.bindView(runtime, activation.packageDir, process.cwd())
 
     const calls = Array.from({ length: MAX_BACKEND_CALLS_PER_INSTANCE }, () =>
       host.call('view-1', 'fixture.delay', { milliseconds: 10_000 })
@@ -224,7 +342,7 @@ describe('PluginBackendHost', () => {
     const host = makeHost()
     hosts.push(host)
     host.register(activation)
-    host.bindView(runtime, activation.packageDir)
+    host.bindView(runtime, activation.packageDir, process.cwd())
 
     const pending = host.call('view-1', 'fixture.delay', { milliseconds: 10_000 })
     host.unbindView('view-1')
@@ -249,7 +367,7 @@ describe('PluginBackendHost', () => {
     const host = makeHost()
     hosts.push(host)
     host.register(activation)
-    host.bindView(runtime, activation.packageDir)
+    host.bindView(runtime, activation.packageDir, process.cwd())
 
     const subscription = await host.subscribe('view-1', 'fixture.changed', () => undefined)
     await subscription.acknowledged
@@ -268,54 +386,59 @@ describe('packaged Plans backend', () => {
     await Promise.all(hosts.splice(0).map((host) => host.close()))
   })
 
-  run('completes resolve_root and emits plans.changed from the same child', async () => {
-    const host = makeHost(packagedFixture)
-    hosts.push(host)
-    host.register({
-      ...activation,
-      entryFile: packagedFixture,
-      approvedMethods: ['plans.resolve_root'],
-      approvedEvents: ['plans.changed'],
+  for (const [label, entryFile] of [
+    ['Python', packagedFixture],
+    ['Go', packagedGoFixture],
+  ] as const) {
+    run(`${label} completes resolve_root and emits plans.changed from the same child`, async () => {
+      const host = makeHost(entryFile)
+      hosts.push(host)
+      host.register({
+        ...activation,
+        entryFile,
+        approvedMethods: ['plans.resolve_root'],
+        approvedEvents: ['plans.changed'],
+      })
+      host.bindView(runtime, activation.packageDir, process.cwd())
+
+      let resolveEvent!: (payload: unknown) => void
+      const eventReceived = new Promise<unknown>((resolve) => {
+        resolveEvent = resolve
+      })
+      const subscription = await host.subscribe('view-1', 'plans.changed', resolveEvent)
+      await subscription.acknowledged
+
+      await expect(host.call('view-1', 'plans.resolve_root', {
+        workspace_path: process.cwd(),
+      })).resolves.toEqual({ ok: true, root: process.cwd() })
+      await expect(eventReceived).resolves.toEqual({ workspace_path: process.cwd() })
     })
-    host.bindView(runtime, activation.packageDir)
 
-    let resolveEvent!: (payload: unknown) => void
-    const eventReceived = new Promise<unknown>((resolve) => {
-      resolveEvent = resolve
+    run(`${label} settles cancellation, timeout, and child crash without hanging the Host`, async () => {
+      const host = makeHost(entryFile)
+      hosts.push(host)
+      host.register({
+        ...activation,
+        entryFile,
+        approvedMethods: ['fixture.delay', 'fixture.exit'],
+        approvedEvents: [],
+      })
+      host.bindView(runtime, activation.packageDir, process.cwd())
+
+      const controller = new AbortController()
+      const cancelled = host.call(
+        'view-1',
+        'fixture.delay',
+        { milliseconds: 10_000 },
+        { signal: controller.signal },
+      )
+      controller.abort()
+      await expect(cancelled).rejects.toMatchObject({ code: 'USER_CANCELLED' })
+
+      await expect(host.call('view-1', 'fixture.delay', { milliseconds: 10_000 }, { timeoutMs: 20 }))
+        .rejects.toMatchObject({ code: 'TIMEOUT' })
+      await expect(host.call('view-1', 'fixture.exit', null))
+        .rejects.toMatchObject({ code: 'BACKEND_UNAVAILABLE' })
     })
-    const subscription = await host.subscribe('view-1', 'plans.changed', resolveEvent)
-    await subscription.acknowledged
-
-    await expect(host.call('view-1', 'plans.resolve_root', {
-      workspace_path: process.cwd(),
-    })).resolves.toEqual({ ok: true, root: process.cwd() })
-    await expect(eventReceived).resolves.toEqual({ workspace_path: process.cwd() })
-  })
-
-  run('settles cancellation, timeout, and child crash without hanging the Host', async () => {
-    const host = makeHost(packagedFixture)
-    hosts.push(host)
-    host.register({
-      ...activation,
-      entryFile: packagedFixture,
-      approvedMethods: ['fixture.delay', 'fixture.exit'],
-      approvedEvents: [],
-    })
-    host.bindView(runtime, activation.packageDir)
-
-    const controller = new AbortController()
-    const cancelled = host.call(
-      'view-1',
-      'fixture.delay',
-      { milliseconds: 10_000 },
-      { signal: controller.signal },
-    )
-    controller.abort()
-    await expect(cancelled).rejects.toMatchObject({ code: 'USER_CANCELLED' })
-
-    await expect(host.call('view-1', 'fixture.delay', { milliseconds: 10_000 }, { timeoutMs: 20 }))
-      .rejects.toMatchObject({ code: 'TIMEOUT' })
-    await expect(host.call('view-1', 'fixture.exit', null))
-      .rejects.toMatchObject({ code: 'BACKEND_UNAVAILABLE' })
-  })
+  }
 })

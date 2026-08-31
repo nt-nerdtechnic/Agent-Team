@@ -1,7 +1,24 @@
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptions } from 'node:child_process'
 import { TextDecoder } from 'node:util'
-import { isAllowedBackendTimeout } from './pluginBackendLimits'
+import {
+  isAllowedBackendTimeout,
+  MAX_BACKEND_BRIDGE_REQUESTS,
+  MAX_BACKEND_BRIDGE_QUEUE_BYTES,
+  MAX_BACKEND_BRIDGE_RESULT_BYTES,
+} from './pluginBackendLimits'
+import {
+  isPlansBridgeOperation,
+  isPlansBridgeOrigin,
+  isPlansBridgePort,
+  PlansBridgeError,
+  type BackendBridgeDispatcher,
+  type PlansBridgeContext,
+  type PlansBridgeErrorCode,
+  type PlansBridgeOrigin,
+  type PlansBridgePort,
+  type PlansBridgeRequest,
+} from './plansBridge'
 
 /** Private Electron-main seam for Backend Wire v1 conformance tests. */
 export const MCP_PROTOCOL_REVISION = '2026-07-28'
@@ -42,6 +59,8 @@ export interface BackendPluginLaunchSpec {
   approvedMethods: readonly string[]
   /** Host-projected package event allowlist; never supplied by the child. */
   approvedEvents: readonly string[]
+  /** Host-private core ports projected for this package activation. */
+  approvedBridgePorts?: readonly PlansBridgePort[]
 }
 
 const AUTHENTICATED_RUNTIME = Symbol('navide.authenticatedBackendRuntime')
@@ -65,6 +84,7 @@ export type BackendPluginErrorCode =
   | 'BACKEND_UNAVAILABLE'
   | 'PROTOCOL_ERROR'
   | 'PLUGIN_STOPPING'
+  | 'RESULT_TOO_LARGE'
 
 const ERROR_MESSAGES: Record<BackendPluginErrorCode, string> = {
   INVALID_ACTIVATION: 'Backend plugin activation is invalid.',
@@ -78,6 +98,7 @@ const ERROR_MESSAGES: Record<BackendPluginErrorCode, string> = {
   BACKEND_UNAVAILABLE: 'Backend plugin is unavailable.',
   PROTOCOL_ERROR: PROTOCOL_ERROR_MESSAGE,
   PLUGIN_STOPPING: 'Backend plugin is stopping.',
+  RESULT_TOO_LARGE: 'Backend plugin result is too large.',
 }
 
 export class BackendPluginError extends Error {
@@ -92,7 +113,6 @@ export class BackendPluginError extends Error {
   ) {
     super(message)
     this.name = 'BackendPluginError'
-    this.stack = undefined
     this.code = code
     this.requestId = options.requestId
     this.pluginCode = options.pluginCode
@@ -177,15 +197,47 @@ export interface PluginBackendSupervisorOptions {
   healthTimeoutMs?: number
   callTimeoutMs?: number
   shutdownTimeoutMs?: number
+  drainTimeoutMs?: number
+  /** Timeout for one child-to-Host Bridge operation; watches are unbounded. */
+  bridgeTimeoutMs?: number
   maxFrameBytes?: number
   onStderr?: (chunk: string) => void
+  /** Host-private child-to-core Bridge dispatcher. Never exposed to SDK code. */
+  bridgeDispatcher?: BackendBridgeDispatcher
+  /** Mutable Host-owned root, refreshed before a restarted generation starts. */
+  authorizedPlanRoot?: AuthorizedPlanRootBinding
+  refreshAuthorizedPlanRoot?: (signal: AbortSignal) => Promise<string>
+}
+
+export interface AuthorizedPlanRootBinding {
+  value: string | null
 }
 
 interface PendingRequest {
   readonly generation: ChildGeneration
+  readonly origin?: PlansBridgeOrigin
   readonly resolve: (response: BackendWireResponse) => void
   readonly reject: (error: BackendPluginError) => void
   readonly cleanup: () => void
+}
+
+interface BridgeOriginBinding {
+  readonly generation: ChildGeneration
+  readonly origin: PlansBridgeOrigin
+  readonly runtime: BackendRuntimeContext
+  readonly workspacePath?: string
+  readonly authorizedPlanRoot?: string
+}
+
+interface PendingBridgeRequest {
+  readonly generation: ChildGeneration
+  readonly originKey: string
+  readonly request: BackendBridgeRequestFrame
+  readonly runtime: BackendRuntimeContext
+  readonly workspacePath?: string
+  readonly authorizedPlanRoot?: string
+  readonly controller: AbortController
+  timeoutTimer?: ReturnType<typeof setTimeout>
 }
 
 interface ChildGeneration {
@@ -194,6 +246,9 @@ interface ChildGeneration {
   exited: boolean
   stdoutBuffer: Buffer
   readonly exitPromise: Promise<void>
+  outputQueue: Buffer[]
+  outputQueueBytes: number
+  outputWriting: boolean
   resolveExit?: () => void
   terminationTask?: Promise<void>
   listeners: {
@@ -246,18 +301,36 @@ interface ProgressNotification {
   message?: string
 }
 
+export interface BackendBridgeRequestFrame {
+  kind: 'bridge-request'
+  id: string
+  origin: PlansBridgeOrigin
+  port: PlansBridgePort
+  operation: string
+  arguments: JsonValue
+}
+
+interface BackendBridgeCancellationNotification {
+  kind: 'bridge-cancelled'
+  requestId: WireRequestId
+  reason?: string
+}
+
 type BackendWireNotification =
   | SubscriptionAcknowledgedNotification
   | EventNotification
   | ProgressNotification
+  | BackendBridgeCancellationNotification
 
-export type BackendWireHostFrame = BackendWireResponse | BackendWireNotification
+export type BackendWireHostFrame = BackendWireResponse | BackendWireNotification | BackendBridgeRequestFrame
 
 type SubscriptionPhase = 'pending-ack' | 'active' | 'reconnecting' | 'settled'
 
 interface SubscriptionState {
   readonly events: readonly string[]
   readonly runtime: BackendRuntimeContext
+  readonly workspacePath?: string
+  readonly authorizedPlanRoot?: string
   readonly binding: AuthenticatedBackendRuntime
   readonly listener: (event: BackendPluginEvent) => void
   readonly onProgress?: (progress: BackendPluginProgress) => void
@@ -279,7 +352,7 @@ interface SubscriptionState {
   acknowledgedOnce: boolean
 }
 
-type SupervisorState = 'idle' | 'starting' | 'ready' | 'restarting' | 'failed' | 'closed'
+type SupervisorState = 'idle' | 'starting' | 'ready' | 'draining' | 'restarting' | 'failed' | 'closed'
 
 class JsonScanner {
   private index = 0
@@ -522,6 +595,15 @@ function isMethodName(value: unknown): value is string {
   return typeof value === 'string' && /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u.test(value)
 }
 
+function isApprovedBridgePortList(value: unknown): value is readonly PlansBridgePort[] {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      new Set(value).size === value.length &&
+      value.every((port) => isPlansBridgePort(port)))
+  )
+}
+
 function serverInfo(value: unknown): BackendServerInfo | undefined {
   if (
     !isRecord(value) ||
@@ -642,6 +724,53 @@ function eventFilter(value: unknown): readonly string[] {
   return events
 }
 
+function validateBridgeRequest(frame: JsonValue): BackendBridgeRequestFrame {
+  if (
+    !isRecord(frame) ||
+    !hasExactKeys(frame, ['jsonrpc', 'id', 'method', 'params']) ||
+    frame.jsonrpc !== '2.0' ||
+    typeof frame.id !== 'string' ||
+    !frame.id.startsWith('bridge:') ||
+    frame.id.length === 'bridge:'.length ||
+    frame.method !== 'navide/host/call' ||
+    !hasExactKeys(frame.params, ['origin', 'port', 'operation', 'arguments']) ||
+    !isPlansBridgeOrigin(frame.params.origin) ||
+    !isPlansBridgePort(frame.params.port) ||
+    !isPlansBridgeOperation(frame.params.port, frame.params.operation) ||
+    !isJsonValue(frame.params.arguments)
+  ) {
+    throw new Error(PROTOCOL_ERROR_MESSAGE)
+  }
+  return {
+    kind: 'bridge-request',
+    id: frame.id,
+    origin: frame.params.origin,
+    port: frame.params.port,
+    operation: frame.params.operation,
+    arguments: frame.params.arguments,
+  }
+}
+
+function validateBridgeCancellation(frame: JsonValue): BackendBridgeCancellationNotification {
+  if (
+    !isRecord(frame) ||
+    !hasExactKeys(frame, ['jsonrpc', 'method', 'params']) ||
+    frame.jsonrpc !== '2.0' ||
+    frame.method !== 'notifications/cancelled' ||
+    !isRecord(frame.params) ||
+    !Object.keys(frame.params).every((key) => key === 'requestId' || key === 'reason') ||
+    !isRequestId(frame.params.requestId) ||
+    (frame.params.reason !== undefined && typeof frame.params.reason !== 'string')
+  ) {
+    throw new Error(PROTOCOL_ERROR_MESSAGE)
+  }
+  return {
+    kind: 'bridge-cancelled',
+    requestId: frame.params.requestId,
+    ...(frame.params.reason === undefined ? {} : { reason: frame.params.reason }),
+  }
+}
+
 function validateNotification(frame: JsonValue): BackendWireNotification {
   if (!isRecord(frame) || !hasExactKeys(frame, ['jsonrpc', 'method', 'params']) || frame.jsonrpc !== '2.0') {
     throw new Error(PROTOCOL_ERROR_MESSAGE)
@@ -702,6 +831,10 @@ function validateNotification(frame: JsonValue): BackendWireNotification {
 export function parseBackendWireHostFrame(raw: Uint8Array | string): BackendWireHostFrame {
   const frame = parseBackendWireFrame(raw)
   try {
+    if (isRecord(frame) && frame.method === 'navide/host/call') return validateBridgeRequest(frame)
+    if (isRecord(frame) && frame.method === 'notifications/cancelled') {
+      return validateBridgeCancellation(frame)
+    }
     if (isRecord(frame) && typeof frame.method === 'string') return validateNotification(frame)
     return validateResponse(frame)
   } catch {
@@ -711,6 +844,14 @@ export function parseBackendWireHostFrame(raw: Uint8Array | string): BackendWire
 
 function sameEventFilter(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((event) => right.includes(event))
+}
+
+function requestIdKey(requestId: WireRequestId): string {
+  return `${typeof requestId}:${String(requestId)}`
+}
+
+function originKey(origin: PlansBridgeOrigin): string {
+  return `${origin.kind}:${requestIdKey(origin.requestId)}`
 }
 
 function encodeFrame(frame: JsonValue): Buffer {
@@ -773,13 +914,20 @@ export class PluginBackendSupervisor {
   private readonly environment: Readonly<Record<string, string>>
   private readonly approvedMethods: readonly string[]
   private readonly approvedEvents: readonly string[]
+  private readonly approvedBridgePorts: readonly PlansBridgePort[]
   private readonly clientCapabilities: { [key: string]: JsonValue }
   private readonly clientInfo?: { name: string; version: string }
   private readonly healthTimeoutMs: number
   private readonly callTimeoutMs: number
   private readonly shutdownTimeoutMs: number
+  private readonly drainTimeoutMs: number
+  private readonly bridgeTimeoutMs: number
   private readonly maxFrameBytes: number
   private readonly onStderr?: (chunk: string) => void
+  private readonly bridgeDispatcher?: BackendBridgeDispatcher
+  private readonly authorizedPlanRoot?: AuthorizedPlanRootBinding
+  private readonly refreshAuthorizedPlanRoot?: (signal: AbortSignal) => Promise<string>
+  private rootRefreshController?: AbortController
   private state: SupervisorState = 'idle'
   private currentGeneration?: ChildGeneration
   private nextGenerationId = 0
@@ -788,8 +936,12 @@ export class PluginBackendSupervisor {
   private readonly subscriptionsByRequestId = new Map<WireRequestId, SubscriptionState>()
   private readonly subscriptionsByProgressToken = new Map<WireRequestId, SubscriptionState>()
   private readonly ignoredRequestIds = new Set<WireRequestId>()
+  private readonly bridgeOrigins = new Map<string, BridgeOriginBinding>()
+  private readonly bridgeRequests = new Map<string, PendingBridgeRequest>()
+  private readonly bridgeWatchOrigins = new Set<string>()
   private startTask?: Promise<BackendHealth>
   private restartTask?: Promise<BackendHealth>
+  private closeTask?: Promise<void>
   private health?: BackendHealth
   private failure?: BackendPluginError
   private readonly activation: BackendPluginLaunchSpec
@@ -812,6 +964,7 @@ export class PluginBackendSupervisor {
       activation.activation !== 'startup' ||
       !isApprovedMethodList(activation.approvedMethods) ||
       !isApprovedEventList(activation.approvedEvents) ||
+      !isApprovedBridgePortList(activation.approvedBridgePorts) ||
       !options ||
       !isEnvironmentMap(options.environment)
     ) {
@@ -821,18 +974,27 @@ export class PluginBackendSupervisor {
       ...activation,
       approvedMethods: Object.freeze([...activation.approvedMethods]),
       approvedEvents: Object.freeze([...activation.approvedEvents]),
+      ...(activation.approvedBridgePorts === undefined
+        ? {}
+        : { approvedBridgePorts: Object.freeze([...activation.approvedBridgePorts]) }),
     })
     this.environment = Object.freeze({ ...options.environment })
     this.approvedMethods = this.activation.approvedMethods
     this.approvedEvents = this.activation.approvedEvents
+    this.approvedBridgePorts = this.activation.approvedBridgePorts ?? []
     this.spawnProcess = options.spawnProcess ?? defaultSpawnProcess
     this.clientCapabilities = options.clientCapabilities ?? {}
     this.clientInfo = options.clientInfo
     this.healthTimeoutMs = options.healthTimeoutMs ?? 5_000
     this.callTimeoutMs = options.callTimeoutMs ?? 30_000
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 250
+    this.drainTimeoutMs = options.drainTimeoutMs ?? this.shutdownTimeoutMs
+    this.bridgeTimeoutMs = options.bridgeTimeoutMs ?? this.callTimeoutMs
     this.maxFrameBytes = options.maxFrameBytes ?? 1_048_576
     this.onStderr = options.onStderr
+    this.bridgeDispatcher = options.bridgeDispatcher
+    this.authorizedPlanRoot = options.authorizedPlanRoot
+    this.refreshAuthorizedPlanRoot = options.refreshAuthorizedPlanRoot
     if (
       !isRecord(this.clientCapabilities) ||
       !isJsonValue(this.clientCapabilities) ||
@@ -845,6 +1007,8 @@ export class PluginBackendSupervisor {
       !isPositiveFiniteNumber(this.healthTimeoutMs) ||
       !isAllowedBackendTimeout(this.callTimeoutMs) ||
       !isPositiveFiniteNumber(this.shutdownTimeoutMs) ||
+      !isAllowedBackendTimeout(this.drainTimeoutMs) ||
+      !isAllowedBackendTimeout(this.bridgeTimeoutMs) ||
       !isPositiveFiniteNumber(this.maxFrameBytes)
     ) {
       throw new BackendPluginError('INVALID_ACTIVATION')
@@ -855,6 +1019,7 @@ export class PluginBackendSupervisor {
     if (this.state === 'ready' && this.health) return this.health
     if (this.state === 'starting' && this.startTask) return this.startTask
     if (this.state === 'restarting' && this.restartTask) return this.restartTask
+    if (this.state === 'draining') throw new BackendPluginError('PLUGIN_STOPPING')
     if (this.state === 'failed') {
       throw this.failure ?? new BackendPluginError('BACKEND_UNAVAILABLE')
     }
@@ -869,7 +1034,10 @@ export class PluginBackendSupervisor {
     }
   }
 
-  clientFor(binding: AuthenticatedBackendRuntime): PluginBackendClient {
+  clientFor(
+    binding: AuthenticatedBackendRuntime,
+    bridgeContext: { workspacePath?: string; authorizedPlanRoot?: string } = {},
+  ): PluginBackendClient {
     if (!isAuthenticatedRuntime(binding) || !isRuntimeContext(binding)) {
       throw new BackendPluginError('INVALID_RUNTIME')
     }
@@ -880,22 +1048,42 @@ export class PluginBackendSupervisor {
       throw new BackendPluginError('INVALID_RUNTIME')
     }
     const runtime = { ...binding }
+    const authorizedPlanRoot = bridgeContext.authorizedPlanRoot ?? bridgeContext.workspacePath
     return Object.freeze({
       call: <Result extends JsonValue>(
         name: string,
         args: JsonValue,
         options?: BackendPluginCallOptions
-      ): Promise<Result> => this.callWithRuntime<Result>(runtime, name, args, options),
+      ): Promise<Result> => this.callWithRuntime<Result>(
+        runtime,
+        name,
+        args,
+        options,
+        bridgeContext.workspacePath,
+        authorizedPlanRoot,
+      ),
       subscribe: (
         events: readonly string[],
         listener: (event: BackendPluginEvent) => void,
         options?: BackendPluginSubscriptionOptions
-      ): BackendPluginSubscription => this.subscribeWithRuntime(binding, runtime, events, listener, options),
+      ): BackendPluginSubscription => this.subscribeWithRuntime(
+        binding,
+        runtime,
+        events,
+        listener,
+        options,
+        bridgeContext.workspacePath,
+        authorizedPlanRoot,
+      ),
     })
   }
 
   async restart(): Promise<BackendHealth> {
     if (this.state === 'closed') throw new BackendPluginError('PLUGIN_STOPPING')
+    if (this.state === 'draining') {
+      if (this.restartTask) return this.restartTask
+      throw new BackendPluginError('PLUGIN_STOPPING')
+    }
     if (this.state === 'idle' || this.state === 'starting') {
       throw new BackendPluginError('NOT_READY')
     }
@@ -910,16 +1098,35 @@ export class PluginBackendSupervisor {
   }
 
   async close(): Promise<void> {
+    if (this.closeTask) return this.closeTask
     if (this.state === 'closed' && !this.currentGeneration) return
-    this.state = 'closed'
-    this.rejectPending(new BackendPluginError('PLUGIN_STOPPING'))
-    this.settleAllSubscriptions({ reason: 'plugin-stopping', error: new BackendPluginError('PLUGIN_STOPPING') })
-    this.ignoredRequestIds.clear()
+    this.closeTask = this.closeInternal()
+    try {
+      await this.closeTask
+    } finally {
+      this.closeTask = undefined
+    }
+  }
+
+  private async closeInternal(): Promise<void> {
+    this.state = 'draining'
+    this.rootRefreshController?.abort()
     const generation = this.currentGeneration
-    if (!generation) return
-    await this.requestTermination(generation, false)
-    this.disposeGeneration(generation)
-    if (this.currentGeneration === generation) this.currentGeneration = undefined
+    if (generation) await this.drainPending(generation)
+    this.rejectPending(new BackendPluginError('PLUGIN_STOPPING'), true, 'stopping')
+    this.settleAllSubscriptions({
+      reason: 'plugin-stopping',
+      error: new BackendPluginError('PLUGIN_STOPPING'),
+    })
+    this.abortAllBridgeRequests()
+    this.ignoredRequestIds.clear()
+    this.state = 'closed'
+    if (generation) {
+      await this.requestTermination(generation, false)
+      this.disposeGeneration(generation)
+      if (this.currentGeneration === generation) this.currentGeneration = undefined
+    }
+    if (this.authorizedPlanRoot) this.authorizedPlanRoot.value = null
   }
 
   private subscribeWithRuntime(
@@ -927,10 +1134,12 @@ export class PluginBackendSupervisor {
     runtime: BackendRuntimeContext,
     events: readonly string[],
     listener: (event: BackendPluginEvent) => void,
-    options: BackendPluginSubscriptionOptions = {}
+    options: BackendPluginSubscriptionOptions = {},
+    workspacePath?: string,
+    authorizedPlanRoot?: string,
   ): BackendPluginSubscription {
     if (this.state !== 'ready') {
-      throw this.failure ?? new BackendPluginError(this.state === 'closed' ? 'PLUGIN_STOPPING' : 'NOT_READY')
+      throw this.failure ?? new BackendPluginError(this.lifecycleErrorCode())
     }
     if (
       !isRecord(options) ||
@@ -972,6 +1181,8 @@ export class PluginBackendSupervisor {
     const state = {
       events: Object.freeze([...events]),
       runtime: Object.freeze({ ...runtime }),
+      ...(workspacePath === undefined ? {} : { workspacePath }),
+      ...(authorizedPlanRoot === undefined ? {} : { authorizedPlanRoot }),
       binding,
       listener,
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
@@ -1024,11 +1235,19 @@ export class PluginBackendSupervisor {
     state.phase = 'pending-ack'
     this.subscriptionsByRequestId.set(requestId, state)
     this.subscriptionsByProgressToken.set(requestId, state)
+    this.registerBridgeOrigin(
+      { kind: 'subscription', requestId },
+      state.runtime,
+      generation,
+      state.workspacePath,
+      this.currentAuthorizedPlanRoot(state.authorizedPlanRoot),
+    )
     try {
       if (generation.exited || generation.child.stdin.destroyed || generation.child.stdin.writableEnded) {
         throw new Error('closed')
       }
-      generation.child.stdin.write(
+      this.writeFrame(
+        generation,
         encodeFrame({
           jsonrpc: '2.0',
           id: requestId,
@@ -1038,7 +1257,7 @@ export class PluginBackendSupervisor {
             notifications: { [EVENT_FILTER_KEY]: [...state.events] },
             runtime: { ...state.runtime },
           },
-        })
+        }),
       )
     } catch {
       this.failProcess(generation, 'BACKEND_UNAVAILABLE')
@@ -1083,6 +1302,8 @@ export class PluginBackendSupervisor {
     const requestId = state.requestId
     const generation = state.generation
     if (requestId !== undefined) {
+      this.unregisterBridgeOrigin({ kind: 'subscription', requestId }, generation)
+      this.abortBridgeRequestsForOrigin({ kind: 'subscription', requestId })
       this.subscriptionsByRequestId.delete(requestId)
       this.subscriptionsByProgressToken.delete(requestId)
       if (sendCancellation) {
@@ -1128,6 +1349,11 @@ export class PluginBackendSupervisor {
         continue
       }
       if (state.requestId !== undefined) {
+        this.unregisterBridgeOrigin(
+          { kind: 'subscription', requestId: state.requestId },
+          state.generation,
+        )
+        this.abortBridgeRequestsForOrigin({ kind: 'subscription', requestId: state.requestId })
         this.rememberIgnoredRequestId(state.requestId)
         this.subscriptionsByRequestId.delete(state.requestId)
         this.subscriptionsByProgressToken.delete(state.requestId)
@@ -1170,19 +1396,28 @@ export class PluginBackendSupervisor {
   }
 
   private async restartInternal(): Promise<BackendHealth> {
-    this.state = 'restarting'
-    this.rejectPending(new BackendPluginError('BACKEND_UNAVAILABLE'), true)
-    this.detachSubscriptionsForRestart()
+    this.state = 'draining'
     const generation = this.currentGeneration
-    if (generation) await this.requestTermination(generation, true)
+    if (generation) await this.drainPending(generation)
+    this.rejectPending(new BackendPluginError('BACKEND_UNAVAILABLE'), true, 'restarting')
+    this.detachSubscriptionsForRestart()
+    this.abortBridgeRequestsForGeneration(generation)
     if ((this.state as SupervisorState) === 'closed') {
       throw new BackendPluginError('PLUGIN_STOPPING')
     }
+    this.state = 'restarting'
+    if (generation) await this.requestTermination(generation, false)
     if (generation) {
       this.disposeGeneration(generation)
       if (this.currentGeneration === generation) this.currentGeneration = undefined
     }
+    if ((this.state as SupervisorState) === 'closed' || this.closeTask) {
+      throw new BackendPluginError('PLUGIN_STOPPING')
+    }
     this.failure = undefined
+    if (this.authorizedPlanRoot && this.refreshAuthorizedPlanRoot) {
+      this.authorizedPlanRoot.value = null
+    }
     this.state = 'starting'
     this.startTask = this.startInternal()
     try {
@@ -1203,8 +1438,72 @@ export class PluginBackendSupervisor {
     }
   }
 
+  private async drainPending(generation: ChildGeneration): Promise<void> {
+    if (this.pendingForGeneration(generation) === 0) return
+    await new Promise<void>((resolvePromise) => {
+      let settled = false
+      const finish = (): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(deadline)
+        resolvePromise()
+      }
+      const deadline = setTimeout(finish, this.drainTimeoutMs)
+      const check = (): void => {
+        if (settled) return
+        if (this.pendingForGeneration(generation) !== 0) {
+          setImmediate(check)
+          return
+        }
+        finish()
+      }
+      setImmediate(check)
+    })
+  }
+
+  private pendingForGeneration(generation: ChildGeneration): number {
+    let count = 0
+    for (const pending of this.pending.values()) {
+      if (pending.generation === generation) count += 1
+    }
+    return count
+  }
+
+  private lifecycleErrorCode(): 'NOT_READY' | 'PLUGIN_STOPPING' {
+    return this.state === 'draining' || this.state === 'restarting' || this.state === 'closed'
+      ? 'PLUGIN_STOPPING'
+      : 'NOT_READY'
+  }
+
+  private currentAuthorizedPlanRoot(fallback?: string): string | undefined {
+    return this.authorizedPlanRoot?.value ?? fallback
+  }
+
+  private async refreshRootIfNeeded(): Promise<void> {
+    if (!this.authorizedPlanRoot || this.authorizedPlanRoot.value !== null) return
+    if (!this.refreshAuthorizedPlanRoot) return
+    const controller = new AbortController()
+    this.rootRefreshController = controller
+    try {
+      const root = await this.refreshAuthorizedPlanRoot(controller.signal)
+      if (controller.signal.aborted || this.state !== 'starting') {
+        throw new BackendPluginError(this.lifecycleErrorCode())
+      }
+      if (typeof root !== 'string' || root.length === 0) throw new Error('invalid authorized root')
+      this.authorizedPlanRoot.value = root
+    } catch (error) {
+      this.authorizedPlanRoot.value = null
+      if (error instanceof BackendPluginError) throw error
+      throw new BackendPluginError('BACKEND_UNAVAILABLE')
+    } finally {
+      if (this.rootRefreshController === controller) this.rootRefreshController = undefined
+    }
+  }
+
   private async startInternal(): Promise<BackendHealth> {
     try {
+      await this.refreshRootIfNeeded()
+      if (this.state !== 'starting') throw new BackendPluginError(this.lifecycleErrorCode())
       this.spawnChild()
       const id = this.nextRequestId()
       const response = await this.sendRequest(
@@ -1217,6 +1516,9 @@ export class PluginBackendSupervisor {
         { timeoutMs: this.healthTimeoutMs }
       )
       const health = this.successResult(response)
+      if (this.state !== 'starting') {
+        throw new BackendPluginError(this.lifecycleErrorCode())
+      }
       this.health = health
       this.state = 'ready'
       return health
@@ -1224,7 +1526,7 @@ export class PluginBackendSupervisor {
       const error = value instanceof BackendPluginError
         ? value
         : new BackendPluginError('BACKEND_UNAVAILABLE')
-      if (this.state !== 'closed' && this.state !== 'failed') {
+      if (this.state !== 'closed' && this.state !== 'failed' && this.state !== 'draining') {
         this.failProcess(
           this.currentGeneration,
           error.code === 'PROTOCOL_ERROR' ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE'
@@ -1256,6 +1558,9 @@ export class PluginBackendSupervisor {
       child,
       exited: false,
       stdoutBuffer: Buffer.alloc(0),
+      outputQueue: [],
+      outputQueueBytes: 0,
+      outputWriting: false,
       exitPromise: new Promise<void>((resolve) => {
         resolveExit = resolve
       }),
@@ -1342,6 +1647,12 @@ export class PluginBackendSupervisor {
     this.disposeGeneration(generation)
     if (this.currentGeneration !== generation) return
     this.ignoredRequestIds.clear()
+    if (this.state === 'draining') {
+      const error = new BackendPluginError(this.closeTask ? 'PLUGIN_STOPPING' : 'BACKEND_UNAVAILABLE')
+      this.abortBridgeRequestsForGeneration(generation)
+      this.rejectPending(error, true, this.closeTask ? 'stopping' : 'restarting')
+      return
+    }
     if (this.state !== 'closed' && this.state !== 'failed' && this.state !== 'restarting') {
       this.failProcess(generation, generation.stdoutBuffer.length > 0 ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE', false)
     }
@@ -1349,6 +1660,14 @@ export class PluginBackendSupervisor {
 
   private handleFrame(generation: ChildGeneration, frame: BackendWireHostFrame): void {
     if (this.currentGeneration !== generation) return
+    if (frame.kind === 'bridge-request') {
+      this.handleBridgeRequest(generation, frame)
+      return
+    }
+    if (frame.kind === 'bridge-cancelled') {
+      this.cancelBridgeRequest(frame.requestId, frame.reason ?? 'cancelled')
+      return
+    }
     if (
       frame.kind === 'subscription-acknowledged' ||
       frame.kind === 'event' ||
@@ -1360,7 +1679,284 @@ export class PluginBackendSupervisor {
     this.handleResponse(generation, frame)
   }
 
-  private handleNotification(generation: ChildGeneration, notification: BackendWireNotification): void {
+  private handleBridgeRequest(generation: ChildGeneration, request: BackendBridgeRequestFrame): void {
+    const originBinding = this.bridgeOrigins.get(originKey(request.origin))
+    const parent = request.origin.kind === 'call'
+      ? this.pending.get(request.origin.requestId)
+      : undefined
+    const drainingCall = this.state === 'draining' &&
+      request.origin.kind === 'call' &&
+      parent?.generation === generation &&
+      parent.origin?.kind === 'call' &&
+      parent.origin.requestId === request.origin.requestId
+    if (this.state !== 'ready' && !drainingCall) {
+      this.sendBridgeError(
+        generation,
+        request.id,
+        this.state === 'draining' ? 'PLUGIN_STOPPING' : 'BACKEND_UNAVAILABLE',
+      )
+      return
+    }
+    if (this.bridgeRequests.has(request.id)) {
+      this.sendBridgeError(generation, request.id, 'PROTOCOL_ERROR')
+      return
+    }
+    if (this.bridgeRequests.size >= MAX_BACKEND_BRIDGE_REQUESTS) {
+      this.sendBridgeError(generation, request.id, 'RESOURCE_LIMIT')
+      return
+    }
+    if (!this.approvedBridgePorts.includes(request.port)) {
+      this.sendBridgeError(generation, request.id, 'CAPABILITY_DENIED')
+      return
+    }
+    if (!originBinding || originBinding.generation !== generation) {
+      this.sendBridgeError(generation, request.id, 'INVALID_RUNTIME')
+      return
+    }
+    if (request.port === 'filesystem' && originBinding.authorizedPlanRoot === undefined) {
+      this.sendBridgeError(generation, request.id, 'WORKSPACE_SCOPE_VIOLATION')
+      return
+    }
+    const requestOriginKey = originKey(request.origin)
+    if (request.operation === 'watch' && this.bridgeWatchOrigins.has(requestOriginKey)) {
+      this.sendBridgeError(generation, request.id, 'RESOURCE_LIMIT')
+      return
+    }
+    const controller = new AbortController()
+    const pending: PendingBridgeRequest = {
+      generation,
+      originKey: requestOriginKey,
+      request,
+      runtime: Object.freeze({ ...originBinding.runtime }),
+      ...(originBinding.workspacePath === undefined ? {} : { workspacePath: originBinding.workspacePath }),
+      ...(originBinding.authorizedPlanRoot === undefined
+        ? {}
+        : { authorizedPlanRoot: originBinding.authorizedPlanRoot }),
+      controller,
+    }
+    if (request.operation !== 'watch') {
+      pending.timeoutTimer = setTimeout(
+        () => this.timeoutBridgeRequest(request.id),
+        this.bridgeTimeoutMs,
+      )
+    }
+    this.bridgeRequests.set(request.id, pending)
+    if (request.operation === 'watch') this.bridgeWatchOrigins.add(requestOriginKey)
+    const context: PlansBridgeContext = {
+      runtime: pending.runtime,
+      ...(pending.workspacePath === undefined ? {} : { workspacePath: pending.workspacePath }),
+      ...(pending.authorizedPlanRoot === undefined
+        ? {}
+        : { authorizedPlanRoot: pending.authorizedPlanRoot }),
+      requestId: request.id,
+      signal: controller.signal,
+      emit: (event, payload): void => {
+        this.sendBridgeEvent(pending, event, payload)
+      },
+    }
+    void (async (): Promise<void> => {
+      try {
+        if (!this.bridgeDispatcher) throw new PlansBridgeError('CAPABILITY_DENIED')
+        const value = await this.bridgeDispatcher.dispatch(request, context)
+        if (!isJsonValue(value)) throw new BackendPluginError('PROTOCOL_ERROR')
+        if (!controller.signal.aborted) this.sendBridgeSuccess(generation, request.id, value)
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          this.sendBridgeError(generation, request.id, this.bridgeErrorCode(error))
+        }
+      } finally {
+        if (this.bridgeRequests.get(request.id) === pending) {
+          this.bridgeRequests.delete(request.id)
+        }
+        if (request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+        if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
+      }
+    })()
+  }
+
+  private timeoutBridgeRequest(requestId: string): void {
+    const pending = this.bridgeRequests.get(requestId)
+    if (!pending) return
+    this.sendBridgeError(pending.generation, requestId, 'TIMEOUT')
+    this.bridgeRequests.delete(requestId)
+    if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+    pending.controller.abort()
+    this.sendCancellation(requestId, 'timeout', pending.generation)
+  }
+
+  private bridgeErrorCode(error: unknown): PlansBridgeErrorCode | BackendPluginErrorCode {
+    if (error instanceof PlansBridgeError) return error.code
+    if (error instanceof BackendPluginError) return error.code
+    return 'INTERNAL_ERROR'
+  }
+
+  private sendBridgeSuccess(generation: ChildGeneration, requestId: WireRequestId, value: JsonValue): void {
+    if (this.currentGeneration !== generation || generation.exited) return
+    try {
+      const encoded = encodeFrame({
+        jsonrpc: '2.0',
+        id: requestId,
+        result: {
+          resultType: 'complete',
+          value,
+          _meta: {
+            [SERVER_INFO_KEY]: { name: 'navide.host-bridge', version: '1.0.0' },
+          },
+        },
+      })
+      if (encoded.length > MAX_BACKEND_BRIDGE_RESULT_BYTES) {
+        this.sendBridgeError(generation, requestId, 'RESULT_TOO_LARGE')
+        return
+      }
+      this.writeFrame(generation, encoded)
+    } catch {
+      /* The generation has already failed or is being terminated. */
+    }
+  }
+
+  private sendBridgeError(
+    generation: ChildGeneration,
+    requestId: WireRequestId,
+    code: PlansBridgeErrorCode | BackendPluginErrorCode,
+  ): void {
+    if (this.currentGeneration !== generation || generation.exited) return
+    try {
+      this.writeFrame(
+        generation,
+        encodeFrame({
+          jsonrpc: '2.0',
+          id: requestId,
+          error: {
+            code: 1000,
+            message: 'Host Bridge request failed.',
+            data: { code },
+          },
+        }),
+      )
+    } catch {
+      /* The generation has already failed or is being terminated. */
+    }
+  }
+
+  private sendBridgeEvent(
+    pending: PendingBridgeRequest,
+    event: string,
+    payload: JsonValue,
+  ): void {
+    if (
+      !isMethodName(event) ||
+      !isJsonValue(payload) ||
+      pending.controller.signal.aborted ||
+      this.bridgeRequests.get(pending.request.id) !== pending ||
+      this.currentGeneration !== pending.generation ||
+      pending.generation.exited
+    ) return
+    let encoded: Buffer
+    try {
+      encoded = encodeFrame({
+        jsonrpc: '2.0',
+        method: 'navide/host/event',
+        params: {
+          origin: {
+            kind: pending.request.origin.kind,
+            requestId: pending.request.origin.requestId,
+          },
+          event,
+          payload,
+        },
+      })
+    } catch {
+      this.cancelBridgeRequest(pending.request.id, 'protocol-error')
+      return
+    }
+    if (encoded.length > MAX_BACKEND_BRIDGE_QUEUE_BYTES) {
+      this.cancelBridgeRequest(pending.request.id, 'resource-limit')
+      return
+    }
+    try {
+      this.writeFrame(pending.generation, encoded)
+    } catch {
+      /* The generation has already failed or is being terminated. */
+    }
+  }
+
+  private cancelBridgeRequest(requestId: WireRequestId, reason: string): void {
+    if (typeof requestId !== 'string') return
+    const pending = this.bridgeRequests.get(requestId)
+    if (!pending) return
+    this.bridgeRequests.delete(requestId)
+    if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+    if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
+    pending.controller.abort()
+    this.sendCancellation(requestId, reason, pending.generation)
+  }
+
+  private registerBridgeOrigin(
+    origin: PlansBridgeOrigin,
+    runtime: BackendRuntimeContext,
+    generation: ChildGeneration,
+    workspacePath?: string,
+    authorizedPlanRoot?: string,
+  ): void {
+    this.bridgeOrigins.set(originKey(origin), {
+      generation,
+      origin,
+      runtime: Object.freeze({ ...runtime }),
+      ...(workspacePath === undefined ? {} : { workspacePath }),
+      ...(authorizedPlanRoot === undefined ? {} : { authorizedPlanRoot }),
+    })
+  }
+
+  private unregisterBridgeOrigin(origin: PlansBridgeOrigin, generation?: ChildGeneration): void {
+    const key = originKey(origin)
+    const binding = this.bridgeOrigins.get(key)
+    if (!binding || (generation && binding.generation !== generation)) return
+    this.bridgeOrigins.delete(key)
+  }
+
+  private abortBridgeRequestsForOrigin(origin: PlansBridgeOrigin): void {
+    const key = originKey(origin)
+    for (const [requestId, pending] of this.bridgeRequests) {
+      if (pending.originKey !== key) continue
+      this.bridgeRequests.delete(requestId)
+      if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+      if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
+      pending.controller.abort()
+      this.sendCancellation(requestId, 'cancelled', pending.generation)
+    }
+  }
+
+  private abortBridgeRequestsForGeneration(generation: ChildGeneration | undefined): void {
+    if (!generation) return
+    for (const [requestId, pending] of this.bridgeRequests) {
+      if (pending.generation !== generation) continue
+      this.bridgeRequests.delete(requestId)
+      if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+      if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
+      pending.controller.abort()
+      this.sendCancellation(requestId, 'stopping', generation)
+    }
+    for (const [key, binding] of this.bridgeOrigins) {
+      if (binding.generation === generation) this.bridgeOrigins.delete(key)
+    }
+  }
+
+  private abortAllBridgeRequests(): void {
+    for (const [requestId, pending] of this.bridgeRequests) {
+      this.bridgeRequests.delete(requestId)
+      if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+      if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
+      pending.controller.abort()
+      this.sendCancellation(requestId, 'stopping', pending.generation)
+    }
+    this.bridgeOrigins.clear()
+    this.bridgeWatchOrigins.clear()
+  }
+
+  private handleNotification(
+    generation: ChildGeneration,
+    notification: Exclude<BackendWireNotification, BackendBridgeCancellationNotification>,
+  ): void {
     if (this.currentGeneration !== generation) return
     if (notification.kind === 'subscription-acknowledged') {
       const state = this.subscriptionsByRequestId.get(notification.subscriptionId)
@@ -1445,7 +2041,7 @@ export class PluginBackendSupervisor {
           requestId,
           () =>
             pending.reject(
-              new BackendPluginError('PLUGIN_ERROR', undefined, {
+              new BackendPluginError(this.pluginErrorCode(response.pluginCode), undefined, {
                 requestId,
                 pluginCode: response.pluginCode,
               })
@@ -1472,7 +2068,7 @@ export class PluginBackendSupervisor {
         return
       }
       const error = response.kind === 'plugin-error'
-        ? new BackendPluginError('PLUGIN_ERROR', undefined, {
+        ? new BackendPluginError(this.pluginErrorCode(response.pluginCode), undefined, {
             requestId,
             pluginCode: response.pluginCode,
           })
@@ -1491,14 +2087,20 @@ export class PluginBackendSupervisor {
     throw new Error(PROTOCOL_ERROR_MESSAGE)
   }
 
+  private pluginErrorCode(pluginCode: string): BackendPluginErrorCode {
+    return pluginCode === 'RESULT_TOO_LARGE' ? 'RESULT_TOO_LARGE' : 'PLUGIN_ERROR'
+  }
+
   private async callWithRuntime<Result extends JsonValue>(
     runtime: BackendRuntimeContext,
     name: string,
     args: JsonValue,
-    options: BackendPluginCallOptions = {}
+    options: BackendPluginCallOptions = {},
+    workspacePath?: string,
+    authorizedPlanRoot?: string,
   ): Promise<Result> {
     if (this.state !== 'ready') {
-      throw this.failure ?? new BackendPluginError(this.state === 'closed' ? 'PLUGIN_STOPPING' : 'NOT_READY')
+      throw this.failure ?? new BackendPluginError(this.lifecycleErrorCode())
     }
     if (
       !isMethodName(name) ||
@@ -1518,7 +2120,11 @@ export class PluginBackendSupervisor {
           runtime: { ...runtime },
         },
       },
-      options
+      options,
+      { kind: 'call', requestId: id },
+      runtime,
+      workspacePath,
+      authorizedPlanRoot,
     )
     const result = this.successResult(response)
     return result.value as Result
@@ -1543,7 +2149,11 @@ export class PluginBackendSupervisor {
 
   private sendRequest(
     frame: JsonValue,
-    options: BackendPluginCallOptions
+    options: BackendPluginCallOptions,
+    origin?: PlansBridgeOrigin,
+    runtime?: BackendRuntimeContext,
+    workspacePath?: string,
+    authorizedPlanRoot?: string,
   ): Promise<BackendWireResponse> {
     const requestId = isRecord(frame) && isRequestId(frame.id) ? frame.id : undefined
     const generation = this.currentGeneration
@@ -1568,9 +2178,14 @@ export class PluginBackendSupervisor {
       const cleanup = (): void => {
         clearTimeout(timer)
         options.signal?.removeEventListener('abort', abort)
+        if (origin) {
+          this.unregisterBridgeOrigin(origin, generation)
+          this.abortBridgeRequestsForOrigin(origin)
+        }
       }
       const pending: PendingRequest = {
         generation,
+        ...(origin ? { origin } : {}),
         resolve: (response) => {
           if (settled) return
           settled = true
@@ -1586,11 +2201,14 @@ export class PluginBackendSupervisor {
         cleanup,
       }
       this.pending.set(requestId, pending)
+      if (origin && runtime) {
+        this.registerBridgeOrigin(origin, runtime, generation, workspacePath, authorizedPlanRoot)
+      }
       try {
         if (generation.exited || generation.child.stdin.destroyed || generation.child.stdin.writableEnded) {
           throw new Error('closed')
         }
-        generation.child.stdin.write(encodeFrame(frame))
+        this.writeFrame(generation, encodeFrame(frame))
       } catch {
         this.failProcess(generation, 'BACKEND_UNAVAILABLE')
       }
@@ -1619,12 +2237,13 @@ export class PluginBackendSupervisor {
         generation.exited ||
         generation.child.stdin.destroyed
       ) return
-      generation.child.stdin.write(
+      this.writeFrame(
+        generation,
         encodeFrame({
           jsonrpc: '2.0',
           method: 'notifications/cancelled',
           params: { requestId, ...(reason ? { reason } : {}) },
-        })
+        }),
       )
     } catch {
       /* Cancellation is best effort; the original safe error has already settled. */
@@ -1639,12 +2258,17 @@ export class PluginBackendSupervisor {
     action()
   }
 
-  private rejectPending(error: BackendPluginError, rememberRequestIds = false): void {
+  private rejectPending(
+    error: BackendPluginError,
+    rememberRequestIds = false,
+    cancellationReason?: string,
+  ): void {
     for (const [requestId, pending] of this.pending) {
       this.pending.delete(requestId)
       if (rememberRequestIds) this.rememberIgnoredRequestId(requestId)
       pending.cleanup()
       pending.reject(error)
+      if (cancellationReason) this.sendCancellation(requestId, cancellationReason, pending.generation)
     }
   }
 
@@ -1655,6 +2279,12 @@ export class PluginBackendSupervisor {
   ): void {
     if (generation && this.currentGeneration !== generation) return
     if (this.state === 'closed' || this.state === 'restarting') return
+    if (this.state === 'draining') {
+      const error = new BackendPluginError(this.closeTask ? 'PLUGIN_STOPPING' : 'BACKEND_UNAVAILABLE')
+      this.abortBridgeRequestsForGeneration(generation)
+      this.rejectPending(error, true, this.closeTask ? 'stopping' : 'restarting')
+      return
+    }
     const error = this.failure ?? new BackendPluginError(code)
     if (code === 'PROTOCOL_ERROR') {
       this.settleAllSubscriptions({ reason: 'protocol-error', error })
@@ -1662,8 +2292,10 @@ export class PluginBackendSupervisor {
       this.detachSubscriptionsForRestart()
     }
     this.failure = error
+    if (this.authorizedPlanRoot) this.authorizedPlanRoot.value = null
     this.state = 'failed'
     this.ignoredRequestIds.clear()
+    this.abortBridgeRequestsForGeneration(generation)
     this.rejectPending(error)
     if (terminate && generation && !generation.exited) {
       void this.requestTermination(generation, code === 'PROTOCOL_ERROR')
@@ -1676,6 +2308,8 @@ export class PluginBackendSupervisor {
     const child = generation.child
     const task = (async (): Promise<void> => {
       if (force) {
+        generation.outputQueue = []
+        generation.outputQueueBytes = 0
         try {
           child.stdin.destroy()
         } catch {
@@ -1687,6 +2321,7 @@ export class PluginBackendSupervisor {
           /* already gone */
         }
       } else {
+        await this.waitForOutputQueue(generation)
         try {
           child.stdin.end()
         } catch {
@@ -1709,6 +2344,74 @@ export class PluginBackendSupervisor {
     })()
     generation.terminationTask = task
     return task
+  }
+
+  private async waitForOutputQueue(generation: ChildGeneration): Promise<void> {
+    const drained = await new Promise<boolean>((resolvePromise) => {
+      let settled = false
+      const finish = (value: boolean): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(deadline)
+        resolvePromise(value)
+      }
+      const deadline = setTimeout(() => finish(false), this.shutdownTimeoutMs)
+      const check = (): void => {
+        if (generation.outputQueue.length === 0 && !generation.outputWriting) {
+          finish(true)
+          return
+        }
+        if (!generation.exited) setTimeout(check, 0)
+        else finish(true)
+      }
+      check()
+    })
+    if (!drained) {
+      generation.outputQueue = []
+      generation.outputQueueBytes = 0
+    }
+  }
+
+  /** Serialize all Host→child frames and keep the internal Bridge bounded. */
+  private writeFrame(generation: ChildGeneration, frame: Buffer): void {
+    if (
+      this.currentGeneration !== generation ||
+      generation.exited ||
+      generation.child.stdin.destroyed ||
+      generation.child.stdin.writableEnded
+    ) throw new Error('closed')
+    if (generation.outputQueueBytes + frame.length > MAX_BACKEND_BRIDGE_QUEUE_BYTES) {
+      this.failProcess(generation, 'BACKEND_UNAVAILABLE')
+      throw new Error('output queue limit reached')
+    }
+    generation.outputQueue.push(frame)
+    generation.outputQueueBytes += frame.length
+    this.flushOutput(generation)
+  }
+
+  private flushOutput(generation: ChildGeneration): void {
+    if (
+      generation.outputWriting ||
+      this.currentGeneration !== generation ||
+      generation.exited
+    ) return
+    const frame = generation.outputQueue.shift()
+    if (!frame) return
+    generation.outputQueueBytes -= frame.length
+    generation.outputWriting = true
+    try {
+      generation.child.stdin.write(frame, (error?: Error | null) => {
+        generation.outputWriting = false
+        if (error) {
+          this.failProcess(generation, 'BACKEND_UNAVAILABLE')
+          return
+        }
+        this.flushOutput(generation)
+      })
+    } catch {
+      generation.outputWriting = false
+      this.failProcess(generation, 'BACKEND_UNAVAILABLE')
+    }
   }
 
   private nextRequestId(): string {

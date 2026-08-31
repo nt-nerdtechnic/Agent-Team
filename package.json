@@ -20,7 +20,7 @@
     "build:mini-ide": "vite build --config vite.mini-ide.config.ts",
     "build:plans": "vite build --config vite.plans.config.ts",
     "build:plans:fixture": "node scripts/build-plans-backend.mjs",
-    "test:packaged-plans": "pnpm run build:plans:fixture && NAVIDE_TEST_PACKAGED_PLANS=1 pnpm test:run tests/integration/plansPackagedRoundtrip.test.ts src/main/plugins/pluginBackendHost.test.ts",
+    "test:packaged-plans": "pnpm run build:plans:fixture && NAVIDE_TEST_PACKAGED_PLANS=1 pnpm test:run tests/integration/plansPackagedRoundtrip.test.ts src/main/plugins/pluginBackendHost.test.ts src/main/plugins/pluginBackendSupervisor.test.ts",
     "build:git:legacy": "vite build --config vite.git.config.ts",
     "build:git:v2": "vite build --config plugins/navide-git/vite.config.ts",
     "build:git": "pnpm run build:git:legacy && pnpm run build:git:v2",

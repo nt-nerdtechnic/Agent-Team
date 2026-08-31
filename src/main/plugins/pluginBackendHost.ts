@@ -15,24 +15,54 @@ import {
 import {
   isAllowedBackendTimeout,
   MAX_BACKEND_CALLS_PER_INSTANCE,
+  MAX_BACKEND_CHILDREN,
   MAX_BACKEND_SUBSCRIPTIONS_PER_INSTANCE,
 } from './pluginBackendLimits'
+import {
+  createProductionPlansBridgeDispatcher,
+  type BackendBridgeDispatcher,
+} from './plansBridge'
+import {
+  canonicalExistingDirectory,
+  isWorkspaceContainedPath,
+} from './workspacePathPolicy'
 import { lstatSync, realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+export interface PlanRootResolverInput {
+  readonly runtime: BackendRuntimeContext
+  readonly workspacePath: string
+  readonly signal: AbortSignal
+}
+
+export type PlanRootResolver = (input: PlanRootResolverInput) => Promise<string>
+
 export interface PluginBackendHostOptions {
   environment?: Readonly<Record<string, string>>
-  createSupervisor?: (activation: BackendPluginLaunchSpec) => PluginBackendSupervisor
+  createSupervisor?: (
+    activation: BackendPluginLaunchSpec,
+    options: PluginBackendSupervisorOptions,
+  ) => PluginBackendSupervisor
+  /** Internal Host-owned Plans Bridge; never passed to renderer/SDK code. */
+  bridgeDispatcher?: BackendBridgeDispatcher
+  /** Resolve the Host-authorized Plans repository root for one bound view. */
+  resolvePlanRoot?: PlanRootResolver
 }
 
 interface RegisteredBackend {
   activation: BackendPluginLaunchSpec
-  supervisor: PluginBackendSupervisor
 }
 
 interface BoundView {
   runtime: AuthenticatedBackendRuntime
-  backend: RegisteredBackend
+  workspacePath?: string
+  activation: BackendPluginLaunchSpec
+  supervisor?: PluginBackendSupervisor
+  authorizedPlanRoot: { value: string | null }
+  bindingController: AbortController
+  bindingTask: Promise<void>
+  closing: boolean
+  slotReleased: boolean
   calls: Set<AbortController>
   subscriptions: Set<BackendPluginSubscription>
   pendingSubscriptions: number
@@ -80,33 +110,35 @@ function isViewRuntime(runtime: BackendRuntimeContext): boolean {
 
 function defaultSupervisor(
   activation: BackendPluginLaunchSpec,
-  environment: Readonly<Record<string, string>>,
+  options: PluginBackendSupervisorOptions,
 ): PluginBackendSupervisor {
-  const options: PluginBackendSupervisorOptions = {
-    // The child executable is already self-contained. Supplying an explicit
-    // map prevents Electron's process environment from crossing the boundary.
-    environment,
-    clientInfo: { name: 'navide-host', version: activation.packageVersion },
-  }
   return new PluginBackendSupervisor(activation, options)
 }
 
 /**
  * Host-owned router for one package's Backend Wire child processes.
  *
- * Renderer code never receives this object. Main registers a view from its
- * sender-bound record, then addresses calls by that opaque instance id.
+ * A registered package is only metadata. Each bound view gets its own
+ * supervisor, authenticated runtime, root binding, and process slot. Renderer
+ * code never receives this object or any of those Host-owned handles.
  */
 export class PluginBackendHost {
   private readonly environment: Readonly<Record<string, string>>
-  private readonly createSupervisor: (activation: BackendPluginLaunchSpec) => PluginBackendSupervisor
+  private readonly createSupervisor: (
+    activation: BackendPluginLaunchSpec,
+    options: PluginBackendSupervisorOptions,
+  ) => PluginBackendSupervisor
+  private readonly bridgeDispatcher: BackendBridgeDispatcher
+  private readonly resolvePlanRoot?: PlanRootResolver
   private readonly backends = new Map<string, RegisteredBackend>()
   private readonly views = new Map<string, BoundView>()
+  private reservedChildSlots = 0
 
   constructor(options: PluginBackendHostOptions = {}) {
     this.environment = Object.freeze({ ...(options.environment ?? {}) })
-    this.createSupervisor = options.createSupervisor ?? ((activation) =>
-      defaultSupervisor(activation, this.environment))
+    this.bridgeDispatcher = options.bridgeDispatcher ?? createProductionPlansBridgeDispatcher()
+    this.resolvePlanRoot = options.resolvePlanRoot
+    this.createSupervisor = options.createSupervisor ?? defaultSupervisor
   }
 
   register(activation: BackendPluginLaunchSpec): void {
@@ -119,8 +151,7 @@ export class PluginBackendHost {
     const normalizedActivation = activation.packageDir === packageDir
       ? activation
       : { ...activation, packageDir }
-    const supervisor = this.createSupervisor(normalizedActivation)
-    this.backends.set(key, { activation: normalizedActivation, supervisor })
+    this.backends.set(key, { activation: normalizedActivation })
   }
 
   hasActivation(pluginId: string, packageVersion: string): boolean {
@@ -142,7 +173,17 @@ export class PluginBackendHost {
     return [...this.backends.values()].find(({ activation }) => activation.pluginId === pluginId)?.activation
   }
 
-  bindView(runtime: BackendRuntimeContext, packageDir: string): void {
+  /**
+   * Reserve a view synchronously, then resolve its root and create its child.
+   * Synchronous input/identity errors still throw at the binding boundary;
+   * asynchronous root failures are returned by the binding promise and by all
+   * calls/subscriptions addressed to that view.
+   */
+  bindView(
+    runtime: BackendRuntimeContext,
+    packageDir: string,
+    workspacePath?: string,
+  ): Promise<void> {
     if (!isViewRuntime(runtime)) throw new BackendPluginError('INVALID_RUNTIME')
     const instanceId = runtime.instanceId
     if (!nonEmptyString(instanceId)) throw new BackendPluginError('INVALID_RUNTIME')
@@ -155,25 +196,124 @@ export class PluginBackendHost {
     if (this.views.has(instanceId)) {
       throw new BackendPluginError('INVALID_RUNTIME', 'Backend view instance is already bound.')
     }
-    this.views.set(instanceId, {
+    if (workspacePath !== undefined && !nonEmptyString(workspacePath)) {
+      throw new BackendPluginError('INVALID_RUNTIME')
+    }
+    if (this.reservedChildSlots >= MAX_BACKEND_CHILDREN) {
+      throw new BackendPluginError('RESOURCE_LIMIT', 'Backend child process limit reached.')
+    }
+
+    const view: BoundView = {
       runtime: createAuthenticatedBackendRuntime(runtime),
-      backend,
+      ...(workspacePath === undefined ? {} : { workspacePath: resolve(workspacePath) }),
+      activation: backend.activation,
+      authorizedPlanRoot: { value: null },
+      bindingController: new AbortController(),
+      bindingTask: Promise.resolve(),
+      closing: false,
+      slotReleased: false,
       calls: new Set(),
       subscriptions: new Set(),
       pendingSubscriptions: 0,
+    }
+    this.views.set(instanceId, view)
+    this.reservedChildSlots++
+    view.bindingTask = this.finishBinding(view).catch((error: unknown) => {
+      if (this.views.get(instanceId) === view) this.views.delete(instanceId)
+      view.closing = true
+      view.bindingController.abort()
+      this.releaseChildSlot(view)
+      throw error
     })
+    return view.bindingTask
   }
 
-  unbindView(instanceId: string): void {
+  private async finishBinding(view: BoundView): Promise<void> {
+    try {
+      const needsFilesystem = view.activation.approvedBridgePorts?.includes('filesystem') ?? false
+      if (needsFilesystem) {
+        if (!view.workspacePath || !this.resolvePlanRoot) {
+          throw new BackendPluginError('INVALID_RUNTIME')
+        }
+        const root = await this.resolvePlanRoot({
+          runtime: view.runtime,
+          workspacePath: view.workspacePath,
+          signal: view.bindingController.signal,
+        })
+        if (view.bindingController.signal.aborted || view.closing) {
+          throw new BackendPluginError('USER_CANCELLED')
+        }
+        const canonicalRoot = nonEmptyString(root) ? canonicalExistingDirectory(root) : null
+        if (!canonicalRoot || !isWorkspaceContainedPath(canonicalRoot, view.workspacePath)) {
+          throw new BackendPluginError('INVALID_RUNTIME', 'Plans root is outside the bound workspace.')
+        }
+        view.authorizedPlanRoot.value = canonicalRoot
+      }
+
+      if (view.bindingController.signal.aborted || view.closing) {
+        throw new BackendPluginError('USER_CANCELLED')
+      }
+      const supervisorOptions: PluginBackendSupervisorOptions = {
+        environment: this.environment,
+        clientInfo: { name: 'navide-host', version: view.activation.packageVersion },
+        bridgeDispatcher: this.bridgeDispatcher,
+        authorizedPlanRoot: view.authorizedPlanRoot,
+        ...(needsFilesystem && this.resolvePlanRoot && view.workspacePath !== undefined
+          ? {
+              refreshAuthorizedPlanRoot: (signal: AbortSignal): Promise<string> =>
+                this.refreshPlanRoot(view, signal),
+            }
+          : {}),
+      }
+      view.supervisor = this.createSupervisor(view.activation, supervisorOptions)
+    } catch (error) {
+      if (error instanceof BackendPluginError) throw error
+      throw new BackendPluginError('BACKEND_UNAVAILABLE')
+    }
+  }
+
+  private async refreshPlanRoot(view: BoundView, signal: AbortSignal): Promise<string> {
+    if (!this.resolvePlanRoot || !view.workspacePath) {
+      throw new BackendPluginError('INVALID_RUNTIME')
+    }
+    const root = await this.resolvePlanRoot({
+      runtime: view.runtime,
+      workspacePath: view.workspacePath,
+      signal,
+    })
+    const canonicalRoot = nonEmptyString(root) ? canonicalExistingDirectory(root) : null
+    if (!canonicalRoot || !isWorkspaceContainedPath(canonicalRoot, view.workspacePath)) {
+      throw new BackendPluginError('INVALID_RUNTIME', 'Plans root is outside the bound workspace.')
+    }
+    view.authorizedPlanRoot.value = canonicalRoot
+    return canonicalRoot
+  }
+
+  private releaseChildSlot(view: BoundView): void {
+    if (view.slotReleased) return
+    view.slotReleased = true
+    this.reservedChildSlots--
+  }
+
+  async unbindView(instanceId: string): Promise<void> {
     const view = this.views.get(instanceId)
     if (!view) return
     this.views.delete(instanceId)
+    view.closing = true
+    view.bindingController.abort()
     for (const controller of view.calls) controller.abort()
     view.calls.clear()
     for (const subscription of view.subscriptions) {
       subscription.dispose('view-destroyed')
     }
     view.subscriptions.clear()
+    try {
+      await view.bindingTask
+    } catch {
+      // A failed binding has no child to close; callers already receive it.
+    }
+    await view.supervisor?.close()
+    this.releaseChildSlot(view)
   }
 
   async call<Result extends JsonValue>(
@@ -184,7 +324,7 @@ export class PluginBackendHost {
   ): Promise<Result> {
     const view = this.views.get(instanceId)
     if (!view) throw new BackendPluginError('INVALID_RUNTIME')
-    if (!view.backend.activation.approvedMethods.includes(name)) {
+    if (!view.activation.approvedMethods.includes(name)) {
       throw new BackendPluginError('INVALID_ARGUMENT')
     }
     if (options?.timeoutMs !== undefined && !isAllowedBackendTimeout(options.timeoutMs)) {
@@ -199,10 +339,17 @@ export class PluginBackendHost {
     else options?.signal?.addEventListener('abort', abort, { once: true })
     view.calls.add(controller)
     try {
-      await view.backend.supervisor.start()
+      await view.bindingTask
       if (controller.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
-      if (this.views.get(instanceId) !== view) throw new BackendPluginError('INVALID_RUNTIME')
-      return view.backend.supervisor.clientFor(view.runtime).call<Result>(name, args, {
+      if (this.views.get(instanceId) !== view || view.closing || !view.supervisor) {
+        throw new BackendPluginError('INVALID_RUNTIME')
+      }
+      await view.supervisor.start()
+      if (controller.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
+      return view.supervisor.clientFor(view.runtime, {
+        workspacePath: view.workspacePath,
+        authorizedPlanRoot: view.authorizedPlanRoot.value ?? undefined,
+      }).call<Result>(name, args, {
         ...options,
         signal: controller.signal,
       })
@@ -220,7 +367,7 @@ export class PluginBackendHost {
   ): Promise<BackendPluginSubscription> {
     const view = this.views.get(instanceId)
     if (!view) throw new BackendPluginError('INVALID_RUNTIME')
-    if (!view.backend.activation.approvedEvents.includes(event)) {
+    if (!view.activation.approvedEvents.includes(event)) {
       throw new BackendPluginError('INVALID_ARGUMENT')
     }
     if (options?.timeoutMs !== undefined && !isAllowedBackendTimeout(options.timeoutMs)) {
@@ -231,30 +378,32 @@ export class PluginBackendHost {
     }
     view.pendingSubscriptions++
     try {
-      await view.backend.supervisor.start()
-      const current = this.views.get(instanceId)
-      if (current !== view) throw new BackendPluginError('INVALID_RUNTIME')
-      const subscription = view.backend.supervisor.clientFor(view.runtime).subscribe(
+      await view.bindingTask
+      if (options?.signal?.aborted) throw new BackendPluginError('USER_CANCELLED')
+      if (this.views.get(instanceId) !== view || view.closing || !view.supervisor) {
+        throw new BackendPluginError('INVALID_RUNTIME')
+      }
+      await view.supervisor.start()
+      const subscription = view.supervisor.clientFor(view.runtime, {
+        workspacePath: view.workspacePath,
+        authorizedPlanRoot: view.authorizedPlanRoot.value ?? undefined,
+      }).subscribe(
         [event],
         (backendEvent: BackendPluginEvent) => {
           if (backendEvent.event === event) listener(backendEvent.payload)
         },
         options,
       )
-      view.pendingSubscriptions--
       view.subscriptions.add(subscription)
       void subscription.settled.then(() => view.subscriptions.delete(subscription))
       return subscription
-    } catch (error) {
+    } finally {
       view.pendingSubscriptions--
-      throw error
     }
   }
 
   async close(): Promise<void> {
-    for (const instanceId of [...this.views.keys()]) this.unbindView(instanceId)
-    const supervisors = [...this.backends.values()].map(({ supervisor }) => supervisor.close())
+    await Promise.all([...this.views.keys()].map((instanceId) => this.unbindView(instanceId)))
     this.backends.clear()
-    await Promise.all(supervisors)
   }
 }

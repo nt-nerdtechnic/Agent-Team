@@ -33,6 +33,12 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -69,6 +75,7 @@ jobs:
           pnpm run build:plans
           test -f dist-plugins/plans/index.html
           test ! -e dist-plugins/plans/backend/navide-plans
+          test ! -e dist-plugins/plans/backend/navide-plans-go
 
       - name: Backend tests
         run: uv --project backend run pytest backend/tests

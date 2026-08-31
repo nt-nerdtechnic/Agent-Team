@@ -15,9 +15,12 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 // This artifact is deliberately outside dist-plugins/. It is a self-contained
 // Issue 21 integration fixture, not a production Plans backend.
 const source = resolve(repositoryRoot, 'src/main/plugins/test-fixtures/plans-backend-wire.py')
+const goSource = resolve(repositoryRoot, 'src/main/plugins/test-fixtures/plans-backend-wire.go')
 const backendDirectory = resolve(repositoryRoot, 'dist-test-fixtures/plans/backend')
 const executableName = process.platform === 'win32' ? 'navide-plans.exe' : 'navide-plans'
 const executable = join(backendDirectory, executableName)
+const goExecutableName = process.platform === 'win32' ? 'navide-plans-go.exe' : 'navide-plans-go'
+const goExecutable = join(backendDirectory, goExecutableName)
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'navide-plans-backend-'))
 
 try {
@@ -64,6 +67,28 @@ try {
     throw new Error(`Plans backend output is a script, not a packaged executable: ${executable}`)
   }
   console.log(`Built packaged Plans backend fixture: ${executable}`)
+
+  const goVersion = execFileSync('go', ['version'], { encoding: 'utf8' })
+  if (!/\bgo1\.27(?:\.\d+)?\b/u.test(goVersion)) {
+    throw new Error(`Plans Go fixture requires Go 1.27.x, received: ${goVersion.trim()}`)
+  }
+  execFileSync(
+    'go',
+    ['build', '-trimpath', '-o', goExecutable, goSource],
+    { cwd: repositoryRoot, stdio: 'inherit' },
+  )
+  const goEntry = lstatSync(goExecutable)
+  if (!goEntry.isFile() || goEntry.isSymbolicLink() || goEntry.size === 0) {
+    throw new Error(`Go did not produce a regular Plans backend executable: ${goExecutable}`)
+  }
+  if (process.platform !== 'win32') {
+    chmodSync(goExecutable, goEntry.mode | 0o111)
+  }
+  const goPrefix = readFileSync(goExecutable).subarray(0, 5)
+  if (goPrefix[0] === 0x23 && goPrefix[1] === 0x21) {
+    throw new Error(`Plans Go backend output is a script, not a packaged executable: ${goExecutable}`)
+  }
+  console.log(`Built packaged Plans backend fixture: ${goExecutable}`)
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true })
 }

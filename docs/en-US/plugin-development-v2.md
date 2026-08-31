@@ -1,6 +1,6 @@
 # Plugin Developer Spec v2
 
-> **Status: target draft; Issues 03, 16, and the bounded Issue 21 Plans spike are implemented.** The current runtime uses manifest
+> **Status: target draft; Issues 03, 16, the bounded Issue 21 Plans spike, and Issue 22's bridge/lifecycle spike are implemented.** The current runtime uses manifest
 > v1 and is documented in [Plugin development guide](plugin-development.md).
 > This document is the author-facing contract that the v2 migration must
 > implement before third-party publishing opens.
@@ -8,8 +8,10 @@
 > Issue 03 adds strict Manifest v2 grant parsing, catalog validation, and the
 > Host authorization/planning seam. Issue 21 adds one bundled Plans
 > package-local operation through the public SDK, authenticated Host router,
-> and self-contained Python Backend Wire child. Full backend child lifecycle
-> and core-service ports remain deferred to their owning follow-up issues. Issue 03 completes the
+> and self-contained Python Backend Wire child. Issue 22 adds the Host-private
+> core-service ports, package-owned watcher, bounded child lifecycle, and
+> cross-language fixture parity. Normal production Plans activation remains
+> deferred to Issue 23E. Issue 03 completes the
 > parser, catalog, authorization planner, and Host enforcement seams.
 > Issue 16 adds the durable storage adapter and Host-only lifecycle seams to
 > Electron main. Production grant/consent and runtime-context production are
@@ -319,8 +321,12 @@ may retain an existing event fallback until its package owns the equivalent
 event source, and must dispose the returned subscription when its view is
 destroyed. `settled` rejects if an accepted subscription ends because the
 backend becomes unavailable, so the view can restore that fallback event
-route. The bounded Plans spike keeps the core file-watcher route active because
-the packaged child does not yet own a watcher; Issue 22 supplies that port.
+route. Issue 22 supplies the package-owned watcher and makes the accepted
+package subscription authoritative. Legacy watcher fallback remains available
+only when the package subscription cannot be accepted or later becomes
+unavailable. This watcher and lifecycle work is test-only until Issue 23E
+activates the production Plans package; normal production startup remains on
+the legacy adapter.
 
 The production adapter maps that Interface to MCP base methods plus one
 Navide-owned event notification:
@@ -371,9 +377,11 @@ published under `docs/plugin-contracts/` and validated together with the
 Manifest v2 corpus. This contract enables backend-only and combined package
 description and installation. Issues 07 and 08 add the private Electron-main
 supervisor/stdio and subscription lifecycle seams; Issue 21 connects one
-bundled Plans operation and event through the public SDK and Host router. These
-are not a public installed-backend activation workflow. Future AI
-integration is a separate adapter: it may
+bundled Plans operation and event through the public SDK and Host router. Issue
+22's bridge ports and child lifecycle are Host-private implementation seams;
+they do not activate the production Plans package or expose core services to
+the public SDK. These are not a public installed-backend activation workflow.
+Future AI integration is a separate adapter: it may
 expose an explicit allowlist of schema-described package methods as MCP tools.
 No package method is AI-callable by default, and adopting this wire profile
 does not itself create a tool catalog.

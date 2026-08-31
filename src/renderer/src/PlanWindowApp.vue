@@ -7,7 +7,7 @@
 // PlanMarkdownBody. Other HTML docs keep the plain sandboxed FilePreviewPane;
 // plain markdown (no frontmatter meta) falls back to the read-only PlanFileView.
 // Plans only — no file tree, terminal, or git.
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onBeforeMount, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useBackend } from './composables/useBackend'
 import { resolvePlanRoot as resolvePlanRootOperation } from '../plugins/plans/resolvePlanRoot'
@@ -405,16 +405,10 @@ let offThemeSettingsChange: (() => void) | null = null
 let offPlansChanged: (() => void) | null = null
 let offPlanOpenDoc: (() => void) | null = null
 
-onMounted(() => {
-  document.title = `${workspaceBaseName} — Plans`
-  loadTheme()
-  offThemeSettingsChange = onSettingsChanged((keys) => {
-    if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {
-      loadTheme()
-    }
-  })
-  // Live refresh: a plan changed on disk (any writer) — reload the open
-  // preview in place so the scroll position is preserved.
+// Live refresh: subscribe before child mounts start their initial list calls.
+// The packaged resolver emits its first plans.changed event immediately after
+// resolving the root, so registering in onMounted can miss that event.
+onBeforeMount(() => {
   offPlansChanged = backend.on('plans.changed', (payload) => {
     const p = payload as { workspace_path?: unknown } | null
     const changedWorkspace = p?.workspace_path
@@ -427,6 +421,16 @@ onMounted(() => {
       planPreviewRefresh.value++
     } else {
       pendingPlansChangedRoot = changedWorkspace
+    }
+  })
+})
+
+onMounted(() => {
+  document.title = `${workspaceBaseName} — Plans`
+  loadTheme()
+  offThemeSettingsChange = onSettingsChanged((keys) => {
+    if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {
+      loadTheme()
     }
   })
   // Auto-open the plan this window was launched for, once the root its path is

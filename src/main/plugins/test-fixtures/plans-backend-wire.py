@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import re
 import sys
 import threading
-from pathlib import Path
+import uuid
 from typing import Any
 
 PROTOCOL_REVISION = "2026-07-28"
@@ -24,20 +25,29 @@ SUBSCRIPTION_ID_KEY = "io.modelcontextprotocol/subscriptionId"
 EVENT_FILTER_KEY = "dev.navide/pluginEvents"
 MAX_FRAME_BYTES = 1_048_576
 METHOD_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
-_MAX_ROOT_ASCENT = 6
 
 SERVER_INFO = {"name": "navide.plans", "version": "0.1.92"}
 _MISSING = object()
 _write_lock = threading.Lock()
 _state_lock = threading.Lock()
 _pending_delays: dict[str, threading.Timer] = {}
+_pending_delay_intents: set[str] = set()
+_pre_cancelled_delays: set[str] = set()
 _subscriptions: dict[str, dict[str, Any]] = {}
+_bridge_pending: dict[str, queue.Queue[tuple[str, Any]]] = {}
+_bridge_origin_ids: dict[str, set[str]] = {}
 _cancelled_count = 0
 _closing = False
 
 
 class DuplicateKeyError(ValueError):
     pass
+
+
+class BridgeFailure(RuntimeError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 
 def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -101,6 +111,22 @@ def _is_request_id(value: Any) -> bool:
         isinstance(value, int)
         and not isinstance(value, bool)
     )
+
+
+def _is_bridge_id(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith("bridge:") and len(value) > len("bridge:")
+
+
+def _is_bridge_origin(value: Any) -> bool:
+    return (
+        _exact_keys(value, ("kind", "requestId"))
+        and value["kind"] in {"call", "subscription"}
+        and _is_request_id(value["requestId"])
+    )
+
+
+def _origin_key(origin: dict[str, Any]) -> str:
+    return f"{origin['kind']}:{type(origin['requestId']).__name__}:{origin['requestId']}"
 
 
 def _is_json_value(value: Any) -> bool:
@@ -212,6 +238,131 @@ def _response(request_id: Any, value: Any = _MISSING, subscription_id: Any = _MI
     _write_frame({"jsonrpc": "2.0", "id": request_id, "result": result})
 
 
+def _plugin_error(request_id: Any, code: str, message: str = "Plugin request failed") -> None:
+    _write_frame(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": 1000, "message": message, "data": {"code": code}},
+        }
+    )
+
+
+def _bridge_result(frame: Any) -> bool:
+    if not _is_record(frame) or not _is_bridge_id(frame.get("id")):
+        return False
+    bridge_id = frame["id"]
+    with _state_lock:
+        response_queue = _bridge_pending.get(bridge_id)
+    if response_queue is None:
+        return True
+    if _exact_keys(frame, ("jsonrpc", "id", "result")) and frame["jsonrpc"] == "2.0":
+        result = frame["result"]
+        if (
+            _is_record(result)
+            and result.get("resultType") == "complete"
+            and _is_record(result.get("_meta"))
+            and _is_record(result["_meta"].get(SERVER_INFO_KEY))
+        ):
+            response_queue.put(("result", result.get("value", _MISSING)))
+        else:
+            response_queue.put(("error", "PROTOCOL_ERROR"))
+        return True
+    if _is_record(frame.get("error")) and frame["jsonrpc"] == "2.0":
+        error = frame["error"]
+        data = error.get("data")
+        code = data.get("code") if _is_record(data) else None
+        response_queue.put(("error", code if isinstance(code, str) else "BACKEND_UNAVAILABLE"))
+        return True
+    response_queue.put(("error", "PROTOCOL_ERROR"))
+    return True
+
+
+def _bridge_event(frame: Any) -> bool:
+    if not _is_record(frame) or frame.get("method") != "navide/host/event":
+        return False
+    if (
+        not _exact_keys(frame, ("jsonrpc", "method", "params"))
+        or frame["jsonrpc"] != "2.0"
+        or not _exact_keys(frame["params"], ("origin", "event", "payload"))
+        or not _is_bridge_origin(frame["params"]["origin"])
+        or not _is_method_name(frame["params"]["event"])
+        or not _is_json_value(frame["params"]["payload"])
+    ):
+        raise ValueError("invalid Host Bridge event")
+    origin = frame["params"]["origin"]
+    if origin["kind"] == "subscription" and frame["params"]["event"] == "filesystem.changed":
+        _emit("plans.changed", frame["params"]["payload"], origin["requestId"])
+    return True
+
+
+def _bridge_cancel(bridge_id: str, code: str = "USER_CANCELLED") -> None:
+    with _state_lock:
+        response_queue = _bridge_pending.get(bridge_id)
+    if response_queue is not None:
+        try:
+            response_queue.put_nowait(("error", code))
+        except queue.Full:
+            pass
+
+
+def _bridge_cancel_for_origin(origin: dict[str, Any]) -> None:
+    key = _origin_key(origin)
+    with _state_lock:
+        bridge_ids = list(_bridge_origin_ids.get(key, set()))
+    for bridge_id in bridge_ids:
+        _bridge_cancel(bridge_id)
+        _write_frame(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": bridge_id, "reason": "cancelled"},
+            }
+        )
+
+
+def _bridge_call(origin: dict[str, Any], port: str, operation: str, arguments: Any) -> Any:
+    bridge_id = f"bridge:{uuid.uuid4().hex}"
+    response_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+    key = _origin_key(origin)
+    with _state_lock:
+        _bridge_pending[bridge_id] = response_queue
+        _bridge_origin_ids.setdefault(key, set()).add(bridge_id)
+    try:
+        _write_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": bridge_id,
+                "method": "navide/host/call",
+                "params": {
+                    "origin": {"kind": origin["kind"], "requestId": origin["requestId"]},
+                    "port": port,
+                    "operation": operation,
+                    "arguments": arguments,
+                },
+            }
+        )
+        while True:
+            try:
+                kind, value = response_queue.get(timeout=0.25)
+            except queue.Empty:
+                with _state_lock:
+                    if _closing:
+                        raise BridgeFailure("BACKEND_UNAVAILABLE")
+                continue
+            if kind == "error":
+                raise BridgeFailure(str(value))
+            return None if value is _MISSING else value
+    finally:
+        with _state_lock:
+            _bridge_pending.pop(bridge_id, None)
+            ids = _bridge_origin_ids.get(key)
+            if ids is not None:
+                ids.discard(bridge_id)
+                if not ids:
+                    _bridge_origin_ids.pop(key, None)
+
+
 def _acknowledge(subscription: dict[str, Any]) -> None:
     _write_frame(
         {
@@ -225,12 +376,17 @@ def _acknowledge(subscription: dict[str, Any]) -> None:
     )
 
 
-def _emit(event: str, payload: Any) -> None:
+def _emit(event: str, payload: Any, target_subscription_id: Any = _MISSING) -> None:
     with _state_lock:
         subscriptions = [
             dict(subscription)
             for subscription in _subscriptions.values()
-            if event in subscription["events"] and subscription["acknowledged"]
+            if event in subscription["events"]
+            and subscription["acknowledged"]
+            and (
+                target_subscription_id is _MISSING
+                or subscription["id"] == target_subscription_id
+            )
         ]
     for subscription in subscriptions:
         _write_frame(
@@ -246,37 +402,6 @@ def _emit(event: str, payload: Any) -> None:
         )
 
 
-def _resolve_plan_root(workspace_path: str) -> str:
-    """Mirror ``plan_index.resolve_plan_root`` for the packaged test child.
-
-    This is intentionally a small standalone copy because the PyInstaller
-    fixture cannot import the application backend package. Keep the algorithm
-    and ``_MAX_ROOT_ASCENT`` in parity with
-    ``backend/agent_team_backend/plan_index.py``; the backend test suite runs a
-    shared corpus against both implementations.
-    """
-    if not workspace_path:
-        return workspace_path
-    try:
-        current = Path(workspace_path).resolve()
-        if not current.is_dir():
-            return workspace_path
-    except (OSError, RuntimeError):
-        return workspace_path
-
-    try:
-        home = Path.home().resolve()
-    except (OSError, RuntimeError):
-        home = None
-    for _ in range(_MAX_ROOT_ASCENT + 1):
-        if current == home or current.parent == current:
-            break
-        if (current / ".git").exists():
-            return str(current)
-        current = current.parent
-    return workspace_path
-
-
 def _delay(request_id: Any, milliseconds: float) -> None:
     key = str(request_id)
 
@@ -290,6 +415,10 @@ def _delay(request_id: Any, milliseconds: float) -> None:
     timer = threading.Timer(max(0.0, milliseconds) / 1000.0, complete)
     timer.daemon = True
     with _state_lock:
+        _pending_delay_intents.discard(key)
+        if key in _pre_cancelled_delays:
+            _pre_cancelled_delays.remove(key)
+            return
         _pending_delays[key] = timer
     timer.start()
 
@@ -302,8 +431,44 @@ def _cancel(request_id: Any) -> None:
         if timer is not None:
             timer.cancel()
             _cancelled_count += 1
+        elif key in _pending_delay_intents:
+            _pending_delay_intents.remove(key)
+            _pre_cancelled_delays.add(key)
+            _cancelled_count += 1
         if _subscriptions.pop(key, None) is not None:
             _cancelled_count += 1
+    if _is_bridge_id(request_id):
+        _bridge_cancel(str(request_id))
+        return
+    if _is_request_id(request_id):
+        _bridge_cancel_for_origin({"kind": "call", "requestId": request_id})
+        _bridge_cancel_for_origin({"kind": "subscription", "requestId": request_id})
+
+
+def _start_plan_watchers(root: str) -> None:
+    with _state_lock:
+        subscriptions = [
+            subscription
+            for subscription in _subscriptions.values()
+            if "plans.changed" in subscription["events"] and not subscription["watch_started"]
+        ]
+        for subscription in subscriptions:
+            subscription["watch_started"] = True
+            subscription["workspace_path"] = root
+
+    def watch(subscription: dict[str, Any]) -> None:
+        origin = {"kind": "subscription", "requestId": subscription["id"]}
+        try:
+            _bridge_call(origin, "filesystem", "watch", {"rel_path": ""})
+        except (BridgeFailure, BrokenPipeError):
+            with _state_lock:
+                current = _subscriptions.pop(str(subscription["id"]), None)
+            if current is not None:
+                _response(subscription["id"], subscription_id=subscription["id"])
+
+    for subscription in subscriptions:
+        thread = threading.Thread(target=watch, args=(subscription,), daemon=True)
+        thread.start()
 
 
 def _valid_request(frame: Any, method: str, params_keys: tuple[str, ...]) -> bool:
@@ -318,6 +483,8 @@ def _valid_request(frame: Any, method: str, params_keys: tuple[str, ...]) -> boo
 
 
 def _handle(frame: Any) -> None:
+    if _bridge_result(frame) or _bridge_event(frame):
+        return
     if (
         _is_record(frame)
         and frame.get("jsonrpc") == "2.0"
@@ -370,6 +537,8 @@ def _handle(frame: Any) -> None:
             "id": frame["id"],
             "events": list(notifications[EVENT_FILTER_KEY]),
             "acknowledged": True,
+            "watch_started": False,
+            "workspace_path": None,
         }
         with _state_lock:
             _subscriptions[str(frame["id"])] = subscription
@@ -391,9 +560,22 @@ def _handle(frame: Any) -> None:
         if not _is_record(arguments) or not isinstance(arguments.get("workspace_path"), str):
             _protocol_error(frame["id"])
             return
-        root = _resolve_plan_root(arguments["workspace_path"])
+        try:
+            root_result = _bridge_call(
+                {"kind": "call", "requestId": frame["id"]},
+                "filesystem",
+                "resolve_root",
+                {},
+            )
+            if not _is_record(root_result) or not isinstance(root_result.get("root"), str):
+                raise BridgeFailure("PROTOCOL_ERROR")
+            root = root_result["root"]
+        except BridgeFailure as error:
+            _plugin_error(frame["id"], error.code)
+            return
         _response(frame["id"], {"ok": True, "root": root})
         _emit("plans.changed", {"workspace_path": root})
+        _start_plan_watchers(root)
         return
 
     if name == "fixture.echo":
@@ -626,6 +808,8 @@ def _fail_closed() -> None:
         _closing = True
         timers = list(_pending_delays.values())
         _pending_delays.clear()
+        _pending_delay_intents.clear()
+        _pre_cancelled_delays.clear()
         _subscriptions.clear()
     for timer in timers:
         timer.cancel()
@@ -637,7 +821,19 @@ def main() -> int:
         for raw in sys.stdin.buffer:
             if not raw.endswith(b"\n"):
                 _fail_closed()
-            _handle(parse_strict(raw[:-1]))
+            frame = parse_strict(raw[:-1])
+            if _is_record(frame) and frame.get("method") == "navide/call":
+                params = frame.get("params")
+                if (
+                    _valid_request(frame, "navide/call", ("_meta", "name", "arguments", "runtime"))
+                    and _is_record(params)
+                    and params.get("name") == "fixture.delay"
+                ):
+                    with _state_lock:
+                        _pending_delay_intents.add(str(frame["id"]))
+                threading.Thread(target=_handle, args=(frame,), daemon=True).start()
+            else:
+                _handle(frame)
     except (UnicodeDecodeError, DuplicateKeyError, ValueError, json.JSONDecodeError):
         _fail_closed()
     except BrokenPipeError:

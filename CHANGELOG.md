@@ -47,6 +47,9 @@ All notable released changes to Navide will be documented in this file. The form
   CI and release gates build and run the fixture explicitly; it is not a
   production artifact, and the full third-party backend lifecycle and remaining
   Plans operations stay on their owning migration issues.
+- Add the Host-private Plans core-service bridge, package-owned watcher, bounded
+  child drain/restart lifecycle, and Python/Go packaged fixture parity. Normal
+  production Plans startup remains on the legacy adapter until Issue 23E.
 - Require a verified Registry signature from a signer authorized by the
   App-pinned Registry root before a Manifest v2 marketplace package can be
   installed, including packages whose signed listing metadata has been

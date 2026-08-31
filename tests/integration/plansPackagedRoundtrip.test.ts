@@ -1,10 +1,9 @@
 // @vitest-environment happy-dom
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
-import PlanWindowApp from '../../src/renderer/src/PlanWindowApp.vue'
 import { i18n } from '@navide/plugin-ui/foundation'
 
 type IpcEvent = { sender: { id: number } }
@@ -179,7 +178,9 @@ const coreWsMock = vi.hoisted(() => {
             id: request.id,
             type: request.type,
             ok: true,
-            payload: { settings: {} },
+            payload: request.type === 'plans.resolve_root'
+              ? { root: process.cwd() }
+              : { settings: {} },
             error: null,
             timestamp: new Date().toISOString(),
           }),
@@ -211,7 +212,7 @@ vi.mock('ws', () => ({ WebSocket: coreWsMock.FakeNodeWebSocket }))
 // The production Plans build aliases this import to capabilityBackend. Mirror
 // that build-time alias here so the mounted production component uses the real
 // package SDK/IPC path instead of opening the core WebSocket client.
-vi.mock('../../src/renderer/src/composables/useBackend', async () => {
+vi.doMock(resolve(process.cwd(), 'src/renderer/src/composables/useBackend.ts'), async () => {
   const plansBackend = await import('../../src/renderer/plugins/plans/capabilityBackend')
   return { useBackend: plansBackend.useBackend }
 })
@@ -367,9 +368,13 @@ describe('Plans packaged backend composition', () => {
         activation: 'startup',
         approvedMethods: ['plans.resolve_root'],
         approvedEvents: ['plans.changed'],
+        approvedBridgePorts: ['filesystem'],
       })
 
       const hostWindow = new FakeHostWindow()
+      // The Host resolves the package filesystem root during view binding, so
+      // the legacy core transport must be available before the view opens.
+      manager.setBackendWsUrl('ws://plans-core-test')
       const handle = await manager.openView(descriptor, view, {
         hostWindow: hostWindow as never,
         bounds: 'fill',
@@ -381,13 +386,10 @@ describe('Plans packaged backend composition', () => {
       expect(hostWindow.children).toHaveLength(1)
       const webContents = (hostWindow.children[0] as FakeWebContentsViewLike).webContents
       mock.setSender(webContents.id)
-      // PlanWindowApp also reconciles legacy UI settings on mount. Keep that
-      // unrelated shared transport healthy without replacing the package-local
-      // Backend Wire path under test.
-      manager.setBackendWsUrl('ws://plans-core-test')
       const coreSocket = coreWsMock.FakeNodeWebSocket.instances.at(-1)
       expect(coreSocket?.url).toBe('ws://plans-core-test')
       coreSocket?.open()
+      await flushPromises()
 
       process.argv.splice(
         0,
@@ -426,6 +428,7 @@ describe('Plans packaged backend composition', () => {
       const consoleError = vi.spyOn(console, 'error')
       const consoleWarn = vi.spyOn(console, 'warn')
       try {
+        const { default: PlanWindowApp } = await import('../../src/renderer/src/PlanWindowApp.vue')
         const app = mount(PlanWindowApp, {
           global: {
             plugins: [i18n],

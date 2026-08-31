@@ -334,16 +334,32 @@ export function useBackend(): {
             type,
             cb as (payload: JsonValue) => void,
           )
-          // The packaged B5 child emits this event for its own roundtrip but
-          // does not yet own the core file watcher. Keep the established
-          // watcher subscription for the lifetime of the view until Issue 22
-          // supplies an equivalent package-owned watcher port.
-          const fallbackDisposer = navBridge().on(type, cb)
-          void subscription.ready.catch(() => undefined)
-          void subscription.settled.catch(() => undefined)
+          // The package-owned watcher is authoritative once the Host accepts
+          // it. Install the legacy watcher only after acceptance fails or the
+          // accepted package stream later becomes unavailable; this avoids
+          // duplicate plans.changed delivery while preserving rollback.
+          let disposed = false
+          let fallbackDisposer: (() => void) | null = null
+          const installFallback = (): void => {
+            if (disposed || fallbackDisposer) return
+            fallbackDisposer = navBridge().on(type, cb)
+          }
+          const fallbackOnPackageFailure = (error: unknown): void => {
+            const code = error instanceof PluginBackendError
+              ? error.code
+              : (error as { code?: unknown } | null)?.code
+            if (typeof code === 'string' && PACKAGE_BACKEND_FALLBACK_CODES.has(code)) {
+              installFallback()
+            }
+          }
+          void subscription.ready.catch(fallbackOnPackageFailure)
+          void subscription.settled
+            .then(() => installFallback())
+            .catch(fallbackOnPackageFailure)
           return () => {
+            disposed = true
             subscription.dispose()
-            fallbackDisposer()
+            fallbackDisposer?.()
           }
         } catch {
           // A package subscription failure is local to the optional route;

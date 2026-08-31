@@ -45,7 +45,8 @@ Describe the problem you are trying to solve and the solution you have in mind.
 
 ## Development Setup / 開發環境設定
 
-**Requirements:** Node.js 22+, pnpm 10+, Python 3.12+, uv 0.11+, macOS 13+
+**Requirements:** Node.js 22+, pnpm 10+, Python 3.12+, uv 0.11+, Go 1.27.x
+for the packaged Plans fixture, macOS 13+
 
 ```bash
 git clone https://github.com/nt-nerdtechnic/Navide.git

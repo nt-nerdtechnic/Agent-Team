@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeMount, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
 import { parsePlanMeta, writePlanMeta } from '../composables/usePlanFile'
@@ -161,8 +161,7 @@ async function loadPlans(): Promise<void> {
 // Backend broadcasts plans.changed when any plan document under
 // .agent-team/plans changes on disk (own writes or external agents).
 let offPlansChanged: (() => void) | null = null
-onMounted(() => {
-  void loadPlans()
+onBeforeMount(() => {
   offPlansChanged = props.backend.on('plans.changed', (payload) => {
     const p = payload as { workspace_path?: unknown } | null
     // The watcher reports whichever path it was started on, which is the
@@ -171,6 +170,9 @@ onMounted(() => {
       void loadPlans()
     }
   })
+})
+onMounted(() => {
+  void loadPlans()
 })
 onUnmounted(() => {
   offPlansChanged?.()

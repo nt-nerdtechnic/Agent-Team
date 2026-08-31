@@ -77,7 +77,11 @@ import {
   buildPluginContributionCatalog,
   type PluginContributionCatalogEntry,
 } from './pluginContributionCatalog'
-import { canonicalBackendPackageDir, PluginBackendHost } from './pluginBackendHost'
+import {
+  canonicalBackendPackageDir,
+  PluginBackendHost,
+  type PlanRootResolverInput,
+} from './pluginBackendHost'
 import {
   isAllowedBackendTimeout,
   MAX_BACKEND_CALLS_PER_INSTANCE,
@@ -89,6 +93,11 @@ import {
   type BackendPluginSubscription,
   type JsonValue,
 } from './pluginBackendSupervisor'
+import {
+  isWorkspaceContainedPath,
+  resolvePathForContainment,
+  workspaceMutationPathError,
+} from './workspacePathPolicy'
 
 /** Everything the manager needs to launch one plugin view. */
 export interface PluginLaunchDescriptor {
@@ -549,76 +558,6 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
-function isErrnoCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null &&
-    (error as { code?: unknown }).code === code
-}
-
-/** Resolve existing symlinks while preserving a non-existent trailing path. */
-function resolvePathForContainment(path: string): string | null {
-  let current = resolve(path)
-  const missingSegments: string[] = []
-
-  while (true) {
-    try {
-      lstatSync(current)
-    } catch (error) {
-      if (!isErrnoCode(error, 'ENOENT')) return null
-      const parent = dirname(current)
-      if (parent === current) return null
-      missingSegments.unshift(basename(current))
-      current = parent
-      continue
-    }
-
-    try {
-      return missingSegments.length > 0
-        ? resolve(realpathSync(current), ...missingSegments)
-        : realpathSync(current)
-    } catch {
-      // An existing symlink that cannot be resolved is not safe to fall back
-      // to lexically: this includes dangling links and symlink loops.
-      return null
-    }
-  }
-}
-
-function isWorkspaceContainedPath(workspacePath: string, candidatePath: string): boolean {
-  if (candidatePath.includes('\0')) return false
-  const root = resolvePathForContainment(workspacePath)
-  const normalizedCandidate = candidatePath.replace(/\\/g, '/')
-  const candidate = root
-    ? resolvePathForContainment(resolve(workspacePath, normalizedCandidate))
-    : null
-  if (!root || !candidate) return false
-  const relativePath = relative(root, candidate)
-  return relativePath !== '..' &&
-    !relativePath.startsWith(`..${sep}`) &&
-    !isAbsolute(relativePath)
-}
-
-/** Return the Host-side policy error for a filesystem mutation target. The
- * backend repeats this check, but the Host must stop a denied request before it
- * reaches the transport as well. `.gitignore` is intentionally not matched by
- * the segment check. */
-function workspaceMutationPathError(workspacePath: string, candidatePath: unknown): string | null {
-  if (typeof candidatePath !== 'string' || !candidatePath || !isWorkspaceContainedPath(workspacePath, candidatePath)) {
-    return 'path escapes the Host workspace binding'
-  }
-  const normalizedCandidate = candidatePath.replace(/\\/g, '/')
-  const root = resolvePathForContainment(workspacePath)
-  const candidate = root
-    ? resolvePathForContainment(resolve(workspacePath, normalizedCandidate))
-    : null
-  if (!root || !candidate) return 'path cannot be safely resolved'
-  const relativePath = relative(root, candidate)
-  const rootIsGitDirectory = basename(root) === '.git'
-  if (rootIsGitDirectory || relativePath.split(sep).some((segment) => segment === '.git')) {
-    return 'Git metadata paths are protected'
-  }
-  return null
-}
-
 function isExpectedHttpsRemote(url: unknown, expectedHost: string): boolean {
   if (typeof url !== 'string' || !url) return false
   try {
@@ -743,6 +682,7 @@ export class FrontendPluginManager {
   /** Package-local Backend Wire children receive only Host-approved temp paths. */
   private readonly pluginBackendHost = new PluginBackendHost({
     environment: createPluginBackendChildEnvironment(),
+    resolvePlanRoot: (input) => this.resolvePlansRoot(input),
   })
   private readonly pendingBackendCalls = new Map<string, Map<string, AbortController>>()
   private readonly pendingBackendSubscriptions = new Map<
@@ -1881,6 +1821,8 @@ export class FrontendPluginManager {
         return buildError(reqId, 'INVALID_ARGUMENT', 'Backend call arguments are invalid.')
       case 'RESOURCE_LIMIT':
         return buildError(reqId, 'RESOURCE_LIMIT', 'Backend resource limit reached.')
+      case 'RESULT_TOO_LARGE':
+        return buildError(reqId, 'RESOURCE_LIMIT', 'Backend result exceeds the allowed size.')
       case 'TIMEOUT':
         return buildError(reqId, 'TIMEOUT', 'Backend plugin call timed out.')
       case 'USER_CANCELLED':
@@ -2941,6 +2883,73 @@ export class FrontendPluginManager {
     return false
   }
 
+  /** Resolve the package-local Plans repository through the existing core
+   * transport. The result is validated again by PluginBackendHost before it
+   * becomes the private filesystem root for this view. */
+  private async resolvePlansRoot(input: PlanRootResolverInput): Promise<string> {
+    const instanceId = input.runtime.instanceId
+    const plugin = instanceId ? this.running.get(instanceId) : undefined
+    if (
+      !instanceId ||
+      !plugin ||
+      plugin.id !== PLANS_PLUGIN_ID ||
+      !plugin.workspacePath ||
+      resolve(plugin.workspacePath) !== input.workspacePath ||
+      this.workspaceIdForPath(input.workspacePath) !== input.runtime.workspaceId
+    ) {
+      throw new BackendPluginError('INVALID_RUNTIME')
+    }
+    if (input.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
+    const client = this.ensureBackend()
+    if (!client) throw new BackendPluginError('BACKEND_UNAVAILABLE')
+
+    let rejectAborted!: (error: BackendPluginError) => void
+    const aborted = new Promise<never>((_, reject) => {
+      rejectAborted = reject
+    })
+    const onAbort = (): void => rejectAborted(new BackendPluginError('USER_CANCELLED'))
+    input.signal.addEventListener('abort', onAbort, { once: true })
+    try {
+      const response = await Promise.race([
+        client.send<{ root?: unknown }>(
+          'plans.resolve_root',
+          { workspace_path: input.workspacePath },
+          2_500,
+        ),
+        aborted,
+      ])
+      if (input.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
+      const current = this.running.get(instanceId)
+      if (
+        current !== plugin ||
+        current.senderId !== plugin.senderId ||
+        current.workspacePath !== plugin.workspacePath
+      ) throw new BackendPluginError('INVALID_RUNTIME')
+      if (!response.ok) {
+        throw new BackendPluginError(
+          response.error?.code === 'WORKSPACE_SCOPE_VIOLATION'
+            ? 'INVALID_RUNTIME'
+            : 'BACKEND_UNAVAILABLE',
+          response.error?.message ?? 'Plans root could not be resolved.',
+        )
+      }
+      const root =
+        typeof response.payload === 'object' &&
+        response.payload !== null &&
+        !Array.isArray(response.payload) &&
+        typeof response.payload.root === 'string'
+          ? response.payload.root
+          : null
+      if (!root) throw new BackendPluginError('BACKEND_UNAVAILABLE', 'Plans root response is invalid.')
+      return root
+    } catch (error) {
+      if (error instanceof BackendPluginError) throw error
+      throw new BackendPluginError('BACKEND_UNAVAILABLE')
+    } finally {
+      input.signal.removeEventListener('abort', onAbort)
+    }
+  }
+
   /** Lazily create + connect the backend transport, subscribing to the
    *  server-push events the broker forwards. Returns null when no backend url
    *  is known yet. */
@@ -3879,15 +3888,27 @@ export class FrontendPluginManager {
       const workspaceId = this.workspaceIdForPath(record.workspacePath)
       if (workspaceId) {
         try {
-          this.pluginBackendHost.bindView({
+          const binding = this.pluginBackendHost.bindView({
             pluginId: descriptor.id,
             packageVersion: activation.packageVersion,
             workspaceId,
             instanceId,
             contributionKey: 'navide.plans.window',
             hostWindowId: String(hostWindow.id),
-          }, descriptor.packageDir!)
-          record.backendWorkspaceId = workspaceId
+          }, descriptor.packageDir!, record.workspacePath)
+          void binding.then(() => {
+            if (this.running.get(instanceId) === record) record.backendWorkspaceId = workspaceId
+          }).catch((error: unknown) => {
+            // A package backend is an optional route during the migration. Keep
+            // the running record intact so the Plans shim can fall back to its
+            // legacy adapter when root resolution loses a race with teardown
+            // or the shared backend transport.
+            console.warn(
+              `[plugin-backend] Plans view ${instanceId} could not bind: ${
+                error instanceof Error ? error.message : 'invalid backend runtime'
+              }`,
+            )
+          })
         } catch (error) {
           // A package backend is an optional route during the migration. Keep
           // the running record intact so the Plans shim can fall back to its
@@ -5385,7 +5406,7 @@ export function bundledPlansDir(source: BundledMiniIdeSource): string {
 /**
  * Register the app-bundled Plans frontend as a builtin descriptor at startup,
  * mirroring {@link registerBundledMiniIde} exactly (same precedence order and
- * fail-closed validation). Issue 21 deliberately does not register the
+ * fail-closed validation). Issue 22 deliberately does not register the
  * packaged backend fixture here: normal application startup keeps Plans on
  * the legacy adapter until the production artifact gate is complete. A
  * missing dir, invalid manifest, spoofed id, or missing entry file returns
