@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "mode": "allowlist",
+  "system": ["fs", "ui", "aiCli"],
+  "shell": ["git", "gh", "glab"]
+}

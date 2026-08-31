@@ -4,6 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  parseExecutionPolicyJson,
   parseManifestJson as parsePublicManifestJson,
   parseManifestV2 as parsePublicManifestV2,
 } from '../../../packages/plugin-contracts/src/index'
@@ -18,6 +19,7 @@ import { readManifestFromEntries, type ZipEntry } from './pluginPackage'
 
 const CONTRACT_FIXTURES = join(process.cwd(), 'docs/plugin-contracts')
 const MANIFEST_FIXTURES = join(CONTRACT_FIXTURES, 'fixtures')
+const POLICY_FIXTURES = join(CONTRACT_FIXTURES, 'execution-policy-fixtures')
 const WIRE_FIXTURES = join(CONTRACT_FIXTURES, 'backend-wire-fixtures')
 const BACKEND_WIRE_CHILD = fileURLToPath(new URL('./test-fixtures/backend-wire-child.mjs', import.meta.url))
 
@@ -28,6 +30,15 @@ const invalidManifestFixtures = readdirSync(join(MANIFEST_FIXTURES, 'invalid'))
   .filter((name) => name.endsWith('.json'))
   .sort()
 const rawManifestFixtures = readdirSync(join(MANIFEST_FIXTURES, 'invalid-raw'))
+  .filter((name) => name.endsWith('.json'))
+  .sort()
+const validExecutionPolicyFixtures = readdirSync(join(POLICY_FIXTURES, 'valid'))
+  .filter((name) => name.endsWith('.json'))
+  .sort()
+const invalidExecutionPolicyFixtures = readdirSync(join(POLICY_FIXTURES, 'invalid'))
+  .filter((name) => name.endsWith('.json'))
+  .sort()
+const rawExecutionPolicyFixtures = readdirSync(join(POLICY_FIXTURES, 'invalid-raw'))
   .filter((name) => name.endsWith('.json'))
   .sort()
 const validWireFixtures = readdirSync(join(WIRE_FIXTURES, 'valid'))
@@ -59,6 +70,10 @@ const hostToChildWireFixtures = [
 
 function readFixture(group: string, name: string): string {
   return readFileSync(join(MANIFEST_FIXTURES, group, name), 'utf8')
+}
+
+function readExecutionPolicyFixture(group: string, name: string): string {
+  return readFileSync(join(POLICY_FIXTURES, group, name), 'utf8')
 }
 
 function manifestEntry(raw: string): ZipEntry {
@@ -116,6 +131,20 @@ describe('B0 integrated Manifest v2 corpus gate', () => {
     expect(() => parsePublicManifestJson(raw)).toThrow()
     expect(() => parseHostManifestJson(raw)).toThrow()
     expect(() => readManifestFromEntries([manifestEntry(raw)])).toThrow()
+  })
+})
+
+describe('Global agent Execution Policy contract gate', () => {
+  it.each(validExecutionPolicyFixtures)('accepts valid fixture %s at the public parser seam', (name) => {
+    expect(() => parseExecutionPolicyJson(readExecutionPolicyFixture('valid', name))).not.toThrow()
+  })
+
+  it.each(invalidExecutionPolicyFixtures)('rejects invalid fixture %s at the public parser seam', (name) => {
+    expect(() => parseExecutionPolicyJson(readExecutionPolicyFixture('invalid', name))).toThrow()
+  })
+
+  it.each(rawExecutionPolicyFixtures)('rejects raw fixture %s before policy validation', (name) => {
+    expect(() => parseExecutionPolicyJson(readExecutionPolicyFixture('invalid-raw', name))).toThrow()
   })
 })
 

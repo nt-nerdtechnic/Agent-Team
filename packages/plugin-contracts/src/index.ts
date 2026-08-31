@@ -1,5 +1,6 @@
 import manifestV2Schema from './schemas/plugin-manifest-v2.schema.json' with { type: 'json' }
 import capabilitiesV1 from './schemas/capabilities-v1.json' with { type: 'json' }
+import executionPolicyV1Schema from './schemas/execution-policy-v1.schema.json' with { type: 'json' }
 import { canonicalHtmlPath, canonicalPackagePath } from './archive.js'
 
 export * from './archive.js'
@@ -14,9 +15,19 @@ export type StorageGetResult =
 export const V2_VIEW_LOCATIONS = ['top', 'bottom', 'right', 'left', 'main', 'window'] as const
 export const V2_SYSTEM_NAMESPACES = ['fs', 'ui', 'aiCli'] as const
 export const V2_SHELL_MODES = ['allowlist', 'full'] as const
+export const EXECUTION_POLICY_SCHEMA_VERSION = 1 as const
+export const EXECUTION_POLICY_MODES = ['full', 'allowlist', 'denylist'] as const
 
 export type PluginSystemNamespace = (typeof V2_SYSTEM_NAMESPACES)[number]
 export type PluginShellMode = (typeof V2_SHELL_MODES)[number]
+export type ExecutionPolicyMode = (typeof EXECUTION_POLICY_MODES)[number]
+
+export interface ExecutionPolicy {
+  schemaVersion: typeof EXECUTION_POLICY_SCHEMA_VERSION
+  mode: ExecutionPolicyMode
+  system: PluginSystemNamespace[]
+  shell: string[]
+}
 
 export type PluginManifestV2Permissions = {
   system?: PluginSystemNamespace[]
@@ -63,6 +74,7 @@ export type PluginManifestV2 = {
 export type PluginContractErrorCode =
   | 'INVALID_JSON'
   | 'INVALID_MANIFEST'
+  | 'INVALID_EXECUTION_POLICY'
   | 'INVALID_PACKAGE'
 
 export class PluginContractError extends Error {
@@ -134,6 +146,92 @@ function uniqueStringArray(
   const result = value.map((item, index) => stringValue(item, `${label}[${index}]`))
   if (new Set(result).size !== result.length) fail(`${label} must not contain duplicate items`)
   return result
+}
+
+function requiredUniqueStringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value)) fail(`${label} must be an array`, 'INVALID_EXECUTION_POLICY')
+  const result = value.map((item, index) => {
+    if (typeof item !== 'string') {
+      fail(`${label}[${index}] must be a string`, 'INVALID_EXECUTION_POLICY')
+    }
+    return item
+  })
+  if (new Set(result).size !== result.length) {
+    fail(`${label} must not contain duplicate items`, 'INVALID_EXECUTION_POLICY')
+  }
+  return result
+}
+
+const EXECUTION_POLICY_SHELL_ENTRY = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/
+
+/** Return the stable lowercase spelling used for persisted shell names. */
+export function canonicalizeExecutionPolicyShellName(value: unknown): string {
+  if (typeof value !== 'string') {
+    fail('execution policy.shell entry must be a string', 'INVALID_EXECUTION_POLICY')
+  }
+  if (!EXECUTION_POLICY_SHELL_ENTRY.test(value)) {
+    fail(
+      `execution policy.shell contains an unsafe executable spelling '${value}'`,
+      'INVALID_EXECUTION_POLICY'
+    )
+  }
+  return value.replace(/[A-Z]/g, (character) => character.toLowerCase())
+}
+
+/** Parse and validate the global, agent-oriented Execution Policy contract. */
+export function parseExecutionPolicy(raw: unknown): ExecutionPolicy {
+  if (!isRecord(raw)) fail('execution policy must be a JSON object', 'INVALID_EXECUTION_POLICY')
+  const policy = raw
+  const policyKeys = ['schemaVersion', 'mode', 'system', 'shell'] as const
+  for (const key of Object.keys(policy)) {
+    if (!policyKeys.includes(key as (typeof policyKeys)[number])) {
+      fail(`execution policy has unknown field '${key}'`, 'INVALID_EXECUTION_POLICY')
+    }
+  }
+  for (const key of policyKeys) {
+    if (!Object.prototype.hasOwnProperty.call(policy, key)) {
+      fail(`execution policy is missing required field '${key}'`, 'INVALID_EXECUTION_POLICY')
+    }
+  }
+  if (policy.schemaVersion !== EXECUTION_POLICY_SCHEMA_VERSION) {
+    fail(
+      `execution policy schemaVersion must be ${EXECUTION_POLICY_SCHEMA_VERSION}`,
+      'INVALID_EXECUTION_POLICY'
+    )
+  }
+  if (!EXECUTION_POLICY_MODES.includes(policy.mode as ExecutionPolicyMode)) {
+    fail('execution policy mode is invalid', 'INVALID_EXECUTION_POLICY')
+  }
+
+  const system = requiredUniqueStringArray(policy.system, 'execution policy.system')
+  if (system.some((item) => !V2_SYSTEM_NAMESPACES.includes(item as PluginSystemNamespace))) {
+    fail('execution policy.system contains an unknown namespace', 'INVALID_EXECUTION_POLICY')
+  }
+
+  if (!Array.isArray(policy.shell)) {
+    fail('execution policy.shell must be an array', 'INVALID_EXECUTION_POLICY')
+  }
+  const shell = policy.shell.map((item, index) => {
+    if (typeof item !== 'string') {
+      fail(`execution policy.shell[${index}] must be a string`, 'INVALID_EXECUTION_POLICY')
+    }
+    return canonicalizeExecutionPolicyShellName(item)
+  })
+  if (new Set(shell).size !== shell.length) {
+    fail('execution policy.shell must not contain duplicate items', 'INVALID_EXECUTION_POLICY')
+  }
+
+  const mode = policy.mode as ExecutionPolicyMode
+  if (mode === 'full' && (system.length > 0 || shell.length > 0)) {
+    fail('execution policy full mode must have empty system and shell arrays', 'INVALID_EXECUTION_POLICY')
+  }
+
+  return {
+    schemaVersion: EXECUTION_POLICY_SCHEMA_VERSION,
+    mode,
+    system: system as PluginSystemNamespace[],
+    shell,
+  }
 }
 
 function safePath(value: unknown, label: string): string {
@@ -497,22 +595,30 @@ function assertUniqueJsonKeys(text: string): void {
   if (cursor !== text.length) throw new Error('trailing JSON data')
 }
 
-export function parseManifestJson(text: string): Record<string, unknown> {
-  if (text.charCodeAt(0) === 0xfeff) fail('manifest JSON must not start with UTF-8 BOM', 'INVALID_JSON')
+export function parseStrictJson(text: string, label = 'JSON'): unknown {
+  if (text.charCodeAt(0) === 0xfeff) fail(`${label} must not start with UTF-8 BOM`, 'INVALID_JSON')
   try {
     assertUniqueJsonKeys(text)
   } catch (error) {
     if (error instanceof PluginContractError) throw error
-    fail(`manifest JSON is not valid: ${error instanceof Error ? error.message : String(error)}`, 'INVALID_JSON')
+    fail(`${label} is not valid: ${error instanceof Error ? error.message : String(error)}`, 'INVALID_JSON')
   }
   try {
-    const parsed: unknown = JSON.parse(text)
-    if (!isRecord(parsed)) fail('manifest must be a JSON object')
-    return parsed
+    return JSON.parse(text) as unknown
   } catch (error) {
     if (error instanceof PluginContractError) throw error
-    fail(`manifest JSON is not valid: ${error instanceof Error ? error.message : String(error)}`, 'INVALID_JSON')
+    fail(`${label} is not valid: ${error instanceof Error ? error.message : String(error)}`, 'INVALID_JSON')
   }
+}
+
+export function parseManifestJson(text: string): Record<string, unknown> {
+  const parsed = parseStrictJson(text, 'manifest JSON')
+  if (!isRecord(parsed)) fail('manifest must be a JSON object')
+  return parsed
+}
+
+export function parseExecutionPolicyJson(text: string): ExecutionPolicy {
+  return parseExecutionPolicy(parseStrictJson(text, 'execution policy JSON'))
 }
 
 export const PLUGIN_ERROR_CODES = [
@@ -614,4 +720,4 @@ export interface Disposable {
   dispose(): void
 }
 
-export { manifestV2Schema, capabilitiesV1 }
+export { manifestV2Schema, capabilitiesV1, executionPolicyV1Schema }

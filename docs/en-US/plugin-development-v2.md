@@ -576,6 +576,78 @@ fail closed. Manifest v2 initially supports only `custom` views.
 `tree`/`provider` is deferred until its provider registration, item shape,
 pagination, cancellation, error, and lifecycle Interface is published.
 
+## Agent Execution Policy
+
+The Host has one global, agent-oriented Execution Policy. It is separate from
+Manifest `permissions`, package-version Plugin Grants, and direct user actions;
+it is not a per-plugin permission document. The normative v1 schema is
+[`execution-policy-v1.schema.json`](../plugin-contracts/execution-policy-v1.schema.json).
+
+The policy has exactly these fields:
+
+```json
+{
+  "schemaVersion": 1,
+  "mode": "allowlist",
+  "system": ["fs", "ui", "aiCli"],
+  "shell": ["git", "gh", "glab"]
+}
+```
+
+`mode` is exactly `full`, `allowlist`, or `denylist`. `system` contains only
+first-level public namespaces (`fs`, `ui`, and `aiCli`). `shell` contains exact
+top-level executable names, not command strings or paths. The normative JSON
+Schema describes the canonical persisted spelling
+`[a-z0-9][a-z0-9._+-]*`. The contract parser also accepts ASCII uppercase
+letters in input, canonicalizing them to lowercase before duplicate detection
+and persistence, so `git` and `GIT` are the same entry. Entries are unique.
+`full` is represented by the same shape with both arrays empty:
+
+```json
+{
+  "schemaVersion": 1,
+  "mode": "full",
+  "system": [],
+  "shell": []
+}
+```
+
+The initial Host default is `allowlist` with all three system namespaces and
+only `git`, `gh`, and `glab` in `shell`. Wrappers and interpreters are not in
+that default. A user policy replaces the single global default and persists at
+`<userData>/execution-policy/policy.json`. The Host-owned companion
+`<userData>/execution-policy/revision.json` stores the durable revision
+high-water mark. A valid policy is accepted only when its `revision` exactly
+matches that high-water mark; a missing or corrupt policy therefore cannot
+silently roll the effective revision backward. A missing sidecar is a legacy
+migration case: only a strict-valid, owner-safe `policy.json` can bootstrap it
+at the existing revision, without incrementing; bootstrap is serialized by
+exclusive creation, idempotent for parallel readers, and must succeed before
+the legacy policy is returned. If an existing sidecar is corrupt or unsafe,
+the Host fails closed at the store instance's trusted revision floor, never
+reconstructs that floor from `policy.json`, and rejects ordinary set/reset
+writes. A strict-valid sidecar below the instance floor is treated as rollback
+or inconsistent state: reads fail closed at the floor, while a valid set/reset
+may repair it at the next revision. The directory and both files are owner-only
+(`0700` and `0600`). Valid updates use same-directory temporary files and
+atomic replacement, writing the high-water mark before the policy so an
+interrupted update fails closed at the newer revision. Unknown versions,
+fields, namespaces, modes, duplicate keys or entries, oversized state, and
+unsafe executable spellings fail closed. Corrupt policy or inconsistent
+state with a trusted sidecar can be repaired by a valid set/reset; corrupt or
+unsafe sidecars and unsafe filesystem entries such as symlinks or non-regular
+files remain preserved for explicit recovery or manual cleanup. On read, the
+Host repairs an existing policy directory whose mode has drifted from `0700`
+before loading its files; a missing directory remains the normal missing-state
+path. If the directory cannot be inspected or safely repaired, the store treats
+it as unavailable, fails closed, and leaves recovery to explicit or manual
+handling rather than interpreting it as a corrupt revision sidecar.
+
+This issue defines the durable contract and Host persistence seam. Policy
+sources, UI/IPC exposure, and runtime enforcement are specified by later
+issues; this contract does not add rules for plugins, Plans, Git, miniIDE,
+methods, paths, subcommands, arguments, globs, or regular expressions.
+
 ## SDK interface
 
 ```ts

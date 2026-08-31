@@ -19,6 +19,7 @@
       "default": "./dist/index.js"
     },
     "./schemas/plugin-manifest-v2.schema.json": "./dist/schemas/plugin-manifest-v2.schema.json",
-    "./schemas/capabilities-v1.json": "./dist/schemas/capabilities-v1.json"
+    "./schemas/capabilities-v1.json": "./dist/schemas/capabilities-v1.json",
+    "./schemas/execution-policy-v1.schema.json": "./dist/schemas/execution-policy-v1.schema.json"
   }
 }
