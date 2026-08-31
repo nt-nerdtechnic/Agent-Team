@@ -1586,7 +1586,7 @@ class ServerLink:
             },
         }
 
-    def _note_inbound(self, msg_key: str) -> bool:
+    async def _note_inbound(self, msg_key: str) -> bool:
         """Claim a msgKey. False means it was already handled — drop it.
 
         The server pushes ``messages.pending`` to every connection it holds for
@@ -1603,8 +1603,6 @@ class ServerLink:
         """
         if msg_key in self._inbound:
             return False
-        if trust_store.has_seen_message(msg_key):
-            return False
         now = time.monotonic()
         for key, entry in list(self._inbound.items()):
             if now - entry["created_at"] >= MESSAGE_MEMORY_TTL_S:
@@ -1612,12 +1610,28 @@ class ServerLink:
         # Insertion-ordered, so the front of the dict is the oldest message.
         while len(self._inbound) >= MESSAGE_MEMORY_MAX:
             self._inbound.pop(next(iter(self._inbound)))
+        # Claimed before any await. Everything above is synchronous on purpose:
+        # the first `await` below yields the loop, and two pushes of the same
+        # key would otherwise both get past the membership check while the first
+        # was still in a thread — which is the duplicate this method exists to
+        # stop, reintroduced by the fix for something else.
         self._inbound[msg_key] = {"created_at": now, "pane_id": "", "acked": False}
+
+        # The persisted half, off the loop. A cold cache makes the read a
+        # Keychain read and every 25th record a Keychain write; every other
+        # trust_store call on this path already goes through a thread for that
+        # reason, and a stalled loop in this backend is a symptom that has cost
+        # this project real time before.
+        #
+        # Checked after the claim rather than before: the claim is what makes
+        # the check race-free, and a key already in the ledger is simply left
+        # marked handled in memory too.
+        if await asyncio.to_thread(trust_store.has_seen_message, msg_key):
+            return False
         # Recorded on the claim rather than after delivery: a message that got
         # this far has been handed to the delivery path, and re-running that
-        # path is the thing being prevented. Batched (see note_seen_message), so
-        # this is a dict write here and a Keychain write every so often.
-        trust_store.note_seen_message(msg_key)
+        # path is the thing being prevented.
+        await asyncio.to_thread(trust_store.note_seen_message, msg_key)
         return True
 
     async def _authenticate_sender(
@@ -1765,7 +1779,7 @@ class ServerLink:
         if not msg_key:
             log.warning("navide-server pushed a message with no msgKey; ignoring it")
             return
-        if not self._note_inbound(msg_key):
+        if not await self._note_inbound(msg_key):
             log.info("navide-server re-sent message %s; ignoring the duplicate", msg_key)
             return
         if self._trust_locked:
