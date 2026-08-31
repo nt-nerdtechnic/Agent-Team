@@ -212,12 +212,6 @@ def default_responder(conn: "FakeConnection", message: dict) -> dict | None:
                 "updatedAt": 0,
             },
         )
-    if kind == "team.members.list":
-        conn.member_lists.append(payload)
-        return _ok(message, {"members": conn.server.members})
-    if kind in ("team.members.invite", "team.members.set_role", "team.members.revoke"):
-        conn.member_writes.append((kind, payload))
-        return conn.server.member_write(message, kind, payload)
     if kind == "messages.send":
         conn.sends.append(payload)
         return _ok(message, {"msgKey": payload.get("msgKey"), "state": "pending"})
@@ -230,20 +224,6 @@ def default_responder(conn: "FakeConnection", message: dict) -> dict | None:
         "ok": False,
         "error": {"code": "BAD_REQUEST", "message": f"unknown type {kind}"},
     }
-
-
-def _admin_responder(conn: "FakeConnection", message: dict) -> dict | None:
-    """The default server, except auth.hello grants admin.
-
-    The role is the whole difference between a pane that offers the management
-    actions and one that only lists the team, so it has to come from the
-    handshake in the tests too.
-    """
-    if message.get("type") == "auth.hello":
-        reply = default_responder(conn, message)
-        reply["payload"]["role"] = "admin"  # type: ignore[index]
-        return reply
-    return default_responder(conn, message)
 
 
 def rejecting_responder(code: str, message_text: str = "nope"):
@@ -273,8 +253,6 @@ class FakeConnection:
         self.directories: list[dict] = []
         self.policy_gets: list[dict] = []
         self.policy_sets: list[dict] = []
-        self.member_lists: list[dict] = []
-        self.member_writes: list[tuple[str, dict]] = []
         self.sends: list[dict] = []
         self.acks: list[dict] = []
         self.closed = False
@@ -352,44 +330,6 @@ class FakeServer:
         #: key travels on: a device the directory never mentions is one this
         #: machine has no key for and therefore refuses.
         self.directory: list[dict] = [PEER.session_row()]
-        #: The team roster, as team.members.list answers it. Never carries a
-        #: token: the real server filters it out of every read, which is what
-        #: makes the invite reply the only place one ever appears.
-        self.members: list[dict] = [
-            {"memberId": "m1", "displayName": "Tester", "role": "member", "disabled": False}
-        ]
-
-    def member_write(self, message: dict, kind: str, payload: dict) -> dict:
-        """Apply one membership write to `members` and answer like the server."""
-        if kind == "team.members.invite":
-            member = {
-                "memberId": f"m{len(self.members) + 1}",
-                "displayName": payload.get("displayName") or "",
-                "email": payload.get("email") or "",
-                "role": payload.get("role") or "member",
-                "disabled": False,
-            }
-            self.members.append(member)
-            return _ok(message, {**member, "token": "one-time-token"})
-        target = next(
-            (m for m in self.members if m["memberId"] == payload.get("memberId")), None
-        )
-        if target is None:
-            return {
-                "id": message["id"],
-                "type": f"{kind}.result",
-                "ok": False,
-                "error": {"code": "NOT_FOUND", "message": "no such member"},
-            }
-        if kind == "team.members.set_role":
-            target["role"] = payload.get("role")
-            return _ok(message, {"memberId": target["memberId"], "role": target["role"]})
-        target["disabled"] = True
-        return _ok(
-            message,
-            {"memberId": target["memberId"], "disabled": True, "droppedConnections": 2},
-        )
-
     def connect(self, url: str):
         self.urls.append(url)
         server = self
@@ -1596,148 +1536,6 @@ async def test_with_no_server_there_is_no_policy_to_read_or_write(monkeypatch):
         "memberId": "",
     }
     assert await server_link.set_policy(_allow_own_devices()) is None
-
-
-# ---- team members (the Settings pane) ---------------------------------------
-# The roster and the role live on the server. This side stores the role because
-# it decides whether the pane may offer the management actions at all, and
-# caches the roster so the pane can show the team while the link is down.
-
-
-async def test_the_role_from_auth_hello_is_kept(monkeypatch):
-    """A UI that guessed at the role would show buttons every request refuses,
-    so the role has to come from the handshake and be readable afterwards."""
-    server = FakeServer()
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        assert link.member_role == "member"
-        state = await server_link.members_state()
-        assert state["role"] == "member"
-        assert state["memberId"] == "m1"
-        # Connected, but not an admin: no management actions.
-        assert state["canManage"] is False
-    finally:
-        await link.stop()
-
-
-async def test_an_admin_on_a_live_link_may_manage(monkeypatch):
-    server = FakeServer(responder=_admin_responder)
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        assert (await server_link.members_state())["canManage"] is True
-    finally:
-        await link.stop()
-
-
-async def test_the_roster_is_fetched_once_per_connection(monkeypatch):
-    server = FakeServer()
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: bool(server.opened[0].member_lists))
-        assert len(server.opened[0].member_lists) == 1
-        state = await server_link.members_state()
-        assert [m["memberId"] for m in state["members"]] == ["m1"]
-    finally:
-        await link.stop()
-
-
-async def test_a_members_changed_push_replaces_the_cache(monkeypatch):
-    """The push carries the whole roster, so subscribing to it is what saves the
-    pane from polling the server."""
-    server = FakeServer()
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        await server.opened[0].push(
-            {
-                "type": "team.members.changed",
-                "payload": {
-                    "members": [
-                        {"memberId": "m1", "role": "member", "disabled": False},
-                        {"memberId": "m2", "role": "observer", "disabled": False},
-                    ]
-                },
-            }
-        )
-        await _until(lambda: len(link.members_snapshot() or []) == 2)
-        state = await server_link.members_state()
-        assert [m["memberId"] for m in state["members"]] == ["m1", "m2"]
-        # No second read: the push *is* the update.
-        assert len(server.opened[0].member_lists) == 1
-    finally:
-        await link.stop()
-
-
-async def test_a_write_re_reads_the_roster_without_waiting_for_the_push(monkeypatch):
-    server = FakeServer(responder=_admin_responder)
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        reply = await server_link.members_request(
-            "team.members.invite", {"displayName": "Bo", "role": "observer"}
-        )
-        assert reply["ok"] is True
-        # The one-time token is in the invite reply and nowhere else.
-        assert reply["payload"]["token"] == "one-time-token"
-        state = await server_link.members_state()
-        assert [m["memberId"] for m in state["members"]] == ["m1", "m2"]
-        assert all("token" not in m for m in state["members"])
-    finally:
-        await link.stop()
-
-
-async def test_revoke_reports_the_connections_it_dropped(monkeypatch):
-    server = FakeServer(responder=_admin_responder)
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        reply = await server_link.members_request("team.members.revoke", {"memberId": "m1"})
-        assert reply["payload"]["droppedConnections"] == 2
-        assert (await server_link.members_state())["members"][0]["disabled"] is True
-    finally:
-        await link.stop()
-
-
-async def test_the_roster_survives_the_connection_that_fetched_it(monkeypatch):
-    """An admin whose server just went down still has to see who is on the team
-    — with the actions off, which is what canManage says."""
-    server = FakeServer(responder=_admin_responder)
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        await server.opened[0].close()
-        await _until(lambda: link._ws is None)
-
-        state = await server_link.members_state()
-        assert [m["memberId"] for m in state["members"]] == ["m1"]
-        assert state["canManage"] is False
-        # And a write refuses at once rather than blocking on a socket that is
-        # not there.
-        reply = await server_link.members_request("team.members.revoke", {"memberId": "m1"})
-        assert reply["ok"] is False
-        assert reply["error"]["code"] == server_link.LINK_OFFLINE
-    finally:
-        await link.stop()
-
-
-async def test_with_no_server_there_is_no_team(monkeypatch):
-    monkeypatch.setattr(server_link, "_link", None)
-    assert await server_link.members_state() == {
-        "state": server_link.STATE_UNCONFIGURED,
-        "role": "",
-        "memberId": "",
-        "canManage": False,
-        "members": [],
-    }
-    assert await server_link.members_request("team.members.revoke", {"memberId": "m1"}) is None
 
 
 async def test_a_stale_pane_id_hint_is_re_resolved_and_the_new_id_acked(broadcasts):

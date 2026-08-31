@@ -81,8 +81,6 @@ describe('account modal', () => {
   // taken by someone who has no way to judge it yet.
   it('does not ask for a display name or a network name', () => {
     expect(MODAL).not.toContain('acct-display')
-    expect(MODAL).not.toContain('acct-tenant')
-    expect(MODAL).not.toContain('tenantName')
     expect(MODAL).not.toMatch(/payload\.displayName\s*=/)
   })
 
@@ -91,7 +89,7 @@ describe('account modal', () => {
   })
 
   it('shows the account and offers sign-out once signed in', () => {
-    expect(MODAL).toMatch(/v-if="signedIn"[\s\S]{0,1200}status\.role[\s\S]{0,400}status\.tenantId/)
+    expect(MODAL).toMatch(/v-if="signedIn"[\s\S]{0,1200}status\.role/)
     expect(MODAL).toMatch(/@click="signOut"/)
     expect(MODAL).toContain("emit('changed')")
   })
@@ -178,18 +176,6 @@ describe('settings — read-only link status', () => {
     expect(SETTINGS).toContain("'p2p.link.status'")
     expect(SETTINGS).toMatch(/data-settings-section="general-p2p"[\s\S]{0,1600}settings\.p2p\.account\.hint-titlebar/)
     expect(SETTINGS).toContain('data-settings-section="general-p2p-policy"')
-    expect(SETTINGS).toContain('data-settings-section="general-p2p-members"')
-  })
-
-  // Inviting is the one action the gate closes, so it is the one place Settings
-  // has to offer the way out rather than relay a code nobody can act on.
-  it('answers a refused invite with the verification notice, not a raw code', () => {
-    expect(SETTINGS).toContain("'EMAIL_UNVERIFIED'")
-    expect(SETTINGS).toContain('membersUnverified')
-    expect(SETTINGS).toContain("'p2p.account.resend_verification'")
-    expect(SETTINGS).toMatch(/v-if="membersUnverified"[\s\S]{0,500}account\.verify-resend/)
-    // The bare message must not also be shown for this one code.
-    expect(SETTINGS).toMatch(/EMAIL_UNVERIFIED'\)\s*\{[\s\S]{0,320}\} else \{[\s\S]{0,160}membersError\.value =/)
   })
 
   it('has every string it shows, in both locales', () => {

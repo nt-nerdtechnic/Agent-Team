@@ -458,15 +458,6 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     keywords: 'policy permission authorization allow rule deny default pane cross device remote rejected 政策 權限 授權 允許 規則 拒絕 跨裝置 被擋',
   },
   {
-    id: 'general-p2p-members',
-    tab: 'general',
-    section: 'general-p2p-members',
-    title: 'Team Members / 團隊成員',
-    group: 'General',
-    summary: 'See who belongs to this team space; admins can invite people, change roles and disable access.',
-    keywords: 'team member membership invite token role admin observer revoke disable account seat 團隊 成員 邀請 權杖 角色 管理員 觀察者 停用 撤銷',
-  },
-  {
     id: 'appearance-language',
     tab: 'appearance',
     section: 'appearance-language',
@@ -1165,210 +1156,20 @@ function policyDeviceLabel(deviceId: string): string {
   return known?.deviceName || deviceId
 }
 
-// ── Team members ─────────────────────────────────────────────────────────────
-// Who belongs to this team space. The roster and the role both come from the
-// server — `canManage` is the backend's answer, never derived here, because a
-// pane that guessed would offer buttons every request is going to refuse.
-// Invite is deliberately the whole flow: the server mints a one-time token and
-// the admin hands it over out of band, which is why it is shown once, loudly.
-const MEMBER_ROLES = ['admin', 'member', 'observer'] as const
-type MemberRole = (typeof MEMBER_ROLES)[number]
-interface TeamMember {
-  memberId: string
-  displayName?: string
-  email?: string
-  role: MemberRole
-  disabled?: boolean
-}
-interface P2pMembersState {
-  state: string
-  role: string
-  memberId: string
-  canManage: boolean
-  members: TeamMember[]
-}
-interface InviteResult {
-  memberId: string
-  displayName?: string
-  email?: string
-  role?: string
-  token: string
-}
-const p2pMembers = ref<P2pMembersState | null>(null)
-const membersBusy = ref(false)
-const membersError = ref('')
-const membersNotice = ref('')
-/** The one-time invite token, held on screen until the admin says they have it.
- *  Nothing can bring it back once this is cleared. */
-const memberInvite = ref<InviteResult | null>(null)
-const memberInviteCopied = ref(false)
-const inviteName = ref('')
-const inviteEmail = ref('')
-const inviteRole = ref<MemberRole>('member')
-/** memberId whose disable is waiting for confirmation. */
-const memberRevoking = ref('')
-/** The server refused an invite because this account's e-mail is unconfirmed.
- *  Inviting is the one action the soft gate closes — an unverified address is
- *  the one path that could pull other people into a network — so this is the
- *  one place Settings has to offer a way out instead of a bare error code. */
-const membersUnverified = ref(false)
-const membersResending = ref(false)
-const membersResent = ref(false)
-
-const membersList = computed<TeamMember[]>(() => p2pMembers.value?.members ?? [])
-const membersCanManage = computed(() => p2pMembers.value?.canManage === true && !membersBusy.value)
-const myMemberId = computed(() => p2pMembers.value?.memberId ?? '')
-/** Connected, but signed in as a member or observer: the roster is readable and
- *  nothing on it is actionable. Distinct from being offline. */
-const membersReadonlyByRole = computed(
-  () => p2pMembers.value?.state === 'connected' && p2pMembers.value?.canManage === false
-)
-
-async function loadP2pMembers(): Promise<void> {
-  // Same reason as the policy poll: a write owns the state while it is in
-  // flight, and a poll landing after it would flash the pre-write roster.
-  if (membersBusy.value) return
-  try {
-    const resp = await props.backend.send<P2pMembersState>('p2p.members.list', {})
-    if (!resp.ok || !resp.payload) return
-    p2pMembers.value = resp.payload
-  } catch { /* non-fatal — the roster keeps its last value */ }
-}
-
-async function membersWrite(
-  type: string,
-  payload: Record<string, unknown>
-): Promise<{ result: Record<string, unknown>; state: P2pMembersState } | null> {
-  membersBusy.value = true
-  membersError.value = ''
-  try {
-    const resp = await props.backend.send<{ result: Record<string, unknown>; state: P2pMembersState }>(type, payload)
-    if (!resp.ok || !resp.payload) {
-      if (resp.error?.code === 'EMAIL_UNVERIFIED') {
-        // Not a failure to report as one: the notice below says what to do and
-        // carries the button that does it.
-        membersUnverified.value = true
-        membersResent.value = false
-      } else {
-        membersError.value = resp.error?.message ?? 'The server refused the change'
-      }
-      return null
-    }
-    membersUnverified.value = false
-    p2pMembers.value = resp.payload.state
-    return resp.payload
-  } catch (err) {
-    membersError.value = err instanceof Error ? err.message : String(err)
-    return null
-  } finally {
-    membersBusy.value = false
-  }
-}
-
-async function inviteMember(): Promise<void> {
-  membersNotice.value = ''
-  const written = await membersWrite('p2p.members.invite', {
-    displayName: inviteName.value,
-    email: inviteEmail.value,
-    role: inviteRole.value,
-  })
-  if (!written) return
-  inviteName.value = ''
-  inviteEmail.value = ''
-  inviteRole.value = 'member'
-  memberInviteCopied.value = false
-  memberInvite.value = written.result as unknown as InviteResult
-}
-
-async function resendVerificationMail(): Promise<void> {
-  if (membersResending.value) return
-  membersResending.value = true
-  membersError.value = ''
-  membersResent.value = false
-  try {
-    const resp = await props.backend.send<{ emailVerified: boolean }>('p2p.account.resend_verification', {})
-    if (!resp.ok) {
-      membersError.value =
-        resp.error?.code === 'RATE_LIMITED'
-          ? t('settings.p2p.account.verify-rate-limited')
-          : (resp.error?.message ?? 'The server refused the change')
-      return
-    }
-    // Confirmed in a browser since this link signed in: the gate is already open.
-    if (resp.payload?.emailVerified) membersUnverified.value = false
-    else membersResent.value = true
-  } catch (err) {
-    membersError.value = err instanceof Error ? err.message : String(err)
-  } finally {
-    membersResending.value = false
-  }
-}
-
-async function copyInviteToken(): Promise<void> {
-  const token = memberInvite.value?.token
-  if (!token) return
-  try {
-    await navigator.clipboard.writeText(token)
-    memberInviteCopied.value = true
-  } catch { /* clipboard unavailable — the token is selectable on screen */ }
-}
-
-async function changeMemberRole(member: TeamMember, select: HTMLSelectElement): Promise<void> {
-  const role = select.value as MemberRole
-  membersNotice.value = ''
-  const written = await membersWrite('p2p.members.set_role', {
-    memberId: member.memberId,
-    role,
-  })
-  // A refused change leaves the roster as it was, and the select would keep the
-  // role it was never granted.
-  if (!written) select.value = member.role
-}
-
-async function revokeMember(member: TeamMember): Promise<void> {
-  memberRevoking.value = ''
-  membersNotice.value = ''
-  const written = await membersWrite('p2p.members.revoke', { memberId: member.memberId })
-  if (!written) return
-  const dropped = Number(written.result.droppedConnections ?? 0)
-  membersNotice.value = t('settings.p2p.members.revoked', {
-    name: memberLabel(member),
-    count: Number.isFinite(dropped) ? dropped : 0,
-  })
-}
-
-function memberLabel(member: TeamMember): string {
-  return member.displayName || member.email || member.memberId
-}
-
-/** Whether this row's role select may be touched.
- *
- *  The server refuses an admin demoting themselves, so the row is locked here
- *  too rather than sending a request that is guaranteed to come back an error.
- *  It is only the last admin's own row: another admin can still change it. */
-function memberRoleLocked(member: TeamMember): boolean {
-  return member.memberId === myMemberId.value
-}
-
 watch(activeTab, (tab) => {
   if (p2pTimer) { clearInterval(p2pTimer); p2pTimer = null }
   if (tab !== 'general') return
   void loadP2pStatus()
   void loadP2pPolicy()
-  void loadP2pMembers()
   p2pTimer = setInterval(() => {
     void loadP2pStatus()
     void loadP2pPolicy()
-    void loadP2pMembers()
   }, P2P_POLL_MS)
 }, { immediate: true })
 
-// Close on ESC — except while a one-time invite token is on screen. That token
-// cannot be fetched again, so ESC must not take it away by closing the pane
-// underneath it; the panel has its own dismiss button.
+// Close on ESC.
 function onKeyDown(e: KeyboardEvent) {
   if (e.key !== 'Escape') return
-  if (memberInvite.value) return
   emit('close')
 }
 onMounted(() => {
@@ -2939,148 +2740,6 @@ watch(activeTab, (tab) => {
                 <p v-if="p2pPolicyError" class="err-msg">{{ p2pPolicyError }}</p>
               </div>
             </SettingsCard>
-
-            <!-- Who belongs to the team space. Hidden for the same reason the
-                 policy card is: a machine with no server has no team, and the
-                 on-machine path has never had a concept of one. -->
-            <SettingsCard v-if="p2pState !== 'unconfigured'">
-              <div class="s-fullrow" data-settings-section="general-p2p-members">
-                <h3 class="policy-title">{{ $t('settings.p2p.members.title') }}</h3>
-                <p class="ap-hint">{{ $t('settings.p2p.members.hint') }}</p>
-                <p v-if="membersReadonlyByRole" class="policy-readonly">{{ $t('settings.p2p.members.readonly-role') }}</p>
-                <p v-else-if="!p2pMembers?.canManage" class="policy-readonly">{{ $t('settings.p2p.members.readonly-offline') }}</p>
-
-                <p class="policy-section-label">{{ $t('settings.p2p.members.roster') }}</p>
-                <p v-if="!membersList.length" class="policy-empty">{{ $t('settings.p2p.members.empty') }}</p>
-                <ul v-else class="policy-rules">
-                  <li v-for="member in membersList" :key="member.memberId" class="policy-rule member-row">
-                    <div class="member-main">
-                      <span class="policy-rule-text">
-                        {{ memberLabel(member) }}
-                        <span v-if="member.memberId === myMemberId" class="member-tag">{{ $t('settings.p2p.members.you') }}</span>
-                        <span v-if="member.disabled" class="member-tag off">{{ $t('settings.p2p.members.disabled') }}</span>
-                      </span>
-                      <!-- Non-admins see the role as text: the server refuses
-                           every write they could make from a control. -->
-                      <span v-if="!p2pMembers?.canManage" class="member-role-static">
-                        {{ $t('settings.p2p.members.role-' + member.role) }}
-                      </span>
-                      <template v-else>
-                        <select
-                          class="member-role"
-                          :value="member.role"
-                          :aria-label="$t('settings.p2p.members.role')"
-                          :disabled="!membersCanManage || memberRoleLocked(member)"
-                          :title="memberRoleLocked(member) ? $t('settings.p2p.members.self-locked') : ''"
-                          @change="changeMemberRole(member, $event.target as HTMLSelectElement)"
-                        >
-                          <option v-for="role in MEMBER_ROLES" :key="role" :value="role">
-                            {{ $t('settings.p2p.members.role-' + role) }}
-                          </option>
-                        </select>
-                        <button
-                          v-if="!member.disabled"
-                          class="ap-reset"
-                          :disabled="!membersCanManage"
-                          @click="memberRevoking = member.memberId"
-                        >
-                          {{ $t('settings.p2p.members.revoke') }}
-                        </button>
-                      </template>
-                    </div>
-                    <!-- Disabling drops live connections, so it says so before
-                         it happens rather than after. -->
-                    <div v-if="memberRevoking === member.memberId" class="member-confirm">
-                      <p class="member-confirm-text">
-                        {{ $t('settings.p2p.members.revoke-confirm', { name: memberLabel(member) }) }}
-                      </p>
-                      <div class="row-g gap">
-                        <button class="ap-reset danger" :disabled="!membersCanManage" @click="revokeMember(member)">
-                          {{ $t('settings.p2p.members.revoke-do') }}
-                        </button>
-                        <button class="ap-reset" @click="memberRevoking = ''">
-                          {{ $t('settings.p2p.members.revoke-cancel') }}
-                        </button>
-                      </div>
-                    </div>
-                  </li>
-                </ul>
-
-                <template v-if="p2pMembers?.canManage">
-                  <p class="policy-section-label">{{ $t('settings.p2p.members.invite-title') }}</p>
-                  <div class="policy-add">
-                    <div class="field">
-                      <label class="lbl" for="member-name">{{ $t('settings.p2p.members.invite-name') }}</label>
-                      <input
-                        id="member-name"
-                        v-model="inviteName"
-                        type="text"
-                        spellcheck="false"
-                        autocomplete="off"
-                        :disabled="!membersCanManage"
-                        :placeholder="$t('settings.p2p.members.invite-optional')"
-                      />
-                    </div>
-                    <div class="field">
-                      <label class="lbl" for="member-email">{{ $t('settings.p2p.members.invite-email') }}</label>
-                      <input
-                        id="member-email"
-                        v-model="inviteEmail"
-                        type="text"
-                        spellcheck="false"
-                        autocomplete="off"
-                        :disabled="!membersCanManage"
-                        :placeholder="$t('settings.p2p.members.invite-optional')"
-                      />
-                    </div>
-                    <div class="field">
-                      <label class="lbl" for="member-role">{{ $t('settings.p2p.members.role') }}</label>
-                      <select id="member-role" v-model="inviteRole" :disabled="!membersCanManage">
-                        <option v-for="role in MEMBER_ROLES" :key="role" :value="role">
-                          {{ $t('settings.p2p.members.role-' + role) }}
-                        </option>
-                      </select>
-                    </div>
-                  </div>
-                  <div class="row-g gap p2p-actions">
-                    <button class="ap-reset" :disabled="!membersCanManage" @click="inviteMember">
-                      {{ $t('settings.p2p.members.invite') }}
-                    </button>
-                  </div>
-                </template>
-
-                <!-- The one-time token. The server never sends it again, so it
-                     stays on screen until the admin says they have it, and ESC
-                     is ignored while it is up. -->
-                <div v-if="memberInvite" class="member-token">
-                  <p class="member-token-title">
-                    {{ $t('settings.p2p.members.token-title', { name: memberInvite.displayName || memberInvite.email || memberInvite.memberId }) }}
-                  </p>
-                  <p class="member-token-warn">{{ $t('settings.p2p.members.token-once') }}</p>
-                  <code class="member-token-value">{{ memberInvite.token }}</code>
-                  <div class="row-g gap">
-                    <button class="ap-reset" @click="copyInviteToken">
-                      {{ memberInviteCopied ? $t('settings.p2p.members.token-copied') : $t('settings.p2p.members.token-copy') }}
-                    </button>
-                    <button class="ap-reset" @click="memberInvite = null">
-                      {{ $t('settings.p2p.members.token-done') }}
-                    </button>
-                  </div>
-                </div>
-
-                <p v-if="membersNotice" class="summary-ok">{{ membersNotice }}</p>
-                <template v-if="membersUnverified">
-                  <p class="policy-readonly">{{ $t('settings.p2p.account.verify-required') }}</p>
-                  <div class="row-g gap p2p-actions">
-                    <button class="ap-reset" :disabled="membersResending" @click="resendVerificationMail">
-                      {{ $t('settings.p2p.account.verify-resend') }}
-                    </button>
-                  </div>
-                  <p v-if="membersResent" class="ap-hint">{{ $t('settings.p2p.account.verify-resent') }}</p>
-                </template>
-                <p v-if="membersError" class="err-msg">{{ membersError }}</p>
-              </div>
-            </SettingsCard>
           </SettingsSection>
         </div>
 
@@ -4085,19 +3744,6 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .policy-rule { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-muted); }
 .policy-rule-text { font-size: 11.5px; color: var(--text-bright); word-break: break-all; }
 .policy-add { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.member-row { flex-direction: column; align-items: stretch; gap: 6px; }
-.member-main { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.member-main .policy-rule-text { flex: 1; min-width: 0; }
-.member-tag { margin-left: 6px; padding: 1px 5px; border-radius: var(--radius-xs); font-size: var(--font-3xs); background: var(--bg-default); color: var(--text-secondary); }
-.member-tag.off { color: var(--attention-fg); }
-.member-role-static { font-size: 11.5px; color: var(--text-secondary); flex-shrink: 0; }
-.member-role { flex-shrink: 0; }
-.member-confirm { border-top: 1px solid var(--border-default); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
-.member-confirm-text { margin: 0; font-size: 11.5px; color: var(--attention-fg); }
-.member-token { margin: 12px 0 0; padding: 10px; border: 1px solid var(--attention-fg); border-radius: var(--radius-sm); background: var(--bg-muted); display: flex; flex-direction: column; gap: 8px; }
-.member-token-title { margin: 0; font-size: 12.5px; color: var(--text-bright); }
-.member-token-warn { margin: 0; font-size: 11.5px; color: var(--attention-fg); }
-.member-token-value { display: block; padding: 8px; border-radius: var(--radius-xs); background: var(--bg-default); font-size: var(--font-xs); color: var(--text-bright); word-break: break-all; user-select: all; }
 .hint-msg { color: var(--text-secondary); font-size: var(--font-2xs); margin: 0; }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */

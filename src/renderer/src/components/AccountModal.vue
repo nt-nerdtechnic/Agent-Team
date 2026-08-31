@@ -33,7 +33,6 @@ interface LinkStatus {
   detail: string
   deviceId: string
   accountEmail?: string
-  tenantId?: string
   displayName?: string
   role?: string
   /** Soft gate: an unverified account works normally, it is only flagged. */
@@ -576,9 +575,6 @@ onUnmounted(() => {
             </div>
             <div v-if="status?.role" class="kv">
               <span>{{ t('settings.p2p.account.role') }}</span><span>{{ status.role }}</span>
-            </div>
-            <div v-if="status?.tenantId" class="kv">
-              <span>{{ t('settings.p2p.account.tenant') }}</span><span class="mono">{{ status.tenantId }}</span>
             </div>
           </template>
           <div v-else class="kv">
