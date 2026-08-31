@@ -394,6 +394,12 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
     with same_workspace false and "you" set to the credential kind ("host" or
     "external"); always use the qualified address. Read-only.
 
+    This is who exists, not who is related to you — the list carries no
+    lineage. The panes you opened with cli_open_agent are yours to keep track
+    of; that record lives in your own context, not in this answer. Refer to
+    them however reads naturally when talking to the user; the word does not
+    matter, remembering who you opened does.
+
     `pane_id` is that pane's internal id. It is the key every `ui.pane.*` action
     takes (`ui.pane.close`, `ui.pane.focus`, `ui.pane.getStatus` via ui_invoke)
     — those reject a pane NAME — and it is also accepted by cli_send,
@@ -484,6 +490,17 @@ async def cli_open_agent(
     `agent` is the CLI to run (e.g. "claude", "codex"), `name` is what the pane
     will be called — that name is also its messaging address, so pick something
     role-shaped like "reviewer" — and `task` is what it should do.
+
+    The pane you open is related to you: you opened it, so its result needs to
+    come back to you. When you talk to the user about it, use whatever reads
+    naturally — partner, junior, the one you sent out, your child agent. No
+    word is prescribed and none is more correct than another; what matters is
+    not the label but that you remember who you opened.
+
+    Say both of these in `task`: who opened it (your own name, from
+    cli_list_targets' `you`), and who to send the result to when it is done.
+    Without that line it finishes, writes the answer to its own screen, and
+    nobody ever sees it.
 
     Pane callers open the pane in their own workspace; `workspace_path` is
     ignored for them. A caller with no pane identity (host / external
