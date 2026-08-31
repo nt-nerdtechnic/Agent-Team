@@ -97,7 +97,7 @@ import { i18n } from '@navide/plugin-ui/foundation'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from '@navide/terminal'
-import { reclaimBlockedBy, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
+import { reclaimBlockedBy, idleReclaimDisabled, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
 import { findConsecutiveQuestionBlocks, findSentinel } from '@navide/terminal'
 import {
   buildCliPaneBufferReply,
@@ -11569,6 +11569,10 @@ let _idleReclaimTimer: number | null = null
 
 async function sweepIdlePanes(): Promise<void> {
   if (!idleReclaimEnabled.value) return
+  // "Never" is a threshold the timer can never reach, so the sweep stops here
+  // rather than measuring ages it would refuse to act on. Manual reclaim is
+  // untouched: this setting is about the timer, not about the button.
+  if (idleReclaimDisabled(idleReclaimMinutes.value)) return
   const now = Date.now()
   const due = panes.value.filter((p) => paneReclaimable(p, now)).map((p) => p.id)
   if (due.length === 0) return

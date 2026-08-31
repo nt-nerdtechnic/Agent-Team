@@ -78,6 +78,24 @@ describe('idle reclaim wiring', () => {
     expect(sweep).toContain('if (!idleReclaimEnabled.value) return')
   })
 
+  // "Never" is a threshold the timer can never reach. The sweep stops on it
+  // outright rather than measuring ages it would refuse to act on.
+  it('does nothing at all while the threshold is never', () => {
+    const sweep = block('async function sweepIdlePanes(', 'onMounted(() => {')
+    expect(sweep).toContain('if (idleReclaimDisabled(idleReclaimMinutes.value)) return')
+  })
+
+  // The setting governs the timer. A user who switched off the sweep did not
+  // ask to lose the button, and the button's own guards are unchanged.
+  it('leaves manual reclaim outside the never check', () => {
+    const fn = block('async function reclaimPanesNow(', 'onMounted(() => {')
+    expect(fn).not.toContain('idleReclaimDisabled')
+    expect(fn).not.toContain('idleReclaimMinutes')
+    const ids = block('const reclaimableNowIds = computed<string[]>', 'const RECLAIM_ESTIMATE_BYTES_PER_CLI')
+    expect(ids).not.toContain('idleReclaimDisabled')
+    expect(ids).not.toContain('idleReclaimMinutes')
+  })
+
   // A manual reclaim must not become a way around the guards — the only thing
   // pressing the button skips is the waiting.
   it('runs manual reclaim through the same guards, minus the age check', () => {

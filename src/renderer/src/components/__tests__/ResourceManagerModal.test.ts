@@ -127,6 +127,7 @@ async function mountModal(
     cpu?: Record<string, number | null>
     usageOver?: Parameters<typeof fakeUsage>[2]
     localRows?: ReturnType<typeof localRow>[]
+    autoReclaimMinutes?: string
   } = {}
 ): Promise<{ w: VueWrapper; refresh: ReturnType<typeof vi.fn> }> {
   const usage = fakeUsage(opts.bytes ?? DEFAULT_BYTES, opts.cpu ?? DEFAULT_CPU, opts.usageOver)
@@ -137,7 +138,7 @@ async function mountModal(
       usage: usage.api,
       localRows: opts.localRows ?? [],
       autoReclaimOn: true,
-      autoReclaimMinutes: '45',
+      autoReclaimMinutes: opts.autoReclaimMinutes ?? '45',
     },
     // The modal teleports to <body>; stubbing that keeps the tree inside the
     // wrapper, which is what every query here reads from.
@@ -321,6 +322,16 @@ describe('ResourceManagerModal', () => {
   it('reports the auto-reclaim setting it does not own', async () => {
     const { w } = await mountModal()
     expect(w.text()).toContain('45')
+    w.unmount()
+  })
+
+  // 'never' is a sentinel, not a duration: rendered through the line that ends
+  // in "min" it would read "idle never min".
+  it('reads the never threshold as off rather than as a number of minutes', async () => {
+    const { w } = await mountModal({ autoReclaimMinutes: 'never' })
+    expect(w.text()).toContain(i18n.global.t('resource.auto-reclaim-disabled'))
+    expect(w.text()).not.toContain('never min')
+    expect(w.text()).not.toContain('never 分鐘')
     w.unmount()
   })
 

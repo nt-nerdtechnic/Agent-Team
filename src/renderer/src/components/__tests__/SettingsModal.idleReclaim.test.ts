@@ -30,6 +30,13 @@ describe('Settings › General reclaim rows', () => {
     expect(Math.min(...thresholds)).toBe(15)
   })
 
+  // Every number in this select is a duration the logic clamps to a 15-minute
+  // floor, so there is no number that means off — the way out has to be a word.
+  it('offers a never option that is not a duration', () => {
+    expect(source).toContain('<option value="never">')
+    expect(source).toContain('settings.general.idle-reclaim-never')
+  })
+
   it('hides the reclaim-now row when the feature is switched off', () => {
     const row = source.slice(source.indexOf('general-idle-reclaim-now'))
     expect(source).toContain('v-if="idleReclaimEnabledModel"\n                data-settings-section="general-idle-reclaim-now"')
@@ -57,6 +64,7 @@ describe('Settings › General reclaim rows', () => {
       'settings.general.idle-reclaim-1h',
       'settings.general.idle-reclaim-3h',
       'settings.general.idle-reclaim-8h',
+      'settings.general.idle-reclaim-never',
       'settings.general.idle-reclaim-now',
       'settings.general.idle-reclaim-now-hint',
       'settings.general.idle-reclaim-now-empty',

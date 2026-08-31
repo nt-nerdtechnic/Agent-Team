@@ -2574,6 +2574,7 @@ watch(activeTab, (tab) => {
                     <option value="60">{{ $t('settings.general.idle-reclaim-1h') }}</option>
                     <option value="180">{{ $t('settings.general.idle-reclaim-3h') }}</option>
                     <option value="480">{{ $t('settings.general.idle-reclaim-8h') }}</option>
+                    <option value="never">{{ $t('settings.general.idle-reclaim-never') }}</option>
                   </select>
                 </template>
               </SettingRow>
