@@ -390,6 +390,39 @@ export function chunkForPty(text: string, size: number): string[] {
 export const BRACKETED_PASTE_START = '\x1b[200~'
 export const BRACKETED_PASTE_END = '\x1b[201~'
 
+/** Everything that must not survive into a PTY write.
+ *
+ *  The paste guards first, and they are the reason this exists. Wrapping a body
+ *  in `ESC[200~ … ESC[201~` tells the CLI to take the content as text rather
+ *  than as keys — but only until it sees the end guard, and the end guard is
+ *  five printable bytes that any message can contain. A payload carrying one
+ *  closes paste mode early, and everything after it arrives as *keystrokes*:
+ *  CR submits, `\x03` interrupts, `\x04` can end the session. That turns "send
+ *  this agent a message" into "press these keys on that machine", which is a
+ *  different feature and one nobody agreed to.
+ *
+ *  Then the remaining C0 controls, because the guards only hold for a CLI that
+ *  implements bracketed paste, and `injectionChunks` is also called with
+ *  `bracketed: false`. Newline and tab stay: multi-line messages are ordinary
+ *  and are what `preserveNewlines` exists to carry. CR does not — in a PTY it
+ *  is Enter, and an injected message decides for itself when it is finished.
+ *
+ *  Deliberately not `stripInputSequences`, which lives a few lines below and
+ *  looks like the same job. That one reads what a terminal *sends* and removes
+ *  whole escape sequences, including the arrow keys and mouse reports a person
+ *  generates while typing. Here the input is somebody else's message, and
+ *  silently eating a bracket-looking run of their text would be a second
+ *  surprise on top of the first. */
+export function sanitizeInjectionBody(body: string): string {
+  return body
+    .split(BRACKETED_PASTE_START)
+    .join('')
+    .split(BRACKETED_PASTE_END)
+    .join('')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+}
+
 /** Split an injection payload into PTY writes.
  *
  *  The bracketed-paste guards are emitted as their own chunks and never merged
@@ -397,12 +430,20 @@ export const BRACKETED_PASTE_END = '\x1b[201~'
  *  literal text and never enters paste mode, which is exactly what a size-based
  *  split of the wrapped string would eventually do.
  *
+ *  The body is sanitised here rather than at the callers because this is the one
+ *  place every injection passes through — local `cli_send`, a cross-device
+ *  message off the relay, a spawn kickoff, a pasted pane context. A caller that
+ *  forgot would not fail visibly; it would just hand somebody else's control
+ *  bytes to a terminal.
+ *
  *  An empty body writes nothing at all. Wrapping it would send a pair of guards
  *  around no content — two writes where there used to be none, announcing a
- *  paste that never comes. */
+ *  paste that never comes. A body that is empty only *after* sanitising is the
+ *  same situation and takes the same answer. */
 export function injectionChunks(body: string, size: number, bracketed: boolean): string[] {
-  if (body === '') return []
-  const chunks = chunkForPty(body, size)
+  const clean = sanitizeInjectionBody(body)
+  if (clean === '') return []
+  const chunks = chunkForPty(clean, size)
   return bracketed ? [BRACKETED_PASTE_START, ...chunks, BRACKETED_PASTE_END] : chunks
 }
 
