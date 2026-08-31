@@ -48,9 +48,12 @@ function preparationLabel(status: ActivePaneView['preparationStatus']): string {
 function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
   if (!status || status === 'none') return ''
   switch (status) {
-    case 'pending': return '· kickoff: queued'
-    case 'sent':    return '· kickoff: sent'
-    case 'failed':  return '· kickoff: failed'
+    case 'pending':    return '· kickoff: queued'
+    case 'sent':       return '· kickoff: sent'
+    // Written, but the only echo we got was the buffer growing — which a
+    // booting CLI does regardless. Say so rather than claiming it was sent.
+    case 'unverified': return '· kickoff: unverified'
+    case 'failed':     return '· kickoff: failed'
   }
 }
 </script>

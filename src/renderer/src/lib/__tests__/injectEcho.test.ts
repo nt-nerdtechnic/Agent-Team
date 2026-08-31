@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  echoLanded, echoTimeoutFor, growthNeededFor, normalizeForMatch, submitLanded, TAIL_MATCH_LEN
+  echoEvidence, echoLanded, echoTimeoutFor, growthNeededFor, injectionVerified,
+  normalizeForMatch, submitEvidence, submitLanded, TAIL_MATCH_LEN
 } from '../injectEcho'
 
 describe('normalizeForMatch', () => {
@@ -143,5 +144,89 @@ describe('echoLanded — a TUI that collapses a big paste', () => {
 
   it('leaves the verbatim-echo path alone', () => {
     expect(echoLanded(`> ${tail}`, tail, 0, 2_000)).toBe(true)
+  })
+})
+
+describe('echoEvidence', () => {
+  it('names the tail match, the strongest signal', () => {
+    expect(echoEvidence('...please run the tests', 'runthetests', 0, 20)).toBe('tail')
+  })
+
+  it('names growth when only the buffer size says anything', () => {
+    // No tail anywhere in the buffer; the only thing that changed is its size.
+    expect(echoEvidence('unrelated repaint output', 'nowherenearthis', 400, 40)).toBe('growth')
+  })
+
+  it('names the collapsed-paste placeholder', () => {
+    // Below the growth threshold, so the placeholder is the only signal left.
+    expect(echoEvidence('[Pasted text #1 +40 lines]', 'nomatch', 5, 400)).toBe('placeholder')
+  })
+
+  it('answers null when nothing landed', () => {
+    expect(echoEvidence('quiet', 'nomatch', 0, 400)).toBeNull()
+  })
+
+  it('agrees with echoLanded on every one of those', () => {
+    // The refactor must not have moved any decision, only exposed how it was made.
+    const cases: [string, string, number, number][] = [
+      ['...please run the tests', 'runthetests', 0, 20],
+      ['unrelated repaint output', 'nowherenearthis', 400, 40],
+      ['[Pasted text #1 +40 lines]', 'nomatch', 5, 400],
+      ['quiet', 'nomatch', 0, 400],
+    ]
+    for (const c of cases) {
+      expect(echoLanded(...c)).toBe(echoEvidence(...c) !== null)
+    }
+  })
+})
+
+describe('submitEvidence', () => {
+  it('names tail-left when our text left the composer', () => {
+    expect(
+      submitEvidence({ tailWasOnScreen: true, tail: 'runthetests', screen: 'idle prompt', grownBy: 0 }),
+    ).toBe('tail-left')
+  })
+
+  it('answers null while our text is still sitting there', () => {
+    expect(
+      submitEvidence({ tailWasOnScreen: true, tail: 'runthetests', screen: '> run the tests', grownBy: 99 }),
+    ).toBeNull()
+  })
+
+  it('falls back to growth only when the tail never echoed', () => {
+    expect(
+      submitEvidence({ tailWasOnScreen: false, tail: 'x', screen: '', grownBy: 1 }),
+    ).toBe('growth')
+  })
+
+  it('agrees with submitLanded', () => {
+    const cases = [
+      { tailWasOnScreen: true, tail: 'abc', screen: 'gone', grownBy: 0 },
+      { tailWasOnScreen: true, tail: 'abc', screen: 'abc', grownBy: 99 },
+      { tailWasOnScreen: false, tail: 'x', screen: '', grownBy: 1 },
+      { tailWasOnScreen: false, tail: 'x', screen: '', grownBy: 0 },
+    ]
+    for (const c of cases) expect(submitLanded(c)).toBe(submitEvidence(c) !== null)
+  })
+})
+
+describe('injectionVerified', () => {
+  it('is true only when both halves observed the payload itself', () => {
+    expect(injectionVerified('tail', 'tail-left')).toBe(true)
+    expect(injectionVerified('placeholder', 'tail-left')).toBe(true)
+  })
+
+  it('is false when either half rests on growth alone', () => {
+    // This is the freshly-spawned-pane case: a booting TUI repaints, so growth
+    // is satisfied whatever happened to our bytes. Reporting that as success is
+    // the bug this whole distinction exists to stop.
+    expect(injectionVerified('growth', 'tail-left')).toBe(false)
+    expect(injectionVerified('tail', 'growth')).toBe(false)
+    expect(injectionVerified('growth', 'growth')).toBe(false)
+  })
+
+  it('is false when either half found nothing', () => {
+    expect(injectionVerified(null, 'tail-left')).toBe(false)
+    expect(injectionVerified('tail', null)).toBe(false)
   })
 })

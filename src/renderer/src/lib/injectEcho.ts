@@ -27,6 +27,25 @@ export function normalizeForMatch(s: string): string {
   return s.replace(/[\s│┃┆┇┊┋╎╏|─━┄┅┈┉╌╍]+/g, '')
 }
 
+/** How we concluded our text landed. `tail` and `placeholder` observe the
+ *  payload; `growth` only observes that the buffer changed size, which a
+ *  booting TUI does regardless. */
+export type EchoEvidence = 'tail' | 'placeholder' | 'growth'
+
+/** How we concluded Enter took. `tail-left` watched our text leave the
+ *  composer; `growth` only saw the terminal react. */
+export type SubmitEvidence = 'tail-left' | 'growth'
+
+/** Whether a pair of evidences is strong enough to call the injection verified.
+ *  Growth-only on either half means we wrote bytes and cannot say where they
+ *  went — an honest "unverified", not a success and not a failure. */
+export function injectionVerified(
+  echo: EchoEvidence | null,
+  submit: SubmitEvidence | null,
+): boolean {
+  return echo !== null && echo !== 'growth' && submit !== null && submit !== 'growth'
+}
+
 /** Growth that counts as "echoed" for a payload of this size.
  *
  *  A flat 40 chars is unreachable for a short prompt: a one-line instruction
@@ -57,8 +76,27 @@ export function echoLanded(
   grownBy: number,
   normalizedLength: number,
 ): boolean {
-  if (tail && normalizeForMatch(buffer).includes(tail)) return true
-  if (grownBy >= growthNeededFor(normalizedLength)) return true
+  return echoEvidence(buffer, tail, grownBy, normalizedLength) !== null
+}
+
+/** What kind of evidence says our text landed — or null when none does.
+ *
+ *  Same decision as echoLanded, same order, but it does not flatten *how* it
+ *  decided. That distinction is load-bearing: `tail` and `placeholder` both
+ *  observe the payload itself, while `growth` only observes that the buffer got
+ *  bigger. A CLI painting its first screen grows the buffer no matter what
+ *  happened to our bytes, so on a freshly spawned pane `growth` is not evidence
+ *  at all — it is the absence of evidence, reported as success. Callers that
+ *  care (a spawn kickoff) can tell the two apart; callers that just need a
+ *  yes/no keep using echoLanded and are unaffected. */
+export function echoEvidence(
+  buffer: string,
+  tail: string,
+  grownBy: number,
+  normalizedLength: number,
+): EchoEvidence | null {
+  if (tail && normalizeForMatch(buffer).includes(tail)) return 'tail'
+  if (grownBy >= growthNeededFor(normalizedLength)) return 'growth'
   // The collapsed-paste case. Both signals above measure the payload: one
   // looks for it verbatim, the other for enough bytes to account for it — and
   // a collapsed paste produces neither, because the summary is short and
@@ -71,8 +109,10 @@ export function echoLanded(
   // Only a summary inside the region that just grew counts. One left over from
   // an earlier paste would otherwise say "landed" while nothing of ours had,
   // and the Enter that follows would submit whatever the composer was holding.
-  if (grownBy <= 0) return false
+  if (grownBy <= 0) return null
   return PASTE_PLACEHOLDER_RE.test(buffer.slice(-(grownBy + PLACEHOLDER_MARGIN)))
+    ? 'placeholder'
+    : null
 }
 
 /** Lines at the bottom of the visible screen that hold the input box. Small
@@ -101,10 +141,25 @@ export function submitLanded(opts: {
   screen: string
   grownBy: number
 }): boolean {
+  return submitEvidence(opts) !== null
+}
+
+/** What kind of evidence says Enter took — or null when none does.
+ *
+ *  Same split as echoEvidence: `tail-left` watched our own text leave the
+ *  composer, `growth` only saw the terminal react at all. The second is the
+ *  documented fallback for TUIs that collapse a paste, and it is exactly as
+ *  weak on a booting pane as growth is for the echo. */
+export function submitEvidence(opts: {
+  tailWasOnScreen: boolean
+  tail: string
+  screen: string
+  grownBy: number
+}): SubmitEvidence | null {
   if (opts.tailWasOnScreen && opts.tail) {
-    return !normalizeForMatch(opts.screen).includes(opts.tail)
+    return normalizeForMatch(opts.screen).includes(opts.tail) ? null : 'tail-left'
   }
-  return opts.grownBy > 0
+  return opts.grownBy > 0 ? 'growth' : null
 }
 
 /** How long to wait for the echo before concluding the bytes never landed.

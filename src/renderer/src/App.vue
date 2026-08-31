@@ -132,7 +132,8 @@ import {
 import { pickReusablePane, runReportedDispatch, validatePlanDispatch, type PlanDispatchOutcome, type PlanDispatchPayload } from './lib/planDispatch'
 import { planExecutionPrompt } from './lib/planExecutePrompt'
 import {
-  echoLanded, echoTimeoutFor, normalizeForMatch, submitLanded,
+  echoEvidence, echoTimeoutFor, injectionVerified, normalizeForMatch,
+  submitEvidence, type EchoEvidence, type SubmitEvidence,
   SUBMIT_CONFIRM_MS, SUBMIT_SCREEN_LINES, TAIL_MATCH_LEN
 } from './lib/injectEcho'
 import { recordDiagnostic, readDiagnostics, currentDiagnosticSeq } from './lib/uiDiagnostics'
@@ -2347,7 +2348,32 @@ async function kickoffRequestedPane(
     }
     await waitForQuiet(paneId, 1000, 8000)
     if (!paneAlive(paneId)) return false
-    const kicked = await injectPane(paneId, renderSpawnKickoff(task, parentName), 'agent-spawn', true)
+    // Collect HOW the injection was verified, not just whether. On a pane that
+    // is still painting its first screen the echo check passes on buffer growth
+    // alone, so a `true` here can mean "we wrote bytes and cannot say where they
+    // went" — which used to be reported as an outright success.
+    const evidence: { echo?: EchoEvidence | null; submit?: SubmitEvidence | null } = {}
+    const kicked = await injectPane(
+      paneId, renderSpawnKickoff(task, parentName), 'agent-spawn', true, undefined, evidence
+    )
+    const verified = kicked && injectionVerified(evidence.echo ?? null, evidence.submit ?? null)
+    const settled = paneRefs[paneId] ? panes.value.find((p) => p.id === paneId) : undefined
+    if (settled) {
+      settled.kickoffStatus = !kicked ? 'failed' : verified ? 'sent' : 'unverified'
+    }
+    if (kicked && !verified) {
+      // The one outcome that used to be invisible: no throw, no false, and no
+      // notice — just a pane sitting idle with an empty prompt.
+      recordDiagnostic({
+        level: 'warn',
+        code: 'spawn.kickoff-unverified',
+        message:
+          `kickoff reported success on ${evidence.echo ?? 'no'} echo / ` +
+          `${evidence.submit ?? 'no'} submit evidence — growth alone cannot ` +
+          'distinguish our text from a booting CLI repainting',
+        paneId,
+      })
+    }
     // Arm the fallback report only once the task is really in: a kickoff that
     // never landed leaves a pane with nothing to report on. `parentName` is
     // only a messaging handle when a live pane answers to it — the MCP path
@@ -2362,6 +2388,9 @@ async function kickoffRequestedPane(
     }
     return kicked
   } finally {
+    // Only clear a kickoff that never reached a verdict (an early return, a
+    // throw). A settled 'sent' / 'unverified' / 'failed' is the answer callers
+    // and cli_get_status read, and resetting it to 'none' would erase it.
     const live = panes.value.find((p) => p.id === paneId)
     if (live?.kickoffStatus === 'pending') live.kickoffStatus = 'none'
   }
@@ -2830,7 +2859,13 @@ async function injectText(
   // Loop callers pass a generation check so a manual cancel / restart aborts an
   // already-running injection mid-flight instead of letting a stray prompt land
   // in the CLI. Returns false on abort (treated as a failed inject).
-  shouldAbort?: () => boolean
+  shouldAbort?: () => boolean,
+  // Optional out-parameter: filled with HOW the echo and submit checks decided,
+  // for callers that need to tell "we saw our own text land" apart from "the
+  // buffer changed size". A booting CLI repaints constantly, so growth-only
+  // evidence is not evidence at all — see injectionVerified. Callers that only
+  // need the yes/no simply omit it.
+  evidence?: { echo?: EchoEvidence | null; submit?: SubmitEvidence | null }
 ): Promise<boolean> {
   // Log the full injection text to the session's output log file BEFORE
   // chunking so the log file shows one readable block per send.
@@ -2929,7 +2964,9 @@ async function injectText(
       await sleep(200)
       if (shouldAbort?.()) return false
       const buf = cleanBuf()
-      if (echoLanded(buf, tail, cleanBytes() - preBytes, normalizedLen)) {
+      const found = echoEvidence(buf, tail, cleanBytes() - preBytes, normalizedLen)
+      if (found !== null) {
+        if (evidence) evidence.echo = found
         ready = true
         break
       }
@@ -2988,12 +3025,14 @@ async function injectText(
     while (Date.now() < deadline && !landed) {
       await sleep(200)
       if (shouldAbort?.()) return false
-      landed = submitLanded({
+      const how = submitEvidence({
         tailWasOnScreen,
         tail,
         screen: screenTail(),
         grownBy: cleanBytes() - before
       })
+      landed = how !== null
+      if (landed && evidence) evidence.submit = how
     }
     if (landed) return true
     if (attempt < MAX_SUBMITS) {
@@ -3014,7 +3053,8 @@ async function injectPane(
   text: string,
   logLabel?: string,
   preserveNewlines = false,
-  shouldAbort?: () => boolean
+  shouldAbort?: () => boolean,
+  evidence?: { echo?: EchoEvidence | null; submit?: SubmitEvidence | null }
 ): Promise<boolean> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane?.realized) return false
@@ -3023,7 +3063,7 @@ async function injectPane(
   // Anything reaching the prompt ends the parked-after-resume state the continue
   // button exists for — including this button's own injection.
   pane.resumeContinueAvailable = false
-  return injectText(ref.sessionId, text, logLabel, preserveNewlines, shouldAbort)
+  return injectText(ref.sessionId, text, logLabel, preserveNewlines, shouldAbort, evidence)
 }
 
 // Text of a pane worth SHARING with another pane / the AI Chat: the rendered

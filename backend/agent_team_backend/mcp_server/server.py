@@ -509,9 +509,14 @@ async def cli_open_agent(
     its own; the workspace's CLI-pane count is still tracked for the advisory
     below.
 
-    This returns once the pane exists, which takes a few seconds. Its CLI then
-    boots and receives the task in the background — if that part fails you are
-    told by message. For a pane caller, the new pane is asked to report its
+    `ok: true` means the PANE EXISTS — not that the task arrived. The CLI boots
+    and is given the task afterwards, and that half can fail on its own. Check
+    it with cli_get_status: `ui.kickoff` is "sent" when the task was observed
+    landing, "unverified" when the bytes were written but the only echo was a
+    booting CLI repainting (read `ui.buffer`; re-send with cli_send if the
+    prompt is empty), or "failed". A failure is ALSO reported by message to a
+    pane caller — but only to a pane caller, and only when the injection
+    reported failure, which is exactly the case "unverified" exists to cover. For a pane caller, the new pane is asked to report its
     result to you by message when it finishes — but that report is the child
     agent's own output, not a guarantee from Navide: it is held until you are
     between turns, and nothing arrives if the child never writes the block.
@@ -1612,8 +1617,21 @@ async def cli_get_status(target: str, ctx: Context, pane_id: str = "") -> dict[s
     agent_key, busy, last_activity?, ui?}. `last_activity`, when known, is
     {type: "agent_active"|"turn_complete", text? (turn_complete only),
     age_seconds}. `ui`, when the owning Navide window answers in time, is
-    {status, buffer, logPath?} straight from the renderer; it is omitted
-    (not a failure) when the window does not reply.
+    {status, buffer, logPath?, awaitingKind?, kickoff?} straight from the
+    renderer; it is omitted (not a failure) when the window does not reply.
+
+    `ui.kickoff` is how this pane's spawn-time task injection ended, and it is
+    the authoritative answer to "did cli_open_agent's task actually arrive":
+
+      - "sent" — our own text was observed landing in the composer.
+      - "unverified" — the bytes were written and the echo check passed, but
+        only on buffer growth, which a CLI painting its first screen does
+        whatever happened to our text. Treat it as "probably not delivered":
+        read `buffer`, and re-send with cli_send if the prompt is empty.
+      - "failed" — the injection did not go in. 
+      - "pending" — still running.
+
+    Absent when the pane was not spawned with a task.
     """
 
     try:

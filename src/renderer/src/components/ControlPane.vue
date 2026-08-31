@@ -50,7 +50,12 @@ const yoloVendors = CLI_AGENT_SPECS
 /** Whether the pane's role prompt has been handed to the CLI yet. */
 export type InjectionStatus = 'pending' | 'scheduled' | 'sent' | 'failed' | 'skipped'
 /** Whether the pipeline's opening instruction has been sent. */
-export type KickoffStatus = 'none' | 'pending' | 'sent' | 'failed'
+//: 'unverified' is a real outcome, not a shade of 'sent': the bytes were written
+//: and the echo check passed, but only on buffer growth — which a CLI painting
+//: its first screen satisfies whatever happened to our text. Reporting that as
+//: 'sent' is what let a spawned pane sit idle with an empty prompt while its
+//: caller believed the task had been delivered.
+export type KickoffStatus = 'none' | 'pending' | 'sent' | 'unverified' | 'failed'
 /** How far the spawn-to-ready sequence has got; shown in the pane subtitle. */
 export type PreparationStatus =
   | 'starting'
@@ -1591,6 +1596,10 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
       return '· kickoff: queued'
     case 'sent':
       return '· kickoff: sent'
+    // Written, but the only echo we got was the buffer growing — which a
+    // booting CLI does regardless. Say so rather than claiming it was sent.
+    case 'unverified':
+      return '· kickoff: unverified'
     case 'failed':
       return '· kickoff: failed'
   }

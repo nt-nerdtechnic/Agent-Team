@@ -519,6 +519,13 @@ export interface PaneStatusReply {
    *  consumer that must not regress: a question was always something it
    *  returned from, a permission prompt never was. */
   awaitingKind?: string
+  /** How the pane's spawn-time task injection ended: 'sent' (our own text was
+   *  observed landing), 'unverified' (bytes written, but the only echo was the
+   *  buffer growing — which a booting CLI does regardless), 'failed', or
+   *  'pending' while it is still running. Absent when the pane was not spawned
+   *  with a task. A caller that opened this pane and got `ok: true` cannot
+   *  otherwise tell a delivered task from a pane sitting at an empty prompt. */
+  kickoff?: string
   buffer: string
   logPath?: string
 }
@@ -529,7 +536,7 @@ export interface PaneStatusReply {
  *  buffer text — null when the pane exists but hasn't realized its
  *  TerminalPane ref yet (still shows a status, but no scrollback). */
 export function buildPaneStatusReply(
-  pane: { outputLogFile?: string } | undefined,
+  pane: { outputLogFile?: string; kickoffStatus?: string } | undefined,
   live: { displayStatus?: string; awaitingKind?: string | null; buffer: string } | null
 ): PaneStatusReply {
   const reply: PaneStatusReply = {
@@ -538,5 +545,7 @@ export function buildPaneStatusReply(
     logPath: pane?.outputLogFile || undefined
   }
   if (live?.awaitingKind) reply.awaitingKind = live.awaitingKind
+  // 'none' means this pane was never given a task; saying so would be noise.
+  if (pane?.kickoffStatus && pane.kickoffStatus !== 'none') reply.kickoff = pane.kickoffStatus
   return reply
 }
