@@ -1593,8 +1593,17 @@ class ServerLink:
         this device. That is one connection in the steady state, but a backend
         restart can leave the old socket open a moment after the new one is up,
         and then the same message arrives twice.
+
+        The in-memory half above answers the ordinary case — the same socket
+        pair, seconds apart. The persisted half answers the one a relay can
+        arrange: hold a delivered message, wait for a backend restart, push it
+        again. That wait used to be all it took, because this map was rebuilt
+        empty every time the process came up, and a restart is a daily event
+        rather than something anyone has to engineer.
         """
         if msg_key in self._inbound:
+            return False
+        if trust_store.has_seen_message(msg_key):
             return False
         now = time.monotonic()
         for key, entry in list(self._inbound.items()):
@@ -1604,6 +1613,11 @@ class ServerLink:
         while len(self._inbound) >= MESSAGE_MEMORY_MAX:
             self._inbound.pop(next(iter(self._inbound)))
         self._inbound[msg_key] = {"created_at": now, "pane_id": "", "acked": False}
+        # Recorded on the claim rather than after delivery: a message that got
+        # this far has been handed to the delivery path, and re-running that
+        # path is the thing being prevented. Batched (see note_seen_message), so
+        # this is a dict write here and a Keychain write every so often.
+        trust_store.note_seen_message(msg_key)
         return True
 
     async def _authenticate_sender(
@@ -1874,6 +1888,35 @@ class ServerLink:
                 await self._ack(msg_key, "rejected", reason="undecryptable")
                 return
         else:
+            # The other half of the downgrade rule. The send side has refused to
+            # emit plaintext to a peer known to hold a key ever since that record
+            # was made durable — but a rule enforced on only one side is not a
+            # rule, it is a preference. A relay that wants cleartext does not
+            # need to break the sender; it can ask the receiver, and until now
+            # the receiver had nothing to say no with.
+            #
+            # `is_encrypted_peer` is read from disk, so this survives the restart
+            # that the in-memory version could simply be waited out through.
+            sender_device = str(source.get("deviceId") or "")
+            if sender_device and trust_store.is_encrypted_peer(sender_device):
+                log.warning(
+                    "refusing plaintext %s from %s, which has been encrypting",
+                    msg_key, sender_device,
+                )
+                # Recorded as well as acked: the sender learning it was refused
+                # tells a hostile sender only what it already knew. The notice is
+                # for the person at this machine, and it is not dismissible for
+                # the same reason a changed key is not — it reports a message
+                # that was dropped, and that stays worth seeing.
+                try:
+                    await asyncio.to_thread(
+                        trust_store.note_plaintext_refused, sender_device, msg_key=msg_key
+                    )
+                except Exception as err:  # noqa: BLE001
+                    # The refusal stands either way; only the telling failed.
+                    log.warning("could not record the refused downgrade: %s", err)
+                await self._ack(msg_key, "rejected", reason="plaintext-downgrade")
+                return
             text = str(data.get("text") or "")
 
         self._inbound[msg_key]["pane_id"] = result.pane.pane_id

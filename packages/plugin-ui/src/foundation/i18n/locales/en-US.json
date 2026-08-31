@@ -1135,7 +1135,13 @@
         "policy-unverified": "Your rules could not be verified",
         "policy-unverified-body": "Nothing is being accepted from other devices until they are. Open the rules and save them once — that signs them again.",
         "locked-title": "Cross-device is stopped",
-        "locked-body": "This machine had trust state and no longer does. Nothing is sent or accepted until that is understood. Starting over is exactly what deleting that state would achieve, so there is no button for it."
+        "locked-body": "This machine had trust state and no longer does. Nothing is sent or accepted until that is understood. Starting over is exactly what deleting that state would achieve, so there is no button for it.",
+        "plaintext-refused": "Refused an unencrypted message from {device}",
+        "plaintext-refused-body": "This device has been sending encrypted messages, and this one arrived in the clear. It was dropped rather than delivered — a peer that once had a key does not lose it, so something else is asking you to accept plaintext.",
+        "plaintext-refused-what-to-do": "Nothing is required: the message was already refused. If that device was legitimately reinstalled, it will publish a new key and its next message will go through.",
+        "member-changed": "{device} now answers to a different account",
+        "member-changed-body": "The pinned key is unchanged, so it is still that machine — but the server now reports it under another member. That is either a genuine account move or the server saying so.",
+        "unknown-notice": "Security notice this version cannot display ({kind})"
       },
       "link": {
         "pause": "Turn off",

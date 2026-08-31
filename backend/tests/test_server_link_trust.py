@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
+import json
+import pathlib
 
 import pytest
 
@@ -802,3 +805,270 @@ def test_a_marker_from_an_older_build_still_locks():
     app.credential_vault.write_app_secret(trust_store.SECRET_NAME, None)
     trust_store._state = None
     assert "unreadable" in trust_store.locked_reason()
+
+
+# ---- H2: the receiving half of the downgrade rule ----------------------------
+
+
+async def test_a_peer_that_has_been_encrypting_cannot_revert_to_plaintext(broadcasts):
+    """The other half of the rule the send side has enforced for a while.
+
+    A rule kept on one side only is not a rule. The send side refuses to emit
+    plaintext to a peer known to hold a key, so a relay that wants cleartext
+    does not attack the sender — it asks the receiver, and until now the
+    receiver had nothing to say no with.
+
+    The message here is *properly signed*: this is not a forgery. It is what a
+    genuine peer sends after losing its own downgrade record — a reinstall, an
+    older build — while the relay quietly stops publishing the recipient's key
+    to it. Both halves of that are things the relay can arrange.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        # This machine learns the peer encrypts, the way it normally would.
+        trust_store.note_encrypted_peer(PEER.device_id)
+
+        await conn.push({"type": "messages.pending", "payload": _pending("k-plain")})
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["reason"] == "plaintext-downgrade"
+        assert broadcasts == [], "nothing reached a pane"
+
+        # Refused *and* narrated. The sender being told is not the point — a
+        # hostile sender already knew. The person at this machine is the one
+        # who needs to see that something asked them to accept cleartext.
+        refused = [
+            n for n in trust_store.notices()
+            if n["kind"] == trust_store.NOTICE_PLAINTEXT_REFUSED
+        ]
+        assert len(refused) == 1
+        assert refused[0]["deviceId"] == PEER.device_id
+        assert refused[0]["msgKey"] == "k-plain"
+    finally:
+        await link.stop()
+
+
+async def test_plaintext_from_a_peer_that_never_encrypted_still_lands(broadcasts):
+    """The other direction, and the reason this is not simply "refuse plaintext".
+
+    A peer that has never published a key is an un-upgraded build, and it can
+    only read and write cleartext. Refusing it would take the feature away from
+    every machine that has not been updated yet — the failure mode that makes
+    people turn a defence off.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        assert not trust_store.is_encrypted_peer(PEER.device_id)
+        await conn.push({"type": "messages.pending", "payload": _pending("k-ok")})
+        await _until(lambda: bool(broadcasts))
+        assert broadcasts, "an un-upgraded peer is still reachable"
+    finally:
+        await link.stop()
+
+
+def test_no_public_read_answers_from_an_empty_cache():
+    """A cold cache must not read as an empty store — for every reader, not
+    the three somebody remembered.
+
+    The writes in this module have always loaded; the reads had not, so every
+    durable guarantee was conditional on the order the process warmed up in.
+    Two of them handed back a CRITICAL that way: `pin_for` answered "never seen
+    this device" about a pinned one, and the caller answers that by verifying
+    the signature against whatever key the relay advertises (C1); `policy_seq`
+    answered 0, which makes `offered < seq` vacuous and lets any older signed
+    policy be replayed (C2).
+
+    Enumerated rather than listed. The first version of this test named three
+    functions by hand and passed while `policy_seq` — the fourth — was still
+    broken, which is the same failure as the notice union that type-checked
+    while missing a member: a check that only covers what its author thought of
+    reads as coverage and stops anyone writing the real one.
+    """
+    trust_store.note_encrypted_peer("dev-cold")
+    trust_store.pin_device("dev-cold", sign_key="k-cold", member_id="m-cold")
+    trust_store.note_policy_seq("dev-cold", 7)
+    trust_store.note_seen_message("k-seen")
+    trust_store.flush_seen_messages()
+
+    # Every public reader, with an argument that has something to find. A new
+    # one added here without a loading path makes this test fail.
+    readers = {
+        "pin_for": lambda: trust_store.pin_for("dev-cold") is not None,
+        "is_encrypted_peer": lambda: trust_store.is_encrypted_peer("dev-cold"),
+        "policy_seq": lambda: trust_store.policy_seq("dev-cold"),
+        "notices": lambda: len(trust_store.notices()),
+        "has_seen_message": lambda: trust_store.has_seen_message("k-seen"),
+    }
+    warm = {name: read() for name, read in readers.items()}
+
+    # Cleared before *each* reader, not once before the loop. The first reader
+    # to run loads the state, so a single reset only ever tests that one — this
+    # test passed against a deliberately broken `policy_seq` until the reset
+    # moved inside, because `pin_for` had already warmed the cache for it.
+    cold = {}
+    for name, read in readers.items():
+        trust_store._state = None        # a fresh process, same disk
+        cold[name] = read()
+    assert cold == warm, f"a cold cache answered differently: {warm} vs {cold}"
+
+    # The public read surface itself, so that adding a fifth reader without
+    # adding it above is caught rather than silently uncovered.
+    import inspect
+
+    touching_state = {
+        name
+        for name, fn in inspect.getmembers(trust_store, inspect.isfunction)
+        if not name.startswith("_")
+        and fn.__module__ == trust_store.__name__
+        and "_state" in (inspect.getsource(fn))
+    }
+    # clear_policy_notice reads the cache too, but its cold answer is "leave the
+    # warning alone" — the safe direction, and the reason it is exempt.
+    unchecked = touching_state - set(readers) - {"clear_policy_notice", "locked_reason"}
+    assert not unchecked, f"public readers with no cold-cache assertion: {unchecked}"
+
+
+def test_the_refusal_survives_a_restart():
+    """What made the in-memory version worth waiting out.
+
+    The record lives in the trust store, which is on disk, so a relay cannot
+    simply outlast the process to get the receiver to accept cleartext again.
+    """
+    trust_store.note_encrypted_peer("dev-remembered")
+    # Drop only the in-process cache. `_reset_for_test` would also clear the
+    # initialised marker, which is the fail-closed latch rather than the data —
+    # using it here would prove the store forgets when told to forget, not that
+    # the record outlives a process.
+    trust_store._state = None
+    assert trust_store.is_encrypted_peer("dev-remembered")
+
+
+def test_a_refused_downgrade_cannot_be_dismissed():
+    """Same reason a changed key cannot: it reports a message that was dropped,
+    and that stays worth seeing. A button that made it disappear would let the
+    answer to "why did nothing arrive" be one click."""
+    assert trust_store.NOTICE_PLAINTEXT_REFUSED not in trust_store.DISMISSIBLE
+    trust_store.note_plaintext_refused("dev-x", msg_key="k1")
+    key = next(
+        n["key"] for n in trust_store.notices()
+        if n["kind"] == trust_store.NOTICE_PLAINTEXT_REFUSED
+    )
+    assert trust_store.dismiss_notice(key) is False
+
+
+def test_every_notice_kind_has_a_branch_in_the_account_modal():
+    """The renderer's union has to list every kind this module can record.
+
+    Nothing else can catch this. A union missing a member is perfectly legal
+    TypeScript — the values arrive as JSON, so the compiler never sees them —
+    and the cost is not a render failure: the notice falls through to whichever
+    branch is last. That is how `member-changed` came to be announced as "first
+    seen this device", which is not merely unhelpful but false, and false in the
+    reassuring direction.
+    """
+    modal = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "src" / "renderer" / "src" / "components" / "AccountModal.vue"
+    ).read_text(encoding="utf-8")
+    missing = [k for k in sorted(trust_store.ALL_NOTICE_KINDS) if f"'{k}'" not in modal]
+    assert not missing, f"AccountModal has no branch for: {missing}"
+    # And the fallthrough must not be one of the real branches wearing a
+    # `v-else` — see the comment above it.
+    assert "v-else-if=\"n.kind === 'device-first-seen'\"" in modal
+
+
+# ---- M1: the delivered-message ledger outlives the process -------------------
+
+
+def test_a_delivered_message_is_still_known_after_a_restart():
+    """What the in-memory ledger could be waited out for.
+
+    A relay holding a delivered message did not have to defeat anything to
+    replay it — it only had to wait for the next backend restart, which is a
+    daily event rather than something it has to arrange.
+    """
+    trust_store.note_seen_message("k-replay")
+    trust_store.flush_seen_messages()
+    trust_store._state = None                 # a fresh process, same disk
+    assert trust_store.has_seen_message("k-replay")
+    assert not trust_store.has_seen_message("k-never")
+
+
+def test_a_state_file_written_before_the_ledger_existed_still_loads():
+    """The failure direction that matters more than the feature.
+
+    Every guarantee in this module is read out of one document: the pins (C1),
+    the policy sequences (C2), the downgrade list (H1/H2). A field this build
+    added but an older one never wrote must therefore read as *empty*, never as
+    a parse failure — a missing ledger costs replay protection for one restart,
+    while an unreadable document costs all four at once.
+    """
+    old_doc = json.dumps({
+        "v": trust_store.STATE_VERSION,
+        "ownMembers": {}, "pins": {"dev-x": {"signKey": "k", "memberId": "m", "at": 1}},
+        "encryptedPeers": ["dev-x"], "notices": [],
+        # no policySeqs, no seenMessages — this is what the old build wrote
+    })
+    parsed = trust_store._parse(old_doc)
+    assert parsed is not None, "an older state document became unreadable"
+    assert parsed["seenMessages"] == {}
+    assert parsed["policySeqs"] == {}
+    # And the guarantees that document carries survived the upgrade.
+    assert parsed["pins"]["dev-x"]["signKey"] == "k"
+    assert "dev-x" in parsed["encryptedPeers"]
+
+
+def test_a_ledger_of_the_wrong_type_is_still_refused():
+    """Tolerating absence is not tolerating garbage: a field that is present and
+    wrong is a document this build cannot reason about, and the fail-closed
+    answer is the right one there."""
+    bad = json.dumps({
+        "v": trust_store.STATE_VERSION, "ownMembers": {}, "pins": {},
+        "encryptedPeers": [], "notices": [], "seenMessages": ["not", "a", "map"],
+    })
+    assert trust_store._parse(bad) is None
+
+
+def test_recording_a_delivery_does_not_write_on_every_message():
+    """The write lands on the delivery path, so it is batched.
+
+    Per message it would be a full rewrite of the state document into the
+    Keychain before the message reaches a pane. The trade is stated in
+    SEEN_FLUSH_AFTER: a process killed with unflushed keys forgets them, which
+    is replay after a crash — not the clean restart this ledger defends.
+    """
+    trust_store.load()          # let the store initialise before counting
+    writes = []
+    original = trust_store._write
+    trust_store._write = lambda state: writes.append(len(state.get("seenMessages") or {}))
+    try:
+        for i in range(trust_store.SEEN_FLUSH_AFTER - 1):
+            trust_store.note_seen_message(f"k-batch-{i}")
+        assert writes == [], "wrote before the batch was full"
+        # Known immediately all the same — a duplicate in the same second is
+        # still refused, it just has not reached disk yet.
+        assert trust_store.has_seen_message("k-batch-0")
+        trust_store.note_seen_message("k-batch-last")
+        assert len(writes) == 1, "the full batch did not write exactly once"
+    finally:
+        trust_store._write = original
+
+
+def test_the_ledger_is_bounded():
+    """It is fed by a remote peer, so it needs a ceiling — and the eviction has
+    to be by recorded time, not insertion order: a flush merges a batch in with
+    dict.update, after which insertion order is no longer delivery order."""
+    now = int(time.time())
+    for i in range(trust_store.MAX_SEEN_MESSAGES + 40):
+        trust_store.note_seen_message(f"k-many-{i}")
+    trust_store.flush_seen_messages()
+    trust_store._state = None
+    kept = (trust_store._state_for_read() if False else trust_store.load())["seenMessages"]
+    assert len(kept) <= trust_store.MAX_SEEN_MESSAGES
+    assert all(int(at) >= now - 5 for at in kept.values())
+

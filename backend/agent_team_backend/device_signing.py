@@ -93,12 +93,18 @@ def _write_private(path: Path, raw: bytes) -> None:
     """Same shape as ``device_crypto._write_private``, and for the same reason:
     a reader that opened the file between truncate and write would see an empty
     key and this machine would mint a second identity for itself."""
+    payload = json.dumps({"ed25519_private": base64.b64encode(raw).decode("ascii")})
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(
-        json.dumps({"ed25519_private": base64.b64encode(raw).decode("ascii")}),
-        encoding="utf-8",
-    )
+    # 模式在建立時就給，不是寫完再 chmod。兩者之間那一段時間裡，檔案的權限由
+    # umask 決定——私鑰在那個窗裡可能是全體可讀，而它已經有內容了。
+    # ws_auth.issue_token 是同一個做法，理由也一樣。
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        os.write(fd, payload.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # O_CREAT 不會改動既有檔案的權限，所以殘留的 .tmp 仍要收一次。
     os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
     tmp.replace(path)
 

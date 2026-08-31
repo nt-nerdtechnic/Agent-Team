@@ -56,7 +56,17 @@ interface LinkStatus {
  */
 interface TrustNotice {
   key: string
-  kind: 'device-first-seen' | 'device-key-changed' | 'policy-unverified'
+  /** Every kind trust_store can record — kept in step with its
+   *  ALL_NOTICE_KINDS by a test, because nothing else can. A missing member is
+   *  legal TypeScript (these values arrive as JSON), and the cost is not a
+   *  render failure: the notice falls through to the last branch below and is
+   *  announced as something it is not. */
+  kind:
+    | 'device-first-seen'
+    | 'device-key-changed'
+    | 'policy-unverified'
+    | 'member-changed'
+    | 'plaintext-refused'
   deviceId: string
   at: number
   memberId?: string
@@ -67,8 +77,10 @@ interface TrustNotice {
   /** key-changed: both halves, so a person can compare them out of band. */
   pinnedFingerprint?: string
   offeredFingerprint?: string
-  /** policy-unverified */
+  /** policy-unverified, member-changed */
   reason?: string
+  /** plaintext-refused: which message was dropped. */
+  msgKey?: string
   seq?: number
   expected?: number
 }
@@ -622,6 +634,26 @@ onUnmounted(() => {
                 <p class="hint">{{ t('settings.p2p.trust.key-changed-what-to-do') }}</p>
               </template>
 
+              <template v-else-if="n.kind === 'plaintext-refused'">
+                <div class="req-head">
+                  <span class="dev-name danger-text">
+                    {{ t('settings.p2p.trust.plaintext-refused', { device: n.deviceId }) }}
+                  </span>
+                </div>
+                <p class="req-what">{{ t('settings.p2p.trust.plaintext-refused-body') }}</p>
+                <p class="hint">{{ t('settings.p2p.trust.plaintext-refused-what-to-do') }}</p>
+              </template>
+
+              <template v-else-if="n.kind === 'member-changed'">
+                <div class="req-head">
+                  <span class="dev-name danger-text">
+                    {{ t('settings.p2p.trust.member-changed', { device: n.deviceId }) }}
+                  </span>
+                </div>
+                <p class="req-what">{{ t('settings.p2p.trust.member-changed-body') }}</p>
+                <p v-if="n.reason" class="hint">{{ n.reason }}</p>
+              </template>
+
               <template v-else-if="n.kind === 'policy-unverified'">
                 <div class="req-head">
                   <span class="dev-name danger-text">
@@ -632,7 +664,11 @@ onUnmounted(() => {
                 <p v-if="n.reason" class="hint">{{ n.reason }}</p>
               </template>
 
-              <template v-else>
+              <!-- Named rather than `v-else`. It used to be the fallthrough,
+                   which meant any kind without a branch above was announced as
+                   a first sighting — a sentence that is not merely unhelpful
+                   but false, and false in the reassuring direction. -->
+              <template v-else-if="n.kind === 'device-first-seen'">
                 <div class="req-head">
                   <span class="dev-name">
                     {{ t('settings.p2p.trust.first-seen', { device: n.deviceId }) }}
@@ -650,6 +686,20 @@ onUnmounted(() => {
                     {{ t('settings.p2p.trust.notice-ack') }}
                   </button>
                 </div>
+              </template>
+
+              <!-- A kind this build has no branch for. Showing it raw is ugly
+                   and deliberate: the alternatives are to render nothing, which
+                   hides a security notice the backend thought worth recording,
+                   or to borrow another branch's wording, which is how this
+                   panel came to announce member changes as first sightings. -->
+              <template v-else>
+                <div class="req-head">
+                  <span class="dev-name danger-text">
+                    {{ t('settings.p2p.trust.unknown-notice', { kind: n.kind }) }}
+                  </span>
+                </div>
+                <p class="req-what"><code>{{ n.deviceId }}</code></p>
               </template>
             </div>
           </div>

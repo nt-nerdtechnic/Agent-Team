@@ -88,16 +88,60 @@ MAX_DEVICES = 200
 #: whichever is oldest. See ``_record_locked``.
 MAX_NOTICES = 50
 
+#: Bounds on the delivered-message ledger. Same shape and reasoning as the
+#: in-memory version it replaces: a map fed by a remote peer needs a ceiling,
+#: and a delivered message stops being interesting once no sender would retry.
+MAX_SEEN_MESSAGES = 500
+SEEN_MESSAGE_TTL_S = 3600
+
+#: How long recording a delivery may stay in memory before it reaches disk.
+#:
+#: Without this, every inbound message rewrites the whole state document into
+#: the Keychain — on the delivery path, so the cost lands as latency before the
+#: message reaches a pane.
+#:
+#: The trade is worth stating rather than assuming: a process killed with
+#: unflushed keys forgets them, so those messages could be replayed once. That
+#: is acceptable because this ledger defends against replay after a *clean*
+#: restart — which a relay can simply wait for — not after a crash, which it
+#: cannot arrange and which loses at most a few seconds of keys.
+SEEN_FLUSH_AFTER = 25
+SEEN_FLUSH_SECONDS = 10.0
+
 NOTICE_FIRST_SEEN = "device-first-seen"
 NOTICE_KEY_CHANGED = "device-key-changed"
 NOTICE_POLICY_UNVERIFIED = "policy-unverified"
 NOTICE_MEMBER_CHANGED = "member-changed"
+#: A peer that has been encrypting sent plaintext, and this machine refused it.
+#: The send side has refused to *emit* plaintext to such a peer since the
+#: downgrade record was made durable; this is the other half — without it, a
+#: relay that wants cleartext only has to ask the far end for it, because the
+#: far end had no rule against accepting.
+NOTICE_PLAINTEXT_REFUSED = "plaintext-refused"
 
 #: Only a first sighting may be dismissed. A key change is not a notification
 #: to acknowledge — it is a refusal in force, and a button that made it go away
 #: would let the answer to "somebody may be standing in for that machine" be one
 #: click, which is the click an attacker is counting on.
+#:
+#: A refused downgrade is the same shape and stays for the same reason: it says
+#: a message was dropped, and dropped messages are exactly what a person needs
+#: to keep seeing while they work out why.
 DISMISSIBLE = frozenset({NOTICE_FIRST_SEEN})
+
+#: Every kind this module can record. Exists so the renderer's union can be
+#: checked against it: a kind the UI has no branch for does not fail to render,
+#: it falls through to whichever branch is last — which is how `member-changed`
+#: came to be displayed as "first seen this device", a sentence that is not
+#: merely unhelpful but false. Type systems cannot catch that: the values
+#: arrive as JSON, so a union missing a member is perfectly legal TypeScript.
+ALL_NOTICE_KINDS = frozenset({
+    NOTICE_FIRST_SEEN,
+    NOTICE_KEY_CHANGED,
+    NOTICE_POLICY_UNVERIFIED,
+    NOTICE_MEMBER_CHANGED,
+    NOTICE_PLAINTEXT_REFUSED,
+})
 
 
 class TrustStoreLocked(RuntimeError):
@@ -151,6 +195,11 @@ def _blank() -> dict[str, Any]:
         # another's. In production this map holds exactly one entry.
         "policySeqs": {},
         "encryptedPeers": [],
+        # msg_key -> unix seconds when it was first delivered. Persisted because
+        # the in-memory version expired at every restart, and a backend restart
+        # is a daily event rather than something a relay has to arrange — so
+        # "we already delivered that" was a promise anyone could simply wait out.
+        "seenMessages": {},
         "notices": [],
     }
 
@@ -172,11 +221,18 @@ def _parse(raw: str | None) -> dict[str, Any] | None:
     ):
         if not isinstance(doc.get(key), kind):
             return None
-    seqs = doc.get("policySeqs")
-    if seqs is None:
-        doc["policySeqs"] = {}
-    elif not isinstance(seqs, dict):
-        return None
+    # Fields added after v1 shipped. Absent means "this state file predates the
+    # field", which has to read as the empty value rather than as a parse
+    # failure: every other guarantee in this module — the pins (C1), the policy
+    # sequences (C2), the downgrade list (H1/H2) — is read out of this same
+    # document. A missing ledger costs replay protection for one restart; an
+    # unreadable document costs all four at once.
+    for later, empty in (("policySeqs", {}), ("seenMessages", {})):
+        value = doc.get(later)
+        if value is None:
+            doc[later] = empty
+        elif not isinstance(value, type(empty)):
+            return None
     return doc
 
 
@@ -289,6 +345,25 @@ def _save_locked(state: dict[str, Any]) -> None:
     _write(state)
 
 
+def _state_for_read() -> dict[str, Any]:
+    """The state, for every public read. Caller holds ``_lock``.
+
+    Exists because four separate readers each answered from an empty cache, and
+    each of those answers was the permissive one: no pin, no downgrade rule, no
+    notices, sequence zero. The writes had always loaded; only the reads had
+    not, so every durable guarantee in this module was conditional on the order
+    in which the process happened to warm up. Two of them reopened a CRITICAL
+    that way — `pin_for` gave the relay back key substitution (C1), `policy_seq`
+    gave it back policy rollback (C2).
+
+    Fixing them one at a time would have left the fifth reader to be written
+    wrong later, so the cache is no longer reachable from a read: there is one
+    door and it loads. A new reader gets a loaded state without having to know
+    that it must.
+    """
+    return _load_locked() if _state is None else _state
+
+
 def _try_load() -> dict[str, Any] | None:
     """The state, or None when it cannot be had. Caller holds ``_lock``.
 
@@ -365,9 +440,16 @@ def pin_for(device_id: str) -> dict[str, Any] | None:
     """The pinned key and member for *device_id*, from memory. Never raises: the
     delivery path calls this per message and has already checked the lock."""
     with _lock:
-        if _state is None or not device_id:
+        if not device_id:
             return None
-        pin = (_state.get("pins") or {}).get(device_id)
+        # Load rather than answer from an empty cache. Returning None here means
+        # "never seen this device", and the caller answers that by trusting the
+        # key the relay advertises — so a cold cache silently handed the relay
+        # back the substitution that pinning exists to stop, for as long as it
+        # took something else to touch the store. The writes have always loaded;
+        # only the reads did not, which made the durable half of TOFU
+        # conditional on the order in which the process happened to warm up.
+        pin = (_state_for_read().get("pins") or {}).get(device_id)
         return dict(pin) if isinstance(pin, dict) else None
 
 
@@ -445,10 +527,16 @@ def note_key_change(device_id: str, *, pinned_key: str, offered_key: str, member
 
 
 def policy_seq(device_id: str) -> int:
+    """The highest policy sequence accepted for *device_id*, or 0.
+
+    Reads through ``_state_for_read``. Answering 0 from a cold cache made the
+    monotonicity check (``offered < seq`` in server_link) vacuous, so a relay
+    could replay any older but properly signed policy — the permissive one from
+    before the user tightened it, say — and the acceptance would then write that
+    lower number back as the new high-water mark.
+    """
     with _lock:
-        if _state is None:
-            return 0
-        return int((_state.get("policySeqs") or {}).get(device_id) or 0)
+        return int((_state_for_read().get("policySeqs") or {}).get(device_id) or 0)
 
 
 def reserve_policy_seq(device_id: str) -> int:
@@ -502,7 +590,13 @@ def note_policy_unverified(reason: str, *, device_id: str = "", seq: Any = None)
 
 
 def clear_policy_notice() -> None:
-    """Drop the "policy could not be verified" notice once one verifies again."""
+    """Drop the "policy could not be verified" notice once one verifies again.
+
+    Deliberately *not* converted to ``_state_for_read``. Its cold-cache
+    behaviour is "do not clear the warning", which fails toward keeping a notice
+    that should have gone — the harmless direction. Every other reader failed
+    the other way, which is why they were changed and this one was not.
+    """
     with _lock:
         if _state is None:
             return
@@ -516,10 +610,16 @@ def clear_policy_notice() -> None:
 
 
 def is_encrypted_peer(device_id: str) -> bool:
+    """Whether this peer has been sent — or has sent — sealed traffic before.
+
+    Loads on a cold cache, for the same reason ``pin_for`` does: False here
+    means "no downgrade rule applies", and both sides of the rule read this
+    one function. Answering from an empty cache made the refusal expire at
+    every restart — which is precisely the property the record was moved to
+    disk to remove.
+    """
     with _lock:
-        if _state is None:
-            return False
-        return device_id in set(_state.get("encryptedPeers") or [])
+        return device_id in set(_state_for_read().get("encryptedPeers") or [])
 
 
 def note_encrypted_peer(device_id: str) -> None:
@@ -573,11 +673,111 @@ def _record_locked(state: dict[str, Any], kind: str, *, device_id: str, detail: 
         notices.pop(index)
 
 
-def notices() -> list[dict[str, Any]]:
+def note_plaintext_refused(device_id: str, *, msg_key: str) -> None:
+    """Record that a message from *device_id* was dropped for arriving in the
+    clear from a peer that had been encrypting.
+
+    Recorded even though the sender is also told, because the two audiences
+    learn different things: the sender is told its message was refused, which a
+    hostile sender already knew; the person at this machine is told that
+    something asked them to accept cleartext, which is the part worth seeing.
+    """
     with _lock:
-        if _state is None:
-            return []
-        return [dict(n) for n in _state.get("notices") or []]
+        state = _load_locked()
+        _record_locked(state, NOTICE_PLAINTEXT_REFUSED,
+                       device_id=device_id, detail={"msgKey": msg_key})
+        _save_locked(state)
+
+
+# ---- messages already delivered ----------------------------------------------
+
+#: Keys recorded but not yet written out. See SEEN_FLUSH_AFTER.
+_seen_pending: dict[str, int] = {}
+_seen_last_flush: float = 0.0
+
+
+def has_seen_message(msg_key: str) -> bool:
+    """Whether this message was already delivered.
+
+    Loads on a cold cache — answering False from an empty one would put the
+    ledger back where it was before it was persisted, which is the whole bug.
+
+    But it does not *raise* on a store that cannot be opened, which the other
+    readers do. This one runs earlier than they do: it is the first thing the
+    inbound path asks, ahead of the check that refuses everything while the pins
+    are unreadable. Raising here would turn that refusal — the intended outcome
+    — into a dropped connection before the refusal could be sent. False is safe
+    precisely because the very next check says no anyway.
+    """
+    with _lock:
+        if msg_key in _seen_pending:
+            return True
+        state = _try_load() if _state is None else _state
+        return msg_key in ((state or {}).get("seenMessages") or {})
+
+
+def note_seen_message(msg_key: str) -> None:
+    """Record a delivery, writing out in batches rather than per message.
+
+    Recorded in memory immediately — so a duplicate arriving in the same second
+    is still refused — and flushed once a batch or a few seconds have passed.
+    """
+    global _seen_last_flush
+    with _lock:
+        now = time.time()
+        _seen_pending[msg_key] = int(now)
+        if _seen_last_flush == 0.0:
+            _seen_last_flush = now
+        if (
+            len(_seen_pending) >= SEEN_FLUSH_AFTER
+            or now - _seen_last_flush >= SEEN_FLUSH_SECONDS
+        ):
+            _flush_seen_locked(now)
+
+
+def flush_seen_messages() -> None:
+    """Write out whatever is pending. For shutdown, and for tests that need the
+    ledger on disk without waiting for a batch to fill."""
+    with _lock:
+        if _seen_pending:
+            _flush_seen_locked(time.time())
+
+
+def _flush_seen_locked(now: float) -> None:
+    global _seen_last_flush
+    state = _try_load()
+    if state is None:
+        # Keep the keys in memory rather than dropping them: this runs while a
+        # message is being delivered, and raising would turn a delivery into a
+        # dropped connection.
+        return
+    seen = state.setdefault("seenMessages", {})
+    seen.update(_seen_pending)
+    _seen_pending.clear()
+    _seen_last_flush = now
+    cutoff = int(now) - SEEN_MESSAGE_TTL_S
+    for key in [k for k, at in seen.items() if int(at or 0) < cutoff]:
+        del seen[key]
+    # Sorted by recorded time, not insertion order: a flush merges a batch with
+    # dict.update, after which insertion order is no longer delivery order.
+    if len(seen) > MAX_SEEN_MESSAGES:
+        for key in sorted(seen, key=lambda k: int(seen[k] or 0))[: len(seen) - MAX_SEEN_MESSAGES]:
+            del seen[key]
+    _save_locked(state)
+
+
+def notices() -> list[dict[str, Any]]:
+    """Every recorded notice. Never raises: this feeds a panel, and a status
+    read that could fail would leave it with nothing to say. But it does load —
+    an empty list from a cold cache reads as "nothing has happened", which is
+    the most reassuring thing this function can say and the least likely to be
+    checked."""
+    with _lock:
+        # _try_load, not _state_for_read: this one promises never to raise —
+        # it feeds a panel, and a status read that could fail leaves it with
+        # nothing to say. It still loads; it just tolerates not being able to.
+        state = _try_load() if _state is None else _state
+        return [dict(n) for n in (state or {}).get("notices") or []]
 
 
 def dismiss_notice(key: str) -> bool:
@@ -598,10 +798,15 @@ def dismiss_notice(key: str) -> bool:
 def _reset_for_test() -> None:
     """Forget the process cache and the marker. Tests run against a throwaway
     vault and a throwaway data dir, so this touches nothing real."""
-    global _state, _locked_reason
+    global _state, _locked_reason, _seen_last_flush
     with _lock:
         _state = None
         _locked_reason = ""
+        # Module-level too, and just as much part of "this process has seen
+        # nothing". Left behind, a batch recorded by one test is still pending
+        # when the next starts and lands in its state document instead.
+        _seen_pending.clear()
+        _seen_last_flush = 0.0
         # A JSON null reads back as "no marker" (kv_get's default), which is
         # what the marker's absence means; the kv store has no delete.
         _database().kv_set(INITIALISED_KEY, None, now=0)
