@@ -8,9 +8,15 @@ All notable released changes to Navide will be documented in this file. The form
 
 - Add the global agent Execution Policy v1 contract and Host-owned durable
   default/user policy store with strict fail-closed parsing, owner-only atomic
-  persistence, lowercase shell-name canonicalization, and a durable monotonic
-  revision high-water mark. The setting remains separate from Manifest
+  persistence, lowercase shell-name canonicalization, case-insensitive agent
+  executable policy matching, and a durable monotonic revision high-water mark.
+  The setting remains separate from Manifest
   permissions and package-version Plugin Grants.
+- Enforce Host-owned `user` and MCP-routed `agent` initiators across public
+  capabilities and package-local Backend Wire calls, including policy revision
+  rechecks before queued dispatch, complete shell-chain executable checks, and
+  exact package-version Grant revocation that drains calls, subscriptions,
+  events, views, and child backends without rolling back completed effects.
 - Add the Host-only repository Execution Policy source service for strict,
   untrusted `.navide/execution-policy.json` recommendations, explicit
   per-repository source selection bound to inspected canonical-content

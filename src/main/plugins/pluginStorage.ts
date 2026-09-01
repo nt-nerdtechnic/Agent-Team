@@ -3,6 +3,7 @@ import { open, readFile, readdir, rename, rm, stat, unlink, mkdir } from 'node:f
 import { basename, dirname, join, relative, sep } from 'node:path'
 import type { JsonValue, StorageGetResult } from '../../../packages/plugin-contracts/src/index'
 import type {
+  AuthenticatedInitiator,
   StoragePartition,
   StorageSnapshotRef,
   StorageSnapshotTier,
@@ -25,6 +26,8 @@ export interface StorageExecution {
   args: Record<string, unknown>
   partition: StoragePartition
   snapshot: StorageSnapshotRef
+  /** Host-authenticated operation origin, retained for internal adapters. */
+  initiator?: AuthenticatedInitiator
 }
 
 export type PluginStorageErrorCode =

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { generateKeyPairSync, sign as edSign } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // The manager imports electron for its view lifecycle. A functional stub backs
@@ -255,6 +255,7 @@ import {
   type StorageSnapshotTier,
 } from './pluginCapabilityBroker'
 import { PluginStorageError } from './pluginStorage'
+import type { ExecutionPolicySnapshot } from './executionPolicy'
 
 interface FakeWebContentsLike {
   id: number
@@ -365,6 +366,29 @@ function asHost(win: FakeBrowserWindow): BrowserWindow {
 function descriptor(id: string): PluginLaunchDescriptor {
   return { id, requires: [], devUrl: '', entryFile: `/plugins/${id}/index.html` }
 }
+
+describe('backend Host session registration', () => {
+  it('re-registers on the new socket when the previous registration is pending', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    mgr.open(
+      asHost(host),
+      { id: 'acme.host-session', requires: ['terminal'], devUrl: '', entryFile: '/plugins/acme.host-session/index.html' },
+      { x: 0, y: 0, width: 10, height: 10 },
+    )
+    mgr.setBackendHostToken('host-token')
+    mgr.setBackendWsUrl('ws://backend-old')
+    const oldSocket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    oldSocket.open()
+    expect(oldSocket.sent.map((raw) => JSON.parse(raw).type)).toContain('host.register')
+
+    mgr.setBackendWsUrl('ws://backend-new')
+    const newSocket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    newSocket.open()
+
+    expect(newSocket.sent.map((raw) => JSON.parse(raw).type)).toContain('host.register')
+  })
+})
 
 describe('createPluginBackendChildEnvironment', () => {
   it('keeps only the temporary-directory variables needed by packaged backends', () => {
@@ -651,6 +675,110 @@ describe('devPlansPluginDescriptor', () => {
     }
   })
 
+  it('applies the sender-bound workspace scope to agent Plans calls', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call').mockResolvedValue(null)
+    const host = new FakeBrowserWindow()
+
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+      })
+      const running = (mgr as unknown as {
+        running: Map<string, { backendWorkspaceId: string | null }>
+      }).running.get(handle.instanceId)
+      expect(running).toBeDefined()
+      running!.backendWorkspaceId = createHash('sha256').update(resolve('/workspace')).digest('hex')
+
+      const response = await mgr.executeAgentBackendCall(handle.instanceId, {
+        reqId: 'agent-scope-1',
+        name: 'plans.resolve_root',
+        args: { workspace_path: '/other-workspace' },
+      })
+
+      expect(response).toMatchObject({
+        reqId: 'agent-scope-1',
+        ok: false,
+        error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+      })
+      expect(hostCall).not.toHaveBeenCalled()
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      hostCall.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('requires the v2 Manifest context and package grant before an agent backend call', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.agent-backend'
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'main',
+      contributionKey: `${pluginId}.main`,
+      kind: 'custom',
+      location: 'main',
+      title: 'Agent backend',
+      entryFile: '/plugins/acme.agent-backend/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(descriptor)
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call').mockResolvedValue(null)
+    const host = new FakeBrowserWindow()
+
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+      })
+
+      await expect(mgr.executeAgentBackendCall(handle.instanceId, {
+        reqId: 'agent-backend-context-1',
+        name: 'fixture.echo',
+        args: null,
+      })).resolves.toMatchObject({
+        reqId: 'agent-backend-context-1',
+        ok: false,
+        error: { code: 'CAPABILITY_DENIED' },
+      })
+      expect(hostCall).not.toHaveBeenCalled()
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      hostCall.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
   it('maps a Host resource limit to the stable IPC error code', async () => {
     const mgr = new FrontendPluginManager()
     const packageVersion = '1.0.0'
@@ -711,6 +839,196 @@ describe('devPlansPluginDescriptor', () => {
       mgr.destroyInstance(handle.instanceId)
     } finally {
       hostCall.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+})
+
+describe('package-version grant revocation', () => {
+  it('disables and destroys only the revoked package version', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.revocable'
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${pluginId}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Revocable',
+      entryFile: '/plugins/acme.revocable/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: null,
+      runtimeBinding: {
+        pluginId,
+        packageVersion,
+        workspaceId: 'workspace-1',
+        instanceId: null,
+        audience: view.contributionKey,
+      },
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+      capabilityContext: context,
+    }
+    mgr.registerDescriptor(descriptor)
+    const revoke = vi
+      .spyOn(PluginBackendHost.prototype, 'revokePackageVersion')
+      .mockResolvedValue()
+    const host = new FakeBrowserWindow()
+
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        capabilityContext: context,
+      })
+      const surface = host.children[0] as FakeViewLike
+
+      await mgr.revokePackageVersion(pluginId, packageVersion)
+
+      expect(revoke).toHaveBeenCalledWith(pluginId, packageVersion)
+      expect(surface.visible).toBe(false)
+      expect(surface.webContents.isDestroyed()).toBe(true)
+      expect((mgr as unknown as { running: Map<string, unknown> }).running.has(handle.instanceId)).toBe(false)
+    } finally {
+      revoke.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('blocks reopening while a package version is being revoked', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.revocation-gate'
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'main',
+      contributionKey: `${pluginId}.main`,
+      kind: 'custom',
+      location: 'main',
+      title: 'Revocation gate',
+      entryFile: '/plugins/acme.revocation-gate/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: null,
+      runtimeBinding: {
+        pluginId,
+        packageVersion,
+        workspaceId: 'workspace-1',
+        instanceId: null,
+        audience: view.contributionKey,
+      },
+    }
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+      capabilityContext: context,
+    }
+    mgr.registerDescriptor(packageDescriptor)
+    let finish!: () => void
+    const revoke = vi
+      .spyOn(PluginBackendHost.prototype, 'revokePackageVersion')
+      .mockImplementation(() => new Promise<void>((resolve) => { finish = resolve }))
+    const host = new FakeBrowserWindow()
+
+    try {
+      await mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        capabilityContext: context,
+      })
+      const revocation = mgr.revokePackageVersion(pluginId, packageVersion)
+      await Promise.resolve()
+
+      await expect(mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(new FakeBrowserWindow()),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        capabilityContext: context,
+      })).rejects.toMatchObject({ code: 'PLUGIN_STOPPING' })
+
+      finish()
+      await revocation
+      expect(revoke).toHaveBeenCalledWith(pluginId, packageVersion)
+    } finally {
+      revoke.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('blocks contribution updates while a package version is being revoked', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.contribution-revocation-gate'
+    const packageVersion = '1.0.0'
+    const contributionKey = `${pluginId}.main`
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'main',
+      contributionKey,
+      kind: 'custom',
+      location: 'main',
+      title: 'Revocation update gate',
+      entryFile: '/plugins/acme.contribution-revocation-gate/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+      capabilityPolicy: {
+        kind: 'manifest-v2',
+        system: ['fs'],
+        grants: [{ permission: 'system', namespace: 'fs' }],
+      },
+    }
+    mgr.registerDescriptor(descriptor)
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion,
+      system: ['fs'],
+      storage: true,
+    }))
+    const host = new FakeBrowserWindow()
+    let finish!: () => void
+    const revoke = vi
+      .spyOn(PluginBackendHost.prototype, 'revokePackageVersion')
+      .mockImplementation(() => new Promise<void>((resolve) => { finish = resolve }))
+
+    try {
+      await expect(mgr.openContribution(asHost(host), contributionKey, {
+        bounds: { x: 0, y: 0, width: 300, height: 500 },
+        workspacePath: '/workspace',
+      })).resolves.toEqual({ ok: true })
+      const revocation = mgr.revokePackageVersion(pluginId, packageVersion)
+
+      expect(mgr.updateContribution(
+        asHost(host),
+        contributionKey,
+        { x: 0, y: 0, width: 300, height: 500 },
+        true,
+      )).toEqual({ ok: false })
+
+      await Promise.resolve()
+      finish()
+      await revocation
+    } finally {
+      revoke.mockRestore()
       await mgr.closeBackendPlugins()
     }
   })
@@ -3923,6 +4241,152 @@ describe('first-party Git private bridge', () => {
       args,
     })) as Record<string, unknown>
   }
+
+  it('keeps manual calls usable while denying the equivalent agent operation', async () => {
+    const { mgr, view, instanceId } = await openGitView()
+    const plans: unknown[] = []
+    mgr.setExecutionPolicyResolver((): ExecutionPolicySnapshot => ({
+      policy: { schemaVersion: 1, mode: 'denylist', system: ['fs'], shell: [] },
+      revision: 7,
+      state: 'user',
+    }))
+    mgr.setPublicCapabilityHandler((plan) => {
+      plans.push(plan)
+      return null
+    })
+    const capabilityHandler = ipcHandlers.get('plugin:cap:call')
+    expect(capabilityHandler).toBeDefined()
+
+    await expect(mgr.executeAgentCapability(instanceId, {
+      reqId: 'agent-fs',
+      ns: 'fs',
+      method: 'listFilesFlat',
+      args: { query: '', maxResults: 1 },
+    })).resolves.toMatchObject({
+      reqId: 'agent-fs',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED', message: 'agent execution policy denied the operation' },
+    })
+    expect(plans).toEqual([])
+
+    await expect(capabilityHandler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'manual-fs',
+      ns: 'fs',
+      method: 'listFilesFlat',
+      args: { query: '', maxResults: 1 },
+    })).resolves.toMatchObject({ reqId: 'manual-fs', ok: true })
+    expect(plans[0]).toMatchObject({
+      initiator: { kind: 'user' },
+    })
+
+    await expect(mgr.executeAgentCapability(instanceId, {
+      reqId: 'forged-agent',
+      ns: 'fs',
+      method: 'listFilesFlat',
+      args: { query: '', maxResults: 1 },
+      initiator: { kind: 'user', id: 'forged' },
+    })).resolves.toMatchObject({
+      reqId: 'forged-agent',
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+  })
+
+  it('rechecks a stale agent policy before invoking the public handler', async () => {
+    const { mgr, instanceId } = await openGitView()
+    let reads = 0
+    const allow = (): ExecutionPolicySnapshot => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] },
+      revision: 1,
+      state: 'user',
+    })
+    const deny = (): ExecutionPolicySnapshot => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: [], shell: [] },
+      revision: 2,
+      state: 'user',
+    })
+    mgr.setExecutionPolicyResolver(() => {
+      reads += 1
+      return reads === 1 ? allow() : deny()
+    })
+    const handler = vi.fn()
+    mgr.setPublicCapabilityHandler(handler)
+
+    await expect(mgr.executeAgentCapability(instanceId, {
+      reqId: 'stale-agent-policy',
+      ns: 'fs',
+      method: 'listFilesFlat',
+      args: { query: '', maxResults: 1 },
+    })).resolves.toMatchObject({
+      reqId: 'stale-agent-policy',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED', message: 'agent execution policy denied the operation' },
+    })
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('uses the global policy for an agent plugin-scoped UI call without a workspace', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.plugin-ui'
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'main',
+      contributionKey: `${pluginId}.main`,
+      kind: 'custom',
+      location: 'main',
+      title: 'Plugin UI',
+      entryFile: '/plugins/acme.plugin-ui/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion, system: ['ui'] },
+      runtimeBinding: {
+        pluginId,
+        packageVersion,
+        workspaceId: null,
+        instanceId: null,
+        audience: view.contributionKey,
+      },
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: ['ui'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['ui'] }),
+      capabilityContext: context,
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(descriptor)
+    mgr.setExecutionPolicyResolver(() => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['ui'], shell: [] },
+      revision: 1,
+      state: 'user',
+    }))
+    const handler = vi.fn()
+    mgr.setPublicCapabilityHandler(handler)
+    const host = new FakeBrowserWindow()
+
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        capabilityContext: context,
+      })
+
+      await expect(mgr.executeAgentCapability(handle.instanceId, {
+        reqId: 'agent-plugin-ui-1',
+        ns: 'ui',
+        method: 'openExternal',
+        args: { url: 'https://example.com' },
+      })).resolves.toMatchObject({ reqId: 'agent-plugin-ui-1', ok: true })
+      expect(handler).toHaveBeenCalledOnce()
+    } finally {
+      await mgr.closeBackendPlugins()
+    }
+  })
 
   it('denies Git storage writes outside the approved preference ownership', async () => {
     const { mgr, view } = await openGitView()

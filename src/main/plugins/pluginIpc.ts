@@ -151,6 +151,36 @@ function assertPluginRemovalTarget(pluginsRoot: string, value: unknown): string 
   return value
 }
 
+function installedPackageVersion(
+  manager: FrontendPluginManager,
+  pluginsRoot: string,
+  pluginId: string,
+): string | null {
+  const descriptorVersion = manager.getDescriptor(pluginId)?.packageVersion
+  if (typeof descriptorVersion === 'string' && descriptorVersion.length > 0) {
+    return descriptorVersion
+  }
+  try {
+    const activation = loadPluginDir(join(pluginsRoot, pluginId)).activation
+    return activation?.packageVersion ?? null
+  } catch {
+    return null
+  }
+}
+
+async function revokeInstalledPackageRuntime(
+  manager: FrontendPluginManager,
+  pluginsRoot: string,
+  pluginId: string,
+): Promise<void> {
+  const packageVersion = installedPackageVersion(manager, pluginsRoot, pluginId)
+  if (packageVersion) {
+    await manager.revokePackageVersion(pluginId, packageVersion)
+  } else {
+    manager.preparePluginRemoval(pluginId)
+  }
+}
+
 function cleanupFailedPluginInstall(
   manager: FrontendPluginManager,
   onActivationChange: PluginIpcOptions['onActivationChange'],
@@ -323,7 +353,7 @@ export function registerPluginIpc(
 
   ipcMain.handle(
     'plugins:commitInstall',
-    (
+    async (
       event,
       args: { id: string; publisherConfirmed?: boolean; riskConfirmed?: boolean }
     ) => {
@@ -370,9 +400,13 @@ export function registerPluginIpc(
             }
           })()
         : undefined
+      const previousPackageVersion = installedPackageVersion(manager, pluginsRoot, pkg.id)
       let transaction: ReturnType<typeof commitInstallTransaction> | undefined
       let publisherConsentPersisted = false
       try {
+        if (previousPackageVersion) {
+          await manager.revokePackageVersion(pkg.id, previousPackageVersion)
+        }
         transaction = commitInstallTransaction(pkg, pluginsRoot)
         const descriptor = transaction.descriptor
         let verifiedArtifactDigest: string | undefined
@@ -492,7 +526,7 @@ export function registerPluginIpc(
     // Stop live instances before storage cleanup. The storage adapter drains
     // operations already admitted for this plugin; this phase also prevents
     // new renderer calls from being admitted while cleanup is in progress.
-    manager.preparePluginRemoval(id)
+    await revokeInstalledPackageRuntime(manager, pluginsRoot, id)
     // Storage cleanup is an explicit uninstall operation. If it fails, keep
     // the package and prepared state intact so the caller can retry. The
     // manager deliberately remains registered but stopped until this succeeds.

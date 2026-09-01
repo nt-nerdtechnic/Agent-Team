@@ -322,6 +322,9 @@ function runtimeOwnerKey(runtime: BackendRuntimeContext): string {
     runtime.instanceId,
     runtime.contributionKey,
     runtime.hostWindowId,
+    runtime.initiator.kind,
+    runtime.initiator.kind === 'agent' ? runtime.initiator.source : '',
+    runtime.initiator.id,
   ])
 }
 

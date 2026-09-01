@@ -658,16 +658,20 @@ func handle(frame any) {
 
 func validRuntime(value any) bool {
 	runtime, ok := isRecord(value)
-	if !ok || len(runtime) != 6 {
+	if !ok || len(runtime) != 7 {
 		return false
 	}
-	for _, key := range []string{"pluginId", "packageVersion", "workspaceId", "instanceId", "contributionKey", "hostWindowId"} {
+	for _, key := range []string{"pluginId", "packageVersion", "workspaceId", "instanceId", "contributionKey", "hostWindowId", "initiator"} {
 		value, present := runtime[key]
 		if !present {
 			return false
 		}
 		if key == "pluginId" || key == "packageVersion" {
 			if text, ok := value.(string); !ok || text == "" {
+				return false
+			}
+		} else if key == "initiator" {
+			if !validInitiator(value) {
 				return false
 			}
 		} else if value != nil {
@@ -677,6 +681,20 @@ func validRuntime(value any) bool {
 		}
 	}
 	return true
+}
+
+func validInitiator(value any) bool {
+	initiator, ok := isRecord(value)
+	if !ok {
+		return false
+	}
+	kind, _ := initiator["kind"].(string)
+	id, idOK := initiator["id"].(string)
+	if kind == "user" {
+		return len(initiator) == 2 && idOK && id != ""
+	}
+	source, sourceOK := initiator["source"].(string)
+	return kind == "agent" && source == "mcp" && sourceOK && len(initiator) == 3 && idOK && id != ""
 }
 
 func handleCall(frame map[string]any) {

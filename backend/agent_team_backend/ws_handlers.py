@@ -145,6 +145,53 @@ def lookup(msg_type: str) -> Handler | None:
 
 
 # ── Editor AI (editor.*) ────────────────────────────────────────────────────
+@handler("host.register")
+async def host_register(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Authenticate Electron's private Host WebSocket session."""
+    from . import app
+
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"token"}
+        or not app.host_session_token_matches(payload.get("token"))
+    ):
+        session.host_authenticated = False
+        await session.send_json(
+            make_error(msg_id, msg_type, "UNAUTHORIZED", "Host session authentication failed")
+        )
+        return
+    session.host_authenticated = True
+    await session.send_json(make_response(msg_id, msg_type, {"registered": True}))
+
+
+@handler("agent.capability.result")
+async def agent_capability_result(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Return a Host-brokered agent capability response to the MCP waiter."""
+    if not session.host_authenticated:
+        await session.send_json(
+            make_error(msg_id, msg_type, "UNAUTHORIZED", "Host session is not authenticated")
+        )
+        return
+    from .mcp_server import server as plan_mcp
+
+    if not isinstance(payload, dict) or set(payload) != {"request_id", "response"}:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent.capability.result is malformed")
+        )
+        return
+    request_id = payload.get("request_id")
+    response = payload.get("response")
+    if not isinstance(request_id, str) or not request_id or not isinstance(response, dict):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent.capability.result is malformed")
+        )
+        return
+    delivered = plan_mcp.resolve_agent_capability(request_id, response)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))
+
+
 @handler("editor.rewrite")
 async def editor_rewrite(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app

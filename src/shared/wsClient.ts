@@ -57,10 +57,20 @@ export interface WsClientOptions {
   reconnectMaxMs?: number
 }
 
+export interface WsSendOptions {
+  /** Host admission check run immediately before a request reaches the socket. */
+  beforeDispatch?: () => boolean
+}
+
 export interface WsClient {
   /** Issue a request; resolves with the response envelope, rejects on
    *  timeout / closed-for-good. Queued while mid-reconnect. */
-  send<T = unknown>(type: string, payload?: Record<string, unknown>, timeoutMs?: number): Promise<WsResponse<T>>
+  send<T = unknown>(
+    type: string,
+    payload?: Record<string, unknown>,
+    timeoutMs?: number,
+    options?: WsSendOptions,
+  ): Promise<WsResponse<T>>
   /** Subscribe to server-pushed events of `type`. Returns a disposer. */
   on(type: string, cb: (payload: unknown) => void): () => void
   /** (Re)connect to `url`. Clears any prior errored/fail-fast state. */
@@ -144,7 +154,11 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   interface PendingEntry { resolve: (resp: WsResponse) => void; reject: (err: Error) => void }
   const pending = new Map<string, PendingEntry>()
   const listeners = new Map<string, Set<(payload: unknown) => void>>()
-  interface QueuedRequest { req: WsRequest; settle: PendingEntry }
+  interface QueuedRequest {
+    req: WsRequest
+    settle: PendingEntry
+    beforeDispatch?: () => boolean
+  }
   const sendQueue: QueuedRequest[] = []
 
   function resolveCtor(): WsCtor {
@@ -188,7 +202,21 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
 
   function flushSendQueue(sock: WsLike): void {
     const items = sendQueue.splice(0)
-    for (const { req, settle } of items) writeToSocket(sock, req, settle)
+    for (const { req, settle, beforeDispatch } of items) {
+      if (beforeDispatch && !admit(beforeDispatch)) {
+        settle.reject(new Error('request denied before dispatch'))
+        continue
+      }
+      writeToSocket(sock, req, settle)
+    }
+  }
+
+  function admit(beforeDispatch: () => boolean): boolean {
+    try {
+      return beforeDispatch()
+    } catch {
+      return false
+    }
   }
 
   function rejectSendQueue(err: Error): void {
@@ -203,7 +231,8 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   function rawSend<T>(
     type: string,
     payload: Record<string, unknown>,
-    timeoutMs: number
+    timeoutMs: number,
+    options?: WsSendOptions,
   ): Promise<WsResponse<T>> {
     return new Promise((resolve, reject) => {
       const req: WsRequest = { id: uuid(), type, payload, timestamp: nowIso() }
@@ -230,12 +259,17 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
       }, timeoutMs)
 
       if (canSend && socket) {
+        if (options?.beforeDispatch && !admit(options.beforeDispatch)) {
+          clearTimeout(timerId)
+          reject(new Error('request denied before dispatch'))
+          return
+        }
         writeToSocket(socket, req, settle)
       } else if (sendQueue.length >= maxSendQueue) {
         clearTimeout(timerId)
         reject(new Error('ws not open'))
       } else {
-        sendQueue.push({ req, settle })
+        sendQueue.push({ req, settle, beforeDispatch: options?.beforeDispatch })
       }
     })
   }
@@ -243,9 +277,10 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   function send<T = unknown>(
     type: string,
     payload: Record<string, unknown> = {},
-    timeoutMs = 10_000
+    timeoutMs = 10_000,
+    options?: WsSendOptions,
   ): Promise<WsResponse<T>> {
-    return rawSend<T>(type, payload, timeoutMs)
+    return rawSend<T>(type, payload, timeoutMs, options)
   }
 
   function clearTimers(): void {

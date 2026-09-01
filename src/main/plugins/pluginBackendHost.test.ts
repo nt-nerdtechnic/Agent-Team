@@ -51,6 +51,7 @@ const runtime = {
   instanceId: 'view-1',
   contributionKey: 'navide.plans.window',
   hostWindowId: 'window-1',
+  initiator: { kind: 'user', id: 'user-1' },
 } as const
 
 function makeHost(entryFile = fixture): PluginBackendHost {
@@ -374,6 +375,32 @@ describe('PluginBackendHost', () => {
     host.unbindView('view-1')
 
     await expect(subscription.settled).resolves.toMatchObject({ reason: 'view-destroyed' })
+  })
+
+  it('revokes one package version and settles its calls and subscriptions', async () => {
+    const host = makeHost()
+    hosts.push(host)
+    host.register(activation)
+    host.bindView(runtime, activation.packageDir, process.cwd())
+
+    const subscription = await host.subscribe('view-1', 'fixture.changed', () => undefined)
+    await subscription.acknowledged
+    const pending = host.call('view-1', 'fixture.delay', { milliseconds: 10_000 })
+      .then(() => null, (error: unknown) => error)
+
+    const revocation = host.revokePackageVersion(activation.pluginId, activation.packageVersion)
+    await Promise.resolve()
+    await expect(host.call('view-1', 'fixture.echo', null)).rejects.toMatchObject({
+      code: 'PLUGIN_STOPPING',
+    })
+    await revocation
+
+    await expect(pending).resolves.toMatchObject({ code: 'PLUGIN_STOPPING' })
+    await expect(subscription.settled).resolves.toMatchObject({ reason: 'plugin-stopping' })
+    expect(host.hasActivation(activation.pluginId, activation.packageVersion)).toBe(false)
+    await expect(host.call('view-1', 'fixture.echo', null)).rejects.toMatchObject({
+      code: 'INVALID_RUNTIME',
+    })
   })
 })
 

@@ -39,11 +39,19 @@ function isRuntime(value) {
     'instanceId',
     'contributionKey',
     'hostWindowId',
+    'initiator',
   ]) &&
     typeof value.pluginId === 'string' && value.pluginId.length > 0 &&
     typeof value.packageVersion === 'string' && value.packageVersion.length > 0 &&
     ['workspaceId', 'instanceId', 'contributionKey', 'hostWindowId']
-      .every((key) => value[key] === null || typeof value[key] === 'string')
+      .every((key) => value[key] === null || typeof value[key] === 'string') &&
+    isRecord(value.initiator) &&
+    (exactKeys(value.initiator, ['kind', 'id']) &&
+      value.initiator.kind === 'user' &&
+      typeof value.initiator.id === 'string' && value.initiator.id.length > 0 ||
+      exactKeys(value.initiator, ['kind', 'source', 'id']) &&
+      value.initiator.kind === 'agent' && value.initiator.source === 'mcp' &&
+      typeof value.initiator.id === 'string' && value.initiator.id.length > 0)
 }
 
 function scanString(text, start) {

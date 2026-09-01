@@ -24,6 +24,7 @@ const runtime = {
   instanceId: 'view-1',
   contributionKey: 'navide.plans.window',
   hostWindowId: 'window-1',
+  initiator: { kind: 'user', id: 'user-1' },
 } as const
 
 function context(

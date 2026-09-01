@@ -17,6 +17,7 @@ import re
 import sys
 import threading
 import uuid
+from pathlib import Path
 from typing import Any
 
 PROTOCOL_REVISION = "2026-07-28"
@@ -38,6 +39,7 @@ _bridge_pending: dict[str, queue.Queue[tuple[str, Any]]] = {}
 _bridge_origin_ids: dict[str, set[str]] = {}
 _cancelled_count = 0
 _closing = False
+_MAX_ROOT_ASCENT = 6
 
 
 class DuplicateKeyError(ValueError):
@@ -184,6 +186,7 @@ def _is_runtime(value: Any) -> bool:
                 "instanceId",
                 "contributionKey",
                 "hostWindowId",
+                "initiator",
             ),
         )
         and isinstance(value["pluginId"], str)
@@ -194,7 +197,51 @@ def _is_runtime(value: Any) -> bool:
             value[key] is None or isinstance(value[key], str)
             for key in ("workspaceId", "instanceId", "contributionKey", "hostWindowId")
         )
+        and _is_initiator(value["initiator"])
     )
+
+
+def _is_initiator(value: Any) -> bool:
+    if not _is_record(value):
+        return False
+    if value.get("kind") == "user":
+        return (
+            _exact_keys(value, ("kind", "id"))
+            and isinstance(value["id"], str)
+            and len(value["id"]) > 0
+        )
+    return (
+        value.get("kind") == "agent"
+        and value.get("source") == "mcp"
+        and _exact_keys(value, ("kind", "source", "id"))
+        and isinstance(value["id"], str)
+        and len(value["id"]) > 0
+    )
+
+
+def _resolve_plan_root(workspace_path: str) -> str:
+    """Mirror the core Plans root resolver without importing application code."""
+    if not workspace_path:
+        return workspace_path
+    try:
+        current = Path(workspace_path).resolve()
+        if not current.is_dir():
+            return workspace_path
+    except OSError:
+        return workspace_path
+
+    try:
+        stop = Path.home().resolve()
+    except (OSError, RuntimeError):
+        stop = None
+
+    for _ in range(_MAX_ROOT_ASCENT + 1):
+        if current == stop or current.parent == current:
+            break
+        if (current / ".git").exists():
+            return str(current)
+        current = current.parent
+    return workspace_path
 
 
 def _write_frame(frame: Any) -> None:

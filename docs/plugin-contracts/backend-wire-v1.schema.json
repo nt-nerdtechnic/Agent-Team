@@ -105,7 +105,8 @@
         "workspaceId",
         "instanceId",
         "contributionKey",
-        "hostWindowId"
+        "hostWindowId",
+        "initiator"
       ],
       "properties": {
         "pluginId": { "type": "string", "minLength": 1 },
@@ -113,8 +114,32 @@
         "workspaceId": { "type": ["string", "null"] },
         "instanceId": { "type": ["string", "null"] },
         "contributionKey": { "type": ["string", "null"] },
-        "hostWindowId": { "type": ["string", "null"] }
+        "hostWindowId": { "type": ["string", "null"] },
+        "initiator": { "$ref": "#/$defs/initiator" }
       }
+    },
+    "initiator": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": { "const": "user" },
+            "id": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "source", "id"],
+          "properties": {
+            "kind": { "const": "agent" },
+            "source": { "const": "mcp" },
+            "id": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
     },
     "healthRequest": {
       "type": "object",

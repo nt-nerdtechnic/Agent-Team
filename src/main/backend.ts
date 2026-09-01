@@ -1,4 +1,5 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +15,8 @@ export interface BackendHandle {
   host: string
   port: number
   shell: string
+  /** Main-process-only bearer used to register the Host WebSocket session. */
+  hostSessionToken: string
   proc: ChildProcess
   stop: () => Promise<void>
 }
@@ -119,6 +122,7 @@ export async function startBackend(
   guardStdioStreams()
   const port = await findFreePort()
   const host = '127.0.0.1'
+  const hostSessionToken = randomBytes(32).toString('base64url')
 
   // Electron strips PATH on macOS when launched from Finder/Dock.
   // Use a login shell to recover the full user PATH (nvm, fnm, volta, brew…).
@@ -129,6 +133,7 @@ export async function startBackend(
       { schemaVersion: 1, packages: [] }
     )
   const env = bindBackendPluginActivationCatalog(process.env, catalog)
+  env.NAVIDE_BACKEND_HOST_TOKEN = hostSessionToken
   let userShell = process.env.SHELL ?? '/bin/zsh'
   if (process.platform === 'darwin') {
     const { shell, path: loginPath } = await getLoginShellEnv()
@@ -198,6 +203,7 @@ export async function startBackend(
     host,
     port,
     shell: userShell,
+    hostSessionToken,
     proc,
     stop: () =>
       new Promise<void>((resolve) => {

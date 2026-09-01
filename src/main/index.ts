@@ -19,6 +19,10 @@ import { contributionIconDataUrl } from './plugins/pluginContributionIcon'
 import { currentPluginHostTarget } from './plugins/pluginTarget'
 import { PluginStorageStore } from './plugins/pluginStorage'
 import { PluginCapabilityGrantStore } from './plugins/pluginCapabilityGrantStore'
+import {
+  ExecutionPolicySourceStore,
+} from './plugins/executionPolicySourceStore'
+import { FAIL_CLOSED_EXECUTION_POLICY, type ExecutionPolicySnapshot } from './plugins/executionPolicy'
 import { PluginFactoryOptOutStore } from './plugins/pluginFactoryOptOutStore'
 import { recoverFailedGitV2Activation } from './plugins/gitV2ActivationRecovery'
 import { composePluginContributionQuery } from './plugins/pluginContributionQuery'
@@ -539,10 +543,13 @@ const backendBroadcastTracker = new BackendBroadcastTracker<ReturnType<typeof ba
 
 function broadcastBackendChanged(): void {
   const payload = backendInfoPayload()
-  // The plugin capability broker connects to the backend directly from main
-  // (it must not proxy through a renderer), so it needs the wsUrl the same way
-  // the renderers do — pushed on every backend transition.
+  // Point the main-process transport at the new backend before changing its
+  // bearer. This prevents a reconnect from registering the new token on the
+  // old socket while that socket's registration task is still in flight.
   frontendPluginManager.setBackendWsUrl(payload.status === 'ready' ? payload.wsUrl : null)
+  frontendPluginManager.setBackendHostToken(
+    payload.status === 'ready' && backend ? backend.hostSessionToken : null
+  )
   // A terminal error bypasses the focus gate — see BackendBroadcastTracker.
   const urgent = payload.status === 'error'
   for (const win of BrowserWindow.getAllWindows()) {
@@ -615,6 +622,7 @@ const installedPluginTrust = {
   expectedTarget: currentPluginHostTarget(),
 }
 const pluginCapabilityGrants = new PluginCapabilityGrantStore(pluginsRoot())
+const executionPolicySourceStore = new ExecutionPolicySourceStore(app.getPath('userData'))
 const pluginFactoryOptOuts = new PluginFactoryOptOutStore(pluginsRoot())
 const installedPluginLoad = frontendPluginManager.loadInstalledPlugins(pluginsRoot(), {
   provenance: 'official-registry',
@@ -627,6 +635,24 @@ const installedGitDescriptorPresent = frontendPluginManager.getDescriptor('navid
 frontendPluginManager.setCapabilityGrantResolver((pluginId, packageVersion) =>
   pluginCapabilityGrants.get(pluginId, packageVersion)
 )
+frontendPluginManager.setExecutionPolicyResolver((workspacePath?: string): ExecutionPolicySnapshot => {
+  try {
+    if (!workspacePath) return executionPolicySourceStore.getGlobalEffectivePolicy()
+    const snapshot = executionPolicySourceStore.getEffectivePolicy(workspacePath)
+    return {
+      policy: snapshot.policy,
+      revision: snapshot.revision,
+      state:
+        snapshot.status === 'active'
+          ? snapshot.activeSource === 'default'
+            ? 'default'
+            : 'user'
+          : 'corrupt',
+    }
+  } catch {
+    return { policy: FAIL_CLOSED_EXECUTION_POLICY, revision: 0, state: 'corrupt' }
+  }
+})
 const factoryGitActivations = installedPluginLoad.activationCatalog.slice(0, 0)
 const factoryGitDir = (): string => app.isPackaged
   ? join(process.resourcesPath, 'plugins', 'navide-git')

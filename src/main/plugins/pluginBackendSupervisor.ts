@@ -19,6 +19,13 @@ import {
   type PlansBridgePort,
   type PlansBridgeRequest,
 } from './plansBridge'
+import {
+  executionPolicyAllows,
+  isAuthenticatedInitiator,
+  type AuthenticatedInitiator,
+} from './pluginCapabilityBroker'
+import type { ExecutionPolicySnapshot } from './executionPolicy'
+import type { PluginSystemNamespace } from './pluginManifestV2'
 
 /** Private Electron-main seam for Backend Wire v1 conformance tests. */
 export const MCP_PROTOCOL_REVISION = '2026-07-28'
@@ -45,6 +52,8 @@ export interface BackendRuntimeContext {
   instanceId: string | null
   contributionKey: string | null
   hostWindowId: string | null
+  /** Host-authenticated operation origin; never selected by the child. */
+  initiator: AuthenticatedInitiator
 }
 
 export interface BackendPluginLaunchSpec {
@@ -124,6 +133,8 @@ export type WireRequestId = string | number
 export interface BackendPluginCallOptions {
   signal?: AbortSignal
   timeoutMs?: number
+  /** Host-only origin override; never accepted from child payloads. */
+  initiator?: AuthenticatedInitiator
 }
 
 export interface BackendPluginEvent {
@@ -143,6 +154,8 @@ export interface BackendPluginSubscriptionOptions {
   signal?: AbortSignal
   timeoutMs?: number
   onProgress?: (progress: BackendPluginProgress) => void
+  /** Host-only origin override; never accepted from child payloads. */
+  initiator?: AuthenticatedInitiator
 }
 
 export type BackendPluginSubscriptionCloseReason =
@@ -163,7 +176,7 @@ export interface BackendPluginSubscription {
   readonly subscriptionId: WireRequestId | undefined
   readonly acknowledged: Promise<void>
   readonly settled: Promise<BackendPluginSubscriptionResult>
-  dispose(reason?: 'cancelled' | 'view-destroyed'): void
+  dispose(reason?: 'cancelled' | 'view-destroyed' | 'plugin-stopping'): void
 }
 
 export interface PluginBackendClient {
@@ -207,6 +220,11 @@ export interface PluginBackendSupervisorOptions {
   /** Mutable Host-owned root, refreshed before a restarted generation starts. */
   authorizedPlanRoot?: AuthorizedPlanRootBinding
   refreshAuthorizedPlanRoot?: (signal: AbortSignal) => Promise<string>
+  /** Resolve the current agent policy for a Host-bound bridge operation. */
+  resolveExecutionPolicy?: (
+    runtime: BackendRuntimeContext,
+    workspacePath?: string,
+  ) => ExecutionPolicySnapshot | undefined
 }
 
 export interface AuthorizedPlanRootBinding {
@@ -580,6 +598,7 @@ function isRuntimeContext(value: unknown): value is BackendRuntimeContext {
       'instanceId',
       'contributionKey',
       'hostWindowId',
+      'initiator',
     ]) &&
     typeof value.pluginId === 'string' &&
     value.pluginId.length > 0 &&
@@ -587,7 +606,8 @@ function isRuntimeContext(value: unknown): value is BackendRuntimeContext {
     value.packageVersion.length > 0 &&
     ['workspaceId', 'instanceId', 'contributionKey', 'hostWindowId'].every(
       (key) => value[key] === null || typeof value[key] === 'string'
-    )
+    ) &&
+    isAuthenticatedInitiator(value.initiator)
   )
 }
 
@@ -602,6 +622,27 @@ function isApprovedBridgePortList(value: unknown): value is readonly PlansBridge
       new Set(value).size === value.length &&
       value.every((port) => isPlansBridgePort(port)))
   )
+}
+
+/** Map Bridge ports to the agent Execution Policy namespace they represent.
+ * Ports without an established policy namespace remain unavailable to agents
+ * until a later contract assigns one explicitly. */
+function executionPolicyNamespaceForBridgePort(
+  port: PlansBridgePort,
+): PluginSystemNamespace | undefined {
+  switch (port) {
+    case 'filesystem':
+      return 'fs'
+    case 'workspace-storage':
+    case 'terminal':
+    case 'agent-messaging':
+    case 'routes':
+    case 'streams':
+    case 'spawn':
+      return undefined
+  }
+  const exhaustive: never = port
+  return exhaustive
 }
 
 function serverInfo(value: unknown): BackendServerInfo | undefined {
@@ -892,7 +933,17 @@ export function createAuthenticatedBackendRuntime(
   if (!isRuntimeContext(runtime)) {
     throw new BackendPluginError('INVALID_RUNTIME')
   }
-  const copy = { ...runtime }
+  const initiator: AuthenticatedInitiator = runtime.initiator.kind === 'agent'
+    ? Object.freeze({
+        kind: 'agent' as const,
+        source: 'mcp' as const,
+        id: runtime.initiator.id,
+      })
+    : Object.freeze({
+        kind: 'user' as const,
+        id: runtime.initiator.id,
+      })
+  const copy = { ...runtime, initiator }
   Object.defineProperty(copy, AUTHENTICATED_RUNTIME, {
     value: true,
     enumerable: false,
@@ -927,6 +978,10 @@ export class PluginBackendSupervisor {
   private readonly bridgeDispatcher?: BackendBridgeDispatcher
   private readonly authorizedPlanRoot?: AuthorizedPlanRootBinding
   private readonly refreshAuthorizedPlanRoot?: (signal: AbortSignal) => Promise<string>
+  private readonly resolveExecutionPolicy?: (
+    runtime: BackendRuntimeContext,
+    workspacePath?: string,
+  ) => ExecutionPolicySnapshot | undefined
   private rootRefreshController?: AbortController
   private state: SupervisorState = 'idle'
   private currentGeneration?: ChildGeneration
@@ -995,6 +1050,7 @@ export class PluginBackendSupervisor {
     this.bridgeDispatcher = options.bridgeDispatcher
     this.authorizedPlanRoot = options.authorizedPlanRoot
     this.refreshAuthorizedPlanRoot = options.refreshAuthorizedPlanRoot
+    this.resolveExecutionPolicy = options.resolveExecutionPolicy
     if (
       !isRecord(this.clientCapabilities) ||
       !isJsonValue(this.clientCapabilities) ||
@@ -1271,20 +1327,26 @@ export class PluginBackendSupervisor {
 
   private cancelSubscription(
     state: SubscriptionState,
-    reason: 'cancelled' | 'view-destroyed',
+    reason: 'cancelled' | 'view-destroyed' | 'plugin-stopping',
     timeout?: 'timeout'
   ): void {
     if (state.settledOnce) return
     const requestId = state.requestId
     const error = new BackendPluginError(
-      timeout === 'timeout' ? 'TIMEOUT' : 'USER_CANCELLED',
+      timeout === 'timeout' ? 'TIMEOUT' : reason === 'plugin-stopping' ? 'PLUGIN_STOPPING' : 'USER_CANCELLED',
       undefined,
       requestId === undefined ? {} : { requestId }
     )
     this.settleSubscription(
       state,
       {
-        reason: timeout === 'timeout' ? 'timeout' : reason === 'view-destroyed' ? 'view-destroyed' : 'cancelled',
+        reason: timeout === 'timeout'
+          ? 'timeout'
+          : reason === 'plugin-stopping'
+            ? 'plugin-stopping'
+            : reason === 'view-destroyed'
+              ? 'view-destroyed'
+              : 'cancelled',
         error,
       },
       true
@@ -1477,6 +1539,17 @@ export class PluginBackendSupervisor {
 
   private currentAuthorizedPlanRoot(fallback?: string): string | undefined {
     return this.authorizedPlanRoot?.value ?? fallback
+  }
+
+  private currentExecutionPolicy(
+    runtime: BackendRuntimeContext,
+    workspacePath?: string,
+  ): ExecutionPolicySnapshot | undefined {
+    try {
+      return this.resolveExecutionPolicy?.(runtime, workspacePath)
+    } catch {
+      return undefined
+    }
   }
 
   private async refreshRootIfNeeded(): Promise<void> {
@@ -1715,6 +1788,18 @@ export class PluginBackendSupervisor {
     }
     if (request.port === 'filesystem' && originBinding.authorizedPlanRoot === undefined) {
       this.sendBridgeError(generation, request.id, 'WORKSPACE_SCOPE_VIOLATION')
+      return
+    }
+    const policyNamespace = executionPolicyNamespaceForBridgePort(request.port)
+    if (
+      originBinding.runtime.initiator.kind === 'agent' &&
+      (policyNamespace === undefined || !executionPolicyAllows(
+        originBinding.runtime.initiator,
+        this.currentExecutionPolicy(originBinding.runtime, originBinding.workspacePath),
+        policyNamespace,
+      ))
+    ) {
+      this.sendBridgeError(generation, request.id, 'CAPABILITY_DENIED')
       return
     }
     const requestOriginKey = originKey(request.origin)
@@ -2165,7 +2250,11 @@ export class PluginBackendSupervisor {
       return Promise.reject(new BackendPluginError('INVALID_ARGUMENT'))
     }
     if (options.signal?.aborted) {
-      return Promise.reject(new BackendPluginError('USER_CANCELLED', undefined, { requestId }))
+      return Promise.reject(new BackendPluginError(
+        options.signal.reason === 'plugin-stopping' ? 'PLUGIN_STOPPING' : 'USER_CANCELLED',
+        undefined,
+        { requestId },
+      ))
     }
 
     return new Promise<BackendWireResponse>((resolve, reject) => {
@@ -2173,7 +2262,10 @@ export class PluginBackendSupervisor {
       const timer = setTimeout(() => {
         this.cancelPending(requestId, 'TIMEOUT')
       }, timeoutMs)
-      const abort = (): void => this.cancelPending(requestId, 'USER_CANCELLED')
+      const abort = (): void => this.cancelPending(
+        requestId,
+        options.signal?.reason === 'plugin-stopping' ? 'PLUGIN_STOPPING' : 'USER_CANCELLED',
+      )
       options.signal?.addEventListener('abort', abort, { once: true })
       const cleanup = (): void => {
         clearTimeout(timer)
@@ -2215,7 +2307,10 @@ export class PluginBackendSupervisor {
     })
   }
 
-  private cancelPending(requestId: WireRequestId, code: 'TIMEOUT' | 'USER_CANCELLED'): void {
+  private cancelPending(
+    requestId: WireRequestId,
+    code: 'TIMEOUT' | 'USER_CANCELLED' | 'PLUGIN_STOPPING',
+  ): void {
     const pending = this.pending.get(requestId)
     if (!pending) return
     this.pending.delete(requestId)

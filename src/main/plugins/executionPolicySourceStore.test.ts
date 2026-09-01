@@ -139,6 +139,21 @@ describe('ExecutionPolicySourceStore', () => {
     }
   })
 
+  it('exposes the global policy for plugin-scoped operations without a workspace', () => {
+    const userData = temporaryRoot('navide-policy-source-global-')
+    try {
+      const store = new ExecutionPolicySourceStore(userData)
+
+      expect(store.getGlobalEffectivePolicy()).toEqual({
+        policy: HOST_DEFAULT_EXECUTION_POLICY,
+        revision: 0,
+        state: 'default',
+      })
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+
   it('activates a repository recommendation only after explicit selection and persists it', () => {
     const userData = temporaryRoot('navide-policy-source-user-')
     const workspacePath = temporaryRoot('navide-policy-source-workspace-')

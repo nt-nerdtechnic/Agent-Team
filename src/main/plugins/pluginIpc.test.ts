@@ -287,7 +287,7 @@ async function installRegistryEvidence(
   const commitHandler = handlers.get('plugins:commitInstall')
   if (!prepareHandler || !commitHandler) throw new Error('install handlers not registered')
   await prepareHandler(null, { namespace, name })
-  commitHandler(null, { id: `${namespace}.${name}`, publisherConfirmed: true })
+  await commitHandler(null, { id: `${namespace}.${name}`, publisherConfirmed: true })
   manager.removeInstalledPlugin(`${namespace}.${name}`)
   handlers.clear()
 }
@@ -944,14 +944,14 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
 
       const commitHandler = handlers.get('plugins:commitInstall')
       if (!commitHandler) throw new Error('commitInstall handler not registered')
-      expect(() => commitHandler(null, { id: 'acme.demo' })).toThrow(
+      await expect(commitHandler(null, { id: 'acme.demo' })).rejects.toThrow(
         /publisher trust confirmation/
       )
-      expect(() =>
+      await expect(
         commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })
-      ).toThrow(/capability and backend risk confirmation/)
+      ).rejects.toThrow(/capability and backend risk confirmation/)
       expect(
-        commitHandler(null, {
+        await commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
@@ -991,12 +991,12 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       const commitHandler = handlers.get('plugins:commitInstall')
       if (!commitHandler) throw new Error('commitInstall handler not registered')
 
-      expect(() => commitHandler(null, {
+      await expect(commitHandler(null, {
         id: 'acme.demo',
         publisherConfirmed: true,
-      })).toThrow(/capability and backend risk confirmation/)
+      })).rejects.toThrow(/capability and backend risk confirmation/)
 
-      commitHandler(null, {
+      await commitHandler(null, {
         id: 'acme.demo',
         publisherConfirmed: true,
         riskConfirmed: true,
@@ -1028,7 +1028,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       const removeHandler = handlers.get('plugins:remove')
       if (!commitHandler || !removeHandler) throw new Error('plugin lifecycle handlers not registered')
       expect(
-        commitHandler(null, {
+        await commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
@@ -1063,8 +1063,8 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       expect(prepared.requiresConfirmation).toBe(false)
       const commitHandler = handlers.get('plugins:commitInstall')
       if (!commitHandler) throw new Error('commitInstall handler not registered')
-      expect(() => commitHandler(null, { id: 'acme.demo' })).toThrow(/publisher trust confirmation/)
-      expect(commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })).toEqual({
+      await expect(commitHandler(null, { id: 'acme.demo' })).rejects.toThrow(/publisher trust confirmation/)
+      expect(await commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })).toEqual({
         id: 'acme.demo',
         requires: ['git'],
       })
@@ -1096,7 +1096,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
 
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
       expect(
-        commitHandler(null, {
+        await commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
@@ -1150,7 +1150,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
 
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
       expect(
-        commitHandler(null, {
+        await commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
@@ -1161,7 +1161,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       installFetch(signedDetail(digest), bytes, digest)
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
       expect(
-        commitHandler(null, {
+        await commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
@@ -1216,7 +1216,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
 
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
       expect(
-        commitHandler(null, {
+        await commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
@@ -1231,13 +1231,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
       injectFailure()
 
-      expect(() =>
+      await expect(
         commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
         })
-      ).toThrow(/test .* failure/)
+      ).rejects.toThrow(/test .* failure/)
       expect(manager.listInstalledPackages()).toEqual([
         { id: 'acme.demo', requires: [], provenance: 'official-registry' },
       ])
@@ -1278,7 +1278,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
 
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
       expect(
-        commitHandler(null, {
+        await commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
@@ -1290,13 +1290,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
       failVerification = true
 
-      expect(() =>
+      await expect(
         commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
         })
-      ).toThrow(/test post-commit verification failure/)
+      ).rejects.toThrow(/test post-commit verification failure/)
       expect(manager.listInstalledPackages()).toEqual([
         { id: 'acme.demo', requires: [], provenance: 'official-registry' },
       ])
@@ -1336,7 +1336,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       if (!prepareHandler || !commitHandler) throw new Error('install handlers not registered')
 
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
-      commitHandler(null, {
+      await commitHandler(null, {
         id: 'acme.demo',
         publisherConfirmed: true,
         riskConfirmed: true,
@@ -1347,7 +1347,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       const replacement = buildReplacement()
       installFetch(signedDetail(replacement.digest), replacement.bytes, replacement.digest)
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
-      expect(commitHandler(null, { id: 'acme.demo' })).toEqual({
+      expect(await commitHandler(null, { id: 'acme.demo' })).toEqual({
         id: 'acme.demo',
         requires: [],
       })
@@ -1385,13 +1385,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       if (!prepareHandler || !commitHandler) throw new Error('install handlers not registered')
 
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
-      expect(() =>
+      await expect(
         commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
         })
-      ).toThrow(/installed plugin quarantined/)
+      ).rejects.toThrow(/installed plugin quarantined/)
       expect(projectBackendPluginActivationCatalog([...active.values()])).toEqual({
         schemaVersion: 1,
         packages: [],
@@ -1422,7 +1422,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       }
       expect(prepared.requiresPublisherTrust).toBe(true)
       expect(
-        commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })
+        await commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })
       ).toEqual({ id: 'acme.demo', requires: [] })
       expect(manager.listInstalledPackages()).toEqual([
         { id: 'acme.demo', requires: [], provenance: 'official-registry' },
@@ -1490,13 +1490,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       if (!prepareHandler || !commitHandler) throw new Error('install handlers not registered')
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
 
-      expect(() =>
+      await expect(
         commitHandler(null, {
           id: 'acme.demo',
           publisherConfirmed: true,
           riskConfirmed: true,
         })
-      ).toThrow(/installed package file was modified/)
+      ).rejects.toThrow(/installed package file was modified/)
       expect(manager.listInstalledPackages()).toEqual([])
       expect(existsSync(join(root, 'acme.demo', '.navide-package.zip'))).toBe(false)
       expect(existsSync(join(root, '.navide-quarantine'))).toBe(true)
@@ -1518,9 +1518,9 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       if (!prepareHandler || !commitHandler) throw new Error('install handlers not registered')
       await prepareHandler(null, { namespace: 'acme', name: 'demo' })
       installTrust.now = new Date('2026-08-18T12:00:00.000Z')
-      expect(() =>
+      await expect(
         commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })
-      ).toThrow(/expired/)
+      ).rejects.toThrow(/expired/)
       expect(manager.listInstalledPackages()).toEqual([])
       expect(existsSync(join(root, 'acme.demo'))).toBe(false)
 

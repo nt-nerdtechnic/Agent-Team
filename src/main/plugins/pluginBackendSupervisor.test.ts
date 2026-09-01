@@ -19,8 +19,10 @@ import {
   type BackendRuntimeContext,
 } from './pluginBackendSupervisor'
 import {
+  PLANS_BRIDGE_PORTS,
   createInMemoryPlansBridgeDispatcher,
   createProductionPlansBridgeDispatcher,
+  type PlansBridgePort,
 } from './plansBridge'
 import { MAX_BACKEND_BRIDGE_RESULT_BYTES } from './pluginBackendLimits'
 
@@ -80,6 +82,7 @@ const runtime: BackendRuntimeContext = {
   instanceId: 'instance-1',
   contributionKey: 'acme.backend.panel',
   hostWindowId: 'window-1',
+  initiator: { kind: 'user', id: 'user-1' },
 }
 
 const authenticatedRuntime = createAuthenticatedBackendRuntime(runtime)
@@ -123,6 +126,7 @@ const packagedRuntime = createAuthenticatedBackendRuntime({
   instanceId: 'instance-1',
   contributionKey: 'navide.plans.window',
   hostWindowId: 'window-1',
+  initiator: { kind: 'user', id: 'user-1' },
 })
 
 function makeSupervisor(
@@ -201,7 +205,11 @@ function makeControlledChild(
   }) as unknown as ChildProcessWithoutNullStreams
 }
 
-function makeBridgeChild(onFrame?: (frame: string) => void): ChildProcessWithoutNullStreams {
+function makeBridgeChild(
+  onFrame?: (frame: string) => void,
+  port: PlansBridgePort = 'filesystem',
+  operation = 'resolve_root',
+): ChildProcessWithoutNullStreams {
   const child = new EventEmitter()
   const stdin = new PassThrough()
   const stdout = new PassThrough()
@@ -246,9 +254,21 @@ function makeBridgeChild(onFrame?: (frame: string) => void): ChildProcessWithout
           method: 'navide/host/call',
           params: {
             origin: { kind: 'call', requestId: frame.id },
-            port: 'filesystem',
-            operation: 'resolve_root',
+            port,
+            operation,
             arguments: {},
+          },
+        })}\n`)
+        continue
+      }
+      if (frame.method === 'navide/call' && frame.id && frame.params?.name === 'fixture.echo') {
+        writeFrame(`${JSON.stringify({
+          jsonrpc: '2.0',
+          id: frame.id,
+          result: {
+            resultType: 'complete',
+            value: { arguments: frame.params.arguments },
+            _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'bridge-child', version: '1.0.0' } },
           },
         })}\n`)
         continue
@@ -280,6 +300,41 @@ function makeBridgeChild(onFrame?: (frame: string) => void): ChildProcessWithout
     return true
   }
   return Object.assign(child, { stdin, stdout, stderr, kill, pid: 99 }) as unknown as ChildProcessWithoutNullStreams
+}
+
+function bridgeOperationForPort(port: PlansBridgePort): string {
+  switch (port) {
+    case 'filesystem':
+      return 'resolve_root'
+    case 'workspace-storage':
+      return 'get'
+    case 'terminal':
+      return 'create'
+    case 'agent-messaging':
+      return 'list'
+    case 'routes':
+      return 'invoke'
+    case 'streams':
+      return 'open'
+    case 'spawn':
+      return 'transform'
+  }
+  const exhaustive: never = port
+  return exhaustive
+}
+
+function makeBridgePolicySupervisor(
+  port: PlansBridgePort,
+  overrides: Partial<PluginBackendSupervisorOptions> = {},
+): PluginBackendSupervisor {
+  return new PluginBackendSupervisor(
+    { ...activation, approvedBridgePorts: [port] },
+    {
+      ...overrides,
+      environment: overrides.environment ?? { NAVIDE_FIXTURE: 'backend-wire' },
+      spawnProcess: overrides.spawnProcess ?? (() => makeBridgeChild(undefined, port, bridgeOperationForPort(port))),
+    },
+  )
 }
 
 describe('PluginBackendSupervisor', () => {
@@ -353,6 +408,143 @@ describe('PluginBackendSupervisor', () => {
       },
     })
     expect(bridgeRequest).not.toHaveProperty('params.runtime')
+  })
+
+  it('keeps an agent Initiator on the child call and Host bridge context', async () => {
+    let bridgeRuntime: BackendRuntimeContext | undefined
+    const supervisor = makeSupervisor({
+      resolveExecutionPolicy: () => ({
+        policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] },
+        revision: 1,
+        state: 'user',
+      }),
+      bridgeDispatcher: {
+        dispatch: async (_request, context) => {
+          bridgeRuntime = context.runtime
+          return { root: '/workspace' }
+        },
+      },
+      spawnProcess: () => makeBridgeChild(),
+    })
+    supervisors.push(supervisor)
+    const agentRuntime = createAuthenticatedBackendRuntime({
+      ...runtime,
+      initiator: { kind: 'agent', source: 'mcp', id: 'agent-request-1' },
+    })
+
+    await supervisor.start()
+    await expect(
+      supervisor.clientFor(agentRuntime, { workspacePath: '/workspace' }).call('fixture.bridge', null)
+    ).resolves.toEqual({ root: '/workspace' })
+    expect(bridgeRuntime?.initiator).toEqual({
+      kind: 'agent',
+      source: 'mcp',
+      id: 'agent-request-1',
+    })
+  })
+
+  it('rejects an agent filesystem Bridge request when fs is not allowed', async () => {
+    const bridgeDispatcher = vi.fn(async () => ({ root: '/workspace' }))
+    const supervisor = makeBridgePolicySupervisor('filesystem', {
+      resolveExecutionPolicy: () => ({
+        policy: { schemaVersion: 1, mode: 'allowlist', system: [], shell: [] },
+        revision: 1,
+        state: 'user',
+      }),
+      bridgeDispatcher: { dispatch: bridgeDispatcher },
+    })
+    supervisors.push(supervisor)
+    const agentRuntime = createAuthenticatedBackendRuntime({
+      ...runtime,
+      initiator: { kind: 'agent', source: 'mcp', id: 'filesystem-denied-agent' },
+    })
+
+    await supervisor.start()
+    await expect(
+      supervisor
+        .clientFor(agentRuntime, { workspacePath: '/workspace' })
+        .call('fixture.bridge', null)
+    ).rejects.toMatchObject({ code: 'PLUGIN_ERROR', pluginCode: 'CAPABILITY_DENIED' })
+    expect(bridgeDispatcher).not.toHaveBeenCalled()
+  })
+
+  it.each(PLANS_BRIDGE_PORTS.filter((port) => port !== 'filesystem'))(
+    'rejects agent Bridge use of unmapped %s even in full policy',
+    async (port) => {
+      const bridgeDispatcher = vi.fn(async () => ({ ok: true }))
+      const supervisor = makeBridgePolicySupervisor(port, {
+        resolveExecutionPolicy: () => ({
+          policy: { schemaVersion: 1, mode: 'full', system: [], shell: [] },
+          revision: 1,
+          state: 'user',
+        }),
+        bridgeDispatcher: { dispatch: bridgeDispatcher },
+      })
+      supervisors.push(supervisor)
+      const agentRuntime = createAuthenticatedBackendRuntime({
+        ...runtime,
+        initiator: { kind: 'agent', source: 'mcp', id: `${port}-agent` },
+      })
+
+      await supervisor.start()
+      await expect(
+        supervisor
+          .clientFor(agentRuntime, { workspacePath: '/workspace' })
+          .call('fixture.bridge', null)
+      ).rejects.toMatchObject({ code: 'PLUGIN_ERROR', pluginCode: 'CAPABILITY_DENIED' })
+      expect(bridgeDispatcher).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(PLANS_BRIDGE_PORTS)(
+    'does not apply the agent Bridge policy to user %s operations',
+    async (port) => {
+      const bridgeDispatcher = vi.fn(async () => ({ ok: true }))
+      const supervisor = makeBridgePolicySupervisor(port, {
+        resolveExecutionPolicy: () => ({
+          policy: { schemaVersion: 1, mode: 'allowlist', system: [], shell: [] },
+          revision: 1,
+          state: 'corrupt',
+        }),
+        bridgeDispatcher: { dispatch: bridgeDispatcher },
+      })
+      supervisors.push(supervisor)
+
+      await supervisor.start()
+      await expect(
+        supervisor
+          .clientFor(authenticatedRuntime, { workspacePath: '/workspace' })
+          .call('fixture.bridge', null)
+      ).resolves.toEqual({ ok: true })
+      expect(bridgeDispatcher).toHaveBeenCalledOnce()
+    },
+  )
+
+  it('fails closed without killing the child when the policy resolver throws', async () => {
+    const bridgeDispatcher = vi.fn(async () => ({ root: '/workspace' }))
+    const supervisor = makeSupervisor({
+      resolveExecutionPolicy: () => {
+        throw new Error('policy state unavailable')
+      },
+      bridgeDispatcher: { dispatch: bridgeDispatcher },
+      spawnProcess: () => makeBridgeChild(),
+    })
+    supervisors.push(supervisor)
+
+    await supervisor.start()
+    await expect(
+      supervisor.clientFor(
+        createAuthenticatedBackendRuntime({
+          ...runtime,
+          initiator: { kind: 'agent', source: 'mcp', id: 'resolver-error-agent' },
+        }),
+        { workspacePath: '/workspace' },
+      ).call('fixture.bridge', null)
+    ).rejects.toMatchObject({ code: 'PLUGIN_ERROR' })
+    expect(bridgeDispatcher).not.toHaveBeenCalled()
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.echo', { value: 'still-ready' })
+    ).resolves.toMatchObject({ arguments: { value: 'still-ready' } })
   })
 
   it('aborts a pending Bridge dispatcher when the child crashes', async () => {
@@ -929,6 +1121,19 @@ describe('PluginBackendSupervisor', () => {
     expect(() =>
       createAuthenticatedBackendRuntime({ ...runtime, forged: 'field' } as BackendRuntimeContext)
     ).toThrowError(new BackendPluginError('INVALID_RUNTIME', 'Backend runtime is invalid.'))
+  })
+
+  it('freezes the Host-authenticated initiator at the runtime boundary', () => {
+    const mutableRuntime = {
+      ...runtime,
+      initiator: { kind: 'user' as const, id: 'user-1' },
+    }
+    const authenticated = createAuthenticatedBackendRuntime(mutableRuntime)
+
+    mutableRuntime.initiator.id = 'replaced'
+
+    expect(authenticated.initiator).toEqual({ kind: 'user', id: 'user-1' })
+    expect(Object.isFrozen(authenticated.initiator)).toBe(true)
   })
 
   it('does not accept a cloned authentication brand or audience', async () => {

@@ -348,11 +348,15 @@ to the same request ID. A backend-initiated graceful close sends the final
 Each Host-to-backend call carries a `runtime` object generated from the
 authenticated binding. The frontend cannot set or override `pluginId`,
 `packageVersion`, `workspaceId`, `instanceId`, `contributionKey`, or
-`hostWindowId`. Optional view/workspace fields are `null` for startup-only
-backend calls that have no such binding.
+`hostWindowId`. It also carries the Host-authenticated `initiator`: a `user`
+initiator has `kind` and `id`, while an MCP-routed agent has `kind: "agent"`,
+`source: "mcp"`, and an opaque `id`. The Host mints both forms from the
+authenticated caller and rejects package-supplied identity fields. Optional
+view/workspace fields are `null` for startup-only backend calls that have no
+such binding.
 
 ```json
-{"jsonrpc":"2.0","id":"req-1","method":"navide/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"navide-host","version":"0.2.0"}},"name":"plans.list","arguments":{"filter":"open"},"runtime":{"pluginId":"navide.plans","packageVersion":"1.0.0","workspaceId":"ws-1","instanceId":"view-1","contributionKey":"navide.plans.left","hostWindowId":"window-1"}}}
+{"jsonrpc":"2.0","id":"req-1","method":"navide/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"navide-host","version":"0.2.0"}},"name":"plans.list","arguments":{"filter":"open"},"runtime":{"pluginId":"navide.plans","packageVersion":"1.0.0","workspaceId":"ws-1","instanceId":"view-1","contributionKey":"navide.plans.left","hostWindowId":"window-1","initiator":{"kind":"agent","source":"mcp","id":"agent-request-1"}}}}
 ```
 
 A successful call response includes MCP's required `resultType` discriminator,
@@ -600,7 +604,10 @@ top-level executable names, not command strings or paths. The normative JSON
 Schema describes the canonical persisted spelling
 `[a-z0-9][a-z0-9._+-]*`. The contract parser also accepts ASCII uppercase
 letters in input, canonicalizing them to lowercase before duplicate detection
-and persistence, so `git` and `GIT` are the same entry. Entries are unique.
+and persistence, so `git` and `GIT` are the same entry.
+Agent shell enforcement compares parsed top-level executable tokens
+case-insensitively, so `GIT status` is evaluated against the `git` entry in
+both allowlist and denylist modes. Entries are unique.
 `full` is represented by the same shape with both arrays empty:
 
 ```json
@@ -717,6 +724,41 @@ opaque revision-aware `effectivePolicyKey` and canonical-policy
 implement caching or enforcement. This Host source service is intentionally
 not exposed through preload, IPC, renderer APIs, or Settings UI in Issue 23B;
 those surfaces belong to Issue 23D.
+
+### Runtime enforcement
+
+The Host authenticates `user` and `agent` initiators independently from every
+plugin payload. Direct user actions use the Host-owned `user` identity. An
+MCP-routed agent request receives a Host-minted `agent` identity that survives
+the MCP handoff, package-local Backend Wire call, and any Host capability call;
+the package cannot add, remove, or replace it.
+
+Only the `agent` initiator is evaluated against the global Execution Policy.
+Manifest permissions, the capability catalog, the explicit package-version
+Grant, publisher eligibility, request schemas, workspace binding, and runtime
+state remain mandatory for both initiators. `full` mode bypasses only the
+agent-specific namespace and executable filters. `allowlist` and `denylist`
+operate on first-level `fs`, `ui`, and `aiCli` namespaces and on every resolved
+top-level executable in a shell pipeline or command chain. Policy v1 does not
+express subcommands, arguments, path patterns, or wrappers. The v1 shell parser
+fails closed on unquoted grouping or negation syntax (`(`, `)`, `{`, `}`, `!`)
+and assignment-prefixed commands (`NAME=value`); this applies to both direct
+user and agent shell execution, so quote these characters or assignment-shaped
+arguments when they are intended as command data. For the private Backend
+Bridge, only the `filesystem` port currently maps to the `fs` Execution Policy
+namespace. All other current Bridge ports fail closed for agent Initiators until
+an explicit namespace mapping is assigned; user Initiators continue through
+their existing checks.
+
+When a queued operation is held across a policy revision, the Host re-evaluates
+it immediately before dispatch. An operation already dispatched keeps the
+decision made for that dispatch; completed effects are not reversible. An
+exact package-version Grant revocation marks that package version stopping
+before draining it, rejects new work, settles pending calls and subscriptions
+once with `PLUGIN_STOPPING`, stops its event routes, disables and closes its
+views, and gracefully closes its child backend before the bounded force-kill
+fallback. Other package versions remain independent. Factory and Official
+Registry packages use these same checks and have no bypass.
 
 ## SDK interface
 

@@ -13,6 +13,11 @@ import {
   type PluginBackendSupervisorOptions,
 } from './pluginBackendSupervisor'
 import {
+  isAuthenticatedInitiator,
+  type AuthenticatedInitiator,
+} from './pluginCapabilityBroker'
+import type { ExecutionPolicySnapshot } from './executionPolicy'
+import {
   isAllowedBackendTimeout,
   MAX_BACKEND_CALLS_PER_INSTANCE,
   MAX_BACKEND_CHILDREN,
@@ -47,6 +52,11 @@ export interface PluginBackendHostOptions {
   bridgeDispatcher?: BackendBridgeDispatcher
   /** Resolve the Host-authorized Plans repository root for one bound view. */
   resolvePlanRoot?: PlanRootResolver
+  /** Resolve the current agent policy for one Host-bound child bridge call. */
+  resolveExecutionPolicy?: (
+    runtime: BackendRuntimeContext,
+    workspacePath?: string,
+  ) => ExecutionPolicySnapshot | undefined
 }
 
 interface RegisteredBackend {
@@ -62,6 +72,7 @@ interface BoundView {
   bindingController: AbortController
   bindingTask: Promise<void>
   closing: boolean
+  closingReason?: 'view-destroyed' | 'plugin-stopping'
   slotReleased: boolean
   calls: Set<AbortController>
   subscriptions: Set<BackendPluginSubscription>
@@ -104,8 +115,31 @@ function isViewRuntime(runtime: BackendRuntimeContext): boolean {
     nonEmptyString(runtime.workspaceId) &&
     nonEmptyString(runtime.instanceId) &&
     nonEmptyString(runtime.contributionKey) &&
-    nonEmptyString(runtime.hostWindowId)
+    nonEmptyString(runtime.hostWindowId) &&
+    isAuthenticatedInitiator(runtime.initiator)
   )
+}
+
+function runtimeWithInitiator(
+  runtime: AuthenticatedBackendRuntime,
+  initiator: AuthenticatedInitiator | undefined,
+): AuthenticatedBackendRuntime {
+  if (initiator === undefined) return runtime
+  if (!isAuthenticatedInitiator(initiator)) {
+    throw new BackendPluginError('INVALID_RUNTIME')
+  }
+  const sameKindAndId =
+    runtime.initiator.kind === initiator.kind &&
+    runtime.initiator.id === initiator.id
+  const sameAgentSource =
+    runtime.initiator.kind === 'agent' &&
+    initiator.kind === 'agent' &&
+    runtime.initiator.source === initiator.source
+  if (
+    sameKindAndId &&
+    (runtime.initiator.kind === 'user' || sameAgentSource)
+  ) return runtime
+  return createAuthenticatedBackendRuntime({ ...runtime, initiator })
 }
 
 function defaultSupervisor(
@@ -130,14 +164,23 @@ export class PluginBackendHost {
   ) => PluginBackendSupervisor
   private readonly bridgeDispatcher: BackendBridgeDispatcher
   private readonly resolvePlanRoot?: PlanRootResolver
+  private readonly resolveExecutionPolicy?: PluginBackendHostOptions['resolveExecutionPolicy']
   private readonly backends = new Map<string, RegisteredBackend>()
   private readonly views = new Map<string, BoundView>()
+  /** Package-version revocations are serialized and also act as an admission
+   *  barrier while the old views and child are being drained. */
+  private readonly packageRevocations = new Map<string, Promise<void>>()
+  private readonly unbindTasks = new Map<
+    string,
+    { packageKey: string; task: Promise<void> }
+  >()
   private reservedChildSlots = 0
 
   constructor(options: PluginBackendHostOptions = {}) {
     this.environment = Object.freeze({ ...(options.environment ?? {}) })
     this.bridgeDispatcher = options.bridgeDispatcher ?? createProductionPlansBridgeDispatcher()
     this.resolvePlanRoot = options.resolvePlanRoot
+    this.resolveExecutionPolicy = options.resolveExecutionPolicy
     this.createSupervisor = options.createSupervisor ?? defaultSupervisor
   }
 
@@ -145,6 +188,9 @@ export class PluginBackendHost {
     const packageDir = canonicalBackendPackageDir(activation.packageDir)
     if (!packageDir) throw new BackendPluginError('INVALID_ACTIVATION')
     const key = backendKey(activation.pluginId, activation.packageVersion)
+    if (this.packageRevocations.has(key)) {
+      throw new BackendPluginError('PLUGIN_STOPPING')
+    }
     if (this.backends.has(key)) {
       throw new BackendPluginError('INVALID_ACTIVATION', 'Backend package version is already registered.')
     }
@@ -187,7 +233,9 @@ export class PluginBackendHost {
     if (!isViewRuntime(runtime)) throw new BackendPluginError('INVALID_RUNTIME')
     const instanceId = runtime.instanceId
     if (!nonEmptyString(instanceId)) throw new BackendPluginError('INVALID_RUNTIME')
-    const backend = this.backends.get(backendKey(runtime.pluginId, runtime.packageVersion))
+    const key = backendKey(runtime.pluginId, runtime.packageVersion)
+    if (this.packageRevocations.has(key)) throw new BackendPluginError('PLUGIN_STOPPING')
+    const backend = this.backends.get(key)
     if (!backend) throw new BackendPluginError('INVALID_RUNTIME')
     const canonicalPackageDir = canonicalBackendPackageDir(packageDir)
     if (!canonicalPackageDir || canonicalPackageDir !== backend.activation.packageDir) {
@@ -258,6 +306,9 @@ export class PluginBackendHost {
         clientInfo: { name: 'navide-host', version: view.activation.packageVersion },
         bridgeDispatcher: this.bridgeDispatcher,
         authorizedPlanRoot: view.authorizedPlanRoot,
+        ...(this.resolveExecutionPolicy
+          ? { resolveExecutionPolicy: this.resolveExecutionPolicy }
+          : {}),
         ...(needsFilesystem && this.resolvePlanRoot && view.workspacePath !== undefined
           ? {
               refreshAuthorizedPlanRoot: (signal: AbortSignal): Promise<string> =>
@@ -295,25 +346,80 @@ export class PluginBackendHost {
     this.reservedChildSlots--
   }
 
-  async unbindView(instanceId: string): Promise<void> {
+  async unbindView(
+    instanceId: string,
+    reason: 'view-destroyed' | 'plugin-stopping' = 'view-destroyed',
+  ): Promise<void> {
+    const existing = this.unbindTasks.get(instanceId)
+    if (existing) {
+      await existing.task
+      return
+    }
     const view = this.views.get(instanceId)
     if (!view) return
-    this.views.delete(instanceId)
-    view.closing = true
-    view.bindingController.abort()
-    for (const controller of view.calls) controller.abort()
-    view.calls.clear()
-    for (const subscription of view.subscriptions) {
-      subscription.dispose('view-destroyed')
-    }
-    view.subscriptions.clear()
+    const packageKey = backendKey(view.activation.pluginId, view.activation.packageVersion)
+    const task = (async (): Promise<void> => {
+      this.views.delete(instanceId)
+      view.closing = true
+      view.closingReason = reason
+      if (reason === 'plugin-stopping') view.bindingController.abort('plugin-stopping')
+      else view.bindingController.abort()
+      for (const controller of view.calls) {
+        if (reason === 'plugin-stopping') controller.abort('plugin-stopping')
+        else controller.abort()
+      }
+      view.calls.clear()
+      for (const subscription of view.subscriptions) {
+        subscription.dispose(reason)
+      }
+      view.subscriptions.clear()
+      try {
+        await view.bindingTask
+      } catch {
+        // A failed binding has no child to close; callers already receive it.
+      }
+      await view.supervisor?.close()
+      this.releaseChildSlot(view)
+    })()
+    this.unbindTasks.set(instanceId, { packageKey, task })
     try {
-      await view.bindingTask
-    } catch {
-      // A failed binding has no child to close; callers already receive it.
+      await task
+    } finally {
+      if (this.unbindTasks.get(instanceId)?.task === task) this.unbindTasks.delete(instanceId)
     }
-    await view.supervisor?.close()
-    this.releaseChildSlot(view)
+  }
+
+  /** Revoke exactly one package-version activation. New binds are rejected as
+   * soon as this method starts; existing views are drained before the selected
+   * activation is removed from the Host registry. */
+  async revokePackageVersion(pluginId: string, packageVersion: string): Promise<void> {
+    const key = backendKey(pluginId, packageVersion)
+    const existing = this.packageRevocations.get(key)
+    if (existing) {
+      await existing
+      return
+    }
+    const task = Promise.resolve().then(async () => {
+      const instances = [...this.views.entries()]
+        .filter(([, view]) =>
+          view.activation.pluginId === pluginId && view.activation.packageVersion === packageVersion,
+        )
+        .map(([instanceId]) => instanceId)
+      const draining = [...this.unbindTasks.values()]
+        .filter(({ packageKey }) => packageKey === key)
+        .map(({ task }) => task)
+      await Promise.all([
+        ...instances.map((instanceId) => this.unbindView(instanceId, 'plugin-stopping')),
+        ...draining,
+      ])
+      this.backends.delete(key)
+    })
+    this.packageRevocations.set(key, task)
+    try {
+      await task
+    } finally {
+      if (this.packageRevocations.get(key) === task) this.packageRevocations.delete(key)
+    }
   }
 
   async call<Result extends JsonValue>(
@@ -322,8 +428,15 @@ export class PluginBackendHost {
     args: JsonValue,
     options?: BackendPluginCallOptions,
   ): Promise<Result> {
+    const unbinding = this.unbindTasks.get(instanceId)
+    if (unbinding && this.packageRevocations.has(unbinding.packageKey)) {
+      throw new BackendPluginError('PLUGIN_STOPPING')
+    }
     const view = this.views.get(instanceId)
     if (!view) throw new BackendPluginError('INVALID_RUNTIME')
+    if (this.packageRevocations.has(backendKey(view.activation.pluginId, view.activation.packageVersion))) {
+      throw new BackendPluginError('PLUGIN_STOPPING')
+    }
     if (!view.activation.approvedMethods.includes(name)) {
       throw new BackendPluginError('INVALID_ARGUMENT')
     }
@@ -339,18 +452,38 @@ export class PluginBackendHost {
     else options?.signal?.addEventListener('abort', abort, { once: true })
     view.calls.add(controller)
     try {
-      await view.bindingTask
-      if (controller.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
+      const runtime = runtimeWithInitiator(view.runtime, options?.initiator)
+      const supervisorOptions: BackendPluginCallOptions = { ...options }
+      delete supervisorOptions.initiator
+      try {
+        await view.bindingTask
+      } catch (error) {
+        if (view.closingReason === 'plugin-stopping') {
+          throw new BackendPluginError('PLUGIN_STOPPING')
+        }
+        throw error
+      }
+      if (controller.signal.aborted) {
+        throw new BackendPluginError(
+          controller.signal.reason === 'plugin-stopping' ? 'PLUGIN_STOPPING' : 'USER_CANCELLED',
+        )
+      }
       if (this.views.get(instanceId) !== view || view.closing || !view.supervisor) {
-        throw new BackendPluginError('INVALID_RUNTIME')
+        throw new BackendPluginError(
+          view.closingReason === 'plugin-stopping' ? 'PLUGIN_STOPPING' : 'INVALID_RUNTIME',
+        )
       }
       await view.supervisor.start()
-      if (controller.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
-      return view.supervisor.clientFor(view.runtime, {
+      if (controller.signal.aborted) {
+        throw new BackendPluginError(
+          controller.signal.reason === 'plugin-stopping' ? 'PLUGIN_STOPPING' : 'USER_CANCELLED',
+        )
+      }
+      return view.supervisor.clientFor(runtime, {
         workspacePath: view.workspacePath,
         authorizedPlanRoot: view.authorizedPlanRoot.value ?? undefined,
       }).call<Result>(name, args, {
-        ...options,
+        ...supervisorOptions,
         signal: controller.signal,
       })
     } finally {
@@ -365,8 +498,15 @@ export class PluginBackendHost {
     listener: (payload: JsonValue) => void,
     options?: BackendPluginSubscriptionOptions,
   ): Promise<BackendPluginSubscription> {
+    const unbinding = this.unbindTasks.get(instanceId)
+    if (unbinding && this.packageRevocations.has(unbinding.packageKey)) {
+      throw new BackendPluginError('PLUGIN_STOPPING')
+    }
     const view = this.views.get(instanceId)
     if (!view) throw new BackendPluginError('INVALID_RUNTIME')
+    if (this.packageRevocations.has(backendKey(view.activation.pluginId, view.activation.packageVersion))) {
+      throw new BackendPluginError('PLUGIN_STOPPING')
+    }
     if (!view.activation.approvedEvents.includes(event)) {
       throw new BackendPluginError('INVALID_ARGUMENT')
     }
@@ -378,13 +518,29 @@ export class PluginBackendHost {
     }
     view.pendingSubscriptions++
     try {
-      await view.bindingTask
-      if (options?.signal?.aborted) throw new BackendPluginError('USER_CANCELLED')
+      const runtime = runtimeWithInitiator(view.runtime, options?.initiator)
+      const supervisorOptions: BackendPluginSubscriptionOptions = { ...options }
+      delete supervisorOptions.initiator
+      try {
+        await view.bindingTask
+      } catch (error) {
+        if (view.closingReason === 'plugin-stopping') {
+          throw new BackendPluginError('PLUGIN_STOPPING')
+        }
+        throw error
+      }
+      if (options?.signal?.aborted) {
+        throw new BackendPluginError(
+          options.signal.reason === 'plugin-stopping' ? 'PLUGIN_STOPPING' : 'USER_CANCELLED',
+        )
+      }
       if (this.views.get(instanceId) !== view || view.closing || !view.supervisor) {
-        throw new BackendPluginError('INVALID_RUNTIME')
+        throw new BackendPluginError(
+          view.closingReason === 'plugin-stopping' ? 'PLUGIN_STOPPING' : 'INVALID_RUNTIME',
+        )
       }
       await view.supervisor.start()
-      const subscription = view.supervisor.clientFor(view.runtime, {
+      const subscription = view.supervisor.clientFor(runtime, {
         workspacePath: view.workspacePath,
         authorizedPlanRoot: view.authorizedPlanRoot.value ?? undefined,
       }).subscribe(
@@ -392,7 +548,7 @@ export class PluginBackendHost {
         (backendEvent: BackendPluginEvent) => {
           if (backendEvent.event === event) listener(backendEvent.payload)
         },
-        options,
+        supervisorOptions,
       )
       view.subscriptions.add(subscription)
       void subscription.settled.then(() => view.subscriptions.delete(subscription))
@@ -404,6 +560,8 @@ export class PluginBackendHost {
 
   async close(): Promise<void> {
     await Promise.all([...this.views.keys()].map((instanceId) => this.unbindView(instanceId)))
+    await Promise.all([...this.unbindTasks.values()].map(({ task }) => task))
+    await Promise.all([...this.packageRevocations.values()])
     this.backends.clear()
   }
 }

@@ -380,6 +380,13 @@ export class ExecutionPolicySourceStore {
     return this.readSelectionContext(workspacePath).snapshot
   }
 
+  /** Return only the global policy for plugin-scoped operations that have no
+   * workspace source to select. Repository recommendations are workspace
+   * scoped and therefore do not participate in this snapshot. */
+  getGlobalEffectivePolicy(): ExecutionPolicySnapshot {
+    return this.policyStore.getEffectivePolicy()
+  }
+
   private readSelectionContext(workspacePath: string): SourceSelectionContext {
     const global = this.policyStore.getEffectivePolicy()
     const sourceState = this.readSourceState()

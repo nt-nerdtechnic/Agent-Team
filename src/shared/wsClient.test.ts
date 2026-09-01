@@ -120,6 +120,18 @@ describe('createWsClient', () => {
     await expect(p).resolves.toMatchObject({ ok: true })
   })
 
+  it('rechecks a queued request before dispatch and drops a stale denial', async () => {
+    const c = makeClient()
+    c.connect(URL)
+    const sock = FakeWebSocket.instances[0]
+    const beforeDispatch = vi.fn(() => false)
+    const p = c.send('fs.write_file', {}, 10_000, { beforeDispatch })
+    sock.open()
+    expect(beforeDispatch).toHaveBeenCalledTimes(1)
+    expect(sock.sent).toHaveLength(0)
+    await expect(p).rejects.toThrow('request denied before dispatch')
+  })
+
   it('dispatches server-pushed events by type', () => {
     const c = makeClient()
     c.connect(URL)
