@@ -1499,7 +1499,13 @@ describe('loadInstalledPlugins official receipt gate', () => {
     expect(result).toMatchObject({ loaded: true, pluginId: 'navide.git', packageVersion: '1.0.0' })
     expect(mgr.getDescriptor('navide.git')?.packageVersion).toBe('1.0.0')
     expect(mgr.listInstalledPackages()).toEqual([
-      { id: 'navide.git', requires: [], provenance: 'factory-bundled' },
+      {
+        id: 'navide.git',
+        requires: [],
+        packageVersion: '1.0.0',
+        manifestPermissions: { system: [] },
+        provenance: 'factory-bundled',
+      },
     ])
   })
 
@@ -1721,6 +1727,8 @@ describe('loadInstalledPlugins official receipt gate', () => {
         {
           id: 'acme.viewer',
           requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
           provenance: 'developer-local-unpacked',
           warning: 'Unsigned local unpacked plugin — Developer Mode only',
         },

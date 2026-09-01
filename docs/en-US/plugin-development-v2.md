@@ -760,6 +760,37 @@ views, and gracefully closes its child backend before the bounded force-kill
 fallback. Other package versions remain independent. Factory and Official
 Registry packages use these same checks and have no bypass.
 
+### Settings and Extensions surface
+
+Settings exposes Execution Policy in its own tab. The Host default is
+read-only; the user can create or edit one global user policy in `full`,
+`allowlist`, or `denylist` mode. Allowlist and denylist editing has separate
+first-level `system` namespace and top-level `shell` executable controls. Full
+mode explains that arbitrary executables, including high-risk tools, are
+allowed and cannot be saved without an explicit high-risk confirmation.
+
+For an open workspace, Settings shows the currently effective source and the
+repository recommendation as untrusted proposed configuration. Selecting the
+Host default, user policy, or a valid repository recommendation is explicit;
+repository acceptance is bound to the inspected canonical fingerprint. The
+Host never merges sources or silently changes an unavailable selection to a
+broader source. Selecting the Host default is the source-level reset; resetting
+the user policy is a separate operation.
+
+If durable global policy state is corrupt, Settings offers a separately
+confirmed rebuild that removes and recreates only the Host-owned `policy.json`
+and `revision.json` pair from the Host default. Workspace source selections,
+`sources.json`, `sources-revision.json`, and repository policy files are
+preserved. An unsafe or unavailable policy directory is reported as a manual
+remediation case and never treated as permission to delete files.
+
+Extensions displays the selected agent's effective Execution Policy next to
+the installed package inventory. Each v2 package separately reports its
+Manifest Permissions and exact package-version Grant state, including when no
+matching Grant exists. Neither display is presented as replacing the other;
+policy validation, broker denials, and recovery failures remain fail-closed
+and are surfaced with safe messages.
+
 ## SDK interface
 
 ```ts

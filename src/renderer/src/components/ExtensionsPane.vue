@@ -7,12 +7,35 @@
 // All privileged work is brokered through the main process via
 // `window.agentTeam.plugins`; this component holds no secrets and never touches
 // package bytes.
-import { computed, ref, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import type {
+  ExecutionPolicySettingsSnapshot,
+  ExecutionPolicySource,
+  ManifestPermissionsSummary,
+  PackageVersionGrantSummary,
+} from '../../../shared/executionPolicy'
 
-const plugins = window.agentTeam?.plugins
+const props = defineProps<{
+  workspacePath?: string
+}>()
+
+const { t } = useI18n()
+
+function pluginsApi() {
+  return window.agentTeam?.plugins
+}
+
+function policyApi() {
+  return window.agentTeam?.executionPolicy
+}
 
 const installed = ref<InstalledPluginSummary[]>([])
 const factoryPackages = ref<FactoryPluginSummary[]>([])
+const factoryRows = computed(() => factoryPackages.value.map((factoryPackage) => ({
+  ...factoryPackage,
+  installed: installed.value.find((plugin) => plugin.id === factoryPackage.id) ?? null,
+})))
 const nonFactoryInstalled = computed(() =>
   installed.value.filter((plugin) => plugin.provenance !== 'factory-bundled')
 )
@@ -20,6 +43,9 @@ const results = ref<MarketplaceExtension[]>([])
 const query = ref('')
 const busy = ref(false)
 const error = ref('')
+const policySnapshot = ref<ExecutionPolicySettingsSnapshot | null>(null)
+const policyError = ref('')
+let stopPolicyChanged: (() => void) | undefined
 // A prepared, verified install awaiting the existing install-risk confirmation.
 const pendingConfirm = ref<{ ext: MarketplaceExtension; prepared: PreparedInstallSummary } | null>(
   null
@@ -28,19 +54,81 @@ const pendingStep = ref<'publisher' | 'risk' | null>(null)
 const publisherConfirmed = ref(false)
 
 async function refreshInstalled(): Promise<void> {
-  if (!plugins) return
+  const api = pluginsApi()
+  if (!api) return
   ;[installed.value, factoryPackages.value] = await Promise.all([
-    plugins.listInstalled(),
-    plugins.listFactoryPackages(),
+    api.listInstalled(),
+    api.listFactoryPackages(),
   ])
 }
 
+async function refreshPolicy(): Promise<void> {
+  const api = policyApi()
+  if (!api) return
+  policyError.value = ''
+  try {
+    policySnapshot.value = await api.inspect(props.workspacePath)
+  } catch (err) {
+    policyError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+const selectedPolicy = computed(() => {
+  const current = policySnapshot.value
+  return current?.workspace?.policy ?? current?.global.policy ?? null
+})
+const selectedPolicySource = computed<ExecutionPolicySource | null>(() => {
+  const current = policySnapshot.value
+  if (!current) return null
+  if (current.workspace) return current.workspace.activeSource
+  return current.global.state === 'user'
+    ? 'user'
+    : current.global.state === 'default'
+      ? 'default'
+      : null
+})
+const selectedPolicyStatus = computed(() => {
+  const current = policySnapshot.value
+  return current?.workspace?.status ?? (current?.global.state === 'corrupt' ? 'corrupt' : 'active')
+})
+
+function formatPolicySource(source: ExecutionPolicySource | null): string {
+  return t(`settings.extensionsPolicy.source.${source ?? 'unavailable'}`)
+}
+
+function formatList(values: readonly string[]): string {
+  return values.length > 0 ? values.join(', ') : t('settings.extensionsPolicy.none')
+}
+
+function formatManifestPermissions(permissions: ManifestPermissionsSummary): string {
+  const parts = [`${t('settings.extensionsPolicy.system')}: ${formatList(permissions.system)}`]
+  if (permissions.shell) parts.push(`${t('settings.extensionsPolicy.shell')}: ${permissions.shell}`)
+  return parts.join('; ')
+}
+
+function formatPackageGrant(grant: PackageVersionGrantSummary | null | undefined): string {
+  if (!grant) return t('settings.extensionsPolicy.noMatchingGrant')
+  const parts = [
+    `${t('settings.extensionsPolicy.version')} ${grant.packageVersion}`,
+    `${t('settings.extensionsPolicy.system')}: ${formatList(grant.system)}`,
+  ]
+  if (grant.shell) parts.push(`${t('settings.extensionsPolicy.shell')}: ${grant.shell}`)
+  if (grant.highRiskShellConfirmed !== undefined) {
+    parts.push(`${t('settings.extensionsPolicy.highRiskShellConfirmed')}: ${grant.highRiskShellConfirmed ? t('settings.extensionsPolicy.yes') : t('settings.extensionsPolicy.no')}`)
+  }
+  if (grant.storage !== undefined) {
+    parts.push(`${t('settings.extensionsPolicy.storage')}: ${grant.storage ? t('settings.extensionsPolicy.yes') : t('settings.extensionsPolicy.no')}`)
+  }
+  return parts.join('; ')
+}
+
 async function search(): Promise<void> {
-  if (!plugins) return
+  const api = pluginsApi()
+  if (!api) return
   busy.value = true
   error.value = ''
   try {
-    const res = await plugins.marketplaceSearch(query.value || undefined)
+    const res = await api.marketplaceSearch(query.value || undefined)
     results.value = res.items
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -50,11 +138,12 @@ async function search(): Promise<void> {
 }
 
 async function install(ext: MarketplaceExtension): Promise<void> {
-  if (!plugins) return
+  const api = pluginsApi()
+  if (!api) return
   busy.value = true
   error.value = ''
   try {
-    const prepared = await plugins.prepareInstall({ namespace: ext.namespace, name: ext.name })
+    const prepared = await api.prepareInstall({ namespace: ext.namespace, name: ext.name })
     const requiresPublisherTrust = prepared.requiresPublisherTrust === true
     const requiresRiskConfirmation =
       prepared.requiresRiskConfirmation ?? prepared.requiresConfirmation
@@ -77,8 +166,9 @@ async function commit(
   id: string,
   approval: { publisherConfirmed?: boolean; riskConfirmed?: boolean }
 ): Promise<void> {
-  if (!plugins) return
-  await plugins.commitInstall(id, approval)
+  const api = pluginsApi()
+  if (!api) return
+  await api.commitInstall(id, approval)
   pendingConfirm.value = null
   pendingStep.value = null
   await refreshInstalled()
@@ -126,17 +216,19 @@ function cancelInstall(): void {
 }
 
 async function remove(id: string): Promise<void> {
-  if (!plugins) return
-  await plugins.remove(id)
+  const api = pluginsApi()
+  if (!api) return
+  await api.remove(id)
   await refreshInstalled()
 }
 
 async function restoreFactoryPackage(id: string): Promise<void> {
-  if (!plugins) return
+  const api = pluginsApi()
+  if (!api) return
   busy.value = true
   error.value = ''
   try {
-    await plugins.restoreFactoryPackage(id)
+    await api.restoreFactoryPackage(id)
     await refreshInstalled()
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -145,27 +237,60 @@ async function restoreFactoryPackage(id: string): Promise<void> {
   }
 }
 
-onMounted(refreshInstalled)
+onMounted(() => {
+  void refreshInstalled()
+  void refreshPolicy()
+  stopPolicyChanged = policyApi()?.onChanged(() => { void refreshPolicy() })
+})
+
+onUnmounted(() => stopPolicyChanged?.())
+watch(() => props.workspacePath, () => { void refreshPolicy() })
 </script>
 
 <template>
   <div class="extensions-pane">
     <p v-if="error" class="ext-error" role="alert">{{ error }}</p>
 
+    <section class="ext-section ext-policy-section" data-section="agent-execution-policy">
+      <h3>{{ $t('settings.extensionsPolicy.title') }}</h3>
+      <p class="ext-policy-separation">
+        {{ $t('settings.extensionsPolicy.separation') }}
+      </p>
+      <div v-if="selectedPolicy" class="ext-policy-card">
+        <span><strong>{{ $t('settings.extensionsPolicy.effectiveSource') }}:</strong> {{ formatPolicySource(selectedPolicySource) }}</span>
+        <span><strong>{{ $t('settings.extensionsPolicy.mode') }}:</strong> {{ $t(`settings.executionPolicy.mode.${selectedPolicy.mode}`) }}</span>
+        <span><strong>{{ $t('settings.extensionsPolicy.systemNamespaces') }}:</strong> {{ formatList(selectedPolicy.system) }}</span>
+        <span><strong>{{ $t('settings.extensionsPolicy.shellExecutables') }}:</strong> {{ formatList(selectedPolicy.shell) }}</span>
+        <span><strong>{{ $t('settings.extensionsPolicy.status') }}:</strong> {{ $t(`settings.executionPolicy.status.${selectedPolicyStatus}`) }}</span>
+      </div>
+      <p v-else-if="policyError" class="ext-error" role="alert">{{ policyError }}</p>
+      <p v-else class="ext-policy-muted">{{ $t('settings.extensionsPolicy.unavailable') }}</p>
+    </section>
+
     <section class="ext-section">
       <h3>Bundled</h3>
       <ul class="ext-list">
         <li
-          v-for="p in factoryPackages"
+          v-for="p in factoryRows"
           :key="p.id"
           class="ext-installed ext-factory"
           :data-factory-id="p.id"
         >
           <span class="ext-id">{{ p.id === 'navide.git' ? 'Bundled Git' : p.id }}</span>
-          <span v-if="p.version" class="ext-requires">{{ p.version }}</span>
+          <span v-if="p.installed?.packageVersion ?? p.version" class="ext-requires">
+            {{ p.installed?.packageVersion ?? p.version }}
+          </span>
           <span class="ext-badge" :class="p.active ? 'ext-active' : 'ext-removed'">
             {{ p.active ? 'Active' : p.optedOut ? 'Removed' : 'Unavailable' }}
           </span>
+          <div v-if="p.installed?.manifestPermissions || p.installed?.packageVersion" class="ext-permission-details">
+            <span v-if="p.installed?.manifestPermissions" class="ext-manifest-permissions">
+              {{ $t('settings.extensionsPolicy.manifestPermissions') }}: {{ formatManifestPermissions(p.installed.manifestPermissions) }}
+            </span>
+            <span v-if="p.installed?.packageVersion" class="ext-package-grant">
+              {{ $t('settings.extensionsPolicy.packageVersionGrant') }}: {{ formatPackageGrant(p.installed.packageVersionGrant) }}
+            </span>
+          </div>
           <button
             v-if="p.optedOut"
             class="ext-restore"
@@ -183,11 +308,20 @@ onMounted(refreshInstalled)
       <ul class="ext-list">
         <li v-for="p in nonFactoryInstalled" :key="p.id" class="ext-installed" :data-id="p.id">
           <span class="ext-id">{{ p.id }}</span>
+          <span v-if="p.packageVersion" class="ext-requires">{{ $t('settings.extensionsPolicy.version') }} {{ p.packageVersion }}</span>
           <span v-if="p.sensitive.length" class="ext-badge ext-sensitive">
             sensitive: {{ p.sensitive.join(', ') }}
           </span>
           <span class="ext-requires">{{ p.requires.join(', ') }}</span>
           <span v-if="p.warning" class="ext-badge ext-dev-warning">{{ p.warning }}</span>
+          <div v-if="p.manifestPermissions || p.packageVersion" class="ext-permission-details">
+            <span v-if="p.manifestPermissions" class="ext-manifest-permissions">
+              {{ $t('settings.extensionsPolicy.manifestPermissions') }}: {{ formatManifestPermissions(p.manifestPermissions) }}
+            </span>
+            <span v-if="p.packageVersion" class="ext-package-grant">
+              {{ $t('settings.extensionsPolicy.packageVersionGrant') }}: {{ formatPackageGrant(p.packageVersionGrant) }}
+            </span>
+          </div>
           <button class="ext-remove" @click="remove(p.id)">Remove</button>
         </li>
         <li v-if="!nonFactoryInstalled.length" class="ext-empty nv-empty">No plugins installed.</li>
@@ -268,6 +402,20 @@ onMounted(refreshInstalled)
 .ext-section {
   margin-bottom: 20px;
 }
+.ext-policy-separation,
+.ext-policy-muted {
+  color: var(--text-secondary, #888);
+  line-height: 1.45;
+}
+.ext-policy-card {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  background: var(--bg-subtle);
+  line-height: 1.5;
+}
 .ext-list {
   list-style: none;
   padding: 0;
@@ -281,6 +429,9 @@ onMounted(refreshInstalled)
   padding: 6px 0;
   border-bottom: 1px solid var(--border-muted);
 }
+.ext-installed {
+  flex-wrap: wrap;
+}
 .ext-id {
   font-weight: 600;
 }
@@ -288,6 +439,15 @@ onMounted(refreshInstalled)
 .ext-requires {
   color: var(--text-muted, #888);
   font-size: var(--font-xs);
+}
+.ext-permission-details {
+  flex: 1 1 100%;
+  display: grid;
+  gap: 2px;
+  margin: 2px 0 2px 4px;
+  color: var(--text-secondary, #888);
+  font-size: var(--font-2xs);
+  line-height: 1.4;
 }
 .ext-badge.ext-sensitive {
   color: #c77400;

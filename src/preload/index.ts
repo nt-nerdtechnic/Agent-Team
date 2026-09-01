@@ -5,6 +5,11 @@ import type {
   UpdaterSettings,
   UpdateState,
 } from '../shared/updater'
+import type {
+  ExecutionPolicyApi,
+  ManifestPermissionsSummary,
+  PackageVersionGrantSummary,
+} from '../shared/executionPolicy'
 
 /** Which Electron-owned cache groups to clear. Never touches user state. */
 export interface ClearElectronCachesOptions {
@@ -86,6 +91,9 @@ export interface InstalledPluginSummary {
   id: string
   requires: string[]
   sensitive: string[]
+  packageVersion?: string
+  manifestPermissions?: ManifestPermissionsSummary
+  packageVersionGrant?: PackageVersionGrantSummary | null
   provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
 }
@@ -637,6 +645,31 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ): Promise<PermissionStatus> => ipcRenderer.invoke('permissions:request', key, payload),
     openSettings: (key: PermissionKey): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('permissions:open-settings', key),
+  },
+  executionPolicy: {
+    inspect: (workspacePath?: string): ReturnType<ExecutionPolicyApi['inspect']> =>
+      ipcRenderer.invoke('execution-policy:inspect', workspacePath),
+    setUser: (args: Parameters<ExecutionPolicyApi['setUser']>[0]): ReturnType<ExecutionPolicyApi['setUser']> =>
+      ipcRenderer.invoke('execution-policy:set-user', args),
+    resetUser: (args: Parameters<ExecutionPolicyApi['resetUser']>[0]): ReturnType<ExecutionPolicyApi['resetUser']> =>
+      ipcRenderer.invoke('execution-policy:reset-user', args),
+    selectSource: (
+      args: Parameters<ExecutionPolicyApi['selectSource']>[0]
+    ): ReturnType<ExecutionPolicyApi['selectSource']> =>
+      ipcRenderer.invoke('execution-policy:select-source', args),
+    rebuild: (
+      args: Parameters<ExecutionPolicyApi['rebuild']>[0]
+    ): ReturnType<ExecutionPolicyApi['rebuild']> =>
+      ipcRenderer.invoke('execution-policy:rebuild', args),
+    resetSourceSelections: (
+      args: Parameters<ExecutionPolicyApi['resetSourceSelections']>[0]
+    ): ReturnType<ExecutionPolicyApi['resetSourceSelections']> =>
+      ipcRenderer.invoke('execution-policy:reset-source-selections', args),
+    onChanged: (handler: Parameters<ExecutionPolicyApi['onChanged']>[0]): ReturnType<ExecutionPolicyApi['onChanged']> => {
+      const listener = (): void => handler()
+      ipcRenderer.on('execution-policy:changed', listener)
+      return () => ipcRenderer.removeListener('execution-policy:changed', listener)
+    },
   },
   plugins: {
     listInstalled: (): Promise<InstalledPluginSummary[]> =>

@@ -4957,6 +4957,17 @@ export class FrontendPluginManager {
     return [...this.installedPackages.values()].map((summary) => ({
       id: summary.id,
       requires: [...summary.requires],
+      ...(summary.packageVersion ? { packageVersion: summary.packageVersion } : {}),
+      ...(summary.manifestPermissions
+        ? {
+            manifestPermissions: {
+              system: [...summary.manifestPermissions.system],
+              ...(summary.manifestPermissions.shell
+                ? { shell: summary.manifestPermissions.shell }
+                : {}),
+            },
+          }
+        : {}),
       ...(summary.provenance ? { provenance: summary.provenance } : {}),
       ...(summary.warning ? { warning: summary.warning } : {}),
     }))
@@ -5104,6 +5115,17 @@ export class FrontendPluginManager {
     this.installedPackages.set(summary.id, {
       id: summary.id,
       requires: [...summary.requires],
+      ...(summary.packageVersion ? { packageVersion: summary.packageVersion } : {}),
+      ...(summary.manifestPermissions
+        ? {
+            manifestPermissions: {
+              system: [...summary.manifestPermissions.system],
+              ...(summary.manifestPermissions.shell
+                ? { shell: summary.manifestPermissions.shell }
+                : {}),
+            },
+          }
+        : {}),
       ...(summary.provenance ? { provenance: summary.provenance } : {}),
       ...(summary.warning ? { warning: summary.warning } : {}),
     })

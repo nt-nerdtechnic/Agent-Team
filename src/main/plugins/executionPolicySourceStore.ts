@@ -21,9 +21,14 @@ import {
   EXECUTION_POLICY_DIRECTORY,
   FAIL_CLOSED_EXECUTION_POLICY,
   HOST_DEFAULT_EXECUTION_POLICY,
+  ExecutionPolicyManualRepairError,
   ExecutionPolicyStore,
 } from './executionPolicyStore'
 import { OwnerOnlyJsonPersistence } from './ownerOnlyJsonPersistence'
+import type {
+  ExecutionPolicySettingsSnapshot,
+  ExecutionPolicySourceRecoveryStatus,
+} from '../../shared/executionPolicy'
 
 export const REPOSITORY_EXECUTION_POLICY_PATH = '.navide/execution-policy.json'
 export const EXECUTION_POLICY_SOURCES_FILE = 'sources.json'
@@ -65,6 +70,7 @@ export type ExecutionPolicySourceErrorCode =
   | 'recommendation-stale'
   | 'user-policy-unavailable'
   | 'global-policy-corrupt'
+  | 'manual-repair-required'
   | 'recovery-blocked-by-global-policy'
 
 export interface RepositoryPolicyRecommendation {
@@ -126,20 +132,22 @@ type PersistedSourceRevision = {
 }
 
 type SourceStateRead =
-  | { kind: 'missing'; revision: number }
+  | { kind: 'missing'; revision: number; unsafePaths: string[] }
   | {
       kind: 'valid'
       revision: number
       selections: Record<string, PersistedSourceSelection>
       highWaterTrusted: true
+      unsafePaths: string[]
     }
   | {
       kind: 'corrupt'
       revision: number
       highWaterTrusted: boolean
       reason: 'invalid' | 'too-large' | 'unsafe'
+      unsafePaths: string[]
     }
-  | { kind: 'unavailable'; revision: number; highWaterTrusted: boolean }
+  | { kind: 'unavailable'; revision: number; highWaterTrusted: boolean; unsafePaths: string[] }
 
 type SourceSelectionContext = {
   global: ExecutionPolicySnapshot
@@ -323,6 +331,7 @@ const SOURCE_ERROR_MESSAGES: Record<ExecutionPolicySourceErrorCode, string> = {
   'recommendation-stale': 'repository execution policy recommendation is stale',
   'user-policy-unavailable': 'global user execution policy is unavailable',
   'global-policy-corrupt': 'global execution policy is corrupt or unsafe',
+  'manual-repair-required': 'execution policy state requires manual repair',
   'recovery-blocked-by-global-policy': 'source recovery is blocked by global policy state',
 }
 
@@ -352,6 +361,7 @@ function readBoundedUtf8(fd: number, initialSize: number, maximumBytes: number):
 
 export class ExecutionPolicySourceStore {
   private readonly policyStore: ExecutionPolicyStore
+  private readonly sourceDirectory: string
   private readonly sourceFile: string
   private readonly sourceRevisionFile: string
   private readonly persistence: OwnerOnlyJsonPersistence
@@ -359,11 +369,11 @@ export class ExecutionPolicySourceStore {
 
   constructor(userData: string, policyStore = new ExecutionPolicyStore(userData)) {
     this.policyStore = policyStore
-    const directory = join(userData, EXECUTION_POLICY_DIRECTORY)
-    this.sourceFile = join(directory, EXECUTION_POLICY_SOURCES_FILE)
-    this.sourceRevisionFile = join(directory, EXECUTION_POLICY_SOURCES_REVISION_FILE)
+    this.sourceDirectory = join(userData, EXECUTION_POLICY_DIRECTORY)
+    this.sourceFile = join(this.sourceDirectory, EXECUTION_POLICY_SOURCES_FILE)
+    this.sourceRevisionFile = join(this.sourceDirectory, EXECUTION_POLICY_SOURCES_REVISION_FILE)
     this.persistence = new OwnerOnlyJsonPersistence(
-      directory,
+      this.sourceDirectory,
       MAX_SOURCE_STATE_BYTES,
       MAX_SOURCE_STATE_BYTES,
     )
@@ -387,9 +397,89 @@ export class ExecutionPolicySourceStore {
     return this.policyStore.getEffectivePolicy()
   }
 
-  private readSelectionContext(workspacePath: string): SourceSelectionContext {
-    const global = this.policyStore.getEffectivePolicy()
+  getSettingsSnapshot(workspacePath?: string): ExecutionPolicySettingsSnapshot {
+    const globalState = this.policyStore.getSettingsState()
     const sourceState = this.readSourceState()
+    const workspace = typeof workspacePath === 'string' && workspacePath.trim().length > 0
+      ? this.readSelectionContext(workspacePath, globalState.global, sourceState).snapshot
+      : null
+    return {
+      ...globalState,
+      workspace,
+      sourceRecovery: this.sourceRecoveryStatus(sourceState),
+    }
+  }
+
+  setUserPolicy(
+    raw: unknown,
+    workspacePath?: string,
+    expectedRevision?: number,
+  ): ExecutionPolicySettingsSnapshot {
+    this.assertSettingsMutationAvailable()
+    this.policyStore.setUserPolicy(raw, expectedRevision)
+    return this.getSettingsSnapshot(workspacePath)
+  }
+
+  resetUserPolicy(
+    workspacePath?: string,
+    expectedRevision?: number,
+  ): ExecutionPolicySettingsSnapshot {
+    this.assertSettingsMutationAvailable()
+    this.policyStore.resetUserPolicy(expectedRevision)
+    return this.getSettingsSnapshot(workspacePath)
+  }
+
+  rebuildGlobalPolicy(workspacePath?: string): ExecutionPolicySettingsSnapshot {
+    const sourceState = this.readSourceState()
+    const sourceRevisionFloor = Math.max(this.sourceRevisionFloor, sourceState.revision)
+    this.policyStore.rebuild(sourceRevisionFloor)
+    return this.getSettingsSnapshot(workspacePath)
+  }
+
+  private assertSettingsMutationAvailable(): void {
+    const recovery = this.policyStore.getRecoveryStatus()
+    if (recovery.state === 'unsafe-entry') {
+      throw new Error('execution policy state contains an unsafe filesystem entry')
+    }
+    if (recovery.state === 'corrupt') {
+      throw new Error('global execution policy is corrupt or unsafe; rebuild is required')
+    }
+    if (recovery.state === 'directory-unsafe') {
+      throw new Error('execution policy directory is unsafe')
+    }
+    if (recovery.state === 'directory-unavailable') {
+      throw new Error('execution policy directory is unavailable')
+    }
+  }
+
+  private sourceRecoveryStatus(state: SourceStateRead): ExecutionPolicySourceRecoveryStatus {
+    if (state.kind === 'missing') {
+      return { state: 'missing', canReset: false, unsafePaths: [] }
+    }
+    if (state.kind === 'unavailable') {
+      return { state: 'unavailable', canReset: false, unsafePaths: state.unsafePaths }
+    }
+    if (state.kind === 'corrupt') {
+      return {
+        state: state.reason === 'unsafe' ? 'unsafe-entry' : 'corrupt',
+        canReset: state.highWaterTrusted && state.reason !== 'unsafe',
+        unsafePaths: state.unsafePaths,
+      }
+    }
+    return {
+      state: 'healthy',
+      canReset: Object.keys(state.selections).length > 0,
+      unsafePaths: [],
+    }
+  }
+
+  private readSelectionContext(
+    workspacePath: string,
+    suppliedGlobal?: ExecutionPolicySnapshot,
+    suppliedSourceState?: SourceStateRead,
+  ): SourceSelectionContext {
+    const global = suppliedGlobal ?? this.policyStore.getEffectivePolicy()
+    const sourceState = suppliedSourceState ?? this.readSourceState()
     const workspace = canonicalExistingDirectory(workspacePath)
     const recommendation = workspace === null
       ? unavailableRecommendation()
@@ -429,18 +519,6 @@ export class ExecutionPolicySourceStore {
       : undefined
     const selectedSource = selection?.source ?? null
 
-    if (global.state === 'corrupt') {
-      return this.makeSnapshot({
-        policy: FAIL_CLOSED_EXECUTION_POLICY,
-        revision,
-        selectedSource,
-        activeSource: null,
-        status: 'corrupt',
-        recommendation,
-        acceptedFingerprint: selection?.source === 'repository' ? selection.fingerprint : null,
-      })
-    }
-
     if (sourceState.kind === 'unavailable') {
       return this.makeSnapshot({
         policy: FAIL_CLOSED_EXECUTION_POLICY,
@@ -463,6 +541,29 @@ export class ExecutionPolicySourceStore {
         status: 'corrupt',
         recommendation,
         acceptedFingerprint: null,
+      })
+    }
+
+    if (global.state === 'corrupt') {
+      if (selection?.source === 'default') {
+        return this.makeSnapshot({
+          policy: HOST_DEFAULT_EXECUTION_POLICY,
+          revision,
+          selectedSource: 'default',
+          activeSource: 'default',
+          status: 'active',
+          recommendation,
+          acceptedFingerprint: null,
+        })
+      }
+      return this.makeSnapshot({
+        policy: FAIL_CLOSED_EXECUTION_POLICY,
+        revision,
+        selectedSource,
+        activeSource: null,
+        status: 'corrupt',
+        recommendation,
+        acceptedFingerprint: selection?.source === 'repository' ? selection.fingerprint : null,
       })
     }
 
@@ -582,7 +683,8 @@ export class ExecutionPolicySourceStore {
       return this.failedSelection('source-state-unavailable', currentSnapshot)
     }
 
-    if (global.state === 'corrupt') {
+    const isDefaultRecovery = global.state === 'corrupt' && source === 'default'
+    if (global.state === 'corrupt' && !isDefaultRecovery) {
       return this.failedSelection('global-policy-corrupt', currentSnapshot)
     }
 
@@ -645,8 +747,13 @@ export class ExecutionPolicySourceStore {
     const floor = Math.max(this.sourceRevisionFloor, sourceState.revision)
     let advanced
     try {
-      advanced = this.policyStore.advanceRevision(floor)
-    } catch {
+      advanced = isDefaultRecovery
+        ? this.policyStore.advanceRevisionForSourceRecovery(floor)
+        : this.policyStore.advanceRevision(floor)
+    } catch (error) {
+      if (error instanceof ExecutionPolicyManualRepairError) {
+        return this.failedSelection('manual-repair-required', currentSnapshot)
+      }
       throw new ExecutionPolicySourceCommitError()
     }
 
@@ -805,12 +912,13 @@ export class ExecutionPolicySourceStore {
     const directoryStatus = this.persistence.ensureDirectory(false)
     if (directoryStatus === 'missing') {
       return this.sourceRevisionFloor === 0
-        ? { kind: 'missing', revision: 0 }
+        ? { kind: 'missing', revision: 0, unsafePaths: [] }
         : {
             kind: 'corrupt',
             revision: this.sourceRevisionFloor,
             highWaterTrusted: false,
             reason: 'invalid',
+            unsafePaths: [],
           }
     }
     if (directoryStatus === 'unsafe') {
@@ -819,6 +927,7 @@ export class ExecutionPolicySourceStore {
         revision: this.sourceRevisionFloor,
         highWaterTrusted: false,
         reason: 'unsafe',
+        unsafePaths: [this.sourceDirectory],
       }
     }
     if (directoryStatus === 'unavailable') {
@@ -826,6 +935,7 @@ export class ExecutionPolicySourceStore {
         kind: 'unavailable',
         revision: this.sourceRevisionFloor,
         highWaterTrusted: false,
+        unsafePaths: [],
       }
     }
 
@@ -836,6 +946,7 @@ export class ExecutionPolicySourceStore {
         revision: this.sourceRevisionFloor,
         highWaterTrusted: false,
         reason: revisionResult.reason,
+        unsafePaths: revisionResult.reason === 'unsafe' ? [this.sourceRevisionFile] : [],
       }
     }
     if (revisionResult.kind === 'too-large') {
@@ -844,6 +955,7 @@ export class ExecutionPolicySourceStore {
         revision: this.sourceRevisionFloor,
         highWaterTrusted: false,
         reason: 'too-large',
+        unsafePaths: [],
       }
     }
     if (revisionResult.kind === 'unavailable') {
@@ -851,18 +963,20 @@ export class ExecutionPolicySourceStore {
         kind: 'unavailable',
         revision: this.sourceRevisionFloor,
         highWaterTrusted: false,
+        unsafePaths: [],
       }
     }
     if (revisionResult.kind === 'missing') {
       const sourceResult = this.readJsonFile(this.sourceFile, 'execution policy source state JSON')
       if (sourceResult.kind === 'missing' && this.sourceRevisionFloor === 0) {
-        return { kind: 'missing', revision: 0 }
+        return { kind: 'missing', revision: 0, unsafePaths: [] }
       }
       if (sourceResult.kind === 'unavailable') {
         return {
           kind: 'unavailable',
           revision: this.sourceRevisionFloor,
           highWaterTrusted: false,
+          unsafePaths: [],
         }
       }
       return {
@@ -874,6 +988,9 @@ export class ExecutionPolicySourceStore {
           : sourceResult.kind === 'corrupt'
             ? sourceResult.reason
             : 'invalid',
+        unsafePaths: sourceResult.kind === 'corrupt' && sourceResult.reason === 'unsafe'
+          ? [this.sourceFile]
+          : [],
       }
     }
 
@@ -886,6 +1003,7 @@ export class ExecutionPolicySourceStore {
         revision: this.sourceRevisionFloor,
         highWaterTrusted: false,
         reason: 'invalid',
+        unsafePaths: [],
       }
     }
     const previousFloor = this.sourceRevisionFloor
@@ -897,6 +1015,7 @@ export class ExecutionPolicySourceStore {
         kind: 'unavailable',
         revision: this.sourceRevisionFloor,
         highWaterTrusted: true,
+        unsafePaths: [],
       }
     }
     if (sourceResult.kind !== 'present') {
@@ -909,6 +1028,9 @@ export class ExecutionPolicySourceStore {
           : sourceResult.kind === 'corrupt'
             ? sourceResult.reason
             : 'invalid',
+        unsafePaths: sourceResult.kind === 'corrupt' && sourceResult.reason === 'unsafe'
+          ? [this.sourceFile]
+          : [],
       }
     }
 
@@ -920,6 +1042,7 @@ export class ExecutionPolicySourceStore {
           revision: this.sourceRevisionFloor,
           highWaterTrusted: true,
           reason: 'invalid',
+          unsafePaths: [],
         }
       }
       return {
@@ -927,6 +1050,7 @@ export class ExecutionPolicySourceStore {
         revision: state.revision,
         selections: state.selections,
         highWaterTrusted: true,
+        unsafePaths: [],
       }
     } catch {
       return {
@@ -934,6 +1058,7 @@ export class ExecutionPolicySourceStore {
         revision: this.sourceRevisionFloor,
         highWaterTrusted: true,
         reason: 'invalid',
+        unsafePaths: [],
       }
     }
   }

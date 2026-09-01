@@ -12,6 +12,7 @@ import {
   readSync,
   renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { parseStrictJson } from '../../../packages/plugin-contracts/src/index'
@@ -202,6 +203,20 @@ export class OwnerOnlyJsonPersistence {
       return 'created'
     } finally {
       rmSync(temporary, { force: true })
+    }
+  }
+
+  /** Remove one exact state entry without following links or deleting a directory. */
+  removeIfPresent(file: string): void {
+    this.requireDirectory()
+    try {
+      const entry = lstatSync(file)
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw new Error('owner-only JSON file is unsafe')
+      }
+      unlinkSync(file)
+    } catch (error) {
+      if (!isMissingError(error)) throw error
     }
   }
 

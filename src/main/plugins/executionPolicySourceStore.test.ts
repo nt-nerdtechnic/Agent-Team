@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -26,6 +27,8 @@ import {
 } from './executionPolicySourceStore'
 import {
   EXECUTION_POLICY_DIRECTORY,
+  EXECUTION_POLICY_FILE,
+  EXECUTION_POLICY_REVISION_FILE,
   FAIL_CLOSED_EXECUTION_POLICY,
   HOST_DEFAULT_EXECUTION_POLICY,
   ExecutionPolicyStore,
@@ -78,6 +81,10 @@ function sourceStateFile(userData: string): string {
 
 function sourceRevisionFile(userData: string): string {
   return join(userData, EXECUTION_POLICY_DIRECTORY, EXECUTION_POLICY_SOURCES_REVISION_FILE)
+}
+
+function policyFile(userData: string, file: string): string {
+  return join(userData, EXECUTION_POLICY_DIRECTORY, file)
 }
 
 function selectionSnapshot(result: SelectSourceResult): ExecutionPolicySourceSnapshot {
@@ -652,6 +659,80 @@ describe('ExecutionPolicySourceStore', () => {
     }
   })
 
+  it('allows explicit default recovery with a trusted global revision and preserves corrupt policy data', () => {
+    const userData = temporaryRoot('navide-policy-source-recovery-user-')
+    const workspacePath = temporaryRoot('navide-policy-source-recovery-workspace-')
+    try {
+      const directory = join(userData, EXECUTION_POLICY_DIRECTORY)
+      const globalPolicyPath = policyFile(userData, EXECUTION_POLICY_FILE)
+      mkdirSync(directory, { recursive: true, mode: 0o700 })
+      writeFileSync(globalPolicyPath, '{not-json\n', 'utf8')
+      chmodSync(globalPolicyPath, 0o600)
+      writeFileSync(
+        policyFile(userData, EXECUTION_POLICY_REVISION_FILE),
+        '{"schemaVersion":1,"highWater":4}\n',
+        'utf8',
+      )
+      chmodSync(policyFile(userData, EXECUTION_POLICY_REVISION_FILE), 0o600)
+      writeRecommendation(workspacePath)
+      const beforePolicy = readFileSync(globalPolicyPath, 'utf8')
+      const store = new ExecutionPolicySourceStore(userData)
+
+      const selected = selectionSnapshot(store.selectSource(workspacePath, { source: 'default' }))
+
+      expectSourceSnapshot(selected, {
+        policy: HOST_DEFAULT_EXECUTION_POLICY,
+        revision: 5,
+        selectedSource: 'default',
+        activeSource: 'default',
+        status: 'active',
+      })
+      expect(readFileSync(globalPolicyPath, 'utf8')).toBe(beforePolicy)
+      expect(readFileSync(
+        policyFile(userData, EXECUTION_POLICY_REVISION_FILE),
+        'utf8',
+      )).toBe('{"schemaVersion":1,"highWater":5}\n')
+      expect(store.getSettingsSnapshot(workspacePath)).toMatchObject({
+        global: {
+          revision: 5,
+          state: 'corrupt',
+        },
+        recovery: { state: 'corrupt', canRebuild: true, unsafePaths: [] },
+        workspace: {
+          selectedSource: 'default',
+          activeSource: 'default',
+          status: 'active',
+          policy: HOST_DEFAULT_EXECUTION_POLICY,
+        },
+      })
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('requires manual repair when default recovery cannot trust the global revision entry', () => {
+    const userData = temporaryRoot('navide-policy-source-unsafe-recovery-user-')
+    const workspacePath = temporaryRoot('navide-policy-source-unsafe-recovery-workspace-')
+    try {
+      const directory = join(userData, EXECUTION_POLICY_DIRECTORY)
+      mkdirSync(directory, { recursive: true, mode: 0o700 })
+      writeFileSync(policyFile(userData, EXECUTION_POLICY_FILE), '{not-json\n', 'utf8')
+      mkdirSync(policyFile(userData, EXECUTION_POLICY_REVISION_FILE))
+      writeRecommendation(workspacePath)
+      const store = new ExecutionPolicySourceStore(userData)
+
+      const result = store.selectSource(workspacePath, { source: 'default' })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('manual-repair-required')
+      expect(existsSync(sourceStateFile(userData))).toBe(false)
+      expect(lstatSync(policyFile(userData, EXECUTION_POLICY_REVISION_FILE)).isDirectory()).toBe(true)
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
   it('persists an explicit user source and follows the global user setting', () => {
     const userData = temporaryRoot('navide-policy-source-user-')
     const workspacePath = temporaryRoot('navide-policy-source-workspace-')
@@ -730,6 +811,93 @@ describe('ExecutionPolicySourceStore', () => {
       rmSync(userData, { recursive: true, force: true })
       rmSync(firstWorkspacePath, { recursive: true, force: true })
       rmSync(secondWorkspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('resets all source pins without modifying repository policy files', () => {
+    const userData = temporaryRoot('navide-policy-source-reset-user-')
+    const firstWorkspacePath = temporaryRoot('navide-policy-source-reset-first-')
+    const secondWorkspacePath = temporaryRoot('navide-policy-source-reset-second-')
+    try {
+      const firstPolicyPath = writeRecommendation(firstWorkspacePath)
+      writeRecommendation(secondWorkspacePath, CHANGED_POLICY)
+      const beforeRepositoryPolicy = readFileSync(firstPolicyPath, 'utf8')
+      new ExecutionPolicyStore(userData).setUserPolicy(USER_POLICY)
+      const store = new ExecutionPolicySourceStore(userData)
+
+      selectionSnapshot(
+        store.selectSource(firstWorkspacePath, repositorySelectionRequest(store, firstWorkspacePath)),
+      )
+      selectionSnapshot(store.selectSource(secondWorkspacePath, { source: 'default' }))
+
+      const reset = store.resetSourceState()
+      expect(reset).toEqual({ ok: true, changed: true, snapshot: null })
+      expect(JSON.parse(readFileSync(sourceStateFile(userData), 'utf8'))).toMatchObject({
+        selections: {},
+      })
+      expect(readFileSync(firstPolicyPath, 'utf8')).toBe(beforeRepositoryPolicy)
+      expectSourceSnapshot(store.getEffectivePolicy(firstWorkspacePath), {
+        policy: USER_POLICY,
+        selectedSource: null,
+        activeSource: 'user',
+        status: 'active',
+      })
+      expectSourceSnapshot(store.getEffectivePolicy(secondWorkspacePath), {
+        policy: USER_POLICY,
+        selectedSource: null,
+        activeSource: 'user',
+        status: 'active',
+      })
+      expect(store.getSettingsSnapshot(firstWorkspacePath).sourceRecovery).toEqual({
+        state: 'healthy',
+        canReset: false,
+        unsafePaths: [],
+      })
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+      rmSync(firstWorkspacePath, { recursive: true, force: true })
+      rmSync(secondWorkspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('rebuilds corrupt global state while preserving and revalidating source selection', () => {
+    const userData = temporaryRoot('navide-policy-source-rebuild-user-')
+    const workspacePath = temporaryRoot('navide-policy-source-rebuild-workspace-')
+    try {
+      writeRecommendation(workspacePath)
+      const store = new ExecutionPolicySourceStore(userData)
+      const selected = selectionSnapshot(
+        store.selectSource(workspacePath, repositorySelectionRequest(store, workspacePath)),
+      )
+      const beforeSources = readFileSync(sourceStateFile(userData), 'utf8')
+      const beforeSourceRevision = readFileSync(sourceRevisionFile(userData), 'utf8')
+      writeFileSync(policyFile(userData, EXECUTION_POLICY_FILE), '{not-json', 'utf8')
+
+      expect(store.getSettingsSnapshot(workspacePath).recovery).toEqual({
+        state: 'corrupt',
+        canRebuild: true,
+        unsafePaths: [],
+      })
+
+      const rebuilt = store.rebuildGlobalPolicy(workspacePath)
+      expect(rebuilt.global).toEqual({
+        policy: HOST_DEFAULT_EXECUTION_POLICY,
+        revision: selected.revision + 1,
+        state: 'default',
+      })
+      expect(rebuilt.workspace).toMatchObject({
+        policy: RECOMMENDED_POLICY,
+        selectedSource: 'repository',
+        activeSource: 'repository',
+        status: 'active',
+      })
+      expect(readFileSync(sourceStateFile(userData), 'utf8')).toBe(beforeSources)
+      expect(readFileSync(sourceRevisionFile(userData), 'utf8')).toBe(beforeSourceRevision)
+      expect(readFileSync(policyFile(userData, EXECUTION_POLICY_REVISION_FILE), 'utf8'))
+        .not.toBe(beforeSourceRevision)
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+      rmSync(workspacePath, { recursive: true, force: true })
     }
   })
 })

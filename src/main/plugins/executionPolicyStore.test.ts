@@ -45,6 +45,8 @@ import {
   EXECUTION_POLICY_REVISION_FILE,
   EXECUTION_POLICY_DIRECTORY,
   ExecutionPolicyStore,
+  ExecutionPolicyManualRepairError,
+  ExecutionPolicyRevisionConflictError,
   FAIL_CLOSED_EXECUTION_POLICY,
   HOST_DEFAULT_EXECUTION_POLICY,
 } from './executionPolicyStore'
@@ -625,6 +627,25 @@ describe('ExecutionPolicyStore', () => {
     }
   })
 
+  it('rejects a stale expected revision without changing durable policy state', () => {
+    const userData = temporaryUserData()
+    try {
+      const store = new ExecutionPolicyStore(userData)
+      expect(store.setUserPolicy(USER_POLICY, 0)).toMatchObject({ revision: 1 })
+      const beforePolicy = readFileSync(policyFile(userData), 'utf8')
+      const beforeRevision = readFileSync(revisionFile(userData), 'utf8')
+
+      expect(() => store.setUserPolicy(FULL_POLICY, 0))
+        .toThrow(ExecutionPolicyRevisionConflictError)
+      expect(() => store.resetUserPolicy(0))
+        .toThrow(ExecutionPolicyRevisionConflictError)
+      expect(readFileSync(policyFile(userData), 'utf8')).toBe(beforePolicy)
+      expect(readFileSync(revisionFile(userData), 'utf8')).toBe(beforeRevision)
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+
   it('keeps policy persistence separate from Plugin Capability Grants', () => {
     const userData = temporaryUserData()
     try {
@@ -647,4 +668,75 @@ describe('ExecutionPolicyStore', () => {
       rmSync(userData, { recursive: true, force: true })
     }
   })
+
+  it('offers explicit rebuild only for durable corruption and recreates Host-default state', () => {
+    const userData = temporaryUserData()
+    try {
+      writeRevisionFile(userData, persistedRevision(7))
+      writePolicyFile(userData, '{not-json')
+      const store = new ExecutionPolicyStore(userData)
+
+      expect(store.getRecoveryStatus()).toEqual({ state: 'corrupt', canRebuild: true, unsafePaths: [] })
+      expect(store.rebuild()).toEqual({
+        policy: HOST_DEFAULT_EXECUTION_POLICY,
+        revision: 8,
+        state: 'default',
+      })
+      expect(store.getRecoveryStatus()).toEqual({ state: 'healthy', canRebuild: false, unsafePaths: [] })
+      expect(readFileSync(policyFile(userData), 'utf8')).toBe(persistedState(null, 8))
+      expect(readFileSync(revisionFile(userData), 'utf8')).toBe(persistedRevision(8))
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+
+  it('does not offer rebuild when the policy directory itself is unsafe', () => {
+    const userData = temporaryUserData()
+    const target = temporaryUserData()
+    try {
+      symlinkSync(target, policyDirectory(userData))
+      const store = new ExecutionPolicyStore(userData)
+
+      expect(store.getRecoveryStatus()).toEqual({
+        state: 'directory-unsafe',
+        canRebuild: false,
+        unsafePaths: [policyDirectory(userData)],
+      })
+      expect(() => store.rebuild()).toThrow('execution policy directory is unsafe')
+      expect(lstatSync(policyDirectory(userData)).isSymbolicLink()).toBe(true)
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+      rmSync(target, { recursive: true, force: true })
+    }
+  })
+
+  it.each(['directory', 'symlink'] as const)(
+    'does not offer rebuild for an unsafe policy file that is a %s',
+    (entryType) => {
+      const userData = temporaryUserData()
+      try {
+        writeRevisionFile(userData, persistedRevision(3))
+        if (entryType === 'directory') {
+          mkdirSync(policyFile(userData))
+        } else {
+          const target = join(userData, 'unsafe-policy-target.json')
+          writeFileSync(target, persistedState(USER_POLICY), { encoding: 'utf8', mode: 0o600 })
+          symlinkSync(target, policyFile(userData))
+        }
+
+        const store = new ExecutionPolicyStore(userData)
+        expect(store.getRecoveryStatus()).toEqual({
+          state: 'unsafe-entry',
+          canRebuild: false,
+          unsafePaths: [policyFile(userData)],
+        })
+        expect(() => store.rebuild()).toThrow(ExecutionPolicyManualRepairError)
+        expect(entryType === 'directory'
+          ? lstatSync(policyFile(userData)).isDirectory()
+          : lstatSync(policyFile(userData)).isSymbolicLink()).toBe(true)
+      } finally {
+        rmSync(userData, { recursive: true, force: true })
+      }
+    },
+  )
 })

@@ -6,6 +6,11 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Added
 
+- Add a dedicated Settings → Execution Policy editor for the Host default,
+  global user modes, explicit workspace source selection, untrusted repository
+  recommendations, confirmed corrupt-state rebuild, and fail-closed recovery
+  guidance. Extensions now shows Manifest Permissions, exact package-version
+  Grant state, and the selected agent Execution Policy as separate concepts.
 - Add the global agent Execution Policy v1 contract and Host-owned durable
   default/user policy store with strict fail-closed parsing, owner-only atomic
   persistence, lowercase shell-name canonicalization, case-insensitive agent

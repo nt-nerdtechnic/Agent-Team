@@ -31,6 +31,7 @@ import {
   PLUGIN_QUARANTINE_MARKER,
   PLUGIN_STAGING_DIR,
 } from './pluginInstallPaths'
+import type { ManifestPermissionsSummary } from '../../shared/executionPolicy'
 
 export {
   assertManifestFiles,
@@ -323,6 +324,8 @@ export interface ScannedPlugin {
 export interface InstalledPluginPackageSummary {
   id: string
   requires: string[]
+  packageVersion?: string
+  manifestPermissions?: ManifestPermissionsSummary
   provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
 }
@@ -334,6 +337,15 @@ export function manifestToInstalledPackageSummary(
   return {
     id: manifest.id,
     requires: manifestCapabilities(manifest),
+    ...(isManifestV2(manifest)
+      ? {
+          packageVersion: manifest.version,
+          manifestPermissions: {
+            system: [...(manifest.permissions.system ?? [])],
+            ...(manifest.permissions.shell ? { shell: manifest.permissions.shell } : {}),
+          },
+        }
+      : {}),
     ...(provenance ? { provenance } : {}),
   }
 }

@@ -53,6 +53,10 @@ import {
 import { currentPluginHostTarget } from './pluginTarget'
 import type { FrontendPluginManager } from './frontendPluginManager'
 import { PluginCapabilityGrantStore } from './pluginCapabilityGrantStore'
+import type {
+  ManifestPermissionsSummary,
+  PackageVersionGrantSummary,
+} from '../../shared/executionPolicy'
 
 /** Development-only endpoint. It is intentionally not the official Registry
  * identity: a local Registry must establish trust through root approval. */
@@ -104,6 +108,9 @@ interface InstalledSummary {
   id: string
   requires: string[]
   sensitive: string[]
+  packageVersion?: string
+  manifestPermissions?: ManifestPermissionsSummary
+  packageVersionGrant?: PackageVersionGrantSummary | null
   provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
 }
@@ -240,18 +247,62 @@ export function registerPluginIpc(
       {
         id: string
         requires: string[]
+        packageVersion?: string
+        manifestPermissions?: ManifestPermissionsSummary
         provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
         warning?: string
       }
     >()
     for (const descriptor of manager.listDescriptors()) {
-      summaries.set(descriptor.id, { id: descriptor.id, requires: descriptor.requires })
+      const manifestPermissions = descriptor.capabilityPolicy?.kind === 'manifest-v2'
+        ? {
+            system: [...descriptor.capabilityPolicy.system],
+            ...(descriptor.capabilityPolicy.shell
+              ? { shell: descriptor.capabilityPolicy.shell }
+              : {}),
+          }
+        : undefined
+      summaries.set(descriptor.id, {
+        id: descriptor.id,
+        requires: [...descriptor.requires],
+        ...(descriptor.packageVersion ? { packageVersion: descriptor.packageVersion } : {}),
+        ...(manifestPermissions ? { manifestPermissions } : {}),
+      })
     }
     for (const pkg of manager.listInstalledPackages()) summaries.set(pkg.id, pkg)
     return [...summaries.values()].map((summary) => ({
       id: summary.id,
       requires: summary.requires,
       sensitive: sensitiveCapabilities(summary.requires),
+      ...(summary.packageVersion ? { packageVersion: summary.packageVersion } : {}),
+      ...(summary.manifestPermissions
+        ? {
+            manifestPermissions: {
+              system: [...summary.manifestPermissions.system],
+              ...(summary.manifestPermissions.shell
+                ? { shell: summary.manifestPermissions.shell }
+                : {}),
+            },
+          }
+        : {}),
+      ...(summary.packageVersion
+        ? {
+            packageVersionGrant: (() => {
+              const grant = capabilityGrants.get(summary.id, summary.packageVersion)
+              return grant
+                ? {
+                    packageVersion: grant.packageVersion,
+                    system: [...grant.system],
+                    ...(grant.shell ? { shell: grant.shell } : {}),
+                    ...(grant.highRiskShellConfirmed !== undefined
+                      ? { highRiskShellConfirmed: grant.highRiskShellConfirmed }
+                      : {}),
+                    ...(grant.storage !== undefined ? { storage: grant.storage } : {}),
+                  }
+                : null
+            })(),
+          }
+        : {}),
       ...(summary.provenance ? { provenance: summary.provenance } : {}),
       ...(summary.warning ? { warning: summary.warning } : {}),
     }))

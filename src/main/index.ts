@@ -22,6 +22,7 @@ import { PluginCapabilityGrantStore } from './plugins/pluginCapabilityGrantStore
 import {
   ExecutionPolicySourceStore,
 } from './plugins/executionPolicySourceStore'
+import { registerExecutionPolicyIpc } from './plugins/executionPolicyIpc'
 import { FAIL_CLOSED_EXECUTION_POLICY, type ExecutionPolicySnapshot } from './plugins/executionPolicy'
 import { PluginFactoryOptOutStore } from './plugins/pluginFactoryOptOutStore'
 import { recoverFailedGitV2Activation } from './plugins/gitV2ActivationRecovery'
@@ -861,6 +862,33 @@ const pluginTrustRefresh = registerPluginIpc(
       if (pluginId === 'navide.git') pluginFactoryOptOuts.remove(pluginId)
     },
   }
+)
+registerExecutionPolicyIpc(
+  executionPolicySourceStore,
+  (event) => isTrustedPluginManagementSender(event, mainWindows),
+  {
+    resolveWorkspace: (event, requestedWorkspace) => {
+      const hostWindow = BrowserWindow.fromWebContents(event.sender)
+      if (!hostWindow || !mainWindows.has(hostWindow) || detachedWindowIds.has(hostWindow.id)) {
+        return undefined
+      }
+      const registeredWorkspace = mainWindowWorkspaces.get(hostWindow)
+      if (!registeredWorkspace) return undefined
+      if (requestedWorkspace === undefined) return registeredWorkspace
+      return registeredGitLeftWorkspace(
+        hostWindow,
+        requestedWorkspace,
+        mainWindowWorkspaces,
+        normalizeWorkspacePath,
+      ) ?? undefined
+    },
+    onChanged: () => {
+      for (const hostWindow of mainWindows) {
+        if (hostWindow.isDestroyed() || detachedWindowIds.has(hostWindow.id)) continue
+        hostWindow.webContents.send('execution-policy:changed')
+      }
+    },
+  },
 )
 async function refreshInstalledPluginTrust(): Promise<void> {
   try {

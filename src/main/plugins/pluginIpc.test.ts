@@ -969,6 +969,9 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         id: 'acme.demo',
         requires: [],
         sensitive: [],
+        packageVersion: '1.0.0',
+        manifestPermissions: { system: [] },
+        packageVersionGrant: { packageVersion: '1.0.0', system: [], storage: true },
         provenance: 'official-registry',
       }])
 
@@ -1040,6 +1043,19 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         shell: 'allowlist',
         storage: true,
       })
+      const listHandler = handlers.get('plugins:listInstalled')
+      if (!listHandler) throw new Error('installed inventory handler not registered')
+      expect(listHandler(null)).toMatchObject([{
+        id: 'acme.demo',
+        packageVersion: '1.0.0',
+        manifestPermissions: { system: ['fs', 'ui'], shell: 'allowlist' },
+        packageVersionGrant: {
+          packageVersion: '1.0.0',
+          system: ['fs', 'ui'],
+          shell: 'allowlist',
+          storage: true,
+        },
+      }])
 
       await removeHandler(null, { id: 'acme.demo' })
       expect(grants.get('acme.demo', '1.0.0')).toBeNull()
@@ -1223,7 +1239,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         })
       ).toEqual({ id: 'acme.demo', requires: [] })
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+        {
+          id: 'acme.demo',
+          requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
+          provenance: 'official-registry',
+        },
       ])
       expect(active.has('acme.demo')).toBe(true)
 
@@ -1239,7 +1261,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         })
       ).rejects.toThrow(/test .* failure/)
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+        {
+          id: 'acme.demo',
+          requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
+          provenance: 'official-registry',
+        },
       ])
       expect(active.has('acme.demo')).toBe(true)
       expect(projectBackendPluginActivationCatalog([...active.values()]).packages).toEqual([
@@ -1298,7 +1326,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         })
       ).rejects.toThrow(/test post-commit verification failure/)
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+        {
+          id: 'acme.demo',
+          requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
+          provenance: 'official-registry',
+        },
       ])
       expect(active.has('acme.demo')).toBe(true)
       expect(projectBackendPluginActivationCatalog([...active.values()]).packages).toEqual([
@@ -1425,7 +1459,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         await commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })
       ).toEqual({ id: 'acme.demo', requires: [] })
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+        {
+          id: 'acme.demo',
+          requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
+          provenance: 'official-registry',
+        },
       ])
     } finally {
       if (previousUrl === undefined) delete process.env['AGENT_TEAM_MARKETPLACE_URL']
@@ -1569,7 +1609,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       ])
       expect(refreshed.activationCatalog).toHaveLength(1)
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+        {
+          id: 'acme.demo',
+          requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
+          provenance: 'official-registry',
+        },
       ])
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -1591,7 +1637,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         },
       })
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+        {
+          id: 'acme.demo',
+          requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
+          provenance: 'official-registry',
+        },
       ])
       writeExpiredTrustSnapshot(root)
       global.fetch = vi.fn(async () => ({ ok: false, status: 503 })) as unknown as typeof fetch
@@ -1623,7 +1675,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
 
       await expect(controller.refreshRegistryTrust()).rejects.toThrow(/HTTP 503/)
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+        {
+          id: 'acme.demo',
+          requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
+          provenance: 'official-registry',
+        },
       ])
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -1867,7 +1925,13 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         { pluginId: 'acme.demo', action: 'allow', artifactDigest: digest },
       ])
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+        {
+          id: 'acme.demo',
+          requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
+          provenance: 'official-registry',
+        },
       ])
       expect(changes).toEqual([])
     } finally {

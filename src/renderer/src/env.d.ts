@@ -4,6 +4,9 @@ type UpdateActionResult = import('../../shared/updater').UpdateActionResult
 type UpdateSettingsResult = import('../../shared/updater').UpdateSettingsResult
 type UpdaterSettings = import('../../shared/updater').UpdaterSettings
 type UpdateState = import('../../shared/updater').UpdateState
+type ExecutionPolicyApi = import('../../shared/executionPolicy').ExecutionPolicyApi
+type ManifestPermissionsSummary = import('../../shared/executionPolicy').ManifestPermissionsSummary
+type PackageVersionGrantSummary = import('../../shared/executionPolicy').PackageVersionGrantSummary
 
 interface BackendInfo {
   status: 'starting' | 'ready' | 'error'
@@ -308,6 +311,7 @@ declare global {
         ) => Promise<TccPermissionStatus>
         openSettings: (key: TccPermissionKey) => Promise<{ ok: boolean; error?: string }>
       }
+      executionPolicy?: ExecutionPolicyApi
       plugins?: {
         listInstalled: () => Promise<InstalledPluginSummary[]>
         listFactoryPackages: () => Promise<FactoryPluginSummary[]>
@@ -353,6 +357,9 @@ declare global {
     id: string
     requires: string[]
     sensitive: string[]
+    packageVersion?: string
+    manifestPermissions?: ManifestPermissionsSummary
+    packageVersionGrant?: PackageVersionGrantSummary | null
     provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
     warning?: string
   }
