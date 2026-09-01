@@ -1341,6 +1341,10 @@ class ServerLink:
             # force, with both fingerprints, because "they reinstalled" and
             # "somebody is standing in for them" look identical from here).
             "trustNotices": trust_store.notices(),
+            # Pinned devices nobody has vouched for yet. Separate from the
+            # notices because a notice can be dismissed and this question
+            # cannot be retired by dismissing anything.
+            "trustPending": trust_store.unapproved_devices(),
             "trustLocked": self._trust_locked,
             # This device first, then by label: the row a user recognises is
             # the one that should not move as other machines come and go.
@@ -1658,9 +1662,29 @@ class ServerLink:
         compared against the member id pinned for *this* credential rather than
         against whatever the last ``auth.hello`` said. Both halves used to come
         from the relay; now neither does, and neither can be revised once taken.
+
+        Both halves still arrived over the wire on the day the pin was taken,
+        though, and that is what the approval check is for. The pinned member
+        id was copied out of the first message, which the relay wrote: a relay
+        that invents a device id, generates a keypair, signs correctly with it
+        and fills in this account's own member id passes every test above. It
+        gets exactly one attempt and leaves a notice with a fingerprint on it,
+        which is what pinning buys, but until this version nothing stood between
+        that attempt and the ring that consults no rules. Now something does,
+        and it is a person comparing that fingerprint with the other machine.
+
+        Unapproved is not refused. It drops the sender to the member ring, where
+        the pane policy answers, and the policy denies by default and records a
+        knock. So the failure of a legitimate new machine is "it asked and is
+        waiting", which someone can see and fix, rather than "it vanished".
         """
         pinned = str(pin.get("memberId") or "")
-        return bool(self._own_member) and pinned == self._own_member
+        if not (bool(self._own_member) and pinned == self._own_member):
+            return False
+        # Missing rather than False on pins written before approval existed, and
+        # read the same way: see trust_store.unapproved_devices for why those
+        # are not grandfathered.
+        return pin.get("approved") is True
 
     async def _announce_trust_notices(self) -> None:
         """Tell every window that the trust notices changed.
@@ -1675,7 +1699,11 @@ class ServerLink:
         await app.broadcast(
             make_event(
                 "p2p.trust_notices.changed",
-                {"notices": trust_store.notices(), "locked": self._trust_locked},
+                {
+                    "notices": trust_store.notices(),
+                    "pending": trust_store.unapproved_devices(),
+                    "locked": self._trust_locked,
+                },
             )
         )
 

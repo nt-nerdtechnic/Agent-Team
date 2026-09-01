@@ -134,21 +134,25 @@ async def test_a_signature_alone_does_not_make_a_sender_one_of_yours(broadcasts)
         await link.stop()
 
 
-async def test_a_brand_new_device_claiming_your_member_is_still_believed_once(broadcasts):
-    """The residual limit of trust-on-first-use, written down rather than hidden.
+async def test_a_brand_new_device_claiming_your_member_waits_for_approval(broadcasts):
+    """The residual limit of trust-on-first-use, now closed by a person.
 
     A relay that introduces a device id this machine has never heard of, signs
     with a keypair it just generated, and labels it with this credential's own
-    member id **does** land in the own-device ring — because the only thing that
-    could refuse it is a person saying "I did not add a machine", and this
-    version has no surface for that.
+    member id used to land in the own-device ring, which consults no policy at
+    all. It could do that because both halves of "is this one of mine" arrived
+    over the wire: the signature proves only that somebody holds the key they
+    just offered, and the member id it is checked against was copied out of the
+    same message.
 
-    What pinning buys is not that this cannot happen; it is that it can happen
-    at most once per device id, cannot be revised afterwards (see the key-change
-    test), and leaves a notice marked ``own`` for the account view to raise. This
-    test exists so that limit is a decision on the record: if the behaviour it
-    describes ever changes, it should change because somebody built the approval
-    surface, not by accident.
+    So the pin is taken and the sighting is recorded, exactly as before, but the
+    own-device ring is not granted by it. Until a person vouches for the device
+    it is held to the ordinary rules, which deny by default, and it shows up in
+    ``unapproved_devices`` where dismissing the notice cannot hide it.
+
+    The previous version of this test asserted the opposite and said so plainly:
+    the behaviour should change "because somebody built the approval surface,
+    not by accident". This is that change.
     """
     agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
     relay = Peer("dev-relay", name="relay")
@@ -160,8 +164,9 @@ async def test_a_brand_new_device_claiming_your_member_is_still_believed_once(br
         await conn.push(
             {"type": "messages.pending", "payload": _pending(member_id="m1", peer=relay)}
         )
-        await _until(lambda: bool(broadcasts))
-        assert conn.acks == []
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["reason"] == "policy-denied"
+        assert broadcasts == [], "an unapproved device does not skip the policy"
 
         notice = next(
             n
@@ -169,6 +174,26 @@ async def test_a_brand_new_device_claiming_your_member_is_still_believed_once(br
             if n["kind"] == trust_store.NOTICE_FIRST_SEEN and n["deviceId"] == "dev-relay"
         )
         assert notice["own"] is True, "the account view has to be able to raise this one"
+
+        # Recorded as a state, not only as an event: the notice above can be
+        # dismissed, and dismissing it must not retire the question.
+        pending = {row["deviceId"] for row in trust_store.unapproved_devices()}
+        assert "dev-relay" in pending
+
+        # And the other direction, or a fix that simply refused everything would
+        # pass everything above while breaking the feature outright.
+        assert trust_store.approve_device("dev-relay") is True
+        assert "dev-relay" not in {
+            row["deviceId"] for row in trust_store.unapproved_devices()
+        }
+        await conn.push(
+            {
+                "type": "messages.pending",
+                "payload": _pending("pa:mcp:second", member_id="m1", peer=relay),
+            }
+        )
+        await _until(lambda: bool(broadcasts))
+        assert broadcasts[0]["payload"]["content"] == "please review"
     finally:
         await link.stop()
 
@@ -213,6 +238,13 @@ async def test_your_own_machine_still_reaches_you_without_a_rule(broadcasts):
     consulted for it.
     """
     agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    # Pinned *and* vouched for, which is what the own-device ring now costs. The
+    # test above covers the half before that; this one is about what approval
+    # buys, so it starts from the state approval leaves behind.
+    trust_store.pin_device(
+        PEER.device_id, sign_key=PEER.sign_key, member_id="m1", own_member_id="m1"
+    )
+    trust_store.approve_device(PEER.device_id)
     server = FakeServer(policy=DENY_ALL)
     link = await _connected(server)
     try:
@@ -903,6 +935,7 @@ def test_no_public_read_answers_from_an_empty_cache():
         "policy_seq": lambda: trust_store.policy_seq("dev-cold"),
         "notices": lambda: len(trust_store.notices()),
         "has_seen_message": lambda: trust_store.has_seen_message("k-seen"),
+        "unapproved_devices": lambda: len(trust_store.unapproved_devices()),
     }
     warm = {name: read() for name, read in readers.items()}
 

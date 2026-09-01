@@ -3144,7 +3144,11 @@ async def p2p_trust_notices_list(
         make_response(
             msg_id,
             msg_type,
-            {"notices": trust_store.notices(), "locked": trust_store.locked_reason()},
+            {
+                "notices": trust_store.notices(),
+                "pending": trust_store.unapproved_devices(),
+                "locked": trust_store.locked_reason(),
+            },
         )
     )
 
@@ -3177,6 +3181,34 @@ async def p2p_trust_notices_dismiss(
         return
     await _announce_trust_notices()
     await session.send_json(make_response(msg_id, msg_type, {"dismissed": True}))
+
+
+@handler("p2p.trust.device.approve")
+async def p2p_trust_device_approve(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Vouch for a first-seen device: this is the machine it says it is.
+
+    This is the strongest button in the trust panel and it is deliberately not
+    the same one as answering a knock. Granting a knock lets a device reach one
+    pane under the rules; approving a device says it is *ours*, which puts it in
+    the ring that consults no rules at all. So it is addressed by device id and
+    the caller is expected to have compared the fingerprint from the first-seen
+    notice against the other machine, somewhere this program is not.
+
+    Approving does not touch the pinned key. A device whose key later changes is
+    still refused, approved or not, and that refusal is still not dismissible.
+    """
+    device_id = str(payload.get("deviceId") or "")
+    if not device_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "deviceId is required")
+        )
+        return
+    approved = await asyncio.to_thread(trust_store.approve_device, device_id)
+    if approved:
+        await _announce_trust_notices()
+    await session.send_json(make_response(msg_id, msg_type, {"approved": approved}))
 
 
 @handler("p2p.trust.block")
@@ -3254,7 +3286,11 @@ async def _announce_trust_notices() -> None:
     await app.broadcast(
         make_event(
             "p2p.trust_notices.changed",
-            {"notices": trust_store.notices(), "locked": trust_store.locked_reason()},
+            {
+                "notices": trust_store.notices(),
+                "pending": trust_store.unapproved_devices(),
+                "locked": trust_store.locked_reason(),
+            },
         )
     )
 

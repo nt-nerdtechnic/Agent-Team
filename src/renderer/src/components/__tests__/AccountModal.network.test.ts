@@ -328,6 +328,45 @@ describe('account modal — your network', () => {
     expect(MODAL).toContain('settings.p2p.trust.first-seen-own')
   })
 
+  it('asks someone to vouch for a first-seen device before it skips the rules', () => {
+    // The device is pinned either way; what approval releases is the own-machine
+    // ring, which consults no policy. So the panel has to offer the act, and it
+    // has to show the fingerprint next to it — that is the one part of the
+    // question a server cannot answer for you.
+    const start = MODAL.indexOf('settings.p2p.trust.pending-title')
+    expect(start).toBeGreaterThan(-1)
+    const section = MODAL.slice(start, MODAL.indexOf('</section>', start))
+    expect(section).toContain('row.fingerprint')
+    expect(section).toContain('approveDevice(row)')
+    expect(MODAL).toContain("'p2p.trust.device.approve'")
+  })
+
+  it('keeps pending approvals out of the notice list', () => {
+    // A notice records that something happened and can be acknowledged away. A
+    // pending approval is a question that is still open, and acknowledging the
+    // first-sighting notice must not be able to answer it — so it reads from
+    // its own field rather than filtering the notices.
+    expect(MODAL).toContain('network.value?.trustPending')
+    const start = MODAL.indexOf('settings.p2p.trust.pending-title')
+    const section = MODAL.slice(start, MODAL.indexOf('</section>', start))
+    expect(section).not.toContain('dismissNotice')
+    expect(section).not.toContain('trustNotices')
+  })
+
+  it('no longer tells the reader that an own first sighting skips the rules', () => {
+    // It used to, and it was true then. Approval made it false, and copy that
+    // describes a defence the code stopped providing is worse than no copy: it
+    // reads as reassurance at exactly the moment someone is deciding whether to
+    // ask about a machine they did not add.
+    for (const locale of LOCALES) {
+      const trust = (i18n.global.getLocaleMessage(locale) as Record<string, any>).settings.p2p
+        .trust as Record<string, string>
+      expect(trust['first-seen-own-body']).toBeTruthy()
+      expect(trust['first-seen-own-body']).not.toMatch(/skip your rules entirely\./)
+      expect(trust['first-seen-own-body']).not.toMatch(/完全不經過你的規則。/)
+    }
+  })
+
   it('gives no way to clear a trust lock', () => {
     // Starting over is precisely what deleting that state was meant to achieve.
     // Sliced from the section's own markup, not from the first mention of

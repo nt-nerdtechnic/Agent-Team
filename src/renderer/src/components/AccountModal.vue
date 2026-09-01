@@ -125,6 +125,20 @@ interface BlockedEntry {
   reason: string
 }
 
+/**
+ * A device this machine pinned but nobody has vouched for yet.
+ *
+ * Deliberately not a notice. A notice records that something happened and can
+ * be acknowledged away; this records a question that is still open, and
+ * dismissing the first-sighting notice must not be able to answer it.
+ */
+interface PendingDevice {
+  deviceId: string
+  memberId?: string
+  at?: number
+  fingerprint?: string
+}
+
 interface NetworkSnapshot {
   state: LinkStatus['state']
   deviceId: string
@@ -133,6 +147,8 @@ interface NetworkSnapshot {
   accessRequests?: AccessRequest[]
   blocked?: BlockedEntry[]
   trustNotices?: TrustNotice[]
+  /** Absent on a backend that predates first-sight approval. */
+  trustPending?: PendingDevice[]
   /**
    * Non-empty means this machine has lost the trust state it once had, and all
    * cross-device traffic is stopped in both directions until it is understood.
@@ -256,6 +272,7 @@ async function refresh(): Promise<void> {
 }
 
 const trustNotices = computed<TrustNotice[]>(() => network.value?.trustNotices ?? [])
+const trustPending = computed<PendingDevice[]>(() => network.value?.trustPending ?? [])
 const trustLocked = computed(() => network.value?.trustLocked ?? '')
 const paused = computed(() => status.value?.paused === true)
 
@@ -292,6 +309,28 @@ async function dismissNotice(notice: TrustNotice): Promise<void> {
   pending.value = notice.key
   try {
     await props.backend.send('p2p.trust.notices.dismiss', { key: notice.key })
+    await loadNetwork()
+  } catch {
+    /* left on screen; nothing was decided */
+  } finally {
+    pending.value = ''
+  }
+}
+
+/**
+ * Vouch for a pinned device: confirm it is the machine it says it is.
+ *
+ * The strongest button in this panel, and not the same act as answering a
+ * knock. Granting a knock lets a device reach one pane under the rules;
+ * approving one says it is *ours*, which puts it in the ring that consults no
+ * rules at all. Which is why the fingerprint is shown next to it and the copy
+ * asks for it to be compared on the other machine, not here.
+ */
+async function approveDevice(row: PendingDevice): Promise<void> {
+  if (pending.value) return
+  pending.value = row.deviceId
+  try {
+    await props.backend.send('p2p.trust.device.approve', { deviceId: row.deviceId })
     await loadNetwork()
   } catch {
     /* left on screen; nothing was decided */
@@ -602,6 +641,34 @@ onUnmounted(() => {
             <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
             <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>
             <p class="hint">{{ trustLocked }}</p>
+          </div>
+        </section>
+
+        <!-- Devices waiting to be vouched for. Above the notices because this
+             is the only part of this panel that is asking for something, and
+             because until it is answered those machines are being held to the
+             ordinary rules — which usually means they cannot reach anything. -->
+        <section v-if="signedIn && trustPending.length" class="net">
+          <h2 class="net-title">{{ t('settings.p2p.trust.pending-title') }}</h2>
+          <div class="card net-card">
+            <p class="hint">{{ t('settings.p2p.trust.pending-body') }}</p>
+            <div v-for="row in trustPending" :key="row.deviceId" class="req">
+              <div class="req-head">
+                <span class="dev-name">
+                  {{ t('settings.p2p.trust.pending-device', { device: row.deviceId }) }}
+                </span>
+              </div>
+              <p class="req-what"><code>{{ row.fingerprint }}</code></p>
+              <div class="req-acts">
+                <button
+                  class="btn small"
+                  :disabled="!!pending"
+                  @click="approveDevice(row)"
+                >
+                  {{ t('settings.p2p.trust.pending-approve') }}
+                </button>
+              </div>
+            </div>
           </div>
         </section>
 

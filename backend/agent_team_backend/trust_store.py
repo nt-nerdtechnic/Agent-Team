@@ -475,6 +475,16 @@ def pin_device(
             "signKey": sign_key,
             "memberId": member_id,
             "at": int(time.time()),
+            # Taken, but not yet vouched for. Pinning settles *which* key this
+            # device id may use from here on; it does not settle whether the
+            # machine behind it is the one the person has in mind. The member
+            # id above arrived in the message, which the relay writes, so a
+            # relay that names a device nobody has seen, signs with a key it
+            # just generated, and fills in this account's own member id would
+            # otherwise land in the own-device ring, the one ring that consults
+            # no rules at all. Approval is what a person adds to that, by
+            # comparing the fingerprint in the notice against the other machine.
+            "approved": False,
         }
         pins[device_id] = pin
         _record_locked(
@@ -493,6 +503,62 @@ def pin_device(
         )
         _save_locked(state)
         return dict(pin)
+
+
+def approve_device(device_id: str) -> bool:
+    """Vouch for a pinned device: this really is the machine it claims to be.
+
+    Blocking; call off the event loop. Returns whether anything changed, so a
+    second approval is not an error and does not re-announce.
+
+    Only the *approval* is recorded here. The pinned key is untouched, and
+    approving cannot revise it: that is still one attempt per device id. What
+    approval releases is the own-device ring, which skips the pane policy. An
+    unapproved device is not refused, it is merely held to the same rules as
+    everyone else, and those deny by default.
+    """
+    with _lock:
+        if not device_id:
+            return False
+        state = _load_locked()
+        pin = state["pins"].get(device_id)
+        if not isinstance(pin, dict) or pin.get("approved") is True:
+            return False
+        pin["approved"] = True
+        _save_locked(state)
+        return True
+
+
+def unapproved_devices() -> list[dict[str, Any]]:
+    """Pinned devices still waiting for someone to vouch for them.
+
+    Never raises; this feeds a panel. Kept separate from ``notices`` on purpose:
+    a first-sighting notice can be dismissed, and dismissing it must not be able
+    to hide a device that is still pending. The notice records an event; this
+    records a state nobody has resolved yet.
+
+    A pin written before approval existed carries no ``approved`` key and is
+    reported here rather than grandfathered. Reading a missing field as "yes"
+    would hand every device pinned under the old rule the very ring this
+    function exists to gate, including one that was an impostor all along.
+    """
+    with _lock:
+        state = _try_load() if _state is None else _state
+        pins = (state or {}).get("pins") or {}
+        out: list[dict[str, Any]] = []
+        for device_id, pin in pins.items():
+            if not isinstance(pin, dict) or pin.get("approved") is True:
+                continue
+            out.append(
+                {
+                    "deviceId": device_id,
+                    "memberId": str(pin.get("memberId") or ""),
+                    "at": pin.get("at"),
+                    "fingerprint": device_signing.fingerprint(str(pin.get("signKey") or "")),
+                }
+            )
+        out.sort(key=lambda row: (row.get("at") or 0))
+        return out
 
 
 def note_key_change(device_id: str, *, pinned_key: str, offered_key: str, member_id: str) -> None:

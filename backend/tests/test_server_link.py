@@ -1301,6 +1301,12 @@ async def test_a_refused_member_leaves_a_knock_the_receiver_can_see(broadcasts):
 async def test_your_own_machine_leaves_no_knock(broadcasts):
     """It was never refused, so there is nothing to decide about it."""
     agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    # An own-device pin only skips the pane policy once somebody has vouched for
+    # it; see test_server_link_trust for why the pin alone is not enough.
+    trust_store.pin_device(
+        PEER.device_id, sign_key=PEER.sign_key, member_id="m1", own_member_id="m1"
+    )
+    trust_store.approve_device(PEER.device_id)
     server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
     link = await _connected(server)
     try:
@@ -1320,6 +1326,12 @@ async def test_your_own_other_machine_is_not_subject_to_the_pane_policy(broadcas
     adding a laptop would mean editing a policy before it could reach anything.
     """
     agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    # An own-device pin only skips the pane policy once somebody has vouched for
+    # it; see test_server_link_trust for why the pin alone is not enough.
+    trust_store.pin_device(
+        PEER.device_id, sign_key=PEER.sign_key, member_id="m1", own_member_id="m1"
+    )
+    trust_store.approve_device(PEER.device_id)
     server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
     link = await _connected(server)
     try:
