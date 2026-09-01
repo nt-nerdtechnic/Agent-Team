@@ -1,23 +1,6 @@
-import {
-  chmodSync,
-  closeSync,
-  constants,
-  fstatSync,
-  fsyncSync,
-  linkSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
-import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import {
   parseExecutionPolicy,
-  parseStrictJson,
   type ExecutionPolicy,
 } from '../../../packages/plugin-contracts/src/index'
 import {
@@ -26,12 +9,12 @@ import {
   HOST_DEFAULT_EXECUTION_POLICY,
   type ExecutionPolicySnapshot,
 } from './executionPolicy'
+import { OwnerOnlyJsonPersistence } from './ownerOnlyJsonPersistence'
 
 export const EXECUTION_POLICY_DIRECTORY = 'execution-policy'
 export const EXECUTION_POLICY_FILE = 'policy.json'
 export const EXECUTION_POLICY_REVISION_FILE = 'revision.json'
 const MAX_EXECUTION_POLICY_STATE_BYTES = 256 * 1024
-const NO_FOLLOW_FLAG = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW
 
 type PersistedExecutionPolicyState = {
   schemaVersion: 1
@@ -66,26 +49,6 @@ type RevisionReadResult =
   | { kind: 'missing' }
   | { kind: 'valid'; revision: PersistedRevisionState }
   | { kind: 'corrupt' }
-
-function isMissingError(error: unknown): boolean {
-  return error instanceof Error && 'code' in error && error.code === 'ENOENT'
-}
-
-function isAlreadyExistsError(error: unknown): boolean {
-  return error instanceof Error && 'code' in error && error.code === 'EEXIST'
-}
-
-function isOwnerOnly(mode: number): boolean {
-  return process.platform === 'win32' || (mode & 0o077) === 0
-}
-
-function sameFileSnapshot(
-  left: { dev: number; ino: number; mode: number; size: number },
-  right: { dev: number; ino: number; mode: number; size: number }
-): boolean {
-  return left.dev === right.dev && left.ino === right.ino &&
-    left.mode === right.mode && left.size === right.size
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -130,15 +93,16 @@ function parsePersistedRevision(value: unknown): PersistedRevisionState {
 }
 
 export class ExecutionPolicyStore {
-  private readonly directory: string
   private readonly file: string
   private readonly revisionFile: string
+  private readonly persistence: OwnerOnlyJsonPersistence
   private revisionFloor = 0
 
   constructor(userData: string) {
-    this.directory = join(userData, EXECUTION_POLICY_DIRECTORY)
-    this.file = join(this.directory, EXECUTION_POLICY_FILE)
-    this.revisionFile = join(this.directory, EXECUTION_POLICY_REVISION_FILE)
+    const directory = join(userData, EXECUTION_POLICY_DIRECTORY)
+    this.file = join(directory, EXECUTION_POLICY_FILE)
+    this.revisionFile = join(directory, EXECUTION_POLICY_REVISION_FILE)
+    this.persistence = new OwnerOnlyJsonPersistence(directory, MAX_EXECUTION_POLICY_STATE_BYTES)
   }
 
   getDefaultPolicy(): ExecutionPolicy {
@@ -216,6 +180,31 @@ export class ExecutionPolicyStore {
     }
   }
 
+  /** Advance the durable policy revision while preserving the user setting. */
+  advanceRevision(minimumRevision = 0): ExecutionPolicySnapshot {
+    const current = this.readState()
+    if (current.kind !== 'missing' && current.kind !== 'valid') {
+      throw new Error('execution policy state is corrupt or unavailable')
+    }
+
+    const revision = nextRevision(Math.max(this.revisionFloor, current.revision, minimumRevision))
+    const userPolicy = current.kind === 'valid' ? current.userPolicy : null
+    this.writeState({ schemaVersion: 1, revision, userPolicy })
+    this.revisionFloor = revision
+
+    return userPolicy === null
+      ? {
+        policy: this.getDefaultPolicy(),
+        revision,
+        state: 'default',
+      }
+      : {
+        policy: cloneExecutionPolicy(userPolicy),
+        revision,
+        state: 'user',
+      }
+  }
+
   private assertRevisionWritable(state: ReadState): void {
     if (state.revisionFile === 'corrupt') {
       throw new Error('execution policy revision sidecar is corrupt or unsafe')
@@ -223,10 +212,9 @@ export class ExecutionPolicyStore {
   }
 
   private readState(): ReadState {
-    try {
-      this.ensureDirectory(false)
-    } catch (error) {
-      return isMissingError(error) ? this.missingState() : this.unavailableState()
+    const directoryStatus = this.persistence.ensureDirectory(false)
+    if (directoryStatus !== 'ready') {
+      return directoryStatus === 'missing' ? this.missingState() : this.unavailableState()
     }
 
     const revisionResult = this.readRevision()
@@ -276,7 +264,10 @@ export class ExecutionPolicyStore {
 
     let bootstrapResult: 'created' | 'exists'
     try {
-      bootstrapResult = this.createRevisionIfMissing(policy.revision)
+      bootstrapResult = this.persistence.createIfMissing(this.revisionFile, {
+        schemaVersion: 1,
+        highWater: policy.revision,
+      } satisfies PersistedRevisionState)
     } catch {
       return this.corruptState('missing')
     }
@@ -314,45 +305,12 @@ export class ExecutionPolicyStore {
   }
 
   private readJsonFile(file: string, label: string): ReadFileResult {
-    let fileEntry
-    try {
-      fileEntry = lstatSync(file)
-    } catch (error) {
-      if (isMissingError(error)) return { kind: 'missing' }
-      return { kind: 'corrupt' }
-    }
-    if (!fileEntry.isFile() || fileEntry.isSymbolicLink() || !isOwnerOnly(fileEntry.mode)) {
-      return { kind: 'corrupt' }
-    }
-
-    let fd: number | undefined
-    let value: unknown
-    let failed = false
-    try {
-      fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | NO_FOLLOW_FLAG)
-      const opened = fstatSync(fd)
-      if (!opened.isFile() || !sameFileSnapshot(fileEntry, opened) || !isOwnerOnly(opened.mode)) {
-        throw new Error('execution policy state file changed while opening')
-      }
-      const raw = readBoundedUtf8(fd, opened.size)
-      const closed = fstatSync(fd)
-      if (!sameFileSnapshot(opened, closed)) {
-        throw new Error('execution policy state file changed while reading')
-      }
-      value = parseStrictJson(raw, label)
-    } catch {
-      failed = true
-    }
-    if (fd !== undefined) {
-      try {
-        closeSync(fd)
-      } catch {
-        failed = true
-      } finally {
-        fd = undefined
-      }
-    }
-    return failed || value === undefined ? { kind: 'corrupt' } : { kind: 'present', value }
+    const result = this.persistence.read(file, label)
+    return result.kind === 'missing'
+      ? { kind: 'missing' }
+      : result.kind === 'present'
+        ? { kind: 'present', value: result.value }
+        : { kind: 'corrupt' }
   }
 
   private missingState(): ReadState {
@@ -378,120 +336,12 @@ export class ExecutionPolicyStore {
   }
 
   private writeState(state: PersistedExecutionPolicyState): void {
-    this.writeJsonAtomic(this.revisionFile, {
+    this.persistence.write(this.revisionFile, {
       schemaVersion: 1,
       highWater: state.revision,
     } satisfies PersistedRevisionState)
-    this.writeJsonAtomic(this.file, state)
+    this.persistence.write(this.file, state)
   }
-
-  private createRevisionIfMissing(highWater: number): 'created' | 'exists' {
-    this.ensureDirectory()
-    const temporary = `${this.revisionFile}.${randomUUID()}.tmp`
-    try {
-      this.writeTemporaryJson(temporary, {
-        schemaVersion: 1,
-        highWater,
-      } satisfies PersistedRevisionState)
-      try {
-        linkSync(temporary, this.revisionFile)
-      } catch (error) {
-        if (isAlreadyExistsError(error)) return 'exists'
-        throw error
-      }
-      this.syncDirectory()
-      return 'created'
-    } finally {
-      rmSync(temporary, { force: true })
-    }
-  }
-
-  private writeJsonAtomic(file: string, value: unknown): void {
-    this.ensureDirectory()
-    this.assertReplaceableFile(file)
-
-    const temporary = `${file}.${randomUUID()}.tmp`
-    try {
-      this.writeTemporaryJson(temporary, value)
-      this.assertReplaceableFile(file)
-      renameSync(temporary, file)
-      chmodSync(file, 0o600)
-      this.syncDirectory()
-    } finally {
-      rmSync(temporary, { force: true })
-    }
-  }
-
-  private writeTemporaryJson(file: string, value: unknown): void {
-    writeFileSync(file, `${JSON.stringify(value)}\n`, { encoding: 'utf8', mode: 0o600 })
-    chmodSync(file, 0o600)
-    const fd = openSync(file, 'r')
-    try {
-      fsyncSync(fd)
-    } finally {
-      closeSync(fd)
-    }
-  }
-
-  private syncDirectory(): void {
-    if (process.platform === 'win32') return
-    const directory = openSync(
-      this.directory,
-      constants.O_RDONLY | constants.O_DIRECTORY | NO_FOLLOW_FLAG
-    )
-    try {
-      fsyncSync(directory)
-    } finally {
-      closeSync(directory)
-    }
-  }
-
-  private ensureDirectory(createIfMissing = true): void {
-    let entry
-    try {
-      entry = lstatSync(this.directory)
-    } catch (error) {
-      if (!isMissingError(error)) throw error
-      if (!createIfMissing) throw error
-      mkdirSync(this.directory, { recursive: true, mode: 0o700 })
-      entry = lstatSync(this.directory)
-    }
-    if (!entry.isDirectory() || entry.isSymbolicLink()) {
-      throw new Error('execution policy directory is unsafe')
-    }
-    if ((entry.mode & 0o077) !== 0) chmodSync(this.directory, 0o700)
-  }
-
-  private assertReplaceableFile(file: string): void {
-    try {
-      const entry = lstatSync(file)
-      if (!entry.isFile() || entry.isSymbolicLink()) {
-        throw new Error('execution policy file is unsafe')
-      }
-    } catch (error) {
-      if (!isMissingError(error)) throw error
-    }
-  }
-}
-
-function readBoundedUtf8(fd: number, initialSize: number): string {
-  if (!Number.isSafeInteger(initialSize) || initialSize < 0 || initialSize > MAX_EXECUTION_POLICY_STATE_BYTES) {
-    throw new Error('execution policy state file is too large')
-  }
-
-  const chunks: Buffer[] = []
-  const buffer = Buffer.alloc(Math.min(64 * 1024, MAX_EXECUTION_POLICY_STATE_BYTES + 1))
-  let total = 0
-  while (true) {
-    const count = readSync(fd, buffer, 0, buffer.length, null)
-    if (count === 0) break
-    total += count
-    if (total > MAX_EXECUTION_POLICY_STATE_BYTES) {
-      throw new Error('execution policy state file is too large')
-    }
-    chunks.push(Buffer.from(buffer.subarray(0, count)))
-  }
-  return Buffer.concat(chunks, total).toString('utf8')
 }
 
 function nextRevision(current: number): number {

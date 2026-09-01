@@ -643,10 +643,80 @@ path. If the directory cannot be inspected or safely repaired, the store treats
 it as unavailable, fails closed, and leaves recovery to explicit or manual
 handling rather than interpreting it as a corrupt revision sidecar.
 
-This issue defines the durable contract and Host persistence seam. Policy
-sources, UI/IPC exposure, and runtime enforcement are specified by later
-issues; this contract does not add rules for plugins, Plans, Git, miniIDE,
-methods, paths, subcommands, arguments, globs, or regular expressions.
+The global-policy portion of Issue 23A defines the durable contract and Host
+persistence seam. Repository source selection, UI/IPC exposure, and runtime
+enforcement are specified by the relevant follow-up issues; this contract does
+not add rules for plugins, Plans, Git, miniIDE, methods, paths, subcommands,
+arguments, globs, or regular expressions.
+
+## Repository Policy Recommendations
+
+A repository may provide one untrusted recommendation at the Host-defined
+canonical path `.navide/execution-policy.json`. The document uses the same
+strict versioned Execution Policy contract as the Host default and global user
+setting. Unknown fields or versions, duplicate JSON keys or entries, invalid
+modes or namespaces, unsafe executable spellings, oversized files, symlinks,
+and non-regular files are invalid and never broaden authority.
+
+Opening a repository only makes its recommendation inspectable. It never
+selects the recommendation automatically. Without a per-repository selection,
+the Host preserves the existing global default or user policy behavior. An
+explicit Host selection chooses exactly one source: the Navide default, the
+global user setting, or the repository recommendation. Sources replace one
+another; they are not merged with each other, Manifest permissions, or Plugin
+Grants.
+
+The Host stores per-repository source selections and the accepted repository
+document fingerprint in its owner-only user-data state at
+`<userData>/execution-policy/sources.json`, with the companion
+`sources-revision.json`. Selection changes use the same durable effective
+policy revision as the global policy store and persist across application
+restarts. The repository document is never rewritten or deleted by source
+selection or by switching back to the default or user source.
+
+The accepted fingerprint is calculated from the parser's canonical policy
+representation, including normalized shell names and set-stable system and
+shell entries, rather than raw file bytes. Formatting, JSON key ordering, and
+equivalent entry ordering therefore do not require re-acceptance. A missing or
+temporarily unavailable document resolves to an unavailable source, while an
+invalid, unsupported, duplicate-key, or unsafe document resolves to a corrupt
+source. A changed valid document makes a previously accepted repository source
+stale. In each case the Host preserves the durable selection, leaves the
+repository source inactive, and returns the empty fail-closed policy; it never
+silently rewrites the selection to default or user.
+
+To accept a repository recommendation, the Host caller must provide the
+fingerprint returned by its inspection of the recommendation. The Host
+re-reads the canonical document and refuses the selection with
+`recommendation-stale` when the current valid fingerprint differs, without
+writing source state or advancing the effective policy revision. The caller
+must inspect the current recommendation again before explicitly accepting it;
+the Host never accepts repository content that was not bound to the caller's
+inspected fingerprint.
+
+The Host source snapshot distinguishes `selectedSource` (the last explicit
+per-workspace choice) from `activeSource` (the source that actually supplied
+the policy) and reports `active`, `stale`, `unavailable`, or `corrupt` status.
+No explicit choice is represented by a null `selectedSource` and follows the
+global user/default policy without creating source state. Expected source
+operation refusals are typed and do not write state or advance the revision;
+an explicit `user` selection requires a strict-valid global user policy. If no
+such policy exists, a new selection is refused with
+`user-policy-unavailable`; an existing user pin remains selected but becomes
+`activeSource: null`, `status: unavailable`, and fail-closed. A malformed,
+owner-unsafe, or metadata-corrupt global policy instead reports a
+`status: corrupt` snapshot and never falls back to the Host default. Querying
+never rewrites the pin; recovery requires restoring the global user policy or
+explicitly selecting the `default` source. This does not affect an implicit
+workspace with no selection, which continues to use the Host default when no
+user policy exists.
+An explicit Host-only full reset can clear all source selections when the
+durable source high-water mark is trustworthy. The snapshot also exposes
+opaque revision-aware `effectivePolicyKey` and canonical-policy
+`effectivePolicyHash` identities for later Host consumers; Issue 23B does not
+implement caching or enforcement. This Host source service is intentionally
+not exposed through preload, IPC, renderer APIs, or Settings UI in Issue 23B;
+those surfaces belong to Issue 23D.
 
 ## SDK interface
 

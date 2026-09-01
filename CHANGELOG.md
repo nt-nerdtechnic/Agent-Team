@@ -11,6 +11,13 @@ All notable released changes to Navide will be documented in this file. The form
   persistence, lowercase shell-name canonicalization, and a durable monotonic
   revision high-water mark. The setting remains separate from Manifest
   permissions and package-version Plugin Grants.
+- Add the Host-only repository Execution Policy source service for strict,
+  untrusted `.navide/execution-policy.json` recommendations, explicit
+  per-repository source selection bound to inspected canonical-content
+  fingerprints, durable owner-only selection state, monotonic revision floors,
+  bounded recovery, typed fail-closed source results, strict user pins,
+  revision-aware snapshot identities, and stale recommendations without source
+  merging.
 - Add the public Plugin Platform v2 contracts, SDK CLI, unified Vue UI package,
   and an external-workspace frontend package smoke workflow with fail-closed
   capability-denial coverage.
