@@ -11,6 +11,10 @@ export interface ResizeController {
   requestResizeRedraw(): void
   readonly ackedCols: number
   readonly ackedRows: number
+  /** Cap cols at a fixed width; null lifts the cap. See colsCap below. */
+  setColsCap(cap: number | null): void
+  /** Apply the active cap to a proposed column count. */
+  capCols(cols: number): number
   attachObserver(el: HTMLElement): void
   dispose(): void
 }
@@ -59,6 +63,26 @@ export function createResizeController(
   let lastRedrawCols = 0
   // True while the observer is attached (mount…dispose lifecycle).
   let active = false
+
+  // Widening is what makes xterm reflow the scrollback, and a CLI that paints
+  // absolute-positioned full-width rows (claude emits ESC[r;cH, never \n) can
+  // never repaint the fragments reflow strands there — its redraw is ESC[H +
+  // ESC[2K per row, which addresses the viewport only. The layout modes that
+  // hand one pane the whole stage (sidebar/spotlight/fullscreen) are a step
+  // change in width, so App.vue caps cols at the pane's grid-mode value before
+  // entering them: the extra space stays blank instead of becoming columns, and
+  // switching back then needs no resize at all. A cap only ever narrows, so it
+  // can never overflow the container — and rows stay uncapped, since changing
+  // row count adds or drops lines without re-wrapping any of them.
+  let colsCap: number | null = null
+
+  function setColsCap(cap: number | null): void {
+    colsCap = cap !== null && cap > 0 ? cap : null
+  }
+
+  function capCols(cols: number): number {
+    return colsCap === null ? cols : Math.min(cols, colsCap)
+  }
 
   function sendResize(cols: number, rows: number): Promise<boolean> {
     if (!sessionId.value) return Promise.resolve(false)
@@ -163,7 +187,7 @@ export function createResizeController(
         // Pinned by useTerminalResize.widthRace.test.ts, which replays recorded
         // claude output through a real xterm buffer.
         const dims = fit.proposeDimensions()
-        const cols = dims && Number.isFinite(dims.cols) ? dims.cols : term.cols
+        const cols = capCols(dims && Number.isFinite(dims.cols) ? dims.cols : term.cols)
         const rows = dims && Number.isFinite(dims.rows) ? dims.rows : term.rows
         // No PTY yet (parked spawn, teardown): nothing is in flight, so there is
         // no barrier to wait for — and xterm must still fit its container.
@@ -297,6 +321,8 @@ export function createResizeController(
     requestResizeRedraw,
     get ackedCols() { return _ackedCols },
     get ackedRows() { return _ackedRows },
+    setColsCap,
+    capCols,
     attachObserver,
     dispose,
   }

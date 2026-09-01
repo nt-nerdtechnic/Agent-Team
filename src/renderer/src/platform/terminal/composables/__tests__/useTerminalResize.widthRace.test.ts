@@ -295,3 +295,130 @@ describe('width resize ordering (real xterm, recorded claude output)', () => {
     ctrl.dispose()
   })
 })
+
+// Switching into a layout mode that hands one pane the whole stage
+// (sidebar/spotlight/fullscreen) is a step change in width, not a drag. Going
+// wide reflows the scrollback, and coming back narrow reflows it again — and
+// because claude paints absolute-positioned full-width rows, the fragments the
+// second reflow strands are permanent. Capping cols on the way in means the
+// terminal never widens, so neither reflow happens: the extra stage space is
+// simply left blank.
+describe('cols cap across a layout-mode switch (real xterm)', () => {
+  let term: Terminal
+  let containerWidth: number
+  let measuredCols: number
+
+  const GRID_COLS = 90
+  const STAGE_COLS = 180
+
+  beforeEach(() => {
+    term = new Terminal({ cols: GRID_COLS, rows: ROWS, scrollback: 10000, convertEol: false, allowProposedApi: true })
+    containerWidth = 800
+    measuredCols = GRID_COLS
+  })
+
+  afterEach(() => {
+    term.dispose()
+    vi.restoreAllMocks()
+  })
+
+  function makeController() {
+    const fit = {
+      fit: () => term.resize(measuredCols, ROWS),
+      proposeDimensions: () => ({ cols: measuredCols, rows: ROWS }),
+    } as unknown as FitAddon
+    return createResizeController(
+      term,
+      fit,
+      ref('term-session-1'),
+      shallowRef({ get clientWidth() { return containerWidth } } as unknown as HTMLElement),
+      ref(Date.now()),
+      () => Promise.resolve({ ok: true, payload: null, error: null }),
+      () => Promise.resolve({ ok: true, payload: null, error: null }),
+      () => false,
+      () => {},
+    )
+  }
+
+  // Drive one applyFit to completion: the scheduleFrame body, then the ack.
+  async function fit(ctrl: ReturnType<typeof makeController>): Promise<void> {
+    ctrl.applyFit()
+    await frame()
+    await macrotask()
+  }
+
+  // grid → stage-wide → grid, with the pane settled at a real claude frame.
+  async function roundTrip(ctrl: ReturnType<typeof makeController>): Promise<void> {
+    await write(term, SHRINK_90)
+    ctrl.setColsCap(term.cols)
+    measuredCols = STAGE_COLS
+    containerWidth = 1600
+    await fit(ctrl)
+    ctrl.setColsCap(null)
+    measuredCols = GRID_COLS
+    containerWidth = 800
+    await fit(ctrl)
+  }
+
+  it('keeps the terminal at its grid width while the container is wider', async () => {
+    const ctrl = makeController()
+    ctrl.setColsCap(GRID_COLS)
+
+    measuredCols = STAGE_COLS
+    containerWidth = 1600
+    await fit(ctrl)
+
+    expect(term.cols).toBe(GRID_COLS)
+    ctrl.dispose()
+  })
+
+  it('follows the container again once the cap is lifted', async () => {
+    const ctrl = makeController()
+    ctrl.setColsCap(GRID_COLS)
+    measuredCols = STAGE_COLS
+    containerWidth = 1600
+    await fit(ctrl)
+    expect(term.cols).toBe(GRID_COLS)
+
+    ctrl.setColsCap(null)
+    await fit(ctrl)
+
+    expect(term.cols).toBe(STAGE_COLS)
+    ctrl.dispose()
+  })
+
+  it('never narrows past the container, so a cap cannot overflow it', async () => {
+    const ctrl = makeController()
+    // Cap wider than the container: the proposal still wins, because the cap is
+    // an upper bound and overflowing would clip under .pane { overflow: hidden }.
+    ctrl.setColsCap(STAGE_COLS)
+    measuredCols = GRID_COLS
+    await fit(ctrl)
+
+    expect(term.cols).toBe(GRID_COLS)
+    ctrl.dispose()
+  })
+
+  it('strands no wrapped rule fragments across a capped round trip', async () => {
+    const ctrl = makeController()
+    await roundTrip(ctrl)
+
+    expect(term.cols).toBe(GRID_COLS)
+    expect(wrappedRuleRowsInScrollback(term)).toEqual([])
+    ctrl.dispose()
+  })
+
+  // The control. Without a cap the switch widens the terminal to the full stage
+  // — the reflow the cap exists to avoid. If a regression made capCols always
+  // clamp, this goes red, so the capped tests above cannot pass vacuously.
+  it('widens to the full stage without the cap', async () => {
+    const ctrl = makeController()
+    await write(term, SHRINK_90)
+    measuredCols = STAGE_COLS
+    containerWidth = 1600
+    await fit(ctrl)
+
+    expect(term.cols).toBe(STAGE_COLS)
+    ctrl.dispose()
+  })
+})

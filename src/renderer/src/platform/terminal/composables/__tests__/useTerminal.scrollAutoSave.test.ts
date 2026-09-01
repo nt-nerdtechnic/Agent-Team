@@ -33,6 +33,8 @@ const ctrl = vi.hoisted(() => ({
   applyFit: vi.fn(),
   sendResizeNow: vi.fn(),
   requestResizeRedraw: vi.fn(),
+  setColsCap: vi.fn(),
+  capCols: vi.fn((cols: number) => cols),
   attachObserver: vi.fn(),
   dispose: vi.fn(),
   ackedCols: 80,

@@ -2404,7 +2404,10 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     if (!el || el.clientWidth === 0) return  // hidden — nothing to reconcile yet
     const dims = fit.proposeDimensions()
     const sized = !!dims && Number.isFinite(dims.cols) && Number.isFinite(dims.rows)
-    if (sized && (dims.cols !== term.cols || dims.rows !== term.rows)) {
+    // Compare against the CAPPED width: while a cols cap is active the container
+    // is deliberately wider than xterm, and comparing the raw proposal would
+    // make this tick refit forever.
+    if (sized && (resizeCtrl.capCols(dims.cols) !== term.cols || dims.rows !== term.rows)) {
       resizeCtrl.applyFit()
       return
     }
@@ -4011,7 +4014,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
       const dims = fit.proposeDimensions()
       // Hidden/unmeasurable panes yield no finite dims — the reconciler owns those.
       if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return
-      if (dims.cols === term.cols && dims.rows === term.rows) return
+      if (resizeCtrl.capCols(dims.cols) === term.cols && dims.rows === term.rows) return
       resizeCtrl.applyFit()
       resizeCtrl.requestResizeRedraw()
     }
@@ -4326,6 +4329,15 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     await terminalPort.kill(sessionId.value, opts?.force ?? false)
   }
 
+  // Pin this pane's width at its current column count, so a layout mode that
+  // hands it the whole stage leaves the extra space blank instead of widening
+  // the terminal. Switching back then needs no resize, which is what keeps
+  // xterm from reflowing (and permanently garbling) the scrollback. Passing
+  // false lifts the cap and lets the next fit use the full container.
+  function lockCols(locked: boolean): void {
+    resizeCtrl.setColsCap(locked ? term.cols : null)
+  }
+
   function fitTerminal(opts?: { redrawAfterSettle?: boolean }): void {
     if (!mounted) return
     resizeCtrl.applyFit()
@@ -4454,6 +4466,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     kill,
     focus,
     fitTerminal,
+    lockCols,
     redraw,
     pasteText,
     pasteFromClipboard,

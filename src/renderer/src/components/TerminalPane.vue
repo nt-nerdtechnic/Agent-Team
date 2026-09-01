@@ -336,6 +336,7 @@ defineExpose({
   readScreenTail: terminal.readScreenTail,
   readLineBeforeCursor: terminal.readLineBeforeCursor,
   fitTerminal: terminal.fitTerminal,
+  lockCols: terminal.lockCols,
   redraw: terminal.redraw,
   // STOP badge: App.vue owns persistence; it reflects stored/broadcast truth
   // into this pane's composable ref via setStopped (no persist side-effect).
