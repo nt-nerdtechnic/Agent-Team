@@ -15,9 +15,8 @@ Sections 1-8 walk the happy path. Sections 9-14 are the boundaries a working
 deployment actually meets: a message key that arrives twice, a policy that
 refuses, a pane whose id changed under a cached hint, two devices discovering
 each other's panes, a device that went offline, and the server itself going away
-mid-session and coming back. Section 15 covers the team roster itself: the role
-auth.hello granted, what a member row does and does not carry, and the invite /
-set_role / revoke round trip.
+mid-session and coming back. Section 16 covers the account path itself:
+registering, signing in, and what a freshly registered account can see.
 
 Usage (server must already be running)::
 
@@ -43,11 +42,10 @@ Every run uses freshly generated deviceIds so repeated runs never inherit state
 (a policy set by a previous run would hide "never configured" behaviour), and it
 cleans up the session rows it created. It never writes to the server's repo.
 
-One thing it cannot clean up: the member section 15 invites. The server has no
-delete-member call — only revoke, which disables the account and keeps it for the
-audit trail — so every run leaves one *disabled* ``verify-member-<run>`` row on
-the shared roster. That is the server's data model, not an unclean script: the
-run revokes what it created and never touches a member it did not create.
+One thing it cannot clean up: the accounts it registers (one in section 10, one
+in section 16). The server has no delete-account call, so every run leaves a
+``verify-*@example.com`` account behind. That is the server's data model, not an
+unclean script.
 """
 
 from __future__ import annotations
@@ -121,12 +119,6 @@ DEVICE_B = f"verify-b-{RUN}"
 #: Section 14 only, against the disposable server.
 DEVICE_C = f"verify-c-{RUN}"
 DEVICE_D = f"verify-d-{RUN}"
-#: Section 15 only: the device the member invited by this run signs in from.
-DEVICE_M = f"verify-m-{RUN}"
-#: The member section 15 creates. Named per run so a leftover row is obviously
-#: this script's and never collides with a real teammate.
-MEMBER_NAME = f"verify-member-{RUN}"
-
 #: The address every A→B message in sections 6-11 uses.
 TO_B = {"deviceId": DEVICE_B, "workspace": WORKSPACE_LABEL, "paneName": PANE_NAME}
 SENDER = {"workspace": WORKSPACE_LABEL, "paneName": "sender", "paneId": "verify-sender"}
@@ -151,11 +143,15 @@ async def write_policy(writer: ServerLink, owner: ServerLink, document: dict[str
 
     The signature is what makes the document a policy at all: an unsigned one is
     read as "no policy" and denies everything (see ``_verified_policy``). Note
-    who does what here — *owner* signs, *writer* transmits. That split is the
-    point of the design and is exactly the shape a hostile relay is in: it can
-    hold and hand back the document, it cannot author one. It also keeps this
-    script's real check intact, which is that ``owner`` learns about the change
-    from the ``policy.changed`` push rather than from its own write.
+    who does what here — *owner* signs, *writer* transmits. The split is kept
+    because it names the two roles, but since L3 the server refuses a write
+    aimed at another device, so every fixture below passes ``writer is owner``.
+    The hostile-relay shape — someone else handing back a document they cannot
+    author — is asserted on its own in the C2 section rather than being the
+    ambient way fixtures are written. The script's real check survives either
+    way: ``policy.set``'s reply never touches ``_policy_revision`` (only the
+    refetch at 906 and the ``policy.changed`` handler at 1074 do), so ``owner``
+    still learns about the change from the push and not from its own write.
     """
     signed = await asyncio.to_thread(owner._signed_policy, document)
     return await writer._request("policy.set", {"deviceId": owner._device_id, "policy": signed})
@@ -525,8 +521,8 @@ async def main() -> int:
 
         # Grant device A permission to drive device B's pane, so the delivery
         # path below exercises "allowed" rather than stopping at the policy gate.
-        set_reply = await write_policy(link_a, link_b, allow_a_policy(link_a.member_id))
-        check(set_reply.get("ok") is True, "（前置）admin 為裝置 B 寫入允許政策", set_reply)
+        set_reply = await write_policy(link_b, link_b, allow_a_policy(link_a.member_id))
+        check(set_reply.get("ok") is True, "（前置）裝置 B 為自己寫入允許 A 的政策", set_reply)
         await until(lambda: link_b._policy_revision == 1, "B 收到 policy.changed 並重抓")
         check(link_b._policy_revision == 1, "policy.changed 推播讓 B 的快取升到 revision 1")
 
@@ -620,10 +616,10 @@ async def main() -> int:
         #   * a deny-everything policy does NOT stand between two machines of
         #     the same person (A and B are both signed in as this run's admin) —
         #     signing one account in on a second device is itself the grant;
-        #   * it DOES stand between different members of the same network, so
-        #     this section invites one and sends from there.
+        #   * a *different* account does not get as far as the policy at all,
+        #     so this section registers one and checks it is turned away.
         deny_set = await write_policy(
-            link_a,
+            link_b,
             link_b,
             {
                 "version": 1,
@@ -664,23 +660,49 @@ async def main() -> int:
         )
         link_b.note_delivery_result(own_key, True, json.dumps({"key": "ok"}))
 
-        # --- a different member of the same network IS policed ---
-        other_invite = await link_a.members_request(
-            "team.members.invite",
-            {"displayName": f"policy-probe-{RUN}", "role": "member"},
+        # --- a different account cannot reach this machine at all ---
+        # Invites went with the tenant layer, so a second identity now comes
+        # from a second registration. That also moved where the refusal
+        # happens: `messages.send` requires the target device to belong to the
+        # sender's own account, so a stranger is turned away by the server
+        # before any pane policy is consulted. What is checked here is
+        # therefore the isolation itself — a second account sees none of the
+        # first account's devices, panes or messages.
+        other_email = f"verify-policy-{RUN}@example.com"
+        other_password = f"verify-pwd-{secrets.token_hex(8)}"
+        other_account: dict[str, Any] = {}
+        try:
+            other_account = await server_link.account_request(
+                URL,
+                "auth.register",
+                {
+                    "email": other_email,
+                    "password": other_password,
+                    "displayName": f"policy-probe-{RUN}",
+                },
+            )
+        except Exception as err:  # noqa: BLE001
+            print(f"  （註冊第二個帳號失敗：{err}）")
+        other_token = str(other_account.get("token") or "")
+        check(
+            bool(other_token),
+            "（前置）另外註冊一個帳號當第二個身分",
+            {key: value for key, value in other_account.items() if key != "token"},
         )
-        other_payload = (
-            other_invite.get("payload") if isinstance(other_invite.get("payload"), dict) else {}
-        )
-        other_token = str(other_payload.get("token") or "")
-        check(bool(other_token), "（前置）邀請一位同租戶成員來測政策", other_invite)
-        link_c, rec_c = await open_link(f"{DEVICE_A}-other-member", "C", token=other_token)
+        link_c, rec_c = await open_link(f"{DEVICE_A}-other-account", "C", token=other_token)
         try:
             check(
                 link_c.member_id and link_c.member_id != link_a.member_id,
-                "C 是另一個成員（不是 A 的另一台裝置）",
+                "C 是另一個帳號（不是 A 的另一台裝置）",
                 {"a": link_a.member_id, "c": link_c.member_id},
             )
+            # No directory assertion here on purpose: every link in this
+            # process shares one agent_messaging registry, so C re-registers
+            # the same local pane under its *own* account the moment it
+            # connects — the row it then reads back is its own, and the check
+            # would pass or fail for a reason that has nothing to do with
+            # isolation. Section 16 asks that question from a link opened
+            # after the registry is empty, which is where it can be answered.
             denied_key = f"verify:{RUN}:denied"
             denied_send = await link_c.send_message(
                 to=TO_B,
@@ -689,158 +711,137 @@ async def main() -> int:
                 msg_key=denied_key,
             )
             check(
-                isinstance(denied_send, dict) and denied_send.get("ok") is True,
-                "server 仍接受送出（政策是收端的事，不是 server 的）",
+                isinstance(denied_send, dict) and denied_send.get("ok") is False,
+                "C 送不到 B（別的帳號的裝置一律當作不存在）",
                 denied_send,
             )
             check(
-                await until(
-                    lambda: any(m.get("msgKey") == denied_key for m in rec_c.acked),
-                    "C 收到拒絕的 acked",
-                ),
-                "拒絕會回報給發送端",
-            )
-            denied_ack = next((m for m in rec_c.acked if m.get("msgKey") == denied_key), {})
-            # rejected, not failed: an agent that cannot tell them apart retries a
-            # permission refusal forever.
-            check(denied_ack.get("state") == "rejected", "acked 是 rejected 不是 failed", denied_ack)
-            check(
-                denied_ack.get("reason") == "policy-denied",
-                "acked 帶 reason=policy-denied",
-                denied_ack,
+                ((denied_send or {}).get("error") or {}).get("code") == "NOT_FOUND",
+                "錯誤碼是 NOT_FOUND，不洩漏那台裝置存不存在",
+                denied_send,
             )
             check(
                 delivered(denied_key) == [], "被拒的訊息完全沒有廣播給 renderer", delivered(denied_key)
             )
-
-            # --- C1, against a real server: a message nobody signed ---
-            # The relay's move, reproduced end to end. `messages.send` is called
-            # raw so the frame carries no `sig`, exactly as a relay writing its
-            # own message would — the server stores and pushes it (it does not
-            # verify, and must not), and the refusal happens at the receiver.
-            unsigned_key = f"verify:{RUN}:unsigned"
-            unsigned = await link_c._request(
-                "messages.send",
-                {"to": TO_B, "msgKey": unsigned_key, "text": "unsigned injection"},
-            )
-            check(unsigned.get("ok") is True, "server 收下未簽章的訊息（驗證不是它的事）", unsigned)
             check(
-                await until(
-                    lambda: any(m.get("msgKey") == unsigned_key for m in rec_c.acked),
-                    "C 收到未簽章訊息的 acked",
-                ),
-                "未簽章的訊息也會被回報",
-            )
-            unsigned_ack = next(
-                (m for m in rec_c.acked if m.get("msgKey") == unsigned_key), {}
-            )
-            check(
-                unsigned_ack.get("reason") == server_link.REASON_UNAUTHENTICATED,
-                "未簽章的訊息被拒為 unauthenticated（在政策之前）",
-                unsigned_ack,
-            )
-            check(
-                delivered(unsigned_key) == [],
-                "未簽章的訊息完全沒有進到 pane",
-                delivered(unsigned_key),
-            )
-
-            # --- and one whose signature is real but covers another message ---
-            lifted_key = f"verify:{RUN}:lifted"
-            lifted_sig = await asyncio.to_thread(
-                device_signing.sign_message,
-                msg_key=f"{lifted_key}-something-else",
-                from_device=link_c._device_id,
-                to_device=DEVICE_B,
-                kind="text",
-                body="lifted",
-            )
-            await link_c._request(
-                "messages.send",
-                {"to": TO_B, "msgKey": lifted_key, "text": "lifted", "sig": lifted_sig},
-            )
-            check(
-                await until(
-                    lambda: any(m.get("msgKey") == lifted_key for m in rec_c.acked),
-                    "C 收到被搬過來的簽章的 acked",
-                ),
-                "簽章對不上訊息時也會回報",
-            )
-            lifted_ack = next((m for m in rec_c.acked if m.get("msgKey") == lifted_key), {})
-            check(
-                lifted_ack.get("reason") == server_link.REASON_UNAUTHENTICATED,
-                "把別則訊息的簽章搬過來一樣被拒（msgKey 綁在簽章裡）",
-                lifted_ack,
-            )
-
-            # --- C2, against a real server: an unsigned policy is no policy ---
-            # This is also the admin-rewrite path: policy.set accepts a write
-            # for another device in the same tenant, so before signing, an admin
-            # (or anyone who took over the server) could replace a receiver's
-            # rules outright. The document below *would* let C through.
-            forged = await link_a._request(
-                "policy.set",
-                {
-                    "deviceId": DEVICE_B,
-                    "policy": {
-                        "version": 1,
-                        "default": "allow",
-                        "rules": [],
-                    },
-                },
-            )
-            check(forged.get("ok") is True, "server 收下未簽章的政策（它不解讀，也不該解讀）", forged)
-            check(
-                await until(
-                    lambda: link_b._policy_revision == 3, "B 抓到那份未簽章的政策"
-                ),
-                "policy.changed 讓 B 去讀了那份文件",
-            )
-            check(
-                link_b._policy is None,
-                "未簽章的政策＝沒有政策（C2 的核心保證）",
-                link_b._policy,
-            )
-            check(
-                bool(
-                    [
-                        n
-                        for n in trust_store.notices()
-                        if n["kind"] == trust_store.NOTICE_POLICY_UNVERIFIED
-                    ]
-                ),
-                "而且留下告警，不是無聲地全拒",
-                trust_store.notices(),
-            )
-            forged_key = f"verify:{RUN}:forged-allow"
-            await link_c.send_message(
-                to=TO_B,
-                sender=dict(SENDER, workspace=WORKSPACE_LABEL),
-                text="the forged policy says this is allowed",
-                msg_key=forged_key,
-            )
-            check(
-                await until(
-                    lambda: any(m.get("msgKey") == forged_key for m in rec_c.acked),
-                    "C 收到偽造政策下的 acked",
-                ),
-                "偽造政策不會讓訊息靜靜通過",
-            )
-            forged_ack = next((m for m in rec_c.acked if m.get("msgKey") == forged_key), {})
-            check(
-                forged_ack.get("reason") == "policy-denied",
-                "default:allow 的偽造政策授權不了任何東西",
-                forged_ack,
-            )
-            check(
-                delivered(forged_key) == [],
-                "偽造政策放行的訊息完全沒有進到 pane",
-                delivered(forged_key),
+                not any(m.get("msgKey") == denied_key for m in rec_c.acked),
+                "訊息沒有進到系統，所以也沒有 acked",
+                rec_c.acked,
             )
         finally:
             await link_c.stop()
 
-        allow_set = await write_policy(link_a, link_b, allow_a_policy(link_a.member_id))
+        # --- C1, against a real server: a message nobody signed ---
+        # The relay's move, reproduced end to end. `messages.send` is called
+        # raw so the frame carries no `sig`, exactly as a relay writing its own
+        # message would — the server stores and pushes it (it does not verify,
+        # and must not), and the refusal happens at the receiver.
+        #
+        # Sent from A, which is now the only sender the server lets reach B at
+        # all. That does not weaken the check: authenticity is settled *before*
+        # the own-machine exemption, so an unsigned frame claiming to be from
+        # your own other machine is refused exactly like a stranger's.
+        unsigned_key = f"verify:{RUN}:unsigned"
+        unsigned = await link_a._request(
+            "messages.send",
+            {"to": TO_B, "msgKey": unsigned_key, "text": "unsigned injection"},
+        )
+        check(unsigned.get("ok") is True, "server 收下未簽章的訊息（驗證不是它的事）", unsigned)
+        check(
+            await until(
+                lambda: any(m.get("msgKey") == unsigned_key for m in rec_a.acked),
+                "A 收到未簽章訊息的 acked",
+            ),
+            "未簽章的訊息也會被回報",
+        )
+        unsigned_ack = next((m for m in rec_a.acked if m.get("msgKey") == unsigned_key), {})
+        check(
+            unsigned_ack.get("reason") == server_link.REASON_UNAUTHENTICATED,
+            "未簽章的訊息被拒為 unauthenticated（在政策與自家豁免之前）",
+            unsigned_ack,
+        )
+        check(
+            delivered(unsigned_key) == [],
+            "未簽章的訊息完全沒有進到 pane",
+            delivered(unsigned_key),
+        )
+
+        # --- and one whose signature is real but covers another message ---
+        lifted_key = f"verify:{RUN}:lifted"
+        lifted_sig = await asyncio.to_thread(
+            device_signing.sign_message,
+            msg_key=f"{lifted_key}-something-else",
+            from_device=link_a._device_id,
+            to_device=DEVICE_B,
+            kind="text",
+            body="lifted",
+        )
+        await link_a._request(
+            "messages.send",
+            {"to": TO_B, "msgKey": lifted_key, "text": "lifted", "sig": lifted_sig},
+        )
+        check(
+            await until(
+                lambda: any(m.get("msgKey") == lifted_key for m in rec_a.acked),
+                "A 收到被搬過來的簽章的 acked",
+            ),
+            "簽章對不上訊息時也會回報",
+        )
+        lifted_ack = next((m for m in rec_a.acked if m.get("msgKey") == lifted_key), {})
+        check(
+            lifted_ack.get("reason") == server_link.REASON_UNAUTHENTICATED,
+            "把別則訊息的簽章搬過來一樣被拒（msgKey 綁在簽章裡）",
+            lifted_ack,
+        )
+
+        # --- C2, against a real server: an unsigned policy is no policy ---
+        # Two defences stack over this document, which *would* let everyone
+        # through, and they are worth checking apart from each other because
+        # they fail in different worlds.
+        forged_document = {"version": 1, "default": "allow", "rules": []}
+        # The outer one is L3: the server refuses a write aimed at another
+        # device, so "took over an account, rewrote a receiver's rules" is
+        # turned away before any signature is consulted. This used to be the
+        # admin-rewrite path and it is the reason this section exists.
+        cross_write = await link_a._request(
+            "policy.set", {"deviceId": DEVICE_B, "policy": forged_document}
+        )
+        check(
+            cross_write.get("ok") is False
+            and (cross_write.get("error") or {}).get("code") == "FORBIDDEN",
+            "server 擋掉跨裝置的政策寫入（L3）",
+            cross_write,
+        )
+        # The inner one is the one that still stands when the server itself is
+        # hostile, which is the case C2 is actually about. B writes it for
+        # itself so the ownership check is satisfied and the *client's*
+        # signature verification is the only thing left that can refuse it.
+        forged = await link_b._request(
+            "policy.set", {"deviceId": DEVICE_B, "policy": forged_document}
+        )
+        check(forged.get("ok") is True, "server 收下未簽章的政策（它不解讀，也不該解讀）", forged)
+        check(
+            await until(lambda: link_b._policy_revision == 3, "B 抓到那份未簽章的政策"),
+            "policy.changed 讓 B 去讀了那份文件",
+        )
+        check(
+            link_b._policy is None,
+            "未簽章的政策＝沒有政策（C2 的核心保證）",
+            link_b._policy,
+        )
+        check(
+            bool(
+                [
+                    n
+                    for n in trust_store.notices()
+                    if n["kind"] == trust_store.NOTICE_POLICY_UNVERIFIED
+                ]
+            ),
+            "而且留下告警，不是無聲地全拒",
+            trust_store.notices(),
+        )
+
+        allow_set = await write_policy(link_b, link_b, allow_a_policy(link_a.member_id))
         check(allow_set.get("ok") is True, "（前置）把 B 的政策改回允許 A", allow_set)
         check(
             await until(lambda: link_b._policy_revision == 4, "B 的政策升到 revision 4"),
@@ -1088,7 +1089,6 @@ async def main() -> int:
         agent_messaging._reset_for_test()
 
     await check_server_outage()
-    await check_team_members()
     await check_account_flow()
 
     print(f"\n== 結果：{_passed} 通過 / {_failed} 失敗 ==")
@@ -1124,7 +1124,7 @@ async def check_server_outage() -> None:
         link_c, _ = await open_link(DEVICE_C, "C", disposable.url)
         link_d, rec_d = await open_link(DEVICE_D, "D", disposable.url)
         granted = await write_policy(
-            link_c, link_d, allow_a_policy(link_c.member_id, DEVICE_C)
+            link_d, link_d, allow_a_policy(link_c.member_id, DEVICE_C)
         )
         check(granted.get("ok") is True, "（前置）允許 C 驅動 D 的 pane", granted)
         await until(lambda: link_d._policy_revision == 1, "D 收到政策")
@@ -1211,210 +1211,6 @@ async def check_server_outage() -> None:
         await disposable.stop()
         shutil.rmtree(db_dir, ignore_errors=True)
         agent_messaging._reset_for_test()
-
-
-def _members_of(reply: dict[str, Any]) -> list[dict[str, Any]]:
-    """The roster rows out of a team.members.* reply frame."""
-    payload = reply.get("payload")
-    rows = payload.get("members") if isinstance(payload, dict) else None
-    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
-
-
-def _row_for(rows: list[dict[str, Any]], member_id: str) -> dict[str, Any]:
-    return next((row for row in rows if row.get("memberId") == member_id), {})
-
-
-async def check_team_members() -> None:
-    """Section 15: the team roster, against the real server.
-
-    Membership is the newest cross-device surface and the only one that has met
-    nothing but the in-process fake — the same gap that once let sessions.sync
-    ship with the wrong status vocabulary while every test was green. So the
-    questions asked here are the ones a fake cannot answer honestly: what role
-    auth.hello really grants, which fields a member row really carries, whether
-    the invite token really appears exactly once, and whether the one rule this
-    backend deliberately does not re-implement — an admin cannot demote itself —
-    is really enforced on the server.
-
-    It runs on the shared server (the roster lives there, not on a disposable
-    instance) and reuses DEVICE_A, whose device row sections 1-13 already
-    created. agent_messaging is empty by now, so neither link here registers a
-    session.
-    """
-    print("\n== 15. 團隊成員管理 ==")
-    link_admin, _ = await open_link(DEVICE_A, "A")
-    link_member: ServerLink | None = None
-    created_id = ""
-    revoked = False
-    try:
-        # --- the role is the server's answer, never this side's guess ---
-        check(
-            link_admin.member_role == "admin",
-            "auth.hello 回帶 role=admin（成員管理按鈕出不出現由它決定）",
-            {"role": link_admin.member_role, "memberId": link_admin.member_id},
-        )
-        # open_link returns at auth.hello, but the connect-time refreshes
-        # (policy -> directory -> members) are still in flight; over a real
-        # WAN each is a round trip, so give the fetch time to land. The
-        # assertion still proves the same thing: a link that never fetches
-        # would stay None past any wait.
-        await until(
-            lambda: link_admin.members_snapshot() is not None, "connect-time roster fetch"
-        )
-        check(
-            link_admin.members_snapshot() is not None,
-            "連線建立時就抓過一次 team.members.list（快取不是「從未抓過」）",
-        )
-
-        # --- what a roster row carries, and what it must not ---
-        listed = await link_admin._request("team.members.list", {})
-        check(listed.get("ok") is True, "team.members.list 被接受", listed)
-        rows = _members_of(listed)
-        check(bool(rows), "名冊至少有一列（admin 自己）", listed)
-        me_row = _row_for(rows, link_admin.member_id)
-        check(
-            all(key in me_row for key in ("memberId", "displayName", "role", "disabled", "createdAt")),
-            "每一列帶 memberId/displayName/role/disabled/createdAt",
-            me_row,
-        )
-        check(me_row.get("role") == "admin", "自己那一列的角色與 auth.hello 說的一致", me_row)
-        # Security-shaped, so it is proven rather than trusted to the server's
-        # publicMember() stripping it: a roster that leaked tokens would hand
-        # every observer everyone else's credential.
-        leaking = [str(row.get("memberId") or "") for row in rows if "token" in row]
-        check(not leaking, "名冊沒有任何一列帶 token（server 端 publicMember 濾掉了）", leaking)
-
-        # --- invite: the token exists exactly once ---
-        invite = await link_admin.members_request(
-            "team.members.invite", {"displayName": MEMBER_NAME, "role": "member"}
-        )
-        check(invite.get("ok") is True, "invite 被接受", invite)
-        invited = invite.get("payload") if isinstance(invite.get("payload"), dict) else {}
-        created_id = str(invited.get("memberId") or "")
-        invite_token = str(invited.get("token") or "")
-        redacted = {key: value for key, value in invited.items() if key != "token"}
-        check(bool(created_id), "invite 回帶新成員的 memberId", redacted)
-        check(bool(invite_token), "invite 的回應帶 token", redacted)
-        check(invited.get("role") == "member", "invite 回帶要求的角色", redacted)
-
-        after_invite = _members_of(await link_admin._request("team.members.list", {}))
-        new_row = _row_for(after_invite, created_id)
-        check(bool(new_row), "新成員出現在名冊裡", created_id)
-        check(new_row.get("displayName") == MEMBER_NAME, "名冊裡是我們給的顯示名", new_row)
-        check(new_row.get("disabled") is False, "新成員一開始沒有被停用", new_row)
-        check(
-            "token" not in new_row,
-            "之後的名冊那一列不含 token（token 只在 invite 回應出現那一次，關掉就要不回來）",
-            new_row,
-        )
-        cached = link_admin.members_snapshot() or []
-        check(
-            any(isinstance(row, dict) and row.get("memberId") == created_id for row in cached),
-            "members_request 成功後就地重讀名冊（UI 不必等 team.members.changed 推播）",
-        )
-
-        # --- that token is a working credential, and it comes back as a role ---
-        if invite_token:
-            try:
-                link_member, _ = await open_link(DEVICE_M, "M", token=invite_token)
-            except SystemExit as err:
-                print(f"  （用 invite token 連線失敗：{err}）")
-        check(link_member is not None, "invite 發的 token 真的連得上 server")
-        if link_member is not None:
-            check(
-                link_member.member_id == created_id,
-                "那條連線認證出來的就是剛建立的成員",
-                {"memberId": link_member.member_id, "expected": created_id},
-            )
-            check(
-                link_member.member_role == "member",
-                "auth.hello 給它的角色就是 invite 指定的 member",
-                link_member.member_role,
-            )
-
-        # --- set_role takes effect ---
-        role_reply = await link_admin.members_request(
-            "team.members.set_role", {"memberId": created_id, "role": "observer"}
-        )
-        check(role_reply.get("ok") is True, "set_role 被接受", role_reply)
-        after_role = _members_of(await link_admin._request("team.members.list", {}))
-        check(
-            _row_for(after_role, created_id).get("role") == "observer",
-            "重讀名冊確認角色真的變成 observer",
-            _row_for(after_role, created_id),
-        )
-
-        # --- the rule this backend does not re-implement ---
-        # The UI only greys out its own row's dropdown; nothing on this side
-        # refuses the request. That is only safe if the server refuses it, which
-        # is what this asks.
-        self_demote = await link_admin.members_request(
-            "team.members.set_role", {"memberId": link_admin.member_id, "role": "member"}
-        )
-        check(
-            self_demote.get("ok") is False,
-            "admin 對自己降級被 server 拒絕（後端刻意沒重做這條規則）",
-            self_demote,
-        )
-        check(
-            ((self_demote.get("error") or {}).get("code")) == "BAD_REQUEST",
-            "拒絕的錯誤碼是 BAD_REQUEST",
-            self_demote,
-        )
-        still_admin = _members_of(await link_admin._request("team.members.list", {}))
-        check(
-            _row_for(still_admin, link_admin.member_id).get("role") == "admin",
-            "被拒之後自己仍然是 admin（沒有半套生效）",
-            _row_for(still_admin, link_admin.member_id),
-        )
-
-        # --- revoke drops the connections that member holds ---
-        revoke_reply = await link_admin.members_request(
-            "team.members.revoke", {"memberId": created_id}
-        )
-        revoked = revoke_reply.get("ok") is True
-        check(revoked, "revoke 被接受", revoke_reply)
-        result = revoke_reply.get("payload") if isinstance(revoke_reply.get("payload"), dict) else {}
-        dropped = result.get("droppedConnections")
-        counted = isinstance(dropped, int) and not isinstance(dropped, bool)
-        check(counted, "revoke 回帶 droppedConnections", result)
-        if link_member is not None:
-            check(
-                counted and dropped > 0,
-                "被停用者當時握著一條連線，droppedConnections 大於 0",
-                result,
-            )
-        else:
-            print("  … 這次沒能替被停用者建立連線，droppedConnections 非零的情形沒驗到")
-        check(result.get("disabled") is True, "revoke 回帶 disabled=true（停用，不是刪除）", result)
-
-        after_revoke = _members_of(await link_admin._request("team.members.list", {}))
-        revoked_row = _row_for(after_revoke, created_id)
-        check(bool(revoked_row), "被停用的成員仍留在名冊（server 沒有刪除介面，保留審計軌跡）", created_id)
-        check(revoked_row.get("disabled") is True, "那一列的 disabled 變成 true", revoked_row)
-        if link_member is not None:
-            member_link = link_member
-            check(
-                await until(
-                    lambda: bool(member_link.terminated_reason), "M 收到 auth.revoked"
-                ),
-                "被停用的那條連線收到 auth.revoked，而且不再自動重連",
-                member_link.terminated_reason,
-            )
-    finally:
-        if created_id and not revoked:
-            # Never leave an enabled account behind on a shared server, even
-            # when a check above failed partway through.
-            with contextlib.suppress(Exception):
-                await link_admin.members_request("team.members.revoke", {"memberId": created_id})
-        if link_member is not None:
-            await link_member.stop()
-        await link_admin.stop()
-        if created_id:
-            print(
-                f"  （留下一筆已停用的成員 {MEMBER_NAME}：server 只有 revoke、沒有刪除介面，"
-                f"所以每跑一次就多一列停用成員，不是腳本沒清乾淨）"
-            )
 
 
 async def check_account_flow() -> None:
