@@ -1215,14 +1215,25 @@ export class FrontendPluginManager {
     if (Object.prototype.hasOwnProperty.call(record, 'credential_owner_nonce')) {
       return buildError('', 'BAD_REQUEST', 'credential ownership is Host-owned')
     }
-    if (
-      record.workspace_path !== undefined &&
-      (typeof record.workspace_path !== 'string' ||
-        resolve(record.workspace_path) !== resolve(plugin.workspacePath))
-    ) {
-      return buildError('', 'WORKSPACE_SCOPE_VIOLATION', 'workspace path does not match the Host binding')
+    // A Git repository nested inside the bound workspace is a legitimate
+    // target: multi-repo mode gives every repository tab the repository's own
+    // absolute path (MultiRepoGit). The binding is therefore a containment
+    // root, not a single permitted value — anything outside it, and any
+    // traversal out of it, is still rejected. The workspace itself keeps its
+    // exact previous value so the common single-repo call is unchanged.
+    const boundWorkspace = resolve(plugin.workspacePath)
+    let targetWorkspace = boundWorkspace
+    if (record.workspace_path !== undefined) {
+      const candidate = typeof record.workspace_path === 'string' ? record.workspace_path : ''
+      const resolvedCandidate = candidate && isWorkspaceContainedPath(plugin.workspacePath, candidate)
+        ? resolvePathForContainment(resolve(plugin.workspacePath, candidate))
+        : null
+      if (!resolvedCandidate) {
+        return buildError('', 'WORKSPACE_SCOPE_VIOLATION', 'workspace path does not match the Host binding')
+      }
+      targetWorkspace = resolve(candidate) === boundWorkspace ? boundWorkspace : resolvedCandidate
     }
-    return { ...record, workspace_path: resolve(plugin.workspacePath) }
+    return { ...record, workspace_path: targetWorkspace }
   }
 
   /** Store the trusted main-renderer state consumed by the independent Git
