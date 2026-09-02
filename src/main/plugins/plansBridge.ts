@@ -9,13 +9,15 @@
  */
 
 import {
+  constants,
   mkdirSync,
   closeSync,
+  fstatSync,
+  lstatSync,
   openSync,
   readSync,
   readdirSync,
   renameSync,
-  rmSync,
   statSync,
   watch as watchPath,
   writeFileSync,
@@ -24,6 +26,7 @@ import {
 import { dirname, extname, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { TextDecoder } from 'node:util'
+import { shell } from 'electron'
 import type {
   BackendRuntimeContext,
   JsonValue,
@@ -110,6 +113,25 @@ export interface PlansFilesystemPort {
   rename(arguments_: JsonValue, context: PlansBridgeContext): Promise<JsonValue>
   resolveRoot(arguments_: JsonValue, context: PlansBridgeContext): Promise<JsonValue>
   watch(arguments_: JsonValue, context: PlansBridgeContext): Promise<JsonValue>
+}
+
+/** Host-owned filesystem service used by the production bridge. The service
+ * receives a Host-selected workspace root and relative arguments; package
+ * payloads never choose the root and the bridge context is never serialized. */
+export type PlansFilesystemServiceOperation =
+  | 'fs.read_file'
+  | 'fs.write_file'
+  | 'fs.list_dir'
+  | 'fs.stat_workspace_path'
+  | 'fs.delete'
+  | 'fs.rename'
+
+export interface PlansFilesystemService {
+  call(
+    operation: PlansFilesystemServiceOperation,
+    payload: Record<string, JsonValue>,
+    context: PlansBridgeContext,
+  ): Promise<JsonValue>
 }
 
 export interface PlansWorkspaceStoragePort {
@@ -278,11 +300,27 @@ function exactArguments(arguments_: JsonValue, expectedKeys: readonly string[]):
   }
 }
 
+function pathExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
 function readFileBounded(path: string): string {
-  const fd = openSync(path, 'r')
+  const flags = constants.O_RDONLY |
+    (constants.O_NONBLOCK ?? 0) |
+    (constants.O_NOFOLLOW ?? 0)
+  const fd = openSync(path, flags)
   const buffer = Buffer.allocUnsafe(MAX_BACKEND_BRIDGE_RESULT_BYTES + 1)
   let offset = 0
   try {
+    if (!fstatSync(fd).isFile()) {
+      throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace path is not a regular file.')
+    }
     while (offset < buffer.length) {
       const count = readSync(fd, buffer, offset, buffer.length - offset, null)
       if (count === 0) break
@@ -298,6 +336,200 @@ function readFileBounded(path: string): string {
     return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, offset))
   } catch {
     throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace file is not valid UTF-8.')
+  }
+}
+
+function backendResultRecord(value: JsonValue): Record<string, JsonValue> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Filesystem service returned an invalid response.')
+  }
+  return value as Record<string, JsonValue>
+}
+
+function backendFailure(value: Record<string, JsonValue>, message: string): PlansBridgeError {
+  if (value.conflict === true) {
+    return new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace file changed while it was being updated.')
+  }
+  if (typeof value.error === 'string' && /too large|content too large/i.test(value.error)) {
+    return new PlansBridgeError('RESULT_TOO_LARGE', 'Workspace file exceeds the Bridge result limit.')
+  }
+  return new PlansBridgeError('BACKEND_UNAVAILABLE', message)
+}
+
+async function callFilesystemService(
+  service: PlansFilesystemService,
+  operation: PlansFilesystemServiceOperation,
+  arguments_: Record<string, JsonValue>,
+  context: PlansBridgeContext,
+  options: { allowConflict?: boolean } = {},
+): Promise<Record<string, JsonValue>> {
+  if (context.signal.aborted) throw new PlansBridgeError('USER_CANCELLED')
+  const root = authorizedPlanRoot(context)
+  try {
+    const result = backendResultRecord(await service.call(
+      operation,
+      { ...arguments_, workspace_path: root },
+      context,
+    ))
+    if (result.ok !== true && !(options.allowConflict && result.conflict === true)) {
+      throw backendFailure(result, 'Workspace filesystem operation failed.')
+    }
+    return result
+  } catch (error) {
+    if (error instanceof PlansBridgeError) throw error
+    throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace filesystem service is unavailable.')
+  }
+}
+
+/** Adapt the existing Host filesystem service to the private Plans port. All
+ * mutation and read paths are delegated to the service; only the long-lived
+ * watcher remains a local Host notification primitive. */
+export function createHostPlansFilesystemPort(
+  service: PlansFilesystemService,
+): PlansFilesystemPort {
+  const localWatcher = createTestPlansFilesystemPort().watch
+  return {
+    async readFile(arguments_, context): Promise<JsonValue> {
+      const values = recordArguments(arguments_)
+      if (
+        Object.keys(values).some((key) => !['rel_path', 'include_mtime'].includes(key)) ||
+        !Object.prototype.hasOwnProperty.call(values, 'rel_path') ||
+        (values.include_mtime !== undefined && typeof values.include_mtime !== 'boolean')
+      ) throw new PlansBridgeError('INVALID_ARGUMENT')
+      const result = await callFilesystemService(
+        service,
+        'fs.read_file',
+        { rel_path: pathString(arguments_, 'rel_path') },
+        context,
+      )
+      if (typeof result.content !== 'string') {
+        throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace file content is unavailable.')
+      }
+      const normalized: Record<string, JsonValue> = { content: result.content }
+      if (typeof result.mtime === 'number' && Number.isFinite(result.mtime)) {
+        normalized.mtime = result.mtime
+      }
+      return normalized
+    },
+    async writeFile(arguments_, context): Promise<JsonValue> {
+      const values = recordArguments(arguments_)
+      if (
+        Object.keys(values).some((key) => !['rel_path', 'content', 'expected_mtime'].includes(key)) ||
+        !Object.prototype.hasOwnProperty.call(values, 'rel_path') ||
+        !Object.prototype.hasOwnProperty.call(values, 'content') ||
+        typeof values.content !== 'string' ||
+        (values.expected_mtime !== undefined &&
+          (typeof values.expected_mtime !== 'number' || !Number.isFinite(values.expected_mtime)))
+      ) throw new PlansBridgeError('INVALID_ARGUMENT')
+      const payload: Record<string, JsonValue> = {
+        rel_path: pathString(arguments_, 'rel_path'),
+        content: values.content,
+      }
+      if (values.expected_mtime !== undefined) payload.expected_mtime = values.expected_mtime
+      const result = await callFilesystemService(
+        service,
+        'fs.write_file',
+        payload,
+        context,
+        { allowConflict: true },
+      )
+      if (result.conflict === true) {
+        return {
+          ok: false,
+          conflict: true,
+          ...(typeof result.mtime === 'number' && Number.isFinite(result.mtime)
+            ? { mtime: result.mtime }
+            : {}),
+        }
+      }
+      return {
+        ok: true,
+        ...(typeof result.mtime === 'number' && Number.isFinite(result.mtime)
+          ? { mtime: result.mtime }
+          : {}),
+      }
+    },
+    async listDir(arguments_, context): Promise<JsonValue> {
+      exactArguments(arguments_, ['rel_path'])
+      const result = await callFilesystemService(
+        service,
+        'fs.list_dir',
+        { rel_path: pathString(arguments_, 'rel_path') },
+        context,
+      )
+      if (!Array.isArray(result.entries)) {
+        throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace directory listing is unavailable.')
+      }
+      return {
+        entries: result.entries.flatMap((entry) => {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return []
+          const name = (entry as Record<string, JsonValue>).name
+          return typeof name === 'string' ? [name] : []
+        }),
+      }
+    },
+    async listFilesFlat(arguments_, context): Promise<JsonValue> {
+      exactArguments(arguments_, ['rel_path'])
+      const result = await callFilesystemService(
+        service,
+        'fs.list_dir',
+        { rel_path: pathString(arguments_, 'rel_path') },
+        context,
+      )
+      if (!Array.isArray(result.entries)) {
+        throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace directory listing is unavailable.')
+      }
+      return {
+        entries: result.entries.flatMap((entry) => {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return []
+          const item = entry as Record<string, JsonValue>
+          const name = item.name
+          return typeof name === 'string' && item.is_dir !== true && extname(name) !== '' ? [name] : []
+        }),
+      }
+    },
+    async statPath(arguments_, context): Promise<JsonValue> {
+      exactArguments(arguments_, ['rel_path'])
+      const result = await callFilesystemService(
+        service,
+        'fs.stat_workspace_path',
+        { rel_path: pathString(arguments_, 'rel_path') },
+        context,
+      )
+      return {
+        exists: result.exists === true,
+        isDirectory: result.is_directory === true,
+        size: typeof result.size === 'number' && Number.isFinite(result.size) ? result.size : 0,
+      }
+    },
+    async delete(arguments_, context): Promise<JsonValue> {
+      exactArguments(arguments_, ['rel_path'])
+      await callFilesystemService(
+        service,
+        'fs.delete',
+        { rel_path: pathString(arguments_, 'rel_path') },
+        context,
+      )
+      return { ok: true }
+    },
+    async rename(arguments_, context): Promise<JsonValue> {
+      exactArguments(arguments_, ['from', 'to'])
+      await callFilesystemService(
+        service,
+        'fs.rename',
+        {
+          src_path: pathString(arguments_, 'from'),
+          dst_path: pathString(arguments_, 'to'),
+        },
+        context,
+      )
+      return { ok: true }
+    },
+    async resolveRoot(arguments_, context): Promise<JsonValue> {
+      exactArguments(arguments_, [])
+      return { root: authorizedPlanRoot(context) }
+    },
+    watch: localWatcher,
   }
 }
 
@@ -449,7 +681,10 @@ export function createPlansBridgeDispatcher(ports: PlansCorePorts): BackendBridg
   })
 }
 
-function createProductionFilesystemPort(): PlansFilesystemPort {
+/** Local filesystem adapter retained for isolated bridge tests. The app's
+ * production composition uses createHostPlansFilesystemPort instead, so this
+ * direct Node filesystem implementation is never selected by default. */
+export function createTestPlansFilesystemPort(): PlansFilesystemPort {
   const emitChanged = (context: PlansBridgeContext, root: string, event: string, path: string | null): void => {
     if (context.signal.aborted) return
     context.emit('filesystem.changed', {
@@ -512,27 +747,62 @@ function createProductionFilesystemPort(): PlansFilesystemPort {
     return null
   }
   return {
-    async readFile(arguments_, context) {
-      const file = exactPathArguments(arguments_, 'rel_path', context)
+    async readFile(arguments_, context): Promise<JsonValue> {
+      const values = recordArguments(arguments_)
+      if (
+        Object.keys(values).some((key) => !['rel_path', 'include_mtime'].includes(key)) ||
+        !Object.prototype.hasOwnProperty.call(values, 'rel_path') ||
+        (values.include_mtime !== undefined && typeof values.include_mtime !== 'boolean')
+      ) throw new PlansBridgeError('INVALID_ARGUMENT')
+      const file = safePlanPath(arguments_, 'rel_path', context)
       try {
-        return { content: readFileBounded(file) }
+        const beforeMtime = values.include_mtime === true ? statSync(file).mtimeMs : undefined
+        const content = readFileBounded(file)
+        const result: Record<string, JsonValue> = { content }
+        if (values.include_mtime === true) {
+          const afterMtime = statSync(file).mtimeMs
+          if (afterMtime !== beforeMtime) {
+            throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace file changed while reading.')
+          }
+          result.mtime = beforeMtime
+        }
+        return result
       } catch (error) {
         if (error instanceof PlansBridgeError) throw error
         throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace file is unavailable.')
       }
     },
-    async writeFile(arguments_, context) {
+    async writeFile(arguments_, context): Promise<JsonValue> {
       const values = recordArguments(arguments_)
-      exactArguments(arguments_, ['rel_path', 'content'])
+      if (
+        Object.keys(values).some((key) => !['rel_path', 'content', 'expected_mtime'].includes(key)) ||
+        !Object.prototype.hasOwnProperty.call(values, 'rel_path') ||
+        !Object.prototype.hasOwnProperty.call(values, 'content')
+      ) throw new PlansBridgeError('INVALID_ARGUMENT')
       const file = mutationPath(context, safePlanPath(arguments_, 'rel_path', context, false))
       if (typeof values.content !== 'string') throw new PlansBridgeError('INVALID_ARGUMENT')
+      const expectedMtime = values.expected_mtime
+      if (
+        expectedMtime !== undefined &&
+        (typeof expectedMtime !== 'number' || !Number.isFinite(expectedMtime))
+      ) throw new PlansBridgeError('INVALID_ARGUMENT')
+      if (expectedMtime !== undefined) {
+        try {
+          const currentMtime = statSync(file).mtimeMs
+          if (currentMtime !== expectedMtime) {
+            return { ok: false, conflict: true, mtime: currentMtime }
+          }
+        } catch {
+          return { ok: false, conflict: true }
+        }
+      }
       try {
         mkdirSync(dirname(file), { recursive: true })
         writeFileSync(file, values.content, 'utf8')
       } catch {
         throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace file could not be written.')
       }
-      return { ok: true }
+      return expectedMtime === undefined ? { ok: true } : { ok: true, mtime: statSync(file).mtimeMs }
     },
     async listDir(arguments_, context) {
       const directory = exactPathArguments(arguments_, 'rel_path', context)
@@ -564,9 +834,9 @@ function createProductionFilesystemPort(): PlansFilesystemPort {
     async delete(arguments_, context) {
       const path = mutationPath(context, exactPathArguments(arguments_, 'rel_path', context, false))
       try {
-        rmSync(path, { recursive: true, force: false })
+        await shell.trashItem(path)
       } catch {
-        throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace path could not be deleted.')
+        throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace path could not be moved to Trash.')
       }
       return { ok: true }
     },
@@ -575,9 +845,13 @@ function createProductionFilesystemPort(): PlansFilesystemPort {
       const from = mutationPath(context, safePlanPath(arguments_, 'from', context, false))
       const to = mutationPath(context, safePlanPath(arguments_, 'to', context, false))
       try {
+        if (pathExists(to)) {
+          throw new PlansBridgeError('INVALID_ARGUMENT', 'Workspace rename destination already exists.')
+        }
         mkdirSync(dirname(to), { recursive: true })
         renameSync(from, to)
-      } catch {
+      } catch (error) {
+        if (error instanceof PlansBridgeError) throw error
         throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Workspace path could not be renamed.')
       }
       return { ok: true }
@@ -611,7 +885,7 @@ export function createProductionPlansCorePorts(
   return {
     ...denied,
     ...overrides,
-    filesystem: overrides.filesystem ?? createProductionFilesystemPort(),
+    filesystem: overrides.filesystem ?? denied.filesystem,
     workspaceStorage: overrides.workspaceStorage ?? createProductionStoragePort(),
   }
 }
@@ -651,6 +925,8 @@ function virtualMutationPathError(root: string, candidate: string): string | nul
 export function createInMemoryPlansCorePorts(options: InMemoryPlansCoreOptions = {}): PlansCorePorts {
   const root = resolve(options.root ?? '/workspace')
   const files = new Map(Object.entries(options.files ?? {}))
+  const mtimes = new Map<string, number>()
+  let nextMtime = 1
   const storage = new Map<string, JsonValue>()
   const sessions = new Map<string, string>()
   const streams = new Map<string, InMemoryOwnedStream>()
@@ -692,27 +968,49 @@ export function createInMemoryPlansCorePorts(options: InMemoryPlansCoreOptions =
   }
   const ownerFor = (context: PlansBridgeContext): string => runtimeOwnerKey(context.runtime)
   const filesystem: PlansFilesystemPort = {
-    async readFile(arguments_, context) {
-      exactArguments(arguments_, ['rel_path'])
+    async readFile(arguments_, context): Promise<JsonValue> {
+      const values = recordArguments(arguments_)
+      if (
+        Object.keys(values).some((key) => !['rel_path', 'include_mtime'].includes(key)) ||
+        !Object.prototype.hasOwnProperty.call(values, 'rel_path') ||
+        (values.include_mtime !== undefined && typeof values.include_mtime !== 'boolean')
+      ) throw new PlansBridgeError('INVALID_ARGUMENT')
       const path = pathFor(arguments_, context)
       const content = files.get(path)
       if (content === undefined) throw new PlansBridgeError('BACKEND_UNAVAILABLE')
       if (Buffer.byteLength(content, 'utf8') > MAX_BACKEND_BRIDGE_RESULT_BYTES) {
         throw new PlansBridgeError('RESULT_TOO_LARGE', 'Workspace file exceeds the Bridge result limit.')
       }
-      return { content }
+      return values.include_mtime === true
+        ? { content, mtime: mtimes.get(path) ?? 1 }
+        : { content }
     },
-    async writeFile(arguments_, context) {
+    async writeFile(arguments_, context): Promise<JsonValue> {
       const values = recordArguments(arguments_)
-      exactArguments(arguments_, ['rel_path', 'content'])
+      if (
+        Object.keys(values).some((key) => !['rel_path', 'content', 'expected_mtime'].includes(key)) ||
+        !Object.prototype.hasOwnProperty.call(values, 'rel_path') ||
+        !Object.prototype.hasOwnProperty.call(values, 'content')
+      ) throw new PlansBridgeError('INVALID_ARGUMENT')
       if (typeof values.content !== 'string') throw new PlansBridgeError('INVALID_ARGUMENT')
       const path = pathFor(arguments_, context)
       if (virtualMutationPathError(workspaceRootFor(context, root), path)) {
         throw new PlansBridgeError('WORKSPACE_SCOPE_VIOLATION')
       }
+      const expectedMtime = values.expected_mtime
+      if (
+        expectedMtime !== undefined &&
+        (typeof expectedMtime !== 'number' || !Number.isFinite(expectedMtime))
+      ) throw new PlansBridgeError('INVALID_ARGUMENT')
+      if (expectedMtime !== undefined && files.has(path) && (mtimes.get(path) ?? 1) !== expectedMtime) {
+        return { ok: false, conflict: true, mtime: mtimes.get(path) ?? 1 }
+      }
+      if (expectedMtime !== undefined && !files.has(path)) return { ok: false, conflict: true }
       files.set(path, values.content)
+      const mtime = ++nextMtime
+      mtimes.set(path, mtime)
       notify(path, 'change')
-      return { ok: true }
+      return expectedMtime === undefined ? { ok: true } : { ok: true, mtime }
     },
     async listDir(arguments_, context) {
       exactArguments(arguments_, ['rel_path'])
@@ -755,6 +1053,9 @@ export function createInMemoryPlansCorePorts(options: InMemoryPlansCoreOptions =
       if (virtualMutationPathError(workspaceRootFor(context, root), from) ||
           virtualMutationPathError(workspaceRootFor(context, root), to)) {
         throw new PlansBridgeError('WORKSPACE_SCOPE_VIOLATION')
+      }
+      if (files.has(to)) {
+        throw new PlansBridgeError('INVALID_ARGUMENT', 'Workspace rename destination already exists.')
       }
       const content = files.get(from)
       if (content !== undefined) {
@@ -963,7 +1264,8 @@ function isJsonValue(value: unknown, seen = new Set<object>()): value is JsonVal
   return valid
 }
 
-/** Default Host composition: real filesystem/watch port, other ports fail closed until their core owners are injected. */
+/** Default Host composition is fail-closed until the application wires the
+ * existing core filesystem service and any other core owners. */
 export function createProductionPlansBridgeDispatcher(
   overrides: Partial<PlansCorePorts> = {},
 ): BackendBridgeDispatcher {

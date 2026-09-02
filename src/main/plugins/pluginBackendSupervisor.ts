@@ -66,6 +66,8 @@ export interface BackendPluginLaunchSpec {
   activation: 'startup'
   /** Host-projected package method allowlist; never supplied by the child. */
   approvedMethods: readonly string[]
+  /** Explicit package-local adapter methods that an MCP agent may invoke. */
+  agentMethods?: readonly string[]
   /** Host-projected package event allowlist; never supplied by the child. */
   approvedEvents: readonly string[]
   /** Host-private core ports projected for this package activation. */
@@ -85,6 +87,7 @@ export type BackendPluginErrorCode =
   | 'INVALID_ACTIVATION'
   | 'INVALID_RUNTIME'
   | 'INVALID_ARGUMENT'
+  | 'CAPABILITY_DENIED'
   | 'RESOURCE_LIMIT'
   | 'NOT_READY'
   | 'TIMEOUT'
@@ -99,6 +102,7 @@ const ERROR_MESSAGES: Record<BackendPluginErrorCode, string> = {
   INVALID_ACTIVATION: 'Backend plugin activation is invalid.',
   INVALID_RUNTIME: 'Backend runtime is invalid.',
   INVALID_ARGUMENT: 'Backend call arguments are invalid.',
+  CAPABILITY_DENIED: 'Backend capability is denied.',
   RESOURCE_LIMIT: 'Backend resource limit reached.',
   NOT_READY: 'Backend plugin is not ready.',
   TIMEOUT: 'Backend plugin call timed out.',
@@ -225,6 +229,8 @@ export interface PluginBackendSupervisorOptions {
     runtime: BackendRuntimeContext,
     workspacePath?: string,
   ) => ExecutionPolicySnapshot | undefined
+  /** Notify the Host when this child generation becomes unusable. */
+  onFailure?: (error: BackendPluginError) => void
 }
 
 export interface AuthorizedPlanRootBinding {
@@ -982,6 +988,7 @@ export class PluginBackendSupervisor {
     runtime: BackendRuntimeContext,
     workspacePath?: string,
   ) => ExecutionPolicySnapshot | undefined
+  private readonly onFailure?: (error: BackendPluginError) => void
   private rootRefreshController?: AbortController
   private state: SupervisorState = 'idle'
   private currentGeneration?: ChildGeneration
@@ -1018,6 +1025,7 @@ export class PluginBackendSupervisor {
       activation.protocolVersion !== 1 ||
       activation.activation !== 'startup' ||
       !isApprovedMethodList(activation.approvedMethods) ||
+      !isAgentMethodList(activation.agentMethods, activation.approvedMethods) ||
       !isApprovedEventList(activation.approvedEvents) ||
       !isApprovedBridgePortList(activation.approvedBridgePorts) ||
       !options ||
@@ -1028,6 +1036,9 @@ export class PluginBackendSupervisor {
     this.activation = Object.freeze({
       ...activation,
       approvedMethods: Object.freeze([...activation.approvedMethods]),
+      ...(activation.agentMethods === undefined
+        ? { agentMethods: Object.freeze([]) }
+        : { agentMethods: Object.freeze([...activation.agentMethods]) }),
       approvedEvents: Object.freeze([...activation.approvedEvents]),
       ...(activation.approvedBridgePorts === undefined
         ? {}
@@ -1051,6 +1062,7 @@ export class PluginBackendSupervisor {
     this.authorizedPlanRoot = options.authorizedPlanRoot
     this.refreshAuthorizedPlanRoot = options.refreshAuthorizedPlanRoot
     this.resolveExecutionPolicy = options.resolveExecutionPolicy
+    this.onFailure = options.onFailure
     if (
       !isRecord(this.clientCapabilities) ||
       !isJsonValue(this.clientCapabilities) ||
@@ -2380,6 +2392,7 @@ export class PluginBackendSupervisor {
       this.rejectPending(error, true, this.closeTask ? 'stopping' : 'restarting')
       return
     }
+    const firstFailure = this.failure === undefined
     const error = this.failure ?? new BackendPluginError(code)
     if (code === 'PROTOCOL_ERROR') {
       this.settleAllSubscriptions({ reason: 'protocol-error', error })
@@ -2392,6 +2405,14 @@ export class PluginBackendSupervisor {
     this.ignoredRequestIds.clear()
     this.abortBridgeRequestsForGeneration(generation)
     this.rejectPending(error)
+    if (firstFailure) {
+      try {
+        this.onFailure?.(error)
+      } catch {
+        // Failure observation must not interrupt child teardown or reject the
+        // calls already being settled above.
+      }
+    }
     if (terminate && generation && !generation.exited) {
       void this.requestTermination(generation, code === 'PROTOCOL_ERROR')
     }
@@ -2549,8 +2570,10 @@ function isViewRuntime(value: BackendRuntimeContext): boolean {
     value.instanceId.length > 0 &&
     typeof value.contributionKey === 'string' &&
     value.contributionKey.length > 0 &&
-    typeof value.hostWindowId === 'string' &&
-    value.hostWindowId.length > 0
+    (value.hostWindowId === null || (
+      typeof value.hostWindowId === 'string' &&
+      value.hostWindowId.length > 0
+    ))
   )
 }
 
@@ -2558,6 +2581,16 @@ function isApprovedMethodList(value: unknown): value is readonly string[] {
   return Array.isArray(value) &&
     new Set(value).size === value.length &&
     value.every((method) => isMethodName(method))
+}
+
+function isAgentMethodList(
+  value: unknown,
+  approvedMethods: readonly string[],
+): value is readonly string[] {
+  return value === undefined || (
+    isApprovedMethodList(value) &&
+    value.every((method) => approvedMethods.includes(method))
+  )
 }
 
 function isApprovedEventList(value: unknown): value is readonly string[] {

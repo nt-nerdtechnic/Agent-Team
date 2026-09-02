@@ -556,6 +556,7 @@ const WS_PATH_KEY = 'agentTeam.currentWorkspace'
 const _bootWorkspace = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
 const _bootIsDuplicate = new URLSearchParams(window.location.search).get('duplicate') === '1'
 const legacyGitRecovery = ref(new URLSearchParams(window.location.search).get('legacy_git_recovery') === '1')
+const legacyPlansRecovery = ref(new URLSearchParams(window.location.search).get('legacy_plans_recovery') === '1')
 // Set by main when this window is reopened from the saved session snapshot
 // (index.ts passes restore: '1'). Distinguishes "the app restored this
 // workspace for you" from "the user deliberately opened it" — an empty
@@ -4107,6 +4108,7 @@ function onGitContributionAction(envelope: {
 let stopGitContributionActions: (() => void) | null = null
 let stopPluginContributionChanges: (() => void) | null = null
 let stopGitRecoveryChanged: (() => void) | null = null
+let stopPlansRecoveryChanged: (() => void) | null = null
 onMounted(() => {
   stopGitContributionActions = window.agentTeam?.onGitContributionAction?.(onGitContributionAction) ?? null
   stopGitRecoveryChanged = window.agentTeam?.onGitRecoveryChanged?.((change) => {
@@ -4114,6 +4116,9 @@ onMounted(() => {
     // restores the bundled v2 package). Latching on true left an open window
     // showing the "Legacy recovery" panel for the rest of its life.
     legacyGitRecovery.value = change.legacy
+  }) ?? null
+  stopPlansRecoveryChanged = window.agentTeam?.onPlansRecoveryChanged?.((change) => {
+    legacyPlansRecovery.value = change.legacy
   }) ?? null
   void refreshPluginContributions()
   stopPluginContributionChanges = window.agentTeam?.plugins?.onContributionsChanged?.(() => {
@@ -4125,6 +4130,8 @@ onUnmounted(() => {
   stopGitContributionActions = null
   stopGitRecoveryChanged?.()
   stopGitRecoveryChanged = null
+  stopPlansRecoveryChanged?.()
+  stopPlansRecoveryChanged = null
   stopPluginContributionChanges?.()
   stopPluginContributionChanges = null
 })
@@ -14301,6 +14308,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :backend="backend"
       :plugin-contributions="pluginContributions"
       :legacy-git-recovery="legacyGitRecovery"
+      :legacy-plans-recovery="legacyPlansRecovery"
       :git-changes-count="gitChangesCount"
       v-model:yolo-enabled="yoloEnabled"
       v-model:analyzer-model="analyzerModel"

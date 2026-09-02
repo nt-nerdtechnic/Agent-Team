@@ -14,6 +14,7 @@ import FolderIcon from './FolderIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
 import GitPluginHostSlot from './GitPluginHostSlot.vue'
 import PluginRegionHost, { type PluginRegionContribution } from './PluginRegionHost.vue'
+import { readLegacyPlansPreferenceProjection } from '../editor/plansPreferences'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
 import type { DisplayStatus } from '@navide/terminal'
 import type { Role, RoleKey } from '../data/roles'
@@ -24,8 +25,9 @@ import { useUpdater } from '../composables/useUpdater'
 import { i18n } from '@navide/plugin-ui/foundation'
 import { useNotify } from '@navide/plugin-ui/foundation'
 
-// Plans remains a Host-owned bundled surface until the B6 migration moves the
-// complete frontend/backend feature behind a Manifest v2 contribution.
+// The legacy pane is a recovery adapter only. Normal Plans composition is the
+// Manifest v2 contribution below, so one active package version owns both
+// left and window surfaces.
 const PlanPane = defineAsyncComponent(() => import('../editor/PlanPane.vue'))
 
 // Re-exported from the canonical per-vendor specs — this was a hand-kept
@@ -289,6 +291,8 @@ interface Props {
   pluginContributions?: PluginRegionContribution[]
   /** Main-process-only legacy Git recovery mode. */
   legacyGitRecovery?: boolean
+  /** Main-process-only legacy Plans recovery mode. */
+  legacyPlansRecovery?: boolean
   /** Change count published by the legacy Git recovery contribution. */
   gitChangesCount?: number
   /** Left slot collapsed — swaps the panel body for a narrow icon rail.
@@ -742,6 +746,7 @@ type SidebarTab = 'agents' | 'pipeline' | 'explorer' | 'git' | 'plans' | `plugin
 const CORE_SIDEBAR_TABS = ['agents', 'pipeline', 'explorer'] as const
 type CoreSidebarTab = (typeof CORE_SIDEBAR_TABS)[number]
 const legacyGitRecovery = computed(() => props.legacyGitRecovery === true)
+const legacyPlansRecovery = computed(() => props.legacyPlansRecovery === true)
 const pluginTabId = (key: string): `plugin:${string}` => `plugin:${key}`
 const isPluginTab = (tab: SidebarTab): tab is `plugin:${string}` => tab.startsWith('plugin:')
 const pluginTabs = computed(() =>
@@ -750,7 +755,24 @@ const pluginTabs = computed(() =>
     .map((entry) => ({ ...entry, tabId: pluginTabId(entry.contributionKey) }))
 )
 const gitPluginTab = computed(() => pluginTabs.value.find((entry) => entry.pluginId === 'navide.git') ?? null)
-const genericPluginTabs = computed(() => pluginTabs.value.filter((entry) => entry.pluginId !== 'navide.git'))
+const plansPluginTab = computed(() => pluginTabs.value.find((entry) => entry.pluginId === 'navide.plans') ?? null)
+const genericPluginTabs = computed(() => pluginTabs.value.filter((entry) =>
+  entry.pluginId !== 'navide.git' && entry.pluginId !== 'navide.plans'
+))
+
+async function projectPlansPreferencesBeforePrepare(): Promise<void> {
+  const workspacePath = props.workspace ?? ''
+  if (!workspacePath) return
+  try {
+    await window.agentTeam?.projectLegacyPlansPreferences?.({
+      workspace_path: workspacePath,
+      values: readLegacyPlansPreferenceProjection(workspacePath),
+    })
+  } catch {
+    // Migration is create-only and best effort; the package still owns the
+    // surface when the legacy storage origin is unavailable.
+  }
+}
 const failedPluginIcons = ref(new Set<string>())
 const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): string =>
   `${entry.contributionKey}\u0000${entry.icon ?? ''}`
@@ -1775,7 +1797,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
     </div>
 
     <!-- ── Explorer / plugin regions (shared split: panel on top, agent dock pinned at bottom) ── -->
-    <div v-show="sidebarTab === 'explorer' || sidebarTab === 'git' || isPluginTab(sidebarTab)" class="pane-split">
+    <div v-show="sidebarTab === 'explorer' || sidebarTab === 'git' || sidebarTab === 'plans' || isPluginTab(sidebarTab)" class="pane-split">
       <div class="part-top" style="flex: 1">
         <ExplorerPane
           v-if="backend && visibleTabIds.has('explorer')"
@@ -1786,11 +1808,19 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <!-- Generic plugin views are mounted by contribution key; the renderer
              never receives the Host-generated instance id. -->
         <PluginRegionHost
-          v-for="pluginTab in pluginTabs"
+          v-for="pluginTab in genericPluginTabs"
           :key="pluginTab.contributionKey"
           :contribution="pluginTab"
           :workspace-path="workspace ?? ''"
           :visible="!collapsed && sidebarTab === pluginTab.tabId"
+        />
+        <PluginRegionHost
+          v-if="plansPluginTab && !legacyPlansRecovery"
+          :key="plansPluginTab.contributionKey"
+          :contribution="plansPluginTab"
+          :workspace-path="workspace ?? ''"
+          :visible="!collapsed && sidebarTab === 'plans'"
+          :before-prepare="projectPlansPreferencesBeforePrepare"
         />
         <template v-if="legacyGitRecovery && backend && sidebarTab === 'git'">
           <div class="legacy-recovery-label" data-legacy-recovery-label>Legacy recovery</div>
@@ -1808,6 +1838,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             @spawn-for-issue="$emit('spawn-for-issue', $event)"
             @focus-pane="$emit('focus-pane', $event)"
             @open-git-accounts="$emit('open-git-accounts')"
+          />
+        </template>
+        <template v-if="legacyPlansRecovery && backend && sidebarTab === 'plans'">
+          <div class="legacy-recovery-label" data-plans-legacy-recovery-label>Legacy recovery</div>
+          <PlanPane
+            class="plans-split"
+            :workspace-path="workspace ?? ''"
+            :backend="backend"
           />
         </template>
       </div>
@@ -2453,14 +2491,6 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       </section>
     </div><!-- /pipeline-detail-scroll -->
     </div><!-- end pipeline tab · detail view -->
-
-    <!-- Plans remains Host-owned until the B6 package migration. -->
-    <PlanPane
-      v-if="backend && visibleTabIds.has('plans') && sidebarTab === 'plans'"
-      class="plans-split"
-      :workspace-path="workspace ?? ''"
-      :backend="backend"
-    />
 
     <Teleport to="body">
       <div v-if="confirmingRestart" class="restart-modal" @click.self="confirmingRestart = false">

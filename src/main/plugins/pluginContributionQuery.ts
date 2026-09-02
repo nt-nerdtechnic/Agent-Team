@@ -16,7 +16,9 @@ export function composePluginContributionQuery(options: PluginContributionQueryO
   params.set('theme', options.theme)
   for (const [key, value] of Object.entries(options.gitReadOnly ?? {})) params.set(key, value)
   params.set('v2', '1')
-  if (options.contributionKey === 'navide.git.left') params.set('contribution', 'left')
-  if (options.contributionKey === 'navide.git.window') params.set('contribution', 'window')
+  const contribution = options.contributionKey.split('.').at(-1)
+  if (contribution === 'left' || contribution === 'window') {
+    params.set('contribution', contribution)
+  }
   return `?${params.toString()}`
 }

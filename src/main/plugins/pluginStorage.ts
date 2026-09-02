@@ -538,6 +538,30 @@ export class PluginStorageStore {
     })
   }
 
+  /** Host-only create-once write used by migrations that must never replace a
+   * value written by the active package or another Host surface. The presence
+   * check and write share the same partition lock, so this is atomic with
+   * respect to normal storage execution. */
+  async setIfAbsent(execution: StorageExecution): Promise<boolean> {
+    if (execution.address !== 'storage.set') {
+      invalid('create-once storage writes require storage.set')
+    }
+    const identity = identityOf(execution.snapshot)
+    return this.withPluginOperation(identity.pluginId, async () => {
+      const validated = validateExecution(execution)
+      return this.withLocks([identity], async () => {
+        const result = await this.set(
+          identity,
+          execution.partition,
+          validated.args,
+          validated.value!,
+          true,
+        )
+        return result === true
+      })
+    })
+  }
+
   /** Copy one Host-selected snapshot without overwriting an existing target. */
   async cloneSnapshot(
     source: HostStorageSnapshotIdentity,
@@ -731,8 +755,9 @@ export class PluginStorageStore {
     identity: HostStorageSnapshotIdentity,
     partition: StoragePartition,
     args: StorageArgs,
-    normalized: NormalizedJsonValue
-  ): Promise<null> {
+    normalized: NormalizedJsonValue,
+    onlyIfAbsent = false,
+  ): Promise<null | boolean> {
     const current = await this.readPartition(identity, partition)
     const document = current?.document ?? {
       schemaVersion: 2 as const,
@@ -747,7 +772,10 @@ export class PluginStorageStore {
       internal('storage partition scope does not match request')
     }
     const existing = document.entries.find((entry) => entry.key === args.key)
-    if (existing) existing.value = normalized.value
+    if (existing) {
+      if (onlyIfAbsent) return false
+      existing.value = normalized.value
+    }
     else document.entries.push({ key: args.key, value: normalized.value })
     validateUniqueEntries(document.entries, 'storage partition')
     const canonical = canonicalPartition(document)
@@ -771,7 +799,7 @@ export class PluginStorageStore {
       if (error instanceof PluginStorageError) throw error
       throw new PluginStorageError('INTERNAL_ERROR', 'storage partition could not be written')
     }
-    return null
+    return onlyIfAbsent ? true : null
   }
 
   private async delete(

@@ -45,6 +45,7 @@ beforeEach(() => {
   plansPaneSpies.closeActiveOverlay.mockReset().mockReturnValue(false)
   ;(window as unknown as { agentTeam?: unknown }).agentTeam = {
     openPlansWindow: vi.fn(async () => ({ ok: true })),
+    projectLegacyPlansPreferences: vi.fn(async () => ({ ok: true })),
   }
 })
 
@@ -98,6 +99,13 @@ describe('PlanPane', () => {
     expect(openPlansWindow).toHaveBeenCalledWith({
       workspace_path: '/tmp/repo',
       rel_path: '.agent-team/plans/feature_a1b2c3.html',
+    })
+    const projectLegacyPlansPreferences = (window as unknown as {
+      agentTeam: { projectLegacyPlansPreferences: ReturnType<typeof vi.fn> }
+    }).agentTeam.projectLegacyPlansPreferences
+    expect(projectLegacyPlansPreferences).toHaveBeenCalledWith({
+      workspace_path: '/tmp/demo-ws',
+      values: {},
     })
   })
 

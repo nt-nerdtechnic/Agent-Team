@@ -10,6 +10,7 @@ import type {
   StorageGetResult,
   StoragePartitionScope,
 } from '@navide/plugin-contracts'
+import { PluginError } from '@navide/plugin-contracts'
 
 export { PluginError } from '@navide/plugin-contracts'
 export type {
@@ -144,6 +145,148 @@ interface RuntimeBackendSubscription {
   readonly ready: Promise<void>
   readonly settled: Promise<void>
   dispose(): void
+}
+
+interface RuntimeCapabilityResponse {
+  reqId: string
+  ok: boolean
+  result?: unknown
+  error?: { code: string; message?: string }
+}
+
+interface RuntimeCapabilityBridge {
+  callCapability(
+    namespace: string,
+    method: string,
+    args?: unknown,
+  ): Promise<RuntimeCapabilityResponse>
+  on(type: string, listener: (payload: unknown) => void): () => void
+}
+
+export interface PluginViewRuntimeClient {
+  ready(): void
+  onOpenTarget(listener: (target: Record<string, string>) => void): Disposable
+}
+
+interface RuntimeViewBridge {
+  ready(): void
+  onOpenTarget(listener: (target: Record<string, string>) => void): () => void
+}
+
+function runtimeCapabilityBridge(): RuntimeCapabilityBridge {
+  const bridge = (globalThis as unknown as { nav?: Partial<RuntimeCapabilityBridge> }).nav
+  if (
+    !bridge ||
+    typeof bridge.callCapability !== 'function' ||
+    typeof bridge.on !== 'function'
+  ) {
+    throw new PluginError('BACKEND_UNAVAILABLE', 'Plugin capability runtime is unavailable.')
+  }
+  return bridge as RuntimeCapabilityBridge
+}
+
+function runtimeViewBridge(): RuntimeViewBridge {
+  const bridge = (globalThis as unknown as { nav?: Partial<RuntimeViewBridge> }).nav
+  if (
+    !bridge ||
+    typeof bridge.ready !== 'function' ||
+    typeof bridge.onOpenTarget !== 'function'
+  ) {
+    throw new PluginError('BACKEND_UNAVAILABLE', 'Plugin view runtime is unavailable.')
+  }
+  return bridge as RuntimeViewBridge
+}
+
+/** Public lifecycle/target adapter for package views. The private preload
+ * transport remains an SDK implementation detail. */
+export function createPluginViewRuntimeClient(): PluginViewRuntimeClient {
+  return Object.freeze({
+    ready(): void {
+      runtimeViewBridge().ready()
+    },
+    onOpenTarget(listener: (target: Record<string, string>) => void): Disposable {
+      if (typeof listener !== 'function') {
+        throw new PluginError('INVALID_ARGUMENT', 'Plugin target listener is invalid.')
+      }
+      return Object.freeze({ dispose: runtimeViewBridge().onOpenTarget(listener) })
+    },
+  })
+}
+
+function publicMethodAddress(method: PublicMethod): { namespace: string; name: string } {
+  const separator = method.indexOf('.')
+  if (separator < 1 || separator === method.length - 1) {
+    throw new PluginError('METHOD_NOT_FOUND', `Invalid public capability '${method}'.`)
+  }
+  return { namespace: method.slice(0, separator), name: method.slice(separator + 1) }
+}
+
+function publicCapabilityError(code: string): PluginErrorCode {
+  switch (code) {
+    case 'CAP_DENIED': return 'CAPABILITY_DENIED'
+    case 'UNKNOWN': return 'METHOD_NOT_FOUND'
+    case 'BAD_REQUEST': return 'INVALID_ARGUMENT'
+    case 'BACKEND_ERROR': return 'BACKEND_UNAVAILABLE'
+    case 'CAPABILITY_DENIED':
+    case 'METHOD_NOT_FOUND':
+    case 'INVALID_ARGUMENT':
+    case 'WORKSPACE_SCOPE_VIOLATION':
+    case 'USER_CANCELLED':
+    case 'TIMEOUT':
+    case 'BACKEND_UNAVAILABLE':
+    case 'PLUGIN_STOPPING':
+    case 'STORAGE_QUOTA_EXCEEDED':
+    case 'INTERNAL_ERROR':
+      return code
+    default:
+      return 'INTERNAL_ERROR'
+  }
+}
+
+/**
+ * Public capability/event runtime for package frontends. The private preload
+ * transport is resolved inside the SDK; package code receives only the typed
+ * capability and Disposable seams declared by PluginContext.
+ */
+export function createPluginCapabilityClient(): Pick<PluginContext, 'capabilities' | 'events'> {
+  return Object.freeze({
+    capabilities: Object.freeze({
+      async invoke<M extends PublicMethod>(method: M, params: Params<M>): Promise<Result<M>> {
+        const address = publicMethodAddress(method)
+        const response = await runtimeCapabilityBridge().callCapability(
+          address.namespace,
+          address.name,
+          params,
+        )
+        if (!response || typeof response.ok !== 'boolean') {
+          throw new PluginError('INTERNAL_ERROR', 'Plugin capability returned an invalid response.')
+        }
+        if (!response.ok) {
+          throw new PluginError(
+            publicCapabilityError(response.error?.code ?? 'INTERNAL_ERROR'),
+            response.error?.message ?? 'Plugin capability request failed.',
+          )
+        }
+        return response.result as Result<M>
+      },
+    }),
+    events: Object.freeze({
+      subscribe<E extends PublicEvent>(
+        event: E,
+        listener: (payload: Payload<E>) => void,
+      ): Disposable {
+        if (typeof listener !== 'function') {
+          throw new PluginError('INVALID_ARGUMENT', 'Plugin event listener is invalid.')
+        }
+        return Object.freeze({
+          dispose: runtimeCapabilityBridge().on(
+            event,
+            listener as (payload: unknown) => void,
+          ),
+        })
+      },
+    }),
+  })
 }
 
 interface RuntimeBackendBridge {

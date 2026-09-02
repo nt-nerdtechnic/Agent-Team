@@ -1,7 +1,18 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import PluginRegionHost, { type PluginRegionContribution } from '../PluginRegionHost.vue'
+import PluginRegionHost from '../PluginRegionHost.vue'
+
+type PluginRegionContribution = {
+  pluginId: string
+  packageVersion: string | null
+  contributionKey: string
+  title: string
+  icon: string | null
+  kind: 'custom'
+  location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
+  manifestOrder: number
+}
 
 const contribution: PluginRegionContribution = {
   pluginId: 'acme.files',
@@ -67,6 +78,24 @@ describe('PluginRegionHost', () => {
     expect(view.exists()).toBe(true)
     expect(view.attributes('src')).toBe(URL_A)
     expect(JSON.stringify(prepare.mock.calls)).not.toContain('instance')
+    wrapper.unmount()
+  })
+
+  it('runs the Host migration funnel before preparing the guest', async () => {
+    const order: string[] = []
+    const beforePrepare = vi.fn(async () => { order.push('migrate') })
+    const prepare = vi.fn(async () => {
+      order.push('prepare')
+      return { ok: true, url: URL_A }
+    })
+    stubPlugins(prepare)
+    const wrapper = mount(PluginRegionHost, {
+      props: { contribution, workspacePath: '/ws', visible: true, beforePrepare },
+    })
+    await flushPromises()
+
+    expect(beforePrepare).toHaveBeenCalledOnce()
+    expect(order).toEqual(['migrate', 'prepare'])
     wrapper.unmount()
   })
 

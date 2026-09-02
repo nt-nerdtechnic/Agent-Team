@@ -48,6 +48,24 @@ describe('composePluginContributionQuery', () => {
     })
   })
 
+  it('identifies Plans left and window contributions for the package entrypoint', () => {
+    const left = new URLSearchParams(composePluginContributionQuery({
+      contributionKey: 'navide.plans.left',
+      workspacePath: '/workspace',
+      theme: 'dark',
+    }))
+    const window = new URLSearchParams(composePluginContributionQuery({
+      contributionKey: 'navide.plans.window',
+      workspacePath: '/workspace',
+      theme: 'dark',
+      extraParams: { rel_path: '.agent-team/plans/example.html' },
+    }))
+
+    expect(left.get('contribution')).toBe('left')
+    expect(window.get('contribution')).toBe('window')
+    expect(window.get('rel_path')).toBe('.agent-team/plans/example.html')
+  })
+
   it('keeps Host-owned context authoritative over extra entry parameters', () => {
     const query = composePluginContributionQuery({
       contributionKey: 'navide.git.window',

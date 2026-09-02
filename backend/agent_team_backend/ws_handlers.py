@@ -50,6 +50,7 @@ from .mcp_settings import (
     restore_mcp_server_secrets,
 )
 from .plan_index import resolve_plan_root
+from .plan_provisioning import SPEC_FILENAME, TEMPLATE_FILENAME, ensure_plan_assets
 from .profiles_store import SUPPORTED_AGENT_KEYS as PROFILE_AGENT_KEYS
 from .skills_store import (
     SkillConflictError,
@@ -152,15 +153,26 @@ async def host_register(session: "Session", msg_id: str, msg_type: str, payload:
 
     if (
         not isinstance(payload, dict)
-        or set(payload) != {"token"}
+        or set(payload) not in ({"token"}, {"token", "features"})
         or not app.host_session_token_matches(payload.get("token"))
+        or (
+            "features" in payload
+            and (
+                not isinstance(payload["features"], dict)
+                or set(payload["features"]) - {"plans_backend_v2"}
+                or not isinstance(payload["features"].get("plans_backend_v2", False), bool)
+            )
+        )
     ):
         session.host_authenticated = False
+        session.plans_backend_v2 = False
         await session.send_json(
             make_error(msg_id, msg_type, "UNAUTHORIZED", "Host session authentication failed")
         )
         return
     session.host_authenticated = True
+    features = payload.get("features", {})
+    session.plans_backend_v2 = isinstance(features, dict) and features.get("plans_backend_v2") is True
     await session.send_json(make_response(msg_id, msg_type, {"registered": True}))
 
 
@@ -371,6 +383,18 @@ async def fs_stat_path(session: "Session", msg_id: str, msg_type: str, payload: 
     await session.send_json(make_response(msg_id, msg_type, result))
 
 
+@handler("fs.stat_workspace_path")
+async def fs_stat_workspace_path(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    result = await asyncio.to_thread(
+        app.fs_service.stat_workspace_path,
+        payload.get("workspace_path") or "",
+        payload.get("rel_path", "") or "",
+    )
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
 @handler("fs.read_image")
 async def fs_read_image(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -406,6 +430,39 @@ async def fs_convert_office(session: "Session", msg_id: str, msg_type: str, payl
 # One scan of every plan/report directory, carrying the meta the caller parsed
 # last time whenever the file has not changed since. Replaces a per-directory
 # fs.list_dir fan-out plus one fs.read_file per document on every refresh.
+@handler("plans.ensure_assets")
+async def plans_ensure_assets(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Provision the canonical Plans assets for a Host-owned create dispatch."""
+    if not session.host_authenticated:
+        await session.send_json(
+            make_error(msg_id, msg_type, "UNAUTHORIZED", "Host session is not authenticated")
+        )
+        return
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"workspace_path"}
+        or not isinstance(payload.get("workspace_path"), str)
+        or not payload["workspace_path"]
+    ):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "Plans asset request is malformed")
+        )
+        return
+    workspace_path = payload["workspace_path"]
+    root = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    await asyncio.to_thread(ensure_plan_assets, workspace_path)
+    plans_dir = Path(root) / ".agent-team" / "plans"
+    if not (
+        (plans_dir / SPEC_FILENAME).is_file()
+        and (plans_dir / TEMPLATE_FILENAME).is_file()
+    ):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BACKEND_UNAVAILABLE", "Plans assets could not be provisioned")
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "root": root}))
+
+
 @handler("plans.list_docs")
 async def plans_list_docs(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app

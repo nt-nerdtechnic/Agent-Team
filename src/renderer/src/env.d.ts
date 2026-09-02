@@ -7,6 +7,7 @@ type UpdateState = import('../../shared/updater').UpdateState
 type ExecutionPolicyApi = import('../../shared/executionPolicy').ExecutionPolicyApi
 type ManifestPermissionsSummary = import('../../shared/executionPolicy').ManifestPermissionsSummary
 type PackageVersionGrantSummary = import('../../shared/executionPolicy').PackageVersionGrantSummary
+type LegacyPlansPreferenceProjection = import('../../shared/plansPreferences').LegacyPlansPreferenceProjection
 
 interface BackendInfo {
   status: 'starting' | 'ready' | 'error'
@@ -41,7 +42,11 @@ interface GitCredential {
 }
 
 interface GitRecoveryChanged {
-  legacy: true
+  legacy: boolean
+}
+
+interface PlansRecoveryChanged {
+  legacy: boolean
 }
 
 declare global {
@@ -62,6 +67,7 @@ declare global {
       onBackendChanged: (cb: (info: BackendInfo) => void) => void
       retryGitV2: () => Promise<{ ok: boolean; reason?: string }>
       onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void) => () => void
+      onPlansRecoveryChanged: (cb: (change: PlansRecoveryChanged) => void) => () => void
       onMenuAction: (cb: (action: string) => void) => void
       onSystemResumed: (cb: () => void) => () => void
       setRecentWorkspaces: (list: { path: string; name: string; exists: boolean }[]) => void
@@ -95,6 +101,14 @@ declare global {
       onGroupReattached: (cb: (groupId: string) => void) => void
       onOpenPipelineManager: (handler: (payload: { pipelineId?: string }) => void) => () => void
       openPlansWindow: (args: { workspace_path: string; rel_path?: string }) => Promise<{ ok: boolean }>
+      projectLegacyPlansPreferences: (args: {
+        workspace_path: string
+        values: LegacyPlansPreferenceProjection
+      }) => Promise<{ ok: boolean; error?: string }>
+      getPlansLegacyRecoveryPreferences: () => Promise<LegacyPlansPreferenceProjection | null>
+      onPlansLegacyRecoveryPreferences: (
+        cb: (values: LegacyPlansPreferenceProjection) => void,
+      ) => () => void
       onOpenResourceManager: (handler: () => void) => () => void
       requestPaneAction: (args: {
         paneId: string

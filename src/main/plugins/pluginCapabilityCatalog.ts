@@ -130,6 +130,10 @@ function validateEditorRequest(value: unknown): value is Record<string, unknown>
   )
 }
 
+function validatePlansWindowRequest(value: unknown): value is Record<string, unknown> {
+  return requestWithString('path', value)
+}
+
 function validateExternalRequest(value: unknown): value is Record<string, unknown> {
   if (!requestWithString('url', value)) return false
   return /^https:\/\/[^\s]+$/i.test(String((value as Record<string, unknown>).url))
@@ -243,6 +247,12 @@ export const PUBLIC_CAPABILITY_CATALOG: Readonly<Record<string, PublicCapability
   'fs.stat': systemMethod('fs.stat', 'fs', (value) => requestWithString('path', value)),
   'fs.statPath': systemMethod('fs.statPath', 'fs', (value) => requestWithString('path', value)),
   'ui.openInEditor': systemMethod('ui.openInEditor', 'ui', validateEditorRequest),
+  'ui.openPlansWindow': systemMethod(
+    'ui.openPlansWindow',
+    'ui',
+    validatePlansWindowRequest,
+    'firstParty',
+  ),
   'ui.openExternal': systemMethod('ui.openExternal', 'ui', validateExternalRequest),
   'storage.get': storageMethod('storage.get'),
   'storage.set': storageMethod('storage.set'),

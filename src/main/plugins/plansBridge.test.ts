@@ -3,15 +3,18 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import {
+  createHostPlansFilesystemPort,
   createInMemoryPlansCorePorts,
   createInMemoryPlansBridgeDispatcher,
+  createTestPlansFilesystemPort,
   createProductionPlansCorePorts,
   createProductionPlansBridgeDispatcher,
   type BackendBridgeDispatcher,
   type PlansBridgeContext,
   type PlansBridgeRequest,
+  type PlansFilesystemService,
 } from './plansBridge'
-import type { BackendRuntimeContext } from './pluginBackendSupervisor'
+import type { BackendRuntimeContext, JsonValue } from './pluginBackendSupervisor'
 import {
   MAX_BACKEND_BRIDGE_RESULT_BYTES,
   MAX_BACKEND_BRIDGE_CHUNK_BYTES,
@@ -109,15 +112,19 @@ async function runCoreCorpus(create: () => ReturnType<typeof createInMemoryPlans
 function createProductionCorpusDispatcher(): BackendBridgeDispatcher {
   const injectedCore = createInMemoryPlansCorePorts({ root: process.cwd() })
   return createProductionPlansBridgeDispatcher({
-    // The production composition owns the filesystem/watch implementation;
-    // the remaining core owners are explicit dependencies until their
-    // production lifecycle is activated by Issue 23E.
+    filesystem: createTestPlansFilesystemPort(),
     workspaceStorage: injectedCore.workspaceStorage,
     terminal: injectedCore.terminal,
     agentMessaging: injectedCore.agentMessaging,
     routes: injectedCore.routes,
     streams: injectedCore.streams,
     spawn: injectedCore.spawn,
+  })
+}
+
+function createLocalFilesystemDispatcher(): BackendBridgeDispatcher {
+  return createProductionPlansBridgeDispatcher({
+    filesystem: createTestPlansFilesystemPort(),
   })
 }
 
@@ -272,10 +279,32 @@ describe('Plans Host Bridge ports', () => {
     )).rejects.toMatchObject({ code: 'BACKEND_UNAVAILABLE' })
   })
 
+  it('does not overwrite an existing production rename destination', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-plans-bridge-rename-'))
+    const dispatcher = createLocalFilesystemDispatcher()
+    const controller = new AbortController()
+    const bridgeContext = context(controller.signal, [], root, runtime, realpathSync(root))
+    writeFileSync(join(root, 'source.html'), 'source', 'utf8')
+    writeFileSync(join(root, 'destination.html'), 'destination', 'utf8')
+    try {
+      await expect(dispatcher.dispatch(
+        request('filesystem', 'rename', {
+          from: 'source.html',
+          to: 'destination.html',
+        }),
+        bridgeContext,
+      )).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+      expect(readFileSync(join(root, 'source.html'), 'utf8')).toBe('source')
+      expect(readFileSync(join(root, 'destination.html'), 'utf8')).toBe('destination')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('protects Git metadata and symlink escapes on production mutations', async () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-plans-bridge-root-'))
     const outside = mkdtempSync(join(tmpdir(), 'navide-plans-bridge-outside-'))
-    const dispatcher = createProductionPlansBridgeDispatcher()
+    const dispatcher = createLocalFilesystemDispatcher()
     const controller = new AbortController()
     const bridgeContext = context(controller.signal, [], root, runtime, realpathSync(root))
     mkdirSync(join(root, '.git', 'hooks'), { recursive: true })
@@ -321,7 +350,7 @@ describe('Plans Host Bridge ports', () => {
 
   it('rejects a filesystem read before it can exceed the bridge result bound', async () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-plans-bridge-large-'))
-    const dispatcher = createProductionPlansBridgeDispatcher()
+    const dispatcher = createLocalFilesystemDispatcher()
     const controller = new AbortController()
     const bridgeContext = context(controller.signal, [], root, runtime, realpathSync(root))
     writeFileSync(
@@ -346,7 +375,7 @@ describe('Plans Host Bridge ports', () => {
   })
 
   it('uses the same production dispatcher seam for the real filesystem root', async () => {
-    const dispatcher = createProductionPlansBridgeDispatcher()
+    const dispatcher = createLocalFilesystemDispatcher()
     const controller = new AbortController()
     await expect(dispatcher.dispatch(
       request('filesystem', 'resolve_root', {}),
@@ -356,6 +385,107 @@ describe('Plans Host Bridge ports', () => {
       request('workspace-storage', 'get', { scope: 'workspace', key: 'draft' }),
       context(controller.signal, [], process.cwd()),
     )).rejects.toMatchObject({ code: 'BACKEND_UNAVAILABLE' })
+  })
+
+  it('supports Host-owned optimistic mtime checks without changing the basic file shape', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-plans-bridge-mtime-'))
+    const dispatcher = createLocalFilesystemDispatcher()
+    const controller = new AbortController()
+    const bridgeContext = context(controller.signal, [], root, runtime, realpathSync(root))
+    writeFileSync(join(root, 'plan.html'), 'before', 'utf8')
+    try {
+      await expect(dispatcher.dispatch(
+        request('filesystem', 'read_file', { rel_path: 'plan.html' }),
+        bridgeContext,
+      )).resolves.toEqual({ content: 'before' })
+      const snapshot = await dispatcher.dispatch(
+        request('filesystem', 'read_file', { rel_path: 'plan.html', include_mtime: true }),
+        bridgeContext,
+      ) as { content: string; mtime: number }
+      expect(snapshot).toMatchObject({ content: 'before', mtime: expect.any(Number) })
+
+      await expect(dispatcher.dispatch(
+        request('filesystem', 'write_file', {
+          rel_path: 'plan.html',
+          content: 'after',
+          expected_mtime: snapshot.mtime + 1,
+        }),
+        bridgeContext,
+      )).resolves.toMatchObject({ ok: false, conflict: true })
+      await expect(dispatcher.dispatch(
+        request('filesystem', 'write_file', {
+          rel_path: 'plan.html',
+          content: 'after',
+          expected_mtime: snapshot.mtime,
+        }),
+        bridgeContext,
+      )).resolves.toMatchObject({ ok: true, mtime: expect.any(Number) })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('delegates production filesystem reads and mutations to the Host service root', async () => {
+    const root = realpathSync(process.cwd())
+    const calls: Array<{ operation: string; payload: Record<string, unknown> }> = []
+    const service: PlansFilesystemService = {
+      async call(operation, payload): Promise<JsonValue> {
+        calls.push({ operation, payload })
+        if (operation === 'fs.read_file') {
+          return { ok: true, content: 'draft', mtime: 10 }
+        }
+        if (operation === 'fs.list_dir') {
+          return {
+            ok: true,
+            entries: [
+              { name: 'plan.md', is_dir: false },
+              { name: 'nested', is_dir: true },
+            ],
+          }
+        }
+        if (operation === 'fs.stat_workspace_path') {
+          return { ok: true, exists: true, is_directory: true, size: 4 }
+        }
+        if (operation === 'fs.write_file') {
+          return { ok: false, conflict: true, mtime: 11 }
+        }
+        if (operation === 'fs.delete' || operation === 'fs.rename') {
+          return { ok: true }
+        }
+        throw new Error(`unexpected operation: ${operation}`)
+      },
+    }
+    const port = createHostPlansFilesystemPort(service)
+    const bridgeContext = context(new AbortController().signal, [], '/workspace', runtime, root)
+
+    await expect(port.readFile({ rel_path: 'plan.md', include_mtime: true }, bridgeContext))
+      .resolves.toEqual({ content: 'draft', mtime: 10 })
+    await expect(port.listDir({ rel_path: '.agent-team/plans' }, bridgeContext))
+      .resolves.toEqual({ entries: ['plan.md', 'nested'] })
+    await expect(port.statPath({ rel_path: '.agent-team/plans' }, bridgeContext))
+      .resolves.toEqual({ exists: true, isDirectory: true, size: 4 })
+    await expect(port.writeFile(
+      { rel_path: 'plan.md', content: 'updated', expected_mtime: 10 },
+      bridgeContext,
+    )).resolves.toEqual({ ok: false, conflict: true, mtime: 11 })
+    await expect(port.delete({ rel_path: 'plan.md' }, bridgeContext)).resolves.toEqual({ ok: true })
+    await expect(port.rename({ from: 'plan.md', to: 'renamed.md' }, bridgeContext))
+      .resolves.toEqual({ ok: true })
+
+    expect(calls).toEqual([
+      { operation: 'fs.read_file', payload: { rel_path: 'plan.md', workspace_path: root } },
+      { operation: 'fs.list_dir', payload: { rel_path: '.agent-team/plans', workspace_path: root } },
+      { operation: 'fs.stat_workspace_path', payload: { rel_path: '.agent-team/plans', workspace_path: root } },
+      {
+        operation: 'fs.write_file',
+        payload: { rel_path: 'plan.md', content: 'updated', expected_mtime: 10, workspace_path: root },
+      },
+      { operation: 'fs.delete', payload: { rel_path: 'plan.md', workspace_path: root } },
+      {
+        operation: 'fs.rename',
+        payload: { src_path: 'plan.md', dst_path: 'renamed.md', workspace_path: root },
+      },
+    ])
   })
 
   it('does not let a workspace storage payload choose its partition identity', async () => {
@@ -387,7 +517,7 @@ describe('Plans Host Bridge ports', () => {
   })
 
   it.each([
-    ['production', () => createProductionPlansBridgeDispatcher()],
+    ['production', createLocalFilesystemDispatcher],
     ['in-memory', () => createInMemoryPlansBridgeDispatcher()],
   ] as const)('rejects a workspace path outside the Host binding in the %s adapter', async (_label, create) => {
     const dispatcher = create()

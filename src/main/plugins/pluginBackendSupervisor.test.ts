@@ -22,6 +22,7 @@ import {
   PLANS_BRIDGE_PORTS,
   createInMemoryPlansBridgeDispatcher,
   createProductionPlansBridgeDispatcher,
+  createTestPlansFilesystemPort,
   type PlansBridgePort,
 } from './plansBridge'
 import { MAX_BACKEND_BRIDGE_RESULT_BYTES } from './pluginBackendLimits'
@@ -148,7 +149,7 @@ function makePackagedSupervisor(entryFile: string): PluginBackendSupervisor {
     { ...packagedActivation, entryFile },
     {
       environment: packagedBackendEnvironment,
-      bridgeDispatcher: createProductionPlansBridgeDispatcher(),
+      bridgeDispatcher: createProductionPlansBridgeDispatcher({ filesystem: createTestPlansFilesystemPort() }),
       authorizedPlanRoot: { value: process.cwd() },
       spawnProcess: (nextEntryFile, options) =>
         spawn(nextEntryFile, [], { ...options, env: options.env }) as ChildProcessWithoutNullStreams,
@@ -1321,6 +1322,22 @@ describe('PluginBackendSupervisor', () => {
     })
     expect(String(error)).not.toContain('exit')
     expect(String(error)).not.toContain('SIG')
+  })
+
+  it('notifies the Host once when a child becomes unavailable', async () => {
+    const onFailure = vi.fn()
+    const supervisor = makeSupervisor({ onFailure })
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.exit', null),
+    ).rejects.toMatchObject({ code: 'BACKEND_UNAVAILABLE' })
+
+    expect(onFailure).toHaveBeenCalledOnce()
+    expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'BACKEND_UNAVAILABLE',
+    }))
   })
 
   it('routes stderr away from the protocol stream', async () => {

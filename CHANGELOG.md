@@ -62,7 +62,7 @@ All notable released changes to Navide will be documented in this file. The form
 - Add an internal Electron-main Backend Wire v1 supervisor seam with real
   child-process health/unary conformance coverage, explicit child environment
   isolation, bounded cancellation tombstones, and subscription lifecycle
-  conformance; production catalog activation remains deferred.
+  conformance; general third-party backend catalog activation remains deferred.
 - Add test-only integration evidence for the bounded Issue 21 Plans
   packaged-child round trip: the real `PlanWindowApp` mounted call site, public
   SDK backend client, sender-authenticated Host router, self-contained Python
@@ -71,8 +71,15 @@ All notable released changes to Navide will be documented in this file. The form
   production artifact, and the full third-party backend lifecycle and remaining
   Plans operations stay on their owning migration issues.
 - Add the Host-private Plans core-service bridge, package-owned watcher, bounded
-  child drain/restart lifecycle, and Python/Go packaged fixture parity. Normal
-  production Plans startup remains on the legacy adapter until Issue 23E.
+  child drain/restart lifecycle, and Python/Go packaged fixture parity. The
+  combined production Plans package now consumes those seams with an explicit
+  agent method allowlist and a retained legacy fallback.
+- Activate the combined `navide.plans` Manifest v2 package with a self-contained
+  Backend Wire executable, Host-private filesystem bridge, workspace-bound
+  headless agent routing, Host-minted agent Initiators, workspace storage
+  preference migration, package-owned change events, and fail-closed legacy
+  recovery. Manual operations remain user-initiated and outside agent policy
+  filtering; no public `plans` permission is added.
 - Require a verified Registry signature from a signer authorized by the
   App-pinned Registry root before a Manifest v2 marketplace package can be
   installed, including packages whose signed listing metadata has been

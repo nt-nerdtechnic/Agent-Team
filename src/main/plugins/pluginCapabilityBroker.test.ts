@@ -316,6 +316,28 @@ describe('Issue 03/04 public Host planner', () => {
     })
   })
 
+  it('requires first-party eligibility for Plans window navigation', () => {
+    const plansBinding = { ...binding, pluginId: 'navide.plans' }
+    const plansPolicy = manifestV2CapabilityPolicy({ system: ['ui'] })
+    const plansCall = call({
+      pluginId: 'navide.plans',
+      ns: 'ui',
+      method: 'openPlansWindow',
+      args: { path: '.agent-team/plans/example.html' },
+    })
+
+    expect(planPublicCapabilityCall(plansCall, plansPolicy, context({
+      runtimeBinding: plansBinding,
+      userGrant: { packageVersion: '1.0.0', system: ['ui'] },
+      publisherEligible: true,
+    }))).toMatchObject({ kind: 'allow', plan: { address: 'ui.openPlansWindow' } })
+    expect(planPublicCapabilityCall(plansCall, plansPolicy, context({
+      runtimeBinding: plansBinding,
+      userGrant: { packageVersion: '1.0.0', system: ['ui'] },
+      publisherEligible: false,
+    }))).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
   it('requires a Host-allowlisted AI CLI profile', () => {
     expect(
       planPublicCapabilityCall(

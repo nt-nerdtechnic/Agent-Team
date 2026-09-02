@@ -657,6 +657,7 @@ export interface PublicMethodParams {
   'fs.stat': { path: string }
   'fs.statPath': { path: string }
   'ui.openInEditor': { path: string; line?: number; column?: number }
+  'ui.openPlansWindow': { path: string }
   'ui.openExternal': { url: string }
   'aiCli.listProfiles': Record<string, never>
   'aiCli.startSession': { profileId: string; requestId?: string; cols: number; rows: number; yolo?: boolean }
@@ -684,6 +685,7 @@ export interface PublicMethodResults {
   'fs.stat': { kind: 'file' | 'directory'; size: number; modifiedAt: string }
   'fs.statPath': { exists: boolean }
   'ui.openInEditor': { opened: boolean }
+  'ui.openPlansWindow': { opened: boolean }
   'ui.openExternal': { opened: boolean }
   'aiCli.listProfiles': { profiles: Array<{ id: string; label: string }> }
   'aiCli.startSession': { sessionId: string }

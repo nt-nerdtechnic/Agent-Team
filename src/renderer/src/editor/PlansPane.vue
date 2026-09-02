@@ -28,6 +28,11 @@ import {
 import { sharePlanToGit } from '../composables/planShare'
 import { useNotify } from '@navide/plugin-ui/foundation'
 import { writePlanDragPayload } from '../lib/planDrag'
+import {
+  isLegacyPlansRecoveryRuntime,
+  readLegacyPlansPreferenceProjection,
+  type LegacyPlansPreferenceProjection,
+} from './plansPreferences'
 
 const props = defineProps<{
   workspacePath: string
@@ -161,6 +166,7 @@ async function loadPlans(): Promise<void> {
 // Backend broadcasts plans.changed when any plan document under
 // .agent-team/plans changes on disk (own writes or external agents).
 let offPlansChanged: (() => void) | null = null
+let offLegacyRecoveryPreferences: (() => void) | null = null
 onBeforeMount(() => {
   offPlansChanged = props.backend.on('plans.changed', (payload) => {
     const p = payload as { workspace_path?: unknown } | null
@@ -172,14 +178,32 @@ onBeforeMount(() => {
   })
 })
 onMounted(() => {
+  offLegacyRecoveryPreferences = window.agentTeam?.onPlansLegacyRecoveryPreferences?.((values) => {
+    if (isLegacyPlansRecoveryRuntime()) void applyLegacyRecoveryPreferences(values)
+  }) ?? null
+  if (!isLegacyPlansRecoveryRuntime()) {
+    void window.agentTeam?.projectLegacyPlansPreferences({
+      workspace_path: props.workspacePath,
+      values: readLegacyPlansPreferenceProjection(props.workspacePath),
+    })
+  }
+  void loadLegacyRecoveryPreferences()
   void loadPlans()
 })
 onUnmounted(() => {
   offPlansChanged?.()
   offPlansChanged = null
+  offLegacyRecoveryPreferences?.()
+  offLegacyRecoveryPreferences = null
   removeCtxListeners()
 })
 watch(() => props.workspacePath, (next) => {
+  if (!isLegacyPlansRecoveryRuntime()) {
+    void window.agentTeam?.projectLegacyPlansPreferences({
+      workspace_path: next,
+      values: readLegacyPlansPreferenceProjection(next),
+    })
+  }
   planRoot.value = next // re-resolved by the next list
   collapsedSections.value = loadCollapsed(next)
   searchQuery.value = ''
@@ -193,6 +217,7 @@ watch(() => props.workspacePath, (next) => {
   groupMode.value = loadStoredChoice(groupStorageKey(next), PLAN_GROUP_MODES, 'flat')
   recentRelPaths.value = loadStringList(recentStorageKey(next))
   pinnedRelPaths.value = loadStringList(pinnedStorageKey(next))
+  void loadLegacyRecoveryPreferences()
   void loadPlans()
 })
 watch(() => props.backend.status?.value, (status) => {
@@ -234,11 +259,20 @@ const sortDirection = ref<PlanSortDirection>(
   loadStoredChoice(sortDirStorageKey(props.workspacePath), PLAN_SORT_DIRECTIONS, DEFAULT_SORT_DIRECTION[sortMode.value]),
 )
 const groupMode = ref<PlanGroupMode>(loadStoredChoice(groupStorageKey(props.workspacePath), PLAN_GROUP_MODES, 'flat'))
+let suppressPreferencePersistence = false
 
-watch(stageFilter, (next) => saveStoredChoice(filterStorageKey(props.workspacePath), next))
-watch(sortMode, (next) => saveStoredChoice(sortStorageKey(props.workspacePath), next))
-watch(sortDirection, (next) => saveStoredChoice(sortDirStorageKey(props.workspacePath), next))
-watch(groupMode, (next) => saveStoredChoice(groupStorageKey(props.workspacePath), next))
+watch(stageFilter, (next) => {
+  if (!suppressPreferencePersistence) saveStoredChoice(filterStorageKey(props.workspacePath), next)
+})
+watch(sortMode, (next) => {
+  if (!suppressPreferencePersistence) saveStoredChoice(sortStorageKey(props.workspacePath), next)
+})
+watch(sortDirection, (next) => {
+  if (!suppressPreferencePersistence) saveStoredChoice(sortDirStorageKey(props.workspacePath), next)
+})
+watch(groupMode, (next) => {
+  if (!suppressPreferencePersistence) saveStoredChoice(groupStorageKey(props.workspacePath), next)
+})
 
 // Picking a mode resets the arrow to that mode's natural direction (A→Z for
 // titles, newest/most-complete first otherwise). Done on the change event
@@ -521,6 +555,72 @@ function saveStringList(storageKey: string, list: string[]): void {
 
 const recentRelPaths = ref<string[]>(loadStringList(recentStorageKey(props.workspacePath)))
 const pinnedRelPaths = ref<string[]>(loadStringList(pinnedStorageKey(props.workspacePath)))
+
+function recoveryChoice<T extends string>(
+  value: string | undefined,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  return value !== undefined && allowed.includes(value as T) ? value as T : fallback
+}
+
+function recoveryStringList(value: string | undefined): string[] {
+  if (value === undefined) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function recoveryCollapsed(value: string | undefined): Set<string> {
+  if (value === undefined) return new Set(DEFAULT_COLLAPSED)
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((entry): entry is string => typeof entry === 'string'))
+      : new Set(DEFAULT_COLLAPSED)
+  } catch {
+    return new Set(DEFAULT_COLLAPSED)
+  }
+}
+
+async function applyLegacyRecoveryPreferences(
+  values: LegacyPlansPreferenceProjection,
+): Promise<void> {
+  suppressPreferencePersistence = true
+  try {
+    stageFilter.value = recoveryChoice(values['plans.filter'], STAGE_FILTERS, 'all')
+    sortMode.value = recoveryChoice(values['plans.sort'], PLAN_SORT_MODES, 'updated')
+    sortDirection.value = recoveryChoice(
+      values['plans.sortdir'],
+      PLAN_SORT_DIRECTIONS,
+      DEFAULT_SORT_DIRECTION[sortMode.value],
+    )
+    groupMode.value = recoveryChoice(values['plans.group'], PLAN_GROUP_MODES, 'flat')
+    collapsedSections.value = recoveryCollapsed(values['plans.collapsed'])
+    recentRelPaths.value = recoveryStringList(values['plans.recent'])
+    pinnedRelPaths.value = recoveryStringList(values['plans.pinned'])
+    await nextTick()
+  } finally {
+    suppressPreferencePersistence = false
+  }
+}
+
+let recoveryPreferenceRequest = 0
+async function loadLegacyRecoveryPreferences(): Promise<void> {
+  if (!isLegacyPlansRecoveryRuntime()) return
+  const request = ++recoveryPreferenceRequest
+  try {
+    const values = await window.agentTeam?.getPlansLegacyRecoveryPreferences?.()
+    if (!values || request !== recoveryPreferenceRequest) return
+    await applyLegacyRecoveryPreferences(values)
+  } catch {
+    // A missing previous snapshot or unavailable Host recovery port leaves the
+    // retained renderer on its normal fail-safe defaults.
+  }
+}
 
 /**
  * Record a plan as just-opened. Called for clicks in this pane and, in the plan

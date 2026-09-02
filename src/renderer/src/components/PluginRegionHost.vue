@@ -30,6 +30,8 @@ const props = defineProps<{
   contribution: PluginRegionContribution
   workspacePath: string
   visible: boolean
+  /** Host-owned work that must complete before the guest is prepared. */
+  beforePrepare?: () => void | Promise<void>
 }>()
 
 const src = ref<string | null>(null)
@@ -68,6 +70,8 @@ async function prepare(): Promise<void> {
   // release it.
   opened = true
   try {
+    await props.beforePrepare?.()
+    if (mine !== generation) return
     const result = await window.agentTeam?.plugins?.prepareContribution({
       contributionKey: props.contribution.contributionKey,
       workspace_path: props.workspacePath,

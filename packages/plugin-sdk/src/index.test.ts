@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  createPluginCapabilityClient,
+  createPluginViewRuntimeClient,
   createPluginBackendClient,
   PluginBackendError,
   createPluginSettingsStore,
@@ -12,6 +14,11 @@ interface TestBackendBridge {
   subscribeBackend: ReturnType<typeof vi.fn>
 }
 
+interface TestCapabilityBridge {
+  callCapability: ReturnType<typeof vi.fn>
+  on: ReturnType<typeof vi.fn>
+}
+
 function installBackendBridge(bridge: TestBackendBridge): void {
   ;(globalThis as unknown as { nav: TestBackendBridge }).nav = bridge
 }
@@ -21,6 +28,72 @@ afterEach(() => {
 })
 
 describe('public plugin SDK adapters', () => {
+  it('routes typed public capabilities and events through the SDK boundary', async () => {
+    const unsubscribe = vi.fn()
+    const bridge: TestCapabilityBridge = {
+      callCapability: vi.fn((namespace: string, method: string) => Promise.resolve({
+        reqId: 'cap-1',
+        ok: true,
+        result: namespace === 'storage' && method === 'get'
+          ? { found: true, value: 'compact' }
+          : null,
+      })),
+      on: vi.fn((_type: string, _listener: (payload: unknown) => void) => unsubscribe),
+    }
+    ;(globalThis as unknown as { nav: TestCapabilityBridge }).nav = bridge
+
+    const client = createPluginCapabilityClient()
+    await expect(client.capabilities.invoke('storage.get', { scope: 'workspace', key: 'density' }))
+      .resolves.toEqual({ found: true, value: 'compact' })
+    const listener = vi.fn()
+    const subscription = client.events.subscribe('aiCli.exited', listener)
+    subscription.dispose()
+
+    expect(bridge.callCapability).toHaveBeenCalledWith(
+      'storage',
+      'get',
+      { scope: 'workspace', key: 'density' },
+    )
+    expect(bridge.on).toHaveBeenCalledWith('aiCli.exited', listener)
+    expect(unsubscribe).toHaveBeenCalledOnce()
+  })
+
+  it('maps legacy broker errors to stable public PluginError codes', async () => {
+    const bridge: TestCapabilityBridge = {
+      callCapability: vi.fn(() => Promise.resolve({
+        reqId: 'cap-2',
+        ok: false,
+        error: { code: 'CAP_DENIED', message: 'not granted' },
+      })),
+      on: vi.fn(),
+    }
+    ;(globalThis as unknown as { nav: TestCapabilityBridge }).nav = bridge
+
+    await expect(createPluginCapabilityClient().capabilities.invoke('storage.get', {
+      scope: 'workspace',
+      key: 'density',
+    })).rejects.toMatchObject({ code: 'CAPABILITY_DENIED', message: 'not granted' })
+  })
+
+  it('adapts view readiness and open targets through the public SDK', () => {
+    const removeTargetListener = vi.fn()
+    const bridge = {
+      ready: vi.fn(),
+      onOpenTarget: vi.fn(() => removeTargetListener),
+    }
+    ;(globalThis as unknown as { nav: typeof bridge }).nav = bridge
+
+    const client = createPluginViewRuntimeClient()
+    const listener = vi.fn()
+    client.ready()
+    const target = client.onOpenTarget(listener)
+    target.dispose()
+
+    expect(bridge.ready).toHaveBeenCalledOnce()
+    expect(bridge.onOpenTarget).toHaveBeenCalledWith(listener)
+    expect(removeTargetListener).toHaveBeenCalledOnce()
+  })
+
   it('keeps the package-local stack for errors created in the renderer', () => {
     const error = new PluginBackendError('INVALID_ARGUMENT', 'bad arguments')
 

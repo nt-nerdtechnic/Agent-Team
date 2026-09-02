@@ -52,6 +52,10 @@ _MAX_DIR_ENTRIES = 2_000  # cap to avoid hanging on huge dirs (e.g. node_modules
 class FsError(Exception):
     """Raised on invalid or unsafe filesystem operations."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def _resolve_safe(
     workspace_path: str, rel_path: str, *, allow_internal_root: bool = False
@@ -737,6 +741,33 @@ def stat_path(abs_path: str) -> dict[str, Any]:
         return {"ok": True, "exists": p.is_file()}
     except Exception:
         return {"ok": True, "exists": False}
+
+
+def stat_workspace_path(workspace_path: str, rel_path: str = "") -> dict[str, Any]:
+    """Return metadata for a path resolved through the workspace guard.
+
+    The absolute ``stat_path`` endpoint is intentionally retained for terminal
+    output.  Plans and other Host-bound callers must use this scoped variant so
+    the workspace root and the relative path are validated together.
+    """
+    try:
+        target = _resolve_safe(workspace_path, rel_path, allow_internal_root=True)
+        entry = target.stat()
+        return {
+            "ok": True,
+            "exists": True,
+            "is_directory": entry.is_dir(),
+            "size": entry.st_size,
+            "mtime": entry.st_mtime,
+        }
+    except (FsError, OSError) as exc:
+        return {
+            "ok": False,
+            "exists": False,
+            "is_directory": False,
+            "size": 0,
+            "error": str(exc),
+        }
 
 
 def delete(workspace_path: str, rel_path: str) -> dict[str, Any]:

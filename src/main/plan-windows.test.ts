@@ -19,6 +19,8 @@ describe('PlanWindowRegistry', () => {
     const win = new FakeWindow()
     reg.set('/ws/a', win)
     expect(reg.get('/ws/a')).toBe(win)
+    expect(reg.hasWindow(win)).toBe(true)
+    expect(reg.workspaceForWindow(win)).toBe('/ws/a')
   })
 
   it('keeps windows per workspace independent', () => {
@@ -40,6 +42,18 @@ describe('PlanWindowRegistry', () => {
     // Pruned, not just filtered: a revived flag must not resurrect the entry.
     win.destroyed = false
     expect(reg.get('/ws/a')).toBeNull()
+  })
+
+  it('does not treat a destroyed window as a trusted registered window', () => {
+    const reg = new PlanWindowRegistry<FakeWindow>()
+    const win = new FakeWindow()
+    reg.set('/ws/a', win)
+    win.destroyed = true
+    expect(reg.hasWindow(win)).toBe(false)
+    expect(reg.workspaceForWindow(win)).toBeNull()
+    win.destroyed = false
+    expect(reg.hasWindow(win)).toBe(false)
+    expect(reg.workspaceForWindow(win)).toBeNull()
   })
 
   it('remove() evicts only the matching window', () => {

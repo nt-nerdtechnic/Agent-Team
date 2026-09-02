@@ -24,6 +24,23 @@ export class PlanWindowRegistry<T extends DestroyableWindow> {
     this.windows.set(workspacePath, win)
   }
 
+  /** True when a live window is registered, regardless of its workspace key. */
+  hasWindow(win: T): boolean {
+    return this.workspaceForWindow(win) !== null
+  }
+
+  /** Workspace key owned by a live window; prunes destroyed entries. */
+  workspaceForWindow(win: T): string | null {
+    for (const [workspacePath, candidate] of this.windows) {
+      if (candidate.isDestroyed()) {
+        this.windows.delete(workspacePath)
+        continue
+      }
+      if (candidate === win) return workspacePath
+    }
+    return null
+  }
+
   /**
    * Remove the entry only when it still points at `win` — a close event from
    * a stale window must not evict a newer one registered for the same

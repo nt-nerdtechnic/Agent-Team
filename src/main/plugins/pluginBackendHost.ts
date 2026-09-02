@@ -32,6 +32,7 @@ import {
   isWorkspaceContainedPath,
 } from './workspacePathPolicy'
 import { lstatSync, realpathSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 
 export interface PlanRootResolverInput {
@@ -57,6 +58,8 @@ export interface PluginBackendHostOptions {
     runtime: BackendRuntimeContext,
     workspacePath?: string,
   ) => ExecutionPolicySnapshot | undefined
+  /** Observe a bound child becoming unavailable before the next call. */
+  onBackendFailure?: (runtime: BackendRuntimeContext, error: BackendPluginError) => void
 }
 
 interface RegisteredBackend {
@@ -115,7 +118,7 @@ function isViewRuntime(runtime: BackendRuntimeContext): boolean {
     nonEmptyString(runtime.workspaceId) &&
     nonEmptyString(runtime.instanceId) &&
     nonEmptyString(runtime.contributionKey) &&
-    nonEmptyString(runtime.hostWindowId) &&
+    (runtime.hostWindowId === null || nonEmptyString(runtime.hostWindowId)) &&
     isAuthenticatedInitiator(runtime.initiator)
   )
 }
@@ -162,9 +165,10 @@ export class PluginBackendHost {
     activation: BackendPluginLaunchSpec,
     options: PluginBackendSupervisorOptions,
   ) => PluginBackendSupervisor
-  private readonly bridgeDispatcher: BackendBridgeDispatcher
+  private bridgeDispatcher: BackendBridgeDispatcher
   private readonly resolvePlanRoot?: PlanRootResolver
   private readonly resolveExecutionPolicy?: PluginBackendHostOptions['resolveExecutionPolicy']
+  private readonly onBackendFailure?: PluginBackendHostOptions['onBackendFailure']
   private readonly backends = new Map<string, RegisteredBackend>()
   private readonly views = new Map<string, BoundView>()
   /** Package-version revocations are serialized and also act as an admission
@@ -181,7 +185,21 @@ export class PluginBackendHost {
     this.bridgeDispatcher = options.bridgeDispatcher ?? createProductionPlansBridgeDispatcher()
     this.resolvePlanRoot = options.resolvePlanRoot
     this.resolveExecutionPolicy = options.resolveExecutionPolicy
+    this.onBackendFailure = options.onBackendFailure
     this.createSupervisor = options.createSupervisor ?? defaultSupervisor
+  }
+
+  /** Replace the Host-owned bridge composition before any package runtime is
+   * bound. Production wiring uses this to connect the existing core
+   * filesystem service; tests may keep their isolated dispatcher. */
+  setBridgeDispatcher(dispatcher: BackendBridgeDispatcher): void {
+    if (this.views.size > 0) {
+      throw new BackendPluginError(
+        'INVALID_RUNTIME',
+        'Backend bridge composition cannot change while a view is bound.',
+      )
+    }
+    this.bridgeDispatcher = dispatcher
   }
 
   register(activation: BackendPluginLaunchSpec): void {
@@ -217,6 +235,29 @@ export class PluginBackendHost {
 
   activationForPlugin(pluginId: string): BackendPluginLaunchSpec | undefined {
     return [...this.backends.values()].find(({ activation }) => activation.pluginId === pluginId)?.activation
+  }
+
+  /**
+   * Bind a package backend to a workspace without requiring a visible view.
+   * The generated instance id remains Host-private; MCP callers address this
+   * binding through the Host's workspace routing seam instead.
+   */
+  async bindWorkspace(
+    runtime: BackendRuntimeContext,
+    packageDir: string,
+    workspacePath: string,
+  ): Promise<string> {
+    if (!nonEmptyString(workspacePath)) throw new BackendPluginError('INVALID_RUNTIME')
+    let instanceId = randomUUID()
+    while (this.views.has(instanceId)) instanceId = randomUUID()
+    const boundRuntime: BackendRuntimeContext = {
+      ...runtime,
+      instanceId,
+      contributionKey: runtime.contributionKey ?? `${runtime.pluginId}.headless`,
+      hostWindowId: runtime.hostWindowId ?? null,
+    }
+    await this.bindView(boundRuntime, packageDir, workspacePath)
+    return instanceId
   }
 
   /**
@@ -309,6 +350,14 @@ export class PluginBackendHost {
         ...(this.resolveExecutionPolicy
           ? { resolveExecutionPolicy: this.resolveExecutionPolicy }
           : {}),
+        onFailure: (error: BackendPluginError): void => {
+          if (this.views.get(view.runtime.instanceId ?? '') !== view) return
+          try {
+            this.onBackendFailure?.(view.runtime, error)
+          } catch {
+            // A liveness observer must not change the child failure result.
+          }
+        },
         ...(needsFilesystem && this.resolvePlanRoot && view.workspacePath !== undefined
           ? {
               refreshAuthorizedPlanRoot: (signal: AbortSignal): Promise<string> =>
@@ -439,6 +488,10 @@ export class PluginBackendHost {
     }
     if (!view.activation.approvedMethods.includes(name)) {
       throw new BackendPluginError('INVALID_ARGUMENT')
+    }
+    const initiator = options?.initiator ?? view.runtime.initiator
+    if (initiator.kind === 'agent' && !view.activation.agentMethods?.includes(name)) {
+      throw new BackendPluginError('CAPABILITY_DENIED')
     }
     if (options?.timeoutMs !== undefined && !isAllowedBackendTimeout(options.timeoutMs)) {
       throw new BackendPluginError('INVALID_ARGUMENT')

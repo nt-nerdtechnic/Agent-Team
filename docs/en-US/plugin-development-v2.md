@@ -1,6 +1,6 @@
 # Plugin Developer Spec v2
 
-> **Status: target draft; Issues 03, 16, the bounded Issue 21 Plans spike, and Issue 22's bridge/lifecycle spike are implemented.** The current runtime uses manifest
+> **Status: target draft; Issues 03, 16, the bounded Issue 21 Plans spike, Issue 22's bridge/lifecycle work, and Issue 23E's production Plans integration are implemented.** The current runtime uses manifest
 > v1 and is documented in [Plugin development guide](plugin-development.md).
 > This document is the author-facing contract that the v2 migration must
 > implement before third-party publishing opens.
@@ -10,21 +10,24 @@
 > package-local operation through the public SDK, authenticated Host router,
 > and self-contained Python Backend Wire child. Issue 22 adds the Host-private
 > core-service ports, package-owned watcher, bounded child lifecycle, and
-> cross-language fixture parity. Normal production Plans activation remains
-> deferred to Issue 23E. Issue 03 completes the
+> cross-language fixture parity. Issue 23E activates the first-party combined
+> Plans package with the shared agent Execution Policy and retains the legacy
+> adapter as a bounded recovery path. Issue 03 completes the
 > parser, catalog, authorization planner, and Host enforcement seams.
 > Issue 16 adds the durable storage adapter and Host-only lifecycle seams to
-> Electron main. Production grant/consent and runtime-context production are
-> not wired yet, so ordinary production plugin instances cannot reach storage;
-> calls remain denied until that later integration is delivered. Other public
+> Electron main. Third-party production grant/consent and general
+> runtime-context wiring are not wired yet, so ordinary third-party plugin
+> instances cannot reach storage; calls remain denied until that later
+> integration is delivered. The bundled Git and Plans packages use explicit
+> Host-selected grants as first-party migration consumers. Other public
 > execution adapters and persisted consent wiring also remain disabled.
 >
 > Issue 06 adds the public package boundary and the external frontend workflow.
 > The checked-in SDK CLI currently supports `validate` and frontend-only
 > `package`; `init`, `dev`, third-party backend packaging, signing, publishing,
 > and general runtime activation remain deferred to their owning issues. The
-> first-party Issue 21 build script packages only the bundled Plans spike and
-> is not the public author workflow.
+> first-party Plans build scripts package the app's production artifact and are
+> not the public author workflow.
 >
 > **Migration decision:** Plan B (the B0-B9 checkpoint path) was approved on
 > 2026-08-13. Plans A and C are not active implementation alternatives.
@@ -33,7 +36,7 @@
 > migration is now implemented as the bundled `navide.git` production case.
 > It is one Manifest v2 package with two isolated `custom` views (`left` and
 > `window`), and both views use the same active package version. This does not
-> open third-party publishing or complete the later Plans/Skills migration,
+> open third-party publishing or complete the later Skills migration,
 > marketplace lifecycle, or legacy-removal work.
 
 ## What is public
@@ -324,9 +327,9 @@ backend becomes unavailable, so the view can restore that fallback event
 route. Issue 22 supplies the package-owned watcher and makes the accepted
 package subscription authoritative. Legacy watcher fallback remains available
 only when the package subscription cannot be accepted or later becomes
-unavailable. This watcher and lifecycle work is test-only until Issue 23E
-activates the production Plans package; normal production startup remains on
-the legacy adapter.
+unavailable. Issue 23E uses this package-owned watcher in production Plans;
+the legacy watcher remains the bounded fallback when the combined package is
+unavailable.
 
 The production adapter maps that Interface to MCP base methods plus one
 Navide-owned event notification:
@@ -382,13 +385,12 @@ Manifest v2 corpus. This contract enables backend-only and combined package
 description and installation. Issues 07 and 08 add the private Electron-main
 supervisor/stdio and subscription lifecycle seams; Issue 21 connects one
 bundled Plans operation and event through the public SDK and Host router. Issue
-22's bridge ports and child lifecycle are Host-private implementation seams;
-they do not activate the production Plans package or expose core services to
-the public SDK. These are not a public installed-backend activation workflow.
-Future AI integration is a separate adapter: it may
-expose an explicit allowlist of schema-described package methods as MCP tools.
-No package method is AI-callable by default, and adopting this wire profile
-does not itself create a tool catalog.
+22's bridge ports and child lifecycle are Host-private implementation seams.
+Issue 23E consumes them for the first-party Plans package and exposes an
+explicit Host-owned allowlist of Plans methods to the MCP adapter; no package
+method is AI-callable by default, and adopting this wire profile does not
+itself create a tool catalog. This remains distinct from a general third-party
+installed-backend activation workflow.
 
 After installation, frontend-only, backend-only, and combined packages appear
 in the Extensions installed list and can be removed there. Package inventory is
@@ -1047,8 +1049,38 @@ uses the retained legacy renderer for the remainder of the process. Trust,
 signature, revocation, grant, and capability denials fail closed and never
 trigger the legacy path. An invalid installed package is also not hidden by the
 factory or legacy copy. `NAVIDE_GIT_RECOVERY=legacy` remains the explicit operator override.
-Issue 19 does not remove the legacy implementation or implement later
-Plans/Skills migration or marketplace lifecycle work.
+Issue 19 does not remove the legacy implementation or implement later Skills
+migration or marketplace lifecycle work.
+
+### First-party production Plans package
+
+Issue 23E makes `navide.plans` the first combined production package that
+consumes the shared agent Execution Policy. One active Manifest v2 package
+version supplies both custom Plans contributions (`left` and `window`) and the
+self-contained Backend Wire executable. The package imports only the public SDK
+and UI packages; the Host selects its exact package/version, grant, workspace
+binding, backend methods, events, and private Bridge ports.
+
+Manual document operations use the package backend through the Host-private
+`filesystem` Bridge, which maps to the existing `fs` capability boundary. User
+initiated operations are not filtered by the agent Execution Policy. Agent MCP
+operations use a Host-owned headless backend binding when the Plans window is
+closed. The Host mints the authenticated `agent` Initiator at dispatch time,
+checks the package's explicit method allowlist, re-evaluates the workspace
+policy, and rejects denied work before the filesystem Bridge can produce a
+side effect. Plans has no public `plans` permission.
+
+Plans documents remain workspace files. Filter, sort, and collapse preferences
+use the approved workspace storage partition with idempotent migration from
+the legacy local preference keys. Backend subscriptions, workspace binding,
+timeouts, cancellation, child restart, Grant revocation, and crash cleanup
+remain Host-owned and settle through the same Backend Wire lifecycle. If the
+combined package cannot be selected or activated, the retained legacy Plans
+adapter remains available without converting or deleting workspace documents.
+
+Issues 25 and 26 must reuse this Execution Policy contract, its Policy Sources,
+Host-minted Initiators, and the shared Host broker for miniIDE composition.
+They must not introduce an IDE-specific policy, permission, or Initiator model.
 
 ### Embedded AI CLI public mapping
 

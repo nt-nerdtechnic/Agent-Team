@@ -2097,6 +2097,65 @@ async def request_host_agent_capability(
         _agent_capability_pending.discard(request_id)
 
 
+async def request_host_agent_workspace_backend(
+    plugin_id: str,
+    workspace_path: str,
+    payload: dict[str, Any],
+    *,
+    caller: "_Caller",
+) -> dict[str, Any]:
+    """Route one agent backend call to a Host-owned workspace binding.
+
+    The workspace is a routing target, never an Initiator or package identity.
+    The Electron Host authenticates the backend session, resolves/reuses its
+    own headless package runtime, and mints the agent Initiator at that final
+    boundary.
+    """
+    from agent_team_backend import app
+    from agent_team_backend.ipc import make_event
+
+    if not isinstance(plugin_id, str) or not plugin_id:
+        return {"ok": False, "error": "plugin id is required", "error_code": "bad_request"}
+    if not isinstance(workspace_path, str) or not workspace_path:
+        return {"ok": False, "error": "workspace path is required", "error_code": "bad_request"}
+    if not isinstance(payload, dict) or caller.kind not in {"pane", "host", "external"}:
+        return {"ok": False, "error": "agent backend request is malformed", "error_code": "bad_request"}
+    request_id = f"mcp:{secrets.token_hex(16)}"
+    future = _agent_capability_pending.register(request_id)
+    try:
+        sent = await app.unicast_host(
+            make_event(
+                "agent.capability.request",
+                {
+                    "request_id": request_id,
+                    "target": {"plugin_id": plugin_id, "workspace_path": workspace_path},
+                    "operation": "backend",
+                    "payload": payload,
+                },
+            )
+        )
+        if not sent:
+            return {
+                "ok": False,
+                "error": "Navide Host is not connected",
+                "error_code": "host_unavailable",
+            }
+        result = await _agent_capability_pending.wait(
+            request_id,
+            future,
+            timeout=_AGENT_CAPABILITY_TIMEOUT_S,
+        )
+        if result is TIMEOUT:
+            return {
+                "ok": False,
+                "error": "Navide Host did not answer the backend request",
+                "error_code": "host_timeout",
+            }
+        return result
+    finally:
+        _agent_capability_pending.discard(request_id)
+
+
 # ── UI control (ui_invoke / ui_snapshot / ui_list_actions) ─────────────────
 # Routes a request to the renderer window that owns `workspace_path` over WS
 # (`ui.invoke.request`), and waits for its `ui.invoke.result` reply. Most

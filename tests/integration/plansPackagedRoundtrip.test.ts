@@ -359,6 +359,7 @@ describe('Plans packaged backend composition', () => {
         views: [view],
       }
       manager.registerDescriptor(descriptor, { builtin: true })
+      manager.configurePlansFilesystemService()
       manager.registerBackendActivation({
         pluginId: PLANS_PLUGIN_ID,
         packageVersion,
@@ -372,8 +373,8 @@ describe('Plans packaged backend composition', () => {
       })
 
       const hostWindow = new FakeHostWindow()
-      // The Host resolves the package filesystem root during view binding, so
-      // the legacy core transport must be available before the view opens.
+      // The production bridge is configured explicitly; the package child
+      // never receives a direct Node filesystem adapter.
       manager.setBackendWsUrl('ws://plans-core-test')
       const handle = await manager.openView(descriptor, view, {
         hostWindow: hostWindow as never,

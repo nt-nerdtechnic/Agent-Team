@@ -8,6 +8,10 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useBackend } from '../composables/useBackend'
 import PlansPane from './PlansPane.vue'
+import {
+  isLegacyPlansRecoveryRuntime,
+  readLegacyPlansPreferenceProjection,
+} from './plansPreferences'
 
 const { workspacePath } = defineProps<{
   workspacePath: string
@@ -20,9 +24,24 @@ const plansPaneRef = ref<InstanceType<typeof PlansPane> | null>(null)
 // root the rel_path is relative to — the workspace itself unless it is a
 // subdirectory of the repository the plans live in, in which case the window
 // would resolve the path against the wrong base.
-function openInWindow(relPath: string, root: string): void {
-  void window.agentTeam?.openPlansWindow({
-    workspace_path: root || workspacePath,
+async function openInWindow(relPath: string, root: string): Promise<void> {
+  const targetWorkspace = root || workspacePath
+  // The legacy pane keyed its preferences by the workspace it was opened on.
+  // `root` may be the repository root discovered by plans.list_docs, which is
+  // the correct base for the file but not the source key for legacy settings.
+  if (!isLegacyPlansRecoveryRuntime()) {
+    try {
+      await window.agentTeam?.projectLegacyPlansPreferences({
+        workspace_path: workspacePath,
+        values: readLegacyPlansPreferenceProjection(workspacePath),
+      })
+    } catch {
+      // Preference migration is best effort; opening the requested plan remains
+      // available when the v2 storage service is temporarily unavailable.
+    }
+  }
+  await window.agentTeam?.openPlansWindow({
+    workspace_path: targetWorkspace,
     rel_path: relPath,
   })
 }
@@ -45,7 +64,7 @@ onUnmounted(() => window.removeEventListener('keydown', onWindowKeydown))
     class="plan-pane"
     :workspace-path="workspacePath"
     :backend="backend"
-    @open-file="(payload) => openInWindow(payload.filepath, payload.root)"
+    @open-file="(payload) => void openInWindow(payload.filepath, payload.root)"
   />
 </template>
 

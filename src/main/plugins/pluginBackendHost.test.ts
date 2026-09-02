@@ -9,8 +9,8 @@ import type {
   BackendPluginLaunchSpec,
   PluginBackendSupervisorOptions,
 } from './pluginBackendSupervisor'
-import { PluginBackendSupervisor } from './pluginBackendSupervisor'
-import { createProductionPlansBridgeDispatcher } from './plansBridge'
+import { BackendPluginError, PluginBackendSupervisor } from './pluginBackendSupervisor'
+import { createProductionPlansBridgeDispatcher, createTestPlansFilesystemPort } from './plansBridge'
 import {
   MAX_BACKEND_CALLS_PER_INSTANCE,
   MAX_BACKEND_CHILDREN,
@@ -59,7 +59,7 @@ function makeHost(entryFile = fixture): PluginBackendHost {
     // PyInstaller --onefile needs a writable temp directory for extraction;
     // keep the test launcher aligned with the Host's minimal environment.
     environment: { ...packagedBackendEnvironment, NAVIDE_FIXTURE: 'backend-wire' },
-    bridgeDispatcher: createProductionPlansBridgeDispatcher(),
+    bridgeDispatcher: createProductionPlansBridgeDispatcher({ filesystem: createTestPlansFilesystemPort() }),
     spawnProcess: (nextEntryFile, spawnOptions) =>
       spawn(nextEntryFile === fixture ? process.execPath : nextEntryFile, nextEntryFile === fixture ? [nextEntryFile] : [], {
         ...spawnOptions,
@@ -148,6 +148,42 @@ describe('PluginBackendHost', () => {
       .not.toBe(secondOptions?.authorizedPlanRoot)
   })
 
+  it('forwards a child failure with the Host-bound runtime identity', async () => {
+    const onBackendFailure = vi.fn()
+    let notifyFailure: ((error: BackendPluginError) => void) | undefined
+    const supervisor = {
+      start: vi.fn(async () => ({
+        value: null,
+        serverInfo: { name: 'controlled', version: '1.0.0' },
+      })),
+      clientFor: vi.fn(() => ({ call: vi.fn(async () => null as never), subscribe: vi.fn() })),
+      close: vi.fn(async () => undefined),
+    }
+    const host = new PluginBackendHost({
+      onBackendFailure,
+      createSupervisor: vi.fn((
+        _activation: BackendPluginLaunchSpec,
+        options: PluginBackendSupervisorOptions,
+      ) => {
+        notifyFailure = options.onFailure
+        return supervisor as unknown as PluginBackendSupervisor
+      }),
+      resolvePlanRoot: async ({ workspacePath }) => workspacePath,
+    })
+    hosts.push(host)
+    host.register(activation)
+
+    await expect(host.bindView(runtime, activation.packageDir, process.cwd())).resolves.toBeUndefined()
+    const error = new BackendPluginError('BACKEND_UNAVAILABLE')
+    notifyFailure?.(error)
+
+    expect(onBackendFailure).toHaveBeenCalledWith(expect.objectContaining({
+      pluginId: runtime.pluginId,
+      packageVersion: runtime.packageVersion,
+      instanceId: runtime.instanceId,
+    }), error)
+  })
+
   it('caps bound child process slots and releases a failed root binding', async () => {
     const createSupervisor = vi.fn(() => ({
       start: vi.fn(async () => ({
@@ -210,6 +246,76 @@ describe('PluginBackendHost', () => {
     await expect(host.bindView(runtime, nonFilesystemActivation.packageDir, process.cwd()))
       .resolves.toBeUndefined()
     expect(createSupervisor).toHaveBeenCalledOnce()
+  })
+
+  it('allows only explicitly adapted backend methods to use an agent Initiator', async () => {
+    const client = {
+      call: vi.fn(async () => ({ ok: true }) as never),
+      subscribe: vi.fn(),
+    }
+    const supervisor = {
+      start: vi.fn(async () => ({
+        value: null,
+        serverInfo: { name: 'controlled', version: '1.0.0' },
+      })),
+      clientFor: vi.fn(() => client),
+      close: vi.fn(async () => undefined),
+    }
+    const host = new PluginBackendHost({
+      createSupervisor: vi.fn(() => supervisor as unknown as PluginBackendSupervisor),
+      resolvePlanRoot: async ({ workspacePath }) => workspacePath,
+    })
+    hosts.push(host)
+    host.register({ ...activation, agentMethods: ['fixture.echo'] })
+    host.bindView(runtime, activation.packageDir, process.cwd())
+
+    const initiator = { kind: 'agent' as const, source: 'mcp' as const, id: 'agent-1' }
+    await expect(host.call('view-1', 'fixture.delay', null, { initiator })).rejects.toMatchObject({
+      code: 'CAPABILITY_DENIED',
+    })
+    await expect(host.call('view-1', 'fixture.echo', null, { initiator })).resolves.toEqual({ ok: true })
+    host.bindView({
+      ...runtime,
+      instanceId: 'agent-view',
+      hostWindowId: 'agent-window',
+      initiator,
+    }, activation.packageDir, process.cwd())
+    await expect(host.call('agent-view', 'fixture.delay', null)).rejects.toMatchObject({
+      code: 'CAPABILITY_DENIED',
+    })
+    await expect(host.call('agent-view', 'fixture.echo', null)).resolves.toEqual({ ok: true })
+    expect(client.call).toHaveBeenCalledTimes(2)
+  })
+
+  it('binds one headless workspace runtime without a BrowserWindow', async () => {
+    const supervisor = {
+      start: vi.fn(async () => ({
+        value: null,
+        serverInfo: { name: 'controlled', version: '1.0.0' },
+      })),
+      clientFor: vi.fn(() => ({
+        call: vi.fn(async () => ({ workspace: 'bound' }) as never),
+        subscribe: vi.fn(),
+      })),
+      close: vi.fn(async () => undefined),
+    }
+    const host = new PluginBackendHost({
+      createSupervisor: vi.fn(() => supervisor as unknown as PluginBackendSupervisor),
+      resolvePlanRoot: async ({ workspacePath }) => workspacePath,
+    })
+    hosts.push(host)
+    host.register(activation)
+
+    const instanceId = await host.bindWorkspace({
+      ...runtime,
+      instanceId: null,
+      contributionKey: null,
+      hostWindowId: null,
+    }, activation.packageDir, process.cwd())
+
+    expect(instanceId).toEqual(expect.any(String))
+    await expect(host.call(instanceId, 'fixture.echo', null)).resolves.toEqual({ workspace: 'bound' })
+    await host.unbindView(instanceId)
   })
 
   it('routes the Plans root operation and event through the non-Python fixture', async () => {

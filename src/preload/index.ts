@@ -10,6 +10,7 @@ import type {
   ManifestPermissionsSummary,
   PackageVersionGrantSummary,
 } from '../shared/executionPolicy'
+import type { LegacyPlansPreferenceProjection } from '../shared/plansPreferences'
 
 /** Which Electron-owned cache groups to clear. Never touches user state. */
 export interface ClearElectronCachesOptions {
@@ -58,7 +59,7 @@ export interface GitCredential {
 /** Main-owned recovery transition. The renderer can only move into recovery;
  * there is deliberately no public event or API for switching back. */
 export interface GitRecoveryChanged {
-  legacy: true
+  legacy: boolean
 }
 
 function isGitRecoveryChanged(payload: unknown): payload is GitRecoveryChanged {
@@ -67,7 +68,21 @@ function isGitRecoveryChanged(payload: unknown): payload is GitRecoveryChanged {
     payload !== null &&
     !Array.isArray(payload) &&
     'legacy' in payload &&
-    payload.legacy === true
+    typeof payload.legacy === 'boolean'
+  )
+}
+
+export interface PlansRecoveryChanged {
+  legacy: boolean
+}
+
+function isPlansRecoveryChanged(payload: unknown): payload is PlansRecoveryChanged {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    'legacy' in payload &&
+    typeof payload.legacy === 'boolean'
   )
 }
 
@@ -164,6 +179,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.on('git:recoveryChanged', listener)
     return () => ipcRenderer.removeListener('git:recoveryChanged', listener)
   },
+  onPlansRecoveryChanged: (cb: (change: PlansRecoveryChanged) => void): (() => void) => {
+    const listener = (_event: unknown, payload: unknown): void => {
+      if (isPlansRecoveryChanged(payload)) cb(payload)
+    }
+    ipcRenderer.on('plans:recoveryChanged', listener)
+    return () => ipcRenderer.removeListener('plans:recoveryChanged', listener)
+  },
   onMenuAction: (cb: (action: string) => void): void => {
     ipcRenderer.on('menu:action', (_event, action: string) => cb(action))
   },
@@ -234,6 +256,29 @@ contextBridge.exposeInMainWorld('agentTeam', {
       workspace_path: args.workspace_path,
       ...(args.rel_path ? { rel_path: args.rel_path } : {}),
     }),
+  projectLegacyPlansPreferences: (args: {
+    workspace_path: string
+    values: LegacyPlansPreferenceProjection
+  }): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('plans:projectLegacyPreferences', {
+      workspace_path: args.workspace_path,
+      values: args.values,
+    }),
+  /** Read the Host-selected previous Plans snapshot projection for the
+   * retained legacy route. The sender/window determines the workspace; the
+   * renderer cannot supply a snapshot, tier, or package version. */
+  getPlansLegacyRecoveryPreferences: (): Promise<LegacyPlansPreferenceProjection | null> =>
+    ipcRenderer.invoke('plans:getLegacyRecoveryPreferences'),
+  onPlansLegacyRecoveryPreferences: (
+    cb: (values: LegacyPlansPreferenceProjection) => void,
+  ): (() => void) => {
+    const listener = (_event: unknown, values: unknown): void => {
+      if (!values || typeof values !== 'object' || Array.isArray(values)) return
+      cb(values as LegacyPlansPreferenceProjection)
+    }
+    ipcRenderer.on('plans:legacyRecoveryPreferences', listener)
+    return () => ipcRenderer.removeListener('plans:legacyRecoveryPreferences', listener)
+  },
   openGitHistoryWindow: (args: { workspace_path: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:openGitHistory', { workspace_path: args.workspace_path }),
   openGitWindow: (args: {

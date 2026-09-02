@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process'
 import { startBackend, getResolvedUserPath, type BackendHandle } from './backend'
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
-import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, registerBundledMiniIde, registerBundledPlans, registerLegacyBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
+import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, devPlansV2PluginBundle, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, registerBundledMiniIde, registerBundledPlans, registerLegacyBundledGit, hasCompletePlansContributions, frontendPluginManager } from './plugins/frontendPluginManager'
 import {
   isTrustedPluginManagementSender,
   registerPluginIpc,
@@ -34,6 +34,15 @@ import {
 } from './plugins/factoryGitStartup'
 import { migrateBundledGitPreferences } from './plugins/gitStorageMigration'
 import { GitStorageLifecycleSelector } from './plugins/gitStorageLifecycle'
+import { PlansStorageLifecycleSelector } from './plugins/plansStorageLifecycle'
+import { resolvePlansRootPath } from './plugins/plansRoot'
+import {
+  migratePlansStorage,
+  projectLegacyPlansPreferences,
+  runPlansLegacyRecovery,
+} from './plugins/plansStorageMigration'
+import { retainedPlansLegacyAdapter, type PlansLegacyRecoveryBootstrap } from './plugins/plansLegacyAdapter'
+import type { LegacyPlansPreferenceProjection } from '../shared/plansPreferences'
 import {
   projectBackendPluginActivationCatalog,
   writeBackendPluginActivationCatalog,
@@ -157,6 +166,11 @@ const mainWindows = new Set<BrowserWindow>()
 const contributionWindows = new Map<string, BrowserWindow>()
 const gitRecoveryForced = process.env['NAVIDE_GIT_RECOVERY'] === 'legacy'
 let gitRecoveryEnabled = gitRecoveryForced
+const plansRecoveryForced = process.env['NAVIDE_PLANS_RECOVERY'] === 'legacy'
+let plansRecoveryEnabled = plansRecoveryForced
+/** The Host-selected v2 package being recovered by the retained legacy route.
+ * Never derive this from the legacy descriptor after fallback. */
+let plansRecoveryPackageVersion: string | null = null
 // Focus recency per window id — approximates z-order for the cross-window pane
 // drop hit-test (Electron has no cross-platform z-order query).
 const windowFocusSeq = new Map<number, number>()
@@ -188,6 +202,24 @@ const adoptedWorkspaces = new Map<BrowserWindow, string[]>()
 // Adopted lists waiting to be claimed by the window being restored for them.
 // Keyed by window id because the renderer asks for its own after mounting.
 const pendingAdoptedWorkspaces = new Map<number, string[]>()
+
+/** Switch all main-window Plans surfaces to the trusted legacy adapter after
+ * a v2 package/child availability failure. The descriptor and package remain
+ * registered for diagnostics, but no renderer is allowed to keep presenting
+ * a dead v2 contribution or MCP availability bit. */
+function enterPlansRecovery(reason: string): void {
+  frontendPluginManager.markPlansBackendUnavailable(reason)
+  if (plansRecoveryEnabled) return
+  plansRecoveryEnabled = true
+  for (const [key, hostWindow] of contributionWindows) {
+    if (key.startsWith('navide.plans.') && !hostWindow.isDestroyed()) hostWindow.close()
+  }
+  for (const hostWindow of mainWindows) {
+    if (hostWindow.isDestroyed() || detachedWindowIds.has(hostWindow.id)) continue
+    hostWindow.webContents.send('plugins:contributionsChanged')
+    hostWindow.webContents.send('plans:recoveryChanged', { legacy: true })
+  }
+}
 
 // Send an event to every non-detached main window bound to a workspace (used to
 // hand a run group off to / back from a detached child window).
@@ -435,7 +467,10 @@ async function createWindow(
     broadcastOpenWorkspacesChanged()
   })
 
-  const mainBootParams: Record<string, string> = gitRecoveryEnabled ? { legacy_git_recovery: '1' } : {}
+  const mainBootParams: Record<string, string> = {
+    ...(gitRecoveryEnabled ? { legacy_git_recovery: '1' } : {}),
+    ...(plansRecoveryEnabled ? { legacy_plans_recovery: '1' } : {}),
+  }
   loadWindow(win, { window: 'main', ...params, ...mainBootParams })
   return win
 }
@@ -729,6 +764,19 @@ frontendPluginManager.setActivationFailureHandler((failure) => {
     )
   }
 })
+frontendPluginManager.setPlansBackendFailureHandler((failure) => {
+  // This covers both an initial bind failure and a later renderer/child
+  // failure. The left contribution is recovered in-place by App/ControlPane;
+  // the standalone window is handed to the existing legacy adapter.
+  const isLeftContribution = failure.contributionKey === 'navide.plans.left'
+  plansRecoveryPackageVersion = failure.packageVersion
+  enterPlansRecovery(failure.reason)
+  frontendPluginManager.destroyInstance(failure.instanceId)
+  const query = failure.query.startsWith('?') ? failure.query.slice(1) : failure.query
+  const relPath = new URLSearchParams(query).get('rel_path') ?? undefined
+  warnMain(`[main] navide.plans v2 failed (${failure.reason}); switched to legacy recovery`)
+  if (!isLeftContribution) void openLegacyPlanWindow(failure.workspacePath, relPath)
+})
 let approvedInstalledPluginActivations = [
   ...installedPluginLoad.activationCatalog,
   ...factoryGitActivations,
@@ -744,6 +792,9 @@ const pluginStorageStore = new PluginStorageStore(
 )
 const gitStorageLifecycle = new GitStorageLifecycleSelector(
   join(app.getPath('userData'), 'plugin-storage-v2', 'lifecycle.json'),
+)
+const plansStorageLifecycle = new PlansStorageLifecycleSelector(
+  join(app.getPath('userData'), 'plugin-storage-v2', 'plans-lifecycle.json'),
 )
 const applyPluginActivationChange = ({
   pluginId,
@@ -952,9 +1003,9 @@ const approvedBackendPluginCatalog = () =>
 // code/GPU caches, electron-updater downloads). Never user state.
 registerStorageIpc()
 
-// Mini-IDE keeps its bundled v1 delivery path. Plans also remains on its
-// legacy backend adapter until the production packaged-backend artifact gate
-// is complete; Issue 22's packaged child is injected only by integration tests.
+// Mini-IDE keeps its bundled v1 delivery path. Plans selects the combined
+// Manifest v2 package when its verified frontend/backend artifact is present;
+// the legacy bundle remains an explicit recovery fallback.
 const bundledMiniIde = registerBundledMiniIde(frontendPluginManager, {
   isPackaged: app.isPackaged,
   resourcesPath: process.resourcesPath,
@@ -966,9 +1017,49 @@ if (!bundledMiniIde.registered) {
 const bundledPlans = registerBundledPlans(frontendPluginManager, {
   isPackaged: app.isPackaged,
   resourcesPath: process.resourcesPath,
+  installedActivation: installedPluginLoad.activationCatalog.find(
+    (entry) => entry.pluginId === 'navide.plans'
+  ),
 })
 if (!bundledPlans.registered) {
   console.warn(`[main] bundled Plans unavailable: ${bundledPlans.reason}`)
+}
+const bundledPlansDescriptor = frontendPluginManager.getDescriptor('navide.plans')
+if (
+  bundledPlansDescriptor?.capabilityPolicy?.kind === 'manifest-v2' &&
+  bundledPlansDescriptor.packageVersion
+) {
+  plansRecoveryPackageVersion = bundledPlansDescriptor.packageVersion
+}
+const plansHasCompleteV2Package = Boolean(
+  bundledPlans.registered &&
+  hasCompletePlansContributions(bundledPlansDescriptor) &&
+  bundledPlansDescriptor?.packageVersion &&
+  bundledPlansDescriptor?.packageDir
+)
+if (!plansHasCompleteV2Package) {
+  plansRecoveryEnabled = true
+}
+if (
+  bundledPlansDescriptor?.capabilityPolicy?.kind === 'manifest-v2' &&
+  bundledPlansDescriptor.packageVersion
+) {
+  pluginCapabilityGrants.set('navide.plans', {
+    packageVersion: bundledPlansDescriptor.packageVersion,
+    system: [...bundledPlansDescriptor.capabilityPolicy.system],
+    ...(bundledPlansDescriptor.capabilityPolicy.shell
+      ? { shell: bundledPlansDescriptor.capabilityPolicy.shell }
+      : {}),
+    storage: true,
+  })
+  if (plansRecoveryEnabled) {
+    frontendPluginManager.markPlansBackendUnavailable('package-recovery')
+    warnMain(
+      `[main] Plans v2 package is unavailable; using legacy recovery${
+        plansRecoveryForced ? ' (NAVIDE_PLANS_RECOVERY=legacy)' : ''
+      }`,
+    )
+  }
 }
 
 ipcMain.handle('backend:info', () => backendInfoPayload())
@@ -1281,7 +1372,130 @@ async function migrateGitStorage(): Promise<void> {
   }
 }
 
+let plansStorageMigrationInFlight: { packageVersion: string; promise: Promise<void> } | null = null
+const plansLegacyRecoveryCache = new Map<string, PlansLegacyRecoveryBootstrap | null>()
+const plansLegacyRecoveryInFlight = new Map<
+  string,
+  Promise<PlansLegacyRecoveryBootstrap | null>
+>()
+
+/** Bind the actual retained legacy Plans adapter to the lifecycle-selected
+ * previous snapshot. The returned projection is cached by Host workspace and
+ * package identity; no renderer-supplied identity participates in selection. */
+async function getPlansLegacyRecoveryBootstrap(
+  workspacePath: string,
+): Promise<PlansLegacyRecoveryBootstrap | null> {
+  const packageVersion = plansRecoveryPackageVersion
+  if (!plansRecoveryEnabled || !packageVersion || !workspacePath) return null
+  const storageWorkspacePath = resolvePlansRootPath(workspacePath)
+  const workspaceId = frontendPluginManager.workspaceIdForPath(storageWorkspacePath)
+  if (!workspaceId) return null
+  const cacheKey = `${packageVersion}\u0000${workspaceId}`
+  if (plansLegacyRecoveryCache.has(cacheKey)) {
+    return plansLegacyRecoveryCache.get(cacheKey) ?? null
+  }
+  const existing = plansLegacyRecoveryInFlight.get(cacheKey)
+  if (existing) return existing
+
+  const promise = runPlansLegacyRecovery(pluginStorageStore, plansStorageLifecycle, {
+    currentPackageVersion: packageVersion,
+    workspaceId,
+    adapter: retainedPlansLegacyAdapter,
+  })
+    .then((recovered) => recovered?.result ?? null)
+    .catch((error: unknown) => {
+      warnMain(
+        `[main] retained Plans recovery adapter unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+      return null
+    })
+  const cachedPromise = promise.then((result) => {
+    plansLegacyRecoveryCache.set(cacheKey, result)
+    return result
+  })
+  plansLegacyRecoveryInFlight.set(cacheKey, cachedPromise)
+  try {
+    return await cachedPromise
+  } finally {
+    if (plansLegacyRecoveryInFlight.get(cacheKey) === cachedPromise) {
+      plansLegacyRecoveryInFlight.delete(cacheKey)
+    }
+  }
+}
+
+async function migratePlansStorageState(): Promise<void> {
+  if (plansRecoveryEnabled) return
+  const descriptor = frontendPluginManager.getDescriptor('navide.plans')
+  const packageVersion = descriptor?.packageVersion
+  if (descriptor?.capabilityPolicy?.kind !== 'manifest-v2' || !packageVersion) return
+  if (plansStorageMigrationInFlight?.packageVersion === packageVersion) {
+    return plansStorageMigrationInFlight.promise
+  }
+  const sourceSnapshot = plansStorageLifecycle.sourceFor(packageVersion)
+  const promise = (async () => {
+    const migration = await migratePlansStorage(pluginStorageStore, {
+      packageVersion,
+      sourceSnapshot,
+    })
+    if (!migration.completed) return
+    frontendPluginManager.setPlansStorageSnapshotContext(
+      packageVersion,
+      migration.sourcePackageVersion,
+    )
+    plansStorageLifecycle.rememberActive(packageVersion)
+  })()
+  plansStorageMigrationInFlight = { packageVersion, promise }
+  try {
+    await promise
+  } finally {
+    if (plansStorageMigrationInFlight?.promise === promise) plansStorageMigrationInFlight = null
+  }
+}
+
+/**
+ * The legacy Plans renderer is the only trusted process that can see the old
+ * renderer-origin localStorage. It sends only the fixed projection; the Host
+ * validates and writes the workspace partition here.
+ */
+async function projectPlansLegacyPreferences(
+  workspacePath: string,
+  values: LegacyPlansPreferenceProjection,
+): Promise<{ ok: boolean; error?: string }> {
+  const descriptor = frontendPluginManager.getDescriptor('navide.plans')
+  const packageVersion = descriptor?.packageVersion
+  // Legacy Plans keyed preferences by the workspace shown in the renderer,
+  // while v2 binds document operations to the repository root that owns
+  // `.agent-team/plans`. Keep the source path for IPC authorization, but write
+  // into the same effective workspace partition the v2 view will read.
+  const storageWorkspacePath = resolvePlansRootPath(workspacePath)
+  const workspaceId = frontendPluginManager.workspaceIdForPath(storageWorkspacePath)
+  if (
+    descriptor?.capabilityPolicy?.kind !== 'manifest-v2' ||
+    !packageVersion ||
+    !workspaceId
+  ) return { ok: false, error: 'Plans v2 storage is unavailable.' }
+
+  await migratePlansStorageState()
+  if (plansRecoveryEnabled) {
+    return { ok: false, error: 'Plans legacy recovery is active.' }
+  }
+  const result = await projectLegacyPlansPreferences(pluginStorageStore, {
+    packageVersion,
+    workspaceId,
+    values,
+  })
+  return result.completed
+    ? { ok: true }
+    : { ok: false, error: 'Plans preferences could not be migrated.' }
+}
+
 async function prepareCatalogContribution(contributionKey: string): Promise<void> {
+  if (contributionKey.startsWith('navide.plans.')) {
+    if (!plansRecoveryEnabled) await migratePlansStorageState()
+    return
+  }
   if (!contributionKey.startsWith('navide.git.')) return
   const descriptor = frontendPluginManager.getDescriptor('navide.git')
   if (
@@ -1291,6 +1505,11 @@ async function prepareCatalogContribution(contributionKey: string): Promise<void
     await migrateGitStorage()
   }
 }
+
+// Warm the candidate/active boundary at startup. Opening Plans awaits the
+// same promise through migratePlansStorageState, so a first click cannot race
+// snapshot promotion.
+void migratePlansStorageState()
 
 const DEFAULT_EDITOR_SETTING_KEY = 'agentTeam.defaultEditor'
 const DEFAULT_EDITOR_COMMAND_KEY = 'agentTeam.defaultEditor.customCommand'
@@ -1464,6 +1683,9 @@ function openMiniIdeEditor(host: BrowserWindow | null, params: Record<string, st
 // through the same router as window:openEditor so the user's default-editor
 // choice applies here too, with the mini-IDE as the fallback.
 frontendPluginManager.setOpenInEditorHandler((params) => routeEditorOpen(null, params))
+frontendPluginManager.setOpenPlansWindowHandler((workspacePath, relPath) =>
+  openPlanWindow(workspacePath, relPath)
+)
 
 // Manifest v2 plans are executed by the Host-owned adapters. In particular,
 // Git's public fs/ui/aiCli calls resolve their workspace and executable/profile
@@ -1471,6 +1693,11 @@ frontendPluginManager.setOpenInEditorHandler((params) => routeEditorOpen(null, p
 frontendPluginManager.setPublicCapabilityHandler((plan) =>
   frontendPluginManager.executePublicCapability(plan)
 )
+
+// Plans v2 keeps all workspace reads and mutations on the existing backend
+// filesystem service. The package child only receives the Host-private bridge
+// adapter; it never gets a Node filesystem handle or a second path resolver.
+frontendPluginManager.configurePlansFilesystemService()
 
 frontendPluginManager.setPublicStorageHandler((execution) => pluginStorageStore.execute(execution))
 
@@ -2092,12 +2319,23 @@ ipcMain.handle('plugins:prepareContribution', async (event, args: Record<string,
       )
     : null
   if (!hostWindow || !contributionKey || !workspacePath) return { ok: false }
+  if (contributionKey.startsWith('navide.plans.') && plansRecoveryEnabled) {
+    return { ok: false, error: 'Plans legacy recovery is active' }
+  }
   await prepareCatalogContribution(contributionKey)
   const renderedTheme = typeof args?.theme === 'string' ? args.theme : ''
-  return frontendPluginManager.prepareGuestContribution(hostWindow, contributionKey, {
+  const result = await frontendPluginManager.prepareGuestContribution(hostWindow, contributionKey, {
     workspacePath,
     query: catalogContributionQuery(contributionKey, workspacePath, {}, renderedTheme),
   })
+  if (
+    !result.ok &&
+    contributionKey.startsWith('navide.plans.') &&
+    frontendPluginManager.plansBackendFallbackAllowed()
+  ) {
+    enterPlansRecovery('guest-prepare-failure')
+  }
+  return result
 })
 
 /** Open a catalog window contribution in a dedicated BrowserWindow. Only the
@@ -2218,7 +2456,7 @@ ipcMain.handle('window:openEditor', async (event, args: Record<string, string>) 
   // With `file_ws` the path is relative to that root, not to the workspace —
   // it can never name this workspace's plan doc, so keep it out of the route.
   if (workspacePath && !params.file_ws && isHtmlPlanDocPath(filepath)) {
-    openPlanWindow(workspacePath, filepath)
+    void openPlanWindow(workspacePath, filepath)
     return { ok: true }
   }
   const ok = await routeEditorOpen(BrowserWindow.fromWebContents(event.sender), params)
@@ -2250,7 +2488,74 @@ const planWindows = new PlanWindowRegistry<BrowserWindow>()
 // click made during load (before the subscription exists) is never lost.
 const planWindowPending = new Map<BrowserWindow, string>()
 
-function openPlanWindow(workspacePath: string, relPath?: string): void {
+function trustedPlansPreferenceHost(event: IpcMainInvokeEvent): BrowserWindow | null {
+  const hostWindow = BrowserWindow.fromWebContents(event.sender)
+  if (
+    !hostWindow ||
+    hostWindow.isDestroyed() ||
+    !event.senderFrame ||
+    event.senderFrame.parent ||
+    hostWindow.webContents !== event.sender
+  ) return null
+  if (isTrustedPluginManagementSender(event, mainWindows)) return hostWindow
+  return planWindows.hasWindow(hostWindow) ? hostWindow : null
+}
+
+function trustedPlansRecoveryWorkspace(event: IpcMainInvokeEvent): string | null {
+  const hostWindow = BrowserWindow.fromWebContents(event.sender)
+  if (
+    !hostWindow ||
+    hostWindow.isDestroyed() ||
+    !event.senderFrame ||
+    event.senderFrame.parent ||
+    hostWindow.webContents !== event.sender
+  ) return null
+  const planWindowWorkspace = planWindows.workspaceForWindow(hostWindow)
+  if (planWindowWorkspace) return planWindowWorkspace
+  if (mainWindows.has(hostWindow) && !detachedWindowIds.has(hostWindow.id)) {
+    return mainWindowWorkspaces.get(hostWindow) ?? null
+  }
+  return null
+}
+
+async function openPlanWindow(workspacePath: string, relPath?: string): Promise<boolean> {
+  const plansDescriptor = frontendPluginManager.getDescriptor('navide.plans')
+  const hasCompleteV2Package = Boolean(
+    hasCompletePlansContributions(plansDescriptor) &&
+    plansDescriptor?.packageVersion &&
+    plansDescriptor?.packageDir
+  )
+  if (!hasCompleteV2Package || plansRecoveryEnabled) {
+    await openLegacyPlanWindow(workspacePath, relPath)
+    return true
+  }
+
+  if (plansDescriptor?.packageVersion) {
+    await migratePlansStorageState()
+    if (plansRecoveryEnabled) {
+      await openLegacyPlanWindow(workspacePath, relPath)
+      return true
+    }
+    const result = await openCatalogContributionWindow(
+      'navide.plans.window',
+      workspacePath,
+      relPath ? { rel_path: relPath } : {},
+    )
+    if (result.ok) return true
+    if (frontendPluginManager.plansBackendFallbackAllowed()) {
+      enterPlansRecovery('window-open-failure')
+      await openLegacyPlanWindow(workspacePath, relPath)
+      return true
+    }
+    warnMain(`[main] navide.plans window open denied: ${result.error ?? 'unknown error'}`)
+    return false
+  }
+  await openLegacyPlanWindow(workspacePath, relPath)
+  return true
+}
+
+async function openLegacyPlanWindow(workspacePath: string, relPath?: string): Promise<void> {
+  const recoveryBootstrap = await getPlansLegacyRecoveryBootstrap(workspacePath)
   const existing = planWindows.get(workspacePath)
   if (existing) {
     // Already open for this workspace: focus it and, when a plan was clicked,
@@ -2258,6 +2563,9 @@ function openPlanWindow(workspacePath: string, relPath?: string): void {
     if (existing.isMinimized()) existing.restore()
     existing.show()
     existing.focus()
+    if (recoveryBootstrap) {
+      existing.webContents.send('plans:legacyRecoveryPreferences', recoveryBootstrap.preferences)
+    }
     if (relPath) {
       if (planWindowPending.has(existing)) {
         // Renderer still loading and not yet subscribed: remember the latest
@@ -2304,17 +2612,76 @@ function openPlanWindow(workspacePath: string, relPath?: string): void {
   loadWindow(win, {
     window: 'plans',
     workspace_path: workspacePath,
+    ...(plansRecoveryEnabled ? { legacy_plans_recovery: '1' } : {}),
     ...(relPath ? { rel_path: relPath } : {})
   })
 }
 
-ipcMain.handle('window:openPlans', (_event, args: { workspace_path?: string; rel_path?: string }) => {
+ipcMain.handle('window:openPlans', async (_event, args: { workspace_path?: string; rel_path?: string }) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }
   const relPath = (args?.rel_path ?? '').trim()
-  openPlanWindow(workspacePath, relPath || undefined)
-  return { ok: true }
+  return { ok: await openPlanWindow(workspacePath, relPath || undefined) }
 })
+
+ipcMain.handle(
+  'plans:projectLegacyPreferences',
+  async (event, args: { workspace_path?: unknown; values?: unknown }) => {
+    const hostWindow = trustedPlansPreferenceHost(event)
+    const requestedWorkspace = typeof args?.workspace_path === 'string'
+      ? args.workspace_path
+      : ''
+    const registeredWorkspace = hostWindow
+      ? isTrustedPluginManagementSender(event, mainWindows)
+        ? registeredGitLeftWorkspace(
+            hostWindow,
+            requestedWorkspace,
+            mainWindowWorkspaces,
+            normalizeWorkspacePath,
+          )
+        : planWindows.workspaceForWindow(hostWindow)
+      : null
+    const workspacePath = registeredWorkspace &&
+      normalizeWorkspacePath(registeredWorkspace) === normalizeWorkspacePath(requestedWorkspace)
+      ? registeredWorkspace
+      : null
+    if (
+      !workspacePath ||
+      args?.values === null ||
+      typeof args?.values !== 'object' ||
+      Array.isArray(args.values)
+    ) {
+      return { ok: false, error: 'untrusted or invalid Plans preference projection' }
+    }
+    const values = args.values as Record<string, unknown>
+    const projection: LegacyPlansPreferenceProjection = {}
+    for (const key of Object.keys(values)) {
+      if (
+        key === 'plans.filter' ||
+        key === 'plans.sort' ||
+        key === 'plans.sortdir' ||
+        key === 'plans.group' ||
+        key === 'plans.collapsed' ||
+        key === 'plans.recent' ||
+        key === 'plans.pinned'
+      ) {
+        const value = values[key]
+        if (typeof value === 'string') projection[key] = value
+      }
+    }
+    return projectPlansLegacyPreferences(normalizeWorkspacePath(workspacePath), projection)
+  },
+)
+
+ipcMain.handle(
+  'plans:getLegacyRecoveryPreferences',
+  async (event): Promise<LegacyPlansPreferenceProjection | null> => {
+    const workspacePath = trustedPlansRecoveryWorkspace(event)
+    if (!workspacePath) return null
+    const recovery = await getPlansLegacyRecoveryBootstrap(workspacePath)
+    return recovery?.preferences ?? null
+  },
+)
 
 // Git History: routes to the unified Git plugin window (its History view). The
 // dedicated `?window=githistory` renderer it used to open is gone.
@@ -3175,15 +3542,44 @@ app.whenReady().then(async () => {
         '[main] AGENT_TEAM_PLUGIN_DEV=1 but mini-IDE dev bundle is missing — run `pnpm run build:mini-ide`'
       )
     }
-    // Dev-only: register the locally built Plans plugin (dist-plugins/plans),
-    // same gate and override semantics as the mini-IDE above.
-    const devPlansDescriptor = devPlansPluginDescriptor()
-    if (existsSync(devPlansDescriptor.entryFile)) {
-      frontendPluginManager.registerDeveloperDescriptor(devPlansDescriptor)
-    } else {
-      console.warn(
-        '[main] AGENT_TEAM_PLUGIN_DEV=1 but Plans dev bundle is missing — run `pnpm run build:plans`'
-      )
+    // Dev-only: keep the already selected combined Plans package when startup
+    // has loaded one. A second backend for the same plugin id cannot be
+    // registered safely, so the legacy bundle is considered only when no v2
+    // package/backend pair is active.
+    const devPlansV2Package = devPlansV2PluginBundle()
+    const activePlansDescriptor = frontendPluginManager.getDescriptor('navide.plans')
+    let devPlansV2Registered = Boolean(
+      activePlansDescriptor?.capabilityPolicy?.kind === 'manifest-v2' &&
+        activePlansDescriptor.packageVersion &&
+        activePlansDescriptor.packageDir &&
+        hasCompletePlansContributions(activePlansDescriptor) &&
+        frontendPluginManager.hasBackendActivation(
+          'navide.plans',
+          activePlansDescriptor.packageVersion,
+        )
+    )
+    if (devPlansV2Package && !devPlansV2Registered) {
+      try {
+        frontendPluginManager.registerDeveloperDescriptor(devPlansV2Package.descriptor)
+        frontendPluginManager.registerBackendActivation(devPlansV2Package.activation)
+        devPlansV2Registered = true
+      } catch (error) {
+        console.warn(
+          `[main] AGENT_TEAM_PLUGIN_DEV=1 but Plans v2 backend activation was rejected: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
+    }
+    if (!devPlansV2Registered) {
+      const devPlansDescriptor = devPlansPluginDescriptor()
+      if (existsSync(devPlansDescriptor.entryFile)) {
+        frontendPluginManager.registerDeveloperDescriptor(devPlansDescriptor)
+      } else {
+        console.warn(
+          '[main] AGENT_TEAM_PLUGIN_DEV=1 but Plans dev bundle is missing — run `pnpm run build:plans`'
+        )
+      }
     }
     const explicitPackageDir = process.env['AGENT_TEAM_PLUGIN_DEV_PATH']
     if (explicitPackageDir !== undefined) {
@@ -3233,7 +3629,7 @@ app.whenReady().then(async () => {
             // Dev-only: workspace via AGENT_TEAM_PLUGIN_WORKSPACE, else empty.
             if (host) {
               const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
-              openPlansPluginView(host, process.env['AGENT_TEAM_PLUGIN_WORKSPACE'] ?? '', httpUrl, '', currentUiTheme())
+              void openPlansPluginView(host, process.env['AGENT_TEAM_PLUGIN_WORKSPACE'] ?? '', httpUrl, '', currentUiTheme())
             }
           }
         }

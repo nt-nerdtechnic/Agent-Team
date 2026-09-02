@@ -47,9 +47,16 @@ describe('generic plugin placement boot wiring', () => {
 
   it('carries the internal legacy boot flag only when recovery is enabled', () => {
     expect(mainSource).toMatch(
-      /const mainBootParams(?:: Record<string, string>)? = gitRecoveryEnabled \? \{ legacy_git_recovery: '1' \} : \{\}/
+      /const mainBootParams: Record<string, string> = \{[\s\S]*legacy_git_recovery: '1'[\s\S]*legacy_plans_recovery: '1'/
     )
     expect(mainSource).toContain("loadWindow(win, { window: 'main', ...params, ...mainBootParams })")
+  })
+
+  it('passes the Host Plans recovery mode to ControlPane and listens for failures', () => {
+    expect(appSource).toContain('legacyPlansRecovery')
+    expect(appSource).toContain('onPlansRecoveryChanged')
+    expect(appSource).toContain(':legacy-plans-recovery="legacyPlansRecovery"')
+    expect(mainSource).toContain("hostWindow.webContents.send('plans:recoveryChanged', { legacy: true })")
   })
 
   it('tracks the recovery notification in both directions', () => {
@@ -68,7 +75,7 @@ describe('generic plugin placement boot wiring', () => {
   it('uses the typed recovery listener exposed by preload', () => {
     const preloadSource = readFileSync(resolve(process.cwd(), 'src/preload/index.ts'), 'utf8')
     expect(preloadSource).toContain('onGitRecoveryChanged')
-    expect(preloadSource).toMatch(/payload\.legacy === true/)
+    expect(preloadSource).toMatch(/typeof payload\.legacy === ['"]boolean['"]|payload\.legacy === true/)
     expect(preloadSource).toContain('removeListener')
   })
 })

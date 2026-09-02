@@ -339,6 +339,14 @@ async def unicast_host(event: dict[str, Any]) -> bool:
     return False
 
 
+def host_supports_plans_backend() -> bool:
+    """Return whether the authenticated Electron Host owns production Plans."""
+    return any(
+        not session.dead and session.host_authenticated and session.plans_backend_v2
+        for session in list(_SESSIONS)
+    )
+
+
 def host_session_token_matches(token: Any) -> bool:
     """Validate the per-backend token used by Electron's Host session."""
     expected = _HOST_SESSION_TOKEN
@@ -394,6 +402,7 @@ class Session:
         # handoffs. The bearer is registered over this WebSocket and never
         # appears in renderer/backend-info payloads.
         self.host_authenticated = False
+        self.plans_backend_v2 = False
         # Throttle state for the slow-send probe (see _note_send_timing).
         # None rather than 0.0: the first slow send must always report, which a
         # zero baseline would swallow whenever the clock starts near zero.

@@ -38,6 +38,50 @@ from agent_team_backend.plan_provisioning import TEMPLATE_FILENAME, ensure_plan_
 from mcp.server.fastmcp import Context
 
 PLANS_REL_DIR = ".agent-team/plans"
+_HOST_ROUTE_AVAILABILITY_ERRORS = frozenset({
+    "BACKEND_UNAVAILABLE",
+    "INVALID_RUNTIME",
+    "NOT_READY",
+    "PROTOCOL_ERROR",
+    "PLUGIN_STOPPING",
+    "host_timeout",
+    "host_unavailable",
+})
+
+
+async def _host_agent_plan_call(
+    caller: Caller,
+    workspace_path: str,
+    name: str,
+    arguments: dict[str, Any],
+) -> Any:
+    """Use the production package and fall back only on availability errors."""
+    from agent_team_backend.mcp_server.server import request_host_agent_workspace_backend
+
+    response = await request_host_agent_workspace_backend(
+        "navide.plans",
+        workspace_path,
+        {"reqId": f"mcp:{secrets.token_hex(16)}", "name": name, "args": arguments},
+        caller=caller,
+    )
+    if response.get("ok") is not True:
+        error = response.get("error")
+        error_code = response.get("error_code")
+        if isinstance(error, dict):
+            error_code = error.get("code") or error_code
+            message = error.get("message")
+        else:
+            message = error
+        if error_code in _HOST_ROUTE_AVAILABILITY_ERRORS:
+            return _NO_HOST_ROUTE
+        raise FsError(
+            str(message or "production Plans backend request was denied"),
+            code=str(error_code) if isinstance(error_code, str) else None,
+        )
+    return response.get("result")
+
+
+_NO_HOST_ROUTE = object()
 
 
 # ── sync filesystem layer (runs in a worker thread) ─────────────────────────
@@ -345,6 +389,9 @@ async def plan_list(ctx: Context, workspace_path: str = "") -> list[dict[str, An
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(caller, workspace_path, "plans.list", {})
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(_list_plans_sync, workspace_path)
 
 
@@ -361,6 +408,9 @@ async def plan_read(rel_path: str, ctx: Context, workspace_path: str = "") -> di
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(caller, workspace_path, "plans.read", {"rel_path": rel_path})
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(_read_plan_sync, workspace_path, rel_path)
 
 
@@ -388,6 +438,14 @@ async def plan_create(
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(
+        caller,
+        workspace_path,
+        "plans.create",
+        {"name": name, "overview": overview, "todos": todos},
+    )
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     result = await asyncio.to_thread(_create_plan_sync, workspace_path, name, overview, todos)
     warning = await asyncio.to_thread(workspace_mismatch_warning, workspace_path)
     if warning:
@@ -410,6 +468,14 @@ async def plan_update_stage(
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(
+        caller,
+        workspace_path,
+        "plans.update_stage",
+        {"rel_path": rel_path, "stage": stage},
+    )
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(_update_stage_sync, workspace_path, rel_path, stage)
 
 
@@ -427,6 +493,14 @@ async def plan_update_todo(
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(
+        caller,
+        workspace_path,
+        "plans.update_todo",
+        {"rel_path": rel_path, "todo_id": todo_id, "status": status},
+    )
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(_update_todo_sync, workspace_path, rel_path, todo_id, status)
 
 
@@ -446,6 +520,14 @@ async def plan_add_note(
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(
+        caller,
+        workspace_path,
+        "plans.add_note",
+        {"rel_path": rel_path, "text": text, "author": author},
+    )
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(_add_note_sync, workspace_path, rel_path, text, author)
 
 
