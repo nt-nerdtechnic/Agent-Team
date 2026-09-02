@@ -54,7 +54,8 @@ import {
 } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
-import { paneStatusLabelKey } from './lib/paneStatusLabel'
+import { paneStatusLabelText } from './lib/paneStatusLabel'
+import { statusBadgeStyle } from './composables/useStatusBadgePrefs'
 import { useBackend } from './composables/useBackend'
 import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
 import { useSettings } from './composables/useSettings'
@@ -3157,7 +3158,7 @@ function mentionCandidatesFor(paneId: string): MentionCandidate[] {
         address: x.messagingName as string,
         group: localGroup,
         status,
-        statusLabel: status ? i18n.global.t(paneStatusLabelKey(status)) : undefined,
+        statusLabel: status ? paneStatusLabelText(status) : undefined,
       }
     })
   // Offer the broadcast keyword first once there are ≥2 recipients — picking it
@@ -14862,7 +14863,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
+            <span class="meeting-badge" :data-status="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
@@ -14922,7 +14923,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="spotlight-thumb-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="spotlight-thumb-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
+            <span class="spotlight-thumb-badge" :data-status="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
           </div>
         </div>
         <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="spotlight-strip-empty">
@@ -14995,7 +14996,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
+            <span class="meeting-badge" :data-status="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
@@ -16258,13 +16259,13 @@ function paneIsCommander(p: ActivePane): boolean {
   padding: 1px 5px;
   border-radius: 3px;
 }
-.spotlight-thumb-badge[data-status="running"]  { background: var(--success-subtle); color: var(--success-fg); border: 1px solid var(--success-emphasis); }
-.spotlight-thumb-badge[data-status="idle"]     { background: var(--attention-subtle); color: var(--attention-bright); border: 1px solid var(--attention-emphasis); }
-.spotlight-thumb-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
-.spotlight-thumb-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-emphasis); }
-.spotlight-thumb-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
-.spotlight-thumb-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
-.spotlight-thumb-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
+.spotlight-thumb-badge[data-status="running"]  { background: var(--status-badge-bg, var(--success-subtle)); color: var(--status-badge-fg, var(--success-fg)); border: 1px solid var(--status-badge-fg, var(--success-emphasis)); }
+.spotlight-thumb-badge[data-status="idle"]     { background: var(--status-badge-bg, var(--attention-subtle)); color: var(--status-badge-fg, var(--attention-bright)); border: 1px solid var(--status-badge-fg, var(--attention-emphasis)); }
+.spotlight-thumb-badge[data-status="starting"] { background: var(--status-badge-bg, var(--status-starting-subtle)); color: var(--status-badge-fg, var(--status-starting-fg)); border: 1px solid var(--status-badge-fg, var(--status-starting-emphasis)); }
+.spotlight-thumb-badge[data-status="error"]    { background: var(--status-badge-bg, var(--danger-subtle)); color: var(--status-badge-fg, var(--danger-fg)); border: 1px solid var(--status-badge-fg, var(--danger-emphasis)); }
+.spotlight-thumb-badge[data-status="stopped"]  { background: var(--status-badge-bg, var(--bg-inset)); color: var(--status-badge-fg, var(--text-bright)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
+.spotlight-thumb-badge[data-status="awaiting"] { background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent)); color: var(--status-badge-fg, var(--warning-fg)); border: 1px solid var(--status-badge-fg, color-mix(in srgb, var(--warning-fg) 45%, transparent)); }
+.spotlight-thumb-badge[data-status="exited"]   { background: var(--status-badge-bg, var(--bg-muted)); color: var(--status-badge-fg, var(--text-primary)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
 .spotlight-thumb-loop {
   font-size: 9px;
   padding: 1px 5px;
@@ -16395,13 +16396,13 @@ function paneIsCommander(p: ActivePane): boolean {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
 }
-.meeting-badge[data-status="running"]  { background: var(--success-subtle); color: var(--success-fg); border: 1px solid var(--success-emphasis); }
-.meeting-badge[data-status="idle"]     { background: var(--attention-subtle); color: var(--attention-bright); border: 1px solid var(--attention-emphasis); }
-.meeting-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
-.meeting-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
-.meeting-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-bright); border: 1px solid var(--danger-emphasis); }
-.meeting-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
-.meeting-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
+.meeting-badge[data-status="running"]  { background: var(--status-badge-bg, var(--success-subtle)); color: var(--status-badge-fg, var(--success-fg)); border: 1px solid var(--status-badge-fg, var(--success-emphasis)); }
+.meeting-badge[data-status="idle"]     { background: var(--status-badge-bg, var(--attention-subtle)); color: var(--status-badge-fg, var(--attention-bright)); border: 1px solid var(--status-badge-fg, var(--attention-emphasis)); }
+.meeting-badge[data-status="stopped"]  { background: var(--status-badge-bg, var(--bg-inset)); color: var(--status-badge-fg, var(--text-bright)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
+.meeting-badge[data-status="starting"] { background: var(--status-badge-bg, var(--status-starting-subtle)); color: var(--status-badge-fg, var(--status-starting-fg)); border: 1px solid var(--status-badge-fg, var(--status-starting-emphasis)); }
+.meeting-badge[data-status="error"]    { background: var(--status-badge-bg, var(--danger-subtle)); color: var(--status-badge-fg, var(--danger-bright)); border: 1px solid var(--status-badge-fg, var(--danger-emphasis)); }
+.meeting-badge[data-status="awaiting"] { background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent)); color: var(--status-badge-fg, var(--warning-fg)); border: 1px solid var(--status-badge-fg, color-mix(in srgb, var(--warning-fg) 45%, transparent)); }
+.meeting-badge[data-status="exited"]   { background: var(--status-badge-bg, var(--bg-muted)); color: var(--status-badge-fg, var(--text-primary)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
 .meeting-loop {
   font-size: var(--font-3xs);
   padding: 2px 6px;

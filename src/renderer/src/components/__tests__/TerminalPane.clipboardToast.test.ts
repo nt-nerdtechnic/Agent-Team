@@ -51,7 +51,11 @@ vi.mock('@navide/plugin-ui/foundation', async (importOriginal) => ({
   // wording, which belongs to the locale files rather than to this behaviour.
   i18n: {
     global: {
-      t: (key: string, params?: Record<string, unknown>) => `${key} ${JSON.stringify(params ?? {})}`
+      t: (key: string, params?: Record<string, unknown>) => `${key} ${JSON.stringify(params ?? {})}`,
+      // The status pill resolves a user-renamed label per locale, so the stub
+      // needs the locale ref too — without it the header throws while mounting
+      // and every clipboard assertion below fails for an unrelated reason.
+      locale: { value: 'en-US' }
     }
   },
 }))

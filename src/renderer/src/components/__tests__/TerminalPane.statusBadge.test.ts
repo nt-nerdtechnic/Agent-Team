@@ -5,6 +5,7 @@ import type { Ref } from 'vue'
 import TerminalPane from '../TerminalPane.vue'
 import type { DisplayStatus } from '@navide/terminal'
 import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
+import { i18n } from '@navide/plugin-ui/foundation'
 import { paneStatusLabelKey } from '../../lib/paneStatusLabel'
 
 // The pane-header status pill — the badge the user actually reads. Every value
@@ -17,6 +18,20 @@ import { paneStatusLabelKey } from '../../lib/paneStatusLabel'
 const mockTerminal = vi.hoisted(() => ({
   displayStatus: null as unknown as Ref<string>,
   awaitingKind: null as unknown as Ref<string | null>,
+}))
+
+// The badge resolves its text and its colour through the user-customization
+// layer now. Mocked rather than driven through settings: what belongs here is
+// that the pill honours an override at all — useStatusBadgePrefs.test.ts owns
+// how one is stored.
+const mockPrefs = vi.hoisted(() => ({
+  label: '' as string,
+  style: undefined as Record<string, string> | undefined,
+}))
+
+vi.mock('../../composables/useStatusBadgePrefs', () => ({
+  statusBadgeLabelOverride: () => mockPrefs.label,
+  statusBadgeStyle: () => mockPrefs.style,
 }))
 
 vi.mock('@navide/terminal', async (importOriginal) => {
@@ -86,6 +101,8 @@ describe('TerminalPane — status pill', () => {
     wrapper?.unmount()
     wrapper = undefined
     mockTerminal.displayStatus.value = 'idle'
+    mockPrefs.label = ''
+    mockPrefs.style = undefined
   })
 
   it('covers every value displayStatus can report', () => {
@@ -99,11 +116,36 @@ describe('TerminalPane — status pill', () => {
 
   it.each(ALL_DISPLAY_STATUSES)('prints the shared label for %s', (status) => {
     // The pill, the sidebar pill and the agent-overview row all resolve their
-    // text through paneStatusLabelKey. It used to print the raw status word
-    // with 'awaiting' and 'stopped' as hand-made exceptions, which is how one
-    // pane read "RUNNING" here and "執行中" in the overview at the same moment.
+    // text through paneStatusLabel. It used to print the raw status word with
+    // 'awaiting' and 'stopped' as hand-made exceptions, which is how one pane
+    // read "RUNNING" here and "執行中" in the overview at the same moment.
+    // Asserted against i18n rather than against the resolver, so a resolver
+    // that returned the key would still fail here.
     wrapper = mountPane(status)
-    expect(wrapper!.get('.status').text()).toBe(paneStatusLabelKey(status))
+    expect(wrapper!.get('.status').text()).toBe(i18n.global.t(paneStatusLabelKey(status)))
+  })
+
+  it.each(ALL_DISPLAY_STATUSES)('prints the user label for %s when there is one', (status) => {
+    // Renaming a status has to reach the badge the user actually reads; a
+    // surface still resolving the raw key looks correct until someone renames.
+    mockPrefs.label = 'my-word'
+    wrapper = mountPane(status)
+    expect(wrapper!.get('.status').text()).toBe('my-word')
+  })
+
+  it('carries no inline colour while a status is at its default', () => {
+    // The [data-status] rule is the default look; emitting variables for every
+    // status would make the palette responsible for reproducing all of them.
+    wrapper = mountPane('idle')
+    expect(wrapper!.get('.status').attributes('style') ?? '').toBe('')
+  })
+
+  it('carries both badge variables once a status is recoloured', () => {
+    mockPrefs.style = { '--status-badge-bg': 'var(--x-bg)', '--status-badge-fg': 'var(--x-fg)' }
+    wrapper = mountPane('idle')
+    const style = wrapper!.get('.status').attributes('style') ?? ''
+    expect(style).toContain('--status-badge-bg: var(--x-bg)')
+    expect(style).toContain('--status-badge-fg: var(--x-fg)')
   })
 
   it('prints the same label whichever kind of wait it is', () => {

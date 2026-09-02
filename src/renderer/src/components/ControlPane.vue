@@ -5,7 +5,8 @@ import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
 import { PANE_BATCH_MIME } from '@navide/terminal'
 import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
-import { paneStatusLabelKey } from '../lib/paneStatusLabel'
+import { paneStatusLabelText } from '../lib/paneStatusLabel'
+import { statusBadgeStyle } from '../composables/useStatusBadgePrefs'
 import { rollupTabStatus, runGroupStateLabelKey } from '../lib/tabStatus'
 import type { TabRunState } from '../lib/tabStatus'
 import RebuildIcon from './RebuildIcon.vue'
@@ -2133,7 +2134,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               @click.stop="emit('toggle-collapsed', p.id)"
             >{{ folded ? '▸' : '▾' }}</button>
             <span v-else-if="depth || g.rail" class="lineage-spacer"></span>
-            <span class="status-dot" :data-state="p.status" :title="$t(paneStatusLabelKey(p.status))"></span>
+            <span class="status-dot" :data-state="p.status" :style="statusBadgeStyle(p.status)" :title="paneStatusLabelText(p.status)"></span>
             <!-- No MCP tag beside it. `origin === 'mcp'` is still recorded and
                  still drives spawn behaviour; it just does not need a badge.
                  The indentation already says an agent spawned this pane, and
@@ -2185,7 +2186,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <template v-if="expandedPaneId === p.id || props.focusPaneId === p.id">
             <div class="agent-role-line">
               <span class="agent-role-main">{{ agentTypeLabel(p.agentKey) }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span></span>
-              <span class="state" :data-state="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
+              <span class="state" :data-state="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
             </div>
             <div v-if="!p.isMinimized && p.origin === 'pipeline'" class="stage-line">
               stage {{ p.stageId }} · {{ preparationLabel(p.preparationStatus) }} · {{ injectionLabel(p.injectionStatus) }} {{ kickoffLabel(p.kickoffStatus) }}
@@ -3935,44 +3936,52 @@ button.icon-btn.muted:hover {
 .agent-line:hover {
   background: var(--bg-hover);
 }
+/* A dot is foreground-only, so it takes --status-badge-fg where the pill takes
+   both variables. Each rule below is that status's DEFAULT colour and stays the
+   whole story until the user recolours the status in Settings; only then is the
+   variable present and the fallback overridden. The base rule carries the
+   fallback too, because idle/running/stopped/starting are painted here rather
+   than by a rule of their own. */
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex: 0 0 8px;
-  background: var(--text-muted);
+  background: var(--status-badge-fg, var(--text-muted));
 }
 .status-dot[data-state='running'] {
-  background: var(--success-fg);
+  background: var(--status-badge-fg, var(--success-fg));
   animation: agent-dot-pulse 1.6s ease-in-out infinite;
 }
 .status-dot[data-state='starting'] {
-  background: var(--status-starting-fg);
+  background: var(--status-badge-fg, var(--status-starting-fg));
   animation: agent-dot-pulse 0.9s ease-in-out infinite;
 }
 .status-dot[data-state='idle'] {
-  background: var(--attention-fg);
+  background: var(--status-badge-fg, var(--attention-fg));
 }
 /* The CLI asked something and is parked on the answer. It pulses like running
    rather than sitting flat like idle: this is the one state where nothing at
    all happens until the user acts, so it must not read as "quiet, all done". */
 .status-dot[data-state='awaiting'] {
-  background: var(--warning-fg);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-fg) 25%, transparent);
+  background: var(--status-badge-fg, var(--warning-fg));
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--status-badge-fg, var(--warning-fg)) 25%, transparent);
   animation: agent-dot-pulse 1.2s ease-in-out infinite;
 }
 /* Cold-restore placeholder: nothing spawned yet — a hollow ring, so it never
    reads as a live-but-quiet pane. */
 .status-dot[data-state='waiting'] {
   background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--text-secondary);
+  box-shadow: inset 0 0 0 1.5px var(--status-badge-fg, var(--text-secondary));
 }
 .status-dot[data-state='error'] {
-  background: var(--danger-fg);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger-fg) 25%, transparent);
+  background: var(--status-badge-fg, var(--danger-fg));
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--status-badge-fg, var(--danger-fg)) 25%, transparent);
 }
 .status-dot[data-state='exited'] {
-  background: var(--text-disabled);
+  background: var(--status-badge-fg, var(--text-disabled));
   opacity: 0.6;
 }
 @keyframes agent-dot-pulse {
@@ -4196,42 +4205,48 @@ button.icon-btn.muted:hover {
   white-space: nowrap;
   flex-shrink: 0;
 }
+/* Each rule is the DEFAULT colour of its status and stays the whole story until
+   the user recolours that status in Settings; only then does the badge carry
+   --status-badge-bg/-fg inline and win the var() fallback. */
 .state {
   margin-left: auto;
   font-size: 9px;
   text-transform: uppercase;
   padding: 2px 6px;
   border-radius: 999px;
-  background: var(--bg-muted);
-  color: var(--text-secondary);
+  background: var(--status-badge-bg, var(--bg-muted));
+  color: var(--status-badge-fg, var(--text-secondary));
 }
 .state[data-state='running'] {
-  background: var(--success-muted);
-  color: var(--success-fg);
+  background: var(--status-badge-bg, var(--success-muted));
+  color: var(--status-badge-fg, var(--success-fg));
 }
 .state[data-state='starting'] {
-  background: var(--status-starting-muted);
-  color: var(--status-starting-fg);
+  background: var(--status-badge-bg, var(--status-starting-muted));
+  color: var(--status-badge-fg, var(--status-starting-fg));
 }
 .state[data-state='idle'] {
-  background: var(--attention-muted);
-  color: var(--attention-fg);
+  background: var(--status-badge-bg, var(--attention-muted));
+  color: var(--status-badge-fg, var(--attention-fg));
 }
 .state[data-state='awaiting'] {
-  background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
-  color: var(--warning-fg);
+  background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent));
+  color: var(--status-badge-fg, var(--warning-fg));
 }
 .state[data-state='error'] {
-  background: var(--danger-deep);
-  color: var(--danger-fg);
+  background: var(--status-badge-bg, var(--danger-deep));
+  color: var(--status-badge-fg, var(--danger-fg));
 }
 .state[data-state='exited'] {
-  background: var(--bg-muted);
+  background: var(--status-badge-bg, var(--bg-muted));
 }
+/* 'stopped' was painted in literal hex here, which punched a black hole through
+   the light theme. It resolves through the palette's `ink` now, matching the
+   pane pill. */
 .state[data-state='stopped'] {
-  background: #000000;
-  color: #ffffff;
-  border: 1px solid #3f3f46;
+  background: var(--status-badge-bg, var(--bg-inset));
+  color: var(--status-badge-fg, var(--text-bright));
+  border: 1px solid var(--border-default);
 }
 .agent-item.minimized {
   opacity: 0.7;

@@ -788,6 +788,7 @@
       "analyzer": "分析器",
       "extensions": "擴充功能",
       "storage": "儲存空間",
+      "statusBadges": "狀態徽章",
       "keybindings": "快捷鍵",
       "updates": "更新",
       "help": "說明"
@@ -1049,10 +1050,8 @@
         "password": "密碼",
         "password-placeholder": "至少 8 個字元",
         "display-name": "顯示名稱",
-        "tenant-name": "網路名稱",
-        "tenant-hint": "註冊會建立一個只屬於你的私有網路，只有登入同一個帳號的機器看得到彼此。顯示名稱與網路名稱由 email 自動產生。",
+        "account-hint": "註冊會建立一個只屬於你的私有網路，只有登入同一個帳號的機器看得到彼此。顯示名稱取自你的 email。",
         "optional": "選填",
-        "role": "角色",
         "submit-login": "登入",
         "submit-register": "建立帳號",
         "sign-out": "登出",
@@ -2330,6 +2329,42 @@
     "error": "錯誤",
     "waiting": "尚未開啟",
     "disconnected": "連線中斷"
+  },
+  "statusBadges": {
+    "intro": "自訂每個 pane 狀態的名稱與顏色。變更會套用到所有顯示狀態的地方——pane 徽章、側欄、會議列與資源面板——並儲存於你的帳號，不隨專案切換。",
+    "col": {
+      "status": "狀態",
+      "zh": "繁體中文",
+      "en": "English",
+      "color": "顏色"
+    },
+    "row-only": "僅清單",
+    "when": {
+      "starting": "已啟動，尚未有輸出",
+      "running": "Agent 正在輸出",
+      "idle": "回合結束，停在輸入提示",
+      "awaiting": "卡在權限確認或問題上",
+      "stopped": "你按了停止",
+      "exited": "程序已結束",
+      "error": "啟動失敗或終端機錯誤",
+      "waiting": "還原的占位，尚未開啟",
+      "disconnected": "後端連線已中斷"
+    },
+    "color": {
+      "green": "綠",
+      "yellow": "黃",
+      "orange": "橘",
+      "red": "紅",
+      "blue": "藍",
+      "purple": "紫",
+      "pink": "粉",
+      "cyan": "青",
+      "gray": "灰",
+      "ink": "墨"
+    },
+    "reset-one": "還原",
+    "reset-all": "全部還原",
+    "note": "名稱留空即使用內建翻譯。顏色透過主題 token 解析，因此在每個主題下都維持可讀。"
   },
   "preview": {
     "binary-file": "二進位檔案",

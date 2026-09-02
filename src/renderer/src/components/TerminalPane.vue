@@ -13,7 +13,8 @@ import { formatLoopTime } from '../lib/loopPrompt'
 import PromptSkillPicker from './PromptSkillPicker.vue'
 import { usePromptSkills } from '../composables/usePromptSkills'
 import { castablePromptSkills } from '../lib/promptSkills'
-import { paneStatusLabelKey } from '../lib/paneStatusLabel'
+import { paneStatusLabelText } from '../lib/paneStatusLabel'
+import { statusBadgeStyle } from '../composables/useStatusBadgePrefs'
 import { setBatchDragImage } from '../lib/batchDragImage'
 import { i18n } from '@navide/plugin-ui/foundation'
 import { isMacPlatform } from '@navide/plugin-ui/shared'
@@ -271,7 +272,11 @@ const displayStatus = terminal.displayStatus
 // the agent overview. It used to print the raw status word with 'awaiting' and
 // 'stopped' as hand-made exceptions, which is how one pane ended up reading
 // "RUNNING" here and "執行中" in the overview at the same moment.
-const statusBadgeKey = computed<string>(() => paneStatusLabelKey(displayStatus.value))
+const statusBadgeText = computed<string>(() => paneStatusLabelText(displayStatus.value))
+
+// Only a status the user recoloured carries inline variables; the rest are left
+// to the [data-status] rules below, unchanged.
+const statusBadgeVars = computed(() => statusBadgeStyle(displayStatus.value))
 
 const statusTooltipKey = computed<string>(() => {
   if (displayStatus.value === 'idle') return 'pane.terminal.idle-status-tooltip'
@@ -617,8 +622,9 @@ onMounted(() => {
         <span
           class="status"
           :data-status="displayStatus"
+          :style="statusBadgeVars"
           :title="statusTooltipKey ? $t(statusTooltipKey) : ''"
-        >{{ $t(statusBadgeKey) }}</span>
+        >{{ statusBadgeText }}</span>
         <UsageBadge v-if="agentKey" :agent-key="agentKey" :cli-profiles="cliProfiles" />
       </div>
       <div v-if="subtitle" class="header-sub">{{ subtitle }}</div>
@@ -882,43 +888,51 @@ onMounted(() => {
   color: var(--success-fg);
   border-color: var(--success-emphasis);
 }
+/* Each rule is the DEFAULT colour of its status, and stays the whole story
+ * until the user recolours that status in Settings; only then does the badge
+ * carry --status-badge-bg/-fg inline and win the var() fallback. Keeping the
+ * defaults here rather than moving them into the palette means a pane still
+ * paints correctly with no settings loaded at all. */
 .status {
   margin-left: auto;
   font-size: var(--font-3xs);
   text-transform: uppercase;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--bg-muted);
-  color: var(--text-secondary);
+  background: var(--status-badge-bg, var(--bg-muted));
+  color: var(--status-badge-fg, var(--text-secondary));
 }
 .status[data-status='running'] {
-  background: var(--success-muted);
-  color: var(--success-fg);
+  background: var(--status-badge-bg, var(--success-muted));
+  color: var(--status-badge-fg, var(--success-fg));
 }
 .status[data-status='starting'] {
-  background: var(--status-starting-muted);
-  color: var(--status-starting-fg);
+  background: var(--status-badge-bg, var(--status-starting-muted));
+  color: var(--status-badge-fg, var(--status-starting-fg));
 }
 .status[data-status='error'] {
-  background: var(--danger-deep);
-  color: var(--danger-fg);
+  background: var(--status-badge-bg, var(--danger-deep));
+  color: var(--status-badge-fg, var(--danger-fg));
 }
 .status[data-status='exited'] {
-  background: var(--bg-muted);
-  color: var(--text-primary);
+  background: var(--status-badge-bg, var(--bg-muted));
+  color: var(--status-badge-fg, var(--text-primary));
 }
 .status[data-status='idle'] {
-  background: var(--attention-muted);
-  color: var(--attention-fg);
+  background: var(--status-badge-bg, var(--attention-muted));
+  color: var(--status-badge-fg, var(--attention-fg));
 }
 .status[data-status='awaiting'] {
-  background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
-  color: var(--warning-fg);
+  background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent));
+  color: var(--status-badge-fg, var(--warning-fg));
 }
+/* 'stopped' was the one status painted in literal hex, which punched a black
+ * hole through the light theme. It resolves through the palette's `ink` now,
+ * like every other status. */
 .status[data-status='stopped'] {
-  background: #000000;
-  color: #ffffff;
-  border: 1px solid #3f3f46;
+  background: var(--status-badge-bg, var(--bg-inset));
+  color: var(--status-badge-fg, var(--text-bright));
+  border: 1px solid var(--border-default);
 }
 .xterm-host {
   flex: 1;

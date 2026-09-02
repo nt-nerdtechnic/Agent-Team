@@ -91,6 +91,7 @@ import McpPane from './McpPane.vue'
 import SkillsPane from './SkillsPane.vue'
 import PromptSkillsPane from './PromptSkillsPane.vue'
 import MemoryPane from './MemoryPane.vue'
+import StatusBadgeSettingsPane from './StatusBadgeSettingsPane.vue'
 import SettingsNavItem from './settings/SettingsNavItem.vue'
 import SettingsSection from './settings/SettingsSection.vue'
 import SettingsCard from './settings/SettingsCard.vue'
@@ -178,7 +179,7 @@ const reclaimNowCount = computed(() => props.reclaimableNowCount ?? 0)
 const reclaimNowSize = computed(() => formatBytes(props.reclaimableNowBytes ?? 0))
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'prompts' | 'memory' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
+type Tab = 'mcp' | 'skills' | 'prompts' | 'memory' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'statusBadges' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
 type HelpTopic = 'messaging' | 'mcp'
@@ -474,6 +475,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     group: 'Appearance',
     summary: 'Restore editor windows on startup.',
     keywords: 'restore windows 還原視窗 startup 啟動',
+  },
+  {
+    id: 'status-badges',
+    tab: 'statusBadges',
+    section: 'statusBadges',
+    title: 'Status Badges / 狀態徽章',
+    group: 'Appearance',
+    summary: 'Rename each pane status and pick its colour, per language.',
+    keywords: 'status badge badges colour color rename label idle running awaiting starting stopped exited error 狀態 徽章 顏色 名稱 重新命名 閒置 執行中 等待回應 啟動中 已停止 已結束 錯誤',
   },
   {
     id: 'general-environment',
@@ -857,6 +867,8 @@ const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof Se
   general: { scope: 'User', storage: 'localStorage' },
   updates: { scope: 'User', storage: 'mainProcess' },
   appearance: { scope: 'User', storage: 'localStorage' },
+  // The user's own names and colours for the pane status badges.
+  statusBadges: { scope: 'User', storage: 'localStorage' },
   // One arrangement for every workspace, shared live across windows.
   layout: { scope: 'User', storage: 'localStorage' },
   accounts: { scope: 'User / Workspace bindings', storage: 'safeStorage' },
@@ -1023,9 +1035,7 @@ interface P2pLinkStatus {
    *  pasted in by hand rather than obtained by signing in — both are valid, so
    *  this decides which face the card shows, not whether it works. */
   accountEmail?: string
-  tenantId?: string
   displayName?: string
-  role?: string
 }
 /** "Connecting" has to resolve on its own, so the section re-asks while it is
  *  on screen rather than freezing on whatever the save call answered. */
@@ -1668,6 +1678,11 @@ watch(activeTab, (tab) => {
               <SettingsNavItem :label="$t('settings.nav.appearance')" :active="activeTab === 'appearance'" @select="activeTab = 'appearance'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.5 13.5 5.5 6.5 12.5 3.5 12.5 3.5 9.5 10.5 2.5Z"/><path d="M9 4l3 3"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.statusBadges')" :active="activeTab === 'statusBadges'" @select="activeTab = 'statusBadges'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4.5" width="13" height="7" rx="3.5"/><circle cx="5.5" cy="8" r="1.5"/></svg>
                 </template>
               </SettingsNavItem>
               <SettingsNavItem :label="$t('settings.nav.layout')" :active="activeTab === 'layout'" @select="activeTab = 'layout'">
@@ -3109,6 +3124,12 @@ watch(activeTab, (tab) => {
           <ExtensionsPane />
         </div>
 
+        <!-- ── STATUS BADGES TAB ─────────────────────────────────────────── -->
+        <div v-show="activeTab === 'statusBadges'" class="s-body status-badges-body" data-settings-section="statusBadges">
+          <h1 class="s-page-title">{{ $t('settings.nav.statusBadges') }}</h1>
+          <StatusBadgeSettingsPane />
+        </div>
+
         <!-- ── LAYOUT TAB ────────────────────────────────────────────────── -->
         <div v-show="activeTab === 'layout'" class="s-body layout-body" data-settings-section="layout">
           <h1 class="s-page-title">{{ $t('settings.nav.layout') }}</h1>
@@ -3522,6 +3543,9 @@ watch(activeTab, (tab) => {
 /* Same reason as storage: a stack of region cards needs the gutter and its own
    scroll, which the bare .s-body (overflow:hidden, no padding) does not give. */
 .layout-body { overflow-y: auto; padding: 18px 22px; }
+/* Same reason: a scrolling list of status rows needs the gutter and its own
+   scroll, which the bare .s-body does not give. */
+.status-badges-body { overflow-y: auto; padding: 18px 22px; }
 /* Same as the other padded tabs: without a modifier the bare .s-body is
    overflow:hidden with no gutter, which clips the shortcut list instead of
    scrolling it. */

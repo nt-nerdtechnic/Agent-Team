@@ -1,0 +1,361 @@
+<script setup lang="ts">
+// The Status Badges tab: rename and recolour every pane status in one place.
+//
+// The nine rows are the whole status vocabulary — the seven a pane reports plus
+// the two only a pane row can show. Each row previews itself with the exact
+// pill markup TerminalPane uses, so what the user picks here is what they will
+// see on the pane, not an approximation of it.
+//
+// Colour is a swatch pick rather than a colour input on purpose: every choice
+// has to stay legible across five themes, which a free hex cannot promise. The
+// swatches render their real resolved colour under the current theme by binding
+// the palette's token expressions straight into the button.
+import { useI18n } from 'vue-i18n'
+
+import { paneStatusLabelKey, type PaneStatusValue } from '../lib/paneStatusLabel'
+import {
+  DEFAULT_STATUS_COLORS,
+  PANE_STATUS_ORDER,
+  STATUS_COLOR_KEYS,
+  STATUS_COLOR_PALETTE,
+  type StatusColorKey,
+} from '../lib/statusBadgePalette'
+import {
+  resetAllStatusBadgePrefs,
+  resetStatusBadgePref,
+  setStatusBadgePref,
+  useStatusBadgePrefs,
+} from '../composables/useStatusBadgePrefs'
+
+const { t } = useI18n()
+const { prefs, hasOverrides } = useStatusBadgePrefs()
+
+/** Statuses a pane cannot report itself; they only ever appear on list rows,
+ *  and saying so stops "why does my pane never show this?" */
+const ROW_ONLY: readonly PaneStatusValue[] = ['waiting', 'disconnected']
+
+/** The shipped translation for a status in one locale — the placeholder, and
+ *  what an emptied field falls back to. */
+function defaultLabel(status: PaneStatusValue, locale: 'zh-TW' | 'en-US'): string {
+  return t(paneStatusLabelKey(status), {}, { locale })
+}
+
+function colorOf(status: PaneStatusValue): StatusColorKey {
+  return prefs.value[status]?.color ?? DEFAULT_STATUS_COLORS[status]
+}
+
+/** Preview swatch / pill fill for a colour, resolved by the browser against the
+ *  live theme rather than by us against a table. */
+function swatchStyle(color: StatusColorKey): Record<string, string> {
+  const spec = STATUS_COLOR_PALETTE[color]
+  return { background: spec.bg, color: spec.fg, borderColor: spec.fg }
+}
+
+function previewStyle(status: PaneStatusValue): Record<string, string> {
+  const spec = STATUS_COLOR_PALETTE[colorOf(status)]
+  return { background: spec.bg, color: spec.fg }
+}
+
+/** What the badge would read as right now, in one locale. */
+function previewLabel(status: PaneStatusValue, locale: 'zh-TW' | 'en-US'): string {
+  const pref = prefs.value[status]
+  const override = locale === 'zh-TW' ? pref?.labelZh : pref?.labelEn
+  return override?.trim() || defaultLabel(status, locale)
+}
+
+function isCustomized(status: PaneStatusValue): boolean {
+  return !!prefs.value[status]
+}
+
+function onLabel(status: PaneStatusValue, locale: 'zh-TW' | 'en-US', value: string): void {
+  setStatusBadgePref(status, locale === 'zh-TW' ? { labelZh: value } : { labelEn: value })
+}
+</script>
+
+<template>
+  <div class="sb">
+    <p class="sb-intro">{{ $t('statusBadges.intro') }}</p>
+
+    <div class="sb-head">
+      <span class="sb-h-status">{{ $t('statusBadges.col.status') }}</span>
+      <span class="sb-h-label">{{ $t('statusBadges.col.zh') }}</span>
+      <span class="sb-h-label">{{ $t('statusBadges.col.en') }}</span>
+      <span class="sb-h-color">{{ $t('statusBadges.col.color') }}</span>
+      <span class="sb-h-reset"></span>
+    </div>
+
+    <div
+      v-for="status in PANE_STATUS_ORDER"
+      :key="status"
+      class="sb-row"
+      :data-customized="isCustomized(status) ? 'yes' : 'no'"
+    >
+      <div class="sb-status">
+        <span class="sb-preview" :style="previewStyle(status)">
+          {{ previewLabel(status, 'zh-TW') }}
+        </span>
+        <span class="sb-key">
+          {{ status }}
+          <em v-if="ROW_ONLY.includes(status)" class="sb-rowonly">
+            {{ $t('statusBadges.row-only') }}
+          </em>
+        </span>
+        <span class="sb-when">{{ $t(`statusBadges.when.${status}`) }}</span>
+      </div>
+
+      <label class="sb-field">
+        <span class="sb-sr">{{ $t('statusBadges.col.zh') }} — {{ status }}</span>
+        <input
+          type="text"
+          maxlength="24"
+          :value="prefs[status]?.labelZh ?? ''"
+          :placeholder="defaultLabel(status, 'zh-TW')"
+          @change="onLabel(status, 'zh-TW', ($event.target as HTMLInputElement).value)"
+        />
+      </label>
+
+      <label class="sb-field">
+        <span class="sb-sr">{{ $t('statusBadges.col.en') }} — {{ status }}</span>
+        <input
+          type="text"
+          maxlength="24"
+          :value="prefs[status]?.labelEn ?? ''"
+          :placeholder="defaultLabel(status, 'en-US')"
+          @change="onLabel(status, 'en-US', ($event.target as HTMLInputElement).value)"
+        />
+      </label>
+
+      <div class="sb-colors" role="radiogroup" :aria-label="$t('statusBadges.col.color')">
+        <button
+          v-for="color in STATUS_COLOR_KEYS"
+          :key="color"
+          type="button"
+          role="radio"
+          class="sb-swatch"
+          :class="{ 'is-on': colorOf(status) === color }"
+          :aria-checked="colorOf(status) === color"
+          :style="swatchStyle(color)"
+          :title="$t(`statusBadges.color.${color}`)"
+          @click="setStatusBadgePref(status, { color })"
+        />
+      </div>
+
+      <button
+        type="button"
+        class="sb-reset"
+        :disabled="!isCustomized(status)"
+        :title="$t('statusBadges.reset-one')"
+        @click="resetStatusBadgePref(status)"
+      >
+        {{ $t('statusBadges.reset-one') }}
+      </button>
+    </div>
+
+    <div class="sb-foot">
+      <p class="sb-note">{{ $t('statusBadges.note') }}</p>
+      <button
+        type="button"
+        class="sb-reset-all"
+        :disabled="!hasOverrides"
+        @click="resetAllStatusBadgePrefs()"
+      >
+        {{ $t('statusBadges.reset-all') }}
+      </button>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.sb {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sb-intro {
+  margin: 0 0 14px;
+  font-size: var(--font-row-desc);
+  color: var(--text-secondary);
+  line-height: 1.6;
+  max-width: 68ch;
+}
+
+/* One grid template shared by the header and every row, so the columns line up
+ * without either knowing the other's widths. */
+.sb-head,
+.sb-row {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.4fr) minmax(96px, 1fr) minmax(96px, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+}
+.sb-head {
+  font-size: var(--font-row-desc);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-muted);
+  padding-bottom: 6px;
+}
+.sb-row {
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid transparent;
+}
+.sb-row:hover {
+  background: var(--bg-hover-faint);
+}
+/* A customized status is worth spotting at a glance when you come back to
+ * undo one; the marker is a rail, not a fill, so it never fights the swatches. */
+.sb-row[data-customized='yes'] {
+  border-color: var(--border-muted);
+  background: var(--bg-hover-faint);
+}
+
+.sb-status {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas: 'preview key' 'preview when';
+  align-items: center;
+  column-gap: 10px;
+  min-width: 0;
+}
+.sb-preview {
+  grid-area: preview;
+  align-self: center;
+  font-size: var(--font-3xs);
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.sb-key {
+  grid-area: key;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-row-desc);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-rowonly {
+  font-family: inherit;
+  font-style: normal;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  border: 1px solid var(--border-muted);
+  border-radius: 4px;
+  padding: 0 4px;
+  margin-left: 6px;
+}
+.sb-when {
+  grid-area: when;
+  font-size: var(--font-row-desc);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-field {
+  display: block;
+  min-width: 0;
+}
+.sb-field input {
+  width: 100%;
+  box-sizing: border-box;
+}
+/* Visually hidden but read aloud: each input needs its own name, and a visible
+ * one would repeat the column header nine times. */
+.sb-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.sb-colors {
+  display: flex;
+  gap: 5px;
+}
+.sb-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--border-muted);
+  padding: 0;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.sb-swatch:hover {
+  transform: scale(1.15);
+}
+/* The selected swatch is ringed in the app's focus colour rather than its own,
+ * so "which one is picked" stays readable even on the two neutral swatches. */
+.sb-swatch.is-on {
+  box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 4px var(--accent-focus);
+}
+.sb-swatch:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 2px;
+}
+
+.sb-reset,
+.sb-reset-all {
+  font-size: var(--font-row-desc);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-default);
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sb-reset:hover:not(:disabled),
+.sb-reset-all:hover:not(:disabled) {
+  background: var(--bg-hover-strong);
+}
+.sb-reset:disabled,
+.sb-reset-all:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.sb-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-muted);
+}
+.sb-note {
+  margin: 0;
+  font-size: var(--font-row-desc);
+  color: var(--text-secondary);
+  max-width: 60ch;
+  line-height: 1.6;
+}
+
+/* Below the two-input width the grid stops being a table and becomes stacked
+ * cards, which is the only way nine rows of five columns stay usable. */
+@media (max-width: 780px) {
+  .sb-head {
+    display: none;
+  }
+  .sb-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    border-color: var(--border-muted);
+    margin-bottom: 8px;
+  }
+  .sb-reset {
+    justify-self: start;
+  }
+}
+</style>
