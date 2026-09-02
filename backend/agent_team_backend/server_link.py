@@ -422,15 +422,6 @@ class ServerLink:
         self._device_id = ""
         self.member_id = ""
         # The role auth.hello granted this member: "admin", "member" or
-        # "observer". Stored because it is the only thing that may decide
-        # whether the Settings pane offers the member-management actions — a UI
-        # guessing at it would show buttons every request is going to refuse.
-        self.member_role = ""
-        # Which tenant this account belongs to, and the human-readable name for
-        # it, both from auth.hello. The Settings pane shows them so the user can
-        # tell *which* account is connected — a bare "connected" says nothing
-        # once one machine can hold several accounts over its lifetime.
-        self.tenant_id = ""
         self.display_name = ""
         # Whether the account's e-mail address has been confirmed, from
         # auth.hello. A soft gate: an unverified account signs in and works
@@ -737,8 +728,6 @@ class ServerLink:
         payload = reply.get("payload")
         payload = payload if isinstance(payload, dict) else {}
         await self._adopt_member(config, str(payload.get("memberId") or ""))
-        self.member_role = str(payload.get("role") or "")
-        self.tenant_id = str(payload.get("tenantId") or "")
         self.display_name = str(payload.get("displayName") or "")
         self.email_verified = bool(payload.get("emailVerified"))
         log.info(
@@ -1325,7 +1314,6 @@ class ServerLink:
             "state": self.state(),
             "deviceId": local,
             "memberId": self.member_id,
-            "tenantId": self.tenant_id,
             # Folded into the same read as the devices for the reason given
             # above them: this view is polled while it is open, and a separate
             # round trip per list would be another chance to draw a picture
@@ -2052,9 +2040,7 @@ async def status() -> dict[str, Any]:
             "deviceId": link._device_id,
             "memberId": link.member_id,
             "accountEmail": await asyncio.to_thread(account_email),
-            "tenantId": getattr(link, "tenant_id", ""),
             "displayName": getattr(link, "display_name", ""),
-            "role": link.member_role,
             "emailVerified": bool(getattr(link, "email_verified", False)),
         }
     config = await asyncio.to_thread(load_config)
@@ -2069,9 +2055,7 @@ async def status() -> dict[str, Any]:
         "deviceId": "",
         "memberId": "",
         "accountEmail": await asyncio.to_thread(account_email),
-        "tenantId": "",
         "displayName": "",
-        "role": "",
         # No link means no account to judge; the UI only shows the verification
         # notice for an account it can actually see.
         "emailVerified": False,

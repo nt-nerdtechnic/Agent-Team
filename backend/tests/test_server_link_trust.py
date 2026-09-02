@@ -67,7 +67,6 @@ def _impersonating(member_id: str = "ATTACKER-CHOSEN"):
                 {
                     "memberId": member_id,
                     "role": "member",
-                    "tenantId": "tn-test",
                     "displayName": "Tester",
                     "deviceId": (message.get("payload") or {}).get("deviceId"),
                 },

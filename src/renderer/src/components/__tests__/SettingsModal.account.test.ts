@@ -89,7 +89,10 @@ describe('account modal', () => {
   })
 
   it('shows the account and offers sign-out once signed in', () => {
-    expect(MODAL).toMatch(/v-if="signedIn"[\s\S]{0,1200}status\.role/)
+    // Anchored on the display name rather than the role: role went with the
+    // identity convergence (the server stopped returning it), so an assertion
+    // that kept naming it would be pinning down a row that cannot render.
+    expect(MODAL).toMatch(/v-if="signedIn"[\s\S]{0,1200}status\.displayName/)
     expect(MODAL).toMatch(/@click="signOut"/)
     expect(MODAL).toContain("emit('changed')")
   })

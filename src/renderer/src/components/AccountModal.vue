@@ -34,7 +34,6 @@ interface LinkStatus {
   deviceId: string
   accountEmail?: string
   displayName?: string
-  role?: string
   /** Soft gate: an unverified account works normally, it is only flagged. */
   emailVerified?: boolean
   /**
@@ -612,9 +611,6 @@ onUnmounted(() => {
             <div v-if="status?.displayName" class="kv">
               <span>{{ t('settings.p2p.account.display-name') }}</span><span>{{ status.displayName }}</span>
             </div>
-            <div v-if="status?.role" class="kv">
-              <span>{{ t('settings.p2p.account.role') }}</span><span>{{ status.role }}</span>
-            </div>
           </template>
           <div v-else class="kv">
             <span>{{ t('settings.p2p.token') }}</span><span>{{ t('account.token-stored') }}</span>
@@ -958,11 +954,12 @@ onUnmounted(() => {
             @keyup.enter="submit"
           />
 
-          <!-- Display name and network name are not asked for: the server derives
-               both from the email (see accounts.ts), and nothing about them can be
+          <!-- A display name is not asked for: the server derives one from the
+               email when the field is absent (see accounts.ts), and it cannot be
                changed later anyway, so a field here would only be a decision the
-               user cannot revisit. -->
-          <p v-if="mode === 'register'" class="hint">{{ t('settings.p2p.account.tenant-hint') }}</p>
+               user cannot revisit. There used to be a network name beside it;
+               the identity convergence removed that concept from the server. -->
+          <p v-if="mode === 'register'" class="hint">{{ t('settings.p2p.account.account-hint') }}</p>
         </template>
 
         <button class="btn wide" :disabled="!canSubmit" @click="submit">

@@ -20,12 +20,13 @@ registering, signing in, and what a freshly registered account can see.
 
 Usage (server must already be running)::
 
-    NAVIDE_ADMIN_TOKEN=dev-token \
-      uv --project backend run python backend/scripts/verify_server_link.py
+    uv --project backend run python backend/scripts/verify_server_link.py
+
+The script registers its own account on startup, so nothing has to exist first.
 
 Environment:
     NAVIDE_WS            WebSocket URL (default ws://localhost:8787/ws)
-    NAVIDE_ADMIN_TOKEN   member credential to authenticate with (default dev-token)
+    NAVIDE_MEMBER_TOKEN  reuse an existing account credential; unset = register one
     NAVIDE_SERVER_DIR    server checkout, used only by section 14 to run a
                          *disposable second instance* it may kill and restart
                          (default ~/Desktop/Navide-Server/server)
@@ -98,7 +99,9 @@ app.credential_vault = CredentialVault(
 )
 
 URL = os.environ.get("NAVIDE_WS") or "ws://localhost:8787/ws"
-TOKEN = os.environ.get("NAVIDE_ADMIN_TOKEN") or "dev-token"
+# 兩層收斂之後沒有 bootstrap admin，也沒有邀請——憑證唯一的來源是自己註冊。
+# 這個值在 main() 開頭由 _ensure_token() 填上；環境變數只是「我已經有一個帳號」的覆寫路徑。
+TOKEN = os.environ.get("NAVIDE_MEMBER_TOKEN") or ""
 SERVER_DIR = Path(
     os.environ.get("NAVIDE_SERVER_DIR")
     or (Path.home() / "Desktop" / "Navide-Server" / "server")
@@ -310,8 +313,9 @@ async def open_link(
     device_id: str, name: str, url: str = "", token: str = ""
 ) -> tuple[ServerLink, Recorder]:
     target = url or URL
-    # Section 15 signs in as the member it just invited, so the credential is a
-    # parameter; everything else uses the admin token from the environment.
+    # The credential is a parameter because section 14's disposable server has
+    # its own database and therefore its own account; everything else uses the
+    # one this script registers for itself at startup.
     credential = token or TOKEN
     link = ServerLink(
         config_loader=lambda: ServerLinkConfig(url=target, token=credential),
@@ -364,6 +368,23 @@ class DisposableServer:
         self.url = f"ws://localhost:{port}/ws"
         self._db = db_dir / "verify.db"
         self._proc: Any = None
+        #: 這台有自己的資料庫，主 server 的 token 在這裡不存在——所以它需要自己的帳號。
+        #: 先前是靠把 NAVIDE_ADMIN_TOKEN 傳進去、讓 bootstrap admin 鑄出同一組 token，
+        #: 那條路隨 bootstrap admin 一起沒了。註冊一次即可：重啟時 DB 還在，帳號還在。
+        self.token: str = ""
+
+    async def _ensure_account(self) -> None:
+        if self.token:
+            return
+        created = await server_link.account_request(
+            self.url,
+            "auth.register",
+            {"email": f"verify-disposable-{RUN}@example.com",
+             "password": f"verify-pwd-{secrets.token_hex(8)}"},
+        )
+        self.token = str(created.get("token") or "")
+        if not self.token:
+            raise RuntimeError(f"拋棄式 server 的 auth.register 沒有回傳 token：{created}")
 
     async def start(self) -> None:
         tsx = SERVER_DIR / "node_modules" / ".bin" / "tsx"
@@ -379,13 +400,13 @@ class DisposableServer:
                 **os.environ,
                 "PORT": str(self.port),
                 "NAVIDE_DB_PATH": str(self._db),
-                "NAVIDE_ADMIN_TOKEN": TOKEN,
             },
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
         if not await _wait_for_port(self.port, True):
             raise RuntimeError(f"the disposable server never listened on {self.port}")
+        await self._ensure_account()
 
     async def stop(self) -> None:
         proc = self._proc
@@ -404,9 +425,30 @@ class DisposableServer:
 # ---- the checks -------------------------------------------------------------
 
 
+async def _ensure_token() -> None:
+    """沒有 bootstrap admin 之後，這支腳本的第一個憑證只能自己註冊來。
+
+    放在 main() 最前面而不是各檢查裡：後面每一條 open_link 都吃 TOKEN，
+    少了它整份腳本會在第一個連線就全倒，而那種倒法看起來像 server 壞了。
+    """
+    global TOKEN
+    if TOKEN:
+        return
+    email = f"verify-boot-{RUN}@example.com"
+    created = await server_link.account_request(
+        URL, "auth.register", {"email": email, "password": f"verify-pwd-{secrets.token_hex(8)}"}
+    )
+    TOKEN = str(created.get("token") or "")
+    if not TOKEN:
+        raise RuntimeError(f"auth.register 沒有回傳 token：{created}")
+    print(f"   已註冊驗證用帳號 {created.get('memberId')}（{email}）")
+
+
 async def main() -> int:
     print(f"== 目標 {URL} ==")
     print(f"   deviceA={DEVICE_A}  deviceB={DEVICE_B}")
+
+    await _ensure_token()
 
     agent_messaging.register(PANE_ID, PANE_NAME, WORKSPACE_PATH, agent_key="claude")
 
@@ -421,8 +463,8 @@ async def main() -> int:
         check(link_a.member_id == str(payload.get("memberId") or ""), "程式碼解析出的 memberId 與回應相符", payload)
         check(payload.get("deviceId") == DEVICE_A, "回應回帶同一個 deviceId", payload)
         check(
-            all(k in payload for k in ("memberId", "role", "tenantId", "displayName", "deviceId")),
-            "回應欄位齊全（memberId/role/tenantId/displayName/deviceId）",
+            all(k in payload for k in ("memberId", "displayName", "deviceId")),
+            "回應欄位齊全（memberId/displayName/deviceId）",
             payload,
         )
 
@@ -1121,8 +1163,8 @@ async def check_server_outage() -> None:
         check(True, f"在 port {VERIFY_PORT} 起了一台自己的 server（不動 {URL}）")
 
         agent_messaging.register(PANE_ID, PANE_NAME, WORKSPACE_PATH, agent_key="claude")
-        link_c, _ = await open_link(DEVICE_C, "C", disposable.url)
-        link_d, rec_d = await open_link(DEVICE_D, "D", disposable.url)
+        link_c, _ = await open_link(DEVICE_C, "C", disposable.url, disposable.token)
+        link_d, rec_d = await open_link(DEVICE_D, "D", disposable.url, disposable.token)
         granted = await write_policy(
             link_d, link_d, allow_a_policy(link_c.member_id, DEVICE_C)
         )
@@ -1221,10 +1263,10 @@ async def check_account_flow() -> None:
     they cannot use the long-lived link, so a mistake here is invisible to every
     test that starts from an authenticated connection.
 
-    The last check is the important one: an account registered here is its own
-    tenant, so it must not be able to see the pane the admin tenant registered
-    at the top of this script. That is the multi-tenant boundary observed from
-    the desktop side, not from the server's own test suite.
+    The last check is the important one: an account registered here is a
+    separate identity, so it must not be able to see the pane the first account
+    registered at the top of this script. That is the account boundary observed
+    from the desktop side, not from the server's own test suite.
     """
     print("\n== 16. 帳號註冊與登入 ==")
     stamp = RUN
@@ -1233,17 +1275,23 @@ async def check_account_flow() -> None:
 
     try:
         created = await server_link.account_request(
-            URL, "auth.register", {"email": email, "password": dummy_pass, "tenantName": f"verify {stamp}"}
+            URL, "auth.register", {"email": email, "password": dummy_pass}
         )
     except Exception as err:  # noqa: BLE001
         check(False, f"註冊失敗：{err}")
         return
 
     token = str(created.get("token") or "")
-    tenant_id = str(created.get("tenantId") or "")
+    member_id = str(created.get("memberId") or "")
     check(bool(token), "註冊回傳長期 token", {k: v for k, v in created.items() if k != "token"})
-    check(bool(tenant_id), "註冊建立了一個新租戶", tenant_id)
-    check(created.get("role") == "admin", "註冊者是該租戶的第一位 admin", created.get("role"))
+    check(bool(member_id), "註冊建立了一個新帳號", member_id)
+    # 角色與租戶都隨兩層收斂移除：回應不該再帶它們。這是負面斷言——
+    # 欄位悄悄留著比缺少更難發現，因為沒有任何東西會壞掉。
+    check(
+        "role" not in created and "tenantId" not in created,
+        "註冊回應不再帶 role / tenantId",
+        {k: created.get(k) for k in ("role", "tenantId") if k in created},
+    )
 
     # Same email twice must not silently create a second account.
     try:
@@ -1266,7 +1314,7 @@ async def check_account_flow() -> None:
         check(False, f"登入失敗：{err}")
         return
     check(signed_in.get("token") == token, "登入取回同一組裝置 token")
-    check(signed_in.get("tenantId") == tenant_id, "登入回報同一個租戶")
+    check(signed_in.get("memberId") == member_id, "登入回報同一個帳號")
 
     # The token must actually work as a device credential.
     device = f"verify-acct-{stamp}"
@@ -1283,7 +1331,7 @@ async def check_account_flow() -> None:
             lambda: bool(link.member_id) or bool(link.terminated_reason), "account auth"
         )
         check(authed and not link.terminated_reason, "auth.hello 接受這組 token", link.terminated_reason)
-        check(link.tenant_id == tenant_id, "連線回報的租戶與註冊時相同", link.tenant_id)
+        check(link.member_id == member_id, "連線回報的帳號與註冊時相同", link.member_id)
 
         directory = await link._request("sessions.directory", {})
         sessions = ((directory.get("payload") or {}).get("sessions")) or []

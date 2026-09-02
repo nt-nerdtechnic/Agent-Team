@@ -2835,8 +2835,8 @@ async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, pay
         await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
 
 
-# Account sign-in. Registering creates a tenant (a private network of this
-# user's own machines) and its first admin; logging in exchanges the password
+# Account sign-in. Registering creates an account — a private network of this
+# user's own machines; logging in exchanges the password
 # for the long-lived device token. Both are the same write as p2p.link.configure
 # ends in — url to settings, token to the vault, then reconnect — so the user
 # never has to see or handle the token at all.
@@ -2862,7 +2862,10 @@ async def _account_call(
 
     request: dict = {"email": email.strip(), "password": password}
     if verb == "auth.register":
-        for optional in ("displayName", "tenantName"):
+        # One optional field, not two: auth.register's signature is
+        # (email, password, displayName), so a tenantName sent alongside it was
+        # being dropped on the floor by the server rather than doing anything.
+        for optional in ("displayName",):
             value = payload.get(optional)
             if isinstance(value, str) and value.strip():
                 request[optional] = value.strip()
@@ -2918,9 +2921,7 @@ async def _account_call(
                     "email": result.get("email"),
                     "memberId": result.get("memberId"),
                     "displayName": result.get("displayName"),
-                    "tenantId": result.get("tenantId"),
-                    "tenantName": result.get("tenantName"),
-                    "role": result.get("role"),
+
                     # Soft gate: a fresh account is unverified and still fully
                     # usable. Carried here as well as in `status` because the
                     # link has only just been told to reconnect — its own

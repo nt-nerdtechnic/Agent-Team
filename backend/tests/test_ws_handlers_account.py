@@ -57,13 +57,16 @@ class FakeSettings:
         return applied
 
 
+# The shape auth.login and auth.register actually answer with. Kept in step
+# with the server by hand, which is the weak point of every test in this file:
+# the fixture *is* the contract here, so a field invented in it is asserted
+# against itself. `tenantId`, `tenantName` and `role` used to be in this dict
+# and were asserted below; the identity convergence removed all three from the
+# server and nothing here went red, because nothing here talks to a server.
 GOOD_ACCOUNT = {
-    "tenantId": "tn-abc",
-    "tenantName": "Neil 的網路",
     "memberId": "m-1",
     "displayName": "neil",
     "email": "neil@example.com",
-    "role": "admin",
     "token": "tok-long-lived",
     # Soft gate: a fresh account is unverified and still fully usable.
     "emailVerified": False,
@@ -151,28 +154,26 @@ async def test_login_clears_a_stale_user_entered_address(env) -> None:
     assert server_link.SERVER_URL_SETTING not in env["settings"].get()
 
 
-async def test_register_forwards_optional_names(env) -> None:
-    await _call(
-        "p2p.account.register",
-        {**LOGIN, "displayName": " Neil ", "tenantName": " 我的網路 "},
-    )
+async def test_register_forwards_a_trimmed_display_name(env) -> None:
+    await _call("p2p.account.register", {**LOGIN, "displayName": " Neil "})
     _url, verb, sent = env["requests"][0]
     assert verb == "auth.register"
     assert sent["displayName"] == "Neil"
-    assert sent["tenantName"] == "我的網路"
 
 
-async def test_register_omits_blank_optional_names(env) -> None:
-    await _call("p2p.account.register", {**LOGIN, "displayName": "   ", "tenantName": ""})
+async def test_register_omits_a_blank_display_name(env) -> None:
+    # Omitted rather than sent empty: the server derives one from the email when
+    # the field is absent, and an empty string would win over that.
+    await _call("p2p.account.register", {**LOGIN, "displayName": "   "})
     _url, _verb, sent = env["requests"][0]
-    assert "displayName" not in sent and "tenantName" not in sent
+    assert "displayName" not in sent
 
 
 async def test_login_answers_with_status_and_account(env) -> None:
     resp = await _call("p2p.account.login", dict(LOGIN))
     assert resp["payload"]["status"]["state"] == "connected"
-    assert resp["payload"]["account"]["tenantName"] == "Neil 的網路"
-    assert resp["payload"]["account"]["role"] == "admin"
+    assert resp["payload"]["account"]["displayName"] == "neil"
+    assert resp["payload"]["account"]["email"] == "neil@example.com"
 
 
 # ---- refusals before anything is sent ---------------------------------------
@@ -374,7 +375,6 @@ async def test_network_snapshot_passes_the_whole_shape_through(
         "state": "connected",
         "deviceId": "dev-1",
         "memberId": "m-1",
-        "tenantId": "tn-abc",
         "devices": [
             {
                 "deviceId": "dev-1",
