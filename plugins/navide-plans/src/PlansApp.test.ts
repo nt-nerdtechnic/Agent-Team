@@ -1,7 +1,9 @@
 // @vitest-environment happy-dom
 import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { createI18n } from 'vue-i18n'
 import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+import { bootstrapPlansI18n } from './plansI18n'
 
 const state = vi.hoisted(() => ({
   preferences: {} as Record<string, unknown>,
@@ -29,12 +31,22 @@ beforeAll(async () => {
     useNotify: () => ({ toast: state.toast }),
     useTheme: () => ({ loadTheme: state.loadTheme }),
   }))
-  vi.doMock('vue-i18n', () => ({
-    useI18n: () => ({
-      t: (key: string, params?: Record<string, unknown>) =>
-        params ? `${key}:${JSON.stringify(params)}` : key,
-    }),
-  }))
+  vi.doMock('vue-i18n', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('vue-i18n')>()
+    return {
+      ...actual,
+      useI18n: (options?: Parameters<typeof actual.useI18n>[0]) => {
+        try {
+          return actual.useI18n(options)
+        } catch {
+          return {
+            t: (key: string, params?: Record<string, unknown>) =>
+              params ? `${key}:${JSON.stringify(params)}` : key,
+          }
+        }
+      },
+    }
+  })
   window.history.replaceState({}, '', `/?workspace_path=%2Fworkspace&rel_path=${encodeURIComponent(existingPath)}`)
   PlansApp = (await import('./PlansApp.vue')).default
 })
@@ -155,10 +167,13 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-async function mountPlans(): Promise<VueWrapper> {
+async function mountPlans(options: Parameters<typeof shallowMount>[1] = {}): Promise<VueWrapper> {
+  const { global: globalOptions, ...rest } = options
   wrapper = shallowMount(PlansApp, {
+    ...rest,
     global: {
       stubs: { SafeAiCliPanel: true },
+      ...globalOptions,
     },
   })
   await flushPromises()
@@ -167,6 +182,53 @@ async function mountPlans(): Promise<VueWrapper> {
 }
 
 describe('PlansApp', () => {
+  it('renders translated Chinese Plans strings on first mount when bootstrapped with locale=zh-TW', async () => {
+    window.history.replaceState(
+      {},
+      '',
+      `/?workspace_path=%2Fworkspace&locale=zh-TW&rel_path=${encodeURIComponent(existingPath)}`,
+    )
+    const realI18n = createI18n({
+      legacy: false,
+      locale: 'en-US',
+      fallbackLocale: 'zh-TW',
+      messages: {
+        'en-US': {
+          action: {
+            'open-in-editor': 'Open in editor',
+            'copy-path': 'Copy path',
+            create: 'Create',
+            rename: 'Rename',
+            delete: 'Delete',
+            cancel: 'Cancel',
+          },
+        },
+        'zh-TW': {
+          action: {
+            'open-in-editor': '在編輯器中開啟',
+            'copy-path': '複製路徑',
+            create: '建立',
+            rename: '重新命名',
+            delete: '刪除',
+            cancel: '取消',
+          },
+        },
+      },
+    })
+    bootstrapPlansI18n(realI18n, window.location.search)
+
+    const view = await mountPlans({
+      global: {
+        plugins: [realI18n],
+      },
+    })
+
+    expect(view.text()).toContain('新增計畫')
+    expect(view.text()).toContain('所有文件')
+    expect(view.text()).toContain('審查留言')
+    expect(view.text()).not.toContain('pane.plans.v2.new-plan')
+    expect(view.text()).not.toContain('pane.plans.review-notes')
+  })
   it('restores workspace preferences and refreshes from plans.changed', async () => {
     state.preferences = {
       'plans.filter': 'approved',

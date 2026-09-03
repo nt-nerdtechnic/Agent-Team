@@ -1852,6 +1852,13 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           :visible="!collapsed && sidebarTab === pluginTab.tabId"
         />
         <PluginRegionHost
+          v-if="gitPluginTab && !legacyGitRecovery"
+          :key="gitPluginTab.contributionKey"
+          :contribution="gitPluginTab"
+          :workspace-path="workspace ?? ''"
+          :visible="!collapsed && (sidebarTab === gitPluginTab.tabId || sidebarTab === 'git')"
+        />
+        <PluginRegionHost
           v-if="plansPluginTab && !legacyPlansRecovery"
           :key="plansPluginTab.contributionKey"
           :contribution="plansPluginTab"

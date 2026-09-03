@@ -27,6 +27,8 @@ import { FAIL_CLOSED_EXECUTION_POLICY, type ExecutionPolicySnapshot } from './pl
 import { PluginFactoryOptOutStore } from './plugins/pluginFactoryOptOutStore'
 import { recoverFailedGitV2Activation } from './plugins/gitV2ActivationRecovery'
 import { composePluginContributionQuery } from './plugins/pluginContributionQuery'
+import { createPlansWindowRouter } from './plansWindowRouting'
+import { HostLocaleManager, readPersistedLocaleFromSettings } from './hostLocale'
 import {
   activateFactoryGitWithLegacyFallback,
   assertFactoryGitRestoreAllowed,
@@ -1332,9 +1334,24 @@ function uiSetting<T>(settings: Record<string, unknown>, key: string): T | null 
   }
 }
 
+const hostLocaleManager = new HostLocaleManager(
+  () => readPersistedLocaleFromSettings(readUiSettings()),
+  () => {
+    try {
+      return app.getLocale()
+    } catch {
+      return process.env.LANG ?? null
+    }
+  },
+)
+
 function currentUiTheme(): string {
   const theme = uiSetting<string>(readUiSettings(), 'agent-team:theme')
   return typeof theme === 'string' ? theme : ''
+}
+
+function currentUiLocale(): string {
+  return hostLocaleManager.getLocale()
 }
 
 /** Read-only Host values bootstrapped into each Git v2 view's entry query.
@@ -2177,6 +2194,16 @@ async function openCatalogContributionWindow(
   return { ok: true }
 }
 
+const plansWindowRouter = createPlansWindowRouter({
+  frontendPluginManager,
+  openCatalogContributionWindow,
+  migratePlansStorageState,
+  isPlansRecoveryEnabled: () => plansRecoveryEnabled,
+  enterPlansRecovery,
+  openLegacyPlanWindow,
+  warnMain,
+})
+
 function catalogContributionQuery(
   contributionKey: string,
   workspacePath: string,
@@ -2192,6 +2219,7 @@ function catalogContributionQuery(
     contributionKey,
     workspacePath,
     theme: renderedTheme || currentUiTheme(),
+    locale: currentUiLocale(),
     ...(isGit && backend ? { httpUrl: `http://${backend.host}:${backend.port}` } : {}),
     ...(isGit ? { gitReadOnly: currentGitReadOnlyQuery() } : {}),
     extraParams,
@@ -2524,39 +2552,7 @@ function trustedPlansRecoveryWorkspace(event: IpcMainInvokeEvent): string | null
 }
 
 async function openPlanWindow(workspacePath: string, relPath?: string): Promise<boolean> {
-  const plansDescriptor = frontendPluginManager.getDescriptor('navide.plans')
-  const hasCompleteV2Package = Boolean(
-    hasCompletePlansContributions(plansDescriptor) &&
-    plansDescriptor?.packageVersion &&
-    plansDescriptor?.packageDir
-  )
-  if (!hasCompleteV2Package || plansRecoveryEnabled) {
-    await openLegacyPlanWindow(workspacePath, relPath)
-    return true
-  }
-
-  if (plansDescriptor?.packageVersion) {
-    await migratePlansStorageState()
-    if (plansRecoveryEnabled) {
-      await openLegacyPlanWindow(workspacePath, relPath)
-      return true
-    }
-    const result = await openCatalogContributionWindow(
-      'navide.plans.window',
-      workspacePath,
-      relPath ? { rel_path: relPath } : {},
-    )
-    if (result.ok) return true
-    if (frontendPluginManager.plansBackendFallbackAllowed()) {
-      enterPlansRecovery('window-open-failure')
-      await openLegacyPlanWindow(workspacePath, relPath)
-      return true
-    }
-    warnMain(`[main] navide.plans window open denied: ${result.error ?? 'unknown error'}`)
-    return false
-  }
-  await openLegacyPlanWindow(workspacePath, relPath)
-  return true
+  return plansWindowRouter.openPlanWindow(workspacePath, relPath)
 }
 
 async function openLegacyPlanWindow(workspacePath: string, relPath?: string): Promise<void> {
@@ -3212,6 +3208,12 @@ ipcMain.on('app:setQuitConfirm', (_event, cfg: Partial<typeof quitConfirm>) => {
 })
 
 ipcMain.on('settings:language-changed', (_event, locale: string) => {
+  const normalizedLocale = hostLocaleManager.setRuntimeLocale(locale)
+  if (normalizedLocale) {
+    frontendPluginManager.dispatchHostSettingsChanged({
+      settings: { 'agent-team:language': normalizedLocale },
+    })
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('settings:language-changed', locale)
   }

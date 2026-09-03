@@ -4785,6 +4785,75 @@ describe('first-party Git private bridge', () => {
     return { mgr, view: host.children[0] as FakeViewLike, host, sent, instanceId: handle.instanceId }
   }
 
+  function plansDescriptor(
+    mgr: FrontendPluginManager,
+    workspacePath = '/workspace',
+    audience = 'plans-window',
+  ): PluginLaunchDescriptor {
+    const packageVersion = '0.1.0'
+    const view = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom' as const,
+      location: 'window' as const,
+      title: 'Plans',
+      entryFile: '/path/to/plans/window.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: '/path/to/plans',
+      requires: ['fs', 'ui', 'plans', 'terminal'],
+      capabilityPolicy: {
+        kind: 'manifest-v2',
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+        grants: [],
+      },
+      devUrl: '',
+      entryFile: '/path/to/plans/window.html',
+      views: [view],
+    }
+    mgr.setCapabilityGrantResolver((pluginId, version) => {
+      if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+        return {
+          packageVersion,
+          system: ['fs', 'ui', 'aiCli'],
+          shell: 'allowlist',
+          storage: true,
+        }
+      }
+      return null
+    })
+    descriptor.capabilityContext = mgr.plansCapabilityContext(packageVersion, workspacePath, audience)
+    return descriptor
+  }
+
+  async function openPlansView(workspacePath = '/workspace', audience = 'plans-window'): Promise<{
+    mgr: FrontendPluginManager
+    view: FakeViewLike
+    host: FakeBrowserWindow
+    sent: Array<{ channel: string; args: unknown[] }>
+    instanceId: string
+  }> {
+    const mgr = new FrontendPluginManager()
+    const descriptor = plansDescriptor(mgr, workspacePath, audience)
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const capabilityContext = mgr.plansCapabilityContext(descriptor.packageVersion!, workspacePath, audience)
+    const host = new FakeBrowserWindow()
+    const sent: Array<{ channel: string; args: unknown[] }> = []
+    ;(host as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => sent.push({ channel, args }),
+    }
+    const handle = await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext,
+    })
+    return { mgr, view: host.children[0] as FakeViewLike, host, sent, instanceId: handle.instanceId }
+  }
+
   async function call(
     view: FakeViewLike,
     action: string,
@@ -4995,6 +5064,255 @@ describe('first-party Git private bridge', () => {
           },
         },
       }],
+    }])
+  })
+
+  it('routes Host-owned language settings changes to v2 views', async () => {
+    const { mgr, view } = await openGitView()
+
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agent-team:language': 'zh-TW',
+        'unknown.setting': 'ignored',
+      },
+    })
+
+    expect(view.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agent-team:language': 'zh-TW',
+          },
+        },
+      }],
+    }])
+  })
+
+  it('routes Host-owned language settings changes to active Plans v2 views', async () => {
+    const { mgr, view } = await openPlansView()
+
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agent-team:language': 'zh-TW',
+        'unknown.setting': 'ignored',
+      },
+    })
+
+    expect(view.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agent-team:language': 'zh-TW',
+          },
+        },
+      }],
+    }])
+  })
+
+  it('preserves Git package-private settings contract: Plans receives only Host language and never Git settings or storage', async () => {
+    const mgr = new FrontendPluginManager()
+    const workspacePath = '/workspace'
+    const gitDesc = gitDescriptor(mgr, workspacePath, 'git-left')
+    mgr.registerDescriptor(gitDesc, { builtin: true })
+    const gitHost = new FakeBrowserWindow()
+    const gitSent: Array<{ channel: string; args: unknown[] }> = []
+    ;(gitHost as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => gitSent.push({ channel, args }),
+    }
+    await mgr.openView(gitDesc, gitDesc.views![0], {
+      hostWindow: asHost(gitHost),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext: gitDesc.capabilityContext,
+    })
+    const gitView = gitHost.children[0] as FakeViewLike
+
+    const plansDesc = plansDescriptor(mgr, workspacePath, 'plans-window')
+    mgr.registerDescriptor(plansDesc, { builtin: true })
+    const plansCapabilityContext = mgr.plansCapabilityContext(plansDesc.packageVersion!, workspacePath, 'plans-window')
+    const plansHost = new FakeBrowserWindow()
+    const plansSent: Array<{ channel: string; args: unknown[] }> = []
+    ;(plansHost as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => plansSent.push({ channel, args }),
+    }
+    await mgr.openView(plansDesc, plansDesc.views![0], {
+      hostWindow: asHost(plansHost),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext: plansCapabilityContext,
+    })
+    const plansView = plansHost.children[0] as FakeViewLike
+
+    gitView.webContents.sent.length = 0
+    plansView.webContents.sent.length = 0
+
+    // 1. Git-only Host settings: Git receives them, Plans receives nothing
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agentTeam.yolo': '0',
+        'agentTeam.analyzerModel': 'qwen2:latest',
+        'agent-team:theme': 'dark',
+      },
+    })
+    expect(gitView.webContents.sent).toHaveLength(1)
+    expect(gitView.webContents.sent[0]).toEqual({
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agentTeam.yolo': '0',
+            'agentTeam.analyzerModel': 'qwen2:latest',
+            'agent-team:theme': 'dark',
+          },
+        },
+      }],
+    })
+    expect(plansView.webContents.sent).toHaveLength(0)
+
+    gitView.webContents.sent.length = 0
+    plansView.webContents.sent.length = 0
+
+    // 2. Mixed Host settings: Git receives git settings + language, Plans receives ONLY language
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agentTeam.yolo': '1',
+        'agent-team:language': 'zh-TW',
+      },
+    })
+    expect(gitView.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agentTeam.yolo': '1',
+            'agent-team:language': 'zh-TW',
+          },
+        },
+      }],
+    }])
+    expect(plansView.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agent-team:language': 'zh-TW',
+          },
+        },
+      }],
+    }])
+
+    gitView.webContents.sent.length = 0
+    plansView.webContents.sent.length = 0
+
+    // 3. Plugin-storage settings: Git receives git user preference, Plans receives nothing
+    mgr.setPublicStorageHandler(() => null)
+    const handler = ipcHandlers.get(CAPABILITY_CALL)
+    await handler!(
+      { sender: { id: gitView.webContents.id } },
+      {
+        reqId: 'git-storage-1',
+        ns: 'storage',
+        method: 'set',
+        args: { scope: 'plugin', key: 'agentTeam.git.logScope', value: 'all' },
+      },
+    )
+    expect(gitView.webContents.sent).toHaveLength(1)
+    expect(gitView.webContents.sent[0].args[0]).toMatchObject({
+      type: 'ui.settings_changed',
+      data: { source: 'plugin-storage' },
+    })
+    expect(plansView.webContents.sent).toHaveLength(0)
+  })
+
+  it('dispatches authenticated navide.plans.left ui.openPlansWindow call to registered handler', async () => {
+    const mgr = new FrontendPluginManager()
+    const workspacePath = '/workspace'
+    const packageVersion = '0.1.0'
+    const viewLeft = {
+      id: 'left',
+      contributionKey: 'navide.plans.left',
+      kind: 'custom' as const,
+      location: 'left' as const,
+      title: 'Plans',
+      entryFile: '/path/to/plans/left.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: '/path/to/plans',
+      requires: ['fs', 'ui', 'plans', 'terminal'],
+      capabilityPolicy: {
+        kind: 'manifest-v2',
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+        grants: [],
+      },
+      devUrl: '',
+      entryFile: viewLeft.entryFile,
+      views: [viewLeft],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.setCapabilityGrantResolver((pluginId, version) => {
+      if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+        return {
+          packageVersion,
+          system: ['fs', 'ui', 'aiCli'],
+          shell: 'allowlist',
+          storage: true,
+        }
+      }
+      return null
+    })
+    const capabilityContext = mgr.plansCapabilityContext(packageVersion, workspacePath, 'plans-left')
+    const host = new FakeBrowserWindow()
+    await mgr.openView(descriptor, viewLeft, {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext,
+    })
+    const leftView = host.children[0] as FakeViewLike
+
+    const opens: Array<{ workspacePath: string; relPath?: string }> = []
+    mgr.setOpenPlansWindowHandler(async (ws, rel) => {
+      opens.push({ workspacePath: ws, relPath: rel })
+      return true
+    })
+    mgr.setPublicCapabilityHandler((plan) => mgr.executePublicCapability(plan))
+
+    const handler = ipcHandlers.get(CAPABILITY_CALL)
+    expect(handler).toBeDefined()
+
+    const response = await handler!(
+      { sender: { id: leftView.webContents.id } },
+      {
+        reqId: 'open-plan-left',
+        ns: 'ui',
+        method: 'openPlansWindow',
+        args: { path: '.agent-team/plans/feature.html' },
+      },
+    )
+
+    expect(response).toEqual({
+      reqId: 'open-plan-left',
+      ok: true,
+      result: { opened: true },
+    })
+    expect(opens).toEqual([{
+      workspacePath,
+      relPath: '.agent-team/plans/feature.html',
     }])
   })
 

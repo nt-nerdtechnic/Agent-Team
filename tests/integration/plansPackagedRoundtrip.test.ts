@@ -1,29 +1,23 @@
 // @vitest-environment happy-dom
 import { existsSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h } from 'vue'
 import { i18n } from '@navide/plugin-ui/foundation'
 
 type IpcEvent = { sender: { id: number } }
 type IpcHandler = (event: IpcEvent, payload?: unknown) => unknown
 type IpcListener = (event: IpcEvent, payload?: unknown) => void
 
-vi.mock('electron', () => {
-  const ipcHandlers = new Map<string, IpcHandler>()
-  const ipcListeners = new Map<string, IpcListener>()
-  const exposed: Record<string, unknown> = {}
-  const views: FakeWebContentsView[] = []
-  let senderId = 0
+const electronMock = vi.hoisted(() => {
   let nextWebContentsId = 9000
+  let nextWindowId = 41
+  let senderId = 0
 
   class FakeWebContents {
     readonly id = nextWebContentsId++
-    readonly loads: string[] = []
     readonly sent: Array<{ channel: string; args: unknown[] }> = []
     private destroyed = false
-    private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>()
 
     isDestroyed(): boolean {
       return this.destroyed
@@ -39,65 +33,36 @@ vi.mock('electron', () => {
 
     focus(): void {}
 
-    loadFile(file: string, options?: { search?: string }): Promise<void> {
-      this.loads.push(`${file}${options?.search ?? ''}`)
+    loadFile(): Promise<void> {
       return Promise.resolve()
     }
 
-    loadURL(url: string): Promise<void> {
-      this.loads.push(url)
+    loadURL(): Promise<void> {
       return Promise.resolve()
     }
 
-    on(event: string, listener: (...args: unknown[]) => void): this {
-      const listeners = this.listeners.get(event) ?? []
-      listeners.push(listener)
-      this.listeners.set(event, listeners)
+    on(): this {
       return this
     }
 
-    once(event: string, listener: (...args: unknown[]) => void): this {
-      const wrapper = (...args: unknown[]): void => {
-        this.removeListener(event, wrapper)
-        listener(...args)
-      }
-      return this.on(event, wrapper)
+    once(): this {
+      return this
     }
 
-    removeListener(event: string, listener: (...args: unknown[]) => void): this {
-      this.listeners.set(
-        event,
-        (this.listeners.get(event) ?? []).filter((candidate) => candidate !== listener),
-      )
+    removeListener(): this {
       return this
     }
 
     close(): void {
-      if (this.destroyed) return
       this.destroyed = true
-      for (const listener of [...(this.listeners.get('destroyed') ?? [])]) listener()
     }
   }
 
+  const ipcHandlers = new Map<string, IpcHandler>()
+  const ipcListeners = new Map<string, IpcListener>()
   const ipcRendererListeners = new Map<string, IpcListener>()
   const invocations: Array<{ channel: string; payload: unknown }> = []
-  const ipcRenderer = {
-    on(channel: string, listener: IpcListener): void {
-      ipcRendererListeners.set(channel, listener)
-    },
-    removeListener(channel: string, listener: IpcListener): void {
-      if (ipcRendererListeners.get(channel) === listener) ipcRendererListeners.delete(channel)
-    },
-    invoke(channel: string, payload: unknown): Promise<unknown> {
-      invocations.push({ channel, payload })
-      const handler = ipcHandlers.get(channel)
-      if (!handler) return Promise.reject(new Error(`missing IPC handler: ${channel}`))
-      return Promise.resolve(handler({ sender: { id: senderId } }, payload))
-    },
-    send(channel: string, payload?: unknown): void {
-      ipcListeners.get(channel)?.({ sender: { id: senderId } }, payload)
-    },
-  }
+  const views: FakeWebContentsView[] = []
 
   class FakeWebContentsView {
     readonly webContents = new FakeWebContents()
@@ -119,33 +84,101 @@ vi.mock('electron', () => {
     }
   }
 
+  class FakeHostWindow {
+    readonly id = nextWindowId++
+    readonly children: unknown[] = []
+    readonly contentView = {
+      addChildView: (view: unknown): void => {
+        this.children.push(view)
+      },
+      removeChildView: (view: unknown): void => {
+        const index = this.children.indexOf(view)
+        if (index >= 0) this.children.splice(index, 1)
+      },
+    }
+
+    isDestroyed(): boolean {
+      return false
+    }
+
+    isMinimized(): boolean {
+      return false
+    }
+
+    restore(): void {}
+
+    show(): void {}
+
+    focus(): void {}
+
+    getContentBounds(): { x: number; y: number; width: number; height: number } {
+      return { x: 0, y: 0, width: 1280, height: 820 }
+    }
+
+    on(): this {
+      return this
+    }
+
+    removeListener(): this {
+      return this
+    }
+  }
+
+  const ipcRenderer = {
+    on(channel: string, listener: IpcListener): void {
+      ipcRendererListeners.set(channel, listener)
+    },
+    removeListener(channel: string, listener: IpcListener): void {
+      if (ipcRendererListeners.get(channel) === listener) ipcRendererListeners.delete(channel)
+    },
+    invoke(channel: string, payload: unknown): Promise<unknown> {
+      invocations.push({ channel, payload })
+      const handler = ipcHandlers.get(channel)
+      if (!handler) return Promise.reject(new Error(`missing IPC handler: ${channel}`))
+      return Promise.resolve(handler({ sender: { id: senderId } }, payload))
+    },
+    send(channel: string, payload?: unknown): void {
+      ipcListeners.get(channel)?.({ sender: { id: senderId } }, payload)
+    },
+  }
+
+  const exposed: Record<string, unknown> = {}
+
   return {
-    BrowserWindow: class BrowserWindow {},
-    WebContentsView: FakeWebContentsView,
+    FakeHostWindow,
+    FakeWebContentsView,
+    ipcHandlers,
+    ipcListeners,
+    ipcRendererListeners,
+    invocations,
+    views,
+    exposed,
+    ipcRenderer,
+    setSender(id: number): void {
+      senderId = id
+    },
+  }
+})
+
+vi.mock('electron', () => {
+  return {
+    BrowserWindow: electronMock.FakeHostWindow,
+    WebContentsView: electronMock.FakeWebContentsView,
     ipcMain: {
       handle(channel: string, handler: IpcHandler): void {
-        ipcHandlers.set(channel, handler)
+        electronMock.ipcHandlers.set(channel, handler)
       },
       on(channel: string, listener: IpcListener): void {
-        ipcListeners.set(channel, listener)
+        electronMock.ipcListeners.set(channel, listener)
       },
     },
-    ipcRenderer,
+    ipcRenderer: electronMock.ipcRenderer,
     contextBridge: {
       exposeInMainWorld(name: string, value: unknown): void {
-        exposed[name] = value
+        electronMock.exposed[name] = value
       },
     },
-    __mock: {
-      ipcHandlers,
-      ipcListeners,
-      exposed,
-      views,
-      invocations,
-      setSender(id: number): void {
-        senderId = id
-      },
-    },
+    __mock: electronMock,
   }
 })
 
@@ -209,14 +242,6 @@ const coreWsMock = vi.hoisted(() => {
 
 vi.mock('ws', () => ({ WebSocket: coreWsMock.FakeNodeWebSocket }))
 
-// The production Plans build aliases this import to capabilityBackend. Mirror
-// that build-time alias here so the mounted production component uses the real
-// package SDK/IPC path instead of opening the core WebSocket client.
-vi.doMock(resolve(process.cwd(), 'src/renderer/src/composables/useBackend.ts'), async () => {
-  const plansBackend = await import('../../src/renderer/plugins/plans/capabilityBackend')
-  return { useBackend: plansBackend.useBackend }
-})
-
 import * as electron from 'electron'
 import {
   FrontendPluginManager,
@@ -224,71 +249,13 @@ import {
   type PluginLaunchDescriptor,
 } from '../../src/main/plugins/frontendPluginManager'
 import { PLANS_PLUGIN_REQUIRES } from '../../src/shared/pluginCapabilities'
-import { createPluginBackendClient } from '@navide/plugin-sdk'
 
 interface FakeWebContentsViewLike {
-  webContents: { id: number }
+  webContents: {
+    id: number
+  }
   options: {
     webPreferences?: { additionalArguments?: string[] }
-  }
-}
-
-class FakeHostWindow {
-  readonly id = 41
-  readonly children: unknown[] = []
-  readonly contentView = {
-    addChildView: (view: unknown): void => {
-      this.children.push(view)
-    },
-    removeChildView: (view: unknown): void => {
-      const index = this.children.indexOf(view)
-      if (index >= 0) this.children.splice(index, 1)
-    },
-  }
-  private destroyed = false
-  private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>()
-
-  isDestroyed(): boolean {
-    return this.destroyed
-  }
-
-  isMinimized(): boolean {
-    return false
-  }
-
-  restore(): void {}
-
-  show(): void {}
-
-  focus(): void {}
-
-  getContentBounds(): { x: number; y: number; width: number; height: number } {
-    return { x: 0, y: 0, width: 1200, height: 800 }
-  }
-
-  setTitle(_title: string): void {}
-
-  on(event: string, listener: (...args: unknown[]) => void): this {
-    const listeners = this.listeners.get(event) ?? []
-    listeners.push(listener)
-    this.listeners.set(event, listeners)
-    return this
-  }
-
-  once(event: string, listener: (...args: unknown[]) => void): this {
-    const wrapper = (...args: unknown[]): void => {
-      this.removeListener(event, wrapper)
-      listener(...args)
-    }
-    return this.on(event, wrapper)
-  }
-
-  removeListener(event: string, listener: (...args: unknown[]) => void): this {
-    this.listeners.set(
-      event,
-      (this.listeners.get(event) ?? []).filter((candidate) => candidate !== listener),
-    )
-    return this
   }
 }
 
@@ -318,10 +285,8 @@ describe('Plans packaged backend composition', () => {
   const originalNav = (globalThis as unknown as { nav?: unknown }).nav
   const originalWindowNav = (window as unknown as { nav?: unknown }).nav
   const originalLocation = window.location.href
-  const mountedApps: Array<{ unmount(): void }> = []
-
   afterEach(async () => {
-    while (mountedApps.length) mountedApps.pop()!.unmount()
+    vi.restoreAllMocks()
     await Promise.all(managers.splice(0).map((manager) => manager.closeBackendPlugins()))
     process.argv.splice(0, process.argv.length, ...originalArgv)
     window.history.replaceState({}, '', originalLocation)
@@ -372,7 +337,7 @@ describe('Plans packaged backend composition', () => {
         approvedBridgePorts: ['filesystem'],
       })
 
-      const hostWindow = new FakeHostWindow()
+      const hostWindow = new electronMock.FakeHostWindow()
       // The production bridge is configured explicitly; the package child
       // never receives a direct Node filesystem adapter.
       manager.setBackendWsUrl('ws://plans-core-test')
@@ -414,46 +379,33 @@ describe('Plans packaged backend composition', () => {
       Object.defineProperty(window, 'nav', { value: nav, configurable: true })
       Object.defineProperty(globalThis, 'nav', { value: nav, configurable: true })
 
-      let resolveChanged!: (payload: unknown) => void
-      const changed = new Promise<unknown>((resolve) => {
-        resolveChanged = resolve
-      })
-      const sdkSubscription = createPluginBackendClient().subscribe(
-        'plans.changed',
-        resolveChanged,
-      )
-      await sdkSubscription.ready
       mock.invocations.length = 0
       // Settings reconciliation currently reports failures through warn while
       // capability plumbing can report errors, so monitor both channels.
       const consoleError = vi.spyOn(console, 'error')
       const consoleWarn = vi.spyOn(console, 'warn')
+      let plansSubscription: { dispose(): void } | undefined
       try {
-        const { default: PlanWindowApp } = await import('../../src/renderer/src/PlanWindowApp.vue')
-        const app = mount(PlanWindowApp, {
-          global: {
-            plugins: [i18n],
-            // The real PlanWindowApp is mounted. Only the unrelated terminal
-            // surface is stubbed because xterm requires a native layout engine.
-            stubs: {
-              AiCliDock: true,
-              PlanDocPreview: defineComponent({
-                name: 'PlanDocPreview',
-                props: ['workspacePath', 'relPath', 'backend', 'refresh'],
-                setup(props) {
-                  return () => h('div', {
-                    class: 'integration-plan-preview',
-                    'data-workspace-path': props.workspacePath,
-                    'data-refresh': String(props.refresh),
-                  })
-                },
-              }),
-            },
-          },
+        const plansBackendModule = '../../plugins/navide-plans/src/backend'
+        const { plansBackend } = (await import(plansBackendModule)) as {
+          plansBackend: {
+            call(name: string, args?: unknown): Promise<unknown>
+            subscribe(event: string, listener: (payload: unknown) => void): { ready: Promise<void>; dispose(): void }
+          }
+        }
+        let resolveChanged!: (payload: unknown) => void
+        const changed = new Promise<unknown>((resolve) => {
+          resolveChanged = resolve
         })
-        mountedApps.push(app)
-        await flushPromises()
-        expect(app.find('.plan-window').exists()).toBe(true)
+        const sub = plansBackend.subscribe(
+          'plans.changed',
+          resolveChanged,
+        )
+        plansSubscription = sub
+        await sub.ready
+
+        const rootResult = await plansBackend.call('plans.resolve_root', { workspace_path: workspacePath })
+        expect(rootResult).toMatchObject({ root: expectedPlanRoot })
         expect(mock.invocations).toContainEqual(expect.objectContaining({
           channel: 'plugin:backend:call',
           payload: expect.objectContaining({
@@ -462,10 +414,6 @@ describe('Plans packaged backend composition', () => {
           }),
         }))
         await expect(changed).resolves.toEqual({ workspace_path: expectedPlanRoot })
-        await flushPromises()
-        const preview = app.find('.integration-plan-preview')
-        expect(preview.attributes('data-workspace-path')).toBe(expectedPlanRoot)
-        expect(preview.attributes('data-refresh')).toBe('1')
         const diagnostics = [...consoleError.mock.calls, ...consoleWarn.mock.calls]
           .map((args) => args.map(String).join(' '))
           .join('\n')
@@ -473,7 +421,135 @@ describe('Plans packaged backend composition', () => {
       } finally {
         consoleError.mockRestore()
         consoleWarn.mockRestore()
-        sdkSubscription.dispose()
+        plansSubscription?.dispose()
+        manager.destroyInstance(handle.instanceId)
+      }
+    },
+  )
+
+  runPackagedTest(
+    'mounts the production PlansApp view and renders the plan list from the packaged child',
+    async () => {
+      const manager = new FrontendPluginManager()
+      managers.push(manager)
+      const workspacePath = join(process.cwd(), 'src')
+      const expectedPlanRoot = process.cwd()
+      const packageVersion = '0.1.92'
+      const view = {
+        id: 'window',
+        contributionKey: `${PLANS_PLUGIN_ID}.window`,
+        kind: 'custom' as const,
+        location: 'window' as const,
+        title: 'Plans',
+        entryFile: join(expectedPlanRoot, 'src/renderer/plugins/plans/index.html'),
+      }
+      const descriptor: PluginLaunchDescriptor = {
+        id: PLANS_PLUGIN_ID,
+        packageVersion,
+        packageDir: expectedPlanRoot,
+        requires: [...PLANS_PLUGIN_REQUIRES],
+        devUrl: '',
+        entryFile: view.entryFile,
+        views: [view],
+      }
+      manager.registerDescriptor(descriptor, { builtin: true })
+      manager.configurePlansFilesystemService()
+      manager.registerBackendActivation({
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion,
+        packageDir: expectedPlanRoot,
+        entryFile: packagedFixture,
+        protocolVersion: 1,
+        activation: 'startup',
+        approvedMethods: ['plans.resolve_root', 'plans.list'],
+        approvedEvents: ['plans.changed'],
+        approvedBridgePorts: ['filesystem'],
+      })
+
+      const hostWindow = new electronMock.FakeHostWindow()
+      manager.setBackendWsUrl('ws://plans-core-test')
+      const handle = await manager.openView(descriptor, view, {
+        hostWindow: hostWindow as never,
+        bounds: 'fill',
+        workspacePath,
+        query: `?window=plans&workspace_path=${encodeURIComponent(workspacePath)}`,
+      })
+      const mountedView = mock.views.at(-1)
+      expect(mountedView?.options.webPreferences?.additionalArguments).toContain('--plugin-backend=1')
+      const webContents = (hostWindow.children[0] as FakeWebContentsViewLike).webContents
+      mock.setSender(webContents.id)
+      const coreSocket = coreWsMock.FakeNodeWebSocket.instances.at(-1)
+      coreSocket?.open()
+      await flushPromises()
+
+      process.argv.splice(
+        0,
+        process.argv.length,
+        ...originalArgv,
+        `--plugin-id=${PLANS_PLUGIN_ID}`,
+        '--plugin-backend=1',
+      )
+      await import('../../src/preload/plugin-preload')
+      const nav = mock.exposed.nav
+      expect(nav).toBeDefined()
+      window.history.replaceState(
+        {},
+        '',
+        `/?window=plans&workspace_path=${encodeURIComponent(workspacePath)}`,
+      )
+      Object.defineProperty(globalThis, 'window', {
+        value: window,
+        configurable: true,
+      })
+      Object.defineProperty(window, 'nav', { value: nav, configurable: true })
+      Object.defineProperty(globalThis, 'nav', { value: nav, configurable: true })
+
+      mock.invocations.length = 0
+      const consoleError = vi.spyOn(console, 'error')
+      const consoleWarn = vi.spyOn(console, 'warn')
+      let app: { unmount(): void } | undefined
+      try {
+        const plansAppModule = '../../plugins/navide-plans/src/PlansApp.vue'
+        const { default: PlansApp } = (await import(plansAppModule)) as {
+          default: any
+        }
+
+        const mountedApp = mount(PlansApp, {
+          global: {
+            plugins: [i18n],
+            stubs: {
+              SafeAiCliPanel: true,
+            },
+          },
+        })
+        app = mountedApp
+
+        for (let i = 0; i < 50; i++) {
+          await flushPromises()
+          if (mountedApp.find('.plan-row').exists()) break
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+
+        expect(mock.invocations).toContainEqual(expect.objectContaining({
+          channel: 'plugin:backend:call',
+          payload: expect.objectContaining({
+            name: 'plans.list',
+            args: {},
+          }),
+        }))
+
+        const row = mountedApp.find('.plan-row')
+        expect(row.exists()).toBe(true)
+        expect(mountedApp.text()).toContain('Integration Plan')
+
+        const diagnostics = [...consoleError.mock.calls, ...consoleWarn.mock.calls]
+          .map((args) => args.map(String).join(' '))
+          .join('\n')
+        expect(diagnostics).not.toMatch(/capability .*not granted|\[settings\] reconcile failed/i)
+      } finally {
+        consoleError.mockRestore()
+        consoleWarn.mockRestore()
+        app?.unmount()
         manager.destroyInstance(handle.instanceId)
       }
     },

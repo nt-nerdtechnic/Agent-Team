@@ -3812,16 +3812,17 @@ export class FrontendPluginManager {
     this.dispatchEvent(event, payload, sourceBinding, targetPluginId)
   }
 
-  /** Route only the fixed Host-owned Git settings contract to v2 Git views. */
+  /** Route only the fixed Host-owned settings contract to v2 views. */
   dispatchHostSettingsChanged(payload: unknown): void {
     const rawSettings =
       typeof payload === 'object' && payload !== null && !Array.isArray(payload)
         ? (payload as Record<string, unknown>).settings
         : null
     if (typeof rawSettings !== 'object' || rawSettings === null || Array.isArray(rawSettings)) return
+    const allowedKeys: readonly string[] = [...GIT_HOST_READ_ONLY_KEYS, 'agent-team:language']
     const settings = Object.fromEntries(
       Object.entries(rawSettings as Record<string, unknown>)
-        .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
+        .filter(([key]) => allowedKeys.includes(key))
     )
     if (Object.keys(settings).length === 0) return
     this.dispatchEvent('ui.settings_changed', { source: 'host', settings })
@@ -4260,54 +4261,64 @@ export class FrontendPluginManager {
         : null
       const rawSettings = record?.settings
       const source = record?.source
-      let settings: Record<string, unknown> = {}
-      let settingsWorkspace: string | null = null
-      let settingsPayload: Record<string, unknown> | null = null
       if (typeof rawSettings === 'object' && rawSettings !== null && !Array.isArray(rawSettings)) {
-        if (source === 'host') {
-          settings = Object.fromEntries(
-            Object.entries(rawSettings as Record<string, unknown>)
-              .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
-          )
-          settingsPayload = { source, settings }
-        } else if (source === 'plugin-storage') {
-          const scope = record?.scope
-          const allowedKeys = scope === 'plugin'
-            ? GIT_USER_PREFERENCE_KEYS
-            : scope === 'workspace'
-              ? [GIT_WORKSPACE_REPOSITORY_KEY]
-              : []
-          settings = Object.fromEntries(
-            Object.entries(rawSettings as Record<string, unknown>)
-              .filter(([key]) => allowedKeys.includes(key as never))
-          )
-          const workspacePath = record?.workspace_path
-          if (scope === 'workspace' && typeof workspacePath === 'string' && workspacePath.length > 0) {
-            settingsWorkspace = resolve(workspacePath)
-          }
-          settingsPayload = {
-            source,
-            scope,
-            settings,
-            ...(settingsWorkspace ? { workspace_path: workspacePath } : {}),
-          }
-        }
-      }
-      if (settingsPayload && Object.keys(settings).length > 0 &&
-        (source !== 'plugin-storage' || record?.scope !== 'workspace' || settingsWorkspace !== null)) {
         for (const plugin of this.running.values()) {
           if (
-            plugin.hasV2DescriptorIdentity &&
-            plugin.id === GIT_PLUGIN_ID &&
-            plugin.capabilityPolicy.kind === 'manifest-v2' &&
-            plugin.capabilityPolicy.system.includes('ui') &&
-            plugin.capabilityContext?.userGrant?.system.includes('ui') &&
-            (settingsWorkspace === null || (
-              plugin.workspacePath !== null &&
-              resolve(plugin.workspacePath) === settingsWorkspace
-            ))
+            !plugin.hasV2DescriptorIdentity ||
+            plugin.capabilityPolicy.kind !== 'manifest-v2' ||
+            !plugin.capabilityPolicy.system.includes('ui') ||
+            !plugin.capabilityContext?.userGrant?.system.includes('ui')
           ) {
-            this.emitToInstance(plugin.instanceId, event, settingsPayload)
+            continue
+          }
+
+          if (plugin.id === GIT_PLUGIN_ID) {
+            if (source === 'host') {
+              const allowedHostKeys: readonly string[] = [...GIT_HOST_READ_ONLY_KEYS, 'agent-team:language']
+              const gitSettings = Object.fromEntries(
+                Object.entries(rawSettings as Record<string, unknown>)
+                  .filter(([key]) => allowedHostKeys.includes(key as never))
+              )
+              if (Object.keys(gitSettings).length > 0) {
+                this.emitToInstance(plugin.instanceId, event, { source, settings: gitSettings })
+              }
+            } else if (source === 'plugin-storage') {
+              const scope = record?.scope
+              const allowedKeys = scope === 'plugin'
+                ? GIT_USER_PREFERENCE_KEYS
+                : scope === 'workspace'
+                  ? [GIT_WORKSPACE_REPOSITORY_KEY]
+                  : []
+              const gitSettings = Object.fromEntries(
+                Object.entries(rawSettings as Record<string, unknown>)
+                  .filter(([key]) => allowedKeys.includes(key as never))
+              )
+              const workspacePath = record?.workspace_path
+              const settingsWorkspace = scope === 'workspace' && typeof workspacePath === 'string' && workspacePath.length > 0
+                ? resolve(workspacePath)
+                : null
+              if (
+                Object.keys(gitSettings).length > 0 &&
+                (scope !== 'workspace' || (settingsWorkspace !== null && plugin.workspacePath !== null && resolve(plugin.workspacePath) === settingsWorkspace))
+              ) {
+                this.emitToInstance(plugin.instanceId, event, {
+                  source,
+                  scope,
+                  settings: gitSettings,
+                  ...(settingsWorkspace ? { workspace_path: workspacePath } : {}),
+                })
+              }
+            }
+          } else if (plugin.id === PLANS_PLUGIN_ID) {
+            if (source === 'host') {
+              const language = (rawSettings as Record<string, unknown>)['agent-team:language']
+              if (language === 'zh-TW' || language === 'en-US') {
+                this.emitToInstance(plugin.instanceId, event, {
+                  source: 'host',
+                  settings: { 'agent-team:language': language },
+                })
+              }
+            }
           }
         }
       }

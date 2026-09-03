@@ -625,6 +625,24 @@ def _handle(frame: Any) -> None:
         _start_plan_watchers(root)
         return
 
+    if name == "plans.list":
+        if not _is_record(arguments):
+            _protocol_error(frame["id"])
+            return
+        _response(
+            frame["id"],
+            [
+                {
+                    "rel_path": ".agent-team/plans/integration.html",
+                    "name": "Integration Plan",
+                    "stage": "draft",
+                    "overview": "Packaged plans integration fixture plan",
+                    "kind": "plan",
+                }
+            ],
+        )
+        return
+
     if name == "fixture.echo":
         _response(frame["id"], {"arguments": arguments, "runtime": runtime})
         return

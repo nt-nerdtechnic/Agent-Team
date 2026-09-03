@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const repositoryRoot = resolve(import.meta.dirname, '../..')
+const repositoryRoot = resolve(import.meta.dirname, '../../..')
 const packageRoot = join(repositoryRoot, 'plugins/navide-plans')
 const supportedLocales = ['en-US', 'zh-TW'] as const
 
