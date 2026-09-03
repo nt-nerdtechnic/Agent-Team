@@ -77,6 +77,12 @@ export interface PaneLineageRow {
   depth: number
   hasChildren: boolean
   collapsed: boolean
+  /** The panes this one hangs under, outermost first; empty for a root. Ids,
+   *  not names — the row is structure, and the name lives on ActivePaneView. */
+  ancestors: readonly string[]
+  /** How many panes descend from this one, at any depth, counted even when
+   *  they are folded away — a folded row shows this instead of its children. */
+  descendantCount: number
 }
 
 /** One workspace section of the sidebar — one this window holds, with real

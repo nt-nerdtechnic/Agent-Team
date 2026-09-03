@@ -5,6 +5,7 @@ import TerminalPane from './components/TerminalPane.vue'
 import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
 import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups'
 import { buildPaneLineage } from './lib/paneLineage'
+import { ancestorTrail } from './lib/paneListView'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
 import { flattenSidebarOrder, resolveFocusedPane } from './lib/paneFocus'
@@ -13924,19 +13925,97 @@ const onScreenPaneIds = computed<Set<string>>(() => {
 const stageSurfaceOrderedIds = computed<string[]>(() =>
   panes.value.filter((p) => onScreenPaneIds.value.has(p.id)).map((p) => p.id)
 )
-// Shift-range selection walks this list, so it has to be the order the user
-// actually sees: the lineage tree flattened depth-first, not the flat pane
-// order. It is also collapse-aware for free — a folded subtree's children are
-// absent from paneLineage, so a range spanning a collapsed parent skips the
-// children the user cannot see.
-const auxiliaryListOrderedIds = computed<string[]>(() => {
-  const visible = new Set(
+// ── The pane lists ─────────────────────────────────────────────────────────
+//
+// Each main-window mode has one: the Auto sidebar's cards, the Spotlight
+// strip, the fullscreen PiP rows. They are one list in three shapes, and until
+// now every one of them was flat — a pane opened by another agent sat beside
+// the pane that opened it with nothing to say so.
+//
+// They earn their ancestry differently from the sidebar tree. The tree spends
+// width on indentation; these have none to spare, so they spend a line of text
+// instead, and show one family at a time rather than the whole forest.
+
+/** The tree these lists read, with nothing folded away.
+ *
+ *  The sidebar's copy drops a folded family's children — that is what makes a
+ *  range there skip what the eye cannot see. These lists have no caret of
+ *  their own, so borrowing it would let folding a family in the sidebar erase
+ *  its panes from a surface with no way to bring them back. */
+const NOTHING_FOLDED: ReadonlySet<string> = new Set()
+const paneListLineage = computed<PaneLineageRow[]>(() =>
+  buildPaneLineage(panes.value, NOTHING_FOLDED)
+)
+
+/** Families closed up in the lists. Everything starts open: a pane you cannot
+ *  see is a pane you forget is running, and these lists are the only place
+ *  some modes show one at all. Closing is for when a family gets in the way.
+ *
+ *  Per window and not persisted: pane ids are reissued on every restart, so a
+ *  stored one would point at nobody. */
+const paneListCollapsed = ref(new Set<string>())
+
+/** What the lists render, in the order they render it — and the order
+ *  shift-range walks, since one is derived from the other.
+ *
+ *  Each entry is the live view widened with two facts from its lineage row.
+ *  Structure and status stay separate right up to here, where they are joined
+ *  for one frame. */
+const auxiliaryListPanes = computed(() => {
+  const visible = new Map(
     paneViews.value
       .filter((v) => !v.isMinimized && tabFilteredPaneIds.value.has(v.id))
-      .map((v) => v.id)
+      .map((v) => [v.id, v] as const)
   )
-  return paneLineage.value.filter((r) => visible.has(r.id)).map((r) => r.id)
+  // A row hides when anything above it has been closed. Roots have no
+  // ancestors, so they always show; closing a parent takes its whole subtree
+  // with it, one level at a time.
+  const closed = paneListCollapsed.value
+  return paneListLineage.value.flatMap((r) => {
+    if (r.ancestors.some((id) => closed.has(id))) return []
+    const view = visible.get(r.id)
+    return view ? [{ ...view, ancestors: r.ancestors, descendantCount: r.descendantCount, expanded: !closed.has(r.id) }] : []
+  })
 })
+
+const auxiliaryListOrderedIds = computed<string[]>(() => auxiliaryListPanes.value.map((v) => v.id))
+
+const paneNameById = computed(() => new Map(paneViews.value.map((v) => [v.id, v.agentLabel])))
+
+/** The source line under a nested card: who opened this pane. */
+function paneListTrail(ancestors: readonly string[]): string {
+  return ancestorTrail(ancestors, (id) => paneNameById.value.get(id) ?? '')
+}
+
+/** How many status dots a card shows before it starts counting instead. */
+const PANE_LIST_MAX_DOTS = 5
+
+/** The dots a top-level card shows in place of the family it stands for.
+ *  Tree order, never sorted by status: sorting would make the strip rearrange
+ *  itself every time a pane started or stopped. */
+function paneListFamilyDots(rootId: string): { id: string; status: ActivePaneView['status'] }[] {
+  const byId = new Map(paneViews.value.map((v) => [v.id, v]))
+  const dots: { id: string; status: ActivePaneView['status'] }[] = []
+  for (const row of paneListLineage.value) {
+    if (!row.ancestors.includes(rootId)) continue
+    const view = byId.get(row.id)
+    if (view) dots.push({ id: row.id, status: view.status })
+    if (dots.length === PANE_LIST_MAX_DOTS) break
+  }
+  return dots
+}
+
+/** Close or reopen one family in place.
+ *
+ *  A new Set rather than a mutation: Vue does not track adds and deletes on a
+ *  Set held in a ref, so mutating it would leave the lists showing the old
+ *  shape until something else happened to re-render them. */
+function togglePaneFamily(rootId: string): void {
+  const next = new Set(paneListCollapsed.value)
+  if (next.has(rootId)) next.delete(rootId)
+  else next.add(rootId)
+  paneListCollapsed.value = next
+}
 
 function onUserChangeLayoutMode(mode: LayoutMode): void {
   layoutMode.value = mode
@@ -14814,7 +14893,7 @@ function paneIsCommander(p: ActivePane): boolean {
         <!-- Auto/sidebar mode: meeting-style agent list on the right -->
         <div v-if="effectiveLayoutMode === 'sidebar'" class="auto-meeting-list" :style="dualFocusActive ? { gridColumn: '3' } : {}">
           <div
-            v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
+            v-for="p in auxiliaryListPanes"
             :key="p.id"
             class="meeting-item"
             :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
@@ -14830,6 +14909,9 @@ function paneIsCommander(p: ActivePane): boolean {
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">
+              <!-- Who opened this pane. These lists have no indentation to
+                   spend on ancestry, so they spend a line of text instead. -->
+              <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
                 <span v-if="p.origin === 'pipeline' && p.stageId" class="meeting-pipe-tag">P{{ p.stageId }}</span>
                 <input
@@ -14857,6 +14939,36 @@ function paneIsCommander(p: ActivePane): boolean {
               <span class="meeting-sub">
                 {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
               </span>
+              <!-- Opens the family in place. Its own click target — the card
+                   itself still focuses the pane — and it stops dragover
+                   because the card is a reorder drop zone.
+                   Closed, the dots stand in for the children being hidden;
+                   open, the children are right there and the dots would only
+                   repeat them. -->
+              <button
+                v-if="p.descendantCount > 0"
+                class="pane-list-kids"
+                :class="{ 'is-open': p.expanded }"
+                :title="$t('label.descendant-count', { count: p.descendantCount })"
+                @click.stop="togglePaneFamily(p.id)"
+                @dragover.stop
+                @dragenter.stop
+              >
+                <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
+                <template v-if="!p.expanded">
+                  <span
+                    v-for="dot in paneListFamilyDots(p.id)"
+                    :key="dot.id"
+                    class="pane-list-kid-dot"
+                    :data-status="dot.status"
+                    :style="statusBadgeStyle(dot.status)"
+                  ></span>
+                </template>
+                <!-- The number alone. "3 descendants" wraps a narrow card and
+                     pushes the status badge off the row; the full wording is
+                     on the control's title. -->
+                <span class="pane-list-kids-count">{{ p.descendantCount }}</span>
+              </button>
             </div>
             <span
               v-if="p.loopActive"
@@ -14865,7 +14977,7 @@ function paneIsCommander(p: ActivePane): boolean {
             >∞ Loop</span>
             <span class="meeting-badge" :data-status="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
           </div>
-          <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
+          <div v-if="auxiliaryListPanes.length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
           </div>
         </div>
@@ -14873,7 +14985,7 @@ function paneIsCommander(p: ActivePane): boolean {
       <!-- Spotlight mode: horizontal scrollable bottom strip -->
       <div v-if="effectiveLayoutMode === 'spotlight'" class="spotlight-strip">
         <div
-          v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
+          v-for="p in auxiliaryListPanes"
           :key="p.id"
           class="spotlight-thumb"
           :class="{ 'spotlight-thumb--active': p.id === effectiveFocusPaneId, 'spotlight-thumb--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
@@ -14916,6 +15028,10 @@ function paneIsCommander(p: ActivePane): boolean {
             <span class="spotlight-thumb-role">
               {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
             </span>
+            <!-- Same source line as the other two lists; the thumb is narrow,
+                 so it truncates sooner, but the nearest parent survives —
+                 the trail is cut from the left for exactly this reason. -->
+            <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
           </div>
           <div class="spotlight-thumb-badges">
             <span
@@ -14924,6 +15040,29 @@ function paneIsCommander(p: ActivePane): boolean {
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
             <span class="spotlight-thumb-badge" :data-status="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
+            <!-- The compact form of the family strip: dots and a count, no
+                 words. A thumb has room for one more chip, not for a row. -->
+            <button
+              v-if="p.descendantCount > 0"
+              class="pane-list-kids pane-list-kids--compact"
+              :class="{ 'is-open': p.expanded }"
+              :title="$t('label.descendant-count', { count: p.descendantCount })"
+              @click.stop="togglePaneFamily(p.id)"
+              @dragover.stop
+              @dragenter.stop
+            >
+              <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
+              <template v-if="!p.expanded">
+                <span
+                  v-for="dot in paneListFamilyDots(p.id)"
+                  :key="dot.id"
+                  class="pane-list-kid-dot"
+                  :data-status="dot.status"
+                  :style="statusBadgeStyle(dot.status)"
+                ></span>
+              </template>
+              <span class="pane-list-kids-count">{{ p.descendantCount }}</span>
+            </button>
           </div>
         </div>
         <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="spotlight-strip-empty">
@@ -14939,7 +15078,7 @@ function paneIsCommander(p: ActivePane): boolean {
       >
         <div class="float-pip-header" @mousedown.prevent="onPipDragStart">
           <span class="float-pip-title">
-            Agents ({{ paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length }})
+            Agents ({{ auxiliaryListPanes.length }})
           </span>
           <button class="float-pip-toggle" @mousedown.stop @click="floatPipExpanded = !floatPipExpanded; clampPipPos()">
             {{ floatPipExpanded ? '▾' : '▸' }}
@@ -14947,7 +15086,7 @@ function paneIsCommander(p: ActivePane): boolean {
         </div>
         <div v-if="floatPipExpanded" class="float-pip-list" :style="{ height: floatPipListHeight + 'px' }">
           <div
-            v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
+            v-for="p in auxiliaryListPanes"
             :key="p.id"
             class="meeting-item"
             :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
@@ -14963,6 +15102,9 @@ function paneIsCommander(p: ActivePane): boolean {
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">
+              <!-- Who opened this pane. These lists have no indentation to
+                   spend on ancestry, so they spend a line of text instead. -->
+              <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
                 <span v-if="p.origin === 'pipeline' && p.stageId" class="meeting-pipe-tag">P{{ p.stageId }}</span>
                 <input
@@ -14990,6 +15132,36 @@ function paneIsCommander(p: ActivePane): boolean {
               <span class="meeting-sub">
                 {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
               </span>
+              <!-- Opens the family in place. Its own click target — the card
+                   itself still focuses the pane — and it stops dragover
+                   because the card is a reorder drop zone.
+                   Closed, the dots stand in for the children being hidden;
+                   open, the children are right there and the dots would only
+                   repeat them. -->
+              <button
+                v-if="p.descendantCount > 0"
+                class="pane-list-kids"
+                :class="{ 'is-open': p.expanded }"
+                :title="$t('label.descendant-count', { count: p.descendantCount })"
+                @click.stop="togglePaneFamily(p.id)"
+                @dragover.stop
+                @dragenter.stop
+              >
+                <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
+                <template v-if="!p.expanded">
+                  <span
+                    v-for="dot in paneListFamilyDots(p.id)"
+                    :key="dot.id"
+                    class="pane-list-kid-dot"
+                    :data-status="dot.status"
+                    :style="statusBadgeStyle(dot.status)"
+                  ></span>
+                </template>
+                <!-- The number alone. "3 descendants" wraps a narrow card and
+                     pushes the status badge off the row; the full wording is
+                     on the control's title. -->
+                <span class="pane-list-kids-count">{{ p.descendantCount }}</span>
+              </button>
             </div>
             <span
               v-if="p.loopActive"
@@ -14998,7 +15170,7 @@ function paneIsCommander(p: ActivePane): boolean {
             >∞ Loop</span>
             <span class="meeting-badge" :data-status="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
           </div>
-          <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
+          <div v-if="auxiliaryListPanes.length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
           </div>
         </div>
@@ -16389,6 +16561,78 @@ function paneIsCommander(p: ActivePane): boolean {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── Ancestry in the pane lists ────────────────────────────────────────────
+   The sidebar tree spends width on indentation to show who opened what. These
+   lists have none to spare — a card is already name, vendor and status — so
+   they spend a line of text, and show one family at a time instead of the
+   whole forest. */
+
+/* Who opened this pane. Above the name, not beside it: the name row is the
+   scarcest space on the card. */
+.pane-list-src {
+  font-size: var(--font-3xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+/* Stands in for the children a top-level card is hiding. Dots come in tree
+   order, never sorted by status: sorting would make the strip rearrange itself
+   every time a pane started or stopped. */
+.pane-list-kids {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  padding: 4px 0 0;
+  border: none;
+  border-top: 1px dashed var(--border-muted);
+  background: none;
+  cursor: pointer;
+  font-size: var(--font-3xs);
+  color: var(--text-secondary);
+  text-align: left;
+  width: 100%;
+}
+.pane-list-kids:hover { color: var(--text-bright); }
+/* The strip has room for a row; a Spotlight thumb has room for one more chip. */
+.pane-list-kids--compact {
+  width: auto;
+  margin-top: 0;
+  padding: 1px 5px;
+  border: 1px solid var(--border-muted);
+  border-radius: 3px;
+  gap: 3px;
+  font-size: 9px;
+}
+.pane-list-kid-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 6px;
+  background: var(--status-badge-fg, var(--text-muted));
+}
+/* A pane that has not been opened yet is hollow rather than dim: a filled dot
+   at any opacity still reads as "running but quiet". */
+.pane-list-kid-dot[data-status='waiting'] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-disabled);
+}
+.pane-list-kids-count { margin-left: 2px; }
+
+/* The caret says which way the control goes. Closed it sits before the dots
+   that stand in for the hidden children; open it stands alone, because those
+   children are now right underneath. */
+.pane-list-kids-caret {
+  flex: none;
+  font-size: 9px;
+  width: 9px;
+  text-align: center;
+}
+.pane-list-kids.is-open { color: var(--text-bright); }
 .meeting-badge {
   font-size: var(--font-3xs);
   padding: 2px 6px;
