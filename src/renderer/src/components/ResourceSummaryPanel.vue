@@ -13,7 +13,8 @@ import { computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatBytes } from '../lib/formatBytes'
 import { formatCpuPercent } from '../lib/resourceSampling'
-import { paneStatusLabelKey, type PaneStatusValue } from '../lib/paneStatusLabel'
+import { paneStatusLabelText, type PaneStatusValue } from '../lib/paneStatusLabel'
+import { statusBadgeStyle } from '../composables/useStatusBadgePrefs'
 
 export interface ResourceSummaryRow {
   paneId: string
@@ -101,7 +102,7 @@ function barWidth(share: number | null): string {
 }
 
 function statusLabel(status: PaneStatusValue): string {
-  return t(paneStatusLabelKey(status))
+  return paneStatusLabelText(status)
 }
 
 /** The hover text carries what the row itself has no width for — the vendor
@@ -146,6 +147,7 @@ function rowTitle(row: ResourceSummaryRow): string {
         data-row="pane"
         :data-pane="row.paneId"
         :data-status="row.status"
+        :style="statusBadgeStyle(row.status)"
         :title="rowTitle(row)"
         @click="emit('jump', row.paneId)"
       >
@@ -295,21 +297,21 @@ function rowTitle(row: ResourceSummaryRow): string {
 }
 /* Same dot vocabulary the agent list used, so a status reads the same after
  * the two panels merged. */
-.rs-row[data-status='running'] .rs-dot { background: var(--success-fg); }
-.rs-row[data-status='starting'] .rs-dot { background: var(--status-starting-fg); }
+.rs-row[data-status='running'] .rs-dot { background: var(--status-badge-fg, var(--success-fg)); }
+.rs-row[data-status='starting'] .rs-dot { background: var(--status-badge-fg, var(--status-starting-fg)); }
 .rs-row[data-status='error'] .rs-dot,
-.rs-row[data-status='exited'] .rs-dot { background: var(--danger-fg); }
-.rs-row[data-status='idle'] .rs-dot { background: var(--attention-fg); }
-.rs-row[data-status='awaiting'] .rs-dot { background: var(--warning-fg); }
-.rs-row[data-status='stopped'] .rs-dot { background: var(--text-disabled); }
+.rs-row[data-status='exited'] .rs-dot { background: var(--status-badge-fg, var(--danger-fg)); }
+.rs-row[data-status='idle'] .rs-dot { background: var(--status-badge-fg, var(--attention-fg)); }
+.rs-row[data-status='awaiting'] .rs-dot { background: var(--status-badge-fg, var(--warning-fg)); }
+.rs-row[data-status='stopped'] .rs-dot { background: var(--status-badge-fg, var(--text-disabled)); }
 /* Hollow ring so a dropped connection never reads as the (also amber) idle dot. */
 .rs-row[data-status='disconnected'] .rs-dot {
   background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--attention-fg);
+  box-shadow: inset 0 0 0 1.5px var(--status-badge-fg, var(--attention-fg));
 }
 .rs-row[data-status='waiting'] .rs-dot {
   background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--text-muted);
+  box-shadow: inset 0 0 0 1.5px var(--status-badge-fg, var(--text-muted));
 }
 .rs-name {
   flex: 1;

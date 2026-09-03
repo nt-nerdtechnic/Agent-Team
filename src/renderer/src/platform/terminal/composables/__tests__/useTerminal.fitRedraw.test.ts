@@ -11,6 +11,9 @@ const ctrl = vi.hoisted(() => ({
   applyFit: vi.fn(),
   sendResizeNow: vi.fn(),
   requestResizeRedraw: vi.fn(),
+  // Uncapped by default: the real capCols is identity until a cap is set.
+  setColsCap: vi.fn(),
+  capCols: vi.fn((cols: number) => cols),
   attachObserver: vi.fn(),
   dispose: vi.fn(),
   ackedCols: 0,

@@ -40,14 +40,23 @@ log = logging.getLogger("agent_team_backend.remote_roster")
 #: startedAt), so the oldest ones survive rather than an arbitrary set.
 MAX_PANES = 500
 
-#: The server's ``status`` vocabulary, as ``sessions.upsert`` enforces it:
-#: running / waiting / exited / disconnected. Only these two are interpreted —
-#: the raw word is reported alongside, so a value this build has never heard of
-#: is passed through rather than hidden.
+#: The server's ``status`` vocabulary, as ``sessions.upsert`` enforces it: the
+#: sending window's own badge words (idle / starting / running / awaiting /
+#: exited / error / stopped), plus ``disconnected`` which only the directory
+#: knows, plus ``waiting`` from a machine too old to send a badge word. Only the
+#: values named below are interpreted — the raw word is reported alongside, so a
+#: value this build has never heard of is passed through rather than hidden.
+#:
+#: ``awaiting`` is deliberately *not* busy: a pane holding a prompt open is the
+#: opposite of working, and it is the one state a person looking at another
+#: machine most needs to pick out. It used to arrive here as "running", because
+#: the old sender had no word for it.
 STATUS_BUSY = "running"
-#: Both mean "addressable, but a message would not land right now": the owning
-#: window disconnected, or the session ended.
-STATUS_UNREACHABLE = frozenset({"disconnected", "exited"})
+#: All mean "addressable, but a message would not land right now": the owning
+#: window disconnected, the session ended, or the CLI behind it died. The last
+#: two are new words — before them a crashed pane arrived as "waiting", which
+#: claims the opposite.
+STATUS_UNREACHABLE = frozenset({"disconnected", "exited", "error", "stopped"})
 
 
 @dataclass
@@ -63,6 +72,16 @@ class RemotePane:
     agent_key: str
     status: str
     host_online: bool
+    #: That device's message public key, as the server distributes it. Empty
+    #: when the far machine has never published one — which is what an
+    #: un-upgraded peer looks like, and the only case where a message may still
+    #: leave here as plaintext. See server_link._sealed_for.
+    device_public_key: str = ""
+    #: That device's *signing* public key, from the same channel. Only ever a
+    #: candidate for a first pin: once ``trust_store`` has pinned a device, this
+    #: field is compared against the pin and never replaces it, so a server that
+    #: swaps it makes the device unreachable rather than impersonable.
+    device_sign_public_key: str = ""
 
     @property
     def device_label(self) -> str:
@@ -144,6 +163,8 @@ def _pane_from_row(row: dict[str, Any]) -> RemotePane | None:
         agent_key=_text(row.get("agentKey")),
         status=_text(row.get("status")),
         host_online=bool(row.get("hostOnline")),
+        device_public_key=_text(row.get("devicePublicKey")),
+        device_sign_public_key=_text(row.get("deviceSignPublicKey")),
     )
 
 
@@ -195,6 +216,37 @@ def set_online_devices(device_ids: set[str]) -> None:
     """
     for pane in _PANES.values():
         pane.host_online = pane.device_id in device_ids
+
+
+def public_key_for(device_id: str) -> str:
+    """That device's message public key, or "" when the roster has never seen
+    one for it.
+
+    Read from the roster rather than from a key store because the roster *is*
+    how keys are distributed — the server sends them alongside the sessions,
+    the same way Tailscale hands out node keys with the netmap. A device with
+    no sessions is therefore also a device nobody can encrypt to, which is not
+    a gap: without a session there is no pane to address either.
+    """
+    for pane in _PANES.values():
+        if pane.device_id == device_id and pane.device_public_key:
+            return pane.device_public_key
+    return ""
+
+
+def sign_public_key_for(device_id: str) -> str:
+    """That device's signing public key as the directory currently reports it,
+    or "" when it reports none.
+
+    Read from the same channel as the message key, and worth just as little on
+    its own: this is what the *server* says, so it is only ever a candidate for
+    a first pin. Once ``trust_store`` holds a pin, verification uses the pin and
+    this value's only job is to say whether the far side's key has changed.
+    """
+    for pane in _PANES.values():
+        if pane.device_id == device_id and pane.device_sign_public_key:
+            return pane.device_sign_public_key
+    return ""
 
 
 def list_panes() -> list[RemotePane]:

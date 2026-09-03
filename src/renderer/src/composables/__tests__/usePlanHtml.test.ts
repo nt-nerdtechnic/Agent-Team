@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  htmlPlanAwaitingUser,
   htmlPlanProgress,
   injectPlanMeta,
   parseHtmlPlanMeta,
@@ -345,6 +346,34 @@ describe('htmlPlanProgress', () => {
   it('counts done only; skipped counts toward neither', () => {
     const meta = parseHtmlPlanMeta(VALID_HTML)!.meta
     expect(htmlPlanProgress(meta.todos)).toEqual({ total: 3, done: 1 })
+  })
+})
+
+describe('htmlPlanAwaitingUser', () => {
+  const todo = (id: string, status: string, owner?: string) =>
+    ({ id, content: id, status, ...(owner ? { owner } : {}) }) as never
+
+  it('counts unfinished todos the user owns', () => {
+    expect(
+      htmlPlanAwaitingUser([
+        todo('a', 'pending', 'user'),
+        todo('b', 'in-progress', 'user'),
+        todo('c', 'pending'),
+      ]),
+    ).toBe(2)
+  })
+
+  it('ignores the ones already settled', () => {
+    // A verification that happened, or was waived, is no longer waiting.
+    expect(
+      htmlPlanAwaitingUser([todo('a', 'done', 'user'), todo('b', 'skipped', 'user')]),
+    ).toBe(0)
+  })
+
+  it('counts zero for documents written before owners existed', () => {
+    // owner rides PlanTodo's index signature, so older files simply have none —
+    // they must not read as "waiting on you" just because nothing is marked.
+    expect(htmlPlanAwaitingUser([todo('a', 'pending'), todo('b', 'pending')])).toBe(0)
   })
 })
 

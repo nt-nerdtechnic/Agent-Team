@@ -5,6 +5,7 @@ import TerminalPane from './components/TerminalPane.vue'
 import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
 import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups'
 import { buildPaneLineage } from './lib/paneLineage'
+import { ancestorTrail } from './lib/paneListView'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
 import { flattenSidebarOrder, resolveFocusedPane } from './lib/paneFocus'
@@ -54,7 +55,8 @@ import {
 } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
-import { paneStatusLabelKey } from './lib/paneStatusLabel'
+import { paneStatusLabelText } from './lib/paneStatusLabel'
+import { statusBadgeStyle } from './composables/useStatusBadgePrefs'
 import { useBackend } from './composables/useBackend'
 import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
 import { useSettings } from './composables/useSettings'
@@ -97,7 +99,7 @@ import { i18n } from '@navide/plugin-ui/foundation'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from '@navide/terminal'
-import { reclaimBlockedBy, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
+import { reclaimBlockedBy, idleReclaimDisabled, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
 import { findConsecutiveQuestionBlocks, findSentinel } from '@navide/terminal'
 import {
   buildCliPaneBufferReply,
@@ -132,7 +134,8 @@ import {
 import { pickReusablePane, runReportedDispatch, validatePlanDispatch, type PlanDispatchOutcome, type PlanDispatchPayload } from './lib/planDispatch'
 import { planExecutionPrompt } from './lib/planExecutePrompt'
 import {
-  echoLanded, echoTimeoutFor, normalizeForMatch, submitLanded,
+  echoEvidence, echoTimeoutFor, injectionVerified, normalizeForMatch,
+  submitEvidence, type EchoEvidence, type SubmitEvidence,
   SUBMIT_CONFIRM_MS, SUBMIT_SCREEN_LINES, TAIL_MATCH_LEN
 } from './lib/injectEcho'
 import { recordDiagnostic, readDiagnostics, currentDiagnosticSeq } from './lib/uiDiagnostics'
@@ -183,6 +186,7 @@ import {
   parseLegacyRunGroups,
   resolveActiveTab,
   resolveManualSpawnGroupId,
+  resolveSpawnGroupId,
   runGroupCreatedAt,
   groupPeers,
 } from './lib/runGroups'
@@ -1796,16 +1800,41 @@ function registerPaneMessaging(pane: ActivePane, preferredName?: string): void {
   mirrorMessagingHandle(pane)
 }
 
-/** Tell the registry whether a pane can take work right now, so cli_list_targets
- *  can report it. Derived from the same judgement that gates delivery, so "busy"
- *  always means "a message sent now would wait" — a flag that disagreed with
- *  that would be worse than none. Deduped: only changes cross the wire. */
-const paneBusyReported = new Map<string, boolean>()
-function reportPaneBusy(paneId: string, busy: boolean): void {
-  if (paneBusyReported.get(paneId) === busy) return
-  paneBusyReported.set(paneId, busy)
+/** The word this pane's sidebar badge is showing. One function because the
+ *  badge and the registry must never disagree: the network view on another
+ *  machine renders whatever we report here beside the very same pane, and two
+ *  copies of this expression is how they drift. Returns '' for a cold-restore
+ *  placeholder — nothing is running behind it, and the backend has its own word
+ *  for that (`not-opened`) which it substitutes rather than trusting ours. */
+function paneDisplayStatus(pane: ActivePane): DisplayStatus | '' {
+  if (!pane.realized) return ''
+  const ref = paneRefs[pane.id]
+  return (
+    (ref?.displayStatus as DisplayStatus | undefined) ??
+    (ref?.status as DisplayStatus | undefined) ??
+    'starting'
+  )
+}
+
+/** Tell the registry what a pane is doing, so cli_list_targets and the network
+ *  view can report it.
+ *
+ *  Two facts, sent together on purpose. `busy` is derived from the same
+ *  judgement that gates delivery, so it always means "a message sent now would
+ *  wait" — a flag that disagreed with that would be worse than none. `status`
+ *  is the badge word, which answers a different question and often disagrees:
+ *  a pane with a half-typed draft is busy but idle, a crashed one is neither.
+ *  Sending them in one call keeps the registry from pairing this tick's flag
+ *  with the last tick's word.
+ *
+ *  Deduped on the pair: only changes cross the wire. */
+const paneBusyReported = new Map<string, string>()
+function reportPaneBusy(paneId: string, busy: boolean, status: string): void {
+  const mark = `${busy}\u0000${status}`
+  if (paneBusyReported.get(paneId) === mark) return
+  paneBusyReported.set(paneId, mark)
   backend
-    .send('agent_msg.set_busy', { pane_id: paneId, busy })
+    .send('agent_msg.set_busy', { pane_id: paneId, busy, status })
     .catch(() => { /* advisory only */ })
 }
 
@@ -1815,7 +1844,7 @@ function reportPaneBusy(paneId: string, busy: boolean): void {
 function syncPaneBusy(): void {
   for (const pane of panes.value) {
     if (!pane.messagingName) continue
-    reportPaneBusy(pane.id, !isPaneIdleForMessaging(pane.id))
+    reportPaneBusy(pane.id, !isPaneIdleForMessaging(pane.id), paneDisplayStatus(pane))
   }
 }
 
@@ -2322,7 +2351,32 @@ async function kickoffRequestedPane(
     }
     await waitForQuiet(paneId, 1000, 8000)
     if (!paneAlive(paneId)) return false
-    const kicked = await injectPane(paneId, renderSpawnKickoff(task, parentName), 'agent-spawn', true)
+    // Collect HOW the injection was verified, not just whether. On a pane that
+    // is still painting its first screen the echo check passes on buffer growth
+    // alone, so a `true` here can mean "we wrote bytes and cannot say where they
+    // went" — which used to be reported as an outright success.
+    const evidence: { echo?: EchoEvidence | null; submit?: SubmitEvidence | null } = {}
+    const kicked = await injectPane(
+      paneId, renderSpawnKickoff(task, parentName), 'agent-spawn', true, undefined, evidence
+    )
+    const verified = kicked && injectionVerified(evidence.echo ?? null, evidence.submit ?? null)
+    const settled = paneRefs[paneId] ? panes.value.find((p) => p.id === paneId) : undefined
+    if (settled) {
+      settled.kickoffStatus = !kicked ? 'failed' : verified ? 'sent' : 'unverified'
+    }
+    if (kicked && !verified) {
+      // The one outcome that used to be invisible: no throw, no false, and no
+      // notice — just a pane sitting idle with an empty prompt.
+      recordDiagnostic({
+        level: 'warn',
+        code: 'spawn.kickoff-unverified',
+        message:
+          `kickoff reported success on ${evidence.echo ?? 'no'} echo / ` +
+          `${evidence.submit ?? 'no'} submit evidence — growth alone cannot ` +
+          'distinguish our text from a booting CLI repainting',
+        paneId,
+      })
+    }
     // Arm the fallback report only once the task is really in: a kickoff that
     // never landed leaves a pane with nothing to report on. `parentName` is
     // only a messaging handle when a live pane answers to it — the MCP path
@@ -2337,6 +2391,9 @@ async function kickoffRequestedPane(
     }
     return kicked
   } finally {
+    // Only clear a kickoff that never reached a verdict (an early return, a
+    // throw). A settled 'sent' / 'unverified' / 'failed' is the answer callers
+    // and cli_get_status read, and resetting it to 'none' would erase it.
     const live = panes.value.find((p) => p.id === paneId)
     if (live?.kickoffStatus === 'pending') live.kickoffStatus = 'none'
   }
@@ -2738,11 +2795,7 @@ function syncViews(): void {
       roleLabel: roleLabel(p.roleKey),
       stageId: p.stageId,
       command: p.command,
-      status: p.realized
-        ? (ref?.displayStatus as DisplayStatus | undefined) ??
-          (ref?.status as DisplayStatus | undefined) ??
-          'starting'
-        : 'waiting',
+      status: paneDisplayStatus(p) || 'waiting',
       error: ref?.error as string | undefined,
       injectionStatus: p.injectionStatus,
       preparationStatus: p.preparationStatus,
@@ -2809,7 +2862,13 @@ async function injectText(
   // Loop callers pass a generation check so a manual cancel / restart aborts an
   // already-running injection mid-flight instead of letting a stray prompt land
   // in the CLI. Returns false on abort (treated as a failed inject).
-  shouldAbort?: () => boolean
+  shouldAbort?: () => boolean,
+  // Optional out-parameter: filled with HOW the echo and submit checks decided,
+  // for callers that need to tell "we saw our own text land" apart from "the
+  // buffer changed size". A booting CLI repaints constantly, so growth-only
+  // evidence is not evidence at all — see injectionVerified. Callers that only
+  // need the yes/no simply omit it.
+  evidence?: { echo?: EchoEvidence | null; submit?: SubmitEvidence | null }
 ): Promise<boolean> {
   // Log the full injection text to the session's output log file BEFORE
   // chunking so the log file shows one readable block per send.
@@ -2908,7 +2967,9 @@ async function injectText(
       await sleep(200)
       if (shouldAbort?.()) return false
       const buf = cleanBuf()
-      if (echoLanded(buf, tail, cleanBytes() - preBytes, normalizedLen)) {
+      const found = echoEvidence(buf, tail, cleanBytes() - preBytes, normalizedLen)
+      if (found !== null) {
+        if (evidence) evidence.echo = found
         ready = true
         break
       }
@@ -2967,12 +3028,14 @@ async function injectText(
     while (Date.now() < deadline && !landed) {
       await sleep(200)
       if (shouldAbort?.()) return false
-      landed = submitLanded({
+      const how = submitEvidence({
         tailWasOnScreen,
         tail,
         screen: screenTail(),
         grownBy: cleanBytes() - before
       })
+      landed = how !== null
+      if (landed && evidence) evidence.submit = how
     }
     if (landed) return true
     if (attempt < MAX_SUBMITS) {
@@ -2993,7 +3056,8 @@ async function injectPane(
   text: string,
   logLabel?: string,
   preserveNewlines = false,
-  shouldAbort?: () => boolean
+  shouldAbort?: () => boolean,
+  evidence?: { echo?: EchoEvidence | null; submit?: SubmitEvidence | null }
 ): Promise<boolean> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane?.realized) return false
@@ -3002,7 +3066,7 @@ async function injectPane(
   // Anything reaching the prompt ends the parked-after-resume state the continue
   // button exists for — including this button's own injection.
   pane.resumeContinueAvailable = false
-  return injectText(ref.sessionId, text, logLabel, preserveNewlines, shouldAbort)
+  return injectText(ref.sessionId, text, logLabel, preserveNewlines, shouldAbort, evidence)
 }
 
 // Text of a pane worth SHARING with another pane / the AI Chat: the rendered
@@ -3096,7 +3160,7 @@ function mentionCandidatesFor(paneId: string): MentionCandidate[] {
         address: x.messagingName as string,
         group: localGroup,
         status,
-        statusLabel: status ? i18n.global.t(paneStatusLabelKey(status)) : undefined,
+        statusLabel: status ? paneStatusLabelText(status) : undefined,
       }
     })
   // Offer the broadcast keyword first once there are ≥2 recipients — picking it
@@ -5022,10 +5086,15 @@ async function onManualSpawn(payload: SpawnPayload): Promise<string | null> {
   // bound for another workspace with an id from THIS one's set gives it a
   // group no tab over there lists — the pane lands in the sidebar and on no
   // tab at all, which is indistinguishable from the spawn having failed.
+  //
+  // A payload may also name a group outright — the sidebar's per-group ＋ knows
+  // which group the user pointed at, which the active tab cannot express. It is
+  // checked against the loaded set for the same reason as above: an id that no
+  // tab here lists would strand the pane on no tab at all.
   const target = payload.workspacePath || currentWorkspace.value
   const onScreen = normWs(target) === normWs(currentWorkspace.value)
   const spawnGroupId = onScreen
-    ? resolveManualSpawnGroupId(runGroups.value, activeTab.value)
+    ? resolveSpawnGroupId(runGroups.value, activeTab.value, payload.runGroupId ?? '')
     : ''
   const paneId = await spawnPane({
     agentKey: payload.agentKey,
@@ -11549,6 +11618,10 @@ let _idleReclaimTimer: number | null = null
 
 async function sweepIdlePanes(): Promise<void> {
   if (!idleReclaimEnabled.value) return
+  // "Never" is a threshold the timer can never reach, so the sweep stops here
+  // rather than measuring ages it would refuse to act on. Manual reclaim is
+  // untouched: this setting is about the timer, not about the button.
+  if (idleReclaimDisabled(idleReclaimMinutes.value)) return
   const now = Date.now()
   const due = panes.value.filter((p) => paneReclaimable(p, now)).map((p) => p.id)
   if (due.length === 0) return
@@ -13388,7 +13461,20 @@ const effectiveLayoutMode = computed<'grid' | 'spotlight' | 'sidebar' | 'fullscr
 // After any layout mode change, refit all terminals once the browser has
 // finished laying out the new grid — ResizeObserver alone is unreliable when
 // panes transition from display:none (sidebar) to visible (spotlight/grid).
-watch(effectiveLayoutMode, () => {
+// The modes that hand one pane the whole stage (sidebar/spotlight/fullscreen)
+// are a step change in width, and widening makes xterm reflow the scrollback.
+// A CLI that paints absolute-positioned full-width rows (claude) can never
+// repaint what reflow strands there — its redraw addresses the viewport only —
+// so the garbled history is permanent. Cap each pane at its grid-mode width on
+// the way in: the extra space is left blank instead of becoming columns, and
+// switching back is then a no-op resize. Set before the fit below, which is
+// what reads the cap. Panes stay uncapped in grid mode, where the container is
+// the width the user actually chose.
+watch(effectiveLayoutMode, (mode) => {
+  const capped = mode !== 'grid'
+  for (const ref of Object.values(paneRefs)) {
+    (ref as unknown as { lockCols?: (locked: boolean) => void })?.lockCols?.(capped)
+  }
   void nextTick(() => {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -13846,19 +13932,97 @@ const onScreenPaneIds = computed<Set<string>>(() => {
 const stageSurfaceOrderedIds = computed<string[]>(() =>
   panes.value.filter((p) => onScreenPaneIds.value.has(p.id)).map((p) => p.id)
 )
-// Shift-range selection walks this list, so it has to be the order the user
-// actually sees: the lineage tree flattened depth-first, not the flat pane
-// order. It is also collapse-aware for free — a folded subtree's children are
-// absent from paneLineage, so a range spanning a collapsed parent skips the
-// children the user cannot see.
-const auxiliaryListOrderedIds = computed<string[]>(() => {
-  const visible = new Set(
+// ── The pane lists ─────────────────────────────────────────────────────────
+//
+// Each main-window mode has one: the Auto sidebar's cards, the Spotlight
+// strip, the fullscreen PiP rows. They are one list in three shapes, and until
+// now every one of them was flat — a pane opened by another agent sat beside
+// the pane that opened it with nothing to say so.
+//
+// They earn their ancestry differently from the sidebar tree. The tree spends
+// width on indentation; these have none to spare, so they spend a line of text
+// instead, and show one family at a time rather than the whole forest.
+
+/** The tree these lists read, with nothing folded away.
+ *
+ *  The sidebar's copy drops a folded family's children — that is what makes a
+ *  range there skip what the eye cannot see. These lists have no caret of
+ *  their own, so borrowing it would let folding a family in the sidebar erase
+ *  its panes from a surface with no way to bring them back. */
+const NOTHING_FOLDED: ReadonlySet<string> = new Set()
+const paneListLineage = computed<PaneLineageRow[]>(() =>
+  buildPaneLineage(panes.value, NOTHING_FOLDED)
+)
+
+/** Families closed up in the lists. Everything starts open: a pane you cannot
+ *  see is a pane you forget is running, and these lists are the only place
+ *  some modes show one at all. Closing is for when a family gets in the way.
+ *
+ *  Per window and not persisted: pane ids are reissued on every restart, so a
+ *  stored one would point at nobody. */
+const paneListCollapsed = ref(new Set<string>())
+
+/** What the lists render, in the order they render it — and the order
+ *  shift-range walks, since one is derived from the other.
+ *
+ *  Each entry is the live view widened with two facts from its lineage row.
+ *  Structure and status stay separate right up to here, where they are joined
+ *  for one frame. */
+const auxiliaryListPanes = computed(() => {
+  const visible = new Map(
     paneViews.value
       .filter((v) => !v.isMinimized && tabFilteredPaneIds.value.has(v.id))
-      .map((v) => v.id)
+      .map((v) => [v.id, v] as const)
   )
-  return paneLineage.value.filter((r) => visible.has(r.id)).map((r) => r.id)
+  // A row hides when anything above it has been closed. Roots have no
+  // ancestors, so they always show; closing a parent takes its whole subtree
+  // with it, one level at a time.
+  const closed = paneListCollapsed.value
+  return paneListLineage.value.flatMap((r) => {
+    if (r.ancestors.some((id) => closed.has(id))) return []
+    const view = visible.get(r.id)
+    return view ? [{ ...view, ancestors: r.ancestors, descendantCount: r.descendantCount, expanded: !closed.has(r.id) }] : []
+  })
 })
+
+const auxiliaryListOrderedIds = computed<string[]>(() => auxiliaryListPanes.value.map((v) => v.id))
+
+const paneNameById = computed(() => new Map(paneViews.value.map((v) => [v.id, v.agentLabel])))
+
+/** The source line under a nested card: who opened this pane. */
+function paneListTrail(ancestors: readonly string[]): string {
+  return ancestorTrail(ancestors, (id) => paneNameById.value.get(id) ?? '')
+}
+
+/** How many status dots a card shows before it starts counting instead. */
+const PANE_LIST_MAX_DOTS = 5
+
+/** The dots a top-level card shows in place of the family it stands for.
+ *  Tree order, never sorted by status: sorting would make the strip rearrange
+ *  itself every time a pane started or stopped. */
+function paneListFamilyDots(rootId: string): { id: string; status: ActivePaneView['status'] }[] {
+  const byId = new Map(paneViews.value.map((v) => [v.id, v]))
+  const dots: { id: string; status: ActivePaneView['status'] }[] = []
+  for (const row of paneListLineage.value) {
+    if (!row.ancestors.includes(rootId)) continue
+    const view = byId.get(row.id)
+    if (view) dots.push({ id: row.id, status: view.status })
+    if (dots.length === PANE_LIST_MAX_DOTS) break
+  }
+  return dots
+}
+
+/** Close or reopen one family in place.
+ *
+ *  A new Set rather than a mutation: Vue does not track adds and deletes on a
+ *  Set held in a ref, so mutating it would leave the lists showing the old
+ *  shape until something else happened to re-render them. */
+function togglePaneFamily(rootId: string): void {
+  const next = new Set(paneListCollapsed.value)
+  if (next.has(rootId)) next.delete(rootId)
+  else next.add(rootId)
+  paneListCollapsed.value = next
+}
 
 function onUserChangeLayoutMode(mode: LayoutMode): void {
   layoutMode.value = mode
@@ -14737,7 +14901,7 @@ function paneIsCommander(p: ActivePane): boolean {
         <!-- Auto/sidebar mode: meeting-style agent list on the right -->
         <div v-if="effectiveLayoutMode === 'sidebar'" class="auto-meeting-list" :style="dualFocusActive ? { gridColumn: '3' } : {}">
           <div
-            v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
+            v-for="p in auxiliaryListPanes"
             :key="p.id"
             class="meeting-item"
             :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
@@ -14753,6 +14917,9 @@ function paneIsCommander(p: ActivePane): boolean {
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">
+              <!-- Who opened this pane. These lists have no indentation to
+                   spend on ancestry, so they spend a line of text instead. -->
+              <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
                 <span v-if="p.origin === 'pipeline' && p.stageId" class="meeting-pipe-tag">P{{ p.stageId }}</span>
                 <input
@@ -14780,15 +14947,45 @@ function paneIsCommander(p: ActivePane): boolean {
               <span class="meeting-sub">
                 {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
               </span>
+              <!-- Opens the family in place. Its own click target — the card
+                   itself still focuses the pane — and it stops dragover
+                   because the card is a reorder drop zone.
+                   Closed, the dots stand in for the children being hidden;
+                   open, the children are right there and the dots would only
+                   repeat them. -->
+              <button
+                v-if="p.descendantCount > 0"
+                class="pane-list-kids"
+                :class="{ 'is-open': p.expanded }"
+                :title="$t('label.descendant-count', { count: p.descendantCount })"
+                @click.stop="togglePaneFamily(p.id)"
+                @dragover.stop
+                @dragenter.stop
+              >
+                <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
+                <template v-if="!p.expanded">
+                  <span
+                    v-for="dot in paneListFamilyDots(p.id)"
+                    :key="dot.id"
+                    class="pane-list-kid-dot"
+                    :data-status="dot.status"
+                    :style="statusBadgeStyle(dot.status)"
+                  ></span>
+                </template>
+                <!-- The number alone. "3 descendants" wraps a narrow card and
+                     pushes the status badge off the row; the full wording is
+                     on the control's title. -->
+                <span class="pane-list-kids-count">{{ p.descendantCount }}</span>
+              </button>
             </div>
             <span
               v-if="p.loopActive"
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
+            <span class="meeting-badge" :data-status="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
           </div>
-          <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
+          <div v-if="auxiliaryListPanes.length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
           </div>
         </div>
@@ -14796,7 +14993,7 @@ function paneIsCommander(p: ActivePane): boolean {
       <!-- Spotlight mode: horizontal scrollable bottom strip -->
       <div v-if="effectiveLayoutMode === 'spotlight'" class="spotlight-strip">
         <div
-          v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
+          v-for="p in auxiliaryListPanes"
           :key="p.id"
           class="spotlight-thumb"
           :class="{ 'spotlight-thumb--active': p.id === effectiveFocusPaneId, 'spotlight-thumb--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
@@ -14839,6 +15036,10 @@ function paneIsCommander(p: ActivePane): boolean {
             <span class="spotlight-thumb-role">
               {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
             </span>
+            <!-- Same source line as the other two lists; the thumb is narrow,
+                 so it truncates sooner, but the nearest parent survives —
+                 the trail is cut from the left for exactly this reason. -->
+            <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
           </div>
           <div class="spotlight-thumb-badges">
             <span
@@ -14846,7 +15047,30 @@ function paneIsCommander(p: ActivePane): boolean {
               class="spotlight-thumb-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="spotlight-thumb-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
+            <span class="spotlight-thumb-badge" :data-status="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
+            <!-- The compact form of the family strip: dots and a count, no
+                 words. A thumb has room for one more chip, not for a row. -->
+            <button
+              v-if="p.descendantCount > 0"
+              class="pane-list-kids pane-list-kids--compact"
+              :class="{ 'is-open': p.expanded }"
+              :title="$t('label.descendant-count', { count: p.descendantCount })"
+              @click.stop="togglePaneFamily(p.id)"
+              @dragover.stop
+              @dragenter.stop
+            >
+              <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
+              <template v-if="!p.expanded">
+                <span
+                  v-for="dot in paneListFamilyDots(p.id)"
+                  :key="dot.id"
+                  class="pane-list-kid-dot"
+                  :data-status="dot.status"
+                  :style="statusBadgeStyle(dot.status)"
+                ></span>
+              </template>
+              <span class="pane-list-kids-count">{{ p.descendantCount }}</span>
+            </button>
           </div>
         </div>
         <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="spotlight-strip-empty">
@@ -14862,7 +15086,7 @@ function paneIsCommander(p: ActivePane): boolean {
       >
         <div class="float-pip-header" @mousedown.prevent="onPipDragStart">
           <span class="float-pip-title">
-            Agents ({{ paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length }})
+            Agents ({{ auxiliaryListPanes.length }})
           </span>
           <button class="float-pip-toggle" @mousedown.stop @click="floatPipExpanded = !floatPipExpanded; clampPipPos()">
             {{ floatPipExpanded ? '▾' : '▸' }}
@@ -14870,7 +15094,7 @@ function paneIsCommander(p: ActivePane): boolean {
         </div>
         <div v-if="floatPipExpanded" class="float-pip-list" :style="{ height: floatPipListHeight + 'px' }">
           <div
-            v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
+            v-for="p in auxiliaryListPanes"
             :key="p.id"
             class="meeting-item"
             :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
@@ -14886,6 +15110,9 @@ function paneIsCommander(p: ActivePane): boolean {
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">
+              <!-- Who opened this pane. These lists have no indentation to
+                   spend on ancestry, so they spend a line of text instead. -->
+              <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
                 <span v-if="p.origin === 'pipeline' && p.stageId" class="meeting-pipe-tag">P{{ p.stageId }}</span>
                 <input
@@ -14913,15 +15140,45 @@ function paneIsCommander(p: ActivePane): boolean {
               <span class="meeting-sub">
                 {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
               </span>
+              <!-- Opens the family in place. Its own click target — the card
+                   itself still focuses the pane — and it stops dragover
+                   because the card is a reorder drop zone.
+                   Closed, the dots stand in for the children being hidden;
+                   open, the children are right there and the dots would only
+                   repeat them. -->
+              <button
+                v-if="p.descendantCount > 0"
+                class="pane-list-kids"
+                :class="{ 'is-open': p.expanded }"
+                :title="$t('label.descendant-count', { count: p.descendantCount })"
+                @click.stop="togglePaneFamily(p.id)"
+                @dragover.stop
+                @dragenter.stop
+              >
+                <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
+                <template v-if="!p.expanded">
+                  <span
+                    v-for="dot in paneListFamilyDots(p.id)"
+                    :key="dot.id"
+                    class="pane-list-kid-dot"
+                    :data-status="dot.status"
+                    :style="statusBadgeStyle(dot.status)"
+                  ></span>
+                </template>
+                <!-- The number alone. "3 descendants" wraps a narrow card and
+                     pushes the status badge off the row; the full wording is
+                     on the control's title. -->
+                <span class="pane-list-kids-count">{{ p.descendantCount }}</span>
+              </button>
             </div>
             <span
               v-if="p.loopActive"
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
+            <span class="meeting-badge" :data-status="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
           </div>
-          <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
+          <div v-if="auxiliaryListPanes.length === 0" class="meeting-empty">
             {{ $t('label.no-agents-yet') }}
           </div>
         </div>
@@ -16182,13 +16439,13 @@ function paneIsCommander(p: ActivePane): boolean {
   padding: 1px 5px;
   border-radius: 3px;
 }
-.spotlight-thumb-badge[data-status="running"]  { background: var(--success-subtle); color: var(--success-fg); border: 1px solid var(--success-emphasis); }
-.spotlight-thumb-badge[data-status="idle"]     { background: var(--attention-subtle); color: var(--attention-bright); border: 1px solid var(--attention-emphasis); }
-.spotlight-thumb-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
-.spotlight-thumb-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-emphasis); }
-.spotlight-thumb-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
-.spotlight-thumb-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
-.spotlight-thumb-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
+.spotlight-thumb-badge[data-status="running"]  { background: var(--status-badge-bg, var(--success-subtle)); color: var(--status-badge-fg, var(--success-fg)); border: 1px solid var(--status-badge-fg, var(--success-emphasis)); }
+.spotlight-thumb-badge[data-status="idle"]     { background: var(--status-badge-bg, var(--attention-subtle)); color: var(--status-badge-fg, var(--attention-bright)); border: 1px solid var(--status-badge-fg, var(--attention-emphasis)); }
+.spotlight-thumb-badge[data-status="starting"] { background: var(--status-badge-bg, var(--status-starting-subtle)); color: var(--status-badge-fg, var(--status-starting-fg)); border: 1px solid var(--status-badge-fg, var(--status-starting-emphasis)); }
+.spotlight-thumb-badge[data-status="error"]    { background: var(--status-badge-bg, var(--danger-subtle)); color: var(--status-badge-fg, var(--danger-fg)); border: 1px solid var(--status-badge-fg, var(--danger-emphasis)); }
+.spotlight-thumb-badge[data-status="stopped"]  { background: var(--status-badge-bg, var(--bg-inset)); color: var(--status-badge-fg, var(--text-bright)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
+.spotlight-thumb-badge[data-status="awaiting"] { background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent)); color: var(--status-badge-fg, var(--warning-fg)); border: 1px solid var(--status-badge-fg, color-mix(in srgb, var(--warning-fg) 45%, transparent)); }
+.spotlight-thumb-badge[data-status="exited"]   { background: var(--status-badge-bg, var(--bg-muted)); color: var(--status-badge-fg, var(--text-primary)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
 .spotlight-thumb-loop {
   font-size: 9px;
   padding: 1px 5px;
@@ -16312,6 +16569,78 @@ function paneIsCommander(p: ActivePane): boolean {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── Ancestry in the pane lists ────────────────────────────────────────────
+   The sidebar tree spends width on indentation to show who opened what. These
+   lists have none to spare — a card is already name, vendor and status — so
+   they spend a line of text, and show one family at a time instead of the
+   whole forest. */
+
+/* Who opened this pane. Above the name, not beside it: the name row is the
+   scarcest space on the card. */
+.pane-list-src {
+  font-size: var(--font-3xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+/* Stands in for the children a top-level card is hiding. Dots come in tree
+   order, never sorted by status: sorting would make the strip rearrange itself
+   every time a pane started or stopped. */
+.pane-list-kids {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  padding: 4px 0 0;
+  border: none;
+  border-top: 1px dashed var(--border-muted);
+  background: none;
+  cursor: pointer;
+  font-size: var(--font-3xs);
+  color: var(--text-secondary);
+  text-align: left;
+  width: 100%;
+}
+.pane-list-kids:hover { color: var(--text-bright); }
+/* The strip has room for a row; a Spotlight thumb has room for one more chip. */
+.pane-list-kids--compact {
+  width: auto;
+  margin-top: 0;
+  padding: 1px 5px;
+  border: 1px solid var(--border-muted);
+  border-radius: 3px;
+  gap: 3px;
+  font-size: 9px;
+}
+.pane-list-kid-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 6px;
+  background: var(--status-badge-fg, var(--text-muted));
+}
+/* A pane that has not been opened yet is hollow rather than dim: a filled dot
+   at any opacity still reads as "running but quiet". */
+.pane-list-kid-dot[data-status='waiting'] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-disabled);
+}
+.pane-list-kids-count { margin-left: 2px; }
+
+/* The caret says which way the control goes. Closed it sits before the dots
+   that stand in for the hidden children; open it stands alone, because those
+   children are now right underneath. */
+.pane-list-kids-caret {
+  flex: none;
+  font-size: 9px;
+  width: 9px;
+  text-align: center;
+}
+.pane-list-kids.is-open { color: var(--text-bright); }
 .meeting-badge {
   font-size: var(--font-3xs);
   padding: 2px 6px;
@@ -16319,13 +16648,13 @@ function paneIsCommander(p: ActivePane): boolean {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
 }
-.meeting-badge[data-status="running"]  { background: var(--success-subtle); color: var(--success-fg); border: 1px solid var(--success-emphasis); }
-.meeting-badge[data-status="idle"]     { background: var(--attention-subtle); color: var(--attention-bright); border: 1px solid var(--attention-emphasis); }
-.meeting-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
-.meeting-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
-.meeting-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-bright); border: 1px solid var(--danger-emphasis); }
-.meeting-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
-.meeting-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
+.meeting-badge[data-status="running"]  { background: var(--status-badge-bg, var(--success-subtle)); color: var(--status-badge-fg, var(--success-fg)); border: 1px solid var(--status-badge-fg, var(--success-emphasis)); }
+.meeting-badge[data-status="idle"]     { background: var(--status-badge-bg, var(--attention-subtle)); color: var(--status-badge-fg, var(--attention-bright)); border: 1px solid var(--status-badge-fg, var(--attention-emphasis)); }
+.meeting-badge[data-status="stopped"]  { background: var(--status-badge-bg, var(--bg-inset)); color: var(--status-badge-fg, var(--text-bright)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
+.meeting-badge[data-status="starting"] { background: var(--status-badge-bg, var(--status-starting-subtle)); color: var(--status-badge-fg, var(--status-starting-fg)); border: 1px solid var(--status-badge-fg, var(--status-starting-emphasis)); }
+.meeting-badge[data-status="error"]    { background: var(--status-badge-bg, var(--danger-subtle)); color: var(--status-badge-fg, var(--danger-bright)); border: 1px solid var(--status-badge-fg, var(--danger-emphasis)); }
+.meeting-badge[data-status="awaiting"] { background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent)); color: var(--status-badge-fg, var(--warning-fg)); border: 1px solid var(--status-badge-fg, color-mix(in srgb, var(--warning-fg) 45%, transparent)); }
+.meeting-badge[data-status="exited"]   { background: var(--status-badge-bg, var(--bg-muted)); color: var(--status-badge-fg, var(--text-primary)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
 .meeting-loop {
   font-size: var(--font-3xs);
   padding: 2px 6px;

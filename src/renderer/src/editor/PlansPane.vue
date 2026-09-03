@@ -19,6 +19,7 @@ import {
   type PlanSortMode,
 } from './plansPaneModel'
 import {
+  htmlPlanAwaitingUser,
   htmlPlanProgress,
   injectPlanMeta,
   parseHtmlPlanMeta,
@@ -354,6 +355,8 @@ interface PlanListRow {
   meta: PlanMeta | null
   done: number
   total: number
+  /** Unfinished todos owned by the user — see htmlPlanAwaitingUser. */
+  awaiting: number
 }
 
 interface PlanStageRow extends PlanListRow {
@@ -362,7 +365,8 @@ interface PlanStageRow extends PlanListRow {
 
 function toListRow(item: PlanItem): PlanListRow {
   const progress = item.meta ? htmlPlanProgress(item.meta.todos) : { done: 0, total: 0 }
-  return { item, meta: item.meta, done: progress.done, total: progress.total }
+  const awaiting = item.meta ? htmlPlanAwaitingUser(item.meta.todos) : 0
+  return { item, meta: item.meta, done: progress.done, total: progress.total, awaiting }
 }
 
 // Both formats group by `meta.stage`; progress uses `htmlPlanProgress`
@@ -376,7 +380,8 @@ function stageRows(stages: PlanStage[]): PlanStageRow[] {
       if (!p.meta || p.meta.archivedAt || !stages.includes(p.meta.stage)) return []
       if (!itemMatchesSearch(p)) return []
       const progress = htmlPlanProgress(p.meta.todos)
-      return [{ item: p, meta: p.meta, done: progress.done, total: progress.total }]
+      const awaiting = htmlPlanAwaitingUser(p.meta.todos)
+      return [{ item: p, meta: p.meta, done: progress.done, total: progress.total, awaiting }]
     }),
   )
 }
@@ -407,7 +412,8 @@ const archivedRows = computed<PlanStageRow[]>(() => {
       if (!p.meta || !p.meta.archivedAt) return []
       if (!itemMatchesSearch(p)) return []
       const progress = htmlPlanProgress(p.meta.todos)
-      return [{ item: p, meta: p.meta, done: progress.done, total: progress.total }]
+      const awaiting = htmlPlanAwaitingUser(p.meta.todos)
+      return [{ item: p, meta: p.meta, done: progress.done, total: progress.total, awaiting }]
     }),
   )
 })
@@ -1198,6 +1204,13 @@ async function ctxUpgradeToPlan(): Promise<void> {
             <span v-if="row.meta" class="plan-chip" :class="`plan-chip--stage-${row.meta.stage}`">
               {{ row.meta.stage }}
             </span>
+            <span
+              v-if="row.awaiting > 0"
+              class="plan-chip plan-chip--awaiting"
+              :title="t('pane.plans.awaiting-you-title')"
+            >
+              {{ t('pane.plans.awaiting-you', { count: row.awaiting }) }}
+            </span>
             <span v-else class="plan-chip">{{ t('pane.plans.doc-badge') }}</span>
             <button
               class="plan-row-pin"
@@ -1268,6 +1281,13 @@ async function ctxUpgradeToPlan(): Promise<void> {
               </span>
               <span v-if="row.meta" class="plan-chip" :class="`plan-chip--stage-${row.meta.stage}`">
                 {{ row.meta.stage }}
+              </span>
+              <span
+                v-if="row.awaiting > 0"
+                class="plan-chip plan-chip--awaiting"
+                :title="t('pane.plans.awaiting-you-title')"
+              >
+                {{ t('pane.plans.awaiting-you', { count: row.awaiting }) }}
               </span>
               <span v-else class="plan-chip">{{ t('pane.plans.doc-badge') }}</span>
             </span>
@@ -1384,6 +1404,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
                 <span>{{ t('pane.plans.progress-done', { done: row.done, total: row.total }) }}</span>
               </span>
               <span class="plan-chip" :class="`plan-chip--stage-${row.meta.stage}`">{{ row.meta.stage }}</span>
+              <span v-if="row.awaiting > 0" class="plan-chip plan-chip--awaiting" :title="t('pane.plans.awaiting-you-title')">{{ t('pane.plans.awaiting-you', { count: row.awaiting }) }}</span>
             </span>
             <button
               class="plan-row-delete"
@@ -1448,6 +1469,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
               </span>
               <span class="plan-row-chips">
                 <span class="plan-chip" :class="`plan-chip--stage-${row.meta.stage}`">{{ row.meta.stage }}</span>
+                <span v-if="row.awaiting > 0" class="plan-chip plan-chip--awaiting" :title="t('pane.plans.awaiting-you-title')">{{ t('pane.plans.awaiting-you', { count: row.awaiting }) }}</span>
                 <span class="plan-chip plan-chip--archived">{{ t('pane.plans.archived') }}</span>
               </span>
             </span>
@@ -1554,6 +1576,13 @@ async function ctxUpgradeToPlan(): Promise<void> {
           <span class="plan-row-name">{{ row.meta?.name ?? row.item.name }}</span>
           <span v-if="row.meta" class="plan-chip" :class="`plan-chip--stage-${row.meta.stage}`">
             {{ row.meta.stage }}
+          </span>
+          <span
+            v-if="row.awaiting > 0"
+            class="plan-chip plan-chip--awaiting"
+            :title="t('pane.plans.awaiting-you-title')"
+          >
+            {{ t('pane.plans.awaiting-you', { count: row.awaiting }) }}
           </span>
         </div>
       </div>
@@ -1903,6 +1932,14 @@ async function ctxUpgradeToPlan(): Promise<void> {
   font-size: var(--font-2xs);
   gap: 8px;
   justify-content: space-between;
+}
+
+/* Waiting on the user: the one thing in this list nobody else can clear, so it
+   reads as an action rather than as another status label. */
+.plan-chip--awaiting {
+  background: var(--danger-subtle, var(--attention-subtle));
+  color: var(--danger-bright, var(--attention-bright));
+  text-transform: none;
 }
 
 .plan-chip {

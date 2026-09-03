@@ -19,6 +19,7 @@ import type { useResourceUsage } from '../composables/useResourceUsage'
 import type { ResourceSummaryRow } from './ResourceSummaryPanel.vue'
 import { formatBytes } from '../lib/formatBytes'
 import { formatCpuPercent, machineCpuShare, machineMemoryShare } from '../lib/resourceSampling'
+import { idleReclaimDisabled } from '../lib/idleReclaim'
 
 const props = defineProps<{
   open: boolean
@@ -36,6 +37,11 @@ const props = defineProps<{
 const emit = defineEmits<{ close: [] }>()
 
 const { t } = useI18n()
+
+// "Never" is a sentinel, not a duration: rendering it through the line that
+// ends in "min" would read "idle never min". The state half already says off,
+// so the whole line collapses to that.
+const autoReclaimNever = computed(() => idleReclaimDisabled(props.autoReclaimMinutes))
 
 // ── The roster: who exists ──────────────────────────────────────────────────
 interface RosterPane {
@@ -438,10 +444,12 @@ async function scanDisk(): Promise<void> {
 
         <div class="rm-foot">
           <span class="rm-foot-text">
-            {{ t('resource.auto-reclaim', {
-              state: autoReclaimOn ? t('resource.auto-reclaim-on') : t('resource.auto-reclaim-off'),
-              minutes: autoReclaimMinutes,
-            }) }}
+            {{ autoReclaimNever
+              ? t('resource.auto-reclaim-disabled')
+              : t('resource.auto-reclaim', {
+                state: autoReclaimOn ? t('resource.auto-reclaim-on') : t('resource.auto-reclaim-off'),
+                minutes: autoReclaimMinutes,
+              }) }}
           </span>
           <span class="rm-spacer" />
           <span class="rm-foot-note">

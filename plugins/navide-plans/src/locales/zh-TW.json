@@ -7,6 +7,8 @@
       "stage-done": "已完成",
       "stage-abandoned": "已放棄",
       "progress-done": "{done}/{total} 已完成",
+      "awaiting-you": "{count} 件待你",
+      "awaiting-you-title": "只有你能完成的項目——實機驗收、決定、或只有你才有的憑證",
       "stage-draft": "草稿",
       "review-notes": "審查留言",
       "review-unresolved": "{count} 則未解決",

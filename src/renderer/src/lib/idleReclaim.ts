@@ -96,7 +96,24 @@ export const RECLAIM_NOW_THRESHOLD_MS = 0
 export const IDLE_RECLAIM_MIN_MINUTES = 15
 export const IDLE_RECLAIM_DEFAULT_MINUTES = 30
 
+/** The stored value that means "no timed reclaim, however long a pane sits".
+ *
+ *  A sentinel rather than a number because every number in this setting is a
+ *  duration the floor clamps: '0' does not mean off, it means 15 minutes. The
+ *  same word the resume-behavior select already uses for the same idea. */
+export const IDLE_RECLAIM_NEVER = 'never'
+
+/** Whether the stored threshold switches the timed sweep off entirely. */
+export function idleReclaimDisabled(stored: string): boolean {
+  return stored.trim().toLowerCase() === IDLE_RECLAIM_NEVER
+}
+
 export function idleReclaimThresholdMs(stored: string): number {
+  // The callers that matter check idleReclaimDisabled first and never sweep.
+  // Answering with an unreachable threshold rather than a fallback duration
+  // means a caller that forgot still reclaims nothing, instead of quietly
+  // reclaiming on the 30-minute default the user just switched off.
+  if (idleReclaimDisabled(stored)) return Number.POSITIVE_INFINITY
   const parsed = Number.parseInt(stored, 10)
   const minutes = Number.isFinite(parsed)
     ? Math.max(parsed, IDLE_RECLAIM_MIN_MINUTES)

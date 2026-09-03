@@ -5537,6 +5537,81 @@ describe('first-party Git private bridge', () => {
     }
   })
 
+  it('targets a Git repository nested inside the workspace and still rejects outside roots', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-nested-workspace-'))
+    const outsidePath = mkdtempSync(join(tmpdir(), 'navide-git-nested-outside-'))
+    try {
+      const nestedPath = join(workspacePath, 'nested')
+      mkdirSync(nestedPath)
+      const { mgr, view } = await openGitView(workspacePath)
+      mgr.setBackendWsUrl('ws://git-nested-repo-test')
+      const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+      socket.open()
+
+      // Multi-repo mode gives every repository tab the repository's own
+      // absolute path, so a nested repo has to reach the backend as itself.
+      const nested = call(view, 'git.request', {
+        type: 'git.status',
+        payload: { workspace_path: nestedPath },
+      }, 'git-nested-status')
+      await Promise.resolve()
+      const nestedRequest = JSON.parse(socket.sent.at(-1)!) as {
+        id: string
+        type: string
+        payload: Record<string, unknown>
+      }
+      expect(nestedRequest.type).toBe('git.status')
+      expect(nestedRequest.payload).toEqual({ workspace_path: realpathSync(nestedPath) })
+      socket.receive({
+        id: nestedRequest.id,
+        type: nestedRequest.type,
+        ok: true,
+        payload: { ok: true },
+        error: null,
+        timestamp: '',
+      })
+      await expect(nested).resolves.toMatchObject({ ok: true })
+
+      // The workspace root keeps the exact binding the view was opened with.
+      const root = call(view, 'git.request', {
+        type: 'git.status',
+        payload: { workspace_path: workspacePath },
+      }, 'git-root-status')
+      await Promise.resolve()
+      const rootRequest = JSON.parse(socket.sent.at(-1)!) as {
+        id: string
+        type: string
+        payload: Record<string, unknown>
+      }
+      expect(rootRequest.payload).toEqual({ workspace_path: workspacePath })
+      socket.receive({
+        id: rootRequest.id,
+        type: rootRequest.type,
+        ok: true,
+        payload: { ok: true },
+        error: null,
+        timestamp: '',
+      })
+      await expect(root).resolves.toMatchObject({ ok: true })
+
+      const forwarded = socket.sent.length
+      const denied = [outsidePath, join(workspacePath, '..'), join(nestedPath, '..', '..'), '']
+      for (const [index, candidate] of denied.entries()) {
+        await expect(call(view, 'git.request', {
+          type: 'git.status',
+          payload: { workspace_path: candidate },
+        }, `git-nested-outside-${index}`)).resolves.toMatchObject({
+          ok: false,
+          error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+        })
+      }
+      expect(socket.sent.length).toBe(forwarded)
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+      rmSync(outsidePath, { recursive: true, force: true })
+    }
+  })
+
   it('prewarms Git hidden, deactivated, and reuses the instance when opened', async () => {
     const mgr = new FrontendPluginManager()
     const workspacePath = mkdtempSync(join(tmpdir(), 'navide-git-prewarm-workspace-'))

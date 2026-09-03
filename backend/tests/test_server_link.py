@@ -7,11 +7,21 @@ be running for these to pass, and none of them touches the real Keychain.
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
 import json
 
 import pytest
 
-from agent_team_backend import agent_messaging, app, remote_roster, server_link
+from agent_team_backend import (
+    agent_messaging,
+    app,
+    device_identity,
+    device_signing,
+    remote_roster,
+    server_link,
+    trust_store,
+)
 from agent_team_backend.credential_vault import CredentialVault, CredentialVaultError
 from agent_team_backend.server_link import ServerLink, ServerLinkConfig
 
@@ -21,8 +31,13 @@ CONFIG = ServerLinkConfig(url="ws://localhost:8787/ws", token="tok-abc")
 @pytest.fixture(autouse=True)
 def _clean_registry():
     agent_messaging._reset_for_test()
+    # The directory now seeds a peer (a device with no signing key in the
+    # roster is a device this machine refuses), and the roster is module state,
+    # so without this a later test would see a peer no test in it created.
+    remote_roster._reset_for_test()
     yield
     agent_messaging._reset_for_test()
+    remote_roster._reset_for_test()
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +70,68 @@ def _bad_request(message: dict, text: str) -> dict:
     }
 
 
+class Peer:
+    """Another device, with a signing key of its own.
+
+    Cross-device messages carry a signature the receiver checks against a key it
+    pinned, so a fake server that only relays text can no longer stand in for a
+    peer: it has to *be* one. Which is the point — a test whose "sender" holds
+    no private key is a test that would still pass if the receiver checked
+    nothing.
+    """
+
+    def __init__(self, device_id: str = "dev-a", *, name: str = "peer-box") -> None:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        self.device_id = device_id
+        self.name = name
+        self._private = Ed25519PrivateKey.generate()
+        self.sign_key = base64.b64encode(
+            self._private.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
+
+    def sign(self, *, msg_key: str, to_device: str, kind: str, body: str) -> str:
+        payload = device_signing.message_payload(
+            msg_key=msg_key,
+            from_device=self.device_id,
+            to_device=to_device,
+            kind=kind,
+            body=body,
+        )
+        return base64.b64encode(
+            self._private.sign(
+                device_signing._MESSAGE_CONTEXT + b"\x00" + device_signing._canonical(payload)
+            )
+        ).decode("ascii")
+
+    def session_row(self, **overrides) -> dict:
+        """How the directory describes this device, keys included — the channel
+        a first pin's candidate key travels on."""
+        row = {
+            "sessionId": f"s-{self.device_id}",
+            "deviceId": self.device_id,
+            "deviceName": self.name,
+            "workspace": "alpha",
+            "workspacePath": f"/tmp/{self.device_id}",
+            "title": "sender",
+            "paneId": "rp1",
+            "agentKey": "claude",
+            "status": "running",
+            "hostOnline": True,
+            "deviceSignPublicKey": self.sign_key,
+        }
+        row.update(overrides)
+        return row
+
+
+#: The peer every inbound-message test receives from.
+PEER = Peer()
+
+
 #: The real server's enum. Enforced here because a fake that accepts anything
 #: only ever proves the code agrees with itself: backend/scripts/verify_server_link.py
 #: caught this module reporting the registry's own busy/idle/offline vocabulary,
@@ -79,7 +156,6 @@ def default_responder(conn: "FakeConnection", message: dict) -> dict | None:
             {
                 "memberId": "m1",
                 "role": "member",
-                "tenantId": "tn-test",
                 "displayName": "Tester",
                 "deviceId": payload.get("deviceId"),
                 "deviceName": payload.get("deviceName"),
@@ -135,12 +211,6 @@ def default_responder(conn: "FakeConnection", message: dict) -> dict | None:
                 "updatedAt": 0,
             },
         )
-    if kind == "team.members.list":
-        conn.member_lists.append(payload)
-        return _ok(message, {"members": conn.server.members})
-    if kind in ("team.members.invite", "team.members.set_role", "team.members.revoke"):
-        conn.member_writes.append((kind, payload))
-        return conn.server.member_write(message, kind, payload)
     if kind == "messages.send":
         conn.sends.append(payload)
         return _ok(message, {"msgKey": payload.get("msgKey"), "state": "pending"})
@@ -153,20 +223,6 @@ def default_responder(conn: "FakeConnection", message: dict) -> dict | None:
         "ok": False,
         "error": {"code": "BAD_REQUEST", "message": f"unknown type {kind}"},
     }
-
-
-def _admin_responder(conn: "FakeConnection", message: dict) -> dict | None:
-    """The default server, except auth.hello grants admin.
-
-    The role is the whole difference between a pane that offers the management
-    actions and one that only lists the team, so it has to come from the
-    handshake in the tests too.
-    """
-    if message.get("type") == "auth.hello":
-        reply = default_responder(conn, message)
-        reply["payload"]["role"] = "admin"  # type: ignore[index]
-        return reply
-    return default_responder(conn, message)
 
 
 def rejecting_responder(code: str, message_text: str = "nope"):
@@ -196,8 +252,6 @@ class FakeConnection:
         self.directories: list[dict] = []
         self.policy_gets: list[dict] = []
         self.policy_sets: list[dict] = []
-        self.member_lists: list[dict] = []
-        self.member_writes: list[tuple[str, dict]] = []
         self.sends: list[dict] = []
         self.acks: list[dict] = []
         self.closed = False
@@ -231,6 +285,21 @@ class FakeConnection:
         return item
 
 
+def _self_signed(policy, *, seq: int = 0):
+    """Wrap a policy in this device's own signature, as ``set_policy`` does.
+
+    ``seq`` 0 is the resting state of a machine that has never written one, so a
+    seeded policy is accepted without pretending a write happened.
+    """
+    if not isinstance(policy, dict):
+        return policy
+    document = {k: v for k, v in policy.items() if k != server_link.POLICY_SIGNATURE_FIELD}
+    signature = device_signing.sign_policy(
+        device_id=device_identity.device_id(), seq=seq, document=document
+    )
+    return {**document, server_link.POLICY_SIGNATURE_FIELD: {"seq": seq, "sig": signature}}
+
+
 #: Allows every sender, so a test that is not about the policy is not about the
 #: policy. `is_allowed` denies anything it cannot read, including None.
 ALLOW_ALL_POLICY = {
@@ -249,49 +318,17 @@ class FakeServer:
         self.connections = [FakeConnection(responder, self) for _ in range(count)]
         self.opened: list[FakeConnection] = []
         self.urls: list[str] = []
-        self.policy = ALLOW_ALL_POLICY if policy is None else policy
+        # Signed as the device would sign it: the receiver refuses a policy it
+        # cannot verify, so a fake that served a bare document would be testing
+        # the deny path in every test that is not about the policy at all.
+        self.policy = _self_signed(ALLOW_ALL_POLICY if policy is None else policy)
         self.policy_revision = 1
         #: What sessions.directory answers with — the whole team space, this
         #: device's own rows included, exactly as the real server sends it.
-        self.directory: list[dict] = []
-        #: The team roster, as team.members.list answers it. Never carries a
-        #: token: the real server filters it out of every read, which is what
-        #: makes the invite reply the only place one ever appears.
-        self.members: list[dict] = [
-            {"memberId": "m1", "displayName": "Tester", "role": "member", "disabled": False}
-        ]
-
-    def member_write(self, message: dict, kind: str, payload: dict) -> dict:
-        """Apply one membership write to `members` and answer like the server."""
-        if kind == "team.members.invite":
-            member = {
-                "memberId": f"m{len(self.members) + 1}",
-                "displayName": payload.get("displayName") or "",
-                "email": payload.get("email") or "",
-                "role": payload.get("role") or "member",
-                "disabled": False,
-            }
-            self.members.append(member)
-            return _ok(message, {**member, "token": "one-time-token"})
-        target = next(
-            (m for m in self.members if m["memberId"] == payload.get("memberId")), None
-        )
-        if target is None:
-            return {
-                "id": message["id"],
-                "type": f"{kind}.result",
-                "ok": False,
-                "error": {"code": "NOT_FOUND", "message": "no such member"},
-            }
-        if kind == "team.members.set_role":
-            target["role"] = payload.get("role")
-            return _ok(message, {"memberId": target["memberId"], "role": target["role"]})
-        target["disabled"] = True
-        return _ok(
-            message,
-            {"memberId": target["memberId"], "disabled": True, "droppedConnections": 2},
-        )
-
+        #: The peer is in it by default because that is the channel a signing
+        #: key travels on: a device the directory never mentions is one this
+        #: machine has no key for and therefore refuses.
+        self.directory: list[dict] = [PEER.session_row()]
     def connect(self, url: str):
         self.urls.append(url)
         server = self
@@ -611,36 +648,137 @@ async def test_a_restore_placeholder_is_published_as_disconnected_not_running():
         await link.stop()
 
 
+async def test_the_published_status_is_the_word_the_sidebar_is_showing():
+    """The network view must call a pane what its own window calls it.
+
+    Before this, the only signal reaching here was `busy`, so seven sidebar
+    states collapsed into two words. The sharp case is the last assertion: a
+    pane whose CLI died is not busy, so it published as "waiting" — the one
+    word that promises a message sent now would be picked up.
+    """
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    agent_messaging.set_busy("p1", False, "idle")
+    server = FakeServer()
+    link = make_link(server)
+    await link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        conn = server.opened[0]
+
+        def published(badge: str) -> bool:
+            """A pane reaches the server through whichever channel is due — the
+            opening sync or a later upsert — so both are searched."""
+            rows = list(conn.upserts) + [
+                row for sync in conn.syncs for row in sync["sessions"]
+            ]
+            return any(r["paneId"] == "p1" and r["status"] == badge for r in rows)
+
+        assert published("idle")
+        for badge, busy in (("awaiting", False), ("starting", True), ("error", False)):
+            agent_messaging.set_busy("p1", busy, badge)
+            link.notify_roster_changed()
+            await _until(lambda badge=badge: published(badge))
+    finally:
+        await link.stop()
+
+
+async def test_a_window_that_reports_no_badge_word_falls_back_to_the_busy_flag():
+    """What an un-upgraded window looks like. It never sends a status word, so
+    the old derivation has to keep working — otherwise upgrading the backend
+    alone would blank the status of every pane on the machine."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    agent_messaging.set_busy("p1", True)  # no badge word, as an old build sends
+    server = FakeServer()
+    link = make_link(server)
+    await link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        published = {s["paneId"]: s for s in server.opened[0].syncs[0]["sessions"]}
+        assert published["p1"]["status"] == "running"
+    finally:
+        await link.stop()
+
+
+async def test_a_placeholder_stays_disconnected_whatever_word_arrives():
+    """The two local overrides win over the reported word, and must: a window
+    can still be reporting the badge of the pane it had before a cold restore,
+    and `offline` is something only this side knows."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude", realized=False)
+    agent_messaging.set_busy("p1", True, "running")
+    server = FakeServer()
+    link = make_link(server)
+    await link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        published = {s["paneId"]: s for s in server.opened[0].syncs[0]["sessions"]}
+        assert published["p1"]["status"] == "disconnected"
+    finally:
+        await link.stop()
+
+
 # ---- cross-device messages --------------------------------------------------
 
 
 def _pending(
-    msg_key: str = "pa:mcp:deadbeef", *, pane_id: str = "p1", member_id: str = "m1"
+    msg_key: str = "pa:mcp:deadbeef",
+    *,
+    pane_id: str = "p1",
+    member_id: str = "m1",
+    text: str = "please review",
+    cipher: str = "",
+    peer: Peer = PEER,
+    sign: bool = True,
 ) -> dict:
-    """A push from the server. ``member_id`` defaults to "m1", which is also the
-    receiver's own member (see FakeServer's auth.hello) — i.e. another machine of
-    the same person. Pass someone else's id to exercise the pane policy, which is
-    only consulted for senders outside your own account."""
-    return {
+    """A push from the server, signed by *peer* the way a real device signs.
+
+    ``member_id`` defaults to "m1", which is also the receiver's own member (see
+    FakeServer's auth.hello) — i.e. another machine of the same person. Pass
+    someone else's id to exercise the pane policy, which is only consulted for
+    senders outside your own account. Note that the member id is deliberately
+    *not* covered by the signature: it is the server's word, and what decides
+    whether a sender counts as one of your own machines is the member recorded
+    against the pinned key, never this field.
+
+    ``sign=False`` is the unauthenticated case — what a relay writing its own
+    messages can produce, and what an un-upgraded peer sends.
+    """
+    body_kind = "cipher" if cipher else "text"
+    body = cipher or text
+    payload = {
         "msgKey": msg_key,
-        "text": "please review",
+        body_kind: body,
         "from": {
-            "deviceId": "dev-a",
+            "deviceId": peer.device_id,
             "memberId": member_id,
             "workspace": "alpha",
             "paneName": "sender",
         },
         "to": {"workspace": "proj-a", "paneName": "reviewer", "paneId": pane_id},
     }
+    if sign:
+        payload["sig"] = peer.sign(
+            msg_key=msg_key,
+            to_device=device_identity.device_id(),
+            kind=body_kind,
+            body=body,
+        )
+    return payload
 
 
 @pytest.fixture
 def broadcasts(monkeypatch):
-    """Every event the link hands to the on-machine delivery path."""
+    """Every *delivery* the link hands to the on-machine path.
+
+    Filtered rather than raw: the link also broadcasts trust notices (a device
+    seen for the first time, a pinned key that changed), and a raw capture would
+    make every count here depend on how many of those a test happened to
+    provoke. Those are asserted where they belong, in test_server_link_trust.
+    """
     events: list[dict] = []
 
     async def fake_broadcast(event: dict, **_kwargs) -> None:
-        events.append(event)
+        if event.get("type") == "agent_msg.deliver":
+            events.append(event)
 
     monkeypatch.setattr(app, "broadcast", fake_broadcast)
     return events
@@ -665,7 +803,10 @@ async def test_outbound_send_goes_over_the_link():
         )
         assert reply["ok"] is True
         assert reply["payload"]["state"] == "pending"
-        assert server.opened[0].sends == [
+        sent = server.opened[0].sends
+        assert len(sent) == 1
+        signature = sent[0].pop("sig")
+        assert sent == [
             {
                 "to": {"deviceId": "dev-b", "workspace": "beta", "paneName": "builder"},
                 "text": "ship it",
@@ -673,6 +814,187 @@ async def test_outbound_send_goes_over_the_link():
                 "from": {"workspace": "alpha", "paneName": "sender", "paneId": "pa"},
             }
         ]
+        # The signature is the whole point of the frame carrying one: it has to
+        # verify against *this* device's published key, over the body actually
+        # sent and the pair of device ids it was addressed between.
+        assert device_signing.verify_message(
+            signature,
+            public_key_b64=device_signing.public_key(),
+            msg_key="pa:mcp:1",
+            from_device=link._device_id,
+            to_device="dev-b",
+            kind="text",
+            body="ship it",
+        )
+    finally:
+        await link.stop()
+
+
+# ---- end-to-end encryption ---------------------------------------------------
+
+
+def _seed_peer_key(device_id: str, public_key: str) -> None:
+    """Put one keyed device in the roster, which is how keys are distributed."""
+    remote_roster.replace(
+        [
+            {
+                "sessionId": f"s-{device_id}",
+                "deviceId": device_id,
+                "deviceName": "far box",
+                "workspace": "beta",
+                "title": "builder",
+                "paneId": "pb",
+                "agentKey": "codex",
+                "status": "running",
+                "hostOnline": True,
+                "devicePublicKey": public_key,
+            }
+        ],
+        local_device_id="dev-local",
+    )
+
+
+@pytest.fixture
+def peer_key(tmp_path, monkeypatch):
+    """A second machine's keypair: its own data dir, so its own key file."""
+    from agent_team_backend import device_crypto
+
+    here = os.environ.get("AGENT_TEAM_DATA_DIR")
+    peer_home = tmp_path / "peer"
+    peer_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(peer_home))
+    key = device_crypto.public_key()
+    if here:
+        monkeypatch.setenv("AGENT_TEAM_DATA_DIR", here)
+    remote_roster._reset_for_test()
+    yield key
+    remote_roster._reset_for_test()
+
+
+async def test_hello_publishes_this_devices_public_key():
+    """Sent on every hello, not only the first: the server keeps the last key it
+    was told, and a build that stopped sending one would leave peers encrypting
+    to a key this machine no longer holds."""
+    from agent_team_backend import device_crypto
+
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        hello = server.opened[0].hellos[0]
+        assert hello["publicKey"] == device_crypto.public_key()
+    finally:
+        await link.stop()
+
+
+async def test_a_message_to_a_keyed_device_leaves_as_ciphertext(peer_key):
+    """The whole point of the change: the relay stores what it cannot read."""
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        _seed_peer_key("dev-b", peer_key)
+        reply = await link.send_message(
+            to={"deviceId": "dev-b", "workspace": "beta", "paneName": "builder"},
+            sender=None,
+            text="deploy the payment fix",
+            msg_key="pa:mcp:enc",
+        )
+        assert reply["ok"] is True
+        sent = server.opened[0].sends[0]
+        assert "text" not in sent, "a plaintext copy alongside the cipher is a downgrade"
+        assert sent["cipher"]
+        assert "deploy" not in sent["cipher"]
+    finally:
+        await link.stop()
+
+
+async def test_a_device_with_no_published_key_still_gets_plaintext():
+    """An un-upgraded peer can only read plaintext, and refusing to talk to it
+    would break every existing pair the day this ships."""
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        remote_roster._reset_for_test()
+        reply = await link.send_message(
+            to={"deviceId": "dev-old", "workspace": "beta", "paneName": "builder"},
+            sender=None,
+            text="ship it",
+            msg_key="pa:mcp:plain",
+        )
+        assert reply["ok"] is True
+        assert server.opened[0].sends[0]["text"] == "ship it"
+        assert "cipher" not in server.opened[0].sends[0]
+    finally:
+        await link.stop()
+
+
+async def test_a_peer_that_had_a_key_never_falls_back_to_plaintext(peer_key):
+    """Without this the encryption would be advisory: anything that made a key
+    disappear — a stale roster, a server that dropped the field, a peer on an
+    older build — would quietly turn ciphertext back into cleartext."""
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        _seed_peer_key("dev-b", peer_key)
+        await link.send_message(
+            to={"deviceId": "dev-b", "workspace": "beta", "paneName": "builder"},
+            sender=None,
+            text="first, encrypted",
+            msg_key="pa:mcp:one",
+        )
+        # The key vanishes from the roster.
+        remote_roster._reset_for_test()
+        reply = await link.send_message(
+            to={"deviceId": "dev-b", "workspace": "beta", "paneName": "builder"},
+            sender=None,
+            text="second, must not go out in the clear",
+            msg_key="pa:mcp:two",
+        )
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == server_link.LINK_ENCRYPTION_FAILED
+        assert len(server.opened[0].sends) == 1, "nothing more may reach the wire"
+    finally:
+        await link.stop()
+
+
+async def test_an_incoming_sealed_message_is_opened_and_delivered(broadcasts):
+    """The receiving half: what the sender sealed for this device's key reaches
+    the pane as ordinary text."""
+    from agent_team_backend import device_crypto
+
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        payload = _pending(
+            cipher=device_crypto.seal(
+                "please review",
+                recipient_public_key=device_crypto.public_key(),
+                from_device=PEER.device_id,
+                to_device=link._device_id,
+            )
+        )
+        await server.opened[0].push({"type": "messages.pending", "payload": payload})
+        await _until(lambda: any(e["type"] == "agent_msg.deliver" for e in broadcasts))
+        delivered = next(e for e in broadcasts if e["type"] == "agent_msg.deliver")
+        assert delivered["payload"]["content"] == "please review"
+    finally:
+        await link.stop()
+
+
+async def test_a_message_that_will_not_open_is_refused_not_typed_in(broadcasts):
+    """Delivering the ciphertext as if it were text would type a wall of base64
+    into somebody's CLI. Rejected, not failed: a retry fails identically."""
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        payload = _pending(cipher="bm90LWEtcmVhbC1zZWFsZWQtYm94")
+        await conn.push({"type": "messages.pending", "payload": payload})
+        await _until(lambda: bool(conn.acks))
+        assert conn.acks[0]["state"] == "rejected"
+        assert conn.acks[0]["reason"] == "undecryptable"
+        assert [e for e in broadcasts if e["type"] == "agent_msg.deliver"] == []
     finally:
         await link.stop()
 
@@ -891,7 +1213,10 @@ async def test_policy_denial_acks_rejected_and_never_reaches_the_renderer(broadc
         # list), which is the point of that surface — but the message itself
         # must never reach the delivery path.
         assert [e for e in broadcasts if e["type"] == "agent_msg.deliver"] == []
-        assert [e["type"] for e in broadcasts] == ["p2p.access_requests.changed"]
+        # The refusal is announced to this machine's own windows — the knock
+        # list is the point of that surface — but the message itself never
+        # reaches the delivery path.
+        assert [r["memberId"] for r in link.access_requests()] == ["m2"]
     finally:
         await link.stop()
 
@@ -975,6 +1300,12 @@ async def test_a_refused_member_leaves_a_knock_the_receiver_can_see(broadcasts):
 async def test_your_own_machine_leaves_no_knock(broadcasts):
     """It was never refused, so there is nothing to decide about it."""
     agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    # An own-device pin only skips the pane policy once somebody has vouched for
+    # it; see test_server_link_trust for why the pin alone is not enough.
+    trust_store.pin_device(
+        PEER.device_id, sign_key=PEER.sign_key, member_id="m1", own_member_id="m1"
+    )
+    trust_store.approve_device(PEER.device_id)
     server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
     link = await _connected(server)
     try:
@@ -994,6 +1325,12 @@ async def test_your_own_other_machine_is_not_subject_to_the_pane_policy(broadcas
     adding a laptop would mean editing a policy before it could reach anything.
     """
     agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    # An own-device pin only skips the pane policy once somebody has vouched for
+    # it; see test_server_link_trust for why the pin alone is not enough.
+    trust_store.pin_device(
+        PEER.device_id, sign_key=PEER.sign_key, member_id="m1", own_member_id="m1"
+    )
+    trust_store.approve_device(PEER.device_id)
     server = FakeServer(policy={"version": 1, "default": "deny", "rules": []})
     link = await _connected(server)
     try:
@@ -1112,7 +1449,19 @@ async def test_writing_the_policy_publishes_it_and_adopts_the_new_revision():
 
         assert reply["ok"] is True
         assert conn.policy_sets[0]["deviceId"] == link._device_id
-        assert conn.policy_sets[0]["policy"] == document
+        # What leaves is the document plus this device's own signature over it.
+        # The server stores that verbatim, which is exactly what it did before —
+        # the difference is that it can no longer hand back something else.
+        written = conn.policy_sets[0]["policy"]
+        envelope = written.pop(server_link.POLICY_SIGNATURE_FIELD)
+        assert written == document
+        assert device_signing.verify_policy(
+            envelope["sig"],
+            public_key_b64=device_signing.public_key(),
+            device_id=link._device_id,
+            seq=envelope["seq"],
+            document=document,
+        )
         # Adopted locally, so the editor re-reading right after the save is not
         # shown the policy it just replaced.
         assert link.policy_snapshot() == {"policy": document, "revision": 2}
@@ -1198,148 +1547,6 @@ async def test_with_no_server_there_is_no_policy_to_read_or_write(monkeypatch):
         "memberId": "",
     }
     assert await server_link.set_policy(_allow_own_devices()) is None
-
-
-# ---- team members (the Settings pane) ---------------------------------------
-# The roster and the role live on the server. This side stores the role because
-# it decides whether the pane may offer the management actions at all, and
-# caches the roster so the pane can show the team while the link is down.
-
-
-async def test_the_role_from_auth_hello_is_kept(monkeypatch):
-    """A UI that guessed at the role would show buttons every request refuses,
-    so the role has to come from the handshake and be readable afterwards."""
-    server = FakeServer()
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        assert link.member_role == "member"
-        state = await server_link.members_state()
-        assert state["role"] == "member"
-        assert state["memberId"] == "m1"
-        # Connected, but not an admin: no management actions.
-        assert state["canManage"] is False
-    finally:
-        await link.stop()
-
-
-async def test_an_admin_on_a_live_link_may_manage(monkeypatch):
-    server = FakeServer(responder=_admin_responder)
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        assert (await server_link.members_state())["canManage"] is True
-    finally:
-        await link.stop()
-
-
-async def test_the_roster_is_fetched_once_per_connection(monkeypatch):
-    server = FakeServer()
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: bool(server.opened[0].member_lists))
-        assert len(server.opened[0].member_lists) == 1
-        state = await server_link.members_state()
-        assert [m["memberId"] for m in state["members"]] == ["m1"]
-    finally:
-        await link.stop()
-
-
-async def test_a_members_changed_push_replaces_the_cache(monkeypatch):
-    """The push carries the whole roster, so subscribing to it is what saves the
-    pane from polling the server."""
-    server = FakeServer()
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        await server.opened[0].push(
-            {
-                "type": "team.members.changed",
-                "payload": {
-                    "members": [
-                        {"memberId": "m1", "role": "member", "disabled": False},
-                        {"memberId": "m2", "role": "observer", "disabled": False},
-                    ]
-                },
-            }
-        )
-        await _until(lambda: len(link.members_snapshot() or []) == 2)
-        state = await server_link.members_state()
-        assert [m["memberId"] for m in state["members"]] == ["m1", "m2"]
-        # No second read: the push *is* the update.
-        assert len(server.opened[0].member_lists) == 1
-    finally:
-        await link.stop()
-
-
-async def test_a_write_re_reads_the_roster_without_waiting_for_the_push(monkeypatch):
-    server = FakeServer(responder=_admin_responder)
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        reply = await server_link.members_request(
-            "team.members.invite", {"displayName": "Bo", "role": "observer"}
-        )
-        assert reply["ok"] is True
-        # The one-time token is in the invite reply and nowhere else.
-        assert reply["payload"]["token"] == "one-time-token"
-        state = await server_link.members_state()
-        assert [m["memberId"] for m in state["members"]] == ["m1", "m2"]
-        assert all("token" not in m for m in state["members"])
-    finally:
-        await link.stop()
-
-
-async def test_revoke_reports_the_connections_it_dropped(monkeypatch):
-    server = FakeServer(responder=_admin_responder)
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        reply = await server_link.members_request("team.members.revoke", {"memberId": "m1"})
-        assert reply["payload"]["droppedConnections"] == 2
-        assert (await server_link.members_state())["members"][0]["disabled"] is True
-    finally:
-        await link.stop()
-
-
-async def test_the_roster_survives_the_connection_that_fetched_it(monkeypatch):
-    """An admin whose server just went down still has to see who is on the team
-    — with the actions off, which is what canManage says."""
-    server = FakeServer(responder=_admin_responder)
-    link = await _connected(server)
-    monkeypatch.setattr(server_link, "_link", link)
-    try:
-        await _until(lambda: link.members_snapshot() is not None)
-        await server.opened[0].close()
-        await _until(lambda: link._ws is None)
-
-        state = await server_link.members_state()
-        assert [m["memberId"] for m in state["members"]] == ["m1"]
-        assert state["canManage"] is False
-        # And a write refuses at once rather than blocking on a socket that is
-        # not there.
-        reply = await server_link.members_request("team.members.revoke", {"memberId": "m1"})
-        assert reply["ok"] is False
-        assert reply["error"]["code"] == server_link.LINK_OFFLINE
-    finally:
-        await link.stop()
-
-
-async def test_with_no_server_there_is_no_team(monkeypatch):
-    monkeypatch.setattr(server_link, "_link", None)
-    assert await server_link.members_state() == {
-        "state": server_link.STATE_UNCONFIGURED,
-        "role": "",
-        "memberId": "",
-        "canManage": False,
-        "members": [],
-    }
-    assert await server_link.members_request("team.members.revoke", {"memberId": "m1"}) is None
 
 
 async def test_a_stale_pane_id_hint_is_re_resolved_and_the_new_id_acked(broadcasts):
@@ -1964,7 +2171,9 @@ async def test_policy_get_and_set_round_trip_through_the_handlers(module_link):
         # second round trip can show it the policy it just replaced.
         assert reply["payload"]["policy"] == document
         assert reply["payload"]["revision"] == 2
-        assert server.opened[0].policy_sets[0]["policy"] == document
+        written = dict(server.opened[0].policy_sets[0]["policy"])
+        written.pop(server_link.POLICY_SIGNATURE_FIELD)
+        assert written == document
     finally:
         await server_link.stop()
         remote_roster._reset_for_test()

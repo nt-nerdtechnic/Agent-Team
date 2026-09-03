@@ -10,7 +10,9 @@ itself the grant, exactly as joining a tailnet is, so your own devices never
 consult the rules at all. Until now that lived as one ``==`` in the middle of
 the delivery path, which is a poor place for a trust boundary: nothing named
 it, nothing tested it as a concept, and the next person to touch that function
-had no reason to know it was load-bearing.
+had no reason to know it was load-bearing. Naming it also made it possible to
+notice what it was comparing — two strings the server had written — which is
+why ``own_device`` now arrives as a verdict rather than as an identity to test.
 
 *How to refuse a device outright.* An allow-only rule set cannot say "not this
 one, ever". You can decline to grant, but you cannot revoke reach from a
@@ -63,7 +65,7 @@ def ring(
     *,
     member_id: str,
     device_id: str,
-    own_member_id: str,
+    own_device: bool,
 ) -> str:
     """Which ring the sender is in. Never raises; unreadable input is a member.
 
@@ -71,15 +73,23 @@ def ring(
     grants nothing by itself — it hands the decision to ``pane_policy``, which
     denies by default. The two rings that *do* decide something (self grants,
     blocked refuses) are only ever reached from data this machine can vouch
-    for: ``own_member_id`` is our own authenticated identity, and the block
-    list was authored here.
+    for: the block list was authored here, and ``own_device`` is settled before
+    the call by evidence this machine holds.
+
+    ``own_device`` used to be ``member_id == own_member_id``, with both sides of
+    that comparison supplied by the server — the ``from`` field of the pushed
+    message and the answer to ``auth.hello``. A relay that filled in the same
+    string twice therefore landed in ``RING_SELF``, which skips the policy
+    entirely; it did not need a key, a member, or an invitation, only the two
+    fields it was already writing. The caller now settles the question from a
+    signature it verified against a key *it* pinned, and passes the verdict in.
+    Which is why this is a bool and not two ids: there is nothing left here to
+    compare, and an identity comparison is exactly the shape that invited the
+    server's answer to stand in for our own.
     """
     if is_blocked(policy, member_id=member_id, device_id=device_id):
         return RING_BLOCKED
-    # Membership is asserted by the server, which fills the sender identity
-    # from the authenticated connection rather than from the message, so a peer
-    # cannot claim to be us. An empty id is nobody and matches nothing.
-    if member_id and own_member_id and member_id == own_member_id:
+    if own_device:
         return RING_SELF
     return RING_MEMBER
 

@@ -143,6 +143,33 @@ describe('buildPaneStatusReply', () => {
     })
   })
 
+  it('carries the kickoff verdict so a caller can tell delivery from a bare prompt', () => {
+    // cli_open_agent's ok:true only means the pane exists. This is the field
+    // that answers whether the task it was opened with actually arrived.
+    const unverified = buildPaneStatusReply(
+      { outputLogFile: '/ws/x.log', kickoffStatus: 'unverified' },
+      { displayStatus: 'running', buffer: '' }
+    )
+    expect(unverified.kickoff).toBe('unverified')
+
+    const sent = buildPaneStatusReply(
+      { outputLogFile: '/ws/x.log', kickoffStatus: 'sent' },
+      { displayStatus: 'running', buffer: '' }
+    )
+    expect(sent.kickoff).toBe('sent')
+  })
+
+  it('omits kickoff for a pane that was never given a task', () => {
+    // 'none' is the resting value; reporting it would be noise on every pane
+    // the user opened by hand.
+    const none = buildPaneStatusReply(
+      { outputLogFile: '/ws/x.log', kickoffStatus: 'none' },
+      { displayStatus: 'running', buffer: '' }
+    )
+    expect(none.kickoff).toBeUndefined()
+    expect(buildPaneStatusReply({ outputLogFile: '/ws/x.log' }, null).kickoff).toBeUndefined()
+  })
+
   it('carries awaitingKind so a caller can tell the two waits apart', () => {
     // The badge merged them; this reply must not. cli_wait_idle returns from a
     // question and blocks on a permission prompt, and `status` reads
@@ -510,6 +537,52 @@ describe('injectionChunks', () => {
     // announcing a paste that never arrives.
     expect(injectionChunks('', 512, true)).toEqual([])
     expect(injectionChunks('', 512, false)).toEqual([])
+  })
+
+  it('does not let a payload close paste mode and keep typing', () => {
+    // The attack this exists for. Bracketed paste says "take the next bytes as
+    // text, not as keys" — until the end guard, which is five printable bytes
+    // any message can contain. A payload carrying one ends paste early, and
+    // everything after it reaches the CLI as keystrokes: CR submits, \x03
+    // interrupts. A message from another machine could press keys on this one.
+    const evil = `looks harmless${BRACKETED_PASTE_END}\rrm -rf something\x03`
+    const wire = injectionChunks(evil, 512, true).join('')
+
+    // Exactly one of each guard, and both at the ends where we put them.
+    expect(wire.split(BRACKETED_PASTE_END)).toHaveLength(2)
+    expect(wire.startsWith(BRACKETED_PASTE_START)).toBe(true)
+    expect(wire.endsWith(BRACKETED_PASTE_END)).toBe(true)
+    // Nothing lands outside the guards.
+    const inside = wire.slice(BRACKETED_PASTE_START.length, -BRACKETED_PASTE_END.length)
+    expect(inside).not.toContain(BRACKETED_PASTE_END)
+    expect(inside).not.toContain('\r')
+    expect(inside).not.toContain('\x03')
+    // The readable part survives: this sanitises, it does not reject.
+    expect(inside).toContain('looks harmless')
+    expect(inside).toContain('rm -rf something')
+  })
+
+  it('sanitises the bare path too, where there are no guards to rely on', () => {
+    // `bracketed: false` exists for CLIs that do not implement paste mode, and
+    // there every control byte is a keypress by definition.
+    const wire = injectionChunks(`a\x03b\x1b[201~c\rd`, 512, false).join('')
+    expect(wire).toBe('abcd')
+  })
+
+  it('keeps newlines and tabs, which are what multi-line messages are made of', () => {
+    // preserveNewlines callers pass real newlines on purpose. Stripping those
+    // would break agent messages rather than protect them — CR is the one that
+    // goes, because in a PTY it is Enter and the payload does not get to decide
+    // when it is finished.
+    const body = 'line one\n\tindented\nline three'
+    const chunks = injectionChunks(body, 512, true)
+    expect(chunks.slice(1, -1).join('')).toBe(body)
+  })
+
+  it('writes nothing when a body is empty only after sanitising', () => {
+    // Same situation as an empty body, reached a different way: guards around
+    // nothing announce a paste that never comes.
+    expect(injectionChunks('\x03\x07', 512, true)).toEqual([])
   })
 })
 

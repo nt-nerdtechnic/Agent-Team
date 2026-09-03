@@ -5,8 +5,10 @@ import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
 import { PANE_BATCH_MIME } from '@navide/terminal'
 import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
-import { paneStatusLabelKey } from '../lib/paneStatusLabel'
-import { rollupTabStatus } from '../lib/tabStatus'
+import { paneStatusLabelText } from '../lib/paneStatusLabel'
+import { statusBadgeStyle } from '../composables/useStatusBadgePrefs'
+import { rollupTabStatus, runGroupStateLabelKey } from '../lib/tabStatus'
+import type { TabRunState } from '../lib/tabStatus'
 import RebuildIcon from './RebuildIcon.vue'
 import AddPaneIcon from './AddPaneIcon.vue'
 import HistoryIcon from './HistoryIcon.vue'
@@ -51,7 +53,12 @@ const yoloVendors = CLI_AGENT_SPECS
 /** Whether the pane's role prompt has been handed to the CLI yet. */
 export type InjectionStatus = 'pending' | 'scheduled' | 'sent' | 'failed' | 'skipped'
 /** Whether the pipeline's opening instruction has been sent. */
-export type KickoffStatus = 'none' | 'pending' | 'sent' | 'failed'
+//: 'unverified' is a real outcome, not a shade of 'sent': the bytes were written
+//: and the echo check passed, but only on buffer growth — which a CLI painting
+//: its first screen satisfies whatever happened to our text. Reporting that as
+//: 'sent' is what let a spawned pane sit idle with an empty prompt while its
+//: caller believed the task had been delivered.
+export type KickoffStatus = 'none' | 'pending' | 'sent' | 'unverified' | 'failed'
 /** How far the spawn-to-ready sequence has got; shown in the pane subtitle. */
 export type PreparationStatus =
   | 'starting'
@@ -72,6 +79,12 @@ export interface PaneLineageRow {
   depth: number
   hasChildren: boolean
   collapsed: boolean
+  /** The panes this one hangs under, outermost first; empty for a root. Ids,
+   *  not names — the row is structure, and the name lives on ActivePaneView. */
+  ancestors: readonly string[]
+  /** How many panes descend from this one, at any depth, counted even when
+   *  they are folded away — a folded row shows this instead of its children. */
+  descendantCount: number
 }
 
 /** One workspace section of the sidebar — one this window holds, with real
@@ -159,6 +172,10 @@ export interface SpawnPayload {
   stageId: StageId
   workspacePath: string
   customName?: string
+  /** Run group to open the pane in. Set only by the sidebar's per-group ＋,
+   *  which knows which group the user is pointing at; every other entry point
+   *  leaves it unset and the pane lands in the group the active tab names. */
+  runGroupId?: string
   /** CLI account profile id for an isolated LOGIN pane (Settings → CLI
    *  accounts). Only set by that flow — never by the control pane itself. */
   loginProfileId?: string
@@ -368,7 +385,7 @@ const hasWorkspaceRows = computed(() => localWorkspaceRows.value.some((w) => w))
  *  Reusing rollupTabStatus rather than restating its rule also means the
  *  sidebar cannot drift from the tab bar — one definition of "active", not two.
  */
-function groupState(rows: readonly { pane: ActivePaneView }[]): string {
+function groupState(rows: readonly { pane: ActivePaneView }[]): TabRunState {
   return rollupTabStatus(rows.map((r) => r.pane.status))
 }
 
@@ -400,7 +417,7 @@ function wsCanRebuild(path: string): boolean {
  *  project against a caret that is nowhere on screen. */
 function groupSectionsOf(
   ws: WorkspaceGroupRow | null
-): { id: string; name: string; state: string; bare: boolean; rail: boolean; rows: ReturnType<typeof panesOf> }[] {
+): { id: string; name: string; state: TabRunState; bare: boolean; rail: boolean; rows: ReturnType<typeof panesOf> }[] {
   if (!ws) {
     const rail = orderedPanes.value.some((r) => r.hasChildren)
     return [{ id: '', name: '', state: 'empty', bare: true, rail, rows: orderedPanes.value }]
@@ -1115,14 +1132,21 @@ const canRunPipeline = computed(
  *  always means "here". */
 const spawnWorkspaceOverride = ref<string>('')
 
+/** Same shape as spawnWorkspaceOverride, for the group a sidebar ＋ named.
+ *  Cleared with it — the spawn card's own button always means "wherever the
+ *  active tab points". */
+const spawnGroupOverride = ref<string>('')
+
 function emitSpawn(): void {
   emit('spawn', {
     agentKey: pickedAgent.value,
     roleKey: pickedRole.value,
     stageId: '',
-    workspacePath: spawnWorkspaceOverride.value || workspacePath.value
+    workspacePath: spawnWorkspaceOverride.value || workspacePath.value,
+    runGroupId: spawnGroupOverride.value || undefined
   })
   spawnWorkspaceOverride.value = ''
+  spawnGroupOverride.value = ''
 }
 
 /** What the heading's ＋ will open. The spawn card can be folded shut, so the
@@ -1138,6 +1162,10 @@ const pickedAgentLabel = computed(
 const addMenuOpen = ref<boolean>(false)
 /** Which workspace heading opened the menu, so a pick starts there. */
 const addMenuWorkspace = ref<string>('')
+/** Which group row opened the menu, so a pick lands in that group rather than
+ *  in whichever one the stage tab happens to be showing. Empty for the
+ *  workspace heading's ＋, which has no group to name. */
+const addMenuGroup = ref<string>('')
 
 // ── Right-click on a workspace heading ───────────────────────────────────
 const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | null>(null)
@@ -1357,15 +1385,16 @@ const addMenuStyle = computed(() => {
     : { top: `${a.bottom + 4}px`, right: `${a.right}px` }
 })
 
-function toggleAddMenu(ev: MouseEvent, wsPath = ''): void {
+function toggleAddMenu(ev: MouseEvent, wsPath = '', groupId = ''): void {
   if (!canSpawn.value) return
-  if (addMenuOpen.value && addMenuWorkspace.value === wsPath) {
+  if (addMenuOpen.value && addMenuWorkspace.value === wsPath && addMenuGroup.value === groupId) {
     addMenuOpen.value = false
     return
   }
   const r = (ev.currentTarget as HTMLElement).getBoundingClientRect()
   addMenuAnchor.value = { top: r.top, bottom: r.bottom, right: window.innerWidth - r.right }
   addMenuWorkspace.value = wsPath
+  addMenuGroup.value = groupId
   addMenuOpen.value = true
 }
 
@@ -1375,6 +1404,7 @@ function toggleAddMenu(ev: MouseEvent, wsPath = ''): void {
 function spawnAs(agentKey: string): void {
   pickedAgent.value = agentKey
   spawnWorkspaceOverride.value = addMenuWorkspace.value
+  spawnGroupOverride.value = addMenuGroup.value
   addMenuOpen.value = false
   spawn()
 }
@@ -1395,12 +1425,14 @@ function openTerminalFromMenu(): void {
   // Menu first, like spawnAs: a click that turns out to be a no-op still
   // dismisses the menu, rather than leaving it open with nothing happening.
   const ws = addMenuWorkspace.value || workspacePath.value
+  const group = addMenuGroup.value
   addMenuOpen.value = false
   if (!canSpawn.value) return
-  emit('spawn', { agentKey: 'terminal', roleKey: '', stageId: '', workspacePath: ws })
+  emit('spawn', { agentKey: 'terminal', roleKey: '', stageId: '', workspacePath: ws, runGroupId: group || undefined })
 }
 
 function openSpawnCardFromMenu(): void {
+  spawnGroupOverride.value = addMenuGroup.value
   addMenuOpen.value = false
   manualSpawnOpen.value = true
 }
@@ -1465,6 +1497,7 @@ async function spawnOrOfferInstall(): Promise<void> {
   }
   const spec = manualAgentSpecs.value.find((s) => s.agentKey === pickedAgent.value)
   spawnWorkspaceOverride.value = ''
+  spawnGroupOverride.value = ''
   emit('install-cli', { agentKey: pickedAgent.value, label: spec?.label ?? pickedAgent.value })
 }
 
@@ -1592,6 +1625,10 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
       return '· kickoff: queued'
     case 'sent':
       return '· kickoff: sent'
+    // Written, but the only echo we got was the buffer growing — which a
+    // booting CLI does regardless. Say so rather than claiming it was sent.
+    case 'unverified':
+      return '· kickoff: unverified'
     case 'failed':
       return '· kickoff: failed'
   }
@@ -2082,7 +2119,15 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <!-- The group layer sits BESIDE the lineage rather than above it: a
              spine on the left edge, not another step of indentation. Indentation
              is already spent on parent/child panes, and a third level would push
-             an MCP child's name past the width it has. -->
+             an MCP child's name past the width it has.
+
+             The header sticks to the top of the scroller so a long list always
+             says which group you are inside; the 2px rail down the member rows
+             (see .agent-item.in-group) says the group has not ended yet. The
+             rail is deliberately NEUTRAL — group colour means run state here,
+             and two different groups can both be green, so a coloured rail
+             could not answer "which group am I in". The stuck header answers
+             that; the rail only answers "still the same one". -->
         <li
           v-if="!g.bare"
           v-show="!ws?.collapsed"
@@ -2096,17 +2141,30 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               : $t('action.collapse-subtree')"
             @click.stop="toggleGroup(ws?.path ?? '', g.id)"
           >{{ isGroupCollapsed(ws?.path ?? '', g.id) ? '›' : '⌄' }}</button>
-          <span class="ws-grp-key"></span>
-          <span class="ws-grp-name">{{ g.name || $t('label.manual-spawn') }}</span>
+          <span class="ws-grp-key" :title="$t(runGroupStateLabelKey(g.state))"></span>
+          <span class="ws-grp-name" :title="g.name || $t('label.manual-spawn')">{{ g.name || $t('label.manual-spawn') }}</span>
           <span class="ws-count">{{ g.rows.length }}</span>
+          <!-- The sidebar's own entry point: ＋ here opens an agent in THIS
+               group, which the stage tab bar cannot express — it can only open
+               into whichever group it is currently showing. Management (rename,
+               delete, detach) stays on the tab bar so there is one place to
+               change a group, not two that can disagree. -->
+          <button
+            v-if="ws && !g.bare && canSpawn"
+            class="ws-grp-add"
+            :aria-expanded="addMenuOpen && addMenuWorkspace === ws.path && addMenuGroup === g.id"
+            :title="`${$t('action.open-agent-in-group')} · ${pickedAgentLabel}`"
+            :aria-label="$t('action.open-agent-in-group')"
+            @click.stop="toggleAddMenu($event, ws.path, g.id)"
+          >＋</button>
         </li>
         <li
-          v-for="{ pane: p, depth, hasChildren, collapsed: folded } in g.rows"
+          v-for="({ pane: p, depth, hasChildren, collapsed: folded }, gi) in g.rows"
           v-show="!ws?.collapsed && !isGroupCollapsed(ws?.path ?? '', g.id)"
           :key="p.id"
           class="agent-item"
           :style="depth ? { marginLeft: depth * 13 + 'px' } : undefined"
-          :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'agent-item--selected': props.selectedPaneIds?.has(p.id), 'agent-item--dragging': draggingBatchIds.includes(p.id), 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
+          :class="{ 'in-group': !g.bare, 'in-group-last': !g.bare && gi === g.rows.length - 1, pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'agent-item--selected': props.selectedPaneIds?.has(p.id), 'agent-item--dragging': draggingBatchIds.includes(p.id), 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
           @dragover="onAgentDragOver($event, p.id)"
           @dragenter="onAgentDragOver($event, p.id)"
           @dragleave="onAgentDragLeave(p.id)"
@@ -2120,7 +2178,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               @click.stop="emit('toggle-collapsed', p.id)"
             >{{ folded ? '▸' : '▾' }}</button>
             <span v-else-if="depth || g.rail" class="lineage-spacer"></span>
-            <span class="status-dot" :data-state="p.status" :title="$t(paneStatusLabelKey(p.status))"></span>
+            <span class="status-dot" :data-state="p.status" :style="statusBadgeStyle(p.status)" :title="paneStatusLabelText(p.status)"></span>
             <!-- No MCP tag beside it. `origin === 'mcp'` is still recorded and
                  still drives spawn behaviour; it just does not need a badge.
                  The indentation already says an agent spawned this pane, and
@@ -2140,7 +2198,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             <span
               v-else
               class="badge"
-              :title="$t('action.rename')"
+              :title="`${p.agentLabel}\n${$t('action.rename')}`"
               @dblclick.stop="startRename(p)"
             >{{ p.agentLabel }}</span>
             <span
@@ -2172,7 +2230,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <template v-if="expandedPaneId === p.id || props.focusPaneId === p.id">
             <div class="agent-role-line">
               <span class="agent-role-main">{{ agentTypeLabel(p.agentKey) }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span></span>
-              <span class="state" :data-state="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
+              <span class="state" :data-state="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>
             </div>
             <div v-if="!p.isMinimized && p.origin === 'pipeline'" class="stage-line">
               stage {{ p.stageId }} · {{ preparationLabel(p.preparationStatus) }} · {{ injectionLabel(p.injectionStatus) }} {{ kickoffLabel(p.kickoffStatus) }}
@@ -3711,10 +3769,13 @@ button.icon-btn.muted:hover {
 }
 .ws-ctx-opt.danger:hover { background: var(--danger-subtle, rgb(224 82 82 / 12%)); }
 /* ── Run group layer ────────────────────────────────────────────────────────
-   A spine down the left edge, not another step of indentation: indentation is
-   already spent on parent/child panes, and a third level would push an MCP
-   child's name past the width it has. The spine also survives scrolling — the
-   heading leaves the viewport, the colour does not. */
+   Still not another step of indentation — indentation is already spent on
+   parent/child panes, and a third level would push an MCP child's name past
+   the width it has. What the layer costs instead is 2px on the left (the rail
+   down the member rows) and one tinted row that sticks to the top of the
+   scroller. Between them they answer the two questions the plain micro-heading
+   could not: "is this a container?" (the tint and the rail) and "which group am
+   I in, now that the heading has scrolled away?" (the stuck heading itself). */
 .ws-empty {
   padding: 4px 8px 6px 18px;
   color: var(--text-muted);
@@ -3725,11 +3786,30 @@ button.icon-btn.muted:hover {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px 2px 18px;
+  padding: 3px 6px 3px 18px;
+  margin: 5px 2px 2px;
   font-size: 11px;
-  font-weight: 650;
-  color: var(--text-secondary);
+  font-weight: 700;
+  color: var(--text-primary);
   user-select: none;
+  border-radius: var(--radius-xs);
+  /* The sidebar has no global border-box reset, and this row now carries
+     padding on all four sides — without this it would push its own content
+     wider than the list and .sidebar's overflow:hidden would clip it, the way
+     .sidebar-tabs once had to be pulled back with negative margins. */
+  box-sizing: border-box;
+  /* Sticks inside .part-bottom, the same scroller .agent-list-hdr sticks in.
+     29px clears that header: 22px min-height + 6px padding-bottom + 1px
+     border. Its 4px margin sits outside the sticky box, so it is not counted.
+     z-index 1 puts this under the section header (which is 2) and over the
+     rows it scrolls past. */
+  position: sticky;
+  top: 29px;
+  z-index: 1;
+  /* Two layers, because the tint token may be translucent and a stuck header
+     must not let the rows scroll through it: the tint is painted over the
+     sidebar's own opaque background. */
+  background: linear-gradient(var(--bg-subtle), var(--bg-subtle)), var(--bg-base);
 }
 /* Sits where the workspace caret sits one level up, so the two read as the
    same control at two depths. */
@@ -3762,17 +3842,40 @@ button.icon-btn.muted:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* The spine is a border rather than a pseudo-element so it composes with the
-   lineage margin: an indented child keeps its own left edge, and the spine
-   stays where the group starts. */
-/* No spine down the rows. One was tried: a colour running beside a group so
-   that scrolling past its heading still told you which group you were in.
-   Then the colour became the group's RUN STATE rather than its identity —
-   which is the more useful signal, and the tab bar's own — and at that point
-   the stripe could no longer answer the question it existed for: two groups
-   that are both running are both green. The heading says which group; the dot
-   says whether it is moving. A stripe repeating the dot down every row adds
-   ink, not information. */
+/* Reserved space, not conditional space: the button keeps its box when hidden
+   so the count does not shift sideways as the pointer crosses the row. */
+.ws-grp-add {
+  flex: none;
+  margin-left: auto;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.ws-grp:hover .ws-grp-add,
+.ws-grp-add:focus-visible,
+.ws-grp-add[aria-expanded='true'] { opacity: 1; }
+.ws-grp-add:hover { color: var(--text-bright); }
+@media (prefers-reduced-motion: reduce) {
+  .ws-grp-add { transition: none; }
+}
+/* A rail down the rows — but read the history before touching its colour.
+   The first attempt was a COLOURED stripe, meant to tell you which group you
+   were in once its heading had scrolled away. Then the colour became the
+   group's RUN STATE rather than its identity — the more useful signal, and the
+   tab bar's own — and the stripe could no longer answer the question it
+   existed for: two groups that are both running are both green. So it went.
+
+   This one is deliberately NEUTRAL and answers a different question. "Which
+   group am I in" is now answered by the heading, which sticks to the top of
+   the scroller; all the rail says is "this group has not ended yet", and for
+   that, one border-coloured line is enough. Giving it a colour again would
+   walk straight back into the contradiction above. */
 
 .agent-item {
   background: transparent;
@@ -3784,6 +3887,29 @@ button.icon-btn.muted:hover {
    scopes this: an ungrouped list has no .ws-head, so nothing indents and that
    layout is untouched. Lineage children add their own margin on top of it. */
 .ws-head ~ .agent-item { padding-left: 22px; }
+/* Group members give up 2px, and only 2px — the name column is already
+   truncating, so the rail is paid for out of the gutter, not out of the name.
+   Written with .ws-head in the selector to outrank the 22px rule above rather
+   than relying on source order. */
+.ws-head ~ .agent-item.in-group {
+  position: relative;
+  padding-left: 24px;
+}
+.ws-head ~ .agent-item.in-group::before {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  /* Reaches 1px past the row to bridge .agent-list's gap, so the rail reads as
+     one line rather than a dotted one. The last member stops short instead, so
+     the rail ends with the group rather than pointing at the next heading. */
+  bottom: -1px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--border-default);
+  pointer-events: none;
+}
+.ws-head ~ .agent-item.in-group-last::before { bottom: 2px; }
 .agent-item.expanded {
   background: var(--bg-subtle);
   border-color: var(--border-muted);
@@ -3846,44 +3972,52 @@ button.icon-btn.muted:hover {
 .agent-line:hover {
   background: var(--bg-hover);
 }
+/* A dot is foreground-only, so it takes --status-badge-fg where the pill takes
+   both variables. Each rule below is that status's DEFAULT colour and stays the
+   whole story until the user recolours the status in Settings; only then is the
+   variable present and the fallback overridden. The base rule carries the
+   fallback too, because idle/running/stopped/starting are painted here rather
+   than by a rule of their own. */
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex: 0 0 8px;
-  background: var(--text-muted);
+  background: var(--status-badge-fg, var(--text-muted));
 }
 .status-dot[data-state='running'] {
-  background: var(--success-fg);
+  background: var(--status-badge-fg, var(--success-fg));
   animation: agent-dot-pulse 1.6s ease-in-out infinite;
 }
 .status-dot[data-state='starting'] {
-  background: var(--status-starting-fg);
+  background: var(--status-badge-fg, var(--status-starting-fg));
   animation: agent-dot-pulse 0.9s ease-in-out infinite;
 }
 .status-dot[data-state='idle'] {
-  background: var(--attention-fg);
+  background: var(--status-badge-fg, var(--attention-fg));
 }
 /* The CLI asked something and is parked on the answer. It pulses like running
    rather than sitting flat like idle: this is the one state where nothing at
    all happens until the user acts, so it must not read as "quiet, all done". */
 .status-dot[data-state='awaiting'] {
-  background: var(--warning-fg);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-fg) 25%, transparent);
+  background: var(--status-badge-fg, var(--warning-fg));
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--status-badge-fg, var(--warning-fg)) 25%, transparent);
   animation: agent-dot-pulse 1.2s ease-in-out infinite;
 }
 /* Cold-restore placeholder: nothing spawned yet — a hollow ring, so it never
    reads as a live-but-quiet pane. */
 .status-dot[data-state='waiting'] {
   background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--text-secondary);
+  box-shadow: inset 0 0 0 1.5px var(--status-badge-fg, var(--text-secondary));
 }
 .status-dot[data-state='error'] {
-  background: var(--danger-fg);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger-fg) 25%, transparent);
+  background: var(--status-badge-fg, var(--danger-fg));
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--status-badge-fg, var(--danger-fg)) 25%, transparent);
 }
 .status-dot[data-state='exited'] {
-  background: var(--text-disabled);
+  background: var(--status-badge-fg, var(--text-disabled));
   opacity: 0.6;
 }
 @keyframes agent-dot-pulse {
@@ -3912,7 +4046,11 @@ button.icon-btn.muted:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
-  flex-shrink: 1;
+  /* Yields four times faster than the name badge beside it. Both used to
+     shrink at the same rate, so a narrow sidebar cut the pane's own name —
+     the row's identity — to make room for context that repeats on the
+     expanded card anyway. */
+  flex-shrink: 4;
 }
 .agent-line .minimized-tag {
   margin-left: auto;
@@ -4103,42 +4241,48 @@ button.icon-btn.muted:hover {
   white-space: nowrap;
   flex-shrink: 0;
 }
+/* Each rule is the DEFAULT colour of its status and stays the whole story until
+   the user recolours that status in Settings; only then does the badge carry
+   --status-badge-bg/-fg inline and win the var() fallback. */
 .state {
   margin-left: auto;
   font-size: 9px;
   text-transform: uppercase;
   padding: 2px 6px;
   border-radius: 999px;
-  background: var(--bg-muted);
-  color: var(--text-secondary);
+  background: var(--status-badge-bg, var(--bg-muted));
+  color: var(--status-badge-fg, var(--text-secondary));
 }
 .state[data-state='running'] {
-  background: var(--success-muted);
-  color: var(--success-fg);
+  background: var(--status-badge-bg, var(--success-muted));
+  color: var(--status-badge-fg, var(--success-fg));
 }
 .state[data-state='starting'] {
-  background: var(--status-starting-muted);
-  color: var(--status-starting-fg);
+  background: var(--status-badge-bg, var(--status-starting-muted));
+  color: var(--status-badge-fg, var(--status-starting-fg));
 }
 .state[data-state='idle'] {
-  background: var(--attention-muted);
-  color: var(--attention-fg);
+  background: var(--status-badge-bg, var(--attention-muted));
+  color: var(--status-badge-fg, var(--attention-fg));
 }
 .state[data-state='awaiting'] {
-  background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
-  color: var(--warning-fg);
+  background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent));
+  color: var(--status-badge-fg, var(--warning-fg));
 }
 .state[data-state='error'] {
-  background: var(--danger-deep);
-  color: var(--danger-fg);
+  background: var(--status-badge-bg, var(--danger-deep));
+  color: var(--status-badge-fg, var(--danger-fg));
 }
 .state[data-state='exited'] {
-  background: var(--bg-muted);
+  background: var(--status-badge-bg, var(--bg-muted));
 }
+/* 'stopped' was painted in literal hex here, which punched a black hole through
+   the light theme. It resolves through the palette's `ink` now, matching the
+   pane pill. */
 .state[data-state='stopped'] {
-  background: #000000;
-  color: #ffffff;
-  border: 1px solid #3f3f46;
+  background: var(--status-badge-bg, var(--bg-inset));
+  color: var(--status-badge-fg, var(--text-bright));
+  border: 1px solid var(--border-default);
 }
 .agent-item.minimized {
   opacity: 0.7;

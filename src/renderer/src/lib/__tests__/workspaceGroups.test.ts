@@ -22,6 +22,8 @@ const row = (id: string, depth = 0): LineageRow => ({
   depth,
   hasChildren: false,
   collapsed: false,
+  ancestors: [],
+  descendantCount: 0,
 })
 const A = '/Users/me/Desktop/alpha'
 const B = '/Users/me/Desktop/beta'
@@ -194,7 +196,7 @@ describe('buildWorkspaceGroups', () => {
   it('is one ungrouped section when nobody has made a group', () => {
     // Which is what makes an untouched workspace render exactly as before.
     const rows = build({ panes: [pane('a', A)], lineage: [row('a')] })
-    expect(rows[0].groups).toEqual([{ id: '', name: '', rows: [{ id: 'a', depth: 0, hasChildren: false, collapsed: false }] }])
+    expect(rows[0].groups).toEqual([{ id: '', name: '', rows: [row('a')] }])
   })
 
   it('lists the workspaces the window holds, in the order it took them on', () => {

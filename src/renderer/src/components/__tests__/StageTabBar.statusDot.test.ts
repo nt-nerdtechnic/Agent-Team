@@ -3,6 +3,9 @@
 // the tab's rolled-up status. The dot must survive a rename (it sits outside
 // the label/input branch) so the tab does not shift width while typing, and it
 // must carry hover/AT text — a bare colour is not a signal for everyone.
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { i18n } from '@navide/plugin-ui/foundation'
@@ -46,5 +49,24 @@ describe('StageTabBar – status dot', () => {
     const tab = mountBar().findAll('.tab-btn')[0]
     const children = Array.from(tab.element.children).map((el) => el.className)
     expect(children.indexOf('tab-dot')).toBeLessThan(children.indexOf('tab-label'))
+  })
+})
+
+describe('StageTabBar – the shape of the status dot', () => {
+  it('matches the sidebar group key rather than being a circle', () => {
+    // The tab dot and ControlPane's .ws-grp-key show the SAME value, from the
+    // same rollupTabStatus() call, for the same group. Two shapes read as two
+    // different kinds of indicator, so the geometry is kept in step on purpose.
+    const bar = readFileSync(resolve(__dirname, '../StageTabBar.vue'), 'utf8')
+    const dot = bar.match(/\.tab-dot \{[^}]*\}/)?.[0] ?? ''
+    expect(dot).toContain('width: 7px')
+    expect(dot).toContain('height: 7px')
+    expect(dot).toContain('border-radius: 2px')
+
+    const pane = readFileSync(resolve(__dirname, '../ControlPane.vue'), 'utf8')
+    const key = pane.match(/\.ws-grp-key \{[^}]*\}/)?.[0] ?? ''
+    expect(key).toContain('width: 7px')
+    expect(key).toContain('height: 7px')
+    expect(key).toContain('border-radius: 2px')
   })
 })

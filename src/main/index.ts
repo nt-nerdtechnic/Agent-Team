@@ -5,7 +5,7 @@ import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
-import { startBackend, getResolvedUserPath, type BackendHandle } from './backend'
+import { startBackend, getResolvedUserPath, readWsToken, type BackendHandle } from './backend'
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
 import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, devPlansV2PluginBundle, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, registerBundledMiniIde, registerBundledPlans, registerLegacyBundledGit, hasCompletePlansContributions, frontendPluginManager } from './plugins/frontendPluginManager'
@@ -565,7 +565,12 @@ function backendInfoPayload() {
     pid: backend.proc.pid,
     shell: backend.shell,
     httpUrl: `http://${backend.host}:${backend.port}`,
-    wsUrl: `ws://${backend.host}:${backend.port}/ws`
+    // The token travels inside the URL the windows and the plugin broker
+    // already receive, so nothing downstream had to learn a new mechanism —
+    // one change here reaches every /ws client at once. A page in a browser
+    // can guess the port but cannot read the file this came from, which is
+    // the whole of the defence; see backend/agent_team_backend/ws_auth.py.
+    wsUrl: `ws://${backend.host}:${backend.port}/ws?t=${encodeURIComponent(readWsToken(backend))}`
   }
 }
 

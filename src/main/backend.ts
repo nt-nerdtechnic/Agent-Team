@@ -1,5 +1,6 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -17,6 +18,10 @@ export interface BackendHandle {
   shell: string
   /** Main-process-only bearer used to register the Host WebSocket session. */
   hostSessionToken: string
+  /** Where the backend keeps its state — and its ws token. Recorded here
+   *  rather than recomputed by callers because dev and packaged resolve it
+   *  differently, and two copies of that rule would drift. */
+  dataDir: string
   proc: ChildProcess
   stop: () => Promise<void>
 }
@@ -204,6 +209,7 @@ export async function startBackend(
     port,
     shell: userShell,
     hostSessionToken,
+    dataDir: env.AGENT_TEAM_DATA_DIR ?? join(app.getPath('appData'), 'Agent-Team'),
     proc,
     stop: () =>
       new Promise<void>((resolve) => {
@@ -256,6 +262,24 @@ export async function startBackend(
   return handle
 }
 
+
+/**
+ * The credential the backend requires on /ws, or '' if it is not there yet.
+ *
+ * Read from disk on every call rather than cached: the backend mints a new one
+ * each run, and an auto-restart replaces the file under a main process that
+ * never stopped. A cached token would survive that and every window would be
+ * refused with no obvious cause.
+ */
+export function readWsToken(handle: BackendHandle): string {
+  try {
+    return readFileSync(join(handle.dataDir, 'backend-ws-token'), 'utf8').trim()
+  } catch {
+    // Absent means the backend has not written it yet, or is an older build.
+    // Callers pass '' through and the backend answers for itself.
+    return ''
+  }
+}
 
 export async function waitForHealth(host: string, port: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs

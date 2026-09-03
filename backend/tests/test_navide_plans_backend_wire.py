@@ -188,6 +188,32 @@ def test_health_and_agent_create_update_read_round_trip(
         backend_process,
         {
             "jsonrpc": "2.0",
+            "id": "create-done-1",
+            "method": "navide/call",
+            "params": {
+                "_meta": CLIENT_META,
+                "name": "plans.create",
+                "arguments": {
+                    "name": "Completed report",
+                    "overview": "Already finished",
+                    "stage": "done",
+                    "todos": [{"id": "verify", "content": "Verify", "owner": "user"}],
+                },
+                "runtime": RUNTIME,
+            },
+        },
+    )
+    completed = service_until_response("create-done-1")
+    assert completed["result"]["value"]["stage"] == "done"
+    completed_path = completed["result"]["value"]["rel_path"]
+    assert '"stage": "done"' in stored[completed_path]
+    assert '"status": "done"' in stored[completed_path]
+    assert '"owner": "user"' in stored[completed_path]
+
+    _send(
+        backend_process,
+        {
+            "jsonrpc": "2.0",
             "id": "update-1",
             "method": "navide/call",
             "params": {
@@ -211,15 +237,44 @@ def test_health_and_agent_create_update_read_round_trip(
             "params": {
                 "_meta": CLIENT_META,
                 "name": "plans.update_todo",
-                "arguments": {"rel_path": rel_path, "todo_id": "t1", "status": "in-progress"},
+                "arguments": {
+                    "rel_path": rel_path,
+                    "todo_id": "t1",
+                    "status": "in-progress",
+                    "owner": "user",
+                },
                 "runtime": RUNTIME,
             },
         },
     )
     updated_todo = service_until_response("update-todo-1")
     assert updated_todo["result"]["value"]["status"] == "in-progress"
+    assert updated_todo["result"]["value"]["owner"] == "user"
     assert 'data-status="pending" data-todo-id="t1"' not in stored[rel_path]
     assert '<span class="st">in-progress</span>' in stored[rel_path]
+
+    _send(
+        backend_process,
+        {
+            "jsonrpc": "2.0",
+            "id": "update-todo-owner-1",
+            "method": "navide/call",
+            "params": {
+                "_meta": CLIENT_META,
+                "name": "plans.update_todo",
+                "arguments": {
+                    "rel_path": rel_path,
+                    "todo_id": "t1",
+                    "status": "done",
+                    "owner": "agent",
+                },
+                "runtime": RUNTIME,
+            },
+        },
+    )
+    reassigned_todo = service_until_response("update-todo-owner-1")
+    assert reassigned_todo["result"]["value"]["status"] == "done"
+    assert "owner" not in reassigned_todo["result"]["value"]
 
     _send(
         backend_process,

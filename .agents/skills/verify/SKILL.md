@@ -15,7 +15,13 @@ AGENT_TEAM_DATA_DIR=<scratch>/data \
   uv --project backend run python -m agent_team_backend --port 8931 --log-level warning
 ```
 
-- WS endpoint: `ws://127.0.0.1:8931/ws`
+- WS endpoint: `ws://127.0.0.1:8931/ws?t=<token>` — **the token is required**.
+  Read it from `<scratch>/data/backend-ws-token` (0600, minted fresh on every
+  backend start). Connecting without it closes with code 4403 rather than
+  answering, which is the point: that socket dispatches `terminal.create` with
+  a caller-supplied command, and a WebSocket handshake is not subject to the
+  same-origin policy, so any web page could otherwise reach it. See
+  `backend/agent_team_backend/ws_auth.py`.
 - Request frame: `{"id": uuid, "type": "<msg_type>", "payload": {...}, "timestamp": iso}`
 - Response frame: `{"id", "type", "ok", "payload"}`; events have no matching `id` — filter by id.
 - Client: `websockets` is already in the backend venv

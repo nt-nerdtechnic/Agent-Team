@@ -2,7 +2,8 @@
 import ViewPanel, { type LayoutMode } from './ViewPanel.vue'
 import HistoryIcon from './HistoryIcon.vue'
 import type { ActivePaneView } from './ControlPane.vue'
-import { paneStatusLabelKey } from '../lib/paneStatusLabel'
+import { paneStatusLabelText } from '../lib/paneStatusLabel'
+import { statusBadgeStyle } from '../composables/useStatusBadgePrefs'
 
 defineProps<{
   panes: ActivePaneView[]
@@ -48,9 +49,12 @@ function preparationLabel(status: ActivePaneView['preparationStatus']): string {
 function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
   if (!status || status === 'none') return ''
   switch (status) {
-    case 'pending': return '· kickoff: queued'
-    case 'sent':    return '· kickoff: sent'
-    case 'failed':  return '· kickoff: failed'
+    case 'pending':    return '· kickoff: queued'
+    case 'sent':       return '· kickoff: sent'
+    // Written, but the only echo we got was the buffer growing — which a
+    // booting CLI does regardless. Say so rather than claiming it was sent.
+    case 'unverified': return '· kickoff: unverified'
+    case 'failed':     return '· kickoff: failed'
   }
 }
 </script>
@@ -86,7 +90,12 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
           <span class="badge">{{ p.agentLabel }}</span>
           <span v-if="p.isCommander" class="manager-inline" title="Stage manager — controls flow and decides ---STAGE-DONE---">🎯 Mgr</span>
           <span v-if="p.isMinimized" class="minimized-tag">▪ sidebar</span>
-          <span v-else class="state" :data-state="p.status">{{ $t(paneStatusLabelKey(p.status)) }}</span>
+          <span
+            v-else
+            class="state"
+            :data-state="p.status"
+            :style="statusBadgeStyle(p.status)"
+          >{{ paneStatusLabelText(p.status) }}</span>
           <span
             v-if="p.loopActive"
             class="loop-tag"
@@ -383,27 +392,38 @@ button.icon-btn:hover {
   text-transform: uppercase;
   padding: 2px 6px;
   border-radius: 999px;
-  background: var(--bg-muted);
-  color: var(--text-secondary);
+  background: var(--status-badge-bg, var(--bg-muted));
+  color: var(--status-badge-fg, var(--text-secondary));
 }
 .state[data-state='running'] {
-  background: var(--success-muted);
-  color: var(--success-fg);
+  background: var(--status-badge-bg, var(--success-muted));
+  color: var(--status-badge-fg, var(--success-fg));
 }
 .state[data-state='starting'] {
-  background: var(--status-starting-muted);
-  color: var(--status-starting-fg);
+  background: var(--status-badge-bg, var(--status-starting-muted));
+  color: var(--status-badge-fg, var(--status-starting-fg));
 }
 .state[data-state='idle'] {
-  background: var(--attention-muted);
-  color: var(--attention-fg);
+  background: var(--status-badge-bg, var(--attention-muted));
+  color: var(--status-badge-fg, var(--attention-fg));
+}
+/* awaiting and stopped had no rule here, so both fell through to the neutral
+ * default — the one surface where "blocked on you" and "done" looked alike. */
+.state[data-state='awaiting'] {
+  background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent));
+  color: var(--status-badge-fg, var(--warning-fg));
+}
+.state[data-state='stopped'] {
+  background: var(--status-badge-bg, var(--bg-inset));
+  color: var(--status-badge-fg, var(--text-bright));
 }
 .state[data-state='error'] {
-  background: var(--danger-deep);
-  color: var(--danger-fg);
+  background: var(--status-badge-bg, var(--danger-deep));
+  color: var(--status-badge-fg, var(--danger-fg));
 }
 .state[data-state='exited'] {
-  background: var(--bg-muted);
+  background: var(--status-badge-bg, var(--bg-muted));
+  color: var(--status-badge-fg, var(--text-primary));
 }
 .loop-tag {
   font-size: 9px;

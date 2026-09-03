@@ -4,6 +4,7 @@ import {
   parseLegacyRunGroups,
   resolveActiveTab,
   resolveManualSpawnGroupId,
+  resolveSpawnGroupId,
   runGroupCreatedAt,
 } from '../runGroups'
 
@@ -31,6 +32,30 @@ describe('resolveActiveTab', () => {
   it("treats an empty current id as invalid and falls back", () => {
     expect(resolveActiveTab(groups, '')).toBe('rg-2')
     expect(resolveActiveTab([], '')).toBe('manual')
+  })
+})
+
+describe('resolveSpawnGroupId', () => {
+  const groups = [{ id: 'run-a' }, { id: 'run-b' }]
+
+  it('honours a group the caller asked for outright', () => {
+    // The sidebar's per-group ＋ can name a group the active tab is not showing.
+    expect(resolveSpawnGroupId(groups, 'run-a', 'run-b')).toBe('run-b')
+  })
+
+  it('ignores an asked-for group this workspace does not have', () => {
+    // Run groups are per-workspace and only the viewed one's are loaded, so an
+    // unknown id would leave the pane on no tab at all.
+    expect(resolveSpawnGroupId(groups, 'run-a', 'run-elsewhere')).toBe('run-a')
+  })
+
+  it('falls back to the active tab when nothing was asked for', () => {
+    expect(resolveSpawnGroupId(groups, 'run-b')).toBe('run-b')
+    expect(resolveSpawnGroupId(groups, 'run-b', '')).toBe('run-b')
+  })
+
+  it('still leaves the synthetic manual tab unassigned', () => {
+    expect(resolveSpawnGroupId(groups, 'manual')).toBe('')
   })
 })
 

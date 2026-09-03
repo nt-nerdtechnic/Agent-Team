@@ -48,6 +48,7 @@ TODO_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*$")
 NOTE_ID_RE = re.compile(r"^n(\d+)$")
 PLAN_STAGES = {"draft", "in-review", "approved", "in-progress", "done", "abandoned"}
 TODO_STATUSES = {"pending", "in-progress", "done", "skipped"}
+TODO_OWNERS = {"user", "agent"}
 PLAN_REL_DIR = ".agent-team/plans"
 _MISSING = object()
 _write_lock = threading.Lock()
@@ -605,24 +606,34 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:60].rstrip("-") or "plan"
 
 
-def _normalize_todos(value: Any) -> list[dict[str, str]]:
+def _normalize_todos(value: Any, status: str = "pending") -> list[dict[str, str]]:
     if not isinstance(value, list):
         raise BridgeFailure("INVALID_ARGUMENT")
     result: list[dict[str, str]] = []
     seen: set[str] = set()
     for index, item in enumerate(value):
+        owner = ""
         if isinstance(item, str):
             todo_id, text = "", item
         elif _is_record(item):
             todo_id, text = str(item.get("id") or ""), str(item.get("content") or "")
+            owner = str(item.get("owner") or "")
         else:
             raise BridgeFailure("INVALID_ARGUMENT")
         text = text.strip()
         todo_id = todo_id.strip() or f"t{index + 1}"
-        if not text or TODO_ID_RE.fullmatch(todo_id) is None or todo_id in seen:
+        if (
+            not text
+            or TODO_ID_RE.fullmatch(todo_id) is None
+            or todo_id in seen
+            or (owner and owner not in TODO_OWNERS)
+        ):
             raise BridgeFailure("INVALID_ARGUMENT")
         seen.add(todo_id)
-        result.append({"id": todo_id, "content": text, "status": "pending"})
+        entry = {"id": todo_id, "content": text, "status": status}
+        if owner == "user":
+            entry["owner"] = owner
+        result.append(entry)
     return result
 
 
@@ -717,9 +728,15 @@ def _load_for_write(origin: dict[str, Any], rel_path: Any) -> tuple[str, str, di
 def _create_plan(origin: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
     name = arguments.get("name")
     overview = arguments.get("overview", "")
-    if not isinstance(name, str) or not name.strip() or not isinstance(overview, str):
+    stage = arguments.get("stage", "draft")
+    if (
+        not isinstance(name, str)
+        or not name.strip()
+        or not isinstance(overview, str)
+        or stage not in PLAN_STAGES
+    ):
         raise BridgeFailure("INVALID_ARGUMENT")
-    todos = _normalize_todos(arguments.get("todos"))
+    todos = _normalize_todos(arguments.get("todos"), "done" if stage == "done" else "pending")
     slug = _slug(name.strip())
     # A random suffix keeps concurrent agent creates independent without an
     # existence probe that could become a side channel across workspaces.
@@ -746,8 +763,8 @@ def _create_plan(origin: dict[str, Any], arguments: dict[str, Any]) -> dict[str,
     content = re.sub(r"\{\{[^{}]*\}\}", "TBD", content)
     if "data-todo-id=" in content:
         rows = "\n".join(
-            f'<li data-status="pending" data-todo-id="{html_escape(todo["id"])}">'
-            f'<span class="st">pending</span> <span>{html_escape(todo["content"])}</span></li>'
+            f'<li data-status="{todo["status"]}" data-todo-id="{html_escape(todo["id"])}">'
+            f'<span class="st">{todo["status"]}</span> <span>{html_escape(todo["content"])}</span></li>'
             for todo in todos
         )
         content = re.sub(r"<li\b[^>]*data-todo-id=[\"']phase-a[\"'][^>]*>[\s\S]*?</li>", rows, content, count=1)
@@ -755,13 +772,17 @@ def _create_plan(origin: dict[str, Any], arguments: dict[str, Any]) -> dict[str,
         "schemaVersion": 1,
         "name": name.strip(),
         "overview": overview.strip(),
-        "stage": "draft",
-        "approvedAt": None,
+        "stage": stage,
+        "approvedAt": (
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if stage in {"approved", "in-progress", "done"}
+            else None
+        ),
         "todos": todos,
         "reviewNotes": [],
     }
-    _bridge_write(origin, rel_path, _write_plan_meta(content, meta))
-    return {"rel_path": rel_path, "name": name.strip(), "stage": "draft"}
+    _bridge_write(origin, rel_path, _write_meta_for_path(rel_path, content, meta, stage=stage))
+    return {"rel_path": rel_path, "name": name.strip(), "stage": stage}
 
 
 def _update_stage(origin: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
@@ -779,13 +800,23 @@ def _update_stage(origin: dict[str, Any], arguments: dict[str, Any]) -> dict[str
 def _update_todo(origin: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
     status = arguments.get("status")
     todo_id = arguments.get("todo_id")
-    if status not in TODO_STATUSES or not isinstance(todo_id, str) or not todo_id:
+    owner = arguments.get("owner", "")
+    if (
+        status not in TODO_STATUSES
+        or not isinstance(todo_id, str)
+        or not todo_id
+        or owner not in {"", *TODO_OWNERS}
+    ):
         raise BridgeFailure("INVALID_ARGUMENT")
     rel_path, content, meta, mtime = _load_for_write(origin, arguments.get("rel_path"))
     target = next((todo for todo in meta["todos"] if _is_record(todo) and todo.get("id") == todo_id), None)
     if target is None:
         raise BridgeFailure("INVALID_ARGUMENT")
     target["status"] = status
+    if owner == "user":
+        target["owner"] = owner
+    elif owner == "agent":
+        target.pop("owner", None)
     updated = _write_meta_for_path(
         rel_path,
         content,

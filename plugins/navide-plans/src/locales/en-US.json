@@ -7,6 +7,8 @@
       "stage-done": "Done",
       "stage-abandoned": "Abandoned",
       "progress-done": "{done}/{total} done",
+      "awaiting-you": "{count} for you",
+      "awaiting-you-title": "Unfinished items only you can clear — a manual check, a decision, a credential nobody else holds",
       "stage-draft": "Draft",
       "review-notes": "Review Notes",
       "review-unresolved": "{count} unresolved",

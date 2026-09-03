@@ -69,6 +69,19 @@ class RegisteredPane:
     #: someone opens it — but nothing is running behind it, and a caller that
     #: reads `busy` alone cannot tell that apart from a working agent.
     realized: bool = True
+    #: The word the owning window's sidebar badge is showing for this pane, from
+    #: the renderer's own DisplayStatus vocabulary (idle / starting / running /
+    #: awaiting / exited / error / stopped). Empty until that window reports one,
+    #: which is what an older build looks like — callers fall back to `busy`.
+    #:
+    #: Deliberately separate from `busy` rather than replacing it. `busy` answers
+    #: "would a message sent now have to wait", which is a delivery question and
+    #: the right one for cli_wait_idle; this answers "what is this pane doing",
+    #: which is a display question. They disagree in both directions — a pane
+    #: with a half-typed draft is busy but idle, a crashed pane is not busy and
+    #: not idle either — and collapsing them is what made the network view call a
+    #: dead pane "waiting".
+    display_status: str = ""
 
     @property
     def offline(self) -> bool:
@@ -97,6 +110,7 @@ class RegisteredPane:
             "busy": self.busy,
             "offline": self.offline,
             "realized": self.realized,
+            "displayStatus": self.display_status,
         }
 
 
@@ -211,6 +225,7 @@ def register(
         agent_key=agent_key,
         # A re-register is a rename or a reconnect, not a state change.
         busy=previous.busy if previous else False,
+        display_status=previous.display_status if previous else "",
         # Read from the caller every time instead of being carried over: a
         # window re-mirrors its panes on reconnect, and whether a placeholder
         # has been opened since is exactly what that re-mirror is reporting.
@@ -403,13 +418,29 @@ def owner(pane_id: str) -> Any | None:
     return _OWNERS.get(pane_id)
 
 
-def set_busy(pane_id: str, busy: bool) -> bool:
-    """Record whether a pane's agent is mid-turn. Returns whether it changed."""
+def set_busy(pane_id: str, busy: bool, display_status: str | None = None) -> bool:
+    """Record what a pane is doing. Returns whether anything changed.
+
+    Both facts arrive together because the window derives them in one tick from
+    one screen read; sending them as two calls would let the registry hold a
+    `busy` from this second and a status word from the last one, and the pair
+    disagreeing is exactly the bug this field exists to fix.
+
+    ``display_status=None`` means "not reported" — an older window that only
+    knows about ``busy`` — and leaves any previous word alone rather than
+    blanking it.
+    """
     entry = _PANES.get(pane_id)
-    if entry is None or entry.busy == busy:
+    if entry is None:
         return False
-    entry.busy = busy
-    return True
+    changed = False
+    if entry.busy != busy:
+        entry.busy = busy
+        changed = True
+    if display_status is not None and entry.display_status != display_status:
+        entry.display_status = display_status
+        changed = True
+    return changed
 
 
 def list_panes(workspace_path: str | None = None) -> list[RegisteredPane]:

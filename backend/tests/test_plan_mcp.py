@@ -138,11 +138,15 @@ async def test_plan_list_returns_plans_with_meta(workspace: Path) -> None:
     assert alpha["name"] == "Alpha"
     assert alpha["stage"] == "approved"
     assert alpha["overview"] == "First plan"
-    assert alpha["todos"] == {"total": 2, "by_status": {"done": 1, "pending": 1}}
+    assert alpha["todos"] == {
+        "total": 2,
+        "by_status": {"done": 1, "pending": 1},
+        "awaiting_user": 0,
+    }
     assert isinstance(alpha["mtime"], float)
     assert beta["name"] == "Beta"
     assert beta["stage"] == "draft"
-    assert beta["todos"] == {"total": 0, "by_status": {}}
+    assert beta["todos"] == {"total": 0, "by_status": {}, "awaiting_user": 0}
 
 
 async def test_plan_read_returns_meta_and_html(workspace: Path) -> None:
@@ -390,6 +394,189 @@ def fake_terminals(monkeypatch: pytest.MonkeyPatch) -> _FakeTerminalService:
     )
     monkeypatch.setattr(backend_app, "get_terminals", lambda: fake)
     return fake
+
+
+async def test_plan_create_at_done_records_finished_work(workspace: Path) -> None:
+    """A report is not a plan waiting for approval. Creating it straight at
+    "done" is what stops finished write-ups from piling up in "in-review",
+    which is the stage that means "blocked until the user approves"."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Delivery Report",
+            "overview": "What shipped.",
+            "todos": ["What changed", "How it was verified"],
+            "stage": "done",
+        },
+    )
+    assert not result.isError
+    data = result.structuredContent
+    assert data["stage"] == "done"
+
+    html = (workspace / data["rel_path"]).read_text(encoding="utf-8")
+    meta = parse_plan_meta(html)
+    assert meta["stage"] == "done"
+    # Its todos are its sections, not things anyone will tick off later —
+    # leaving them pending would render a finished document as "0/2 done".
+    assert [t["status"] for t in meta["todos"]] == ["done", "done"]
+    assert meta["approvedAt"] is not None
+    # The visible badge is what the user actually sees; meta alone is not enough.
+    assert '<span class="pill done">done</span>' in html
+    assert '<span class="pill draft">draft</span>' not in html
+    assert 'data-status="done"' in html
+
+
+async def test_plan_create_still_defaults_to_draft(workspace: Path) -> None:
+    """The default must not move: every existing caller omits the argument."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Ordinary Plan",
+            "overview": "To be approved.",
+            "todos": ["Do the thing"],
+        },
+    )
+    data = result.structuredContent
+    assert data["stage"] == "draft"
+    meta = parse_plan_meta((workspace / data["rel_path"]).read_text(encoding="utf-8"))
+    assert meta["approvedAt"] is None
+    assert [t["status"] for t in meta["todos"]] == ["pending"]
+
+
+async def test_plan_create_at_in_review_does_not_stamp_approval(workspace: Path) -> None:
+    """in-review is before the gate: nothing has been approved yet."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Proposal",
+            "overview": "For review.",
+            "todos": ["Phase one"],
+            "stage": "in-review",
+        },
+    )
+    meta = parse_plan_meta(
+        (workspace / result.structuredContent["rel_path"]).read_text(encoding="utf-8")
+    )
+    assert meta["stage"] == "in-review"
+    assert meta["approvedAt"] is None
+    assert [t["status"] for t in meta["todos"]] == ["pending"]
+
+
+async def test_plan_create_rejects_an_unknown_stage(workspace: Path) -> None:
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Bad",
+            "overview": "x",
+            "todos": ["y"],
+            "stage": "finished",
+        },
+    )
+    assert result.isError
+    assert "invalid stage" in result.content[0].text
+
+
+async def test_a_user_owned_todo_is_counted_as_awaiting_the_user(workspace: Path) -> None:
+    """The whole point: a finished write-up whose only open item is a manual
+    verification must be tellable apart from a plan nobody has started."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    created = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Delivery With Verification",
+            "overview": "Shipped, pending a real-machine check.",
+            "todos": [
+                {"id": "impl", "content": "Implement it"},
+                {"id": "verify", "content": "Verify on a real machine", "owner": "user"},
+            ],
+        },
+    )
+    rel = created.structuredContent["rel_path"]
+    meta = parse_plan_meta((workspace / rel).read_text(encoding="utf-8"))
+    # The default owner is stored by being absent, so existing documents stay
+    # byte-identical when rewritten.
+    assert "owner" not in meta["todos"][0]
+    assert meta["todos"][1]["owner"] == "user"
+
+    listed = await _call("plan_list", {"workspace_path": str(workspace)})
+    entry = next(p for p in listed.structuredContent["result"] if p["rel_path"] == rel)
+    assert entry["todos"]["awaiting_user"] == 1
+
+    # Once done it is no longer awaiting anyone.
+    await _call(
+        "plan_update_todo",
+        {"workspace_path": str(workspace), "rel_path": rel, "todo_id": "verify", "status": "done"},
+    )
+    listed = await _call("plan_list", {"workspace_path": str(workspace)})
+    entry = next(p for p in listed.structuredContent["result"] if p["rel_path"] == rel)
+    assert entry["todos"]["awaiting_user"] == 0
+
+
+async def test_an_existing_todo_can_be_handed_to_the_user(workspace: Path) -> None:
+    """Backfilling matters more than new documents: the pile that prompted this
+    is 59 existing files whose verification items were never marked."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    created = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Older Report",
+            "overview": "Written before owners existed.",
+            "todos": [{"id": "check", "content": "Confirm in the real app"}],
+        },
+    )
+    rel = created.structuredContent["rel_path"]
+    updated = await _call(
+        "plan_update_todo",
+        {
+            "workspace_path": str(workspace),
+            "rel_path": rel,
+            "todo_id": "check",
+            "status": "pending",
+            "owner": "user",
+        },
+    )
+    assert updated.structuredContent["owner"] == "user"
+
+    listed = await _call("plan_list", {"workspace_path": str(workspace)})
+    entry = next(p for p in listed.structuredContent["result"] if p["rel_path"] == rel)
+    assert entry["todos"]["awaiting_user"] == 1
+
+    # And handed back again.
+    await _call(
+        "plan_update_todo",
+        {
+            "workspace_path": str(workspace),
+            "rel_path": rel,
+            "todo_id": "check",
+            "status": "pending",
+            "owner": "agent",
+        },
+    )
+    meta = parse_plan_meta((workspace / rel).read_text(encoding="utf-8"))
+    assert "owner" not in meta["todos"][0]
+
+
+async def test_an_unknown_owner_is_refused(workspace: Path) -> None:
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Bad Owner",
+            "overview": "x",
+            "todos": [{"id": "t1", "content": "y", "owner": "somebody"}],
+        },
+    )
+    assert result.isError
+    assert "invalid todo owner" in result.content[0].text
 
 
 async def test_plan_create_from_a_subdirectory_lands_in_the_repo_root(

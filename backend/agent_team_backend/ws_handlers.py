@@ -36,6 +36,7 @@ from . import (
     remote_roster,
     server_link,
     storage_service,
+    trust_store,
 )
 from .cli_vendors.codex import command_with_resume_id as codex_command_with_resume_id
 from .cli_vendors.registry import VENDORS as CLI_VENDORS
@@ -2843,11 +2844,55 @@ async def ui_settings_set(session: "Session", msg_id: str, msg_type: str, payloa
 # make the link dial, because server_link.start() only runs at boot. These two
 # handlers exist so the whole configuration is one write followed by one
 # reconnect, and so the token only ever travels toward the vault.
+#: Where the pause switch lives. In ui_settings rather than in the link itself:
+#: the link is rebuilt on every reconnect and forgets anything it holds, while
+#: this has to survive a restart — a switch that quietly turns itself back on is
+#: worse than no switch, because the user believes they are disconnected.
+LINK_PAUSED_SETTING = "agentTeam.p2p.linkPaused"
+
+
+def _link_paused() -> bool:
+    from . import app
+
+    return bool(app.ui_settings_store.get().get(LINK_PAUSED_SETTING))
+
+
 @handler("p2p.link.status")
 async def p2p_link_status(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    await session.send_json(
-        make_response(msg_id, msg_type, {"status": await server_link.status()})
-    )
+    status = await server_link.status()
+    # Reported alongside the link's own state rather than folded into it: paused
+    # is a thing the *user* did, and showing it as "unconfigured" or
+    # "unreachable" would blame the network for a switch they flipped.
+    status["paused"] = _link_paused()
+    await session.send_json(make_response(msg_id, msg_type, {"status": status}))
+
+
+@handler("p2p.link.set_paused")
+async def p2p_link_set_paused(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Turn the cross-device link off without forgetting the account.
+
+    Signing out was the only way to stop this machine talking to the server, and
+    it throws away the credential — so "I want this off for now" cost the user
+    their account on this device. Pausing keeps everything and stops the socket.
+
+    The stop is real: the link is torn down, not merely marked. A switch that
+    left the connection open while claiming to be off would be a lie told by the
+    one surface whose whole job is telling the truth about the connection.
+    """
+    from . import app
+
+    paused = bool(payload.get("paused"))
+    app.ui_settings_store.set({LINK_PAUSED_SETTING: paused})
+    if paused:
+        await server_link.stop()
+    else:
+        await server_link.start()
+    status = await server_link.status()
+    status["paused"] = paused
+    await app.broadcast(make_event("p2p.link.changed", {"status": status}))
+    await session.send_json(make_response(msg_id, msg_type, {"status": status}))
 
 
 @handler("p2p.link.configure")
@@ -2894,8 +2939,8 @@ async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, pay
         await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
 
 
-# Account sign-in. Registering creates a tenant (a private network of this
-# user's own machines) and its first admin; logging in exchanges the password
+# Account sign-in. Registering creates an account — a private network of this
+# user's own machines; logging in exchanges the password
 # for the long-lived device token. Both are the same write as p2p.link.configure
 # ends in — url to settings, token to the vault, then reconnect — so the user
 # never has to see or handle the token at all.
@@ -2921,7 +2966,10 @@ async def _account_call(
 
     request: dict = {"email": email.strip(), "password": password}
     if verb == "auth.register":
-        for optional in ("displayName", "tenantName"):
+        # One optional field, not two: auth.register's signature is
+        # (email, password, displayName), so a tenantName sent alongside it was
+        # being dropped on the floor by the server rather than doing anything.
+        for optional in ("displayName",):
             value = payload.get(optional)
             if isinstance(value, str) and value.strip():
                 request[optional] = value.strip()
@@ -2977,9 +3025,7 @@ async def _account_call(
                     "email": result.get("email"),
                     "memberId": result.get("memberId"),
                     "displayName": result.get("displayName"),
-                    "tenantId": result.get("tenantId"),
-                    "tenantName": result.get("tenantName"),
-                    "role": result.get("role"),
+
                     # Soft gate: a fresh account is unverified and still fully
                     # usable. Carried here as well as in `status` because the
                     # link has only just been told to reconnect — its own
@@ -3194,6 +3240,82 @@ async def p2p_access_requests_dismiss(
     await session.send_json(make_response(msg_id, msg_type, {"forgotten": forgotten}))
 
 
+@handler("p2p.trust.notices.list")
+async def p2p_trust_notices_list(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Devices seen for the first time, and pinned devices whose key changed."""
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "notices": trust_store.notices(),
+                "pending": trust_store.unapproved_devices(),
+                "locked": trust_store.locked_reason(),
+            },
+        )
+    )
+
+
+@handler("p2p.trust.notices.dismiss")
+async def p2p_trust_notices_dismiss(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Clear one notice — a first sighting only.
+
+    A changed key is not a notification to acknowledge; it is a refusal that is
+    currently in force, and a button that made it go away would reduce "somebody
+    may be standing in for that machine" to one click. That click is the one an
+    attacker who deleted this machine's key material is counting on, because the
+    natural next move is to pair again and make everything work. So the answer
+    here is a refusal, and the notice stays until the two fingerprints have been
+    compared somewhere this program is not.
+    """
+    dismissed = trust_store.dismiss_notice(str(payload.get("key") or ""))
+    if not dismissed:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "FORBIDDEN",
+                "a changed device key cannot be dismissed; compare the two "
+                "fingerprints with the other machine's owner first",
+            )
+        )
+        return
+    await _announce_trust_notices()
+    await session.send_json(make_response(msg_id, msg_type, {"dismissed": True}))
+
+
+@handler("p2p.trust.device.approve")
+async def p2p_trust_device_approve(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Vouch for a first-seen device: this is the machine it says it is.
+
+    This is the strongest button in the trust panel and it is deliberately not
+    the same one as answering a knock. Granting a knock lets a device reach one
+    pane under the rules; approving a device says it is *ours*, which puts it in
+    the ring that consults no rules at all. So it is addressed by device id and
+    the caller is expected to have compared the fingerprint from the first-seen
+    notice against the other machine, somewhere this program is not.
+
+    Approving does not touch the pinned key. A device whose key later changes is
+    still refused, approved or not, and that refusal is still not dismissible.
+    """
+    device_id = str(payload.get("deviceId") or "")
+    if not device_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "deviceId is required")
+        )
+        return
+    approved = await asyncio.to_thread(trust_store.approve_device, device_id)
+    if approved:
+        await _announce_trust_notices()
+    await session.send_json(make_response(msg_id, msg_type, {"approved": approved}))
+
+
 @handler("p2p.trust.block")
 async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Refuse a device outright, ahead of every rule.
@@ -3258,6 +3380,24 @@ async def p2p_trust_unblock(session: "Session", msg_id: str, msg_type: str, payl
     if await _write_policy(session, msg_id, msg_type, drop_block):
         return
     await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+async def _announce_trust_notices() -> None:
+    """Same shape the link broadcasts on its own paths, so a window has one
+    event to listen for whether the notice came from a message that was refused
+    or from a person clearing one here."""
+    from . import app
+
+    await app.broadcast(
+        make_event(
+            "p2p.trust_notices.changed",
+            {
+                "notices": trust_store.notices(),
+                "pending": trust_store.unapproved_devices(),
+                "locked": trust_store.locked_reason(),
+            },
+        )
+    )
 
 
 async def _announce_requests() -> None:
@@ -3382,146 +3522,6 @@ async def p2p_network_snapshot(
     # the server sent: "the network you had a moment ago, and the link is
     # offline" is the truth, while an error would read as "you have no network".
     await session.send_json(make_response(msg_id, msg_type, snapshot))
-
-
-# Team membership: who belongs to this team space, and what they may do. It
-# lives entirely on the server — this device asks and the server decides, so
-# these handlers add no authorization of their own beyond keeping obviously
-# malformed requests off the wire. The read answers for every role; the three
-# writes are admin-only and come back as the server's refusal for anyone else.
-# None of them touches the on-machine path, which has no concept of a member.
-#
-# Deliberately absent: delete. The server has no such request — ``revoke``
-# disables a member and drops their connections, and the row stays.
-MEMBER_ROLES = ("admin", "member", "observer")
-
-
-@handler("p2p.members.list")
-async def p2p_members_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    await session.send_json(make_response(msg_id, msg_type, await server_link.members_state()))
-
-
-async def _members_write(
-    session: "Session", msg_id: str, msg_type: str, remote_type: str, remote_payload: dict
-) -> None:
-    """Carry one membership write and answer with its result plus fresh state.
-
-    The refreshed state rides along so the pane never has to choose between
-    showing a stale roster and firing a second request: ``members_request``
-    re-reads on success, so by the time this runs the cache already holds the
-    change.
-    """
-    reply = await server_link.members_request(remote_type, remote_payload)
-    if reply is None:
-        await session.send_json(
-            make_error(
-                msg_id,
-                msg_type,
-                "P2P_NOT_CONFIGURED",
-                "no navide-server is configured, so this machine has no team",
-            )
-        )
-        return
-    if not reply.get("ok"):
-        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
-        await session.send_json(
-            make_error(
-                msg_id,
-                msg_type,
-                str(error.get("code") or "P2P_MEMBERS_WRITE_FAILED"),
-                str(error.get("message") or "the navide-server rejected the change"),
-            )
-        )
-        return
-    result = reply.get("payload")
-    await session.send_json(
-        make_response(
-            msg_id,
-            msg_type,
-            {
-                "result": result if isinstance(result, dict) else {},
-                "state": await server_link.members_state(),
-            },
-        )
-    )
-
-
-@handler("p2p.members.invite")
-async def p2p_members_invite(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    """Mint a member and their one-time invite token.
-
-    The token comes back in ``result.token`` and *only* there: the server filters
-    it out of every later roster read, so a UI that loses it has no way to ask
-    for it again — the member has to be revoked and re-invited.
-    """
-    remote: dict = {}
-    for field in ("email", "displayName"):
-        value = payload.get(field)
-        if value is not None and not isinstance(value, str):
-            await session.send_json(
-                make_error(msg_id, msg_type, "BAD_REQUEST", f"{field} must be a string")
-            )
-            return
-        if isinstance(value, str) and value.strip():
-            remote[field] = value.strip()
-    role = payload.get("role")
-    if role is not None:
-        if role not in MEMBER_ROLES:
-            await session.send_json(
-                make_error(
-                    msg_id,
-                    msg_type,
-                    "BAD_REQUEST",
-                    f"role must be one of {', '.join(MEMBER_ROLES)}",
-                )
-            )
-            return
-        remote["role"] = role
-    await _members_write(session, msg_id, msg_type, "team.members.invite", remote)
-
-
-@handler("p2p.members.set_role")
-async def p2p_members_set_role(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    member_id = payload.get("memberId")
-    role = payload.get("role")
-    if not isinstance(member_id, str) or not member_id.strip():
-        await session.send_json(
-            make_error(msg_id, msg_type, "BAD_REQUEST", "memberId is required")
-        )
-        return
-    if role not in MEMBER_ROLES:
-        await session.send_json(
-            make_error(
-                msg_id, msg_type, "BAD_REQUEST", f"role must be one of {', '.join(MEMBER_ROLES)}"
-            )
-        )
-        return
-    await _members_write(
-        session,
-        msg_id,
-        msg_type,
-        "team.members.set_role",
-        {"memberId": member_id.strip(), "role": role},
-    )
-
-
-@handler("p2p.members.revoke")
-async def p2p_members_revoke(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    """Disable a member and drop the connections they currently hold.
-
-    ``result.droppedConnections`` is the second half and the reason this is not
-    just a flag flip: disabling only refused the *next* auth.hello, so a device
-    already signed in kept working until it happened to reconnect.
-    """
-    member_id = payload.get("memberId")
-    if not isinstance(member_id, str) or not member_id.strip():
-        await session.send_json(
-            make_error(msg_id, msg_type, "BAD_REQUEST", "memberId is required")
-        )
-        return
-    await _members_write(
-        session, msg_id, msg_type, "team.members.revoke", {"memberId": member_id.strip()}
-    )
 
 
 # ── Settings bundle / metadata (settings.*) ─────────────────────────────────
@@ -6775,10 +6775,18 @@ async def agent_msg_unregister(session: "Session", msg_id: str, msg_type: str, p
 
 @handler("agent_msg.set_busy")
 async def agent_msg_set_busy(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    """The owning window reports whether a pane's agent is mid-turn, so
-    cli_list_targets can tell a caller that a target is working."""
+    """The owning window reports what a pane is doing: whether its agent is
+    mid-turn (so cli_list_targets can tell a caller the target is working) and
+    the word its own sidebar badge is showing (so the network view can call the
+    pane the same thing this window does)."""
     pane_id = str(payload.get("pane_id") or "")
-    changed = bool(pane_id) and agent_messaging.set_busy(pane_id, bool(payload.get("busy")))
+    # Absent means "this window does not report a status word", which is what an
+    # older build looks like; an empty string would blank the last one we had.
+    raw_status = payload.get("status")
+    display_status = None if raw_status is None else str(raw_status)
+    changed = bool(pane_id) and agent_messaging.set_busy(
+        pane_id, bool(payload.get("busy")), display_status
+    )
     if changed:
         server_link.roster_changed()
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "changed": changed}))

@@ -17,6 +17,7 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from agent_team_backend import app as app_module
+from agent_team_backend import ws_auth
 
 # NOTE: always reference app_module attributes at call time (not from-imports):
 # test_analyzer_routing.py reloads the app module mid-suite, which rebinds
@@ -34,13 +35,37 @@ class ClosedSocket:
         raise RuntimeError('Cannot call "send" once a close message has been sent.')
 
 
+@pytest.fixture(autouse=True)
+def _token(tmp_path, monkeypatch):
+    """The route refuses a handshake with no token, so these tests need one.
+
+    Isolated data dir so the token file lands in tmp rather than beside the
+    real backend's.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    ws_auth.issue_token()
+    yield
+    ws_auth._reset_for_test()
+
+
 class ScriptedSocket:
-    """Fake websocket: accepts, yields queued messages, then disconnects."""
+    """Fake websocket: accepts, yields queued messages, then disconnects.
+
+    Carries ``query_params`` and ``headers`` because the route now authorises
+    the handshake before accepting it (see ws_auth). The token is the real one
+    for this run — this test is about what happens when a live session drops
+    mid-flight, and it can only get there by being let in first.
+    """
 
     def __init__(self, messages: list[dict]) -> None:
         self._messages = list(messages)
+        self.query_params = {"t": ws_auth.current_token()}
+        self.headers: dict[str, str] = {}
 
     async def accept(self) -> None:
+        pass
+
+    async def close(self, code: int = 1000) -> None:
         pass
 
     async def receive_json(self) -> dict:

@@ -30,6 +30,7 @@ from agent_team_backend.mcp_server.toolkit import (
 from agent_team_backend.plan_index import resolve_plan_root
 from agent_team_backend.plugins.builtin.navide_plans.plan_meta import (
     PLAN_STAGES,
+    TODO_OWNERS,
     TODO_STATUSES,
     parse_plan_meta,
     write_plan_meta,
@@ -109,9 +110,18 @@ def _plan_filename(rel_path: str) -> str:
 
 
 def _todo_summary(meta: dict[str, Any]) -> dict[str, Any]:
-    """Summarize the meta's todos as {total, by_status} counts."""
+    """Summarize the meta's todos as {total, by_status, awaiting_user} counts.
+
+    `awaiting_user` is the count of unfinished todos nobody but the user can
+    do — a manual verification, a decision, a credential only they hold. It is
+    surfaced in the listing because otherwise it is invisible: a finished
+    write-up whose only remaining item is "verify on a real machine" looks
+    exactly like an untouched plan, and the reader has to open every document
+    to tell which ones are actually waiting on them.
+    """
     counts: dict[str, int] = {}
     total = 0
+    awaiting_user = 0
     todos = meta.get("todos")
     if isinstance(todos, list):
         for todo in todos:
@@ -121,7 +131,9 @@ def _todo_summary(meta: dict[str, Any]) -> dict[str, Any]:
             status = todo.get("status")
             key = status if isinstance(status, str) and status else "unknown"
             counts[key] = counts.get(key, 0) + 1
-    return {"total": total, "by_status": counts}
+            if todo.get("owner") == "user" and key not in ("done", "skipped"):
+                awaiting_user += 1
+    return {"total": total, "by_status": counts, "awaiting_user": awaiting_user}
 
 
 def _list_plans_sync(workspace_path: str) -> list[dict[str, Any]]:
@@ -233,18 +245,30 @@ def _save_plan(
         raise FsError(str(result.get("error") or "write failed"))
 
 
-def _normalize_todos(todos: list[str | dict[str, str]]) -> list[dict[str, str]]:
-    """Validate the plan_create todos param into [{id, content, status}]."""
+def _normalize_todos(
+    todos: list[str | dict[str, str]], status: str = "pending"
+) -> list[dict[str, str]]:
+    """Validate the plan_create todos param into [{id, content, status}].
+
+    `status` is what every todo starts at. A document created straight at
+    "done" is a record of work already finished, so its todos are its sections,
+    not things anyone is going to tick off later — leaving them pending would
+    render as "0/8 done" on a document that is complete.
+    """
     normalized: list[dict[str, str]] = []
     seen: set[str] = set()
     for index, item in enumerate(todos):
+        owner = ""
         if isinstance(item, str):
             todo_id, content = "", item
         elif isinstance(item, dict):
             todo_id = str(item.get("id") or "")
             content = str(item.get("content") or "")
+            owner = str(item.get("owner") or "")
         else:
-            raise FsError("each todo must be a string or a {id?, content} object")
+            raise FsError("each todo must be a string or a {id?, content, owner?} object")
+        if owner and owner not in TODO_OWNERS:
+            raise FsError(f"invalid todo owner: {owner!r} (valid: {', '.join(sorted(TODO_OWNERS))})")
         content = content.strip()
         if not content:
             raise FsError(f"todo #{index + 1} has empty content")
@@ -254,15 +278,20 @@ def _normalize_todos(todos: list[str | dict[str, str]]) -> list[dict[str, str]]:
         if todo_id in seen:
             raise FsError(f"duplicate todo id: {todo_id}")
         seen.add(todo_id)
-        normalized.append({"id": todo_id, "content": content, "status": "pending"})
+        entry = {"id": todo_id, "content": content, "status": status}
+        # Omitted rather than written as "agent": the default needs no storage,
+        # and an absent key keeps existing documents byte-identical on rewrite.
+        if owner == "user":
+            entry["owner"] = owner
+        normalized.append(entry)
     return normalized
 
 
 def _todos_markup(todos: list[dict[str, str]]) -> str:
     """Render todo <li> rows in the template's shape (ids pre-validated)."""
     return "\n        ".join(
-        f'<li data-status="pending" data-todo-id="{todo["id"]}">\n'
-        f'          <span class="st">pending</span>\n'
+        f'<li data-status="{todo["status"]}" data-todo-id="{todo["id"]}">\n'
+        f'          <span class="st">{todo["status"]}</span>\n'
         f"          <span>{html_escape(todo['content'])}</span>\n"
         f"        </li>"
         for todo in todos
@@ -270,13 +299,20 @@ def _todos_markup(todos: list[dict[str, str]]) -> str:
 
 
 def _create_plan_sync(
-    workspace_path: str, name: str, overview: str, todos: list[str | dict[str, str]]
+    workspace_path: str,
+    name: str,
+    overview: str,
+    todos: list[str | dict[str, str]],
+    stage: str = "draft",
 ) -> dict[str, Any]:
     name = name.strip()
     if not name:
         raise FsError("plan name must be non-empty")
+    stage = (stage or "draft").strip() or "draft"
+    if stage not in PLAN_STAGES:
+        raise FsError(f"invalid stage: {stage!r} (valid: {', '.join(sorted(PLAN_STAGES))})")
     overview = overview.strip()
-    normalized = _normalize_todos(todos)
+    normalized = _normalize_todos(todos, "done" if stage == "done" else "pending")
     root = _plans_root(workspace_path)
     template = root / TEMPLATE_FILENAME
     if not template.is_file():
@@ -304,18 +340,28 @@ def _create_plan_sync(
     # Sweep every remaining {{…}} placeholder (Goals/Risks/etc. prose the
     # caller does not supply) so no template scaffolding leaks into the plan.
     content = _PLACEHOLDER_RE.sub("TBD", content)
+    # Stages past the approval gate imply the gate was passed, and the visible
+    # badge is written from the meta, so both have to be set here rather than
+    # left for a follow-up plan_update_stage call.
+    approved_at = (
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if stage in ("approved", "in-progress", "done")
+        else None
+    )
     meta = {
         "schemaVersion": 1,
         "name": name,
         "overview": overview,
-        "stage": "draft",
-        "approvedAt": None,
+        "stage": stage,
+        "approvedAt": approved_at,
         "todos": normalized,
         "reviewNotes": [],
     }
+    content = content.replace('<span class="pill draft">draft</span>',
+                              f'<span class="pill {stage}">{stage}</span>')
     content = write_plan_meta(content, meta)
     _save_plan(workspace_path, filename, content)
-    return {"rel_path": _plan_rel_path(filename), "name": name, "stage": "draft"}
+    return {"rel_path": _plan_rel_path(filename), "name": name, "stage": stage}
 
 
 def _update_stage_sync(workspace_path: str, rel_path: str, stage: str) -> dict[str, Any]:
@@ -330,8 +376,10 @@ def _update_stage_sync(workspace_path: str, rel_path: str, stage: str) -> dict[s
 
 
 def _update_todo_sync(
-    workspace_path: str, rel_path: str, todo_id: str, status: str
+    workspace_path: str, rel_path: str, todo_id: str, status: str, owner: str = ""
 ) -> dict[str, Any]:
+    if owner and owner not in TODO_OWNERS:
+        raise FsError(f"invalid todo owner: {owner!r} (valid: {', '.join(sorted(TODO_OWNERS))})")
     if status not in TODO_STATUSES:
         raise FsError(f"invalid status: {status!r} (valid: {', '.join(sorted(TODO_STATUSES))})")
     html, meta, mtime = _load_plan_for_write(workspace_path, rel_path)
@@ -344,6 +392,11 @@ def _update_todo_sync(
         valid = [t["id"] for t in todos if isinstance(t, dict) and isinstance(t.get("id"), str)]
         raise FsError(f"unknown todo id: {todo_id!r} (valid ids: {', '.join(valid) or 'none'})")
     target["status"] = status
+    if owner == "user":
+        target["owner"] = owner
+    elif owner == "agent":
+        # Back to the default, which is stored by being absent.
+        target.pop("owner", None)
     _save_plan(workspace_path, rel_path, write_plan_meta(html, meta), expected_mtime=mtime)
     return dict(target)
 
@@ -420,15 +473,29 @@ async def plan_create(
     todos: list[str | dict[str, str]],
     ctx: Context,
     workspace_path: str = "",
+    stage: str = "draft",
 ) -> dict[str, Any]:
     """Create a new plan document in the workspace's .agent-team/plans/ directory.
 
     The file is copied from the provisioned _template.html (auto-provisioned
-    if missing), named <kebab-slug>_<6-hex>.html per the plan spec, and starts
-    at stage "draft". Each todos item is either a plain string (the todo
-    content; id auto-assigned as t1, t2, ...) or a {"id": "<kebab-case>",
-    "content": "..."} object; every todo starts as "pending". name/overview/
-    todos are written to both the plan-meta island and the visible markup.
+    if missing), named <kebab-slug>_<6-hex>.html per the plan spec. Each todos
+    item is either a plain string (the todo content; id auto-assigned as t1,
+    t2, ...) or a {"id": "<kebab-case>", "content": "...", "owner": "user"}
+    object. Set `owner: "user"` on anything only the user can do — a manual
+    verification, a decision, a credential only they hold. Those are the items
+    nobody comes back to tick off, and without the marker a finished document
+    waiting on one verification is indistinguishable from an untouched plan.
+    name/overview/todos are written to both the plan-meta island and the
+    visible markup.
+
+    `stage` is where the document starts, "draft" by default — a plan you are
+    about to have approved. Pass "done" for a document that RECORDS work
+    already finished (a report, an audit, an inventory): it is not waiting for
+    anyone, and its todos are its sections, so they are created "done" too.
+    Using "in-review" for a finished report is the common mistake — that stage
+    means "blocked until the user approves it", which a report never is.
+    Stages at or past the approval gate ("approved", "in-progress", "done")
+    also stamp approvedAt, so no follow-up plan_update_stage call is needed.
     Returns {rel_path, name, stage}, plus "warning" when workspace_path does
     not match any pane's workspace — the plan is on disk but Navide's plan
     view will not find it; re-create it under the warned-about workspace.
@@ -442,11 +509,13 @@ async def plan_create(
         caller,
         workspace_path,
         "plans.create",
-        {"name": name, "overview": overview, "todos": todos},
+        {"name": name, "overview": overview, "todos": todos, "stage": stage},
     )
     if routed is not _NO_HOST_ROUTE:
         return routed
-    result = await asyncio.to_thread(_create_plan_sync, workspace_path, name, overview, todos)
+    result = await asyncio.to_thread(
+        _create_plan_sync, workspace_path, name, overview, todos, stage
+    )
     warning = await asyncio.to_thread(workspace_mismatch_warning, workspace_path)
     if warning:
         result["warning"] = warning
@@ -480,13 +549,26 @@ async def plan_update_stage(
 
 
 async def plan_update_todo(
-    rel_path: str, todo_id: str, status: str, ctx: Context, workspace_path: str = ""
+    rel_path: str,
+    todo_id: str,
+    status: str,
+    ctx: Context,
+    workspace_path: str = "",
+    owner: str = "",
 ) -> dict[str, Any]:
     """Set one todo's status (island + the todo's visible row markup).
 
     status must be one of: pending, in-progress, done, skipped. An unknown
     todo_id fails with an error listing the plan's valid todo ids. Returns the
     updated todo object.
+
+    `owner` reassigns who the todo is waiting on: "user" for something only
+    they can do (a manual verification, a decision, a credential only they
+    hold), "agent" to put it back to the default. Omit it to leave the owner
+    alone. This is what keeps a finished write-up from looking like an
+    untouched plan — plan_list counts unfinished user-owned todos as
+    `todos.awaiting_user`, so "which documents are waiting on me" becomes a
+    question that can be answered without opening every one of them.
 
     workspace_path defaults to your own pane's workspace; pass it only to
     update another project's plan.
@@ -497,11 +579,13 @@ async def plan_update_todo(
         caller,
         workspace_path,
         "plans.update_todo",
-        {"rel_path": rel_path, "todo_id": todo_id, "status": status},
+        {"rel_path": rel_path, "todo_id": todo_id, "status": status, "owner": owner},
     )
     if routed is not _NO_HOST_ROUTE:
         return routed
-    return await asyncio.to_thread(_update_todo_sync, workspace_path, rel_path, todo_id, status)
+    return await asyncio.to_thread(
+        _update_todo_sync, workspace_path, rel_path, todo_id, status, owner
+    )
 
 
 async def plan_add_note(

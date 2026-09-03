@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   IDLE_RECLAIM_DEFAULT_MINUTES,
   IDLE_RECLAIM_MIN_MINUTES,
+  IDLE_RECLAIM_NEVER,
+  idleReclaimDisabled,
   idleReclaimThresholdMs,
   reclaimBlockedBy,
   RECLAIM_NOW_THRESHOLD_MS,
@@ -128,5 +130,39 @@ describe('idleReclaimThresholdMs', () => {
   it('falls back to the default when the stored value is not a number', () => {
     expect(idleReclaimThresholdMs('')).toBe(IDLE_RECLAIM_DEFAULT_MINUTES * 60_000)
     expect(idleReclaimThresholdMs('later')).toBe(IDLE_RECLAIM_DEFAULT_MINUTES * 60_000)
+  })
+})
+
+// "Never" has to be a word rather than a number, because every number here is
+// a duration the floor clamps — '0' means fifteen minutes, not off.
+describe('never', () => {
+  it('recognises the sentinel, and nothing else', () => {
+    expect(idleReclaimDisabled(IDLE_RECLAIM_NEVER)).toBe(true)
+    expect(idleReclaimDisabled('Never')).toBe(true)
+    expect(idleReclaimDisabled(' never ')).toBe(true)
+    for (const stored of ['15', '30', '60', '180', '480', '0', '', 'later']) {
+      expect(idleReclaimDisabled(stored), stored).toBe(false)
+    }
+  })
+
+  // The sweep checks idleReclaimDisabled and returns before it measures ages.
+  // This is the backstop for a caller that does not: an unreachable threshold
+  // reclaims nothing, where the old non-numeric fallback would have reclaimed
+  // on the 30-minute default the user just switched off.
+  it('answers with a threshold no pane can ever reach', () => {
+    expect(idleReclaimThresholdMs(IDLE_RECLAIM_NEVER)).toBe(Number.POSITIVE_INFINITY)
+  })
+
+  it('refuses a pane idle for a century as too recent', () => {
+    const ancient = idleForHours({ lastTouchedAt: NOW - 100 * 365 * 24 * 60 * 60_000 })
+    expect(reclaimBlockedBy(ancient, idleReclaimThresholdMs(IDLE_RECLAIM_NEVER), NOW))
+      .toBe('too-recent')
+  })
+
+  // The setting is about the timer. Pressing "reclaim now" is the user asking
+  // by name, and never was never an answer to that question.
+  it('leaves manual reclaim working', () => {
+    const justIdle = idleForHours({ lastTouchedAt: NOW - 1_000 })
+    expect(reclaimBlockedBy(justIdle, RECLAIM_NOW_THRESHOLD_MS, NOW)).toBeNull()
   })
 })
