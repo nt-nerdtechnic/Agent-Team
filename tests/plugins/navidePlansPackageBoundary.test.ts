@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const repositoryRoot = resolve(import.meta.dirname, '../..')
 const packageRoot = join(repositoryRoot, 'plugins/navide-plans')
+const supportedLocales = ['en-US', 'zh-TW'] as const
 
 function sourceText(root: string): string {
   return readdirSync(root, { withFileTypes: true })
@@ -90,6 +91,20 @@ describe('navide.plans production package boundary', () => {
     expect(backend).not.toContain('"network"')
     expect(backend).not.toContain('agentMethods')
     expect(backend).not.toContain('agent_team_backend')
+  })
+
+  it.each(supportedLocales)('%s owns Plans messages while preserving the legacy recovery shadow', (locale) => {
+    const pluginMessages = JSON.parse(
+      readFileSync(join(packageRoot, `src/locales/${locale}.json`), 'utf8'),
+    ) as Record<string, unknown>
+    const shadowMessages = JSON.parse(
+      readFileSync(
+        join(repositoryRoot, `packages/plugin-ui/src/foundation/i18n/locales/${locale}.json`),
+        'utf8',
+      ),
+    ) as { pane?: { plans?: Record<string, unknown> } }
+
+    expect(pluginMessages).toEqual({ pane: { plans: shadowMessages.pane?.plans } })
   })
 
   it('ships both the v2 artifact and explicit legacy recovery resources', () => {
