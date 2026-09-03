@@ -58,6 +58,7 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     resolve: {
       alias: {
+        '@navide/plugin-contracts': resolve(__dirname, 'packages/plugin-contracts/src/index.ts'),
         '@navide/plugin-ui/shared': resolve(__dirname, 'packages/plugin-ui/src/shared/index.ts'),
         '@navide/terminal': resolve(__dirname, 'src/renderer/src/platform/terminal/index.ts'),
         '@navide/plugin-shell': resolve(__dirname, 'src/renderer/src/platform/plugin-shell/index.ts'),
