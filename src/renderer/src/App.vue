@@ -13191,6 +13191,34 @@ const ctxTargetIds = computed<string[]>(() => {
 })
 const ctxIsBatch = computed(() => ctxTargetIds.value.length > 1)
 
+// "Send message": the address of the right-clicked pane, to be typed into the
+// pane the user is currently working in. Same string the @-menu completes, so
+// this is the menu gesture for what dropping a pane onto a typed "@" does.
+// Null when there is nothing to insert: a pane without a messaging handle
+// (plain terminals have none) cannot be addressed, mentioning the focused pane
+// inside itself addresses no one, and a batch selection has no single address.
+const ctxMentionAddress = computed<string | null>(() => {
+  const m = paneCtxMenu.value
+  if (!m || ctxIsBatch.value) return null
+  const focusId = effectiveFocusPaneId.value
+  if (!focusId || focusId === m.paneId) return null
+  return panes.value.find((p) => p.id === m.paneId)?.messagingName ?? null
+})
+
+// Deliberately NOT injectText: no Enter is sent, matching the @-menu and the
+// pane-drop mention. The user writes the message after the address and submits
+// it themselves.
+async function mentionPaneInFocusedPane(paneId: string): Promise<void> {
+  const targetPaneId = effectiveFocusPaneId.value
+  const address = panes.value.find((p) => p.id === paneId)?.messagingName
+  closePaneCtxMenu()
+  if (!targetPaneId || !address || targetPaneId === paneId) return
+  const lineBeforeCursor = paneRefs[targetPaneId]?.readLineBeforeCursor?.()
+  await pastePaneContext(targetPaneId, buildMentionInsert(lineBeforeCursor, address))
+  paneRefs[targetPaneId]?.focus?.()
+  rememberMentionPick([address])
+}
+
 function openPaneCtxMenu(e: MouseEvent, paneId: string): void {
   e.preventDefault()
   paneCtxMenu.value = { paneId, x: e.clientX, y: e.clientY }
@@ -15278,6 +15306,12 @@ function paneIsCommander(p: ActivePane): boolean {
           @click="restorePane(paneCtxMenu!.paneId); closePaneCtxMenu()"
         >{{ $t('action.restore') }}</div>
         <div class="pane-ctx-item" @click="startRenamePane(paneCtxMenu!.paneId)">{{ $t('action.rename') }}</div>
+        <div
+          class="pane-ctx-item"
+          :class="{ disabled: !ctxMentionAddress }"
+          :title="$t('action.send-message-title')"
+          @click="mentionPaneInFocusedPane(paneCtxMenu!.paneId)"
+        >{{ $t('action.send-message') }}</div>
         <div
           v-if="isGhostPane(paneCtxView)"
           class="pane-ctx-item"

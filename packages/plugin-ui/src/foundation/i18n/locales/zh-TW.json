@@ -473,6 +473,8 @@
     "abort": "中止",
     "remove": "移除",
     "focus": "聚焦",
+    "send-message": "傳送訊息",
+    "send-message-title": "把這個 Agent 的 @名稱插入你正在輸入的 pane",
     "interrupt": "中斷",
     "interrupt-not-running": "無法中斷：Agent 目前未在執行中",
     "reapply-role": "重新套用角色",

@@ -473,6 +473,8 @@
     "abort": "Abort",
     "remove": "Remove",
     "focus": "Focus",
+    "send-message": "Send message",
+    "send-message-title": "Insert this agent's @handle into the pane you are typing in",
     "interrupt": "Interrupt",
     "interrupt-not-running": "Cannot interrupt: agent is not running",
     "reapply-role": "Reapply role",
