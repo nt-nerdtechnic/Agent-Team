@@ -1723,6 +1723,7 @@
     "workspace": "工作區",
     "pipelines": "流程",
     "active-agents": "執行中 ({running}/{total})",
+    "descendant-count": "{count} 個子代",
     "no-agents-running": "沒有執行中的 Agent。",
     "no-agents-yet": "尚無 agent — 新增一個開始",
     "manual-spawn": "啟動Agent",

@@ -7,7 +7,7 @@ import type { LineageRow } from '../workspaceGroups'
 
 const p = (id: string) => ({ id })
 const none = new Set<string>()
-const row = (id: string, depth = 0): LineageRow => ({ id, depth, hasChildren: false, collapsed: false })
+const row = (id: string, depth = 0): LineageRow => ({ id, depth, hasChildren: false, collapsed: false, ancestors: [], descendantCount: 0 })
 const section = (isCurrent: boolean, ...ids: string[]): SidebarSection => ({
   isCurrent,
   lineage: ids.map((id) => row(id)),

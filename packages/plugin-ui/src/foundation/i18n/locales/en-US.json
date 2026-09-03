@@ -1723,6 +1723,7 @@
     "workspace": "Workspace",
     "pipelines": "Pipelines",
     "active-agents": "Active agents ({running}/{total})",
+    "descendant-count": "{count} descendants",
     "no-agents-running": "No agents running.",
     "no-agents-yet": "No agents yet — add one to start",
     "manual-spawn": "Manual spawn",

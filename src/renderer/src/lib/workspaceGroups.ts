@@ -1,11 +1,23 @@
 import { collapseHomePath } from '@navide/terminal'
 
-/** One row of the lineage tree: a pane id and where it sits in the subtree. */
+/** One row of the lineage tree: a pane id and where it sits in the subtree.
+ *
+ *  Every field is pure structure — ids and spawn pointers, never a pane's live
+ *  status or name. That is what lets this list be rebuilt only when the tree
+ *  actually changes instead of on every 400ms status sync. */
 export interface LineageRow {
   id: string
   depth: number
   hasChildren: boolean
   collapsed: boolean
+  /** The panes this one hangs under, outermost first; empty for a root. Ids,
+   *  not names — a name is live state, and joining the two is the renderer's
+   *  job. */
+  ancestors: readonly string[]
+  /** How many panes descend from this one, at any depth. Counted whether or
+   *  not they are currently drawn, because a folded row shows this number in
+   *  place of the children it is hiding. */
+  descendantCount: number
 }
 
 /** One run group's slice of a workspace's panes.

@@ -28,13 +28,29 @@ export function buildPaneLineage(
   panes: readonly LineagePane[],
   collapsed: ReadonlySet<string>,
 ): LineageRow[] {
-  const ids = new Set(panes.map((p) => p.id))
+  const parents = effectiveParents(panes)
   const childrenOf = new Map<string, string[]>()
   for (const p of panes) {
-    const parent = p.spawnedBy && ids.has(p.spawnedBy) && p.spawnedBy !== p.id ? p.spawnedBy : ''
+    const parent = parents.get(p.id) ?? ''
     const bucket = childrenOf.get(parent)
     if (bucket) bucket.push(p.id)
     else childrenOf.set(parent, [p.id])
+  }
+
+  // Subtree sizes, computed over the whole tree rather than over the rows:
+  // a folded row shows this number instead of the children it hides, so it
+  // must not depend on whether they are currently drawn. Seeding the cache
+  // before recursing is what keeps a hand-edited cycle from recursing
+  // forever — though effectiveParents has already rerooted those.
+  const descendants = new Map<string, number>()
+  const countOf = (id: string): number => {
+    const cached = descendants.get(id)
+    if (cached !== undefined) return cached
+    descendants.set(id, 0)
+    let total = 0
+    for (const child of childrenOf.get(id) ?? []) total += 1 + countOf(child)
+    descendants.set(id, total)
+    return total
   }
 
   const rows: LineageRow[] = []
@@ -52,7 +68,7 @@ export function buildPaneLineage(
     }
   }
 
-  const walk = (parent: string, depth: number): void => {
+  const walk = (parent: string, depth: number, ancestors: readonly string[]): void => {
     for (const id of childrenOf.get(parent) ?? []) {
       if (seen.has(id)) continue
       seen.add(id)
@@ -62,16 +78,115 @@ export function buildPaneLineage(
         depth,
         hasChildren: (childrenOf.get(id)?.length ?? 0) > 0,
         collapsed: isCollapsed,
+        ancestors,
+        descendantCount: countOf(id),
       })
       if (isCollapsed) fold(id)
-      else walk(id, depth + 1)
+      else walk(id, depth + 1, [...ancestors, id])
     }
   }
-  walk('', 0)
+  walk('', 0, [])
 
   for (const p of panes) {
     if (seen.has(p.id) || folded.has(p.id)) continue
-    rows.push({ id: p.id, depth: 0, hasChildren: false, collapsed: false })
+    rows.push({ id: p.id, depth: 0, hasChildren: false, collapsed: false, ancestors: [], descendantCount: 0 })
   }
   return rows
+}
+
+/** Where each pane actually hangs, `''` for a root.
+ *
+ *  Applies the same three rules `buildPaneLineage` walks by — a parent that is
+ *  not present, a pane parented to itself, and a pane caught in a cycle all
+ *  count as roots — so ordering and rendering can never disagree about which
+ *  row is whose sibling. A cycle is decided by walking up: ancestry that never
+ *  reaches a root is a cycle, which is exactly the set the tree walk cannot
+ *  reach and appends as roots.
+ */
+export function effectiveParents(panes: readonly LineagePane[]): Map<string, string> {
+  const ids = new Set(panes.map((pane) => pane.id))
+  const raw = new Map<string, string>()
+  for (const pane of panes) {
+    const parent = pane.spawnedBy && ids.has(pane.spawnedBy) && pane.spawnedBy !== pane.id ? pane.spawnedBy : ''
+    raw.set(pane.id, parent)
+  }
+
+  const parents = new Map<string, string>()
+  for (const pane of panes) {
+    const seen = new Set<string>([pane.id])
+    let cur = raw.get(pane.id) ?? ''
+    let rooted = true
+    while (cur) {
+      if (seen.has(cur)) {
+        rooted = false
+        break
+      }
+      seen.add(cur)
+      cur = raw.get(cur) ?? ''
+    }
+    parents.set(pane.id, rooted ? raw.get(pane.id) ?? '' : '')
+  }
+  return parents
+}
+
+/** `ids` plus every pane descended from them, in `panes` order.
+ *
+ *  A drag carries a whole subtree. Pane order lives in one flat array that the
+ *  sidebar rebuilds the tree from, so moving a parent without its children
+ *  would only move the parent — the next walk puts the children straight back
+ *  underneath it, wherever it landed, and the two rows the user saw together
+ *  end up apart.
+ *
+ *  Unknown ids are dropped rather than carried, and a pane listed both
+ *  explicitly and as someone's descendant appears once.
+ */
+export function withDescendants(ids: readonly string[], panes: readonly LineagePane[]): string[] {
+  const parents = effectiveParents(panes)
+  const childrenOf = new Map<string, string[]>()
+  for (const pane of panes) {
+    const parent = parents.get(pane.id) ?? ''
+    const bucket = childrenOf.get(parent)
+    if (bucket) bucket.push(pane.id)
+    else childrenOf.set(parent, [pane.id])
+  }
+
+  const carried = new Set<string>()
+  const queue = ids.filter((id) => parents.has(id))
+  while (queue.length) {
+    const id = queue.shift() as string
+    if (carried.has(id)) continue // also the cycle guard
+    carried.add(id)
+    queue.push(...(childrenOf.get(id) ?? []))
+  }
+  return panes.filter((pane) => carried.has(pane.id)).map((pane) => pane.id)
+}
+
+/** The row a drag from `fromId` onto `toId` really lands on, or `null` when the
+ *  drop cannot be honoured.
+ *
+ *  Reordering never re-parents a pane, so a drop is only meaningful among the
+ *  dragged pane's own siblings. Dropping onto a row nested inside some other
+ *  group therefore means "put me where that group is": the target is lifted up
+ *  its ancestry until it sits at the dragged pane's level. When no ancestor
+ *  does — dropping a child onto an unrelated tree — there is no honest answer,
+ *  and refusing beats silently moving the pane somewhere the user did not aim.
+ */
+export function resolveSiblingDrop(
+  fromId: string,
+  toId: string,
+  panes: readonly LineagePane[],
+): string | null {
+  if (!fromId || !toId || fromId === toId) return null
+  const parents = effectiveParents(panes)
+  if (!parents.has(fromId) || !parents.has(toId)) return null
+
+  const home = parents.get(fromId) ?? ''
+  const seen = new Set<string>()
+  let cur = toId
+  while (cur && !seen.has(cur)) {
+    seen.add(cur)
+    if ((parents.get(cur) ?? '') === home) return cur === fromId ? null : cur
+    cur = parents.get(cur) ?? ''
+  }
+  return null
 }
