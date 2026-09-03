@@ -4,7 +4,7 @@
 
 ## Application が起動しない
 
-1. Node.js 22+、pnpm 10+、Python 3.12+、uv 0.11+ を確認します。
+1. Node.js 22.12+（22.x）、pnpm 10+、Python 3.12+、uv 0.11+ を確認します。
 2. Lock された Dependency を再インストールします。
 
    ```bash

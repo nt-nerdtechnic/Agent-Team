@@ -9,7 +9,7 @@ To install the preview, download the DMG, copy Navide to Applications, then Cont
 ## What you need to install from source
 
 - macOS 13+
-- Node.js 22+
+- Node.js 22.12+ (22.x)
 - pnpm 10+
 - Python 3.12+
 - uv 0.11+

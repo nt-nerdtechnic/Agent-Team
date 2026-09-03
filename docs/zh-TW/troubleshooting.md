@@ -4,7 +4,7 @@
 
 ## 應用程式無法啟動
 
-1. 確認 Node.js 22+、pnpm 10+、Python 3.12+ 與 uv 0.11+。
+1. 確認 Node.js 22.12+（22.x）、pnpm 10+、Python 3.12+ 與 uv 0.11+。
 2. 重新安裝 Lockfile 指定的相依套件：
 
    ```bash

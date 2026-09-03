@@ -126,7 +126,7 @@ Navide 支援配備 Apple 晶片且執行 macOS 13 以上版本的 Mac。v0.1.93
 
 ### 原始碼安裝前置需求
 
-- Node.js 22+ 與 pnpm 10+
+- Node.js 22.12+（22.x）與 pnpm 10+
 - Python 3.12+ 與 uv 0.11+
 - 至少一個受支援的 Coding CLI
 - 選用：Ollama 或本機 GGUF 分析模型

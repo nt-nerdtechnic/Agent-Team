@@ -9,7 +9,7 @@ Preview をインストールするには、DMG をダウンロードして Navi
 ## Source からインストールするために必要なもの
 
 - macOS 13+
-- Node.js 22+
+- Node.js 22.12+（22.x）
 - pnpm 10+
 - Python 3.12+
 - uv 0.11+

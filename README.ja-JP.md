@@ -126,7 +126,7 @@ Navide を Applications にコピーすればそのまま開けます。Gatekeep
 
 ### Source からのインストール要件
 
-- Node.js 22+ と pnpm 10+
+- Node.js 22.12+（22.x）と pnpm 10+
 - Python 3.12+ と uv 0.11+
 - 対応する Coding CLI が一つ以上
 - 任意：解析用の Ollama または Local GGUF Model
