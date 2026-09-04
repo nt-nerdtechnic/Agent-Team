@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 from typing import Callable
@@ -13,6 +14,12 @@ from agent_team_backend.db import DB_FILENAME, WorkspaceDatabases
 from agent_team_backend.plan_index import (
     PLAN_DOC_DIRS,
     PlanIndex,
+    _DOC_SUFFIXES,
+    _MAX_DIRECTORY_ENTRIES,
+    _MAX_NESTED_ROOTS,
+    _MAX_ROOT_DEPTH,
+    _NOISE_SEGMENTS,
+    find_nested_plan_roots,
     is_plan_doc_name,
     is_plan_doc_rel_path,
     resolve_plan_root,
@@ -587,3 +594,87 @@ def test_cache_survives_a_new_index_instance(tmp_path: Path) -> None:
 
     assert doc["cached"] is True
     assert doc["meta"] == {"name": "A"}
+
+
+def test_plan_document_locations_triple_parity() -> None:
+    """Triple-parity: legacy plan_index.py, packaged plans_backend.py, and pure data fixture."""
+    repo_root = Path(__file__).parents[2]
+    fixture_path = repo_root / "docs" / "plugin-contracts" / "plan-document-locations-v1.json"
+    assert fixture_path.exists(), f"Missing fixture at {fixture_path}"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    # Load packaged plans_backend.py
+    backend_path = repo_root / "plugins" / "navide-plans" / "backend" / "plans_backend.py"
+    spec = importlib.util.spec_from_file_location("plans_backend_parity", backend_path)
+    assert spec is not None and spec.loader is not None
+    backend_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend_module)
+
+    # 1. Directory inventory
+    assert list(PLAN_DOC_DIRS) == list(backend_module.PLAN_DOC_DIRS) == fixture["directoryInventory"]
+    assert len(PLAN_DOC_DIRS) == 7
+    assert len(set(PLAN_DOC_DIRS)) == len(PLAN_DOC_DIRS)
+
+    # 2. Supported extensions
+    assert list(_DOC_SUFFIXES) == list(backend_module.DOC_SUFFIXES) == fixture["supportedExtensions"]
+    assert len(_DOC_SUFFIXES) == 3
+
+    # 3. Discovery depth, root count limits, and directory entry limits
+    assert _MAX_ROOT_DEPTH == backend_module._MAX_ROOT_DEPTH == fixture["maxNestedDepth"] == 2
+    assert _MAX_NESTED_ROOTS == backend_module._MAX_NESTED_ROOTS == fixture["maxNestedRoots"] == 50
+    assert _MAX_DIRECTORY_ENTRIES == backend_module._MAX_DIRECTORY_ENTRIES == fixture["maxDirectoryEntries"] == 2000
+
+    # 4. Noise segments
+    assert sorted(_NOISE_SEGMENTS) == sorted(backend_module._NOISE_SEGMENTS) == sorted(fixture["noiseSegments"])
+    assert len(_NOISE_SEGMENTS) == 17
+
+    # 5. Traversal sort order
+    assert fixture["traversalSortOrder"] == "utf8_bytes_ascending"
+
+
+def test_nested_roots_deterministic_50_cap_and_utf8_sort(tmp_path: Path, index: PlanIndex) -> None:
+    """Enforces deterministic 50-root limit using utf-8 bytes ascending order with case-differing names."""
+    # 49 repos R00 through R48
+    for i in range(49):
+        name = f"R{i:02d}"
+        _repo(tmp_path, name)
+        _write(tmp_path, f"{name}/.agent-team/plans/p.html")
+
+    # 50th: Repo-Alpha (starts with 'R' 0x52, second char 'e' 0x65 > '0'-'4')
+    _repo(tmp_path, "Repo-Alpha")
+    _write(tmp_path, "Repo-Alpha/.agent-team/plans/p.html")
+
+    # 51st: repo-alpha (starts with 'r' 0x72 > 0x52)
+    _repo(tmp_path, "repo-alpha")
+    _write(tmp_path, "repo-alpha/.agent-team/plans/p.html")
+
+    roots = find_nested_plan_roots(tmp_path)
+    assert len(roots) == 50
+    assert "Repo-Alpha" in roots
+    assert "repo-alpha" not in roots
+
+    docs = _by_rel(index.list_docs(str(tmp_path)))
+    assert "Repo-Alpha/.agent-team/plans/p.html" in docs
+    assert "repo-alpha/.agent-team/plans/p.html" not in docs
+
+
+def test_nested_roots_deterministic_2000_cap_and_utf8_sort(tmp_path: Path, index: PlanIndex) -> None:
+    """Enforces deterministic 2000-entry directory cap with 2001 candidate dirs (d0000..d1998, r0000-within, z0000-beyond)."""
+    # 1,999 non-repo directories d0000 through d1998
+    for i in range(1999):
+        (tmp_path / f"d{i:04d}").mkdir()
+
+    # 2,000th candidate directory with .git: r0000-within ('d' < 'r' < 'z')
+    _repo(tmp_path, "r0000-within")
+    _write(tmp_path, "r0000-within/.agent-team/plans/p.html")
+
+    # 2,001st candidate directory with .git: z0000-beyond
+    _repo(tmp_path, "z0000-beyond")
+    _write(tmp_path, "z0000-beyond/.agent-team/plans/p.html")
+
+    roots = find_nested_plan_roots(tmp_path)
+    assert roots == ["r0000-within"]
+
+    docs = _by_rel(index.list_docs(str(tmp_path)))
+    assert "r0000-within/.agent-team/plans/p.html" in docs
+    assert "z0000-beyond/.agent-team/plans/p.html" not in docs

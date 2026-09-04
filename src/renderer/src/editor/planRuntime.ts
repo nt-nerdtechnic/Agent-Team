@@ -22,6 +22,12 @@
  * the protocol has a single home.
  */
 
+import {
+  preparePlanDocHtml as prepareSharedPlanDocHtml,
+  createSafeTodoClickHandler,
+  validatePlanMessageEvent,
+} from '@navide/plugin-ui/shared'
+
 /** Frame → host events. Anything else is ignored by the host. */
 export const PLAN_RUNTIME_EVENTS = [
   'todo-clicked',
@@ -39,7 +45,7 @@ export const MAX_ANCHOR_LENGTH = 200
 /** Upper bound for an inline section-edit HTML payload; longer is rejected. */
 export const MAX_SECTION_HTML_LENGTH = 20_000
 
-export interface PlanRuntimeInit {
+export interface PlanRuntimeConfig {
   /** Unresolved review-note count per anchor, rendered as heading badges. */
   anchors: Record<string, number>
   /** Localized label for the injected section comment button. */
@@ -51,6 +57,11 @@ export interface PlanRuntimeInit {
   cancelLabel: string
   /** Scroll offset restored after a reload triggered by a meta write. */
   scrollY: number
+}
+
+export interface PlanRuntimeInit extends PlanRuntimeConfig {
+  /** Document token bound to this preview generation. Required. */
+  documentToken: string
 }
 
 export type PlanRuntimeMessage =
@@ -84,6 +95,8 @@ export function extractPlanOutline(content: string): string[] {
 export interface PlanRuntimeHostHooks {
   /** The plan preview iframe's contentWindow; messages from any other source are ignored. */
   getSourceWindow: () => Window | null | undefined
+  /** The current expected document token; messages with mismatched/missing token are rejected. */
+  getDocumentToken: () => string
   /** Todo ids present in the parsed plan-meta; unknown ids are rejected. */
   getTodoIds: () => readonly string[]
   /** Valid outline anchors; unknown anchors are rejected. */
@@ -113,19 +126,23 @@ export const MAX_OPEN_CODE_LINE = 1_000_000
 export function createPlanRuntimeMessageHandler(
   hooks: PlanRuntimeHostHooks,
 ): (event: MessageEvent) => void {
+  const handleTodoClick = createSafeTodoClickHandler({
+    getSourceWindow: hooks.getSourceWindow,
+    getDocumentToken: hooks.getDocumentToken,
+    getValidTodoIds: hooks.getTodoIds,
+    onTodoClicked: (todoId, alt) => hooks.onTodoClicked(todoId, alt),
+  })
+
   return (event) => {
-    const source = hooks.getSourceWindow()
-    if (!source || event.source !== source) return
-    const data: unknown = event.data
-    if (typeof data !== 'object' || data === null) return
-    const msg = data as Record<string, unknown>
+    if (handleTodoClick(event)) return
+
+    const msg = validatePlanMessageEvent(event, {
+      getSourceWindow: hooks.getSourceWindow,
+      getDocumentToken: hooks.getDocumentToken,
+    })
+    if (!msg) return
+
     switch (msg.type) {
-      case 'todo-clicked': {
-        const todoId = msg.todoId
-        if (typeof todoId !== 'string' || !hooks.getTodoIds().includes(todoId)) return
-        hooks.onTodoClicked(todoId, msg.alt === true)
-        return
-      }
       case 'section-comment': {
         const anchor = msg.anchor
         if (typeof anchor !== 'string' || anchor.length === 0 || anchor.length > MAX_ANCHOR_LENGTH)
@@ -250,7 +267,12 @@ export function buildPlanRuntimeScript(init: PlanRuntimeInit): string {
   return `(function () {
   'use strict';
   var INIT = ${initJson};
-  function post(msg) { parent.postMessage(msg, '*'); }
+  function post(msg) {
+    if (INIT.documentToken) {
+      msg.documentToken = INIT.documentToken;
+    }
+    parent.postMessage(msg, '*');
+  }
 
   var style = document.createElement('style');
   style.textContent =
@@ -540,22 +562,6 @@ export function buildPlanRuntimeScript(init: PlanRuntimeInit): string {
 })();`
 }
 
-// Any <script> without type="application/json" is executable — dropped.
-// Unclosed script tags survive the regex but are blocked by the CSP nonce.
-const EXECUTABLE_SCRIPT_RE =
-  /<script\b(?![^>]*type=["']application\/json["'])[^>]*>[\s\S]*?<\/script\s*>/gi
-
-/** Remove executable scripts from a plan document; JSON data islands stay. */
-export function stripExecutableScripts(content: string): string {
-  return content.replace(EXECUTABLE_SCRIPT_RE, '')
-}
-
-function randomNonce(): string {
-  const bytes = new Uint8Array(16)
-  crypto.getRandomValues(bytes)
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
-}
-
 /**
  * Build the full srcdoc for the plan preview iframe: strip executable
  * document scripts, inject a nonce'd CSP meta (only the runtime may execute;
@@ -564,22 +570,22 @@ function randomNonce(): string {
  */
 export function preparePlanDocHtml(
   content: string,
-  init: PlanRuntimeInit,
-  nonce: string = randomNonce(),
-): string {
-  const csp =
-    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
-    `style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'nonce-${nonce}'">`
-  // Unconditionally FIRST in the document: the HTML parser hoists the meta
-  // into the implied <head>, and prepending guarantees the policy precedes
-  // any stray content before <head> (e.g. an unclosed script the strip regex
-  // could not consume).
-  const html = csp + stripExecutableScripts(content)
-  // "</scr" + "ipt>" keeps this file's own source free of a literal
-  // script-close sequence inside a string.
-  const runtimeTag = `<script nonce="${nonce}">${buildPlanRuntimeScript(init)}</scr` + 'ipt>'
-  const bodyClose = html.search(/<\/body>/i)
-  return bodyClose === -1
-    ? html + runtimeTag
-    : html.slice(0, bodyClose) + runtimeTag + html.slice(bodyClose)
+  config?: PlanRuntimeConfig,
+  overrides?: { nonce?: string },
+): { html: string; nonce: string; documentToken: string } {
+  const effectiveConfig: PlanRuntimeConfig = config ?? {
+    anchors: {},
+    commentLabel: 'Comment',
+    editLabel: 'Edit',
+    deleteLabel: 'Delete',
+    saveLabel: 'Save',
+    cancelLabel: 'Cancel',
+    scrollY: 0,
+  }
+
+  return prepareSharedPlanDocHtml(content, {
+    nonce: overrides?.nonce,
+    buildTrustedRuntimeScript: ({ documentToken }) =>
+      buildPlanRuntimeScript({ ...effectiveConfig, documentToken }),
+  })
 }

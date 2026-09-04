@@ -1,4 +1,15 @@
-import { readFileSync, readdirSync } from 'node:fs'
+import { execSync } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
@@ -121,5 +132,76 @@ describe('navide.plans production package boundary', () => {
       { from: 'dist-plugins/navide-plans', to: 'plugins/navide-plans' },
       { from: 'dist-plugins/plans', to: 'plugins/plans' },
     ]))
+  })
+
+  it('prepares the real production Plans package during pnpm dev without nesting pnpm', () => {
+    const rootPackage = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>
+    }
+    const devScript = rootPackage.scripts?.dev ?? ''
+    expect(devScript).toContain('vite build --config vite.plans.config.ts')
+    expect(devScript).toContain('vite build --config plugins/navide-plans/vite.config.ts')
+    expect(devScript).toContain('build-plans-v2-backend.mjs')
+    expect(devScript).not.toContain('pnpm')
+    expect(devScript).not.toContain('fixture')
+    expect(devScript).toContain('electron-vite dev')
+  })
+
+  it('isolates frontend Vite cleaning so the backend executable is preserved and no stale root assets remain', () => {
+    const viteConfig = readFileSync(join(packageRoot, 'vite.config.ts'), 'utf8')
+    expect(viteConfig).toMatch(/outDir:\s*(?:frontendOutDir|resolve\([^)]*['"]frontend['"]\))/)
+    expect(viteConfig).toContain('emptyOutDir: true')
+    expect(viteConfig).not.toContain('emptyOutDir: false')
+
+    const realDistBackend = join(repositoryRoot, 'dist-plugins/navide-plans/backend/navide-plans')
+    const realBackendStatBefore = existsSync(realDistBackend)
+      ? { mtimeMs: statSync(realDistBackend).mtimeMs, size: statSync(realDistBackend).size }
+      : null
+
+    const tempDistPlans = mkdtempSync(join(tmpdir(), 'navide-plans-boundary-'))
+    const backendDir = join(tempDistPlans, 'backend')
+    const backendExecutable = join(backendDir, 'navide-plans')
+    const legacyAssetsDir = join(tempDistPlans, 'assets')
+    const staleAssetFile = join(legacyAssetsDir, 'stale-test-asset.js')
+
+    try {
+      mkdirSync(backendDir, { recursive: true })
+      writeFileSync(backendExecutable, 'binary-sentinel-marker\n')
+      mkdirSync(legacyAssetsDir, { recursive: true })
+      writeFileSync(staleAssetFile, 'stale-root-asset\n')
+
+      const viteBin = resolve(repositoryRoot, 'node_modules/vite/bin/vite.js')
+      execSync(`"${process.execPath}" "${viteBin}" build --config plugins/navide-plans/vite.config.ts`, {
+        cwd: repositoryRoot,
+        stdio: 'pipe',
+        env: {
+          ...process.env,
+          NAVIDE_PLANS_DIST_DIR: tempDistPlans,
+        },
+      })
+
+      expect(existsSync(backendExecutable)).toBe(true)
+      expect(readFileSync(backendExecutable, 'utf8')).toBe('binary-sentinel-marker\n')
+      expect(existsSync(legacyAssetsDir)).toBe(false)
+
+      const manifest = JSON.parse(readFileSync(join(tempDistPlans, 'manifest.json'), 'utf8')) as {
+        contributes?: { views?: Array<{ entry: string }> }
+      }
+      expect(manifest.contributes?.views?.length).toBeGreaterThan(0)
+      for (const view of manifest.contributes?.views ?? []) {
+        const entryPath = join(tempDistPlans, view.entry)
+        expect(existsSync(entryPath)).toBe(true)
+        expect(readFileSync(entryPath, 'utf8')).toContain('<!doctype html>')
+      }
+
+      if (realBackendStatBefore !== null) {
+        expect(existsSync(realDistBackend)).toBe(true)
+        const realBackendStatAfter = statSync(realDistBackend)
+        expect(realBackendStatAfter.mtimeMs).toBe(realBackendStatBefore.mtimeMs)
+        expect(realBackendStatAfter.size).toBe(realBackendStatBefore.size)
+      }
+    } finally {
+      rmSync(tempDistPlans, { recursive: true, force: true })
+    }
   })
 })

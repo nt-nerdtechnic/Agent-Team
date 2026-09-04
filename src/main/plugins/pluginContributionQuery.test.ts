@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { composePluginContributionQuery } from './pluginContributionQuery'
+import {
+  HostLocaleManager,
+  readPersistedLocaleFromSettings,
+  resolveInitialHostLocale,
+} from '../hostLocale'
 
 describe('composePluginContributionQuery', () => {
   it('identifies an embedded Git contribution as the v2 left view with validated locale', () => {
@@ -18,7 +23,7 @@ describe('composePluginContributionQuery', () => {
     )
   })
 
-  it('identifies a standalone Git contribution as the v2 window view', () => {
+  it('identifies a standalone Git contribution as the v2 window view with validated locale', () => {
     const query = composePluginContributionQuery({
       contributionKey: 'navide.git.window',
       workspacePath: '/workspace',
@@ -73,7 +78,7 @@ describe('composePluginContributionQuery', () => {
     expect(window.get('rel_path')).toBe('.agent-team/plans/example.html')
   })
 
-  it('fails closed to zh-TW for invalid or missing Host locale', () => {
+  it('fails closed to zh-TW for invalid Host locale without adding an absent locale', () => {
     const invalidLocale = new URLSearchParams(composePluginContributionQuery({
       contributionKey: 'navide.plans.window',
       workspacePath: '/workspace',
@@ -87,7 +92,91 @@ describe('composePluginContributionQuery', () => {
     }))
 
     expect(invalidLocale.get('locale')).toBe('zh-TW')
-    expect(missingLocale.get('locale')).toBe('zh-TW')
+    expect(missingLocale.get('locale')).toBeNull()
+  })
+
+  it('composes both Git and Plans contribution queries from persisted raw/JSON canonical locales via HostLocaleManager', () => {
+    // 1. Raw persisted zh-TW
+    const rawZhSettings = { 'agent-team:language': 'zh-TW' }
+    const rawZhManager = {
+      getLocale: () => resolveInitialHostLocale({
+        persistedSetting: readPersistedLocaleFromSettings(rawZhSettings),
+        systemLocale: 'en-US',
+      }),
+    }
+    const gitLeftRawZh = new URLSearchParams(composePluginContributionQuery({
+      contributionKey: 'navide.git.left',
+      workspacePath: '/workspace',
+      theme: 'dark',
+      locale: rawZhManager.getLocale(),
+      gitReadOnly: { git_yolo: '0' },
+    }))
+    expect(gitLeftRawZh.get('locale')).toBe('zh-TW')
+    expect(gitLeftRawZh.get('contribution')).toBe('left')
+    expect(gitLeftRawZh.get('workspace_path')).toBe('/workspace')
+    expect(gitLeftRawZh.get('git_yolo')).toBe('0')
+    expect(gitLeftRawZh.get('v2')).toBe('1')
+
+    const leftRawZh = new URLSearchParams(composePluginContributionQuery({
+      contributionKey: 'navide.plans.left',
+      workspacePath: '/workspace',
+      theme: 'dark',
+      locale: rawZhManager.getLocale(),
+    }))
+    const windowRawZh = new URLSearchParams(composePluginContributionQuery({
+      contributionKey: 'navide.plans.window',
+      workspacePath: '/workspace',
+      theme: 'dark',
+      locale: rawZhManager.getLocale(),
+      extraParams: { rel_path: '.agent-team/plans/my-plan.html' },
+    }))
+
+    expect(leftRawZh.get('locale')).toBe('zh-TW')
+    expect(leftRawZh.get('contribution')).toBe('left')
+    expect(windowRawZh.get('locale')).toBe('zh-TW')
+    expect(windowRawZh.get('contribution')).toBe('window')
+    expect(windowRawZh.get('rel_path')).toBe('.agent-team/plans/my-plan.html')
+
+    // 2. Legacy JSON-encoded "en-US"
+    const jsonEnSettings = { 'agent-team:language': '\"en-US\"' }
+    const jsonEnManager = {
+      getLocale: () => resolveInitialHostLocale({
+        persistedSetting: readPersistedLocaleFromSettings(jsonEnSettings),
+        systemLocale: 'zh-TW',
+      }),
+    }
+    const gitWindowJsonEn = new URLSearchParams(composePluginContributionQuery({
+      contributionKey: 'navide.git.window',
+      workspacePath: '/workspace',
+      theme: 'light',
+      locale: jsonEnManager.getLocale(),
+      httpUrl: 'http://127.0.0.1:8787',
+      extraParams: { git_diff_filepath: 'src/main.ts' },
+    }))
+    expect(gitWindowJsonEn.get('locale')).toBe('en-US')
+    expect(gitWindowJsonEn.get('contribution')).toBe('window')
+    expect(gitWindowJsonEn.get('http_url')).toBe('http://127.0.0.1:8787')
+    expect(gitWindowJsonEn.get('git_diff_filepath')).toBe('src/main.ts')
+
+    const leftJsonEn = new URLSearchParams(composePluginContributionQuery({
+      contributionKey: 'navide.plans.left',
+      workspacePath: '/workspace',
+      theme: 'light',
+      locale: jsonEnManager.getLocale(),
+    }))
+    const windowJsonEn = new URLSearchParams(composePluginContributionQuery({
+      contributionKey: 'navide.plans.window',
+      workspacePath: '/workspace',
+      theme: 'light',
+      locale: jsonEnManager.getLocale(),
+      extraParams: { rel_path: '.agent-team/plans/spec.html' },
+    }))
+
+    expect(leftJsonEn.get('locale')).toBe('en-US')
+    expect(leftJsonEn.get('contribution')).toBe('left')
+    expect(windowJsonEn.get('locale')).toBe('en-US')
+    expect(windowJsonEn.get('contribution')).toBe('window')
+    expect(windowJsonEn.get('rel_path')).toBe('.agent-team/plans/spec.html')
   })
 
   it('keeps Host-owned context authoritative over extra entry parameters including locale', () => {
@@ -120,5 +209,16 @@ describe('composePluginContributionQuery', () => {
       v2: '1',
       contribution: 'window',
     })
+  })
+
+  it('drops an extra locale when the Host did not provide one', () => {
+    const query = new URLSearchParams(composePluginContributionQuery({
+      contributionKey: 'navide.git.left',
+      workspacePath: '/workspace',
+      theme: 'dark',
+      extraParams: { locale: 'zh-TW' },
+    }))
+
+    expect(query.get('locale')).toBeNull()
   })
 })

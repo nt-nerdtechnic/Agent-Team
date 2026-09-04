@@ -292,9 +292,14 @@ function mutationPath(context: PlansBridgeContext, path: string): string {
   return path
 }
 
-function exactArguments(arguments_: JsonValue, expectedKeys: readonly string[]): void {
+function exactArguments(
+  arguments_: JsonValue,
+  expectedKeys: readonly string[],
+  optionalKeys: readonly string[] = [],
+): void {
   const values = recordArguments(arguments_)
-  if (Object.keys(values).some((key) => !expectedKeys.includes(key)) ||
+  const allowed = new Set([...expectedKeys, ...optionalKeys])
+  if (Object.keys(values).some((key) => !allowed.has(key)) ||
       expectedKeys.some((key) => !Object.prototype.hasOwnProperty.call(values, key))) {
     throw new PlansBridgeError('INVALID_ARGUMENT')
   }
@@ -361,7 +366,7 @@ async function callFilesystemService(
   operation: PlansFilesystemServiceOperation,
   arguments_: Record<string, JsonValue>,
   context: PlansBridgeContext,
-  options: { allowConflict?: boolean } = {},
+  options: { allowConflict?: boolean; allowMissing?: boolean } = {},
 ): Promise<Record<string, JsonValue>> {
   if (context.signal.aborted) throw new PlansBridgeError('USER_CANCELLED')
   const root = authorizedPlanRoot(context)
@@ -371,7 +376,11 @@ async function callFilesystemService(
       { ...arguments_, workspace_path: root },
       context,
     ))
-    if (result.ok !== true && !(options.allowConflict && result.conflict === true)) {
+    if (
+      result.ok !== true &&
+      !(options.allowConflict && result.conflict === true) &&
+      !(options.allowMissing && result.exists === false)
+    ) {
       throw backendFailure(result, 'Workspace filesystem operation failed.')
     }
     return result
@@ -450,11 +459,18 @@ export function createHostPlansFilesystemPort(
       }
     },
     async listDir(arguments_, context): Promise<JsonValue> {
-      exactArguments(arguments_, ['rel_path'])
+      exactArguments(arguments_, ['rel_path'], ['mode'])
+      const mode = (arguments_ as Record<string, JsonValue>).mode
+      if (mode !== undefined && mode !== 'discovery' && mode !== 'display') {
+        throw new PlansBridgeError('INVALID_ARGUMENT', "Bridge argument 'mode' must be 'discovery' or 'display'.")
+      }
       const result = await callFilesystemService(
         service,
         'fs.list_dir',
-        { rel_path: pathString(arguments_, 'rel_path') },
+        {
+          rel_path: pathString(arguments_, 'rel_path'),
+          ...(typeof mode === 'string' ? { mode } : {}),
+        },
         context,
       )
       if (!Array.isArray(result.entries)) {
@@ -466,6 +482,7 @@ export function createHostPlansFilesystemPort(
           const name = (entry as Record<string, JsonValue>).name
           return typeof name === 'string' ? [name] : []
         }),
+        ...(result.truncated === true ? { truncated: true } : {}),
       }
     },
     async listFilesFlat(arguments_, context): Promise<JsonValue> {
@@ -495,10 +512,11 @@ export function createHostPlansFilesystemPort(
         'fs.stat_workspace_path',
         { rel_path: pathString(arguments_, 'rel_path') },
         context,
+        { allowMissing: true },
       )
       return {
         exists: result.exists === true,
-        isDirectory: result.is_directory === true,
+        isDirectory: result.is_directory === true || result.isDirectory === true,
         size: typeof result.size === 'number' && Number.isFinite(result.size) ? result.size : 0,
       }
     },

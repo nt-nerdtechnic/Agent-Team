@@ -60,6 +60,8 @@ export interface PluginBackendHostOptions {
   ) => ExecutionPolicySnapshot | undefined
   /** Observe a bound child becoming unavailable before the next call. */
   onBackendFailure?: (runtime: BackendRuntimeContext, error: BackendPluginError) => void
+  /** Observe child diagnostic output (stderr / startup failure diagnostics). */
+  onStderr?: (chunk: string) => void
 }
 
 interface RegisteredBackend {
@@ -169,6 +171,7 @@ export class PluginBackendHost {
   private readonly resolvePlanRoot?: PlanRootResolver
   private readonly resolveExecutionPolicy?: PluginBackendHostOptions['resolveExecutionPolicy']
   private readonly onBackendFailure?: PluginBackendHostOptions['onBackendFailure']
+  private readonly onStderr?: PluginBackendHostOptions['onStderr']
   private readonly backends = new Map<string, RegisteredBackend>()
   private readonly views = new Map<string, BoundView>()
   /** Package-version revocations are serialized and also act as an admission
@@ -186,6 +189,7 @@ export class PluginBackendHost {
     this.resolvePlanRoot = options.resolvePlanRoot
     this.resolveExecutionPolicy = options.resolveExecutionPolicy
     this.onBackendFailure = options.onBackendFailure
+    this.onStderr = options.onStderr
     this.createSupervisor = options.createSupervisor ?? defaultSupervisor
   }
 
@@ -347,6 +351,7 @@ export class PluginBackendHost {
         clientInfo: { name: 'navide-host', version: view.activation.packageVersion },
         bridgeDispatcher: this.bridgeDispatcher,
         authorizedPlanRoot: view.authorizedPlanRoot,
+        ...(this.onStderr ? { onStderr: this.onStderr } : {}),
         ...(this.resolveExecutionPolicy
           ? { resolveExecutionPolicy: this.resolveExecutionPolicy }
           : {}),

@@ -109,6 +109,30 @@ describe('PlanPane', () => {
     })
   })
 
+  it('populates v2 preferences from legacy values before first window opening', async () => {
+    window.localStorage.setItem('navide.plans.filter./tmp/demo-ws', 'approved')
+    window.localStorage.setItem('navide.plans.sort./tmp/demo-ws', 'title')
+    const wrapper = await mountApp()
+    wrapper.findComponent({ name: 'PlansPane' }).vm.$emit('open-file', {
+      filepath: '.agent-team/plans/feature_a1b2c3.html',
+      name: 'feature_a1b2c3.html',
+    })
+    await flushPromises()
+
+    const projectLegacyPlansPreferences = (window as unknown as {
+      agentTeam: { projectLegacyPlansPreferences: ReturnType<typeof vi.fn> }
+    }).agentTeam.projectLegacyPlansPreferences
+    expect(projectLegacyPlansPreferences).toHaveBeenCalledWith({
+      workspace_path: '/tmp/demo-ws',
+      values: expect.objectContaining({
+        'plans.filter': 'approved',
+        'plans.sort': 'title',
+      }),
+    })
+    window.localStorage.removeItem('navide.plans.filter./tmp/demo-ws')
+    window.localStorage.removeItem('navide.plans.sort./tmp/demo-ws')
+  })
+
   it('forwards markdown plan clicks the same way', async () => {
     const wrapper = await mountApp()
     wrapper

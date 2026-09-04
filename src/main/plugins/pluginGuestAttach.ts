@@ -17,7 +17,11 @@
  */
 
 export interface GuestAttachTarget {
-  guestAttachPreferences(src: string): { preload: string; pluginId: string } | null
+  guestAttachPreferences(src: string): {
+    preload: string
+    pluginId: string
+    additionalArguments?: string[]
+  } | null
   attachGuestContribution(src: string, guest: GuestWebContents): boolean
 }
 
@@ -99,7 +103,9 @@ export function createGuestAttachHooks(manager: GuestAttachTarget): GuestAttachH
       // The preload reads this to stamp calls with an id page content cannot
       // forge. Replacing the array (not appending) drops anything the renderer
       // put on the tag.
-      prefs.additionalArguments = [`--plugin-id=${approved.pluginId}`]
+      prefs.additionalArguments = approved.additionalArguments
+        ? [...approved.additionalArguments]
+        : [`--plugin-id=${approved.pluginId}`]
     },
 
     onDidAttach(guest) {

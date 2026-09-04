@@ -36,6 +36,24 @@ const PROTOCOL_ERROR_MESSAGE = 'Backend plugin returned an invalid protocol mess
 const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u
 const MAX_IGNORED_REQUEST_IDS = 256
 const MAX_ACTIVE_SUBSCRIPTIONS = 256
+const MAX_RETAINED_STDERR_BYTES = 64 * 1024
+const MAX_DIAGNOSTIC_EMITTED_BYTES = 64 * 1024
+export const MAX_CAUSE_STDERR_CHARS = 8192
+
+export function sanitizeDiagnosticCauseText(text: string, maxChars = MAX_CAUSE_STDERR_CHARS): string {
+  const stripped = text
+    .replace(/\x1B(?:\].*?(?:\x07|\x1B\\\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_]|.?)/gu, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/gu, '')
+  const normalized = stripped.replace(/\r\n|\r|\u2028|\u2029/gu, '\n').trim()
+  if (normalized.length <= maxChars) {
+    return normalized
+  }
+  const hasTruncatedMarker = normalized.includes('[stderr truncated]')
+  const slice = normalized.slice(0, maxChars).trimEnd()
+  return hasTruncatedMarker
+    ? `${slice}\n... [stderr truncated]`
+    : `${slice}\n... [stderr cause truncated]`
+}
 
 export type JsonValue =
   | null
@@ -118,17 +136,19 @@ export class BackendPluginError extends Error {
   readonly code: BackendPluginErrorCode
   readonly requestId?: WireRequestId
   readonly pluginCode?: string
+  override readonly cause?: unknown
 
   constructor(
     code: BackendPluginErrorCode,
     message = ERROR_MESSAGES[code],
-    options: { requestId?: WireRequestId; pluginCode?: string } = {}
+    options: { requestId?: WireRequestId; pluginCode?: string; cause?: unknown } = {}
   ) {
-    super(message)
+    super(message, { cause: options.cause })
     this.name = 'BackendPluginError'
     this.code = code
     this.requestId = options.requestId
     this.pluginCode = options.pluginCode
+    this.cause = options.cause
   }
 }
 
@@ -269,6 +289,10 @@ interface ChildGeneration {
   readonly child: ChildProcessWithoutNullStreams
   exited: boolean
   stdoutBuffer: Buffer
+  stderrBuffer: Buffer
+  stderrTruncated: boolean
+  diagnosticEmittedBytes: number
+  diagnosticTruncated: boolean
   readonly exitPromise: Promise<void>
   outputQueue: Buffer[]
   outputQueueBytes: number
@@ -278,8 +302,8 @@ interface ChildGeneration {
   listeners: {
     stdout: (chunk: Buffer | string) => void
     stderr: (chunk: Buffer | string) => void
-    error: () => void
-    exit: () => void
+    error: (err?: unknown) => void
+    exit: (code?: number | null, signal?: NodeJS.Signals | null) => void
   }
 }
 
@@ -1610,14 +1634,47 @@ export class PluginBackendSupervisor {
     } catch (value) {
       const error = value instanceof BackendPluginError
         ? value
-        : new BackendPluginError('BACKEND_UNAVAILABLE')
+        : new BackendPluginError('BACKEND_UNAVAILABLE', undefined, { cause: value })
       if (this.state !== 'closed' && this.state !== 'failed' && this.state !== 'draining') {
         this.failProcess(
           this.currentGeneration,
-          error.code === 'PROTOCOL_ERROR' ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE'
+          error.code === 'PROTOCOL_ERROR' ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE',
+          true,
+          error.cause,
         )
       }
       throw error
+    }
+  }
+
+  private emitDiagnostic(cause: unknown, generation?: ChildGeneration): void {
+    if (!this.onStderr) return
+    const targetGen = generation ?? this.currentGeneration
+    if (targetGen?.diagnosticTruncated) return
+    let message = cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)
+    message = message
+      .replace(/\x1B(?:\].*?(?:\x07|\x1B\\\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_]|.?)/gu, '')
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/gu, '')
+    if (!message.endsWith('\n')) message += '\n'
+    if (message.length > MAX_DIAGNOSTIC_EMITTED_BYTES) {
+      message = `${message.slice(0, MAX_DIAGNOSTIC_EMITTED_BYTES)}\n... [diagnostic truncated]\n`
+    }
+    if (targetGen) {
+      const remaining = MAX_DIAGNOSTIC_EMITTED_BYTES - targetGen.diagnosticEmittedBytes
+      if (remaining <= 0) {
+        targetGen.diagnosticTruncated = true
+        return
+      }
+      if (message.length > remaining) {
+        targetGen.diagnosticTruncated = true
+        message = `${message.slice(0, remaining)}\n... [diagnostic truncated]\n`
+      }
+      targetGen.diagnosticEmittedBytes += message.length
+    }
+    try {
+      this.onStderr(message)
+    } catch {
+      /* Diagnostic sinks must not affect protocol ownership. */
     }
   }
 
@@ -1631,11 +1688,16 @@ export class PluginBackendSupervisor {
     let child: ChildProcessWithoutNullStreams
     try {
       child = this.spawnProcess(this.activation.entryFile, options)
-    } catch {
-      throw new BackendPluginError('BACKEND_UNAVAILABLE')
+    } catch (cause) {
+      this.emitDiagnostic(cause)
+      this.failProcess(undefined, 'BACKEND_UNAVAILABLE', false, cause)
+      throw new BackendPluginError('BACKEND_UNAVAILABLE', undefined, { cause })
     }
     if (!child?.stdin || !child.stdout || !child.stderr) {
-      throw new BackendPluginError('BACKEND_UNAVAILABLE')
+      const cause = new Error('Child process spawned without stdio streams')
+      this.emitDiagnostic(cause)
+      this.failProcess(undefined, 'BACKEND_UNAVAILABLE', false, cause)
+      throw new BackendPluginError('BACKEND_UNAVAILABLE', undefined, { cause })
     }
     let resolveExit!: () => void
     const generation: ChildGeneration = {
@@ -1643,6 +1705,10 @@ export class PluginBackendSupervisor {
       child,
       exited: false,
       stdoutBuffer: Buffer.alloc(0),
+      stderrBuffer: Buffer.alloc(0),
+      stderrTruncated: false,
+      diagnosticEmittedBytes: 0,
+      diagnosticTruncated: false,
       outputQueue: [],
       outputQueueBytes: 0,
       outputWriting: false,
@@ -1656,14 +1722,20 @@ export class PluginBackendSupervisor {
     generation.listeners = {
       stdout: (chunk) => this.onStdout(generation, chunk),
       stderr: (chunk) => this.onStderrChunk(generation, chunk),
-      error: () => this.failProcess(generation, 'BACKEND_UNAVAILABLE'),
-      exit: () => this.onChildExit(generation),
+      error: (err) => this.onChildError(generation, err),
+      exit: (code, signal) => this.onChildExit(generation, code, signal),
     }
     this.currentGeneration = generation
     child.stdout.on('data', generation.listeners.stdout)
     child.stderr.on('data', generation.listeners.stderr)
     child.on('error', generation.listeners.error)
     child.on('exit', generation.listeners.exit)
+  }
+
+  private onChildError(generation: ChildGeneration, cause: unknown): void {
+    if (this.currentGeneration !== generation || this.state === 'closed' || this.state === 'restarting') return
+    this.emitDiagnostic(cause, generation)
+    this.failProcess(generation, 'BACKEND_UNAVAILABLE', false, cause)
   }
 
   private disposeGeneration(generation: ChildGeneration): void {
@@ -1716,15 +1788,50 @@ export class PluginBackendSupervisor {
 
   private onStderrChunk(generation: ChildGeneration, chunk: Buffer | string): void {
     if (this.currentGeneration !== generation || this.state === 'closed' || this.state === 'restarting') return
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk
+    if (!generation.stderrTruncated) {
+      const remaining = MAX_RETAINED_STDERR_BYTES - generation.stderrBuffer.length
+      if (bytes.length <= remaining) {
+        generation.stderrBuffer = Buffer.concat([generation.stderrBuffer, bytes])
+      } else {
+        generation.stderrTruncated = true
+        const kept = bytes.subarray(0, Math.max(0, remaining))
+        generation.stderrBuffer = Buffer.concat([
+          generation.stderrBuffer,
+          kept,
+          Buffer.from('\n... [stderr truncated]\n', 'utf8'),
+        ])
+      }
+    }
     if (!this.onStderr) return
-    try {
-      this.onStderr(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
-    } catch {
-      /* Diagnostic sinks must not affect protocol ownership. */
+    if (generation.diagnosticTruncated) return
+    const emitRemaining = MAX_DIAGNOSTIC_EMITTED_BYTES - generation.diagnosticEmittedBytes
+    if (bytes.length <= emitRemaining) {
+      generation.diagnosticEmittedBytes += bytes.length
+      try {
+        this.onStderr(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
+      } catch {
+        /* Diagnostic sinks must not affect protocol ownership. */
+      }
+    } else {
+      generation.diagnosticTruncated = true
+      const rawText = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+      const kept = rawText.slice(0, Math.max(0, emitRemaining))
+      const text = `${kept}\n... [stderr emission truncated]\n`
+      generation.diagnosticEmittedBytes += text.length
+      try {
+        this.onStderr(text)
+      } catch {
+        /* Diagnostic sinks must not affect protocol ownership. */
+      }
     }
   }
 
-  private onChildExit(generation: ChildGeneration): void {
+  private onChildExit(
+    generation: ChildGeneration,
+    code: number | null = null,
+    signal: NodeJS.Signals | null = null,
+  ): void {
     if (generation.exited) return
     generation.exited = true
     generation.resolveExit?.()
@@ -1739,7 +1846,24 @@ export class PluginBackendSupervisor {
       return
     }
     if (this.state !== 'closed' && this.state !== 'failed' && this.state !== 'restarting') {
-      this.failProcess(generation, generation.stdoutBuffer.length > 0 ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE', false)
+      const isProtocolError = generation.stdoutBuffer.length > 0
+      const isEarlyExit = this.state === 'starting' || this.state === 'idle'
+      let exitCause: Error | undefined
+      const stderrText = generation.stderrBuffer.length > 0 ? generation.stderrBuffer.toString('utf8') : ''
+      if (isEarlyExit || stderrText || code !== 0 || signal) {
+        const parts: string[] = []
+        if (code !== null) parts.push(`exit code ${code}`)
+        if (signal) parts.push(`signal ${signal}`)
+        if (stderrText) parts.push(`stderr: ${sanitizeDiagnosticCauseText(stderrText)}`)
+        const reason = isEarlyExit
+          ? `Child process exited prematurely during startup (${parts.length > 0 ? parts.join(', ') : 'exit code 0 before health check'})`
+          : `Child process exited unexpectedly (${parts.length > 0 ? parts.join(', ') : 'exit code 0'})`
+        exitCause = new Error(reason)
+        if (!stderrText) {
+          this.emitDiagnostic(exitCause, generation)
+        }
+      }
+      this.failProcess(generation, isProtocolError ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE', false, exitCause)
     }
   }
 
@@ -2382,18 +2506,19 @@ export class PluginBackendSupervisor {
   private failProcess(
     generation: ChildGeneration | undefined,
     code: 'BACKEND_UNAVAILABLE' | 'PROTOCOL_ERROR',
-    terminate = true
+    terminate = true,
+    cause?: unknown,
   ): void {
     if (generation && this.currentGeneration !== generation) return
     if (this.state === 'closed' || this.state === 'restarting') return
     if (this.state === 'draining') {
-      const error = new BackendPluginError(this.closeTask ? 'PLUGIN_STOPPING' : 'BACKEND_UNAVAILABLE')
+      const error = new BackendPluginError(this.closeTask ? 'PLUGIN_STOPPING' : 'BACKEND_UNAVAILABLE', undefined, { cause })
       this.abortBridgeRequestsForGeneration(generation)
       this.rejectPending(error, true, this.closeTask ? 'stopping' : 'restarting')
       return
     }
     const firstFailure = this.failure === undefined
-    const error = this.failure ?? new BackendPluginError(code)
+    const error = this.failure ?? new BackendPluginError(code, undefined, { cause })
     if (code === 'PROTOCOL_ERROR') {
       this.settleAllSubscriptions({ reason: 'protocol-error', error })
     } else {

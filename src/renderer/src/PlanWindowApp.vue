@@ -12,8 +12,8 @@ import { useI18n } from 'vue-i18n'
 import { useBackend } from './composables/useBackend'
 import { resolvePlanRoot as resolvePlanRootOperation } from '../plugins/plans/resolvePlanRoot'
 import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
-import { initSettingsBackend, onSettingsChanged } from '@navide/plugin-ui/shared'
-import { useTheme } from '@navide/plugin-ui/foundation'
+import { initSettingsBackend, onSettingsChanged, seedSettings, settingsGet } from '@navide/plugin-ui/shared'
+import { i18n, useTheme } from '@navide/plugin-ui/foundation'
 import { useNotify } from '@navide/plugin-ui/foundation'
 import { resolvePlanStore, type PlanCtx, type WriteResult } from './composables/planStore'
 import { sanitizePlanSectionHtml } from './editor/planRuntime'
@@ -37,6 +37,10 @@ const workspaceBaseName = workspacePath.split('/').filter(Boolean).at(-1) ?? wor
 // Plan to auto-open on mount: the sidebar list clicked a plan, which opened
 // this window with the plan carried in the query string.
 const initialRelPath = params.get('rel_path') ?? ''
+const rawLocale =
+  params.get('locale') ??
+  (settingsGet<string | null>('agent-team:language', null) as string | null)
+const initialLocale = rawLocale === 'zh-TW' || rawLocale === 'en-US' ? rawLocale : null
 // Launched without one (Window menu), the window reopens on whichever plan this
 // workspace last had open, keyed per workspace like the sidebar's own choices.
 const lastOpenedKey = lastOpenedStorageKey(workspacePath)
@@ -69,7 +73,12 @@ async function resolvePlanRoot(): Promise<void> {
   }
 }
 const { loadTheme } = useTheme()
-const { t } = useI18n()
+const { t, locale } = useI18n()
+if (initialLocale) {
+  locale.value = initialLocale
+  i18n.global.locale.value = initialLocale
+  seedSettings({ 'agent-team:language': initialLocale })
+}
 const { toast, confirm } = useNotify()
 
 const openDoc = ref<{ relPath: string; name: string } | null>(null)
@@ -401,7 +410,7 @@ async function buildPlanContext(): Promise<string> {
   return buildPlanCliContext({ workspacePath: planRoot.value, relPath, meta, content })
 }
 
-let offThemeSettingsChange: (() => void) | null = null
+let offSettingsChange: (() => void) | null = null
 let offPlansChanged: (() => void) | null = null
 let offPlanOpenDoc: (() => void) | null = null
 
@@ -428,9 +437,23 @@ onBeforeMount(() => {
 onMounted(() => {
   document.title = `${workspaceBaseName} — Plans`
   loadTheme()
-  offThemeSettingsChange = onSettingsChanged((keys) => {
+  offSettingsChange = onSettingsChanged((keys) => {
     if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {
       loadTheme()
+    }
+    if (keys.includes('agent-team:language')) {
+      const nextLocale = settingsGet<string>('agent-team:language', '')
+      if (nextLocale === 'zh-TW' || nextLocale === 'en-US') {
+        locale.value = nextLocale
+        i18n.global.locale.value = nextLocale
+      }
+    }
+  })
+  window.agentTeam?.onLanguageChanged?.((nextLocale) => {
+    if (nextLocale === 'zh-TW' || nextLocale === 'en-US') {
+      locale.value = nextLocale
+      i18n.global.locale.value = nextLocale
+      seedSettings({ 'agent-team:language': nextLocale })
     }
   })
   // Auto-open the plan this window was launched for, once the root its path is
@@ -441,7 +464,7 @@ onMounted(() => {
   offPlanOpenDoc = window.agentTeam?.onPlanOpenDoc?.((relPath) => openRelPath(relPath)) ?? null
 })
 onUnmounted(() => {
-  offThemeSettingsChange?.()
+  offSettingsChange?.()
   offPlansChanged?.()
   offPlanOpenDoc?.()
 })

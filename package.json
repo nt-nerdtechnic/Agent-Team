@@ -14,7 +14,7 @@
     "node": ">=22.12 <23"
   },
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "vite build --config vite.plans.config.ts && vite build --config plugins/navide-plans/vite.config.ts && node scripts/build-plans-v2-backend.mjs && electron-vite dev",
     "build": "pnpm run build:official-plugins && pnpm run build:git:legacy && electron-vite build",
     "build:official-plugins": "pnpm run build:mini-ide && pnpm run build:plans && pnpm run build:git:v2",
     "build:mini-ide": "vite build --config vite.mini-ide.config.ts",
@@ -23,7 +23,7 @@
     "build:plans:backend": "node scripts/build-plans-v2-backend.mjs",
     "build:plans": "pnpm run build:plans:legacy && pnpm run build:plans:v2 && pnpm run build:plans:backend",
     "build:plans:fixture": "node scripts/build-plans-backend.mjs",
-    "test:packaged-plans": "pnpm run build:plans:fixture && NAVIDE_TEST_PACKAGED_PLANS=1 pnpm test:run tests/integration/plansPackagedRoundtrip.test.ts src/main/plugins/pluginBackendHost.test.ts src/main/plugins/pluginBackendSupervisor.test.ts",
+    "test:packaged-plans": "pnpm run build:plans:fixture && pnpm run build:plans:backend && NAVIDE_TEST_PACKAGED_PLANS=1 NAVIDE_TEST_PRODUCTION_PLANS_BACKEND=1 pnpm test:run tests/integration/plansPackagedRoundtrip.test.ts src/main/plugins/pluginBackendHost.test.ts src/main/plugins/pluginBackendSupervisor.test.ts",
     "build:git:legacy": "vite build --config vite.git.config.ts",
     "build:git:v2": "vite build --config plugins/navide-git/vite.config.ts",
     "build:git": "pnpm run build:git:legacy && pnpm run build:git:v2",

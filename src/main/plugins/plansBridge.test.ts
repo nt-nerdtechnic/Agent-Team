@@ -527,4 +527,35 @@ describe('Plans Host Bridge ports', () => {
       context(controller.signal, [], '/workspace'),
     )).rejects.toMatchObject({ code: 'WORKSPACE_SCOPE_VIOLATION' })
   })
+
+  it('forwards discovery mode and truncated flag through Host Plans filesystem port', async () => {
+    const root = realpathSync(process.cwd())
+    const calls: Array<{ operation: string; payload: Record<string, unknown> }> = []
+    const service: PlansFilesystemService = {
+      async call(operation, payload) {
+        calls.push({ operation, payload })
+        if (operation === 'fs.list_dir') {
+          return {
+            ok: true,
+            entries: [{ name: 'repo-1', is_dir: true }],
+            truncated: true,
+          }
+        }
+        throw new Error(`unexpected operation: ${operation}`)
+      },
+    }
+    const port = createHostPlansFilesystemPort(service)
+    const bridgeContext = context(new AbortController().signal, [], '/workspace', runtime, root)
+
+    // Mode discovery + truncated forwarding
+    await expect(port.listDir({ rel_path: '', mode: 'discovery' }, bridgeContext))
+      .resolves.toEqual({ entries: ['repo-1'], truncated: true })
+    expect(calls).toEqual([
+      { operation: 'fs.list_dir', payload: { rel_path: '', mode: 'discovery', workspace_path: root } },
+    ])
+
+    // Invalid mode rejection
+    await expect(port.listDir({ rel_path: '', mode: 'invalid' }, bridgeContext))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+  })
 })

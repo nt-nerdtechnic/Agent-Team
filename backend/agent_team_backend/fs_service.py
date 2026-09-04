@@ -47,6 +47,7 @@ _NOISE_SEGMENTS = frozenset({
 })
 
 _MAX_DIR_ENTRIES = 2_000  # cap to avoid hanging on huge dirs (e.g. node_modules)
+_MAX_DIRECTORY_ENTRIES = _MAX_DIR_ENTRIES
 
 
 class FsError(Exception):
@@ -150,15 +151,30 @@ def _entry(root: Path, parent: Path, name: str, is_dir: bool) -> dict[str, Any]:
     }
 
 
-def list_dir(workspace_path: str, rel_path: str = "", show_hidden: bool = False) -> dict[str, Any]:
+def list_dir(
+    workspace_path: str,
+    rel_path: str = "",
+    show_hidden: bool = False,
+    mode: str = "display",
+) -> dict[str, Any]:
     """List a single directory level (lazy; never recurses).
 
-    Dirs first, then files, each alphabetical. Dotfiles are excluded unless
-    ``show_hidden`` is True — including ``.agent-team``, which is surfaced as a
-    normal hidden dir but shows only its user-facing ``plans/`` and
-    ``reports/`` subtrees; the rest of its contents (the live SQLite database,
-    logs, migration leftovers) stay unlistable and unopenable.
+    mode="display":
+        Dirs first, then files, each alphabetical. Dotfiles are excluded unless
+        ``show_hidden`` is True — including ``.agent-team``, which is surfaced as a
+        normal hidden dir but shows only its user-facing ``plans/`` and
+        ``reports/`` subtrees; the rest of its contents (the live SQLite database,
+        logs, migration leftovers) stay unlistable and unopenable.
+    mode="discovery":
+        Strict 4-step sequence for plan root discovery:
+        1. Directory candidates only (de.is_dir())
+        2. Filter hidden entries and noise segments
+        3. Sort by UTF-8 bytes ascending order
+        4. Cap at _MAX_DIR_ENTRIES (2000) with truncated=True
     """
+    if mode not in ("display", "discovery"):
+        return {"ok": False, "error": "invalid list_dir mode"}
+
     try:
         target = _resolve_safe(workspace_path, rel_path, allow_internal_root=True)
     except FsError as exc:
@@ -170,20 +186,40 @@ def list_dir(workspace_path: str, rel_path: str = "", show_hidden: bool = False)
     entries: list[dict[str, Any]] = []
     truncated = False
     try:
-        # os.scandir() caches is_dir() from the readdir result — no extra stat() per entry.
-        with os.scandir(target) as it:
-            scan = sorted(it, key=lambda e: (not e.is_dir(), e.name.lower()))
-        if len(scan) > _MAX_DIR_ENTRIES:
-            scan = scan[:_MAX_DIR_ENTRIES]
-            truncated = True
-        internal_root = root / PROJECT_DIR_NAME
-        for de in scan:
-            name = de.name
-            if target == internal_root and name not in _ALLOWED_AGENT_TEAM_SUBDIRS:
-                continue  # internal state — only the user-facing subtrees show
-            if name.startswith(".") and not show_hidden:
-                continue
-            entries.append(_entry(root, target, name, de.is_dir()))
+        if mode == "discovery":
+            with os.scandir(target) as it:
+                candidates = [
+                    de
+                    for de in it
+                    if de.is_dir()
+                    and not de.name.startswith(".")
+                    and de.name not in _NOISE_SEGMENTS
+                ]
+            candidates.sort(key=lambda de: de.name.encode("utf-8"))
+            if len(candidates) > _MAX_DIR_ENTRIES:
+                candidates = candidates[:_MAX_DIR_ENTRIES]
+                truncated = True
+            internal_root = root / PROJECT_DIR_NAME
+            for de in candidates:
+                name = de.name
+                if target == internal_root and name not in _ALLOWED_AGENT_TEAM_SUBDIRS:
+                    continue
+                entries.append(_entry(root, target, name, True))
+        else:
+            # os.scandir() caches is_dir() from the readdir result — no extra stat() per entry.
+            with os.scandir(target) as it:
+                scan = sorted(it, key=lambda e: (not e.is_dir(), e.name.lower()))
+            if len(scan) > _MAX_DIR_ENTRIES:
+                scan = scan[:_MAX_DIR_ENTRIES]
+                truncated = True
+            internal_root = root / PROJECT_DIR_NAME
+            for de in scan:
+                name = de.name
+                if target == internal_root and name not in _ALLOWED_AGENT_TEAM_SUBDIRS:
+                    continue  # internal state — only the user-facing subtrees show
+                if name.startswith(".") and not show_hidden:
+                    continue
+                entries.append(_entry(root, target, name, de.is_dir()))
     except OSError as exc:
         return {"ok": False, "error": str(exc)}
     result: dict[str, Any] = {
@@ -752,13 +788,27 @@ def stat_workspace_path(workspace_path: str, rel_path: str = "") -> dict[str, An
     """
     try:
         target = _resolve_safe(workspace_path, rel_path, allow_internal_root=True)
+        if not target.exists():
+            return {
+                "ok": True,
+                "exists": False,
+                "is_directory": False,
+                "size": 0,
+            }
         entry = target.stat()
         return {
             "ok": True,
             "exists": True,
-            "is_directory": entry.is_dir(),
+            "is_directory": target.is_dir(),
             "size": entry.st_size,
             "mtime": entry.st_mtime,
+        }
+    except FileNotFoundError:
+        return {
+            "ok": True,
+            "exists": False,
+            "is_directory": False,
+            "size": 0,
         }
     except (FsError, OSError) as exc:
         return {

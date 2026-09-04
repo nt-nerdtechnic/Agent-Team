@@ -1350,6 +1350,265 @@ describe('PluginBackendSupervisor', () => {
     expect(stderr).toHaveBeenCalledWith('fixture diagnostic: /private/internal/path\n')
   })
 
+  it('emits host-only diagnostic and original cause on sync spawn error before generic failure', async () => {
+    const stderr = vi.fn()
+    const onFailure = vi.fn()
+    const spawnError = new Error('spawn /custom/private/plans ENOENT')
+    const supervisor = makeSupervisor({
+      onStderr: stderr,
+      onFailure,
+      spawnProcess: () => {
+        throw spawnError
+      },
+    })
+    supervisors.push(supervisor)
+
+    const startPromise = supervisor.start()
+    await expect(startPromise).rejects.toMatchObject({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+    })
+    const error = await startPromise.catch((err) => err)
+    expect(error.cause).toBe(spawnError)
+    expect(String(error)).not.toContain('/custom/private/plans')
+
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('/custom/private/plans ENOENT'))
+    expect(onFailure).toHaveBeenCalledOnce()
+    expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+      cause: spawnError,
+    }))
+  })
+
+  it('emits host-only diagnostic and original cause on async child error before generic failure', async () => {
+    const stderr = vi.fn()
+    const onFailure = vi.fn()
+    const childError = new Error('spawn /custom/private/plans EACCES')
+    const supervisor = makeSupervisor({
+      onStderr: stderr,
+      onFailure,
+      spawnProcess: () => {
+        const child = new EventEmitter()
+        const stdin = new PassThrough()
+        const stdout = new PassThrough()
+        const childStderr = new PassThrough()
+        const childProcess = Object.assign(child, {
+          stdin,
+          stdout,
+          stderr: childStderr,
+          kill: vi.fn(),
+        }) as unknown as ChildProcessWithoutNullStreams
+        queueMicrotask(() => {
+          child.emit('error', childError)
+        })
+        return childProcess
+      },
+    })
+    supervisors.push(supervisor)
+
+    const startPromise = supervisor.start()
+    await expect(startPromise).rejects.toMatchObject({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+    })
+    const error = await startPromise.catch((err) => err)
+    expect(error.cause).toBe(childError)
+    expect(String(error)).not.toContain('/custom/private/plans')
+
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('/custom/private/plans EACCES'))
+    expect(onFailure).toHaveBeenCalledOnce()
+    expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+      cause: childError,
+    }))
+  })
+
+  it('emits host-only diagnostic on early child exit with stderr before generic failure', async () => {
+    const stderr = vi.fn()
+    const onFailure = vi.fn()
+    const supervisor = makeSupervisor({
+      onStderr: stderr,
+      onFailure,
+      spawnProcess: () => {
+        const child = new EventEmitter()
+        const stdin = new PassThrough()
+        const stdout = new PassThrough()
+        const childStderr = new PassThrough()
+        const childProcess = Object.assign(child, {
+          stdin,
+          stdout,
+          stderr: childStderr,
+          kill: vi.fn(),
+        }) as unknown as ChildProcessWithoutNullStreams
+        queueMicrotask(() => {
+          childStderr.write('fatal: cannot load /custom/private/lib.so: file not found\n')
+          child.emit('exit', 1, null)
+        })
+        return childProcess
+      },
+    })
+    supervisors.push(supervisor)
+
+    const startPromise = supervisor.start()
+    await expect(startPromise).rejects.toMatchObject({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+    })
+    const error = await startPromise.catch((err) => err)
+    expect(error.cause).toBeDefined()
+    expect(String(error.cause)).toContain('/custom/private/lib.so')
+    expect(String(error)).not.toContain('/custom/private/lib.so')
+
+    expect(stderr).toHaveBeenCalledWith('fatal: cannot load /custom/private/lib.so: file not found\n')
+    expect(onFailure).toHaveBeenCalledOnce()
+    expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+      cause: expect.objectContaining({
+        message: expect.stringContaining('/custom/private/lib.so'),
+      }),
+    }))
+  })
+
+  it('emits host-only diagnostic and records private cause on unexpected early child exit with code 0 before health', async () => {
+    const stderr = vi.fn()
+    const onFailure = vi.fn()
+    const supervisor = makeSupervisor({
+      onStderr: stderr,
+      onFailure,
+      spawnProcess: () => {
+        const child = new EventEmitter()
+        const stdin = new PassThrough()
+        const stdout = new PassThrough()
+        const childStderr = new PassThrough()
+        const childProcess = Object.assign(child, {
+          stdin,
+          stdout,
+          stderr: childStderr,
+          kill: vi.fn(),
+        }) as unknown as ChildProcessWithoutNullStreams
+        queueMicrotask(() => {
+          child.emit('exit', 0, null)
+        })
+        return childProcess
+      },
+    })
+    supervisors.push(supervisor)
+
+    const startPromise = supervisor.start()
+    await expect(startPromise).rejects.toMatchObject({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+    })
+    const error = await startPromise.catch((err) => err)
+    expect(error.cause).toBeDefined()
+    expect(String(error.cause)).toContain('prematurely')
+
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('prematurely'))
+    expect(onFailure).toHaveBeenCalledOnce()
+    expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+      cause: expect.objectContaining({
+        message: expect.stringContaining('prematurely'),
+      }),
+    }))
+  })
+
+  it('bounds retained stderr and diagnostic emission with marked truncation for malicious child stderr', async () => {
+    const stderr = vi.fn()
+    const onFailure = vi.fn()
+    const supervisor = makeSupervisor({
+      onStderr: stderr,
+      onFailure,
+      spawnProcess: () => {
+        const child = new EventEmitter()
+        const stdin = new PassThrough()
+        const stdout = new PassThrough()
+        const childStderr = new PassThrough()
+        const childProcess = Object.assign(child, {
+          stdin,
+          stdout,
+          stderr: childStderr,
+          kill: vi.fn(),
+        }) as unknown as ChildProcessWithoutNullStreams
+        queueMicrotask(() => {
+          const chunk = 'x'.repeat(4096) + '\n'
+          for (let i = 0; i < 50; i++) {
+            childStderr.write(chunk)
+          }
+          child.emit('exit', 1, null)
+        })
+        return childProcess
+      },
+    })
+    supervisors.push(supervisor)
+
+    const startPromise = supervisor.start()
+    await expect(startPromise).rejects.toMatchObject({
+      code: 'BACKEND_UNAVAILABLE',
+    })
+    const error = await startPromise.catch((err) => err)
+    expect(error.cause).toBeDefined()
+    expect(String(error.cause)).toContain('[stderr truncated]')
+
+    const totalEmitted = stderr.mock.calls.map(([arg]) => String(arg)).join('')
+    expect(totalEmitted).toContain('[stderr emission truncated]')
+    expect(totalEmitted.length).toBeLessThan(128 * 1024)
+  })
+
+  it('sanitizes terminal control sequences and line injections in child stderr while keeping path-like cause bounded', async () => {
+    const stderr = vi.fn()
+    const onFailure = vi.fn()
+    const supervisor = makeSupervisor({
+      onStderr: stderr,
+      onFailure,
+      spawnProcess: () => {
+        const child = new EventEmitter()
+        const stdin = new PassThrough()
+        const stdout = new PassThrough()
+        const childStderr = new PassThrough()
+        const childProcess = Object.assign(child, {
+          stdin,
+          stdout,
+          stderr: childStderr,
+          kill: vi.fn(),
+        }) as unknown as ChildProcessWithoutNullStreams
+        queueMicrotask(() => {
+          childStderr.write('\x1b[31;1mfatal error\x1b[0m\x1b[2J\r\n/custom/private/plans/libbackend.so: dynamic loading failed\x07\r\n')
+          child.emit('exit', 1, null)
+        })
+        return childProcess
+      },
+    })
+    supervisors.push(supervisor)
+
+    const startPromise = supervisor.start()
+    await expect(startPromise).rejects.toMatchObject({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+    })
+    const error = await startPromise.catch((err) => err)
+    expect(error.cause).toBeDefined()
+    const causeStr = String(error.cause)
+    expect(causeStr).toContain('/custom/private/plans/libbackend.so')
+    expect(causeStr).not.toContain('\x1b')
+    expect(causeStr).not.toContain('\r')
+    expect(causeStr).not.toContain('\x07')
+    expect(String(error)).not.toContain('/custom/private/plans')
+
+    expect(onFailure).toHaveBeenCalledOnce()
+    expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+      cause: expect.objectContaining({
+        message: expect.stringContaining('/custom/private/plans/libbackend.so'),
+      }),
+    }))
+  })
+
   it('gracefully closes the child and can be closed again', async () => {
     let child: ChildProcessWithoutNullStreams | undefined
     const supervisor = new PluginBackendSupervisor(activation, {

@@ -39,6 +39,21 @@ describe('createGuestAttachHooks', () => {
     expect(prefs.additionalArguments).toEqual(['--plugin-id=navide.git'])
   })
 
+  it('forwards approved additionalArguments including backend flags', () => {
+    const mgr = {
+      guestAttachPreferences: vi.fn(() => ({
+        preload: '/preload/plugin-preload.js',
+        pluginId: 'navide.plans',
+        additionalArguments: ['--plugin-id=navide.plans', '--plugin-backend=1'],
+      })),
+      attachGuestContribution: vi.fn(() => true),
+    }
+    const hooks = createGuestAttachHooks(mgr)
+    const prefs: MutableWebPreferences = {}
+    hooks.onWillAttach(event(), prefs, { src: APPROVED })
+    expect(prefs.additionalArguments).toEqual(['--plugin-id=navide.plans', '--plugin-backend=1'])
+  })
+
   it('vetoes a src the Host never handed out', () => {
     const hooks = createGuestAttachHooks(target())
     const e = event()

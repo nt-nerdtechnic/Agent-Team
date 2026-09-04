@@ -136,4 +136,22 @@ describe('Host locale resolution', () => {
     )
     expect(manager.getLocale()).toBe('zh-TW')
   })
+
+  it('regression: legacy JSON-encoded "zh-TW" setting wins over en-US system locale', () => {
+    const jsonSettings = { 'agent-team:language': '"zh-TW"' }
+    const persisted = readPersistedLocaleFromSettings(jsonSettings)
+    expect(persisted).toBe('zh-TW')
+
+    const initialLocale = resolveInitialHostLocale({
+      persistedSetting: persisted,
+      systemLocale: 'en-US',
+    })
+    expect(initialLocale).toBe('zh-TW')
+
+    const manager = new HostLocaleManager(
+      () => readPersistedLocaleFromSettings(jsonSettings),
+      () => 'en-US',
+    )
+    expect(manager.getLocale()).toBe('zh-TW')
+  })
 })

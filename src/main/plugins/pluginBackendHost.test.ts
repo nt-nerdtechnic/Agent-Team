@@ -184,6 +184,45 @@ describe('PluginBackendHost', () => {
     }), error)
   })
 
+  it('forwards host-only diagnostics and original cause without leaking OS paths to caller', async () => {
+    const onStderr = vi.fn()
+    const onBackendFailure = vi.fn()
+    const spawnError = new Error('spawn /secret/path/plans ENOENT')
+    const host = new PluginBackendHost({
+      onStderr,
+      onBackendFailure,
+      createSupervisor: (_act, options) => {
+        return new PluginBackendSupervisor(_act, {
+          ...options,
+          spawnProcess: () => {
+            throw spawnError
+          },
+        })
+      },
+      resolvePlanRoot: async ({ workspacePath }) => workspacePath,
+    })
+    hosts.push(host)
+    host.register(activation)
+
+    await expect(host.bindView(runtime, activation.packageDir, process.cwd())).resolves.toBeUndefined()
+    const callPromise = host.call(runtime.instanceId, 'fixture.echo', null)
+    await expect(callPromise).rejects.toMatchObject({
+      code: 'BACKEND_UNAVAILABLE',
+      message: 'Backend plugin is unavailable.',
+    })
+    const error = await callPromise.catch((err) => err)
+    expect(String(error)).not.toContain('/secret/path/plans')
+    expect(onStderr).toHaveBeenCalledWith(expect.stringContaining('/secret/path/plans ENOENT'))
+    expect(onBackendFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ instanceId: runtime.instanceId }),
+      expect.objectContaining({
+        code: 'BACKEND_UNAVAILABLE',
+        message: 'Backend plugin is unavailable.',
+        cause: spawnError,
+      }),
+    )
+  })
+
   it('caps bound child process slots and releases a failed root binding', async () => {
     const createSupervisor = vi.fn(() => ({
       start: vi.fn(async () => ({

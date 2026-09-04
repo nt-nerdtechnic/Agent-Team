@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import select
 import subprocess
@@ -429,11 +430,17 @@ def test_lists_metadata_less_documents_and_promotes_markdown_without_corrupting_
             arguments = params["arguments"]
             assert "workspace_path" not in arguments
             if operation == "stat_path":
-                assert arguments == {"rel_path": ".agent-team/plans"}
-                _reply_bridge(backend_process, frame, {"exists": True})
+                _reply_bridge(
+                    backend_process,
+                    frame,
+                    {"exists": arguments.get("rel_path") == ".agent-team/plans"},
+                )
             elif operation == "list_dir":
-                assert arguments == {"rel_path": ".agent-team/plans"}
-                _reply_bridge(backend_process, frame, {"entries": ["README.md"]})
+                if arguments.get("rel_path") == "":
+                    _reply_bridge(backend_process, frame, {"entries": []})
+                else:
+                    assert arguments == {"rel_path": ".agent-team/plans"}
+                    _reply_bridge(backend_process, frame, {"entries": ["README.md"]})
             elif operation == "read_file":
                 rel_path = arguments["rel_path"]
                 if rel_path not in stored:
@@ -533,3 +540,338 @@ def test_host_bridge_cancellation_settles_the_child_call(
     response = _read(backend_process)
     assert response["id"] == "read-cancel-1"
     assert response["error"]["data"] == {"code": "USER_CANCELLED"}
+
+
+def test_lists_and_reads_legacy_plans_across_doc_dirs(
+    backend_process: subprocess.Popen[bytes],
+) -> None:
+    legacy_path = ".cursor/plans/feature.plan.md"
+    legacy_content = (
+        "---\n"
+        "title: Legacy Cursor Feature\n"
+        "overview: A legacy feature plan\n"
+        "todos:\n"
+        "  - id: t1\n"
+        "    content: Step 1\n"
+        "    status: completed\n"
+        "---\n"
+        "# Legacy Cursor Feature\n\n"
+        "Details here.\n"
+    )
+    stored = {legacy_path: legacy_content}
+    mtimes = {legacy_path: 200.0}
+
+    def service_until_response(request_id: str) -> dict[str, Any]:
+        while True:
+            frame = _read(backend_process)
+            if frame.get("id") == request_id:
+                return frame
+            assert frame.get("method") == "navide/host/call"
+            params = frame["params"]
+            operation = params["operation"]
+            arguments = params["arguments"]
+            if operation == "stat_path":
+                _reply_bridge(
+                    backend_process,
+                    frame,
+                    {"exists": arguments.get("rel_path") == ".cursor/plans"},
+                )
+            elif operation == "list_dir":
+                if arguments.get("rel_path") == "":
+                    _reply_bridge(backend_process, frame, {"entries": []})
+                else:
+                    assert arguments == {"rel_path": ".cursor/plans"}
+                    _reply_bridge(backend_process, frame, {"entries": ["feature.plan.md"]})
+            elif operation == "read_file":
+                rel_path = arguments["rel_path"]
+                assert rel_path in stored
+                _reply_bridge(
+                    backend_process,
+                    frame,
+                    {"content": stored[rel_path], "mtime": mtimes[rel_path]},
+                )
+            else:
+                raise AssertionError(f"unexpected operation: {operation}")
+
+    _send(
+        backend_process,
+        {
+            "jsonrpc": "2.0",
+            "id": "list-legacy-1",
+            "method": "navide/call",
+            "params": {
+                "_meta": CLIENT_META,
+                "name": "plans.list",
+                "arguments": {},
+                "runtime": RUNTIME,
+            },
+        },
+    )
+    listed = service_until_response("list-legacy-1")
+    assert listed["result"]["value"] == [
+        {
+            "rel_path": legacy_path,
+            "name": "Legacy Cursor Feature",
+            "stage": "done",
+            "overview": "A legacy feature plan",
+            "todos": {"total": 1, "by_status": {"done": 1}},
+            "mtime": 200.0,
+            "kind": "plan",
+            "meta": {
+                "schemaVersion": 1,
+                "title": "Legacy Cursor Feature",
+                "name": "Legacy Cursor Feature",
+                "stage": "done",
+                "overview": "A legacy feature plan",
+                "approvedAt": None,
+                "archivedAt": None,
+                "todos": [{"id": "t1", "content": "Step 1", "status": "done"}],
+                "reviewNotes": [],
+            },
+        }
+    ]
+
+    # Reading the legacy plan directly by its relative path
+    _send(
+        backend_process,
+        {
+            "jsonrpc": "2.0",
+            "id": "read-legacy-1",
+            "method": "navide/call",
+            "params": {
+                "_meta": CLIENT_META,
+                "name": "plans.read",
+                "arguments": {"rel_path": legacy_path},
+                "runtime": RUNTIME,
+            },
+        },
+    )
+    read_resp = service_until_response("read-legacy-1")
+    assert read_resp["result"]["value"]["rel_path"] == legacy_path
+    assert read_resp["result"]["value"]["meta"]["name"] == "Legacy Cursor Feature"
+    assert read_resp["result"]["value"]["meta"]["stage"] == "done"
+
+
+def test_lists_nested_plan_roots_accepts_git_directory_and_rejects_git_file(
+    backend_process: subprocess.Popen[bytes],
+) -> None:
+    stored = {
+        ".agent-team/plans/top.html": "<html><head><script id='plan-meta' type='application/json'>{\"schemaVersion\":1,\"name\":\"Top Plan\",\"overview\":\"Top\",\"stage\":\"draft\",\"approvedAt\":null,\"todos\":[],\"reviewNotes\":[]}</script></head><body></body></html>",
+        "nested_repo/.agent-team/plans/nested.html": "<html><head><script id='plan-meta' type='application/json'>{\"schemaVersion\":1,\"name\":\"Nested Plan\",\"overview\":\"Nested\",\"stage\":\"approved\",\"approvedAt\":\"2026-09-04T00:00:00Z\",\"todos\":[],\"reviewNotes\":[]}</script></head><body></body></html>",
+        "submodule_dir/.agent-team/plans/sub.html": "<html><head><script id='plan-meta' type='application/json'>{\"schemaVersion\":1,\"name\":\"Sub Plan\",\"overview\":\"Sub\",\"stage\":\"draft\",\"approvedAt\":null,\"todos\":[],\"reviewNotes\":[]}</script></head><body></body></html>",
+        "submodule_dir/inner_repo/.agent-team/plans/inner.html": "<html><head><script id='plan-meta' type='application/json'>{\"schemaVersion\":1,\"name\":\"Inner Plan\",\"overview\":\"Inner\",\"stage\":\"done\",\"approvedAt\":\"2026-09-04T00:00:00Z\",\"todos\":[],\"reviewNotes\":[]}</script></head><body></body></html>",
+    }
+    mtime = 300.0
+
+    def service_until_response(request_id: str) -> dict[str, Any]:
+        while True:
+            frame = _read(backend_process)
+            if frame.get("id") == request_id:
+                return frame
+            assert frame.get("method") == "navide/host/call"
+            params = frame["params"]
+            operation = params["operation"]
+            arguments = params["arguments"]
+            if operation == "stat_path":
+                rel = arguments.get("rel_path", "")
+                if rel in stored:
+                    _reply_bridge(backend_process, frame, {"exists": True, "isDirectory": False})
+                elif rel in {
+                    ".agent-team/plans",
+                    "nested_repo",
+                    "nested_repo/.git",
+                    "nested_repo/.agent-team/plans",
+                    "submodule_dir",
+                    "submodule_dir/inner_repo",
+                    "submodule_dir/inner_repo/.git",
+                    "submodule_dir/inner_repo/.agent-team/plans",
+                }:
+                    _reply_bridge(backend_process, frame, {"exists": True, "isDirectory": True})
+                elif rel == "submodule_dir/.git":
+                    _reply_bridge(backend_process, frame, {"exists": True, "isDirectory": False})
+                else:
+                    _reply_bridge(backend_process, frame, {"exists": False, "isDirectory": False})
+            elif operation == "list_dir":
+                rel = arguments.get("rel_path", "")
+                if rel == "":
+                    _reply_bridge(backend_process, frame, {"entries": ["nested_repo", "submodule_dir"]})
+                elif rel == "submodule_dir":
+                    _reply_bridge(backend_process, frame, {"entries": ["inner_repo"]})
+                elif rel == ".agent-team/plans":
+                    _reply_bridge(backend_process, frame, {"entries": ["top.html"]})
+                elif rel == "nested_repo/.agent-team/plans":
+                    _reply_bridge(backend_process, frame, {"entries": ["nested.html"]})
+                elif rel == "submodule_dir/inner_repo/.agent-team/plans":
+                    _reply_bridge(backend_process, frame, {"entries": ["inner.html"]})
+                else:
+                    _reply_bridge(backend_process, frame, {"entries": []})
+            elif operation == "read_file":
+                rel = arguments["rel_path"]
+                if rel in stored:
+                    _reply_bridge(backend_process, frame, {"content": stored[rel], "mtime": mtime})
+                else:
+                    _error_bridge(backend_process, frame, "BACKEND_UNAVAILABLE")
+            else:
+                raise AssertionError(f"unexpected operation: {operation}")
+
+    _send(
+        backend_process,
+        {
+            "jsonrpc": "2.0",
+            "id": "list-nested-1",
+            "method": "navide/call",
+            "params": {
+                "_meta": CLIENT_META,
+                "name": "plans.list",
+                "arguments": {},
+                "runtime": RUNTIME,
+            },
+        },
+    )
+    listed = service_until_response("list-nested-1")
+    rel_paths = [doc["rel_path"] for doc in listed["result"]["value"]]
+    assert ".agent-team/plans/top.html" in rel_paths
+    assert "nested_repo/.agent-team/plans/nested.html" in rel_paths
+    assert "submodule_dir/inner_repo/.agent-team/plans/inner.html" in rel_paths
+    assert "submodule_dir/.agent-team/plans/sub.html" not in rel_paths
+
+
+def test_plans_backend_fixture_triple_parity() -> None:
+    """Triple-parity: packaged plans_backend.py, legacy plan_index.py, and pure data fixture."""
+    fixture_path = REPOSITORY_ROOT / "docs" / "plugin-contracts" / "plan-document-locations-v1.json"
+    assert fixture_path.exists(), f"Missing fixture at {fixture_path}"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    # Load packaged plans_backend.py
+    spec = importlib.util.spec_from_file_location("plans_backend_parity_check", BACKEND_ENTRY)
+    assert spec is not None and spec.loader is not None
+    backend_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend_module)
+
+    # Load legacy plan_index.py
+    from agent_team_backend import plan_index
+
+    # 1. Directory inventory
+    assert list(backend_module.PLAN_DOC_DIRS) == list(plan_index.PLAN_DOC_DIRS) == fixture["directoryInventory"]
+    assert len(backend_module.PLAN_DOC_DIRS) == 7
+    assert len(set(backend_module.PLAN_DOC_DIRS)) == len(backend_module.PLAN_DOC_DIRS)
+
+    # 2. Supported extensions
+    assert list(backend_module.DOC_SUFFIXES) == list(plan_index._DOC_SUFFIXES) == fixture["supportedExtensions"]
+    assert len(backend_module.DOC_SUFFIXES) == 3
+
+    # 3. Discovery limits
+    assert backend_module._MAX_ROOT_DEPTH == plan_index._MAX_ROOT_DEPTH == fixture["maxNestedDepth"] == 2
+    assert backend_module._MAX_NESTED_ROOTS == plan_index._MAX_NESTED_ROOTS == fixture["maxNestedRoots"] == 50
+
+    # 4. Noise segments
+    assert sorted(backend_module._NOISE_SEGMENTS) == sorted(plan_index._NOISE_SEGMENTS) == sorted(fixture["noiseSegments"])
+    assert len(backend_module._NOISE_SEGMENTS) == 17
+
+    # 5. Traversal sort order
+    assert fixture["traversalSortOrder"] == "utf8_bytes_ascending"
+
+    # 6. Max directory entries cap
+    assert (
+        backend_module._MAX_DIRECTORY_ENTRIES
+        == plan_index._MAX_DIRECTORY_ENTRIES
+        == fixture["maxDirectoryEntries"]
+        == 2000
+    )
+
+
+def test_packaged_plans_backend_nested_roots_deterministic_50_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Packaged plans_backend._find_nested_plan_roots enforces deterministic 50-root limit in UTF-8 byte order."""
+    spec = importlib.util.spec_from_file_location("plans_backend_test_roots", BACKEND_ENTRY)
+    assert spec is not None and spec.loader is not None
+    backend_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend_module)
+
+    # 49 repos R00..R48 + Repo-Alpha + repo-alpha = 51 entries
+    entries = [f"R{i:02d}" for i in range(49)] + ["Repo-Alpha", "repo-alpha"]
+    shuffled_entries = list(reversed(entries))
+
+    def fake_bridge_call(origin: dict, service: str, op: str, args: dict) -> dict:
+        if op == "list_dir" and args.get("rel_path") == "":
+            return {"entries": shuffled_entries}
+        if op == "stat_path":
+            return {"exists": True, "isDirectory": True}
+        return {}
+
+    monkeypatch.setattr(backend_module, "_bridge_call", fake_bridge_call)
+    roots = backend_module._find_nested_plan_roots({"token": "fake"})
+    assert len(roots) == 50
+    assert "Repo-Alpha" in roots
+    assert "repo-alpha" not in roots
+
+
+def test_packaged_plans_backend_nested_roots_2000_entry_wire_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production-shaped wire test: bridge returns 2,000 entries (capped) with truncated: True."""
+    spec = importlib.util.spec_from_file_location("plans_backend_test_cap_wire", BACKEND_ENTRY)
+    assert spec is not None and spec.loader is not None
+    backend_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend_module)
+
+    requested_modes: list[str | None] = []
+    # 1,999 non-repo directories + 1 repo at 2,000th slot
+    entries = [f"d{i:04d}" for i in range(1999)] + ["r0000-within"]
+    shuffled_entries = list(reversed(entries))
+
+    def fake_bridge_call(origin: dict, service: str, op: str, args: dict) -> dict:
+        if op == "list_dir":
+            requested_modes.append(args.get("mode"))
+            if args.get("rel_path") == "":
+                return {"entries": shuffled_entries, "truncated": True}
+            return {"entries": []}
+        if op == "stat_path":
+            rel = args.get("rel_path", "")
+            if rel in ("r0000-within", "r0000-within/.git"):
+                return {"exists": True, "isDirectory": True}
+            if rel.endswith("/.git"):
+                return {"exists": False, "isDirectory": False}
+            return {"exists": True, "isDirectory": True}
+        return {}
+
+    monkeypatch.setattr(backend_module, "_bridge_call", fake_bridge_call)
+    roots = backend_module._find_nested_plan_roots({"token": "fake"})
+    assert roots == ["r0000-within"]
+    assert len(requested_modes) == 2000
+    assert all(m == "discovery" for m in requested_modes)
+
+
+def test_packaged_plans_backend_nested_roots_defensive_2000_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive fallback test: abnormal bridge returns 2,001 entries; plans_backend caps internally."""
+    spec = importlib.util.spec_from_file_location("plans_backend_test_defensive_cap", BACKEND_ENTRY)
+    assert spec is not None and spec.loader is not None
+    backend_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend_module)
+
+    requested_modes: list[str | None] = []
+    # 1,999 non-repo + r0000-within + z0000-beyond = 2,001 entries
+    entries = [f"d{i:04d}" for i in range(1999)] + ["r0000-within", "z0000-beyond"]
+    shuffled_entries = list(reversed(entries))
+
+    def fake_bridge_call(origin: dict, service: str, op: str, args: dict) -> dict:
+        if op == "list_dir":
+            requested_modes.append(args.get("mode"))
+            if args.get("rel_path") == "":
+                return {"entries": shuffled_entries, "truncated": False}
+            return {"entries": []}
+        if op == "stat_path":
+            rel = args.get("rel_path", "")
+            if rel in ("r0000-within", "r0000-within/.git", "z0000-beyond", "z0000-beyond/.git"):
+                return {"exists": True, "isDirectory": True}
+            if rel.endswith("/.git"):
+                return {"exists": False, "isDirectory": False}
+            return {"exists": True, "isDirectory": True}
+        return {}
+
+    monkeypatch.setattr(backend_module, "_bridge_call", fake_bridge_call)
+    roots = backend_module._find_nested_plan_roots({"token": "fake"})
+    assert roots == ["r0000-within"]
+    assert len(requested_modes) == 2000
+    assert all(m == "discovery" for m in requested_modes)

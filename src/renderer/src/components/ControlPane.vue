@@ -778,12 +778,12 @@ const genericPluginTabs = computed(() => pluginTabs.value.filter((entry) =>
 ))
 
 async function projectPlansPreferencesBeforePrepare(): Promise<void> {
-  const workspacePath = props.workspace ?? ''
-  if (!workspacePath) return
+  const activeWorkspace = props.workspace || workspacePath.value || ''
+  if (!activeWorkspace) return
   try {
     await window.agentTeam?.projectLegacyPlansPreferences?.({
-      workspace_path: workspacePath,
-      values: readLegacyPlansPreferenceProjection(workspacePath),
+      workspace_path: activeWorkspace,
+      values: readLegacyPlansPreferenceProjection(activeWorkspace),
     })
   } catch {
     // Migration is create-only and best effort; the package still owns the
@@ -1835,7 +1835,11 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 
     <!-- ── Explorer / plugin regions (shared split: panel on top, agent dock pinned at bottom) ── -->
     <div v-show="sidebarTab === 'explorer' || sidebarTab === 'git' || sidebarTab === 'plans' || isPluginTab(sidebarTab)" class="pane-split">
-      <div class="part-top" style="flex: 1">
+      <div
+        class="part-top"
+        :class="{ 'part-top-plugin': sidebarTab !== 'explorer' && !legacyGitRecovery && !legacyPlansRecovery }"
+        style="flex: 1"
+      >
         <ExplorerPane
           v-if="backend && visibleTabIds.has('explorer')"
           v-show="sidebarTab === 'explorer'"
@@ -4474,6 +4478,10 @@ button.icon-btn.muted:hover {
   gap: 0; /* sections use border-top as divider, no inter-section gap needed */
   padding: 0 14px 4px;
   min-height: 0;
+}
+.pane-split .part-top.part-top-plugin {
+  padding: 0;
+  overflow: hidden;
 }
 /* Pipeline list is the whole scroll area now (nothing sits below it), so it
    needs the same bottom breathing room the agent pane has. */

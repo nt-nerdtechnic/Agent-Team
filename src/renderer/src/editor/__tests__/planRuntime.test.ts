@@ -15,14 +15,24 @@ import {
   extractPlanOutline,
   preparePlanDocHtml,
   sanitizePlanSectionHtml,
-  stripExecutableScripts,
+  type PlanRuntimeConfig,
   type PlanRuntimeHostHooks,
   type PlanRuntimeInit,
 } from '../planRuntime'
 
-// Labels required by PlanRuntimeInit for the inline edit/delete affordances.
+// Labels required by PlanRuntimeConfig for the inline edit/delete affordances.
 const LABELS = { editLabel: 'Edit', deleteLabel: 'Delete', saveLabel: 'Save', cancelLabel: 'Cancel' }
 function initOf(over: Partial<PlanRuntimeInit> = {}): PlanRuntimeInit {
+  return {
+    anchors: {},
+    commentLabel: 'Comment',
+    scrollY: 0,
+    documentToken: '0123456789abcdef0123456789abcdef',
+    ...LABELS,
+    ...over,
+  }
+}
+function configOf(over: Partial<PlanRuntimeConfig> = {}): PlanRuntimeConfig {
   return { anchors: {}, commentLabel: 'Comment', scrollY: 0, ...LABELS, ...over }
 }
 
@@ -85,8 +95,8 @@ describe('buildPlanRuntimeScript', () => {
   })
 })
 
-describe('stripExecutableScripts / preparePlanDocHtml', () => {
-  const init = initOf()
+describe('preparePlanDocHtml', () => {
+  const config = configOf()
 
   it('strips executable scripts but keeps the JSON plan-meta island', () => {
     const html = [
@@ -96,18 +106,20 @@ describe('stripExecutableScripts / preparePlanDocHtml', () => {
       '<script src="https://evil.example/x.js"></scr' + 'ipt>',
       '</head><body></body></html>',
     ].join('')
-    const out = stripExecutableScripts(html)
+    const { html: out, documentToken } = preparePlanDocHtml(html, config)
     expect(out).toContain('id="plan-meta"')
     expect(out).not.toContain('alert(1)')
     expect(out).not.toContain('evil.example')
+    expect(documentToken).toMatch(/^[0-9a-f]{32}$/)
   })
 
   it('prepends a nonce-restricted CSP meta at the very start and the runtime before </body>', () => {
-    const out = preparePlanDocHtml(DOC, init, 'abc123')
+    const nonce = '0123456789abcdef0123456789abcdef'
+    const { html: out } = preparePlanDocHtml(DOC, config, { nonce })
     expect(out.startsWith('<meta http-equiv="Content-Security-Policy"')).toBe(true)
-    expect(out).toContain("script-src 'nonce-abc123'")
+    expect(out).toContain(`script-src 'nonce-${nonce}'`)
     expect(out).toContain("default-src 'none'")
-    const runtimeAt = out.indexOf('<script nonce="abc123">')
+    const runtimeAt = out.indexOf(`<script nonce="${nonce}">`)
     expect(runtimeAt).toBeGreaterThan(-1)
     expect(runtimeAt).toBeLessThan(out.indexOf('</body>'))
     // The plan-meta data island survives assembly.
@@ -115,14 +127,16 @@ describe('stripExecutableScripts / preparePlanDocHtml', () => {
   })
 
   it('appends the runtime and prepends the CSP when head/body tags are missing', () => {
-    const out = preparePlanDocHtml('<p>bare fragment</p>', init, 'abc123')
+    const nonce = '0123456789abcdef0123456789abcdef'
+    const { html: out } = preparePlanDocHtml('<p>bare fragment</p>', config, { nonce })
     expect(out.startsWith('<meta http-equiv="Content-Security-Policy"')).toBe(true)
-    expect(out).toContain('<script nonce="abc123">')
+    expect(out).toContain(`<script nonce="${nonce}">`)
   })
 
   it('places the CSP before pre-head content, including an unclosed script the strip regex cannot consume', () => {
+    const nonce = '0123456789abcdef0123456789abcdef'
     const html = '<script>window.leak=1<!doctype html><html><head><title>t</title></head><body></body></html>'
-    const out = preparePlanDocHtml(html, init, 'abc123')
+    const { html: out } = preparePlanDocHtml(html, config, { nonce })
     // The unclosed script survives stripping, but the CSP still precedes it.
     expect(out.startsWith('<meta http-equiv="Content-Security-Policy"')).toBe(true)
     expect(out.indexOf('<meta http-equiv="Content-Security-Policy"')).toBeLessThan(
@@ -130,20 +144,25 @@ describe('stripExecutableScripts / preparePlanDocHtml', () => {
     )
   })
 
-  it('generates a fresh nonce per render by default', () => {
-    const a = preparePlanDocHtml(DOC, init)
-    const b = preparePlanDocHtml(DOC, init)
+  it('generates a fresh nonce and documentToken per render by default', () => {
+    const a = preparePlanDocHtml(DOC, config)
+    const b = preparePlanDocHtml(DOC, config)
     const nonceOf = (html: string): string => /script-src 'nonce-([0-9a-f]+)'/.exec(html)![1]
-    expect(nonceOf(a)).toHaveLength(32)
-    expect(nonceOf(a)).not.toBe(nonceOf(b))
+    expect(nonceOf(a.html)).toHaveLength(32)
+    expect(nonceOf(a.html)).not.toBe(nonceOf(b.html))
+    expect(a.documentToken).toMatch(/^[0-9a-f]{32}$/)
+    expect(b.documentToken).toMatch(/^[0-9a-f]{32}$/)
+    expect(a.documentToken).not.toBe(b.documentToken)
   })
 })
 
 describe('createPlanRuntimeMessageHandler', () => {
   function harness(overrides: Partial<PlanRuntimeHostHooks> = {}) {
     const frameWindow = {} as Window
+    let activeToken = '0123456789abcdef0123456789abcdef'
     const hooks: PlanRuntimeHostHooks = {
       getSourceWindow: () => frameWindow,
+      getDocumentToken: () => activeToken,
       getTodoIds: () => ['phase-a', 'phase-b'],
       getAnchors: () => ['Goals', 'Risks'],
       onTodoClicked: vi.fn(),
@@ -156,9 +175,30 @@ describe('createPlanRuntimeMessageHandler', () => {
       ...overrides,
     }
     const handler = createPlanRuntimeMessageHandler(hooks)
-    const send = (data: unknown, source: unknown = frameWindow): void =>
+    const send = (data: unknown, source: unknown = frameWindow): void => {
+      let payload = data
+      if (
+        typeof data === 'object' &&
+        data !== null &&
+        !('documentToken' in data) &&
+        !('token' in data)
+      ) {
+        payload = { ...(data as Record<string, unknown>), documentToken: activeToken }
+      }
+      handler({ data: payload, source } as MessageEvent)
+    }
+    const sendRaw = (data: unknown, source: unknown = frameWindow): void => {
       handler({ data, source } as MessageEvent)
-    return { hooks, send, frameWindow }
+    }
+    return {
+      hooks,
+      send,
+      sendRaw,
+      frameWindow,
+      setToken: (t: string) => {
+        activeToken = t
+      },
+    }
   }
 
   it('ignores messages from any other source window', () => {
@@ -288,15 +328,77 @@ describe('createPlanRuntimeMessageHandler', () => {
     expect(hooks.onSectionDelete).toHaveBeenCalledWith('Risks')
   })
 
-  it('accepts section-editing only with a boolean active flag', () => {
+  it('notifies when inline section editing starts and stops', () => {
     const { hooks, send } = harness()
     send({ type: 'section-editing', active: true })
     send({ type: 'section-editing', active: false })
-    send({ type: 'section-editing', active: 'yes' })
-    send({ type: 'section-editing' })
+    send({ type: 'section-editing', active: 'not-a-bool' })
     expect(hooks.onSectionEditing).toHaveBeenNthCalledWith(1, true)
     expect(hooks.onSectionEditing).toHaveBeenNthCalledWith(2, false)
     expect(hooks.onSectionEditing).toHaveBeenCalledTimes(2)
+  })
+
+  describe('document token generation authorization', () => {
+    it('authorizes privileged and state messages only when carrying the current documentToken', () => {
+      let currentToken = 'token-generation-1'
+      const { hooks, sendRaw } = harness({
+        getDocumentToken: () => currentToken,
+      })
+
+      // Missing documentToken rejected across all messages
+      sendRaw({ type: 'todo-clicked', todoId: 'phase-a', alt: false })
+      sendRaw({ type: 'section-comment', anchor: 'Risks' })
+      sendRaw({ type: 'section-edit', anchor: 'Risks', html: '<p>edited</p>' })
+      sendRaw({ type: 'section-delete', anchor: 'Risks' })
+      sendRaw({ type: 'open-code', path: 'src/app.ts', line: 10 })
+      sendRaw({ type: 'scroll-pos', y: 150 })
+      sendRaw({ type: 'section-editing', active: true })
+
+      expect(hooks.onTodoClicked).not.toHaveBeenCalled()
+      expect(hooks.onSectionComment).not.toHaveBeenCalled()
+      expect(hooks.onSectionEdit).not.toHaveBeenCalled()
+      expect(hooks.onSectionDelete).not.toHaveBeenCalled()
+      expect(hooks.onOpenCode).not.toHaveBeenCalled()
+      expect(hooks.onScrollPos).not.toHaveBeenCalled()
+      expect(hooks.onSectionEditing).not.toHaveBeenCalled()
+
+      // Rejected alias 'token'
+      sendRaw({ type: 'section-comment', anchor: 'Risks', token: currentToken })
+      sendRaw({ type: 'todo-clicked', todoId: 'phase-a', alt: false, token: currentToken })
+      expect(hooks.onSectionComment).not.toHaveBeenCalled()
+      expect(hooks.onTodoClicked).not.toHaveBeenCalled()
+
+      // Stale token from prior generation rejected
+      sendRaw({ type: 'section-comment', anchor: 'Risks', documentToken: 'stale-token' })
+      sendRaw({ type: 'section-edit', anchor: 'Risks', html: '<p>edited</p>', documentToken: 'stale-token' })
+      sendRaw({ type: 'section-delete', anchor: 'Risks', documentToken: 'stale-token' })
+      sendRaw({ type: 'open-code', path: 'src/app.ts', line: 10, documentToken: 'stale-token' })
+      expect(hooks.onSectionComment).not.toHaveBeenCalled()
+      expect(hooks.onSectionEdit).not.toHaveBeenCalled()
+      expect(hooks.onSectionDelete).not.toHaveBeenCalled()
+      expect(hooks.onOpenCode).not.toHaveBeenCalled()
+
+      // Valid current documentToken accepted
+      sendRaw({ type: 'section-comment', anchor: 'Risks', documentToken: currentToken })
+      expect(hooks.onSectionComment).toHaveBeenCalledWith('Risks')
+
+      sendRaw({ type: 'section-edit', anchor: 'Risks', html: '<p>edited</p>', documentToken: currentToken })
+      expect(hooks.onSectionEdit).toHaveBeenCalledWith('Risks', '<p>edited</p>')
+
+      sendRaw({ type: 'section-delete', anchor: 'Risks', documentToken: currentToken })
+      expect(hooks.onSectionDelete).toHaveBeenCalledWith('Risks')
+
+      sendRaw({ type: 'open-code', path: 'src/app.ts', line: 10, documentToken: currentToken })
+      expect(hooks.onOpenCode).toHaveBeenCalledWith('src/app.ts', 10)
+
+      sendRaw({ type: 'todo-clicked', todoId: 'phase-a', alt: false, documentToken: currentToken })
+      expect(hooks.onTodoClicked).toHaveBeenCalledWith('phase-a', false)
+
+      // Rotate token
+      currentToken = 'token-generation-2'
+      sendRaw({ type: 'section-comment', anchor: 'Risks', documentToken: 'token-generation-1' })
+      expect(hooks.onSectionComment).toHaveBeenCalledTimes(1) // Still 1, 2nd call rejected
+    })
   })
 })
 

@@ -297,7 +297,7 @@ onMounted(() => {
   settingsApi.loadLanguage()
   void settingsApi.loadHealthCheckTimeoutSec()
   window.agentTeam?.onLanguageChanged?.((locale) => {
-    settingsApi.setLanguage(locale)
+    settingsApi.setLanguage(locale, { broadcast: false })
     pushQuitConfirmConfig()
   })
   // Native application menu actions (Settings…, Check for Updates…, Open
@@ -626,7 +626,13 @@ function pluginContributionsAt(location: Exclude<PluginRegionLocation, 'left' | 
   return pluginContributionsByLocation.value[location]
 }
 
-const windowPluginContributions = computed(() => pluginContributionsByLocation.value.window)
+const windowPluginContributions = computed(() =>
+  pluginContributionsByLocation.value.window.filter(
+    (contribution) =>
+      contribution.pluginId !== 'navide.plans' &&
+      contribution.contributionKey !== 'navide.plans.window'
+  )
+)
 
 // The titlebar shows these as icons, matching the gear beside them. A plugin
 // whose icon file is missing or unreadable falls back to a glyph rather than

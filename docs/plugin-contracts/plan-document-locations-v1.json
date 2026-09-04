@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "directoryInventory": [
+    ".agent-team/plans",
+    ".agent-team/reports",
+    ".claude/loop-reports",
+    ".claude/plans",
+    ".cursor/plans",
+    "docs/plans",
+    "docs/reports"
+  ],
+  "supportedExtensions": [
+    ".html",
+    ".plan.md",
+    ".md"
+  ],
+  "maxNestedDepth": 2,
+  "maxNestedRoots": 50,
+  "maxDirectoryEntries": 2000,
+  "traversalSortOrder": "utf8_bytes_ascending",
+  "noiseSegments": [
+    ".cache",
+    ".gradle",
+    ".idea",
+    ".mypy_cache",
+    ".next",
+    ".nuxt",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".turbo",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "out",
+    "target",
+    "venv"
+  ]
+}

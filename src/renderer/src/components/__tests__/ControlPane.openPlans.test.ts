@@ -92,4 +92,29 @@ describe('ControlPane – Plans sidebar tab', () => {
     expect(wrapper.find('[data-plans-legacy-recovery-label]').exists()).toBe(true)
     expect(wrapper.findComponent({ name: 'PluginRegionHost' }).exists()).toBe(false)
   })
+
+  it('invokes projectLegacyPlansPreferences with active workspace before prepare in PluginRegionHost', async () => {
+    const projectSpy = vi.fn(async () => ({ ok: true }))
+    window.agentTeam = {
+      ...(window.agentTeam ?? {}),
+      projectLegacyPlansPreferences: projectSpy,
+    } as unknown as typeof window.agentTeam
+
+    await wrapper.setProps({
+      workspace: '/workspace/active-target',
+      pluginContributions: [plansContribution],
+      legacyPlansRecovery: false,
+    } as never)
+
+    const planHost = wrapper.findAllComponents({ name: 'PluginRegionHost' })
+      .find((host) => host.props('contribution').contributionKey === 'navide.plans.left')
+    expect(planHost).toBeDefined()
+    const beforePrepare = planHost!.props('beforePrepare') as (() => Promise<void>) | undefined
+    expect(beforePrepare).toBeDefined()
+
+    await beforePrepare!()
+    expect(projectSpy).toHaveBeenCalledWith(expect.objectContaining({
+      workspace_path: '/workspace/active-target',
+    }))
+  })
 })

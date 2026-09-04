@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import '@navide/plugin-ui/styles.css'
+import './pluginDocument.css'
 import PlansApp from './PlansApp.vue'
 import { plansViewRuntime, subscribeHostEvent } from './backend'
 import { i18n } from '@navide/plugin-ui/foundation'

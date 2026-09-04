@@ -185,7 +185,26 @@
         "editor-open-failed": "The editor could not open this document.",
         "plan-created": "Plan created.",
         "html": "HTML",
-        "markdown": "Markdown"
+        "markdown": "Markdown",
+        "errors": {
+          "generic": "Unknown backend error ({code})",
+          "backend-error": "Backend plugin request failed.",
+          "backend-unavailable": "Backend service is currently unavailable.",
+          "invalid-argument": "Invalid request arguments.",
+          "invalid-activation": "Invalid plugin activation state.",
+          "invalid-runtime": "Invalid plugin runtime.",
+          "capability-denied": "Plugin capability was denied.",
+          "resource-limit": "Plugin exceeded resource limits.",
+          "not-ready": "Backend is not ready yet.",
+          "plugin-error": "An error occurred in the plugin backend.",
+          "timeout": "Operation timed out.",
+          "plugin-stopping": "Plugin is stopping.",
+          "user-cancelled": "Operation cancelled by user.",
+          "protocol-error": "Protocol error occurred.",
+          "conflict": "Conflict detected. Please reload and try again.",
+          "internal-error": "An internal backend error occurred.",
+          "workspace-scope-violation": "Attempted to access files outside workspace scope."
+        }
       }
     }
   }

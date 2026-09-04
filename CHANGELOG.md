@@ -130,6 +130,12 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Fixed
 
+- Prevent unintended editor opens from Plans navigation: standalone initial
+  `rel_path` document loading and plan row clicks now only inspect and render
+  the plan in the standalone view without invoking `ui.openInEditor`. Left-sidebar
+  plan row selection invokes `ui.openPlansWindow` and never overwrites the
+  active editor, leaving `ui.openInEditor` strictly for explicit "Open in editor"
+  user actions.
 - Fill the complete Host slot with the isolated Git v2 left contribution,
   without exposing the browser's default white canvas or outer page margin.
 

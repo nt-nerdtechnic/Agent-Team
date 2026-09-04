@@ -27,7 +27,11 @@ import { FAIL_CLOSED_EXECUTION_POLICY, type ExecutionPolicySnapshot } from './pl
 import { PluginFactoryOptOutStore } from './plugins/pluginFactoryOptOutStore'
 import { recoverFailedGitV2Activation } from './plugins/gitV2ActivationRecovery'
 import { composePluginContributionQuery } from './plugins/pluginContributionQuery'
-import { createPlansWindowRouter } from './plansWindowRouting'
+import {
+  createPlansWindowRouter,
+  getContributionWindowConfig,
+  getContributionWindowKey,
+} from './plansWindowRouting'
 import { HostLocaleManager, readPersistedLocaleFromSettings } from './hostLocale'
 import {
   activateFactoryGitWithLegacyFallback,
@@ -2152,25 +2156,15 @@ async function openCatalogContributionWindow(
   )
   if (!contribution) return { ok: false, error: 'window contribution is not installed' }
 
-  let hostWindow = contributionWindows.get(contributionKey)
+  const windowKey = getContributionWindowKey(contributionKey, workspacePath, normalizeWorkspacePath)
+  let hostWindow = contributionWindows.get(windowKey)
   let created = false
   if (!hostWindow || hostWindow.isDestroyed()) {
-    hostWindow = new BrowserWindow({
-      width: 1280,
-      height: 820,
-      title: contribution.title,
-      titleBarStyle: 'hidden',
-      backgroundColor: '#0d1117',
-      show: false,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-      },
-    })
+    hostWindow = new BrowserWindow(getContributionWindowConfig(contributionKey, contribution.title))
     created = true
-    contributionWindows.set(contributionKey, hostWindow)
+    contributionWindows.set(windowKey, hostWindow)
     hostWindow.once('closed', () => {
-      contributionWindows.delete(contributionKey)
+      contributionWindows.delete(windowKey)
       try {
         frontendPluginManager.closeContribution(hostWindow!, contributionKey)
       } catch {
@@ -2184,10 +2178,14 @@ async function openCatalogContributionWindow(
     query: catalogContributionQuery(contributionKey, workspacePath, extraParams),
   })
   if (!result.ok) {
-    if (created && !hostWindow.isDestroyed()) hostWindow.close()
+    if (created && !hostWindow.isDestroyed()) {
+      contributionWindows.delete(windowKey)
+      hostWindow.close()
+    }
     return result
   }
   if (!hostWindow.isDestroyed()) {
+    if (hostWindow.isMinimized()) hostWindow.restore()
     hostWindow.show()
     hostWindow.focus()
   }
@@ -2564,6 +2562,7 @@ async function openLegacyPlanWindow(workspacePath: string, relPath?: string): Pr
     if (existing.isMinimized()) existing.restore()
     existing.show()
     existing.focus()
+    existing.webContents.send('settings:language-changed', currentUiLocale())
     if (recoveryBootstrap) {
       existing.webContents.send('plans:legacyRecoveryPreferences', recoveryBootstrap.preferences)
     }
@@ -2613,6 +2612,7 @@ async function openLegacyPlanWindow(workspacePath: string, relPath?: string): Pr
   loadWindow(win, {
     window: 'plans',
     workspace_path: workspacePath,
+    locale: currentUiLocale(),
     ...(plansRecoveryEnabled ? { legacy_plans_recovery: '1' } : {}),
     ...(relPath ? { rel_path: relPath } : {})
   })
@@ -3214,8 +3214,10 @@ ipcMain.on('settings:language-changed', (_event, locale: string) => {
       settings: { 'agent-team:language': normalizedLocale },
     })
   }
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('settings:language-changed', locale)
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('settings:language-changed', locale)
+    }
   }
 })
 
@@ -3636,7 +3638,7 @@ app.whenReady().then(async () => {
             // Dev-only: workspace via AGENT_TEAM_PLUGIN_WORKSPACE, else empty.
             if (host) {
               const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
-              void openPlansPluginView(host, process.env['AGENT_TEAM_PLUGIN_WORKSPACE'] ?? '', httpUrl, '', currentUiTheme())
+              void openPlansPluginView(host, process.env['AGENT_TEAM_PLUGIN_WORKSPACE'] ?? '', httpUrl, '', currentUiTheme(), currentUiLocale())
             }
           }
         }

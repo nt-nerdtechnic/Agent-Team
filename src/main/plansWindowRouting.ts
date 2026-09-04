@@ -22,6 +22,68 @@ export interface PlansWindowRouter {
   openPlanWindow: (workspacePath: string, relPath?: string) => Promise<boolean>
 }
 
+export interface ContributionWindowConfig {
+  width: number
+  height: number
+  title?: string
+  titleBarStyle?: 'hidden'
+  backgroundColor: string
+  show: boolean
+  modal?: boolean
+  parent?: undefined
+  webPreferences: {
+    contextIsolation: boolean
+    nodeIntegration: boolean
+  }
+}
+
+export function getContributionWindowKey(
+  contributionKey: string,
+  workspacePath: string,
+  normalizeWorkspace?: (path: string) => string,
+): string {
+  if (contributionKey === `${PLANS_PLUGIN_ID}.window`) {
+    const normalized = normalizeWorkspace
+      ? normalizeWorkspace(workspacePath)
+      : (workspacePath ?? '').trim().replace(/\/+$/, '')
+    return `${contributionKey}:${normalized}`
+  }
+  return contributionKey
+}
+
+export function getContributionWindowConfig(
+  contributionKey: string,
+  title?: string,
+): ContributionWindowConfig {
+  if (contributionKey === `${PLANS_PLUGIN_ID}.window`) {
+    return {
+      width: 1100,
+      height: 760,
+      title: title || 'Plans',
+      backgroundColor: '#0d1117',
+      show: false,
+      modal: false,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    }
+  }
+
+  return {
+    width: 1280,
+    height: 820,
+    title,
+    titleBarStyle: 'hidden',
+    backgroundColor: '#0d1117',
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  }
+}
+
 export function createPlansWindowRouter(options: PlansWindowRouterOptions): PlansWindowRouter {
   const {
     frontendPluginManager,

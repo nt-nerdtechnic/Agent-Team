@@ -1,12 +1,32 @@
 import { createApp, type Component } from 'vue'
 import { i18n } from '@navide/plugin-ui/foundation'
+import { seedSettings } from '@navide/plugin-ui/shared'
 import { readHostBootstrapSettings } from './lib/settingsBootstrap'
 
 // Publish the Host snapshot before a lazy renderer root imports lib/settings.
 // The settings module only reads this generic value, so plugin bundles do not
 // inherit the Host preload bridge just to obtain initial UI preferences.
+const bootstrapSettings = readHostBootstrapSettings()
 ;(globalThis as typeof globalThis & { __navideSettingsBootstrap?: Record<string, unknown> }).__navideSettingsBootstrap =
-  readHostBootstrapSettings()
+  bootstrapSettings
+seedSettings(bootstrapSettings)
+
+const bootstrapLocaleRaw = bootstrapSettings['agent-team:language']
+if (typeof bootstrapLocaleRaw === 'string') {
+  const candidate = bootstrapLocaleRaw.trim()
+  if (candidate === 'zh-TW' || candidate === 'en-US') {
+    i18n.global.locale.value = candidate
+  } else {
+    try {
+      const decoded = JSON.parse(candidate)
+      if (decoded === 'zh-TW' || decoded === 'en-US') {
+        i18n.global.locale.value = decoded
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
 
 // Theme token layers — order matters: primitives → semantic roles → theme overrides.
 import '@navide/plugin-ui/styles.css'

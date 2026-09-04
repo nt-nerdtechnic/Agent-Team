@@ -255,6 +255,11 @@ async def editor_complete(session: "Session", msg_id: str, msg_type: str, payloa
 async def fs_list_dir(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    mode = payload.get("mode", "display")
+    if mode not in ("display", "discovery"):
+        await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "invalid list_dir mode"}))
+        return
+
     ws_path = payload.get("workspace_path") or ""
     rel = payload.get("rel_path", "") or ""
     # Registering a watch resolves the path and schedules a recursive observer —
@@ -263,7 +268,7 @@ async def fs_list_dir(session: "Session", msg_id: str, msg_type: str, payload: d
     # place before the scan below reports the tree it is watching.
     await asyncio.to_thread(app._watch_plans_workspace, ws_path, rel)
     show_hidden = bool(payload.get("show_hidden", False))
-    result = await asyncio.to_thread(app.fs_service.list_dir, ws_path, rel, show_hidden=show_hidden)
+    result = await asyncio.to_thread(app.fs_service.list_dir, ws_path, rel, show_hidden=show_hidden, mode=mode)
     await session.send_json(make_response(msg_id, msg_type, result))
 
 

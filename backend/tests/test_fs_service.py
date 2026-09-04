@@ -572,3 +572,79 @@ def test_stat_path_expands_home(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "cert.pem").write_text("x", encoding="utf-8")
     assert fs_service.stat_path("~/cert.pem") == {"ok": True, "exists": True}
     assert fs_service.stat_path("~/missing.pem") == {"ok": True, "exists": False}
+
+
+def test_stat_workspace_path(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (Path(ws) / "subdir").mkdir()
+    (Path(ws) / "file.txt").write_text("hello", encoding="utf-8")
+
+    dir_stat = fs_service.stat_workspace_path(ws, "subdir")
+    assert dir_stat["ok"] is True
+    assert dir_stat["exists"] is True
+    assert dir_stat["is_directory"] is True
+
+    file_stat = fs_service.stat_workspace_path(ws, "file.txt")
+    assert file_stat["ok"] is True
+    assert file_stat["exists"] is True
+    assert file_stat["is_directory"] is False
+    assert file_stat["size"] == 5
+
+    missing_stat = fs_service.stat_workspace_path(ws, "missing-dir")
+    assert missing_stat["ok"] is True
+    assert missing_stat["exists"] is False
+    assert missing_stat["is_directory"] is False
+
+    escape_stat = fs_service.stat_workspace_path(ws, "../../etc/passwd")
+    assert escape_stat["ok"] is False
+    assert escape_stat["exists"] is False
+
+
+def test_list_dir_mode_validation(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    res = fs_service.list_dir(ws, "", mode="invalid")
+    assert res["ok"] is False
+    assert res["error"] == "invalid list_dir mode"
+
+
+def test_list_dir_discovery_mode_contract(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    root = Path(ws)
+    (root / "node_modules").mkdir()
+    (root / ".cache").mkdir()
+    (root / "alpha_dir").mkdir()
+    (root / "Beta_dir").mkdir()
+    (root / "alpha_file.txt").write_text("a", encoding="utf-8")
+
+    # mode="display" keeps Explorer sorting: dirs first, case-insensitive, files next
+    display_res = fs_service.list_dir(ws, "")
+    assert display_res["ok"] is True
+    display_names = [e["name"] for e in display_res["entries"]]
+    assert "alpha_dir" in display_names
+    assert "Beta_dir" in display_names
+    assert "node_modules" in display_names
+    assert "alpha_file.txt" in display_names
+    assert "README.md" in display_names
+
+    # mode="discovery" keeps only non-hidden, non-noise directories, sorted by UTF-8 bytes ascending
+    discovery_res = fs_service.list_dir(ws, "", mode="discovery")
+    assert discovery_res["ok"] is True
+    discovery_names = [e["name"] for e in discovery_res["entries"]]
+    # 'Beta_dir' (0x42) < 'alpha_dir' (0x61) in UTF-8 bytes; node_modules and files are excluded
+    assert discovery_names == ["Beta_dir", "alpha_dir", "src"]
+
+
+def test_list_dir_discovery_mode_2001_truncation(tmp_path: Path) -> None:
+    ws = str(tmp_path)
+    for i in range(1999):
+        (tmp_path / f"d{i:04d}").mkdir()
+    (tmp_path / "r0000-within").mkdir()
+    (tmp_path / "z0000-beyond").mkdir()
+
+    res = fs_service.list_dir(ws, "", mode="discovery")
+    assert res["ok"] is True
+    assert res.get("truncated") is True
+    assert len(res["entries"]) == 2000
+    names = [e["name"] for e in res["entries"]]
+    assert names[-1] == "r0000-within"
+    assert "z0000-beyond" not in names

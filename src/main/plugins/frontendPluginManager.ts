@@ -8,6 +8,8 @@
 // shared WebSocket transport below.
 
 import { BrowserWindow, WebContentsView, ipcMain, type WebContents } from 'electron'
+import { warnMain } from '../main-log'
+import { validateSupportedLocale } from '../hostLocale'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -95,6 +97,7 @@ import {
   createProductionPlansBridgeDispatcher,
   PlansBridgeError,
   type PlansBridgeContext,
+  type PlansFilesystemPort,
   type PlansFilesystemServiceOperation,
 } from './plansBridge'
 import {
@@ -109,6 +112,7 @@ import {
   workspaceMutationPathError,
 } from './workspacePathPolicy'
 import { resolvePlansRootPath } from './plansRoot'
+import { isAllowedPlanDocumentPath } from './plansDirectories'
 
 /** Everything the manager needs to launch one plugin view. */
 export interface PluginLaunchDescriptor {
@@ -728,10 +732,70 @@ function validateV2CapabilityContext(
   }
 }
 
+export const MAX_DIAGNOSTIC_LINE_CHARS = 2048
+export const MAX_DIAGNOSTIC_LINES_PER_EMISSION = 100
+
+export function sanitizeDiagnosticLines(raw: unknown): string[] {
+  if (raw === null || raw === undefined) return []
+  const text = typeof raw === 'string' ? raw : String(raw)
+  const strippedAnsi = text.replace(/\x1B(?:\].*?(?:\x07|\x1B\\\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_]|.?)/gu, '')
+  const strippedControls = strippedAnsi.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/gu, '')
+  const rawLines = strippedControls.split(/\r\n|\r|\n|\u2028|\u2029/u)
+  const result: string[] = []
+
+  for (const rawLine of rawLines) {
+    const line = rawLine.trimEnd()
+    if (line.length === 0) continue
+    if (result.length >= MAX_DIAGNOSTIC_LINES_PER_EMISSION) {
+      result.push('... [diagnostic lines truncated]')
+      break
+    }
+    if (line.length > MAX_DIAGNOSTIC_LINE_CHARS) {
+      result.push(`${line.slice(0, MAX_DIAGNOSTIC_LINE_CHARS)}... [line truncated]`)
+    } else {
+      result.push(line)
+    }
+  }
+
+  return result
+}
+
 export class FrontendPluginManager {
+  private readonly loggedDiagnosticCauses = new WeakSet<object>()
+
+  private emitHostDiagnosticChunk(chunk: string): void {
+    const lines = sanitizeDiagnosticLines(chunk)
+    for (const line of lines) {
+      warnMain(`[plugin-backend] ${line}`)
+    }
+  }
+
+  private emitHostBackendFailureDiagnostic(pluginId: string, error: BackendPluginError): void {
+    const cause = error.cause
+    if (!cause) return
+
+    if (typeof cause === 'object' && cause !== null) {
+      if (this.loggedDiagnosticCauses.has(cause)) return
+      this.loggedDiagnosticCauses.add(cause)
+    }
+    this.loggedDiagnosticCauses.add(error)
+
+    const rawCause = cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)
+    const lines = sanitizeDiagnosticLines(rawCause)
+    if (lines.length === 0) return
+
+    warnMain(`[plugin-backend] Backend child failure for ${pluginId}: ${lines[0]}`)
+    for (let i = 1; i < lines.length; i++) {
+      warnMain(`[plugin-backend] ${lines[i]}`)
+    }
+  }
+
   /** Package-local Backend Wire children receive only Host-approved temp paths. */
   private readonly pluginBackendHost = new PluginBackendHost({
     environment: createPluginBackendChildEnvironment(),
+    onStderr: (chunk) => {
+      this.emitHostDiagnosticChunk(chunk)
+    },
     resolvePlanRoot: async ({ workspacePath, signal }) => {
       if (signal.aborted) throw new BackendPluginError('USER_CANCELLED')
       return resolvePlansRootPath(workspacePath)
@@ -739,6 +803,9 @@ export class FrontendPluginManager {
     resolveExecutionPolicy: (_runtime, workspacePath) =>
       this.executionPolicyResolver?.(workspacePath),
     onBackendFailure: (runtime, error) => {
+      if (error.cause) {
+        this.emitHostBackendFailureDiagnostic(runtime.pluginId, error)
+      }
       if (runtime.pluginId === PLANS_PLUGIN_ID && this.isPlansBackendAvailabilityError(error)) {
         this.markPlansBackendUnavailable('child-unavailable')
         const plugin = runtime.instanceId ? this.running.get(runtime.instanceId) : undefined
@@ -2886,10 +2953,10 @@ export class FrontendPluginManager {
   /** Connect the production Plans child to the existing Host filesystem
    * service. The default Backend Host bridge remains fail-closed for tests and
    * for callers that have not completed application wiring. */
-  configurePlansFilesystemService(): void {
+  configurePlansFilesystemService(filesystemPort?: PlansFilesystemPort): void {
     this.pluginBackendHost.setBridgeDispatcher(
       createProductionPlansBridgeDispatcher({
-        filesystem: createHostPlansFilesystemPort({
+        filesystem: filesystemPort ?? createHostPlansFilesystemPort({
           call: (operation, payload, context) =>
             this.sendPlansFilesystemService(operation, payload, context),
         }),
@@ -2988,14 +3055,7 @@ export class FrontendPluginManager {
       if (!path || isAbsolute(path)) throw new Error('Plans window path must be relative')
       const root = resolve(resolvePlansRootPath(workspacePath))
       const relativePath = relative(root, resolve(root, path))
-      if (
-        !relativePath ||
-        relativePath === '..' ||
-        relativePath.startsWith(`..${sep}`) ||
-        isAbsolute(relativePath) ||
-        (relativePath !== '.agent-team/plans' &&
-          !relativePath.startsWith(`.agent-team/plans${sep}`))
-      ) {
+      if (!isAllowedPlanDocumentPath(relativePath, root)) {
         throw new Error('Plans window path is outside the plans directory')
       }
       if (!this.openPlansWindowHandler) throw new Error('Plans window handler not registered')
@@ -3006,23 +3066,24 @@ export class FrontendPluginManager {
     if (plan.address === 'ui.openInEditor') {
       if (!workspacePath) throw new Error('editor capability requires a workspace')
       const path = typeof plan.args.path === 'string' ? plan.args.path : ''
-      // Plans documents are rooted at the repository's `.agent-team/plans`
-      // directory even when the selected workspace is a nested subdirectory.
+      // Plans documents are rooted at the repository's plan directories
+      // even when the selected workspace is a nested subdirectory.
       // Keep the existing public editor capability and editor router, but use
       // the same Host-selected Plans root for that one first-party surface.
       const root = resolve(
         plugin.id === PLANS_PLUGIN_ID ? resolvePlansRootPath(workspacePath) : workspacePath,
       )
+      if (plugin.id === PLANS_PLUGIN_ID) {
+        if (!path || isAbsolute(path)) {
+          throw new Error('Plans editor path must be relative')
+        }
+        if (!isAllowedPlanDocumentPath(path, root)) {
+          throw new Error('Plans editor path is outside the plans directory')
+        }
+      }
       const relativePath = relative(root, resolve(root, path))
       if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
         throw new Error('editor path escapes the workspace')
-      }
-      if (
-        plugin.id === PLANS_PLUGIN_ID &&
-        (relativePath !== '.agent-team/plans' &&
-          !relativePath.startsWith(`.agent-team/plans${sep}`))
-      ) {
-        throw new Error('Plans editor path is outside the plans directory')
       }
       if (!this.openInEditorHandler) throw new Error('editor open handler not registered')
       const opened = await this.openInEditorHandler({
@@ -4251,10 +4312,12 @@ export class FrontendPluginManager {
       // their workspace-scoped event fan-out during the recovery window.
       if (nonce) return
     }
+    const deliveredInstanceIds = new Set<string>()
+
     // Settings are a private first-party contract for the Git package. The
     // v2 surface receives only the typed Host read-only keys or the exact
-    // plugin-owned storage key; the legacy loop below remains unchanged for
-    // rollback compatibility.
+    // plugin-owned storage key; explicit recovery Git remains baseline and
+    // language must not enter legacy Git fan-out.
     if (event === 'ui.settings_changed') {
       const record = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
         ? payload as Record<string, unknown>
@@ -4263,26 +4326,37 @@ export class FrontendPluginManager {
       const source = record?.source
       if (typeof rawSettings === 'object' && rawSettings !== null && !Array.isArray(rawSettings)) {
         for (const plugin of this.running.values()) {
-          if (
-            !plugin.hasV2DescriptorIdentity ||
-            plugin.capabilityPolicy.kind !== 'manifest-v2' ||
-            !plugin.capabilityPolicy.system.includes('ui') ||
-            !plugin.capabilityContext?.userGrant?.system.includes('ui')
-          ) {
+          const isV2Ui =
+            plugin.hasV2DescriptorIdentity &&
+            plugin.capabilityPolicy.kind === 'manifest-v2' &&
+            plugin.capabilityPolicy.system.includes('ui') &&
+            Boolean(plugin.capabilityContext?.userGrant?.system.includes('ui'))
+
+          const isLegacyGit =
+            !plugin.hasV2DescriptorIdentity &&
+            plugin.id === GIT_PLUGIN_ID &&
+            isEventAllowed(plugin.capabilityPolicy, event)
+
+          const isLegacyPlans =
+            !plugin.hasV2DescriptorIdentity &&
+            plugin.id === PLANS_PLUGIN_ID &&
+            isEventAllowed(plugin.capabilityPolicy, event)
+
+          if (!isV2Ui && !isLegacyGit && !isLegacyPlans) {
             continue
           }
 
           if (plugin.id === GIT_PLUGIN_ID) {
             if (source === 'host') {
-              const allowedHostKeys: readonly string[] = [...GIT_HOST_READ_ONLY_KEYS, 'agent-team:language']
               const gitSettings = Object.fromEntries(
                 Object.entries(rawSettings as Record<string, unknown>)
-                  .filter(([key]) => allowedHostKeys.includes(key as never))
+                  .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
               )
               if (Object.keys(gitSettings).length > 0) {
                 this.emitToInstance(plugin.instanceId, event, { source, settings: gitSettings })
               }
-            } else if (source === 'plugin-storage') {
+              deliveredInstanceIds.add(plugin.instanceId)
+            } else if (source === 'plugin-storage' && isV2Ui) {
               const scope = record?.scope
               const allowedKeys = scope === 'plugin'
                 ? GIT_USER_PREFERENCE_KEYS
@@ -4308,8 +4382,9 @@ export class FrontendPluginManager {
                   ...(settingsWorkspace ? { workspace_path: workspacePath } : {}),
                 })
               }
+              deliveredInstanceIds.add(plugin.instanceId)
             }
-          } else if (plugin.id === PLANS_PLUGIN_ID) {
+          } else if (plugin.id === PLANS_PLUGIN_ID && (isV2Ui || isLegacyPlans)) {
             if (source === 'host') {
               const language = (rawSettings as Record<string, unknown>)['agent-team:language']
               if (language === 'zh-TW' || language === 'en-US') {
@@ -4318,13 +4393,13 @@ export class FrontendPluginManager {
                   settings: { 'agent-team:language': language },
                 })
               }
+              deliveredInstanceIds.add(plugin.instanceId)
             }
           }
         }
       }
       // Keep the legacy loop below active while the rollback bundle is live.
     }
-    const deliveredInstanceIds = new Set<string>()
     // Git's existing changed event is a private first-party transport seam,
     // not a public Manifest v2 capability. Route it by the Host-owned
     // workspace path so two Git view instances never receive one another's
@@ -5125,11 +5200,31 @@ export class FrontendPluginManager {
                 // A recovery observer must not change the bind result.
               }
             }
-            console.warn(
+            warnMain(
               `[plugin-backend] Plans view ${instanceId} could not bind: ${
                 error instanceof Error ? error.message : 'invalid backend runtime'
               }`,
             )
+            if (error instanceof Error && (error as any).cause) {
+              const cause = (error as any).cause
+              const alreadyLogged =
+                (typeof cause === 'object' && cause !== null && this.loggedDiagnosticCauses.has(cause)) ||
+                this.loggedDiagnosticCauses.has(error)
+              if (!alreadyLogged) {
+                if (typeof cause === 'object' && cause !== null) {
+                  this.loggedDiagnosticCauses.add(cause)
+                }
+                this.loggedDiagnosticCauses.add(error)
+                const rawCause = cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)
+                const lines = sanitizeDiagnosticLines(rawCause)
+                if (lines.length > 0) {
+                  warnMain(`[plugin-backend] Cause: ${lines[0]}`)
+                  for (let i = 1; i < lines.length; i++) {
+                    warnMain(`[plugin-backend] ${lines[i]}`)
+                  }
+                }
+              }
+            }
             throw error
           })
         // The opener consumes this rejection; the attached no-op handler keeps
@@ -6006,7 +6101,11 @@ export class FrontendPluginManager {
   /** The webPreferences main must force onto an attaching guest. Null means the
    *  src was not handed out by {@link prepareGuestContribution}, which is the
    *  caller's signal to veto the attach. */
-  guestAttachPreferences(src: string): { preload: string; pluginId: string } | null {
+  guestAttachPreferences(src: string): {
+    preload: string
+    pluginId: string
+    additionalArguments: string[]
+  } | null {
     const pending = this.pendingGuestFor(src)
     if (!pending || this.isPackageVersionStopping(pending.descriptor.id, pending.descriptor.packageVersion)) {
       return null
@@ -6014,6 +6113,12 @@ export class FrontendPluginManager {
     return {
       preload: join(__dirname, '../preload/plugin-preload.js'),
       pluginId: pending.descriptor.id,
+      additionalArguments: [
+        `--plugin-id=${pending.descriptor.id}`,
+        ...(this.hasPlansBackendView(pending.descriptor, pending.workspacePath, pending.capabilityContext)
+          ? ['--plugin-backend=1']
+          : []),
+      ],
     }
   }
 
@@ -6975,15 +7080,25 @@ export function registerBundledPlans(
 
 /** Build the entry query PlanWindowApp reads from `window.location.search`:
  *  `workspace_path`, the backend `http_url` (resolved by the plans
- *  capabilityBackend shim), the optional `rel_path` of a plan to auto-open, and
+ *  capabilityBackend shim), the optional `rel_path` of a plan to auto-open,
  *  the current `theme` id so the plugin paints with the app theme before its
- *  first settings reconcile (zero-flash; see plugins/plans/mount.ts). */
-function plansQuery(workspacePath: string, httpUrl: string, relPath: string, theme: string): string {
+ *  first settings reconcile (zero-flash; see plugins/plans/mount.ts), and the
+ *  validated Host `locale`. */
+export function plansQuery(
+  workspacePath: string,
+  httpUrl: string,
+  relPath: string,
+  theme: string,
+  locale?: string
+): string {
   const params = new URLSearchParams()
   if (workspacePath) params.set('workspace_path', workspacePath)
   if (httpUrl) params.set('http_url', httpUrl)
   if (relPath) params.set('rel_path', relPath)
   if (theme) params.set('theme', theme)
+  const trimmed = typeof locale === 'string' ? locale.trim() : ''
+  const validLocale = validateSupportedLocale(trimmed) ?? 'zh-TW'
+  params.set('locale', validLocale)
   params.set('v2', '1')
   params.set('contribution', 'window')
   const qs = params.toString()
@@ -7060,7 +7175,8 @@ export function openPlansPluginView(
   workspacePath: string,
   httpUrl = '',
   relPath = '',
-  theme = ''
+  theme = '',
+  locale = ''
 ): Promise<boolean> {
   const base = frontendPluginManager.getDescriptor(PLANS_PLUGIN_ID)
   if (!base) return Promise.resolve(false)
@@ -7077,7 +7193,7 @@ export function openPlansPluginView(
       `${PLANS_PLUGIN_ID}.window`,
       {
         workspacePath,
-        query: plansQuery(workspacePath, httpUrl, relPath, theme),
+        query: plansQuery(workspacePath, httpUrl, relPath, theme, locale),
       },
     ).then((result) => {
       if (result.ok) return true
@@ -7088,7 +7204,7 @@ export function openPlansPluginView(
   }
   const instanceId = frontendPluginManager.open(
     hostWindow,
-    { ...base, query: plansQuery(workspacePath, httpUrl, relPath, theme) },
+    { ...base, query: plansQuery(workspacePath, httpUrl, relPath, theme, locale) },
     {
       x: 0,
       y: 0,

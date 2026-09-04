@@ -79,3 +79,36 @@ describe('generic plugin placement boot wiring', () => {
     expect(preloadSource).toContain('removeListener')
   })
 })
+
+describe('window plugin contributions filtering', () => {
+  it('filters only navide.plans window contributions from the titlebar launcher list', () => {
+    // Legacy UX spec: Plans are opened from the Plans side list into a relevant
+    // Plan content window; there must be no standalone Plans-list launcher icon
+    // in the top-right titlebar.
+    expect(appSource).toMatch(
+      /const windowPluginContributions = computed\(\(\) =>\s*pluginContributionsByLocation\.value\.window\.filter\(/
+    )
+    expect(appSource).toContain("contribution.pluginId !== 'navide.plans'")
+    expect(appSource).toContain("contribution.contributionKey !== 'navide.plans.window'")
+  })
+
+  it('keeps programmatic v2 registration usable by passing all plugin-contributions to ControlPane', () => {
+    expect(appSource).toContain(':plugin-contributions="pluginContributions"')
+  })
+
+  it('excludes navide.plans window contributions while preserving all non-Plans actions', () => {
+    type TestContribution = { pluginId: string; contributionKey: string; location: string }
+    const sampleContributions: TestContribution[] = [
+      { pluginId: 'navide.plans', contributionKey: 'navide.plans.window', location: 'window' },
+      { pluginId: 'navide.git', contributionKey: 'navide.git.window', location: 'window' },
+      { pluginId: 'custom.tool', contributionKey: 'custom.tool.window', location: 'window' },
+    ]
+    const filtered = sampleContributions.filter(
+      (c) => c.pluginId !== 'navide.plans' && c.contributionKey !== 'navide.plans.window'
+    )
+    expect(filtered.map((c) => c.contributionKey)).toEqual([
+      'navide.git.window',
+      'custom.tool.window',
+    ])
+  })
+})

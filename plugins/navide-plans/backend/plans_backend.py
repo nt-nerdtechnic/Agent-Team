@@ -50,6 +50,32 @@ PLAN_STAGES = {"draft", "in-review", "approved", "in-progress", "done", "abandon
 TODO_STATUSES = {"pending", "in-progress", "done", "skipped"}
 TODO_OWNERS = {"user", "agent"}
 PLAN_REL_DIR = ".agent-team/plans"
+PLAN_DOC_DIRS: tuple[str, ...] = (
+    ".agent-team/plans",
+    ".agent-team/reports",
+    ".claude/loop-reports",
+    ".claude/plans",
+    ".cursor/plans",
+    "docs/plans",
+    "docs/reports",
+)
+DOC_SUFFIXES = (".html", ".plan.md", ".md")
+_MAX_ROOT_DEPTH = 2
+_MAX_NESTED_ROOTS = 50
+_MAX_DIRECTORY_ENTRIES = 2000
+_NOISE_SEGMENTS = frozenset({
+    "node_modules", ".venv", "venv", "__pycache__", "dist", "build", "out",
+    "target", ".next", ".nuxt", ".turbo", ".cache", ".mypy_cache",
+    ".pytest_cache", ".ruff_cache", ".idea", ".gradle",
+})
+
+
+def is_plan_doc_name(name: str) -> bool:
+    if not isinstance(name, str) or name.startswith(("_", ".")):
+        return False
+    lowered = name.lower()
+    return any(lowered.endswith(suffix) for suffix in DOC_SUFFIXES)
+
 _MISSING = object()
 _write_lock = threading.Lock()
 _state_lock = threading.Lock()
@@ -495,15 +521,30 @@ def _plan_path(value: Any) -> str:
     cleaned = value.strip().replace("\\", "/")
     if cleaned.startswith("/") or (len(cleaned) >= 3 and cleaned[1:3] == ":/"):
         raise BridgeFailure("WORKSPACE_SCOPE_VIOLATION")
-    prefix = f"{PLAN_REL_DIR}/"
-    filename = cleaned[len(prefix):] if cleaned.startswith(prefix) else cleaned
-    if not filename or "/" in filename or filename in {".", ".."} or ".." in filename.split("/"):
+    segments = cleaned.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
         raise BridgeFailure("WORKSPACE_SCOPE_VIOLATION")
-    if filename.startswith("_") or not (
-        filename.endswith(".html") or filename.endswith(".plan.md") or filename.endswith(".md")
-    ):
+
+    if len(segments) == 1:
+        filename = segments[0]
+        if not is_plan_doc_name(filename):
+            raise BridgeFailure("INVALID_ARGUMENT")
+        return f"{PLAN_REL_DIR}/{filename}"
+
+    filename = segments[-1]
+    parent = "/".join(segments[:-1])
+    if not is_plan_doc_name(filename):
         raise BridgeFailure("INVALID_ARGUMENT")
-    return f"{prefix}{filename}"
+
+    matched = False
+    for plan_dir in PLAN_DOC_DIRS:
+        if parent == plan_dir or parent.endswith("/" + plan_dir):
+            matched = True
+            break
+    if not matched:
+        raise BridgeFailure("WORKSPACE_SCOPE_VIOLATION")
+
+    return cleaned
 
 
 def _parse_plan_meta(content: str) -> dict[str, Any] | None:
@@ -526,6 +567,19 @@ def _parse_plan_meta(content: str) -> dict[str, Any] | None:
     return normalized
 
 
+def _normalize_todo_status(value: Any) -> str:
+    if not isinstance(value, str):
+        return "pending"
+    v = value.strip().lower().replace("_", "-")
+    if v in ("done", "completed", "complete", "finished"):
+        return "done"
+    if v in ("in-progress", "inprogress", "active"):
+        return "in-progress"
+    if v in ("skipped", "skip"):
+        return "skipped"
+    return "pending"
+
+
 def _parse_markdown_meta(content: str) -> dict[str, Any] | None:
     if not content.startswith("---"):
         return None
@@ -536,16 +590,45 @@ def _parse_markdown_meta(content: str) -> dict[str, Any] | None:
         parsed = yaml.safe_load(content[3:end])
     except yaml.YAMLError:
         return None
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("name"), str) or not parsed["name"].strip():
+    if not isinstance(parsed, dict):
         return None
+    name = parsed.get("name") if isinstance(parsed.get("name"), str) else parsed.get("title")
+    if not isinstance(name, str) or not name.strip():
+        return None
+
+    raw_todos = parsed.get("todos")
+    todos: list[dict[str, Any]] = []
+    if isinstance(raw_todos, list):
+        for idx, item in enumerate(raw_todos):
+            if isinstance(item, str):
+                todos.append({"id": f"t{idx + 1}", "content": item, "status": "pending"})
+            elif isinstance(item, dict):
+                todo_id = str(item.get("id") or f"t{idx + 1}")
+                content_str = str(item.get("content") or "")
+                status_str = _normalize_todo_status(item.get("status"))
+                entry = dict(item)
+                entry["id"] = todo_id
+                entry["content"] = content_str
+                entry["status"] = status_str
+                todos.append(entry)
+
+    raw_stage = parsed.get("stage")
+    if isinstance(raw_stage, str) and raw_stage in PLAN_STAGES:
+        stage = raw_stage
+    else:
+        stage = "done" if (todos and all(t.get("status") == "done" for t in todos)) else "draft"
+
     fields = dict(parsed)
     fields["schemaVersion"] = 1
-    fields["stage"] = fields.get("stage") if fields.get("stage") in PLAN_STAGES else "draft"
-    fields["overview"] = fields.get("overview") if isinstance(fields.get("overview"), str) else ""
-    fields["approvedAt"] = fields.get("approvedAt") if isinstance(fields.get("approvedAt"), str) else None
-    fields["archivedAt"] = fields.get("archivedAt") if isinstance(fields.get("archivedAt"), str) else None
-    fields["todos"] = fields.get("todos") if isinstance(fields.get("todos"), list) else []
-    fields["reviewNotes"] = fields.get("reviewNotes") if isinstance(fields.get("reviewNotes"), list) else []
+    fields["name"] = name.strip()
+    fields["stage"] = stage
+    fields["overview"] = parsed.get("overview") if isinstance(parsed.get("overview"), str) else (
+        parsed.get("description") if isinstance(parsed.get("description"), str) else ""
+    )
+    fields["approvedAt"] = parsed.get("approvedAt") if isinstance(parsed.get("approvedAt"), str) else None
+    fields["archivedAt"] = parsed.get("archivedAt") if isinstance(parsed.get("archivedAt"), str) else None
+    fields["todos"] = todos
+    fields["reviewNotes"] = parsed.get("reviewNotes") if isinstance(parsed.get("reviewNotes"), list) else []
     return fields
 
 
@@ -672,41 +755,99 @@ def _sync_todo_markup(content: str, todo_id: str, status: str) -> str:
     )
 
 
-def _list_plans(origin: dict[str, Any]) -> list[dict[str, Any]]:
-    try:
-        stat = _bridge_call(origin, "filesystem", "stat_path", {"rel_path": PLAN_REL_DIR})
-        if not _is_record(stat) or stat.get("exists") is not True:
-            return []
-        listing = _bridge_call(origin, "filesystem", "list_dir", {"rel_path": PLAN_REL_DIR})
-        names = listing.get("entries") if _is_record(listing) else None
-        if not isinstance(names, list):
-            raise BridgeFailure("PROTOCOL_ERROR")
-    except BridgeFailure as error:
-        if error.code == "BACKEND_UNAVAILABLE":
-            return []
-        raise
-    entries: list[dict[str, Any]] = []
-    for name in sorted(name for name in names if isinstance(name, str)):
-        if name.startswith("_") or not (name.endswith(".html") or name.endswith(".plan.md") or name.endswith(".md")):
+def _find_nested_plan_roots(origin: dict[str, Any]) -> list[str]:
+    found: list[str] = []
+    frontier: list[tuple[str, int]] = [("", 0)]
+    while frontier and len(found) < _MAX_NESTED_ROOTS:
+        current_rel, depth = frontier.pop(0)
+        if depth >= _MAX_ROOT_DEPTH:
             continue
-        rel_path = f"{PLAN_REL_DIR}/{name}"
         try:
-            content, mtime = _bridge_read(origin, rel_path, include_mtime=True)
-            meta = _parse_plan_meta(content)
+            listing = _bridge_call(origin, "filesystem", "list_dir", {"rel_path": current_rel, "mode": "discovery"})
         except BridgeFailure:
             continue
-        entries.append(
-            {
-                "rel_path": rel_path,
-                "name": meta.get("name") if meta is not None else name,
-                "stage": meta.get("stage") if meta is not None else None,
-                "overview": meta.get("overview", "") if meta is not None else "",
-                "todos": _todo_summary(meta) if meta is not None else {"total": 0, "by_status": {}},
-                "mtime": mtime,
-                "kind": "plan" if meta is not None else "document",
-                "meta": meta,
-            }
-        )
+        entries = listing.get("entries") if _is_record(listing) else None
+        if not isinstance(entries, list):
+            continue
+        # If truncated is True, the listing was capped by Host at _MAX_DIRECTORY_ENTRIES (2000).
+        # We also enforce candidates[:_MAX_DIRECTORY_ENTRIES] defensively.
+        candidates = sorted(
+            (
+                name
+                for name in entries
+                if isinstance(name, str)
+                and not name.startswith(".")
+                and name not in _NOISE_SEGMENTS
+            ),
+            key=lambda s: s.encode("utf-8"),
+        )[:_MAX_DIRECTORY_ENTRIES]
+        for name in candidates:
+            if len(found) >= _MAX_NESTED_ROOTS:
+                break
+            child_rel = f"{current_rel}/{name}" if current_rel else name
+            try:
+                stat = _bridge_call(origin, "filesystem", "stat_path", {"rel_path": child_rel})
+                if not _is_record(stat) or stat.get("exists") is not True or stat.get("isDirectory") is not True:
+                    continue
+                git_stat = _bridge_call(origin, "filesystem", "stat_path", {"rel_path": f"{child_rel}/.git"})
+                if _is_record(git_stat) and git_stat.get("exists") is True and git_stat.get("isDirectory") is True:
+                    found.append(child_rel)
+                else:
+                    frontier.append((child_rel, depth + 1))
+            except BridgeFailure:
+                continue
+    return found
+
+
+def _list_plans(origin: dict[str, Any]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _scan_dir(rel_dir: str) -> None:
+        try:
+            stat = _bridge_call(origin, "filesystem", "stat_path", {"rel_path": rel_dir})
+            if not _is_record(stat) or stat.get("exists") is not True:
+                return
+            listing = _bridge_call(origin, "filesystem", "list_dir", {"rel_path": rel_dir})
+            names = listing.get("entries") if _is_record(listing) else None
+            if not isinstance(names, list):
+                return
+        except BridgeFailure as error:
+            if error.code == "BACKEND_UNAVAILABLE":
+                return
+            raise
+        for name in sorted((n for n in names if isinstance(n, str)), key=lambda s: s.lower()):
+            if not is_plan_doc_name(name):
+                continue
+            rel_path = f"{rel_dir}/{name}"
+            if rel_path in seen:
+                continue
+            seen.add(rel_path)
+            try:
+                content, mtime = _bridge_read(origin, rel_path, include_mtime=True)
+                meta = _parse_plan_meta(content)
+            except BridgeFailure:
+                continue
+            entries.append(
+                {
+                    "rel_path": rel_path,
+                    "name": meta.get("name") if meta is not None else name,
+                    "stage": meta.get("stage") if meta is not None else None,
+                    "overview": meta.get("overview", "") if meta is not None else "",
+                    "todos": _todo_summary(meta) if meta is not None else {"total": 0, "by_status": {}},
+                    "mtime": mtime,
+                    "kind": "plan" if meta is not None else "document",
+                    "meta": meta,
+                }
+            )
+
+    for rel_dir in PLAN_DOC_DIRS:
+        _scan_dir(rel_dir)
+
+    for nested_root in _find_nested_plan_roots(origin):
+        for plan_dir in PLAN_DOC_DIRS:
+            _scan_dir(f"{nested_root}/{plan_dir}")
+
     return entries
 
 

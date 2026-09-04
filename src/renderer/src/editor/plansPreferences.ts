@@ -15,10 +15,17 @@ export function isLegacyPlansRecoveryRuntime(): boolean {
     new URLSearchParams(window.location.search).get('legacy_plans_recovery') === '1'
 }
 
+function defaultStorage(): Pick<Storage, 'getItem'> {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    return window.localStorage
+  }
+  return typeof localStorage !== 'undefined' && localStorage ? localStorage : { getItem: () => null }
+}
+
 /** Read only the fixed legacy Plans key projection from the trusted renderer. */
 export function readLegacyPlansPreferenceProjection(
   workspacePath: string,
-  storage: Pick<Storage, 'getItem'> = localStorage,
+  storage: Pick<Storage, 'getItem'> = defaultStorage(),
 ): LegacyPlansPreferenceProjection {
   const values: LegacyPlansPreferenceProjection = {}
   for (const key of PLANS_STORAGE_KEYS) {
