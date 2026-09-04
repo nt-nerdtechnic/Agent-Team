@@ -2037,15 +2037,22 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
         // Deliberately does NOT erase the query: the characters are already on
         // the prompt, and taking them back would undo typing the user meant.
         closeMentionMenu(); term.focus()
+      } else if ((e.metaKey || e.ctrlKey) && e.key === ' ') {
+        // Switching input source is how a CJK user reaches the keyboard they
+        // came to search with, so it is the one chord that must not read as
+        // "cancel": closing here lands exactly on the moment they were about
+        // to start typing Chinese. Let it through untouched and keep the menu
+        // open — whatever they commit afterwards arrives through term.onData
+        // and narrows the list like any other typing.
+        //
+        // Stays ABOVE the chord branch, which would otherwise close, and above
+        // the Space branch, which would otherwise tick a row.
       } else if (e.metaKey || e.ctrlKey || e.altKey) {
         // A shortcut chord (Cmd+A, etc.) — cancel the menu but let the chord
         // through rather than mangling it into a literal PTY keystroke. Refocus
         // the terminal so the chord (e.g. Cmd+V paste) lands there and typing
         // continues — closing the focused card would otherwise drop focus to
         // <body>, swallowing the chord and every keystroke after it.
-        //
-        // Stays ABOVE the Space branch so Cmd+Space (IME switch) is still a
-        // chord and never a tick.
         closeMentionMenu(); term.focus()
       } else if (e.key === ' ') {
         e.preventDefault(); e.stopPropagation()

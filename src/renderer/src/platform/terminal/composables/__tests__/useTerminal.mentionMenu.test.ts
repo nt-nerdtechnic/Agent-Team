@@ -446,6 +446,40 @@ describe('useTerminal — @-mention menu', () => {
     expect(hits).toEqual(['cod'])
   })
 
+  it('survives the input-source switch that reaches the CJK keyboard', async () => {
+    // Ctrl+Space and Cmd+Space are how a Mac user gets to Bopomofo. Reading
+    // either as a cancel closes the menu at exactly the moment they were about
+    // to start searching in Chinese.
+    for (const mod of [{ ctrlKey: true }, { metaKey: true }]) {
+      const { mock } = await openMenu()
+      const before = ptyWrites(mock).length
+      press(' ', mod)
+      expect(card()).not.toBeNull()
+      expect(checkedAddresses()).toEqual([])
+      expect(ptyWrites(mock)).toHaveLength(before)
+      press('Escape')
+    }
+  })
+
+  it('narrows by Chinese committed right after that switch', async () => {
+    const { mock } = await openMenu([
+      ...LOCAL,
+      { address: '資安檢查', group: 'This window' },
+    ])
+    press(' ', { ctrlKey: true })
+    commit('資安')
+    expect(card()).not.toBeNull()
+    expect(addresses()).toEqual(['資安檢查'])
+    expect(ptyWrites(mock)).toEqual(['@', '資安'])
+  })
+
+  it('still cancels on an ordinary chord', async () => {
+    const { mock } = await openMenu()
+    press('a', { metaKey: true })
+    expect(card()).toBeNull()
+    expect(ptyWrites(mock)).toEqual(['@'])
+  })
+
   it('ignores keys that are really IME pre-edit, by either signal', async () => {
     // While a composition is live, e.key is a raw pre-edit keystroke, not
     // committed text: acting on it both mangles the input and steals the Enter
