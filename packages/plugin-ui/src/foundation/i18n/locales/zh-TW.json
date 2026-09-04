@@ -2319,7 +2319,6 @@
   "mention": {
     "group-recent": "最近",
     "group-local": "本視窗",
-    "group-remote": "其他工作區",
     "broadcast-hint": "全部"
   },
   "paneStatus": {

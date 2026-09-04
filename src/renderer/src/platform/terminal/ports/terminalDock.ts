@@ -69,7 +69,7 @@ export interface TerminalDockPort {
   onExit(callback: (payload: TerminalExitEvent) => void): () => void
 
   listFiles(workspacePath: string, query: string, maxResults: number): Promise<PortResponse<TerminalFileListResult>>
-  listAgentPanes(): Promise<PortResponse<{ panes?: Array<{ pane_id?: string; qualified_name?: string }> }>>
+  listAgentPanes(): Promise<PortResponse<{ panes?: Array<{ pane_id?: string; qualified_name?: string; workspace_label?: string }> }>>
   statPath(path: string, timeoutMs?: number): Promise<PortResponse<{ exists: boolean }>>
   getHomeDirectory?(): Promise<string>
   openFile(args: {

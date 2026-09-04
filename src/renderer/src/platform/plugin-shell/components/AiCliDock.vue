@@ -30,7 +30,7 @@ import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { CLI_AGENT_SPECS } from '../agents'
 import { bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
 import { cliPermissionKey } from '../lib/cliPermission'
-import type { MentionCandidate, TerminalDockPort } from '@navide/terminal'
+import { clusterMentionCandidates, type MentionCandidate, type TerminalDockPort } from '@navide/terminal'
 import AiCliTerminal from './AiCliTerminal.vue'
 
 const props = withDefaults(
@@ -193,11 +193,16 @@ async function refreshMentionTargets(): Promise<void> {
     const resp = await props.terminalPort.listAgentPanes()
     // Every address here lives in another window, so none of them carries a
     // status this panel could read — the menu draws hollow dots and says so by
-    // omission rather than inventing one.
-    const group = t('mention.group-remote')
-    mentionTargets.value = (resp.payload?.panes ?? [])
-      .filter((p) => p.qualified_name && p.pane_id !== props.paneId)
-      .map((p) => ({ address: p.qualified_name as string, group }))
+    // omission rather than inventing one. Grouped by workspace folder, as in
+    // the main window's menu.
+    mentionTargets.value = clusterMentionCandidates(
+      (resp.payload?.panes ?? [])
+        .filter((p) => p.qualified_name && p.pane_id !== props.paneId)
+        .map((p) => ({
+          address: p.qualified_name as string,
+          group: p.workspace_label || (p.qualified_name as string).split('/')[0],
+        }))
+    )
   } catch {
     mentionTargets.value = []
   }

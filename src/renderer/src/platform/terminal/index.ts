@@ -46,6 +46,7 @@ export {
   CLI_PASTE_LINE_CAP,
   injectionChunks,
   MENTION_BROADCAST_ADDRESS,
+  clusterMentionCandidates,
   rankMentionCandidates,
   recordMentionRecents,
   resolveCliDropSources,

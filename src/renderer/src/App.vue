@@ -105,6 +105,7 @@ import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
   buildMentionInsert,
+  clusterMentionCandidates,
   rankMentionCandidates,
   recordMentionRecents,
   MENTION_BROADCAST_ADDRESS,
@@ -3082,7 +3083,9 @@ function readPaneShareText(ref: NonNullable<(typeof paneRefs)[string]>, maxLines
 // Panes in OTHER workspace windows, as `<folder>/<pane>` addresses. Polled
 // rather than pushed: the list only feeds autocomplete, so a slightly stale
 // snapshot costs nothing (routing itself always re-resolves in the backend).
-const remoteMessagingTargets = ref<string[]>([])
+/** `<folder>/<pane>` addresses of panes in other windows, each with the
+ *  workspace folder the menu groups it under. */
+const remoteMessagingTargets = ref<Array<{ address: string; workspaceLabel: string }>>([])
 /** paneId → `<folder>/<pane>`, so a pane dragged in from another window can be
  *  turned into an address without a second round trip. */
 const remoteTargetByPane = new Map<string, string>()
@@ -3090,7 +3093,7 @@ const remoteTargetByPane = new Map<string, string>()
 async function refreshRemoteMessagingTargets(timeoutMs?: number): Promise<void> {
   try {
     const resp = await backend.send<{
-      panes?: Array<{ pane_id?: string; qualified_name?: string }>
+      panes?: Array<{ pane_id?: string; qualified_name?: string; workspace_label?: string }>
     }>('agent_msg.list', {}, timeoutMs)
     const localIds = new Set(panes.value.map((p) => p.id))
     const remote = (resp.payload?.panes ?? []).filter(
@@ -3098,7 +3101,10 @@ async function refreshRemoteMessagingTargets(timeoutMs?: number): Promise<void> 
     )
     remoteTargetByPane.clear()
     for (const p of remote) remoteTargetByPane.set(p.pane_id as string, p.qualified_name as string)
-    remoteMessagingTargets.value = remote.map((p) => p.qualified_name as string)
+    remoteMessagingTargets.value = remote.map((p) => ({
+      address: p.qualified_name as string,
+      workspaceLabel: p.workspace_label || (p.qualified_name as string).split('/')[0],
+    }))
   } catch {
     remoteMessagingTargets.value = []
     remoteTargetByPane.clear()
@@ -3143,11 +3149,17 @@ function rememberMentionPick(addresses: string[]): void {
 // Addresses offered by pane `paneId`'s @-mention autocomplete menu: every OTHER
 // pane that has a messaging name (self excluded), then the qualified addresses
 // of panes open in other workspace windows, with the recently used hoisted.
+// Rows are grouped by workspace folder — the sender's own first — so a window
+// holding several projects, or a roster spanning several windows, reads as
+// one list per project rather than "this window" versus "everything else".
 //
 // The group and status words are resolved HERE because useTerminal owns no i18n
 // scope, and the ordering is decided here because recency is remembered here.
 function mentionCandidatesFor(paneId: string): MentionCandidate[] {
+  const folderOf = (path: string | undefined): string | undefined =>
+    path ? (path.split('/').filter(Boolean).pop() ?? path) : undefined
   const localGroup = i18n.global.t('mention.group-local')
+  const ownGroup = folderOf(panes.value.find((x) => x.id === paneId)?.workspacePath) ?? localGroup
   const others: MentionCandidate[] = panes.value
     .filter((x) => x.id !== paneId && x.messagingName)
     .map((x) => {
@@ -3157,7 +3169,7 @@ function mentionCandidatesFor(paneId: string): MentionCandidate[] {
       const status = paneRefs[x.id]?.displayStatus
       return {
         address: x.messagingName as string,
-        group: localGroup,
+        group: folderOf(x.workspacePath) ?? localGroup,
         status,
         statusLabel: status ? paneStatusLabelText(status) : undefined,
       }
@@ -3176,17 +3188,16 @@ function mentionCandidatesFor(paneId: string): MentionCandidate[] {
   const broadcast: MentionCandidate[] = canBroadcast
     ? [{
         address: MENTION_BROADCAST_ADDRESS,
-        group: localGroup,
+        group: ownGroup,
         statusLabel: i18n.global.t('mention.broadcast-hint'),
       }]
     : []
-  const remoteGroup = i18n.global.t('mention.group-remote')
-  const remote: MentionCandidate[] = remoteMessagingTargets.value.map((address) => ({
-    address,
-    group: remoteGroup,
+  const remote: MentionCandidate[] = remoteMessagingTargets.value.map((t) => ({
+    address: t.address,
+    group: t.workspaceLabel,
   }))
   return rankMentionCandidates(
-    [...broadcast, ...others, ...remote],
+    clusterMentionCandidates([...broadcast, ...others, ...remote], ownGroup),
     loadMentionRecents(),
     i18n.global.t('mention.group-recent')
   )

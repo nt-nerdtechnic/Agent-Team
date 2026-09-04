@@ -145,11 +145,25 @@ describe('useTerminal — @-mention menu', () => {
   }
 
   function press(key: string, init: KeyboardEventInit = {}): void {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...init }))
+    const ev = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init })
+    document.dispatchEvent(ev)
+    // What the browser does with a keydown the menu let through: xterm's
+    // textarea turns it into data. A chord does not, and a composition key
+    // never does — only the committed text, which a test reports via commit().
+    if (ev.defaultPrevented || init.isComposing || init.keyCode === 229) return
+    if (init.metaKey || init.ctrlKey || init.altKey) return
+    if (key === 'Backspace') captured.dataHandler?.('\x7f')
+    else if (key.length === 1) captured.dataHandler?.(key)
   }
 
   function type(text: string): void {
     for (const ch of text) press(ch)
+  }
+
+  /** An IME committing `text`: no keydown carries it, it arrives as one
+   *  onData chunk. */
+  function commit(text: string): void {
+    captured.dataHandler!(text)
   }
 
   function card(): HTMLElement | null {
@@ -392,6 +406,44 @@ describe('useTerminal — @-mention menu', () => {
     type('c')
     expect(queryEl.style.display).toBe('flex')
     expect(queryEl.textContent).toContain('@c')
+  })
+
+  it('keeps focus in the terminal so an IME has somewhere to compose', async () => {
+    // Stealing focus to the card (a plain div) is what broke Chinese input: no
+    // composition can start on a non-editable element, so every key arrived
+    // as a Latin letter, matched nothing, and closed the menu.
+    await openMenu()
+    expect(card()).not.toBeNull()
+    expect(document.activeElement).not.toBe(card())
+    expect(card()!.tabIndex).toBe(-1)
+  })
+
+  it('narrows by IME-committed text and completes it with the right erase', async () => {
+    const { mock } = await openMenu([
+      ...LOCAL,
+      { address: '測試-1', group: 'This window' },
+    ])
+    press('ㄘ', { isComposing: true })
+    press('Enter', { isComposing: true })
+    commit('測試')
+    expect(card()).not.toBeNull()
+    expect(addresses()).toEqual(['測試-1'])
+    expect(document.querySelector('.term-mention-query')!.textContent).toContain('@測試')
+    // The committed text went to the PTY by the ordinary path, once.
+    expect(ptyWrites(mock)).toEqual(['@', '測試'])
+    press('Backspace')
+    expect(addresses()).toEqual(['測試-1'])
+    press('Enter')
+    // One DEL for the one character left, not one per UTF-16 unit.
+    expect(ptyWrites(mock).at(-1)).toBe('\x7f' + '測試-1 ')
+  })
+
+  it('matches a full-width query left behind by a CJK input method', async () => {
+    await openMenu()
+    commit('ＣＯＤ')
+    expect(addresses()).toEqual(['codex-1'])
+    const hits = Array.from(document.querySelectorAll('.term-mention-hit')).map((e) => e.textContent)
+    expect(hits).toEqual(['cod'])
   })
 
   it('ignores keys that are really IME pre-edit, by either signal', async () => {

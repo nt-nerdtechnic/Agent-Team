@@ -14,6 +14,7 @@ import {
   buildMentionPickData,
   chunkForPty,
   filterMentionCandidates,
+  foldMentionText,
   MENTION_BROADCAST_ADDRESS,
   shouldOpenMentionMenu,
   stripInputSequences,
@@ -1691,18 +1692,23 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
 
   // ── @-mention floating autocomplete ──────────────────────────────────────────
   // Imperative-DOM overlay (mirrors showTerminalFilePicker) listing the OTHER CLI
-  // panes' addresses. It steals DOM focus to its own card AND handles keys at the
-  // document capture layer, so ↑/↓/Enter/Esc never reach xterm while open.
+  // panes' addresses. Focus stays in xterm's textarea; the menu handles its own
+  // keys (↑/↓/Enter/Esc/Space) at the document capture layer so they never
+  // reach xterm, and lets everything else through.
   //
-  // Typed characters go to the PTY AND narrow the list. Sending them is what
-  // keeps the prompt honest — the user sees "@cod" where they typed it — and it
-  // is also the escape hatch: when the filter empties, the menu just closes and
-  // the CLI's own "@" completion takes over with every character already in
-  // place. Nothing to re-send, nothing to rewind.
+  // Typed characters therefore go to the PTY by the ordinary term.onData path
+  // AND narrow the list (_mentionMenuOnData). Keeping focus in the textarea is
+  // what lets an IME work: the composition runs where the browser can host it
+  // and only the committed text (中文) is reported, as one onData chunk. The
+  // prompt stays honest — the user sees "@cod" where they typed it — and the
+  // escape hatch is free: when the filter empties, the menu just closes and the
+  // CLI's own "@" completion takes over with every character already in place.
   //
   // Picking writes one PTY frame that erases the query and inserts the
   // addresses (buildMentionPickData), completing `@codex-1 `.
   let _mentionMenuCleanup: (() => void) | null = null
+  /** Typed text the open menu should narrow by; null while no menu is open. */
+  let _mentionMenuOnData: ((data: string) => void) | null = null
 
   function closeMentionMenu(): void {
     if (_mentionMenuCleanup) {
@@ -1763,7 +1769,6 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     // same palette showTerminalFilePicker uses for the same reason — it spells
     // the hex literals out, these name them.
     card.className = 'term-mention-card'
-    card.tabIndex = 0
     Object.assign(card.style, {
       position: 'fixed', left: `${cellLeft}px`, top: `${cellBottom}px`,
       width: '248px', maxHeight: '260px', overflowY: 'auto',
@@ -1809,8 +1814,13 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
      *  each row survived. Built from indexOf rather than a regex: an address is
      *  arbitrary user text and would otherwise need escaping. */
     function appendHighlighted(el: HTMLElement, address: string): void {
-      const at = query ? address.toLowerCase().indexOf(query.toLowerCase()) : -1
-      if (at < 0) { el.textContent = address; return }
+      // Same folding as filterMentionCandidates, so the tinted run is the run
+      // that matched. Offsets are only trusted when folding kept the length
+      // (it does for case and full-width ↔ half-width); otherwise skip the tint.
+      const folded = foldMentionText(address)
+      const needle = foldMentionText(query)
+      const at = query && folded.length === address.length ? folded.indexOf(needle) : -1
+      if (at < 0 || needle.length !== query.length) { el.textContent = address; return }
       const hit = document.createElement('span')
       hit.className = 'term-mention-hit'
       hit.textContent = address.slice(at, at + query.length)
@@ -1959,18 +1969,24 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
       opts?.onMentionPick?.(addresses)
     }
 
-    /** Send a keystroke the menu intercepted, keeping the draft buffer in step.
-     *
-     *  These writes bypass term.onData, which is the ONLY thing that normally
-     *  maintains inputBuffer — so without this the buffer would not contain the
-     *  query the user just typed, and pick()'s slice would eat that many
-     *  characters of the real prompt instead ("傳給 @cod" → "傳codex-1 "). */
-    function sendToPty(data: string): void {
-      if (!inputTransportReady()) return
-      if (data === '\x7f') inputBuffer = inputBuffer.slice(0, -1)
-      else inputBuffer += data
-      syncDraft()
-      void terminalPort.input(sessionId.value, data)
+    /** Typed text arriving through term.onData while the menu is open. It has
+     *  already reached the PTY and inputBuffer by the ordinary path; the menu
+     *  only narrows the list. An IME commit lands here as one multi-character
+     *  chunk, which is the whole reason typing is read from onData rather than
+     *  keydown — during composition keydown carries pre-edit keystrokes, never
+     *  the text the user meant. */
+    function onTypedData(data: string): void {
+      if (data === '\x7f') {
+        // Backspace past the query eats the '@' itself: nothing left to narrow.
+        if (!query) { closeMentionMenu(); return }
+        query = [...query].slice(0, -1).join('')
+      } else if (/[\x00-\x1f]/.test(data)) {
+        // Control bytes and terminal reports (focus, mouse) are not typing.
+        return
+      } else {
+        query += data
+      }
+      if (!refilter()) closeMentionMenu()
     }
 
     /** Anchor the card under the cursor cell, clamped to the viewport. Re-run
@@ -1995,16 +2011,15 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
 
     // Document-capture keydown: intercept the menu's keys before xterm's textarea
     // can see them (capture phase + stopPropagation), so the CLI receives nothing
-    // it should not while the menu is open. Printable keys are the exception —
-    // they reach the PTY AND narrow the list (see the header note).
+    // it should not while the menu is open. Every other key falls through to
+    // xterm untouched — printable ones come back as term.onData, where
+    // onTypedData narrows the list (see the header note).
     const onDocKeydown = (e: KeyboardEvent): void => {
-      // IME guard, same contract as the xterm handler below: while a
-      // composition is live, e.key is a raw pre-edit keystroke ('ㄒ', 'j',
-      // Enter to pick a candidate), NOT committed text. Forwarding it to the
-      // PTY here both mangled the input and stole the Enter/Backspace the IME
-      // needed, so composing in a pane with the mention menu open produced
-      // garbage. Let the browser drive the composition; the committed text
-      // arrives through term.onData like any other input.
+      // IME guard: while a composition is live, e.key is a raw pre-edit
+      // keystroke ('ㄒ', 'j', Enter to pick a candidate), NOT committed text.
+      // Acting on it would steal the Enter/Backspace the IME needs. Let the
+      // browser drive the composition; the committed text arrives through
+      // term.onData and narrows the list from there.
       //
       // MUST stay the first branch: every branch below assumes e.key is real.
       if (e.isComposing || e.keyCode === 229) return
@@ -2035,34 +2050,28 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
       } else if (e.key === ' ') {
         e.preventDefault(); e.stopPropagation()
         toggleCheck()
-      } else if (e.key === 'Backspace') {
-        e.preventDefault(); e.stopPropagation()
-        sendToPty('\x7f')
-        if (!query) { closeMentionMenu(); term.focus(); return }
-        query = query.slice(0, -1)
-        if (!refilter()) { closeMentionMenu(); term.focus() }
-      } else if (e.key.length === 1) {
-        e.preventDefault(); e.stopPropagation()
-        // The character goes to the PTY either way — that is what makes an
-        // empty filter a clean handover rather than a lost keystroke.
-        sendToPty(e.key)
-        query += e.key
-        if (!refilter()) { closeMentionMenu(); term.focus() }
       }
+      // Backspace and printable keys fall through: xterm turns them into
+      // onData ('\x7f', the character, or an IME-committed string), which
+      // maintains inputBuffer as usual and then reaches onTypedData.
     }
 
     root.addEventListener('mousedown', (e) => { if (e.target === root) { closeMentionMenu(); term.focus() } })
-    card.addEventListener('blur', () => closeMentionMenu())
+    // A click on the card (scrollbar, header) must not pull focus out of the
+    // terminal: the textarea is where the next keystroke — and any IME
+    // composition — has to land. Row picks already prevent default themselves.
+    card.addEventListener('mousedown', (e) => e.preventDefault())
     document.addEventListener('keydown', onDocKeydown, true)
+    _mentionMenuOnData = onTypedData
 
     _mentionMenuCleanup = (): void => {
+      _mentionMenuOnData = null
       document.removeEventListener('keydown', onDocKeydown, true)
       root.remove()
     }
 
     renderQueryLine()
     renderSelection()
-    card.focus()
   }
 
   let inputDisposer: { dispose(): void } | null = null
@@ -3550,6 +3559,10 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
       if (!_keystrokeSentAt && data.length <= 16) _keystrokeSentAt = Date.now()
 
       void terminalPort.input(sessionId.value, data)
+
+      // An open @-mention menu narrows by what was just typed (this is also
+      // how IME-committed text reaches it — see openMentionMenu).
+      _mentionMenuOnData?.(data)
 
       // @-mention trigger. Capture the line BEFORE the '@' echoes (onData fires
       // before the PTY round-trips the echo, so readLineBeforeCursor still shows
