@@ -8,6 +8,20 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
+def default_app_data_dir() -> Path:
+    """Where a shipped install keeps its state, ignoring any override.
+
+    Split out from ``app_data_dir`` so something can ask "is this process
+    running on the default state, or beside it?" — which is the question that
+    decides whether a stored secret may share a name with the shipped app's.
+    """
+    if os.name == "posix" and os.uname().sysname == "Darwin":
+        return Path(os.path.expanduser("~/Library/Application Support/Agent-Team"))
+    # Fallback for non-macOS dev: XDG_DATA_HOME or ~/.local/share.
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return Path(base) / "Agent-Team"
+
+
 def app_data_dir() -> Path:
     """Cross-platform-ish app data dir. V1 targets macOS.
 
@@ -19,11 +33,7 @@ def app_data_dir() -> Path:
     override = os.environ.get("AGENT_TEAM_DATA_DIR")
     if override:
         return Path(os.path.expanduser(override))
-    if os.name == "posix" and os.uname().sysname == "Darwin":
-        return Path(os.path.expanduser("~/Library/Application Support/Agent-Team"))
-    # Fallback for non-macOS dev: XDG_DATA_HOME or ~/.local/share.
-    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return Path(base) / "Agent-Team"
+    return default_app_data_dir()
 
 
 def log_dir() -> Path:

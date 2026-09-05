@@ -1643,63 +1643,98 @@ def test_write_slot_rejects_a_multiline_secret_without_touching_the_item(
 # ---- app secrets are per data directory, in Keychain as well as on disk ------
 
 
-def test_two_data_directories_do_not_share_one_keychain_secret(tmp_path):
-    """A dev build beside the installed app must not overwrite its token.
+def test_two_data_directories_do_not_share_one_keychain_secret(tmp_path, monkeypatch):
+    """A dev build beside the installed app must not overwrite its secrets.
 
-    The file fallback was always under the vault's own root; the Keychain name
-    was not, and on macOS Keychain wins. So the second backend to write clobbered
-    the first, and the symptom appeared somewhere else entirely — AUTH_REJECTED
-    on the next reconnect, a roster holding only this machine, and an account
-    view still naming the account whose token had just been replaced.
+    These two vaults are built the way production builds one — ``app.py`` says
+    ``CredentialVault()`` and passes no root — so the only thing separating them
+    is ``AGENT_TEAM_DATA_DIR``, which is exactly what separates a dev backend
+    from the installed app.
+
+    The previous version of this test varied the vault's ``root`` instead, and
+    it passed for a build where the isolation did not work at all: no caller
+    ever passes a root, so both processes computed the same name and the second
+    to write took the Keychain item's ACL with it. On 2026-09-05 that locked the
+    device trust store closed on this machine — the item was still there, the
+    dev backend simply could not read it any more.
     """
     sec = FakeSecurity()
+
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "installed"))
     one = CredentialVault(
-        root=tmp_path / "dir-one",
-        real_home=tmp_path / "home",
-        security_runner=sec,
-        platform="darwin",
-    )
-    two = CredentialVault(
-        root=tmp_path / "dir-two",
-        real_home=tmp_path / "home",
-        security_runner=sec,
-        platform="darwin",
+        real_home=tmp_path / "home", security_runner=sec, platform="darwin"
     )
     one.write_app_secret("navide-server-token", "tok-installed")
+
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dev"))
+    two = CredentialVault(
+        real_home=tmp_path / "home", security_runner=sec, platform="darwin"
+    )
     two.write_app_secret("navide-server-token", "tok-dev")
 
-    assert one.read_app_secret("navide-server-token") == "tok-installed"
+    # Both names are computed at call time, so each vault answers for whichever
+    # data directory is current — read them while that directory is set.
     assert two.read_app_secret("navide-server-token") == "tok-dev"
-    assert one.app_secret_service("navide-server-token") != two.app_secret_service(
-        "navide-server-token"
-    )
+    dev_service = two.app_secret_service("navide-server-token")
+    dev_file = two.app_secret_path("navide-server-token")
+
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "installed"))
+    assert one.read_app_secret("navide-server-token") == "tok-installed"
+    assert one.app_secret_service("navide-server-token") != dev_service
+    # The file fallback too: isolating only the Keychain would leave the two
+    # sharing the file that is read whenever the Keychain has no answer.
+    assert one.app_secret_path("navide-server-token") != dev_file
 
 
-def test_the_default_data_directory_keeps_its_existing_keychain_name(tmp_path):
+def test_the_default_data_directory_keeps_its_existing_keychain_name(tmp_path, monkeypatch):
     """Suffixing every install would sign each one out exactly once, to fix a
-    collision only a second data directory can cause. So the default root keeps
-    the unsuffixed name, and the discriminator is what a *second* root gets."""
-    from agent_team_backend.credential_vault import (
-        _APP_SECRET_SERVICE_PREFIX,
-        default_profiles_root,
-    )
+    collision only a second data directory can cause. So the shipped install
+    keeps the unsuffixed name, and the discriminator is what a *second* data
+    directory gets."""
+    from agent_team_backend.applog import default_app_data_dir
+    from agent_team_backend.credential_vault import _APP_SECRET_SERVICE_PREFIX
 
-    shipped = CredentialVault(
-        root=default_profiles_root(),
+    vault = CredentialVault(
         real_home=tmp_path / "home",
         security_runner=lambda args, input_text=None: (1, ""),
         platform="darwin",
     )
-    assert shipped.app_secret_service("navide-server-token") == (
+
+    monkeypatch.delenv("AGENT_TEAM_DATA_DIR", raising=False)
+    assert vault.app_secret_service("navide-server-token") == (
+        _APP_SECRET_SERVICE_PREFIX + "navide-server-token"
+    )
+    # Spelling the default path out explicitly is the same answer, so an
+    # existing install is not suffixed by having the variable set to where it
+    # already points.
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(default_app_data_dir()))
+    assert vault.app_secret_service("navide-server-token") == (
         _APP_SECRET_SERVICE_PREFIX + "navide-server-token"
     )
 
-    other = CredentialVault(
-        root=tmp_path / "elsewhere",
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "elsewhere"))
+    assert vault.app_secret_service("navide-server-token").startswith(
+        _APP_SECRET_SERVICE_PREFIX + "navide-server-token@"
+    )
+
+
+def test_the_profiles_root_is_not_what_separates_two_backends(tmp_path, monkeypatch):
+    """The mistake that made the previous fix unreachable, pinned so it cannot
+    come back: two vaults with different profile roots but one data directory
+    are one backend's storage, and must answer with one name."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "one-backend"))
+    a = CredentialVault(
+        root=tmp_path / "root-a",
         real_home=tmp_path / "home",
         security_runner=lambda args, input_text=None: (1, ""),
         platform="darwin",
     )
-    assert other.app_secret_service("navide-server-token").startswith(
-        _APP_SECRET_SERVICE_PREFIX + "navide-server-token@"
+    b = CredentialVault(
+        root=tmp_path / "root-b",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (1, ""),
+        platform="darwin",
+    )
+    assert a.app_secret_service("navide-server-token") == b.app_secret_service(
+        "navide-server-token"
     )

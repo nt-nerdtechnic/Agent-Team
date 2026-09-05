@@ -2693,6 +2693,9 @@ const TRUST_CONFIRM_ACTIONS = new Set([
   'p2p.trust.unblock',
   'p2p.pair.start',
   'p2p.pair.confirm',
+  // Destroys every pairing on this machine, so it is exactly the kind of act
+  // this list exists for: only a window can ask for it.
+  'p2p.trust.rebuild',
 ])
 ipcMain.handle('trust:confirm', async (_event, action: unknown, deviceId: unknown) => {
   if (typeof action !== 'string' || !TRUST_CONFIRM_ACTIONS.has(action)) return null

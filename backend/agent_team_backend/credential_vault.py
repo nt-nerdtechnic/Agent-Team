@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .applog import app_data_dir, default_app_data_dir
 from .cli_vendors.registry import vendor as _cli_vendor_spec
 from .profiles_store import (
     CLAUDE_ENV_OVERRIDES,
@@ -437,30 +438,50 @@ class CredentialVault:
 
     # ---- app secrets (not tied to a CLI vendor or an account slot) ----
 
+    def _app_secret_suffix(self) -> str:
+        """`@<digest>` for a backend running beside the shipped install, else "".
+
+        Keyed on the **data directory**, which is the thing that actually makes
+        two backends separate: ``AGENT_TEAM_DATA_DIR`` is what the dev launcher
+        sets, and what a packaged build under test is given.
+
+        This used to be keyed on ``self._root``, the CLI-profiles root — and
+        that root is ``~/.navide/cli-profiles`` for every process, because
+        nothing passes one (``app.py`` constructs ``CredentialVault()`` with no
+        argument) and it is not derived from the data directory. So the branch
+        was unreachable: a dev backend and the installed app computed the same
+        service name, exactly what the docstring said it had fixed. Two runs
+        with different ``AGENT_TEAM_DATA_DIR`` values are now the test.
+
+        What that cost, on this machine, on 2026-09-05: a packaged backend
+        started a few times for release checks wrote the shared
+        ``navide-device-trust`` entry under its own code signature; the Keychain
+        ACL followed the writer, the dev backend could no longer read the item
+        it could still see, and the trust store failed closed with every pairing
+        gone.
+
+        The default install keeps the unsuffixed name. That is the whole reason
+        for the branch: suffixing unconditionally would be tidier and would sign
+        out every shipped install exactly once, to fix a collision only a second
+        data directory can cause.
+        """
+        current = canonical_path_str(app_data_dir())
+        if current == canonical_path_str(default_app_data_dir()):
+            return ""
+        return "@" + hashlib.sha256(current.encode("utf-8")).hexdigest()[:8]
+
     def app_secret_path(self, name: str) -> Path:
-        return self._root / _APP_SECRET_DIRNAME / name
+        """The file fallback, isolated the same way and for the same reason.
+
+        Isolating only the Keychain would leave two backends sharing this file:
+        it is read whenever the Keychain has no answer, and it is the whole
+        story on a platform that has no Keychain.
+        """
+        return self._root / (_APP_SECRET_DIRNAME + self._app_secret_suffix()) / name
 
     def app_secret_service(self, name: str) -> str:
-        """Keychain service for a backend-owned secret, per data directory.
-
-        The file fallback has always been under ``self._root``; the Keychain
-        name was not, so two backends with different data directories shared one
-        entry and macOS prefers Keychain over the file. Running a dev build
-        beside the installed app therefore overwrote the installed app's
-        Navide-Server token: the next reconnect answered AUTH_REJECTED, the
-        roster collapsed to this machine alone, and the account view went on
-        showing the old account because nothing had told it otherwise.
-
-        The default root keeps the unsuffixed name it already has. That is the
-        whole reason for the branch: suffixing everything would be tidier and
-        would sign out every shipped install exactly once, to fix a collision
-        only a second data directory can cause.
-        """
-        base = _APP_SECRET_SERVICE_PREFIX + name
-        if self._root == Path(canonical_path_str(default_profiles_root())):
-            return base
-        digest = hashlib.sha256(str(self._root).encode("utf-8")).hexdigest()
-        return f"{base}@{digest[:8]}"
+        """Keychain service for a backend-owned secret, per data directory."""
+        return _APP_SECRET_SERVICE_PREFIX + name + self._app_secret_suffix()
 
     def read_app_secret(self, name: str) -> str | None:
         """Read a backend-owned secret, or None when it was never stored."""

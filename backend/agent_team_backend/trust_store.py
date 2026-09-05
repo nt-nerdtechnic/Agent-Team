@@ -155,6 +155,15 @@ ALL_NOTICE_KINDS = frozenset({
 })
 
 
+class TrustStoreNotLocked(RuntimeError):
+    """Raised when a rebuild is asked for and there is nothing wrong.
+
+    Refused rather than performed: a rebuild destroys every pairing, and a
+    caller that reaches for it against a healthy store has misunderstood what it
+    does. It is never the answer to "something feels off".
+    """
+
+
 class TrustStoreLocked(RuntimeError):
     """The state was initialised once and cannot be read now.
 
@@ -1186,6 +1195,44 @@ def dismiss_notice(key: str) -> bool:
             _save_locked(state)
             return True
         return False
+
+
+def rebuild_locked_store() -> dict[str, Any]:
+    """Start the trust record over, on purpose, with a person present.
+
+    The lock exists because a *silent* reset is the attack: delete the state and
+    the machine re-pins whatever keys it is next shown, with nobody the wiser.
+    Which is why there is no automatic recovery and never should be — but the
+    absence of any recovery at all was not a decision anybody made, and on a
+    machine that hits this the only way out was Keychain Access. That is not a
+    safer state; it is the same reset, performed with less information and
+    without clearing the marker, so the two halves stay disagreeing.
+
+    So: the same act, made visible and consistent. It refuses unless the store
+    is actually locked, it drops the record and the marker together so they
+    cannot disagree afterwards, and every pin goes with it — both machines have
+    to pair again, which is the point. The caller is responsible for the
+    confirmation that says a person asked for this; nothing here can tell.
+    """
+    global _state, _locked_reason
+    with _lock:
+        if not _locked_reason:
+            try:
+                _load_locked()
+            except TrustStoreLocked:
+                pass
+        if not _locked_reason:
+            raise TrustStoreNotLocked("the device trust store is readable")
+        cleared = _locked_reason
+        _vault().write_app_secret(SECRET_NAME, None)
+        # A JSON null reads back as "no marker" (kv_get's default), which is
+        # what the marker's absence means; the kv store has no delete.
+        _database().kv_set(INITIALISED_KEY, None, now=0)
+        _state = None
+        _locked_reason = ""
+        _seen_pending.clear()
+        log.warning("device trust store rebuilt after a lock: %s", cleared)
+        return {"rebuilt": True, "was": cleared}
 
 
 def _reset_for_test() -> None:

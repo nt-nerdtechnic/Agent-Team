@@ -976,7 +976,14 @@ def test_no_public_read_answers_from_an_empty_cache():
     }
     # clear_policy_notice reads the cache too, but its cold answer is "leave the
     # warning alone" — the safe direction, and the reason it is exempt.
-    unchecked = touching_state - set(readers) - {"clear_policy_notice", "locked_reason"}
+    # rebuild_locked_store is not a reader at all: it refuses unless the store
+    # is locked, and a cold cache is the state in which it does its own load to
+    # find out. Its own tests cover both answers.
+    unchecked = touching_state - set(readers) - {
+        "clear_policy_notice",
+        "locked_reason",
+        "rebuild_locked_store",
+    }
     assert not unchecked, f"public readers with no cold-cache assertion: {unchecked}"
 
 
@@ -2801,3 +2808,66 @@ async def test_the_initiator_can_still_withdraw():
     finally:
         device_pairing._reset_for_test()
         await link.stop()
+
+
+# ── Recovery from a fail-closed lock ─────────────────────────────────────────
+
+
+def _lock_the_store() -> None:
+    """Put the store in the state the user hit: the marker says this machine
+    once had trust state, and the record cannot be read."""
+    trust_store.load()
+    trust_store._vault().write_app_secret(trust_store.SECRET_NAME, "{ not json")
+    trust_store._state = None
+    trust_store._locked_reason = ""
+
+
+def test_a_rebuild_is_refused_while_the_store_is_readable() -> None:
+    """It costs every pairing on the machine. Against a healthy store that is
+    not a recovery, it is destruction, and a caller asking for one has
+    misunderstood what it does."""
+    trust_store.load()
+    with pytest.raises(trust_store.TrustStoreNotLocked):
+        trust_store.rebuild_locked_store()
+
+
+def test_a_rebuild_clears_the_record_and_the_marker_together() -> None:
+    """Both halves, or the lock comes straight back: the marker alone is what
+    turns an unreadable record into a refusal to run."""
+    _lock_the_store()
+    assert trust_store.locked_reason() != ""
+
+    result = trust_store.rebuild_locked_store()
+
+    assert result["rebuilt"] is True and result["was"]
+    # Checked before anything reads the store: the first read initialises a
+    # fresh record and writes the marker again, which is correct and would hide
+    # whether the rebuild cleared it.
+    assert trust_store._database().kv_get(trust_store.INITIALISED_KEY) is None
+    assert trust_store.locked_reason() == ""
+    # And the machine starts over rather than resuming: nothing it was paired
+    # with survives, which is the cost the warning names.
+    assert trust_store.load()["pins"] == {}
+
+
+def test_a_rebuild_erases_the_unreadable_record_itself() -> None:
+    """Not just the marker. Leaving the bad record behind would make the next
+    read find it again — and on macOS it is the Keychain item whose ACL is
+    usually why it could not be read, so the whole point is that it goes."""
+    _lock_the_store()
+    trust_store.rebuild_locked_store()
+
+    assert trust_store._vault().read_app_secret(trust_store.SECRET_NAME) is None
+
+
+def test_a_rebuilt_store_can_pair_again() -> None:
+    """The point of the recovery: after it, the machine works. A reset that
+    left the store unusable would only have moved the dead end."""
+    _lock_the_store()
+    trust_store.rebuild_locked_store()
+
+    key = device_signing.public_key()
+    assert trust_store.pin_paired_device(
+        "dev-after-rebuild", sign_key=key, member_id="m1", own_member_id="m1"
+    ) is True
+    assert trust_store.pin_for("dev-after-rebuild") is not None
