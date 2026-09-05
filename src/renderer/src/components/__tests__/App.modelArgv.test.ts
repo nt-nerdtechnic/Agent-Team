@@ -366,6 +366,9 @@ describe('a remote caller cannot supply a raw command', () => {
     // one is a decision someone makes on purpose rather than a default they
     // inherit. If a new name shows up, the question to answer before adding it
     // is whether MCP or the websocket can reach it.
+    // performRealizeRestoredPane holds a commandOverride variable too, but it
+    // hands it to spawnRestoredPane rather than calling spawnPane itself, so it
+    // is not a separate exit and does not belong here.
     const filled = sites.filter((s) => s.override !== "''").map((s) => s.owner)
     expect([...new Set(filled)].sort()).toEqual([
       'onManualResume', // the user pressing resume, with their own binary choice
