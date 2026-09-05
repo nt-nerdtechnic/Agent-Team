@@ -51,6 +51,32 @@ A future portability feature should use explicit local export/import with redact
 
 Read each provider's policy before sending private code or regulated data.
 
+### Cross-device messaging
+
+When you sign in to a Navide account and address a pane on another device, the
+message body is sealed for that device's public key before it leaves. Navide’s
+relay stores and forwards it without being able to read it — it holds no
+corresponding private key.
+
+What the relay *does* see is the metadata around the message: the sending and
+receiving device ids, the workspace label and pane name on both ends, delivery
+state, and timestamps. It also holds the session directory, which is how devices
+find each other at all.
+
+The absolute filesystem path of a workspace is **not** published. It used to be:
+the session directory carried `workspacePath` verbatim, which in practice meant
+the whole local path including your account name. Devices now publish a salted
+digest instead. The salt is generated per install, kept in the local credential
+vault, and never leaves the machine — so the digest is stable enough to group
+panes from one workspace and cannot be turned back into a path by the relay or
+by another device. An unsalted digest would not be enough here, because a path
+is short and highly structured and would fall to a dictionary.
+
+The workspace *label* (the folder's basename) and the pane name do remain
+readable. They are the two halves of the `<device>/<workspace>/<pane>` address a
+remote agent has to type, so hiding them would remove cross-device addressing by
+name rather than protecting it. Reducing them further needs a user-chosen alias.
+
 The production Git package invokes `git`, `gh`, and `glab` locally through a
 Host-owned argv allowlist. Navide does not proxy those services or upload the
 repository to Navide. GitHub or GitLab may still receive data when the local

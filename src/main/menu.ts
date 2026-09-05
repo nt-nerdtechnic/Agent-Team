@@ -1,4 +1,5 @@
 import { app, clipboard, Menu, webContents, type BrowserWindow, type MenuItemConstructorOptions } from 'electron'
+import { LEGAL_LABELS, LEGAL_ROUTES, type LegalRoute } from '../shared/legalLinks'
 import { getTerminalSelection } from './terminal-selection-cache'
 
 /**
@@ -70,6 +71,8 @@ export interface AppMenuHooks {
   onReportIssue?: () => void
   /** Help menu: show the keyboard-shortcuts panel. */
   onShowShortcuts?: () => void
+  /** Help menu: open one of the legal pages on navide.dev (see shared/legalLinks). */
+  onOpenLegal?: (route: LegalRoute) => void
   // When provided, a dev-only "Developer" submenu with an entry that opens the
   // no-op plugin view is appended. Omit it (the default) and the menu is
   // byte-for-byte the shipping menu. Gated by the caller behind a dev flag.
@@ -327,7 +330,16 @@ export function installApplicationMenu(
         { label: 'Navide on GitHub', click: () => hooks.onOpenRepo?.() },
         { label: 'Report an Issue…', click: () => hooks.onReportIssue?.() },
         { type: 'separator' },
-        { label: 'Keyboard Shortcuts', click: () => hooks.onShowShortcuts?.() }
+        { label: 'Keyboard Shortcuts', click: () => hooks.onShowShortcuts?.() },
+        { type: 'separator' },
+        // One entry per page, in the table's order, so the menu and the site
+        // can only disagree by editing the table.
+        ...LEGAL_ROUTES.map(
+          (route): MenuItemConstructorOptions => ({
+            label: LEGAL_LABELS[route],
+            click: () => hooks.onOpenLegal?.(route)
+          })
+        )
       ]
     } as MenuItemConstructorOptions
   ]

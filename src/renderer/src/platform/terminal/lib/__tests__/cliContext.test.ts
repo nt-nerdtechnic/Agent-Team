@@ -23,6 +23,7 @@ import {
   BRACKETED_PASTE_END,
   CLI_PASTE_BUFFER_CAP,
   filterMentionCandidates,
+  clusterMentionCandidates,
   rankMentionCandidates,
   recordMentionRecents,
   buildMentionPickData,
@@ -752,9 +753,39 @@ describe('filterMentionCandidates', () => {
     expect(filterMentionCandidates(all, 'zzz')).toEqual([])
   })
 
+  it('folds full-width characters so a CJK input method still finds ASCII names', () => {
+    expect(filterMentionCandidates(all, 'ＣＯＤ').map((c) => c.address))
+      .toEqual(filterMentionCandidates(all, 'cod').map((c) => c.address))
+  })
+
+  it('matches a CJK address by its own characters', () => {
+    expect(filterMentionCandidates([cand('測試-1'), cand('codex-1')], '測').map((c) => c.address))
+      .toEqual(['測試-1'])
+  })
+
   it('copies rather than aliasing the input array', () => {
     const out = filterMentionCandidates(all, '')
     expect(out).not.toBe(all)
+  })
+})
+
+describe('clusterMentionCandidates', () => {
+  const c = (address: string, group: string): MentionCandidate => ({ address, group })
+
+  it('makes every group contiguous, in first-seen order', () => {
+    const out = clusterMentionCandidates([c('a', 'proj'), c('b', 'lib'), c('c', 'proj'), c('d', 'lib')])
+    expect(out.map((x) => x.address)).toEqual(['a', 'c', 'b', 'd'])
+  })
+
+  it('leads with the sender own workspace even when it is not first', () => {
+    const out = clusterMentionCandidates([c('a', 'lib'), c('b', 'proj'), c('c', 'lib')], 'proj')
+    expect(out.map((x) => x.address)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('keeps candidates that have no group together, without inventing one', () => {
+    const out = clusterMentionCandidates([{ address: 'x' }, c('a', 'proj'), { address: 'y' }])
+    expect(out.map((x) => x.address)).toEqual(['x', 'y', 'a'])
+    expect(out[0].group).toBeUndefined()
   })
 })
 
@@ -825,6 +856,11 @@ describe('buildMentionPickData', () => {
     // The user typed "@cod"; the three DEL bytes take "cod" back before the
     // full name lands, so the prompt reads "@codex-1 " and never "@codcodex-1".
     expect(buildMentionPickData('cod', ['codex-1'])).toBe('\x7f\x7f\x7fcodex-1 ')
+  })
+
+  it('erases one character per code point, not per UTF-16 unit', () => {
+    expect(buildMentionPickData('測試', ['codex-1'])).toBe('\x7f\x7fcodex-1 ')
+    expect(buildMentionPickData('😀', ['codex-1'])).toBe('\x7fcodex-1 ')
   })
 
   it('sends just the address when nothing was typed', () => {

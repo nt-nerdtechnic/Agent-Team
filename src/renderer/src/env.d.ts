@@ -8,6 +8,7 @@ type ExecutionPolicyApi = import('../../shared/executionPolicy').ExecutionPolicy
 type ManifestPermissionsSummary = import('../../shared/executionPolicy').ManifestPermissionsSummary
 type PackageVersionGrantSummary = import('../../shared/executionPolicy').PackageVersionGrantSummary
 type LegacyPlansPreferenceProjection = import('../../shared/plansPreferences').LegacyPlansPreferenceProjection
+type LegalRoute = import('../../shared/legalLinks').LegalRoute
 
 interface BackendInfo {
   status: 'starting' | 'ready' | 'error'
@@ -186,6 +187,12 @@ declare global {
       stabilizeDroppedPaths: (paths: string[]) => Promise<{ ok: boolean; paths: string[] }>
       saveClipboardImage: (args: { bytes: Uint8Array; mediaType: string }) => Promise<{ ok: boolean; path?: string }>
       openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>
+      legalLinks: Readonly<Record<LegalRoute, string>>
+      trustConfirm: (
+        action: string,
+        deviceId: string,
+      ) => Promise<{ nonce: string; expires: string; mac: string } | null>
+      openLegal: (route: LegalRoute) => Promise<{ ok: boolean; error?: string }>
       onSwitchEditorSidebar: (cb: (sidebar: string) => void) => void
       onOpenEditorDiff: (cb: (params: Record<string, string>) => void) => void
       readKeybindings: () => Promise<{ ok: boolean; content?: string; error?: string }>

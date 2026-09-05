@@ -108,7 +108,7 @@ describe('the stage says a switch is happening', () => {
     // uncover a stage the second is still rebuilding — putting back exactly the
     // blank this was added to fill.
     expect(fn).toContain('const coverSeq = ++switchCoverSeq')
-    expect(fn).toContain('if (coverSeq === switchCoverSeq) switchingWorkspace.value = false')
+    expect(fn).toMatch(/if \(coverSeq === switchCoverSeq\) \{\s*\n\s*switchingWorkspace\.value = false/)
     // Claimed before the first await, or the second run could claim first.
     expect(fn.indexOf('const coverSeq = ++switchCoverSeq')).toBeLessThan(
       fn.indexOf('await onWorkspaceBrowse(path, { keepPanes: true })')

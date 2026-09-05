@@ -105,6 +105,7 @@ import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
   buildMentionInsert,
+  clusterMentionCandidates,
   rankMentionCandidates,
   recordMentionRecents,
   MENTION_BROADCAST_ADDRESS,
@@ -262,6 +263,10 @@ import navideMark from './assets/navide-mark.png'
 const CompletionModal = defineAsyncComponent(() => import('./components/CompletionModal.vue'))
 const SettingsModal = defineAsyncComponent(() => import('./components/SettingsModal.vue'))
 const AccountModal = defineAsyncComponent(() => import('./components/AccountModal.vue'))
+// Not lazy: it has to be listening before anybody asks to pair, and a request
+// expires in five minutes — too short to wait for a chunk to be fetched because
+// somebody happened to open a window.
+import PairingPrompt from './components/PairingPrompt.vue'
 const OnboardingWizard = defineAsyncComponent(() => import('./components/OnboardingWizard.vue'))
 const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
@@ -3089,7 +3094,9 @@ function readPaneShareText(ref: NonNullable<(typeof paneRefs)[string]>, maxLines
 // Panes in OTHER workspace windows, as `<folder>/<pane>` addresses. Polled
 // rather than pushed: the list only feeds autocomplete, so a slightly stale
 // snapshot costs nothing (routing itself always re-resolves in the backend).
-const remoteMessagingTargets = ref<string[]>([])
+/** `<folder>/<pane>` addresses of panes in other windows, each with the
+ *  workspace folder the menu groups it under. */
+const remoteMessagingTargets = ref<Array<{ address: string; workspaceLabel: string }>>([])
 /** paneId → `<folder>/<pane>`, so a pane dragged in from another window can be
  *  turned into an address without a second round trip. */
 const remoteTargetByPane = new Map<string, string>()
@@ -3097,7 +3104,7 @@ const remoteTargetByPane = new Map<string, string>()
 async function refreshRemoteMessagingTargets(timeoutMs?: number): Promise<void> {
   try {
     const resp = await backend.send<{
-      panes?: Array<{ pane_id?: string; qualified_name?: string }>
+      panes?: Array<{ pane_id?: string; qualified_name?: string; workspace_label?: string }>
     }>('agent_msg.list', {}, timeoutMs)
     const localIds = new Set(panes.value.map((p) => p.id))
     const remote = (resp.payload?.panes ?? []).filter(
@@ -3105,7 +3112,10 @@ async function refreshRemoteMessagingTargets(timeoutMs?: number): Promise<void> 
     )
     remoteTargetByPane.clear()
     for (const p of remote) remoteTargetByPane.set(p.pane_id as string, p.qualified_name as string)
-    remoteMessagingTargets.value = remote.map((p) => p.qualified_name as string)
+    remoteMessagingTargets.value = remote.map((p) => ({
+      address: p.qualified_name as string,
+      workspaceLabel: p.workspace_label || (p.qualified_name as string).split('/')[0],
+    }))
   } catch {
     remoteMessagingTargets.value = []
     remoteTargetByPane.clear()
@@ -3150,11 +3160,17 @@ function rememberMentionPick(addresses: string[]): void {
 // Addresses offered by pane `paneId`'s @-mention autocomplete menu: every OTHER
 // pane that has a messaging name (self excluded), then the qualified addresses
 // of panes open in other workspace windows, with the recently used hoisted.
+// Rows are grouped by workspace folder — the sender's own first — so a window
+// holding several projects, or a roster spanning several windows, reads as
+// one list per project rather than "this window" versus "everything else".
 //
 // The group and status words are resolved HERE because useTerminal owns no i18n
 // scope, and the ordering is decided here because recency is remembered here.
 function mentionCandidatesFor(paneId: string): MentionCandidate[] {
+  const folderOf = (path: string | undefined): string | undefined =>
+    path ? (path.split('/').filter(Boolean).pop() ?? path) : undefined
   const localGroup = i18n.global.t('mention.group-local')
+  const ownGroup = folderOf(panes.value.find((x) => x.id === paneId)?.workspacePath) ?? localGroup
   const others: MentionCandidate[] = panes.value
     .filter((x) => x.id !== paneId && x.messagingName)
     .map((x) => {
@@ -3164,7 +3180,7 @@ function mentionCandidatesFor(paneId: string): MentionCandidate[] {
       const status = paneRefs[x.id]?.displayStatus
       return {
         address: x.messagingName as string,
-        group: localGroup,
+        group: folderOf(x.workspacePath) ?? localGroup,
         status,
         statusLabel: status ? paneStatusLabelText(status) : undefined,
       }
@@ -3183,17 +3199,16 @@ function mentionCandidatesFor(paneId: string): MentionCandidate[] {
   const broadcast: MentionCandidate[] = canBroadcast
     ? [{
         address: MENTION_BROADCAST_ADDRESS,
-        group: localGroup,
+        group: ownGroup,
         statusLabel: i18n.global.t('mention.broadcast-hint'),
       }]
     : []
-  const remoteGroup = i18n.global.t('mention.group-remote')
-  const remote: MentionCandidate[] = remoteMessagingTargets.value.map((address) => ({
-    address,
-    group: remoteGroup,
+  const remote: MentionCandidate[] = remoteMessagingTargets.value.map((t) => ({
+    address: t.address,
+    group: t.workspaceLabel,
   }))
   return rankMentionCandidates(
-    [...broadcast, ...others, ...remote],
+    clusterMentionCandidates([...broadcast, ...others, ...remote], ownGroup),
     loadMentionRecents(),
     i18n.global.t('mention.group-recent')
   )
@@ -6413,10 +6428,13 @@ watch(currentWorkspace, (workspacePath) => {
 // alone is not enough: asking for the tab you are already on leaves the prop
 // unchanged, so the modal's watcher never fires and the request is dropped.
 const settingsTabRequest = ref(0)
-const settingsInitialTab = ref<'general' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts' | 'storage' | 'keybindings' | 'prompts'>('general')
+const settingsInitialTab = ref<'general' | 'cross-device' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts' | 'storage' | 'keybindings' | 'prompts'>('general')
 // Needed to retarget an already-open modal: initialTab is only honoured on mount
 // and by its own watcher, so re-issuing the same tab is a no-op without this.
-const settingsModalRef = ref<{ setTab: (tab: string) => void } | null>(null)
+const settingsModalRef = ref<{
+  setTab: (tab: string) => void
+  setSection: (tab: string, section: string) => Promise<void>
+} | null>(null)
 function openSettingsAt(tab: typeof settingsInitialTab.value): void {
   settingsInitialTab.value = tab
   if (showSettings.value) settingsModalRef.value?.setTab(tab)
@@ -6428,6 +6446,20 @@ const knownWorkspacePaths = computed<string[]>(() => {
   const paths = [currentWorkspace.value, ...recentWorkspaces.value.filter((w) => w.exists).map((w) => w.path)]
   return [...new Set(paths.filter(Boolean))]
 })
+/**
+ * Show the pane-authorization rules, from the account window.
+ *
+ * They live in a different window, and the account view's "your rules could not
+ * be verified" notice used to name them in prose with nothing to click — in a
+ * window that does not contain them.
+ */
+function openPanePolicySettings(): void {
+  settingsInitialTab.value = 'cross-device'
+  showSettings.value = true
+  void nextTick(() => {
+    void settingsModalRef.value?.setSection('cross-device', 'general-p2p-policy')
+  })
+}
 function openSettingsAccounts(): void {
   settingsInitialTab.value = 'accounts'
   showSettings.value = true
@@ -7804,7 +7836,9 @@ async function onWorkspaceCheck(path: string): Promise<void> {
     // Cold load seeds a focus so a placeholder is on screen in sidebar/spotlight.
     // onWorkspaceCheck also runs on a pipeline abort and on WS reconnect, so only
     // seed when the current focus is gone — never steal a focus the user set.
-    if (!focusPaneId.value || !tabVisiblePanes.value.some((p) => p.id === focusPaneId.value)) {
+    // A switch lands its own focus (see landingWorkspaceSwitch).
+    if (!landingWorkspaceSwitch &&
+        (!focusPaneId.value || !tabVisiblePanes.value.some((p) => p.id === focusPaneId.value))) {
       focusPaneId.value = tabVisiblePanes.value[0]?.id ?? null
     }
     // Scope selection depends on the settled active tab and focus. Start only
@@ -8639,6 +8673,27 @@ const reconnectPickerOpen = ref(false)
 const reconnectPickerPaneId = ref('')
 const reconnectOrphans = ref<OrphanSession[]>([])
 const reconnectLoading = ref(false)
+
+// ── Panes whose CLI is working right now (for AgentHistoryModal's pinned
+// "running" group) ──────────────────────────────────────────────────────────
+// Two computeds on purpose: paneViews is replaced every 400ms by syncViews, so
+// deriving the Set directly would regroup the whole history list four times a
+// second. The key is a plain string, so the Set below only rebuilds when the
+// membership actually changes. Same shape as stageTabs, same reason.
+const activeHistoryPaneKey = computed(() => {
+  const disconnected = new Set(disconnectedPaneIds.value)
+  const ids: string[] = []
+  for (const view of paneViews.value) {
+    if (disconnected.has(view.id)) continue
+    if (view.status === 'running' || view.status === 'starting' || view.status === 'awaiting') {
+      ids.push(view.id)
+    }
+  }
+  return ids.sort().join(',')
+})
+const activeHistoryPaneIds = computed(
+  () => new Set(activeHistoryPaneKey.value ? activeHistoryPaneKey.value.split(',') : [])
+)
 
 async function resolveReconnectForPane(
   saved: ProjectPane,
@@ -12666,6 +12721,17 @@ let switchCoverSeq = 0
  *  reads as a glitch rather than as loading. Past this the stage would
  *  otherwise sit blank, which is what the cover is for. */
 const SWITCH_COVER_DELAY_MS = 180
+/** True while a switch is landing its workspace.
+ *
+ *  Entering a project must not enter one of its agents. Several fixups keep
+ *  focusPaneId pointing at a pane that is on screen, and each of them fires
+ *  during a switch: the entered workspace's panes arrive as additions, its
+ *  first run group becomes the active tab, and the workspace check seeds a
+ *  focus for a cold load. Each would land the focus on a pane nobody picked —
+ *  and focusing a pane focuses its terminal, so the next keystroke would go to
+ *  an agent the user never opened. They stand down while this is set; the
+ *  switch decides the focus itself, at the end, once the panes are back. */
+let landingWorkspaceSwitch = false
 
 async function switchToWorkspace(path: string): Promise<void> {
   if (isDetachedWindow) return // see adoptWorkspace
@@ -12698,6 +12764,7 @@ async function switchToWorkspace(path: string): Promise<void> {
   const coverTimer = setTimeout(() => {
     if (coverSeq === switchCoverSeq) switchingWorkspace.value = true
   }, SWITCH_COVER_DELAY_MS)
+  landingWorkspaceSwitch = true
   try {
     await onWorkspaceBrowse(path, { keepPanes: true })
     // onWorkspaceBrowse has its own reasons to decline — chiefly finding the
@@ -12721,16 +12788,17 @@ async function switchToWorkspace(path: string): Promise<void> {
     // and grid blink empty on the way through. The debounced call still arrives
     // and is a no-op by then.
     await onWorkspaceCheck(path)
-    // The focused pane is very likely one this window just stopped showing. In
-    // grid mode that is harmless, but sidebar and spotlight render the focused
-    // pane and nothing else, so they would come up blank. Same landing as
-    // onUserSelectTab: keep the focus if it survived the filter, else take the
-    // first pane that did.
+    // The focused pane is very likely one this window just stopped showing.
+    // Keep it if it survived the filter — the switch stayed within one pane's
+    // world and nothing needs to move. Otherwise select nothing: entering a
+    // workspace is not entering one of its CLIs, and the user says which one
+    // they want by clicking it. The stage does not go blank — sidebar and
+    // spotlight draw effectiveFocusPaneId, which falls back to the first pane
+    // on its own — it is just no longer selected, and the keyboard is not
+    // inside it.
     await nextTick()
-    const visible = tabVisiblePanes.value
-    if (!visible.some((p) => p.id === focusPaneId.value)) {
-      const first = visible[0]?.id
-      if (first) selectPane(first, { userInitiated: false })
+    if (!tabVisiblePanes.value.some((p) => p.id === focusPaneId.value)) {
+      selectPane(null, { userInitiated: false })
     }
   } finally {
     // finally, not after the last await: every path out of here — the decline
@@ -12742,7 +12810,10 @@ async function switchToWorkspace(path: string): Promise<void> {
     // unconditional though — an older switch's pending timer must never raise
     // the cover after that switch is over.
     clearTimeout(coverTimer)
-    if (coverSeq === switchCoverSeq) switchingWorkspace.value = false
+    if (coverSeq === switchCoverSeq) {
+      switchingWorkspace.value = false
+      landingWorkspaceSwitch = false
+    }
   }
 }
 
@@ -12760,11 +12831,10 @@ async function closeWorkspace(path: string): Promise<void> {
   if (!workspaceOrder.value.some((w) => normWs(w) === normWs(path))) return
   // Closing the one on screen means landing somewhere first. Switching before
   // letting go — rather than after — is what puts the panes and the focus
-  // somewhere valid: switchToWorkspace already keeps the focused pane if it
-  // survives the filter and otherwise takes the first that did, which is the
-  // next project's first CLI. It can also decline (the target turned out to be
-  // open in another window), and then nothing is closed, rather than leaving
-  // this window on a project it no longer holds.
+  // somewhere valid: switchToWorkspace keeps the focused pane if it survives
+  // the filter and otherwise leaves nothing selected. It can also decline (the
+  // target turned out to be open in another window), and then nothing is
+  // closed, rather than leaving this window on a project it no longer holds.
   if (normWs(path) === normWs(currentWorkspace.value)) {
     const land = workspaceOrder.value.find((w) => normWs(w) !== normWs(path))
     // Nothing to land on. Going back to the Welcome picker is the titlebar's
@@ -12918,7 +12988,7 @@ function persistPaneStopped(id: string, stopped: boolean): void {
 // Keep focusPaneId valid as panes are added/removed
 watch(panes, (newPanes, oldPanes) => {
   const ids = new Set(newPanes.map((p) => p.id))
-  if (focusPaneId.value && !ids.has(focusPaneId.value)) {
+  if (!landingWorkspaceSwitch && focusPaneId.value && !ids.has(focusPaneId.value)) {
     selectPane(newPanes[0]?.id ?? null, { userInitiated: false })
   }
   // Drop selected ids for panes that were removed or had their id replaced by a
@@ -12928,7 +12998,10 @@ watch(panes, (newPanes, oldPanes) => {
     if (pruned.size !== selectedPaneIds.value.size) selectedPaneIds.value = pruned
   }
   if (lastClickPaneId.value && !ids.has(lastClickPaneId.value)) lastClickPaneId.value = null
-  if (layoutMode.value !== 'grid' && newPanes.length > (oldPanes?.length ?? 0)) {
+  // A new pane is the one that was just asked for, so non-grid layouts — which
+  // draw the focused pane and nothing else — follow it. A switch restores a
+  // whole workspace's panes through here, and none of them was asked for.
+  if (!landingWorkspaceSwitch && layoutMode.value !== 'grid' && newPanes.length > (oldPanes?.length ?? 0)) {
     selectPane(newPanes[newPanes.length - 1].id, { userInitiated: false })
   }
   // If the current tab's run group was removed, fall back to first available group
@@ -12941,7 +13014,7 @@ watch(panes, (newPanes, oldPanes) => {
 // When switching tabs, ensure focusPaneId is within the new tab's visible panes
 watch(activeTab, () => {
   const visible = tabVisiblePanes.value
-  if (focusPaneId.value && !visible.some((p) => p.id === focusPaneId.value)) {
+  if (!landingWorkspaceSwitch && focusPaneId.value && !visible.some((p) => p.id === focusPaneId.value)) {
     selectPane(visible[0]?.id ?? null, { userInitiated: false })
   }
   void nextTick(() => refitAllTerminals())
@@ -13203,6 +13276,34 @@ const ctxTargetIds = computed<string[]>(() => {
   return [m.paneId]
 })
 const ctxIsBatch = computed(() => ctxTargetIds.value.length > 1)
+
+// "Send message": the address of the right-clicked pane, to be typed into the
+// pane the user is currently working in. Same string the @-menu completes, so
+// this is the menu gesture for what dropping a pane onto a typed "@" does.
+// Null when there is nothing to insert: a pane without a messaging handle
+// (plain terminals have none) cannot be addressed, mentioning the focused pane
+// inside itself addresses no one, and a batch selection has no single address.
+const ctxMentionAddress = computed<string | null>(() => {
+  const m = paneCtxMenu.value
+  if (!m || ctxIsBatch.value) return null
+  const focusId = effectiveFocusPaneId.value
+  if (!focusId || focusId === m.paneId) return null
+  return panes.value.find((p) => p.id === m.paneId)?.messagingName ?? null
+})
+
+// Deliberately NOT injectText: no Enter is sent, matching the @-menu and the
+// pane-drop mention. The user writes the message after the address and submits
+// it themselves.
+async function mentionPaneInFocusedPane(paneId: string): Promise<void> {
+  const targetPaneId = effectiveFocusPaneId.value
+  const address = panes.value.find((p) => p.id === paneId)?.messagingName
+  closePaneCtxMenu()
+  if (!targetPaneId || !address || targetPaneId === paneId) return
+  const lineBeforeCursor = paneRefs[targetPaneId]?.readLineBeforeCursor?.()
+  await pastePaneContext(targetPaneId, buildMentionInsert(lineBeforeCursor, address))
+  paneRefs[targetPaneId]?.focus?.()
+  rememberMentionPick([address])
+}
 
 function openPaneCtxMenu(e: MouseEvent, paneId: string): void {
   e.preventDefault()
@@ -14608,12 +14709,18 @@ function paneIsCommander(p: ActivePane): boolean {
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"
     />
+    <!-- A machine asking to pair, shown wherever the person happens to be.
+         The same request is a card inside the account window; that card is the
+         record and the way back in, this is what somebody actually sees. Both
+         read one snapshot — see usePairingState. -->
+    <PairingPrompt :backend="backend" />
     <AccountModal
       v-if="accountModalEverOpened"
       :open="showAccount"
       :backend="backend"
       @close="showAccount = false"
       @changed="() => void loadP2pAccount()"
+      @open-rules="openPanePolicySettings"
     />
     <ResourceManagerModal
       v-if="resourceManagerEverOpened"
@@ -14653,6 +14760,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :pane-count="panes.length"
       :reviving-pane-id="revivingHistoryPaneId"
       :unavailable-pane-ids="unavailableHistoryPaneIds"
+      :active-pane-ids="activeHistoryPaneIds"
       :preview-open="previewLogOpen"
       :preview-title="previewLogTitle"
       :preview-content="previewLogContent"
@@ -14927,6 +15035,25 @@ function paneIsCommander(p: ActivePane): boolean {
                    spend on ancestry, so they spend a line of text instead. -->
               <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
+                <!-- Opens the family in place, ahead of the name so the card
+                     stays the same height whether or not it has children. Its
+                     own click target — the card itself still focuses the pane —
+                     and it stops dragover because the card is a reorder drop
+                     zone. -->
+                <button
+                  v-if="p.descendantCount > 0"
+                  class="pane-list-kids"
+                  :class="{ 'is-open': p.expanded }"
+                  :title="$t('label.descendant-count', { count: p.descendantCount })"
+                  @click.stop="togglePaneFamily(p.id)"
+                  @dragover.stop
+                  @dragenter.stop
+                >
+                  <!-- The caret alone: ahead of the name there is no room for
+                       the count or the status dots, and the full wording is on
+                       the control's title. -->
+                  <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
+                </button>
                 <span v-if="p.origin === 'pipeline' && p.stageId" class="meeting-pipe-tag">P{{ p.stageId }}</span>
                 <input
                   v-if="inlineRenamingId === p.id"
@@ -14953,36 +15080,6 @@ function paneIsCommander(p: ActivePane): boolean {
               <span class="meeting-sub">
                 {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
               </span>
-              <!-- Opens the family in place. Its own click target — the card
-                   itself still focuses the pane — and it stops dragover
-                   because the card is a reorder drop zone.
-                   Closed, the dots stand in for the children being hidden;
-                   open, the children are right there and the dots would only
-                   repeat them. -->
-              <button
-                v-if="p.descendantCount > 0"
-                class="pane-list-kids"
-                :class="{ 'is-open': p.expanded }"
-                :title="$t('label.descendant-count', { count: p.descendantCount })"
-                @click.stop="togglePaneFamily(p.id)"
-                @dragover.stop
-                @dragenter.stop
-              >
-                <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
-                <template v-if="!p.expanded">
-                  <span
-                    v-for="dot in paneListFamilyDots(p.id)"
-                    :key="dot.id"
-                    class="pane-list-kid-dot"
-                    :data-status="dot.status"
-                    :style="statusBadgeStyle(dot.status)"
-                  ></span>
-                </template>
-                <!-- The number alone. "3 descendants" wraps a narrow card and
-                     pushes the status badge off the row; the full wording is
-                     on the control's title. -->
-                <span class="pane-list-kids-count">{{ p.descendantCount }}</span>
-              </button>
             </div>
             <span
               v-if="p.loopActive"
@@ -15120,6 +15217,25 @@ function paneIsCommander(p: ActivePane): boolean {
                    spend on ancestry, so they spend a line of text instead. -->
               <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
+                <!-- Opens the family in place, ahead of the name so the card
+                     stays the same height whether or not it has children. Its
+                     own click target — the card itself still focuses the pane —
+                     and it stops dragover because the card is a reorder drop
+                     zone. -->
+                <button
+                  v-if="p.descendantCount > 0"
+                  class="pane-list-kids"
+                  :class="{ 'is-open': p.expanded }"
+                  :title="$t('label.descendant-count', { count: p.descendantCount })"
+                  @click.stop="togglePaneFamily(p.id)"
+                  @dragover.stop
+                  @dragenter.stop
+                >
+                  <!-- The caret alone: ahead of the name there is no room for
+                       the count or the status dots, and the full wording is on
+                       the control's title. -->
+                  <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
+                </button>
                 <span v-if="p.origin === 'pipeline' && p.stageId" class="meeting-pipe-tag">P{{ p.stageId }}</span>
                 <input
                   v-if="inlineRenamingId === p.id"
@@ -15146,36 +15262,6 @@ function paneIsCommander(p: ActivePane): boolean {
               <span class="meeting-sub">
                 {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
               </span>
-              <!-- Opens the family in place. Its own click target — the card
-                   itself still focuses the pane — and it stops dragover
-                   because the card is a reorder drop zone.
-                   Closed, the dots stand in for the children being hidden;
-                   open, the children are right there and the dots would only
-                   repeat them. -->
-              <button
-                v-if="p.descendantCount > 0"
-                class="pane-list-kids"
-                :class="{ 'is-open': p.expanded }"
-                :title="$t('label.descendant-count', { count: p.descendantCount })"
-                @click.stop="togglePaneFamily(p.id)"
-                @dragover.stop
-                @dragenter.stop
-              >
-                <span class="pane-list-kids-caret">{{ p.expanded ? '▾' : '▸' }}</span>
-                <template v-if="!p.expanded">
-                  <span
-                    v-for="dot in paneListFamilyDots(p.id)"
-                    :key="dot.id"
-                    class="pane-list-kid-dot"
-                    :data-status="dot.status"
-                    :style="statusBadgeStyle(dot.status)"
-                  ></span>
-                </template>
-                <!-- The number alone. "3 descendants" wraps a narrow card and
-                     pushes the status badge off the row; the full wording is
-                     on the control's title. -->
-                <span class="pane-list-kids-count">{{ p.descendantCount }}</span>
-              </button>
             </div>
             <span
               v-if="p.loopActive"
@@ -15292,6 +15378,12 @@ function paneIsCommander(p: ActivePane): boolean {
           @click="restorePane(paneCtxMenu!.paneId); closePaneCtxMenu()"
         >{{ $t('action.restore') }}</div>
         <div class="pane-ctx-item" @click="startRenamePane(paneCtxMenu!.paneId)">{{ $t('action.rename') }}</div>
+        <div
+          class="pane-ctx-item"
+          :class="{ disabled: !ctxMentionAddress }"
+          :title="$t('action.send-message-title')"
+          @click="mentionPaneInFocusedPane(paneCtxMenu!.paneId)"
+        >{{ $t('action.send-message') }}</div>
         <div
           v-if="isGhostPane(paneCtxView)"
           class="pane-ctx-item"
@@ -16593,29 +16685,28 @@ function paneIsCommander(p: ActivePane): boolean {
   line-height: 1.3;
 }
 
-/* Stands in for the children a top-level card is hiding. Dots come in tree
-   order, never sorted by status: sorting would make the strip rearrange itself
-   every time a pane started or stopped. */
+/* Opens and closes the family a card is standing for. It rides the name row,
+   so it takes no height of its own. */
 .pane-list-kids {
   display: flex;
   align-items: center;
-  gap: 5px;
-  margin-top: 4px;
-  padding: 4px 0 0;
+  gap: 2px;
+  flex: none;
+  margin: 0;
+  padding: 0;
   border: none;
-  border-top: 1px dashed var(--border-muted);
   background: none;
   cursor: pointer;
   font-size: var(--font-3xs);
   color: var(--text-secondary);
   text-align: left;
-  width: 100%;
 }
 .pane-list-kids:hover { color: var(--text-bright); }
-/* The strip has room for a row; a Spotlight thumb has room for one more chip. */
+/* A Spotlight thumb has no name row to ride, so there the control is a chip of
+   its own — and it has the room to show the dots the name row cannot. Dots come
+   in tree order, never sorted by status: sorting would make them rearrange
+   themselves every time a pane started or stopped. */
 .pane-list-kids--compact {
-  width: auto;
-  margin-top: 0;
   padding: 1px 5px;
   border: 1px solid var(--border-muted);
   border-radius: 3px;
@@ -16637,9 +16728,8 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .pane-list-kids-count { margin-left: 2px; }
 
-/* The caret says which way the control goes. Closed it sits before the dots
-   that stand in for the hidden children; open it stands alone, because those
-   children are now right underneath. */
+/* The caret says which way the control goes. Fixed width so a name never
+   shifts sideways as its family opens and closes. */
 .pane-list-kids-caret {
   flex: none;
   font-size: 9px;

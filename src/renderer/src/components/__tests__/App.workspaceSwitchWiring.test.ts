@@ -137,6 +137,34 @@ describe('workspace switch — how the parts fit together', () => {
     }
   })
 
+  it('lands a switch without entering one of the entered workspace\'s CLIs', () => {
+    // Selecting a pane also focuses its terminal (the focusPaneId watcher),
+    // so landing the focus on the first pane of a workspace the user just
+    // opened puts their next keystroke into an agent they never picked.
+    const sw = body('switchToWorkspace')
+    expect(sw).toContain('selectPane(null, { userInitiated: false })')
+    expect(sw).not.toMatch(/selectPane\(\s*(?:first|visible\[0\])/)
+  })
+
+  it('stands the focus fixups down while a switch lands', () => {
+    // Three of them fire during a switch — the restored panes arrive as
+    // additions, the entered workspace's first run group becomes the active
+    // tab, and the workspace check seeds a focus for a cold load — and each
+    // would select a pane on its own.
+    const sw = body('switchToWorkspace')
+    expect(sw).toContain('landingWorkspaceSwitch = true')
+    expect(sw).toContain('landingWorkspaceSwitch = false')
+    expect(body('onWorkspaceCheck', '\n    const restoreSession =')).toContain('!landingWorkspaceSwitch')
+    for (const start of ['watch(panes, (newPanes, oldPanes) => {', 'watch(activeTab, () => {']) {
+      const at = appSource.indexOf(start)
+      expect(at, start).toBeGreaterThan(-1)
+      const w = appSource.slice(at, appSource.indexOf('\n})', at))
+      expect(w.match(/selectPane\(/g)?.length ?? 0, start).toBe(
+        w.match(/!landingWorkspaceSwitch/g)?.length ?? 0
+      )
+    }
+  })
+
   it('shows a picked workspace instead of only listing it', () => {
     const pick = body('openWorkspaceFromPicker')
     expect(pick).toContain('adoptWorkspace(path)')

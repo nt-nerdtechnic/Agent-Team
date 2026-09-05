@@ -96,7 +96,14 @@ export interface MentionCandidate {
   statusLabel?: string
 }
 
-/** Candidates whose address contains `query`, case-insensitively.
+/** The comparison form of mention text: case-folded and NFKC-normalised, so a
+ *  full-width "ＣＯＤ" left behind by a CJK input method still finds "codex". */
+export function foldMentionText(text: string): string {
+  return text.normalize('NFKC').toLowerCase()
+}
+
+/** Candidates whose address contains `query`, case-insensitively and
+ *  regardless of full-width/half-width form.
  *
  *  Substring rather than fuzzy, matching the mini-IDE's Quick Open symbol
  *  filter: with a dozen candidates fuzzy only earns the surprise of a third
@@ -107,8 +114,27 @@ export function filterMentionCandidates<T extends { address: string }>(
   query: string
 ): T[] {
   if (!query) return [...candidates]
-  const needle = query.toLowerCase()
-  return candidates.filter((c) => c.address.toLowerCase().includes(needle))
+  const needle = foldMentionText(query)
+  return candidates.filter((c) => foldMentionText(c.address).includes(needle))
+}
+
+/** Cluster candidates so every group is contiguous — the menu draws a header
+ *  wherever the group changes, so interleaved groups would draw it twice.
+ *  Groups keep first-seen order, except `first` (the sender's own workspace)
+ *  leads; order within a group is kept. */
+export function clusterMentionCandidates(
+  candidates: readonly MentionCandidate[],
+  first?: string
+): MentionCandidate[] {
+  const buckets = new Map<string, MentionCandidate[]>()
+  if (first) buckets.set(first, [])
+  for (const c of candidates) {
+    const key = c.group ?? ''
+    const bucket = buckets.get(key)
+    if (bucket) bucket.push(c)
+    else buckets.set(key, [c])
+  }
+  return [...buckets.values()].flat()
 }
 
 /** Move recently-picked addresses to the front under `recentGroup`, newest
@@ -161,7 +187,10 @@ export function recordMentionRecents(
  *  selection-delete path in useTerminal). */
 export function buildMentionPickData(query: string, addresses: readonly string[]): string {
   if (!addresses.length) return ''
-  return '\x7f'.repeat(query.length) + addresses.join(' ') + ' '
+  // One DEL per character the CLI sees, so count code points, not UTF-16
+  // units: a query of "測試" is two backspaces, an emoji is one, and counting
+  // units would send one too many and eat a character of the real prompt.
+  return '\x7f'.repeat([...query].length) + addresses.join(' ') + ' '
 }
 
 /** How `pick` changes the draft-tracking input buffer: the query is erased and

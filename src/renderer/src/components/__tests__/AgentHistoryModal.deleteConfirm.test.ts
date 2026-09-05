@@ -41,6 +41,7 @@ function mountModal(
       paneCount: 0,
       revivingPaneId: '',
       unavailablePaneIds: new Set<string>(),
+      activePaneIds: new Set<string>(),
       previewOpen: false,
       previewTitle: '',
       previewContent: '',

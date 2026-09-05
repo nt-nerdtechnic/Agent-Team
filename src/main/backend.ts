@@ -1,5 +1,5 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
@@ -11,6 +11,49 @@ import {
   writeBackendPluginActivationCatalog,
   type BackendPluginActivationCatalogFile,
 } from './plugins/pluginBackendActivationCatalog'
+
+/**
+ * The key that tells a person's own window apart from an agent driving the same
+ * socket through MCP.
+ *
+ * Regenerated per backend, held only here and in the backend's memory: never a
+ * file, never an environment variable. Those are the two places a CLI agent on
+ * this machine reads without effort — `cat` and `ps -E` — and the whole point of
+ * this key is to be out of reach of code that can already open the local
+ * socket. See backend/agent_team_backend/confirm_token.py for what that buys
+ * and, just as importantly, what it does not.
+ */
+let confirmKey = ''
+
+/** How long a minted confirmation stays usable. Must match TOKEN_TTL_S. */
+const CONFIRM_TTL_MS = 30_000
+
+export function handConfirmKey(proc: ChildProcess): void {
+  confirmKey = randomBytes(32).toString('hex')
+  // One line, then the pipe closes: the backend reads exactly this much, and a
+  // stdin left open would be a channel neither side has a use for.
+  proc.stdin?.write(`${confirmKey}\n`)
+  proc.stdin?.end()
+}
+
+/**
+ * Mint a one-time confirmation for one trust-changing action.
+ *
+ * Bound to the action and to the device it names, so a token minted to approve
+ * one machine cannot be spent to block another. Returns null before a backend
+ * has been started, which is the honest answer: there is nothing to confirm to.
+ */
+export function mintTrustConfirmation(
+  action: string,
+  deviceId: string,
+): { nonce: string; expires: string; mac: string } | null {
+  if (!confirmKey) return null
+  const nonce = randomUUID()
+  const expires = String((Date.now() + CONFIRM_TTL_MS) / 1000)
+  const payload = ['navide/trust-confirm/v1', nonce, expires, action, deviceId].join('\u0000')
+  return { nonce, expires, mac: createHmac('sha256', confirmKey).update(payload).digest('hex') }
+}
+
 
 export interface BackendHandle {
   host: string
@@ -173,7 +216,9 @@ export async function startBackend(
     const binaryPath = join(process.resourcesPath, 'bin', 'agent_team_backend')
     proc = spawn(binaryPath, ['--port', String(port), '--log-level', 'info'], {
       env,
-      stdio: ['ignore', 'pipe', 'pipe']
+      // stdin is open only to hand over the trust-confirmation key, and is
+      // closed immediately after. See handConfirmKey below.
+      stdio: ['pipe', 'pipe', 'pipe']
     })
   } else {
     // Dev runs alongside the packaged app, which owns the default state dir.
@@ -189,7 +234,7 @@ export async function startBackend(
       {
         cwd: projectRoot,
         env,
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe']
       }
     )
   }
@@ -200,6 +245,8 @@ export async function startBackend(
   if (!registerPendingBackend(proc)) {
     throw new Error('backend start abandoned: the app is quitting')
   }
+
+  handConfirmKey(proc)
 
   proc.stdout?.on('data', (chunk: Buffer) => forwardBackendLog(process.stdout, chunk))
   proc.stderr?.on('data', (chunk: Buffer) => forwardBackendLog(process.stderr, chunk))

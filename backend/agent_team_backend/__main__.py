@@ -10,8 +10,23 @@ import uvicorn
 
 from . import __version__
 from .app import app as _fastapi_app
-from . import ws_auth
+from . import confirm_token, ws_auth
 from .applog import backend_port_file, setup_file_logging
+
+
+def _read_confirm_key() -> str:
+    """The first line of stdin, or "" when there is nothing there.
+
+    Never blocks a backend started by hand: the app closes the pipe straight
+    after writing, so EOF is the ordinary answer for every other caller, and a
+    terminal that is a tty is not read from at all.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.closed or sys.stdin.isatty():
+            return ""
+        return sys.stdin.readline().strip()
+    except Exception:  # noqa: BLE001 - startup must not die over a missing pipe
+        return ""
 
 
 def main() -> int:
@@ -57,6 +72,25 @@ def main() -> int:
     # is not best-effort — a backend that cannot write it would accept nobody,
     # and failing here says so instead of leaving that to every client.
     ws_auth.issue_token()
+
+    # The other credential, and it travels the other way: the main process
+    # generates it and hands it over on stdin, first line, before anything else
+    # runs. Deliberately not a file and not an environment variable — reading a
+    # file and reading `ps -E` are the two things a CLI agent on this machine
+    # can do without trying, and this key is what tells a person's own window
+    # apart from an agent driving the same socket through MCP. See
+    # confirm_token for what that does and does not buy.
+    #
+    # Absent is normal for a backend nobody spawned from the app (the tests, a
+    # developer running this by hand); it means the six trust-changing actions
+    # refuse rather than that they stop being checked.
+    if confirm_token.set_key(_read_confirm_key()):
+        log.info("adopted the trust-confirmation key from the parent process")
+    else:
+        log.info(
+            "no trust-confirmation key on stdin; actions that change device "
+            "trust will be refused on this backend"
+        )
 
     # Use the already-imported app object so PyInstaller can detect this
     # dependency statically (string-based import is invisible to the bundler).

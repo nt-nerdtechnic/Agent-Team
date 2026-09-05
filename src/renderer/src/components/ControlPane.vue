@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onUnmounted, ref, watch } from 'vue'
 import type { PaneArgContext } from '@navide/plugin-shell'
 import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
 import { PANE_BATCH_MIME } from '@navide/terminal'
@@ -8,6 +8,20 @@ import { setBatchDragImage } from '../lib/batchDragImage'
 import { paneStatusLabelText } from '../lib/paneStatusLabel'
 import { statusBadgeStyle } from '../composables/useStatusBadgePrefs'
 import { rollupTabStatus, runGroupStateLabelKey } from '../lib/tabStatus'
+import {
+  ALL_RAIL_ID,
+  assignToRail,
+  buildRailCells,
+  createRail,
+  deleteRail,
+  filterRowsByRail,
+  parseRails,
+  railIdOf,
+  renameRail,
+  serializeRails,
+  type RailCell,
+  type WorkspaceRail,
+} from '../lib/workspaceRails'
 import type { TabRunState } from '../lib/tabStatus'
 import RebuildIcon from './RebuildIcon.vue'
 import AddPaneIcon from './AddPaneIcon.vue'
@@ -375,6 +389,208 @@ const localWorkspaceRows = computed<(WorkspaceGroupRow | null)[]>(() => {
  *  opens an agent, so replacing them with an empty message leaves the sidebar
  *  with no way back in. */
 const hasWorkspaceRows = computed(() => localWorkspaceRows.value.some((w) => w))
+
+/* ── Workspace rails ─────────────────────────────────────────────────────
+ *
+ *  A strip of one-glyph cells down the sidebar's left edge, one per group of
+ *  workspaces plus a fixed All. Picking a cell filters the list below it, so
+ *  the list's height tracks the biggest group rather than the project count.
+ *
+ *  Switching rails deliberately moves NOTHING: the workspace on screen, its
+ *  panes and the terminal all stay where they are. The strip is a viewfinder
+ *  over the list, not a project switcher — which is why the rail holding the
+ *  current workspace keeps a dot even while you look at another.
+ *
+ *  Per window and in sessionStorage, the same judgement `workspaceOrder`
+ *  makes. A restart therefore starts with no rails; that is the accepted cost
+ *  of not making one window's grouping the other's. Moving to one shared set
+ *  is a swap of these two reads/writes for a kv call.
+ */
+const RAILS_KEY = 'agentTeam.workspaceRails'
+const ACTIVE_RAIL_KEY = 'agentTeam.activeWorkspaceRail'
+
+function readStored(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+function writeStored(key: string, value: string): void {
+  try {
+    sessionStorage.setItem(key, value)
+  } catch {
+    /* sessionStorage unavailable — the rails just won't survive a reload */
+  }
+}
+
+const workspaceRails = ref<WorkspaceRail[]>(parseRails(readStored(RAILS_KEY)))
+const activeRailId = ref<string>(readStored(ACTIVE_RAIL_KEY) ?? ALL_RAIL_ID)
+
+watch(workspaceRails, (rails) => writeStored(RAILS_KEY, serializeRails(rails)), { deep: true })
+watch(activeRailId, (id) => writeStored(ACTIVE_RAIL_KEY, id))
+
+/** The real headings, without the `null` that stands for the ungrouped list. */
+const railRows = computed<WorkspaceGroupRow[]>(() =>
+  localWorkspaceRows.value.filter((w): w is WorkspaceGroupRow => !!w)
+)
+
+/** Whether the strip is worth its 46px.
+ *
+ *  Hidden in a detached window, which is one workspace by definition. With no
+ *  rails yet it still renders, but as a lone ＋ — the only entry point to
+ *  making the first group, and dead weight if it were a full strip of one. */
+const showRail = computed(() => !props.detachedWindow && hasWorkspaceRows.value)
+
+const railCells = computed<RailCell[]>(() =>
+  buildRailCells({
+    rails: workspaceRails.value,
+    rows: railRows.value,
+    currentPath: workspacePath.value,
+    activeId: activeRailId.value,
+    allLabel: i18n.global.t('label.all-workspaces'),
+  })
+)
+
+/** The headings actually drawn. Falls through to the unfiltered list whenever
+ *  the strip is not shown, so nothing about the sidebar changes for a window
+ *  that never makes a rail. */
+const visibleWorkspaceRows = computed<(WorkspaceGroupRow | null)[]>(() =>
+  showRail.value
+    ? filterRowsByRail(railRows.value, workspaceRails.value, activeRailId.value)
+    : localWorkspaceRows.value
+)
+
+/** The current rail's name, for the section heading. Empty on All, where the
+ *  heading keeps saying "Workspace". */
+const activeRailName = computed(
+  () => railCells.value.find((c) => c.active && c.id !== ALL_RAIL_ID)?.name ?? ''
+)
+
+function selectRail(id: string): void {
+  activeRailId.value = id
+}
+
+/** Which rail a workspace sits in, for the ticks in its context menu. */
+function railIdForPath(path: string): string {
+  return railIdOf(workspaceRails.value, path)
+}
+
+function assignWorkspaceToRail(path: string, railId: string): void {
+  workspaceRails.value = assignToRail(workspaceRails.value, path, railId)
+  closeWsMenu()
+}
+
+/* Naming a rail. An inline field rather than `window.prompt`, which blocks the
+ * whole renderer in Electron — the terminals included. */
+const railInput = ref<{ mode: 'create' | 'rename'; id: string; text: string } | null>(null)
+
+function startCreateRail(): void {
+  railMenu.value = null
+  railInput.value = { mode: 'create', id: '', text: '' }
+}
+function startRenameRail(id: string): void {
+  const rail = workspaceRails.value.find((r) => r.id === id)
+  railMenu.value = null
+  if (rail) railInput.value = { mode: 'rename', id, text: rail.name }
+}
+function commitRailInput(): void {
+  const input = railInput.value
+  if (!input) return
+  railInput.value = null
+  if (!input.text.trim()) return
+  if (input.mode === 'rename') {
+    workspaceRails.value = renameRail(workspaceRails.value, input.id, input.text)
+    return
+  }
+  const next = createRail(workspaceRails.value, input.text)
+  workspaceRails.value = next
+  // Show the new rail at once. Creating a group and being left looking at
+  // another one reads as the button having done nothing.
+  const made = next[next.length - 1]
+  if (made) activeRailId.value = made.id
+}
+function cancelRailInput(): void {
+  railInput.value = null
+}
+
+/** Focus the field the moment it appears. A naming box you have to click into
+ *  first is one the keyboard cannot finish. */
+const railInputEl = ref<HTMLInputElement | null>(null)
+watch(railInput, async (open) => {
+  if (!open) return
+  await nextTick()
+  railInputEl.value?.focus()
+  railInputEl.value?.select()
+})
+
+function removeRail(id: string): void {
+  railMenu.value = null
+  workspaceRails.value = deleteRail(workspaceRails.value, id)
+  // Its members are not deleted, only ungrouped — All is where they land.
+  if (activeRailId.value === id) activeRailId.value = ALL_RAIL_ID
+}
+
+/* Dropping a workspace heading onto a cell files it there. The heading already
+ * carries `application/x-workspace-path` for reorder/detach, so this adds a
+ * third outcome to that one gesture without touching its source: cells sit
+ * outside the list, and detach still keys off the pointer leaving the window. */
+const railDropId = ref<string | null>(null)
+
+function onRailDragOver(e: DragEvent, id: string): void {
+  if (!e.dataTransfer?.types.includes('application/x-workspace-path')) return
+  e.preventDefault()
+  railDropId.value = id
+}
+function onRailDragLeave(id: string): void {
+  if (railDropId.value === id) railDropId.value = null
+}
+function onRailDrop(e: DragEvent, id: string): void {
+  railDropId.value = null
+  const from = e.dataTransfer?.getData('application/x-workspace-path') ?? ''
+  if (!from) return
+  workspaceRails.value = assignToRail(workspaceRails.value, from, id)
+}
+
+/** Roughly what the rail menu occupies, for the same edge flip the workspace
+ *  menu does. Two entries and a divider. */
+const RAIL_MENU_H = 76
+const RAIL_MENU_W = 150
+const railMenu = ref<{ id: string; x: number; y: number } | null>(null)
+
+function openRailMenu(ev: MouseEvent, id: string): void {
+  ev.preventDefault()
+  // All is not a rail: there is nothing to rename and nothing to delete.
+  if (id === ALL_RAIL_ID) return
+  const y =
+    ev.clientY + RAIL_MENU_H > window.innerHeight
+      ? Math.max(0, ev.clientY - RAIL_MENU_H)
+      : ev.clientY
+  const x = Math.max(0, Math.min(ev.clientX, window.innerWidth - RAIL_MENU_W))
+  railMenu.value = { id, x, y }
+}
+function closeRailMenu(): void {
+  railMenu.value = null
+}
+function onRailMenuKeydown(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') closeRailMenu()
+}
+watch(railMenu, (open) => {
+  if (open) {
+    document.addEventListener('click', closeRailMenu)
+    document.addEventListener('keydown', onRailMenuKeydown)
+    document.addEventListener('scroll', closeRailMenu, true)
+  } else {
+    document.removeEventListener('click', closeRailMenu)
+    document.removeEventListener('keydown', onRailMenuKeydown)
+    document.removeEventListener('scroll', closeRailMenu, true)
+  }
+})
+onUnmounted(() => {
+  document.removeEventListener('click', closeRailMenu)
+  document.removeEventListener('keydown', onRailMenuKeydown)
+  document.removeEventListener('scroll', closeRailMenu, true)
+})
 
 /** A group's spine state: the same signal its tab already shows.
  *
@@ -908,6 +1124,9 @@ for (let i = 1; i <= 9; i++) {
     const spec = manualAgentSpecs.value[i - 1]
     if (spec) {
       pickedAgent.value = spec.agentKey
+      // Also the dialog's own pick: with it already open the seeding watch does
+      // not fire, and the dropdown this shortcut exists to move would not move.
+      modalAgent.value = spec.agentKey
       manualSpawnOpen.value = true
       selectSidebarTab('agents')
     }
@@ -1016,6 +1235,15 @@ watch(() => props.pipelines?.length, () => { pipelinePage.value = 0 })
 
 const previewOpen = ref<boolean>(false)
 const manualSpawnOpen = ref<boolean>(false)
+/** The dialog's own CLI pick, seeded from pickedAgent each time it opens and
+ *  never written back. The ＋ menu's ✓ is the default for the next spawn from
+ *  the menu itself, so trying another CLI inside the dialog must not move it. */
+const modalAgent = ref<string>(pickedAgent.value)
+/** Which CLI the spawn actions run: the dialog's pick while it is open, the
+ *  menu's default otherwise. */
+const activeSpawnAgent = computed(() =>
+  manualSpawnOpen.value ? modalAgent.value : pickedAgent.value
+)
 const pipelineOpen = ref<boolean>(true)
 // Manual spawn used to be a card, and a spawn-mode workspace opened with it
 // already expanded. As a dialog that same default means it appears over the
@@ -1065,7 +1293,7 @@ const resumeOptions = computed<{ sessionId: string; label: string; workspacePath
   const out: { sessionId: string; label: string; workspacePath: string }[] = []
   for (const entry of [...(props.spawnHistory ?? [])].reverse()) {
     const sid = (entry.sessionId ?? '').trim()
-    if (!sid || entry.agentKey !== pickedAgent.value) continue
+    if (!sid || entry.agentKey !== activeSpawnAgent.value) continue
     if (seen.has(sid)) continue
     seen.add(sid)
     const when = entry.spawnedAt.slice(0, 16).replace('T', ' ')
@@ -1094,7 +1322,7 @@ function resumeAgent(): void {
   // manually-pasted id with no history match falls back to the current one.
   const origin = resumeOptions.value.find((o) => o.sessionId === sid)?.workspacePath
   emit('spawn-resume', {
-    agentKey: pickedAgent.value,
+    agentKey: activeSpawnAgent.value,
     sessionId: sid,
     workspacePath: origin ?? workspacePath.value
   })
@@ -1137,9 +1365,9 @@ const spawnWorkspaceOverride = ref<string>('')
  *  active tab points". */
 const spawnGroupOverride = ref<string>('')
 
-function emitSpawn(): void {
+function emitSpawn(agentKey: string): void {
   emit('spawn', {
-    agentKey: pickedAgent.value,
+    agentKey,
     roleKey: pickedRole.value,
     stageId: '',
     workspacePath: spawnWorkspaceOverride.value || workspacePath.value,
@@ -1156,9 +1384,10 @@ const pickedAgentLabel = computed(
 )
 
 // ── The ＋ menu on this window's workspace heading ────────────────────────────
-// A second way into the spawn card's CLI and role, for when the card is folded
-// shut. It reads and writes pickedAgent/pickedRole directly rather than keeping
-// its own copy — two stores would let the card say Codex while ＋ opens Claude.
+// The default CLI and role for a one-click spawn: it reads and writes
+// pickedAgent/pickedRole, which is what its ✓ marks. The Manual spawn dialog
+// keeps its own CLI pick (modalAgent) instead — it is where you go to run
+// something other than the default, and doing so must not reset the default.
 const addMenuOpen = ref<boolean>(false)
 /** Which workspace heading opened the menu, so a pick starts there. */
 const addMenuWorkspace = ref<string>('')
@@ -1213,7 +1442,10 @@ const canCloseCurrent = computed(
 /** Whether every workspace this window holds is already folded shut, which is
  *  what turns the header button from "collapse all" into "expand all". */
 const allWorkspacesCollapsed = computed(() => {
-  const rows = localWorkspaceRows.value.filter((w): w is WorkspaceGroupRow => !!w)
+  // The rows ON SCREEN, not every row the window holds: folding "all" while a
+  // rail hides half the list would leave the button reading "expand all" over
+  // a list that is plainly open.
+  const rows = visibleWorkspaceRows.value.filter((w): w is WorkspaceGroupRow => !!w)
   return rows.length > 0 && rows.every((w) => w.collapsed)
 })
 
@@ -1225,7 +1457,7 @@ const allWorkspacesCollapsed = computed(() => {
  */
 function toggleAllWorkspaces(): void {
   const collapse = !allWorkspacesCollapsed.value
-  for (const ws of localWorkspaceRows.value) {
+  for (const ws of visibleWorkspaceRows.value) {
     if (!ws) continue
     if (ws.collapsed !== collapse) emit('toggle-workspace', ws.path)
   }
@@ -1287,6 +1519,11 @@ function wsHeadTitle(path: string): string {
     parts.push(i18n.global.t('label.workspace-switch-hint'))
   }
   if (canDragWorkspace.value) parts.push(i18n.global.t('label.workspace-detach-hint'))
+  // Filing a project into a group is otherwise an invisible affordance: the
+  // cells look like filters, and nothing says a heading can be dropped on one.
+  if (canDragWorkspace.value && workspaceRails.value.length) {
+    parts.push(i18n.global.t('label.workspace-group-hint'))
+  }
   return parts.join(' · ')
 }
 
@@ -1406,7 +1643,7 @@ function spawnAs(agentKey: string): void {
   spawnWorkspaceOverride.value = addMenuWorkspace.value
   spawnGroupOverride.value = addMenuGroup.value
   addMenuOpen.value = false
-  spawn()
+  spawn(agentKey)
 }
 
 /** The plain-shell spec, kept out of manualAgentSpecs because the agent
@@ -1445,8 +1682,10 @@ function onSpawnModalKeydown(ev: KeyboardEvent): void {
   if (ev.key === 'Escape') manualSpawnOpen.value = false
 }
 watch(manualSpawnOpen, (open) => {
-  if (open) document.addEventListener('keydown', onSpawnModalKeydown)
-  else document.removeEventListener('keydown', onSpawnModalKeydown)
+  if (open) {
+    modalAgent.value = pickedAgent.value
+    document.addEventListener('keydown', onSpawnModalKeydown)
+  } else document.removeEventListener('keydown', onSpawnModalKeydown)
 })
 onUnmounted(() => document.removeEventListener('keydown', onSpawnModalKeydown))
 function closeAddMenu(): void {
@@ -1476,29 +1715,29 @@ onUnmounted(() => {
   document.removeEventListener('scroll', closeAddMenu, true)
 })
 
-function spawn(): void {
+function spawn(agentKey: string = activeSpawnAgent.value): void {
   if (!canSpawn.value) return
   // Spawning a CLI we know is missing only produces a pane that dies with 127.
   // Offer the guided install instead of that dead end — but re-detect first,
   // since the cached status may predate an install the user just finished.
-  if (missingClis.value.has(pickedAgent.value)) {
-    void spawnOrOfferInstall()
+  if (missingClis.value.has(agentKey)) {
+    void spawnOrOfferInstall(agentKey)
     return
   }
-  emitSpawn()
+  emitSpawn(agentKey)
 }
 
-async function spawnOrOfferInstall(): Promise<void> {
+async function spawnOrOfferInstall(agentKey: string): Promise<void> {
   cliStatusFetchedAt = 0
   await refreshCliStatus()
-  if (!missingClis.value.has(pickedAgent.value)) {
-    emitSpawn()
+  if (!missingClis.value.has(agentKey)) {
+    emitSpawn(agentKey)
     return
   }
-  const spec = manualAgentSpecs.value.find((s) => s.agentKey === pickedAgent.value)
+  const spec = manualAgentSpecs.value.find((s) => s.agentKey === agentKey)
   spawnWorkspaceOverride.value = ''
   spawnGroupOverride.value = ''
-  emit('install-cli', { agentKey: pickedAgent.value, label: spec?.label ?? pickedAgent.value })
+  emit('install-cli', { agentKey, label: spec?.label ?? agentKey })
 }
 
 function openTerminal(): void {
@@ -2028,7 +2267,9 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       <div class="row between agent-list-hdr">
         <!-- Each workspace row carries its own count now, so the header is a
              plain section title rather than a running/total tally. -->
-        <label class="lbl">{{ workspaces?.length ? $t('label.workspace') : $t('label.active-agents', { running: runningCount, total: panes.length }) }}</label>
+        <!-- On a rail the heading names it: the list below is a subset, and
+             nothing else on screen would say so. -->
+        <label class="lbl">{{ workspaces?.length ? (activeRailName || $t('label.workspace')) : $t('label.active-agents', { running: runningCount, total: panes.length }) }}</label>
         <!-- Adds a WORKSPACE, not an agent: the per-workspace ＋ below opens
              an agent inside one. Always present — the section is a list of
              projects whether or not any is grouped yet. -->
@@ -2068,8 +2309,59 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
            one that is empty, because those rows hold the ＋ that opens an
            agent — the sidebar must never lose its own entry point. -->
       <div v-if="panes.length === 0 && !hasWorkspaceRows" class="empty">{{ $t('label.no-agents-running') }}</div>
-      <ul v-else class="agent-list">
-        <template v-for="ws in localWorkspaceRows" :key="ws?.path ?? '\u0000ungrouped'">
+      <div v-else class="ws-rail-wrap">
+        <!-- One glyph per group of workspaces, All pinned first. Filters the
+             list beside it; moves nothing else. -->
+        <!-- A group of filter toggles, not a tablist: the ＋ shares the strip
+             with them, and a tablist may only contain tabs. -->
+        <div v-if="showRail" class="ws-rail" role="group" :aria-label="$t('label.workspace-groups')">
+          <button
+            v-for="cell in (workspaceRails.length ? railCells : [])"
+            :key="cell.id || 'all'"
+            class="ws-rcell"
+            :class="{ on: cell.active, drop: railDropId === cell.id, dim: cell.empty && !cell.active }"
+            :aria-pressed="cell.active"
+            :title="`${cell.name} · ${cell.count}`"
+            @click="selectRail(cell.id)"
+            @contextmenu="openRailMenu($event, cell.id)"
+            @dragover="onRailDragOver($event, cell.id)"
+            @dragenter="onRailDragOver($event, cell.id)"
+            @dragleave="onRailDragLeave(cell.id)"
+            @drop.prevent="onRailDrop($event, cell.id)"
+          >
+            <span class="ws-rglyph">{{ cell.glyph }}</span>
+            <span v-if="cell.count" class="ws-rbump">{{ cell.count }}</span>
+            <!-- You are still working in this group even while looking at
+                 another one. Nothing else on screen would say so. -->
+            <span v-if="cell.hasCurrent" class="ws-rdot"></span>
+          </button>
+          <button
+            class="ws-rcell ws-radd"
+            :title="$t('action.new-workspace-group')"
+            :aria-label="$t('action.new-workspace-group')"
+            @click.stop="startCreateRail"
+          >＋</button>
+        </div>
+
+        <!-- Naming field. Inline rather than window.prompt, which blocks the
+             whole renderer in Electron — terminals included. -->
+        <div v-if="railInput" class="ws-rname" @click.stop>
+          <input
+            ref="railInputEl"
+            v-model="railInput.text"
+            class="ws-rname-in"
+            type="text"
+            maxlength="24"
+            :placeholder="$t('label.workspace-group-name')"
+            @keydown.enter.stop="commitRailInput"
+            @keydown.esc.stop="cancelRailInput"
+            @blur="commitRailInput"
+          />
+        </div>
+
+        <div class="ws-rail-body">
+      <ul class="agent-list">
+        <template v-for="ws in visibleWorkspaceRows" :key="ws?.path ?? '\u0000ungrouped'">
         <!-- The row is the switch. It was the name alone, which is a few
              characters wide with nothing to say it does anything — the caret,
              the two actions and ＋ all stop propagation, so they keep working. -->
@@ -2275,6 +2567,30 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
              agent and busy flag; everything else needs the window that owns
              them, which is what clicking a row goes to. -->
       </ul>
+        <!-- Every member of this group is closed. Not an error and not the
+             same as "no agents": the group still exists, its projects are just
+             not open in this window. -->
+        <div v-if="showRail && !visibleWorkspaceRows.length" class="ws-rail-empty">
+          {{ $t('label.workspace-group-empty') }}
+        </div>
+        </div><!-- /ws-rail-body -->
+      </div><!-- /ws-rail-wrap -->
+
+      <div
+        v-if="railMenu"
+        class="ws-ctx-menu"
+        :style="{ top: `${railMenu.y}px`, left: `${railMenu.x}px` }"
+        @click.stop
+      >
+        <button class="ws-ctx-opt" @click="startRenameRail(railMenu.id)">
+          {{ $t('action.rename-workspace-group') }}
+        </button>
+        <div class="ws-add-div"></div>
+        <!-- Deletes the group, never its projects: they fall back to All. -->
+        <button class="ws-ctx-opt danger" @click="removeRail(railMenu.id)">
+          {{ $t('action.delete-workspace-group') }}
+        </button>
+      </div>
 
       <div
         v-if="wsMenu"
@@ -2284,6 +2600,25 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       >
         <button class="ws-ctx-opt" @click="wsMenuAction('reveal')">{{ $t('action.open-in-finder') }}</button>
         <button class="ws-ctx-opt" @click="wsMenuAction('copy')">{{ $t('action.copy-path') }}</button>
+        <!-- Membership is exclusive, so this reads as a radio group: one tick,
+             and "None" is a real choice rather than the absence of one. -->
+        <template v-if="workspaceRails.length">
+          <div class="ws-add-div"></div>
+          <div class="ws-ctx-lbl">{{ $t('label.move-to-workspace-group') }}</div>
+          <button class="ws-ctx-opt" @click="assignWorkspaceToRail(wsMenu.path, '')">
+            <span class="ws-ctx-ck">{{ railIdForPath(wsMenu.path) === '' ? '✓' : '' }}</span>
+            <span>{{ $t('label.no-workspace-group') }}</span>
+          </button>
+          <button
+            v-for="r in workspaceRails"
+            :key="r.id"
+            class="ws-ctx-opt"
+            @click="assignWorkspaceToRail(wsMenu.path, r.id)"
+          >
+            <span class="ws-ctx-ck">{{ railIdForPath(wsMenu.path) === r.id ? '✓' : '' }}</span>
+            <span>{{ r.name }}</span>
+          </button>
+        </template>
         <!-- The primary workspace is what this window was opened with; closing
              it would leave the window with no root. Switch or close the window
              instead. -->
@@ -2344,7 +2679,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         </div>
         <div class="spawn-card-body">
           <div class="row two-col">
-            <select v-model="pickedAgent" @focus="refreshCliStatus">
+            <select v-model="modalAgent" @focus="refreshCliStatus">
               <option v-for="spec in manualAgentSpecs" :key="spec.agentKey" :value="spec.agentKey">
                 {{ missingClis.has(spec.agentKey) ? $t('label.agent-not-installed', { label: spec.label }) : spec.label }}
               </option>
@@ -2355,7 +2690,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             </select>
           </div>
           <div class="row spawn-actions">
-            <button class="primary wide" :disabled="!canSpawn" @click="spawn">{{ $t('action.add-to-grid') }}</button>
+            <button class="primary wide" :disabled="!canSpawn" @click="spawn()">{{ $t('action.add-to-grid') }}</button>
             <button class="ghost wide terminal-btn" :disabled="!canSpawn" @click="openTerminal">{{ $t('action.open-terminal') }}</button>
           </div>
           <div class="row resume-actions">
@@ -3518,6 +3853,151 @@ button.icon-btn.muted:hover {
 }
 /* Collapsed rows are borderless one-liners; the card chrome only appears on
  * the single expanded item so a long list scans as compact rows. */
+/* ── Workspace rail ──────────────────────────────────────────────────────
+   A strip of one-glyph cells down the left edge, one per group of workspaces.
+   Sticky at the same offset the group headings use, so it stays reachable
+   while the list scrolls under it. */
+.ws-rail-wrap {
+  display: flex;
+  align-items: flex-start;
+  position: relative;
+  /* The sidebar has no global border-box reset (see .ws-grp), and a flex row
+     here would otherwise let the list push past .sidebar's overflow. */
+  box-sizing: border-box;
+  min-width: 0;
+}
+.ws-rail-body {
+  flex: 1;
+  /* Without this a long pane name sets the track's width and the rail gets
+     squeezed out — flex items floor at their content size, not at zero. */
+  min-width: 0;
+}
+.ws-rail {
+  flex: none;
+  width: 40px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 5px 6px 3px;
+  border-right: 1px solid var(--border-muted);
+  /* Same offset and layer as .ws-grp: clears the section header, sits under
+     it, over the rows going past. */
+  position: sticky;
+  top: 29px;
+  z-index: 1;
+  background: var(--bg-base);
+}
+.ws-rcell {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: var(--font-sm);
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.ws-rcell:hover { background: var(--bg-hover); color: var(--text-bright); }
+.ws-rcell.on { background: var(--accent-fg); color: var(--bg-base); }
+/* Nothing in this group is open in this window. Dimmed, never hidden: the
+   cell is the way back to the projects it holds. */
+.ws-rcell.dim { opacity: 0.55; }
+.ws-rcell.drop { border-color: var(--accent-fg); background: var(--bg-hover); }
+.ws-rglyph { pointer-events: none; }
+.ws-rbump {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: var(--radius-pill);
+  /* Ringed in the sidebar's own background so the badge reads as sitting on
+     top of the cell rather than being clipped by it. */
+  border: 1.5px solid var(--bg-base);
+  background: var(--bg-muted);
+  color: var(--text-muted);
+  font-size: var(--font-3xs);
+  font-weight: 700;
+  line-height: 11px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.ws-rcell.on .ws-rbump { background: var(--bg-base); color: var(--text-primary); }
+/* You are still working in this group while looking at another one. */
+.ws-rdot {
+  position: absolute;
+  bottom: -2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--success-fg);
+  box-shadow: 0 0 0 1.5px var(--bg-base);
+  pointer-events: none;
+}
+.ws-radd {
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-md);
+  font-weight: 400;
+}
+.ws-radd:hover { background: var(--bg-hover); color: var(--text-bright); }
+/* Floats over the list rather than pushing it: naming a group must not
+   reflow everything underneath it. */
+.ws-rname {
+  position: absolute;
+  z-index: 3;
+  top: 2px;
+  left: 44px;
+}
+.ws-rname-in {
+  width: 148px;
+  box-sizing: border-box;
+  padding: 3px 7px;
+  border: 1px solid var(--accent-fg);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: var(--font-xs);
+  outline: none;
+}
+.ws-rail-empty {
+  padding: 10px 12px;
+  font-size: var(--font-2xs);
+  color: var(--text-muted);
+}
+/* Section label inside the workspace context menu, above the group list. */
+.ws-ctx-lbl {
+  padding: 5px 12px 2px;
+  font-size: var(--font-3xs);
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.ws-ctx-ck {
+  display: inline-block;
+  width: 13px;
+  color: var(--accent-fg);
+}
+
 /* Workspace section heading. The sidebar's outer layer: one per project, this
    window's first. */
 .ws-head {

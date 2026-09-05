@@ -7,9 +7,10 @@ import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
 import { CLI_AGENT_SPECS } from '@navide/plugin-shell'
 
-// The ＋ on the workspace heading opens a menu of CLIs. It is a second door
-// onto the spawn card's own pickedAgent/pickedRole, NOT a second copy of them:
-// two stores would let the card say Codex while ＋ opens Claude.
+// The ＋ on the workspace heading opens a menu of CLIs. Its ✓ is the default
+// for a one-click spawn, and the Manual spawn dialog opens on that default —
+// but the dialog's own dropdown is a separate store, so reaching for another
+// CLI in there does not silently move what ＋ will open next time.
 
 const specs = [
   { agentKey: 'claude', label: 'Claude Code' },
@@ -203,6 +204,40 @@ describe('ControlPane – the ＋ menu', () => {
     await openMenu(wrapper)
     await wrapper.find('.ws-add-card').trigger('click')
     expect((wrapper.find('.spawn-card-body select').element as HTMLSelectElement).value).toBe('codex')
+  })
+
+  it('leaves the menu default alone when the dialog picks another CLI', async () => {
+    wrapper = mountWith()
+    await openMenu(wrapper)
+    await wrapper.find('.ws-add-card').trigger('click')
+    await wrapper.find('.spawn-card-body select').setValue('codex')
+    // The ✓ still marks claude, and ＋ still opens claude.
+    await openMenu(wrapper)
+    const checks = wrapper.findAll('.ws-add-scroll .ws-add-opt .ws-add-ck')
+    expect(checks[0].text()).toBe('✓')
+    expect(checks[1].text()).toBe('')
+    await wrapper.findAll('.ws-add-scroll .ws-add-opt')[0].trigger('click')
+    expect(wrapper.emitted('spawn')?.[0]?.[0]).toMatchObject({ agentKey: 'claude' })
+  })
+
+  it('spawns the dialog\'s own pick from its Open Agent button', async () => {
+    wrapper = mountWith()
+    await openMenu(wrapper)
+    await wrapper.find('.ws-add-card').trigger('click')
+    await wrapper.find('.spawn-card-body select').setValue('codex')
+    await wrapper.find('.spawn-actions .primary').trigger('click')
+    expect(wrapper.emitted('spawn')?.[0]?.[0]).toMatchObject({ agentKey: 'codex' })
+  })
+
+  it('reopens the dialog on the menu default, not on its last pick', async () => {
+    wrapper = mountWith()
+    await openMenu(wrapper)
+    await wrapper.find('.ws-add-card').trigger('click')
+    await wrapper.find('.spawn-card-body select').setValue('codex')
+    await wrapper.find('.spawn-modal-close').trigger('click')
+    await openMenu(wrapper)
+    await wrapper.find('.ws-add-card').trigger('click')
+    expect((wrapper.find('.spawn-card-body select').element as HTMLSelectElement).value).toBe('claude')
   })
 
   it('carries the role the menu has selected', async () => {

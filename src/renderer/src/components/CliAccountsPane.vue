@@ -295,33 +295,62 @@ function avatarInitial(label: string): string {
 // out a 15-minute cooldown before trying again (reading Claude boots a whole
 // CLI, so a failed read is priced like a successful one). `usage.refresh`
 // clears that cooldown, which is the only way back to a number without waiting
-// — hence a button. It re-polls every provider, not one card: the CLI can only
-// report the account it is signed in as, so there is nothing per-card to ask.
-const refreshingUsage = ref(false)
+// — hence a button. The header button clears every cooldown; each account card
+// carries its own that clears only that CLI's, so one stale number can be
+// re-read without booting every other CLI along with it.
+//
+// Only the account a CLI is signed in as gets a card button: the CLI reports
+// whoever is live, so a parked account has nothing to ask for (its card says
+// "Not measured"). Busy is tracked per scope — the header's key is ALL_SCOPE,
+// a card's is its `switchRowKey`.
+const ALL_SCOPE = '__all__'
+// Maps a busy scope to the agent whose read it waits on (null = every agent).
+const refreshing = ref(new Map<string, string | null>())
 // Safety net only. The poller broadcasts when its cycle ends and that is what
-// normally clears the flag; this stops the button latching when no broadcast
-// ever comes (poller disabled, backend gone).
+// normally clears a flag; this stops a button latching when no broadcast ever
+// comes (poller disabled, backend gone).
 const REFRESH_BUSY_TIMEOUT_MS = 60_000
-let refreshBusyTimer: ReturnType<typeof setTimeout> | undefined
+const refreshBusyTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function clearRefreshBusy(): void {
-  refreshingUsage.value = false
-  clearTimeout(refreshBusyTimer)
-  refreshBusyTimer = undefined
+function clearRefreshBusy(scope: string): void {
+  refreshing.value.delete(scope)
+  const timer = refreshBusyTimers.get(scope)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    refreshBusyTimers.delete(scope)
+  }
+}
+
+function startRefresh(scope: string, agentKey?: string, profileId?: string | null): void {
+  if (refreshing.value.has(scope)) return
+  // Nothing was asked (backend not connected) — going busy would promise an
+  // answer that can never arrive.
+  if (!refreshUsage(agentKey, profileId)) return
+  refreshing.value.set(scope, agentKey ?? null)
+  refreshBusyTimers.set(scope, setTimeout(() => clearRefreshBusy(scope), REFRESH_BUSY_TIMEOUT_MS))
 }
 
 function refreshQuota(): void {
-  if (refreshingUsage.value) return
-  // Nothing was asked (backend not connected) — going busy would promise an
-  // answer that can never arrive.
-  if (!refreshUsage()) return
-  refreshingUsage.value = true
-  clearTimeout(refreshBusyTimer)
-  refreshBusyTimer = setTimeout(clearRefreshBusy, REFRESH_BUSY_TIMEOUT_MS)
+  startRefresh(ALL_SCOPE)
 }
 
-/** True while the backend says a quota read is running for some account. */
-function readInFlight(): boolean {
+function refreshCardQuota(agentKey: string, profileId: string | null): void {
+  startRefresh(switchRowKey(agentKey, profileId), agentKey, profileId)
+}
+
+/** A card's own refresh, shown only where a read can actually happen: the
+ *  active account of a CLI that reports quota at all. */
+function canRefreshCard(agentKey: string, profileId: string | null): boolean {
+  return (
+    props.api.defaultProfileId(agentKey) === profileId &&
+    cardUsage(agentKey, profileId) !== undefined
+  )
+}
+
+/** True while the backend says a quota read is running — for one agent, or
+ *  for any of them when `agentKey` is null (the header's scope). */
+function readInFlight(agentKey: string | null): boolean {
+  if (agentKey !== null) return usageFor(agentKey)?.refreshPending === true
   return CLI_AGENT_SPECS.some(
     (spec) => usageFor(spec.agentKey)?.refreshPending === true
   )
@@ -332,10 +361,15 @@ watch(usageVersion, () => {
   // broadcasts one straight away to announce the wait, so clearing on that
   // would put an idle Refresh button above a card reading "reading its quota".
   // The busy timeout still bounds this if no completing payload ever lands.
-  if (refreshingUsage.value && !readInFlight()) clearRefreshBusy()
+  for (const [scope, agentKey] of [...refreshing.value]) {
+    if (!readInFlight(agentKey)) clearRefreshBusy(scope)
+  }
 })
 
-onUnmounted(() => clearTimeout(refreshBusyTimer))
+onUnmounted(() => {
+  for (const timer of refreshBusyTimers.values()) clearTimeout(timer)
+  refreshBusyTimers.clear()
+})
 
 // Fresh numbers when the pane opens (same nudge UsageBadge sends on switch).
 onMounted(() => refreshUsage())
@@ -350,12 +384,12 @@ onMounted(() => refreshUsage())
       </div>
       <button
         class="cli-btn ghost sm cli-refresh"
-        :disabled="refreshingUsage"
+        :disabled="refreshing.has(ALL_SCOPE)"
         :title="$t('settings.accounts.cli.refresh-quota-hint')"
         @click="refreshQuota"
       >
         {{
-          refreshingUsage
+          refreshing.has(ALL_SCOPE)
             ? $t('settings.accounts.cli.refreshing-quota')
             : $t('settings.accounts.cli.refresh-quota')
         }}
@@ -508,6 +542,19 @@ onMounted(() => refreshUsage())
                 </button>
               </template>
               <template v-else>
+                <button
+                  v-if="canRefreshCard(spec.agentKey, p?.id ?? null)"
+                  class="cli-btn ghost sm cli-card-refresh-btn"
+                  :disabled="refreshing.has(switchRowKey(spec.agentKey, p?.id ?? null))"
+                  :title="$t('settings.accounts.cli.refresh-quota-card-hint')"
+                  @click="refreshCardQuota(spec.agentKey, p?.id ?? null)"
+                >
+                  {{
+                    refreshing.has(switchRowKey(spec.agentKey, p?.id ?? null))
+                      ? $t('settings.accounts.cli.refreshing-quota')
+                      : $t('settings.accounts.cli.refresh-quota')
+                  }}
+                </button>
                 <button
                   v-if="api.defaultProfileId(spec.agentKey) !== (p?.id ?? null)"
                   class="cli-btn ghost sm"

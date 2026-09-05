@@ -80,10 +80,27 @@ The `pnpm dev` command starts Electron, Vite dev server, and the Python FastAPI 
    ```bash
    pnpm typecheck
    ```
-5. Commit your changes following the [commit format](#commit-format) below.
-6. Push and open a pull request against `main`.
+5. If you touched the cross-device path (`server_link.py`, `remote_roster.py`,
+   `trust_store.py`, or the Navide-Server wire protocol), run the end-to-end
+   check against a local server. The in-process tests use a fake server, so they
+   agree with whatever this repository believes the contract is — including
+   where it is wrong. This one talks to the real thing:
+   ```bash
+   NAVIDE_WS=ws://localhost:8787/ws \
+     uv --project backend run python backend/scripts/verify_server_link.py
+   ```
+
+   > 動到跨裝置那條路徑時必跑。in-process 測試用的是假 server，會照著我們對契約
+   > 的理解回應——包含理解錯的地方；這一支打的是真的對端。
+6. Commit your changes following the [commit format](#commit-format) below.
+7. Push and open a pull request against `main`.
 
 Please fill in the pull request template — include a summary of changes and how you tested them.
+
+CI runs frontend checks and the application/plugin build, macOS backend checks,
+packaged Plans checks, and marketplace registry/contract checks in parallel. The
+`Lint and test` status passes only when all four jobs succeed. CI does not run Electron UI automation;
+test UI changes manually. To reproduce the build check locally, run `pnpm build`.
 
 > Fork 後建立 feature branch，跑測試與型別檢查無誤後，依照下方 commit 格式提交，並開 PR 至 `main`。
 

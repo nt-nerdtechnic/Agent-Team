@@ -24,7 +24,7 @@ const usage = vi.hoisted(() => ({
   accountUsageFor: vi.fn<
     (agentKey: string | undefined | null, profileId: string | null) => UsageSnapshot | undefined
   >(),
-  refreshUsage: vi.fn<() => boolean>(() => true),
+  refreshUsage: vi.fn<(agentKey?: string, slotId?: string | null) => boolean>(() => true),
 }))
 vi.mock('../../composables/useUsage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../composables/useUsage')>()
@@ -807,6 +807,67 @@ describe('CliAccountsPane', () => {
     await button.trigger('click')
     expect(button.text()).toBe('Refresh quota')
     expect(button.attributes('disabled')).toBeUndefined()
+  })
+
+  it('gives the signed-in account card a refresh of its own, scoped to that CLI', async () => {
+    usage.usageFor.mockReturnValue(undefined)
+    usage.accountUsageFor.mockImplementation((key, profileId) =>
+      key === 'claude' && profileId === null ? usageSnapshot() : undefined,
+    )
+    const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
+    const w = mountPane(api)
+    usage.refreshUsage.mockClear() // drop the mount poll
+
+    const cards = section(w, 0).findAll('.cli-card')
+    // The parked account has nothing to ask for: the CLI reports whoever is
+    // signed in, so only the active card carries a refresh.
+    expect(cards[1].find('.cli-card-refresh-btn').exists()).toBe(false)
+
+    const button = cards[0].get('.cli-card-refresh-btn')
+    await button.trigger('click')
+    expect(usage.refreshUsage).toHaveBeenCalledWith('claude', null)
+    expect(button.text()).toBe('Refreshing…')
+    // Separate scope from the header button, which stays clickable.
+    expect(w.get('.cli-refresh').attributes('disabled')).toBeUndefined()
+
+    usageVersion.value++
+    await flushPromises()
+    expect(button.text()).toBe('Refresh quota')
+  })
+
+  it('holds each card busy only while its own CLI is still reading', async () => {
+    usage.usageFor.mockReturnValue(undefined)
+    usage.accountUsageFor.mockImplementation((key, profileId) =>
+      profileId === null && (key === 'claude' || key === 'codex')
+        ? usageSnapshot()
+        : undefined,
+    )
+    const w = mountPane(makeApi())
+
+    const claudeBtn = section(w, 0).get('.cli-card-refresh-btn')
+    const codexBtn = section(w, 1).get('.cli-card-refresh-btn')
+    await claudeBtn.trigger('click')
+    await codexBtn.trigger('click')
+    expect(usage.refreshUsage).toHaveBeenCalledWith('codex', null)
+    expect(claudeBtn.text()).toBe('Refreshing…')
+    expect(codexBtn.text()).toBe('Refreshing…')
+
+    // Only Claude is still reading — codex's card must not wait on it.
+    usage.usageFor.mockImplementation((key) =>
+      key === 'claude' ? usageSnapshot({ refreshPending: true }) : undefined,
+    )
+    usageVersion.value++
+    await flushPromises()
+    expect(claudeBtn.text()).toBe('Refreshing…')
+    expect(codexBtn.text()).toBe('Refresh quota')
+  })
+
+  it('hides a card refresh where the CLI reports no quota at all', () => {
+    usage.usageFor.mockReturnValue(undefined)
+    usage.accountUsageFor.mockReturnValue(undefined)
+    const w = mountPane(makeApi())
+
+    expect(w.findAll('.cli-card-refresh-btn')).toHaveLength(0)
   })
 
   it('releases the refresh button when no payload ever arrives', async () => {
