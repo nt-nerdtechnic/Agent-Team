@@ -1427,6 +1427,11 @@ async def cli_pending_incoming(ctx: Context, limit: int = 20) -> dict[str, Any]:
     someone might need to interrupt. A non-empty answer is grounds to wrap up
     the turn you are in, which is what lets the message land.
 
+    `excerpt` is 200 characters with the whitespace flattened: enough to tell
+    what a message is about, not enough to act on. cli_read_incoming returns
+    what was actually written, and can take a message off the queue so it is
+    not typed in afterwards.
+
     Returns {ok, count, messages: [{uid, sender, status, age_seconds, kind?,
     excerpt}]}, oldest first. `status` is "queued" (waiting for you to be
     between turns) or "delivering" (going in right now). `kind` marks a message
