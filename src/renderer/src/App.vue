@@ -8,6 +8,7 @@ import { buildPaneLineage } from './lib/paneLineage'
 import { ancestorTrail } from './lib/paneListView'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
+import { schedulePrewarm } from './lib/prewarm'
 import { flattenSidebarOrder, resolveFocusedPane } from './lib/paneFocus'
 import { formatBytes } from './lib/formatBytes'
 import { formatCpuPercent, machineCpuShare, machineMemoryShare } from './lib/resourceSampling'
@@ -261,8 +262,13 @@ import navideMark from './assets/navide-mark.png'
 // Modals/wizard that only render behind a v-if (settings opened, run completed,
 // first-run onboarding) — defer them off the main shell's first-paint bundle.
 const CompletionModal = defineAsyncComponent(() => import('./components/CompletionModal.vue'))
-const SettingsModal = defineAsyncComponent(() => import('./components/SettingsModal.vue'))
-const AccountModal = defineAsyncComponent(() => import('./components/AccountModal.vue'))
+// Named, because the prewarm below has to import the same module specifier:
+// two different arrow functions pointing at one file still resolve to one
+// module, but writing it twice is how they drift apart.
+const loadSettingsModal = () => import('./components/SettingsModal.vue')
+const loadAccountModal = () => import('./components/AccountModal.vue')
+const SettingsModal = defineAsyncComponent(loadSettingsModal)
+const AccountModal = defineAsyncComponent(loadAccountModal)
 // Not lazy: it has to be listening before anybody asks to pair, and a request
 // expires in five minutes — too short to wait for a chunk to be fetched because
 // somebody happened to open a window.
@@ -369,15 +375,6 @@ onMounted(() => {
     void injectPaneContextSources(paneIds?.length ? paneIds : [paneId], targetPaneId)
   })
   window.addEventListener('resize', onWindowResize)
-  // Warm the heaviest deferred panel (Settings) during idle: it stays lazy to
-  // keep off first paint, but it's commonly opened, so pre-fetching once the
-  // shell is interactive makes its first open instant at no visible cost.
-  const warmSettings = (): void => { void import('./components/SettingsModal.vue') }
-  if (typeof window.requestIdleCallback === 'function') {
-    window.requestIdleCallback(warmSettings, { timeout: 4000 })
-  } else {
-    window.setTimeout(warmSettings, 2500)
-  }
 })
 
 // ── First-run onboarding gate ────────────────────────────────────────────────
@@ -6331,6 +6328,45 @@ function openAccountModal(): void {
   accountModalEverOpened.value = true
   showAccount.value = true
 }
+/**
+ * The two windows the title bar opens, fetched and parsed before anybody clicks.
+ *
+ * Both are lazy chunks, so the first click used to pay for loading them before
+ * anything appeared — measured on this machine: Settings is 507 KB and parses
+ * in ~315 ms, the account window 67 KB and ~25 ms, plus their stylesheets
+ * (150 KB and 18 KB). A click that draws nothing for a third of a second reads
+ * as a click that did nothing.
+ *
+ * Settings already had a warm of exactly this shape, written inline a few
+ * hundred lines up; the account window had none. That code is gone and this is
+ * it — shared, cancellable, tested, and covering both. Same schedule as before,
+ * deliberately: idle with a deadline, not a fixed delay. A delay would only
+ * postpone the warm past the clicks that arrive in the opening seconds, which
+ * are the ones it exists for.
+ *
+ * If a click lands before the warm finishes, nothing breaks: `import()` hands
+ * back the promise already in flight rather than starting a second load.
+ */
+onMounted(() => {
+  const cancel = schedulePrewarm(
+    () => { void loadSettingsModal(); void loadAccountModal() },
+    {
+      idleTimeoutMs: 4000,
+      fallbackDelayMs: 2500,
+      clock: {
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: (id) => window.clearTimeout(id),
+        requestIdleCallback: window.requestIdleCallback
+          ? (fn, o) => window.requestIdleCallback(fn, o)
+          : undefined,
+        cancelIdleCallback: window.cancelIdleCallback
+          ? (id) => window.cancelIdleCallback(id)
+          : undefined,
+      },
+    },
+  )
+  onUnmounted(cancel)
+})
 onMounted(() => {
   void loadP2pAccount()
   const timer = window.setInterval(() => { if (document.hasFocus()) void loadP2pAccount() }, 5000)
