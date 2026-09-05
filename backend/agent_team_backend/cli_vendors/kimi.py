@@ -579,6 +579,7 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="kimi",
+    supports_model=True,
     skills_supported=True,
     # --skills-dir is repeatable but replaces auto-discovery outright, so the
     # roots kimi would have found itself are passed back alongside ours.

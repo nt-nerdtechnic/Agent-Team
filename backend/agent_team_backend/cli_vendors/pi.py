@@ -795,6 +795,9 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="pi",
+    supports_model=True,
+    supports_effort=True,
+    known_efforts=('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'),
     skills_supported=True,
     # --skill takes one skill (file or directory) and is repeated; it adds to
     # discovery rather than replacing it (--no-skills is the opt-out).

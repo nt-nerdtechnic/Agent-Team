@@ -579,6 +579,7 @@ async def fetch_grok(home: Path, env: dict | None = None) -> dict:
 
 SPEC = VendorSpec(
     key="grok",
+    supports_model=True,
     # Verified 2026-08-15: grok's own error message points at
     # ~/.agents/skills/<name>/SKILL.md. It has no dedicated relocation
     # variable, so this rides the HOME shim its MCP wiring already builds.

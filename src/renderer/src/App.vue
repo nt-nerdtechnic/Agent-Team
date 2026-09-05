@@ -149,6 +149,8 @@ import {
   acquirePaneRebuildLock,
   cancelStalePendingCreate,
   dedupeRestorablePanes,
+  modelArgsFor,
+  type CliModelRequest,
   normalizeResumeSessionId,
   sessionHomeIdFor,
   paneBusyForRebuild,
@@ -1043,7 +1045,17 @@ async function savedHistoryFile(
   return resolve(workspacePath, paneId, listPaneDir)
 }
 
-function resolveCommand(agentKey: string, override: string, paneArgCtx?: PaneArgContext): string {
+/** The model/effort a pane was asked to launch on. `{ model: '', effort: '' }`
+ *  means "not requested" and is what every caller that never heard of a model
+ *  passes, so their command comes out byte-for-byte as before. */
+const NO_MODEL_REQUEST: CliModelRequest = { model: '', effort: '' }
+
+function resolveCommand(
+  agentKey: string,
+  override: string,
+  paneArgCtx?: PaneArgContext,
+  modelRequest: CliModelRequest = NO_MODEL_REQUEST
+): string {
   const spec = agentSpecs.find((s) => s.agentKey === agentKey)
   const trimmed = override.trim()
   // If user supplied an override, trust it verbatim.
@@ -1053,6 +1065,24 @@ function resolveCommand(agentKey: string, override: string, paneArgCtx?: PaneArg
   if (paneArg) parts.push(paneArg)
   const skipFlag = skipFlagFor(agentKey, spec)
   if (skipFlag) parts.push(skipFlag)
+  // Model/effort last, the same order buildResumeCommand uses, so a resumed
+  // pane and a fresh one carry the same argv shape.
+  //
+  // This function returns a string and has no error channel, so a request the
+  // vendor cannot honour is DROPPED here, not refused. That is safe only
+  // because the authoritative refusal happens before a spawn ever reaches
+  // this point (the spawn gate for user actions, the MCP tool for agents) —
+  // reaching here with an unsupported request means one of those let it past,
+  // which the warning below makes visible instead of silent.
+  const chosen = modelArgsFor({ spec, request: modelRequest })
+  if (chosen.ok) {
+    if (chosen.args) parts.push(chosen.args)
+  } else {
+    console.warn(
+      `[resolveCommand] ${agentKey} cannot take model="${modelRequest.model}" `
+      + `effort="${modelRequest.effort}" (${chosen.refusal.kind}); launching on the vendor default`
+    )
+  }
   return commandWithSelectedBinary(agentKey, parts.join(' '))
 }
 
@@ -1114,6 +1144,14 @@ interface ActivePane {
    *  Empty string for single-agent stages or manually-spawned panes. */
   slotLabel: string
   command: string
+  /** Model id this pane was launched on; absent = the vendor's own default.
+   *  Kept because a resume passes its command to spawnPane verbatim, so every
+   *  rebuild has to re-derive the flag from here or the pane silently comes
+   *  back on the default model. */
+  model?: string
+  /** Reasoning-effort level, for vendors with a flag separate from the model
+   *  id. Absent = not requested. */
+  effort?: string
   workspacePath: string
   origin: 'manual' | 'pipeline' | 'mcp'
   /** Which pipeline run group this pane belongs to. Undefined = unassigned (manual). */
@@ -2204,7 +2242,7 @@ async function handleSpawnRequestsForTurn(
  *  here, not tens of seconds later. */
 async function createRequestedPane(
   parent: ActivePane,
-  req: { agentKey: string; name: string },
+  req: { agentKey: string; name: string; model?: string; effort?: string },
 ): Promise<string | null> {
   const paneId = await spawnPane({
     agentKey: req.agentKey,
@@ -2217,6 +2255,8 @@ async function createRequestedPane(
     runGroupId: parent.runGroupId,
     preferredMessagingName: req.name,
     spawnedBy: parent.id,
+    model: req.model,
+    effort: req.effort,
   })
   if (!paneId) return null
   // Persistence only — the pane is already usable, and both responses are
@@ -2228,6 +2268,11 @@ async function createRequestedPane(
     agent: req.agentKey,
     role: '',
     command: '',
+    // The only write of these two: without them the pane record keeps the
+    // vendor default and the next restart reopens on the wrong model. The
+    // backend writes them only when non-empty, so '' leaves the record alone.
+    model: req.model ?? '',
+    effort: req.effort ?? '',
     session_id: panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? '',
     session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
     run_group_id: parent.runGroupId ?? '',
@@ -2277,7 +2322,7 @@ function standaloneTaskDeps(): StandaloneTaskInjectionDeps {
  *  would never actually be injected. */
 async function createStandaloneRequestedPane(
   workspacePath: string,
-  req: { agentKey: string; name: string; task: string },
+  req: { agentKey: string; name: string; task: string; model?: string; effort?: string },
 ): Promise<string | null> {
   const runGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
   const paneId = await spawnPane({
@@ -2290,6 +2335,8 @@ async function createStandaloneRequestedPane(
     origin: 'mcp',
     runGroupId: runGroupId || undefined,
     preferredMessagingName: req.name,
+    model: req.model,
+    effort: req.effort,
   })
   if (!paneId) return null
   void sendQuiet<ProjectPayload>('manual_pane.spawn', {
@@ -2298,6 +2345,10 @@ async function createStandaloneRequestedPane(
     agent: req.agentKey,
     role: '',
     command: '',
+    // Same as createRequestedPane: the only place a spawn's model reaches the
+    // pane record. '' means "not requested" and does not overwrite.
+    model: req.model ?? '',
+    effort: req.effort ?? '',
     session_id: panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? '',
     session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
     run_group_id: runGroupId,
@@ -2326,6 +2377,7 @@ function standaloneSpawnGateContext() {
     parentDepth: 0,
     parentChildCount: 0,
     cliPaneCount: panes.value.filter((p) => p.agentKey !== 'terminal').length,
+    modelCapabilityFor: (agentKey: string) => agentSpecs.find((s) => s.agentKey === agentKey),
   }
 }
 
@@ -2450,6 +2502,7 @@ function spawnGateContextFor(parentPaneId: string) {
     ),
     parentChildCount: panes.value.filter((p) => p.spawnedBy === parentPaneId).length,
     cliPaneCount: panes.value.filter((p) => p.agentKey !== 'terminal').length,
+    modelCapabilityFor: (agentKey: string) => agentSpecs.find((s) => s.agentKey === agentKey),
   }
 }
 
@@ -2466,6 +2519,8 @@ async function handleMcpSpawnRequest(ev: {
   name: string
   task: string
   target_workspace?: string
+  model: string
+  effort: string
 }): Promise<void> {
   const standalone = !!ev.target_workspace
   let parent: ActivePane | undefined
@@ -2507,7 +2562,7 @@ async function handleMcpSpawnRequest(ev: {
   }
 
   const gate = evaluateSpawnRequest(
-    { agent: ev.agent_key, name: ev.name, task: ev.task },
+    { agent: ev.agent_key, name: ev.name, task: ev.task, model: ev.model, effort: ev.effort },
     parent ? spawnGateContextFor(parent.id) : standaloneSpawnGateContext(),
   )
   if (!gate.ok) {
@@ -4682,6 +4737,14 @@ interface SpawnInternal {
    *  header for downstream stages can identify which agent produced which output. */
   slotLabel?: string
   commandOverride: string
+  /** Model id to launch on ('' / absent = the vendor default). Only reaches
+   *  the command line on a FRESH spawn — resolveCommand hands a
+   *  commandOverride back untouched, so a resume path must have rebuilt the
+   *  flag into the override itself (buildResumeCommand does). Carried anyway
+   *  so the pane records what it is running and later rebuilds can reproduce it. */
+  model?: string
+  /** Reasoning-effort level, for vendors with a separate effort flag. */
+  effort?: string
   workspacePath: string
   origin: 'manual' | 'pipeline' | 'mcp'
   runGroupId?: string
@@ -4809,7 +4872,10 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   const paneArgCtx: PaneArgContext | undefined = spec.paneArg && opts.workspacePath
     ? { paneId: id, historyRoot: await paneHistoryRootFor(opts.agentKey, opts.workspacePath) }
     : undefined
-  let command = resolveCommand(opts.agentKey, opts.commandOverride, paneArgCtx)
+  let command = resolveCommand(opts.agentKey, opts.commandOverride, paneArgCtx, {
+    model: opts.model ?? '',
+    effort: opts.effort ?? '',
+  })
   const userShell = backend.shell.value || 'bash'
 
   if (opts.agentKey === 'terminal' && !command) {
@@ -4905,6 +4971,8 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     sessionHomeId: sessionHomeId || undefined,
     profileId: opts.profileId || undefined,
     sessionMarker: sessionMarker || undefined,
+    model: opts.model || undefined,
+    effort: opts.effort || undefined,
     spawnedBy: opts.spawnedBy,
     formerPaneIds: opts.formerPaneIds?.length ? [...opts.formerPaneIds] : undefined,
   }
@@ -5316,11 +5384,22 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
   const chatHistoryFile = payload.historyPaneId
     ? await savedHistoryFile(agentKey, workspacePath, payload.historyPaneId)
     : ''
+  // Model/effort come from the pane this session belongs to when it is still
+  // open (Agent History knows its id). A resume of a session whose pane is
+  // gone has no in-memory source and reopens on the vendor default — the
+  // persisted record is the restore path's job, not this one's.
+  const historyPane = payload.historyPaneId
+    ? panes.value.find((p) => p.id === payload.historyPaneId)
+    : undefined
+  const modelRequest: CliModelRequest = {
+    model: historyPane?.model ?? '',
+    effort: historyPane?.effort ?? '',
+  }
   // Custom-binary override applies to resume too — the spec guarantees the
   // command starts with defaultCommand, which this replaces when overridden.
   const commandOverride = commandWithSelectedBinary(
     agentKey,
-    buildResumeCommand(agentKey, sessionId, skipFlag, chatHistoryFile)
+    buildResumeCommand(agentKey, sessionId, skipFlag, chatHistoryFile, modelRequest)
   )
   const spawnGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
   const paneId = await spawnPane({
@@ -5338,6 +5417,8 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
     skipRoleInjection: true,
     restoreMode: 'memory-resume',
     resumeSessionId: sessionId,
+    model: modelRequest.model || undefined,
+    effort: modelRequest.effort || undefined,
   })
   if (paneId) {
     await sendQuiet<ProjectPayload>('manual_pane.spawn', {
@@ -5823,7 +5904,10 @@ async function rebuildPaneViaResume(
     const skipFlag = skipFlagFor(pane.agentKey, spec)
     const resumeCmd = commandWithSelectedBinary(
       pane.agentKey,
-      buildResumeCommand(pane.agentKey, sessionId, skipFlag)
+      buildResumeCommand(pane.agentKey, sessionId, skipFlag, '', {
+        model: pane.model ?? '',
+        effort: pane.effort ?? '',
+      })
     )
     if (!resumeCmd) {
       if (!opts?.suppressBusyToast) {
@@ -5860,6 +5944,8 @@ async function rebuildPaneViaResume(
       runGroupId: pane.runGroupId,
       sessionHomeId: pane.sessionHomeId,
       profileId: pane.profileId,
+      model: pane.model,
+      effort: pane.effort,
     }
     try { localStorage.removeItem(`terminal-scroll:${sessionId}`) } catch {}
     // Preserve layout order: keep the old pane as a dummy to avoid layout
@@ -5884,6 +5970,8 @@ async function rebuildPaneViaResume(
       sessionHomeId: snap.sessionHomeId,
       profileId: snap.profileId,
       resumeSessionId: sessionId,
+      model: snap.model,
+      effort: snap.effort,
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
@@ -7311,6 +7399,12 @@ interface ProjectPane {
   agent: string
   role: string
   command?: string
+  /** Model / reasoning-effort the pane was launched on. Persisted so a restore
+   *  can rebuild the same launch flags instead of reopening the pane on the
+   *  vendor default. Absent for every record written before the fields
+   *  existed, which reads as "not requested". */
+  model?: string
+  effort?: string
   session_id?: string
   session_home_id?: string
   profile_id?: string
@@ -7460,6 +7554,12 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     restoreMode: opts.isResume ? 'memory-resume' : 'fresh',
     sessionHomeId: opts.sessionHomeId,
     profileId: opts.profileId,
+    // The persisted launch model. On a resume the flag is already inside
+    // commandOverride (buildResumeCommand rebuilt it); passing it here is what
+    // lets the restored pane report and later rebuild on the same model, and
+    // on a FRESH restore it is the only thing that puts the flag back.
+    model: saved.model || undefined,
+    effort: saved.effort || undefined,
     resumeSessionId: opts.resumeSessionId,
     sessionKnownOnDisk: opts.sessionKnownOnDisk,
     freshSessionId: opts.freshSessionId,
@@ -8151,7 +8251,10 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       const resumeCmd = attemptResume
         ? commandWithSelectedBinary(
             saved.agent,
-            buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile)
+            buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile, {
+              model: saved.model ?? '',
+              effort: saved.effort ?? '',
+            })
           )
         : ''
       const isResume = !!resumeCmd
@@ -8452,7 +8555,10 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     let resumeCmd = attemptResume
       ? commandWithSelectedBinary(
           saved.agent,
-          buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile)
+          buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile, {
+            model: saved.model ?? '',
+            effort: saved.effort ?? '',
+          })
         )
       : ''
     const ghostConfirmed = !forceFresh && shouldWarnMissingResume(
@@ -8474,7 +8580,10 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
       if (repointed) {
         resumeCmd = commandWithSelectedBinary(
           saved.agent,
-          buildResumeCommand(saved.agent, reconnectId, skipFlag)
+          buildResumeCommand(saved.agent, reconnectId, skipFlag, '', {
+            model: saved.model ?? '',
+            effort: saved.effort ?? '',
+          })
         )
         reconnectedCount.value++
         pipelineLog(`↩ ${saved.agent}: auto-reconnected ${saved.pane_id} → ${reconnectId}`)
@@ -10074,6 +10183,11 @@ backend.on('agent_spawn.request', (raw) => {
     name?: string
     task?: string
     target_workspace?: string
+    // Present on the event only when cli_open_agent was asked for them; a
+    // field left out of this re-shaping is dropped for good, and the pane
+    // would silently launch on the vendor default.
+    model?: string
+    effort?: string
   }
   // An external caller (no requesting pane) addresses this by target_workspace
   // instead — accept the event as long as one of the two identifies an owner.
@@ -10085,6 +10199,8 @@ backend.on('agent_spawn.request', (raw) => {
     name: ev.name ?? '',
     task: ev.task ?? '',
     target_workspace: ev.target_workspace,
+    model: ev.model ?? '',
+    effort: ev.effort ?? '',
   })
 })
 

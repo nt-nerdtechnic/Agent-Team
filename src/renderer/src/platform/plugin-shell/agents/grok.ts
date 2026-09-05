@@ -6,6 +6,8 @@ export const SPEC = {
   agentKey: 'grok',
   label: 'Grok CLI',
   defaultCommand: 'grok',
+  // `reasoning_effort` exists only in grok's API payload, not as a flag.
+  modelArgs: (m) => `--model ${m}`,
   // no skipPermissionFlag: grok-cli has no per-tool confirmation gate, so
   // there is no flag to bypass. It does ask once per workspace whether to run
   // shell commands sandboxed or on the host (answer stored in

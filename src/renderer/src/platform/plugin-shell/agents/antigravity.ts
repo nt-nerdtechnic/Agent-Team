@@ -6,6 +6,11 @@ export const SPEC = {
   agentKey: 'antigravity',
   label: 'Antigravity CLI',
   defaultCommand: 'agy',
+  // agy validates both together and exits 1 on a bad value, naming the
+  // three it accepts.
+  modelArgs: (m) => `--model ${m}`,
+  effortArgs: (e) => `--effort ${e}`,
+  knownEfforts: ['low', 'medium', 'high'],
   skipPermissionFlag: '--dangerously-skip-permissions',
   resumeArgs: (id) => `--conversation ${id}`,
   needsSessionMarker: true,

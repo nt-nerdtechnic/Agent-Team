@@ -101,7 +101,7 @@ documents the addresses, the idle gate and the guard rails they share.
 | `cli_inbox_summary` | — | Your own sends that are stuck or failed: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20` (capped at 200) | **CLI panes only.** What is queued *for you* and has not gone in yet: `{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
 | `cli_send_and_wait` | `to`, `text`, `timeout_s=60` (capped at 120), `pane_id?` | `cli_send` plus the wait for that turn to finish; returns `cli_wait_idle`'s result plus `{ok, target, msg_key}` |
-| `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller) | Spawn a new CLI pane with a task; returns `{ok, name, address}`, plus `advisories` when the spawn crossed an advisory threshold |
+| `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller), `model`, `effort` | Spawn a new CLI pane with a task; returns `{ok, name, address}`, plus `advisories` when the spawn crossed an advisory threshold. `model` and `effort` are optional and are refused — not ignored — when that CLI cannot take them, so a pane never quietly starts on a different model than asked for. Most CLIs accept a model; fewer accept a separate effort, the rest encoding it in the model id (`gpt-5.3-codex-high`). Model ids are not validated (they change every release); effort is checked against that CLI's vocabulary |
 
 `cli_send` returns once the message is *accepted* for delivery, not once the
 other agent read it. `cli_check_message` closes that loop: `status` is

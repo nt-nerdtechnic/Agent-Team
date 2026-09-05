@@ -107,6 +107,8 @@ class PaneRecord:
     agent: str = ""
     role: str = ""
     command: str = ""
+    model: str = ""                 # CLI model pick recorded at spawn; "" = unspecified (use the vendor default)
+    effort: str = ""                # reasoning-effort pick recorded at spawn; "" = unspecified
     session_id: str = ""
     session_home_id: str = ""       # Codex per-pane CODEX_HOME id; stable across restored pane ids
     profile_id: str = ""            # CLI account pin: the profile this pane was spawned on ("__default__" = real home; "" = legacy/unpinned). Restore re-spawns in the SAME account regardless of the current active default.
@@ -780,6 +782,8 @@ class ProjectStore:
         agent: str = "",
         role: str = "",
         command: str = "",
+        model: str = "",
+        effort: str = "",
         session_id: str = "",
         session_home_id: str = "",
         profile_id: str = "",
@@ -810,6 +814,11 @@ class ProjectStore:
         if session_id: pane.session_id = session_id
         if session_home_id: pane.session_home_id = session_home_id
         if profile_id: pane.profile_id = profile_id
+        # Guarded like origin below: the rebuild path re-spawns with an empty
+        # model/effort, and an unconditional write would erase the pick the
+        # user made before the restart.
+        if model: pane.model = model
+        if effort: pane.effort = effort
         if run_group_id: pane.run_group_id = run_group_id
         if output_log_file: pane.output_log_file = output_log_file
         # Guarded like the fields above: an omitted origin must not blank an

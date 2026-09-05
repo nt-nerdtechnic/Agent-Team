@@ -6,6 +6,14 @@ export const SPEC = {
   agentKey: 'copilot',
   label: 'Copilot CLI',
   defaultCommand: 'copilot',
+  // `--effort` is an accepted alias; the long form is used here. GitHub's
+  // published CLI reference documents only the settings.json `effortLevel`
+  // and omits this flag entirely — the values come from the binary's own
+  // --help, which exits 1 listing them. Individual models may still refuse
+  // one of them.
+  modelArgs: (m) => `--model ${m}`,
+  effortArgs: (e) => `--reasoning-effort ${e}`,
+  knownEfforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
   // --yolo ≡ --allow-all-tools --allow-all-paths --allow-all-urls
   skipPermissionFlag: '--yolo',
   // NOTE the `=` form. Verified against 1.0.78 `--help`: this flag is scoped

@@ -1152,6 +1152,9 @@ def _install_hooks(port_file: str) -> Any:
 
 SPEC = VendorSpec(
     key="copilot",
+    supports_model=True,
+    supports_effort=True,
+    known_efforts=('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'),
     # Verified 2026-08-15: `copilot skill list` under a relocated COPILOT_HOME
     # lists exactly the skills below <home>/skills.
     skills_supported=True,

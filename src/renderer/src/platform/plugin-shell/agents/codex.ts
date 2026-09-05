@@ -6,6 +6,10 @@ export const SPEC = {
   agentKey: 'codex',
   label: 'Codex',
   defaultCommand: 'codex',
+  // No effort flag: codex takes it as a config override
+  // (`-c model_reasoning_effort=<value>`), a different injection shape than
+  // every other vendor. Declaring none refuses `effort` rather than guessing.
+  modelArgs: (m) => `--model ${m}`,
   skipPermissionFlag: '--dangerously-bypass-approvals-and-sandbox',
   // Subcommand, NOT a --flag.
   resumeArgs: (id) => `resume ${id}`,

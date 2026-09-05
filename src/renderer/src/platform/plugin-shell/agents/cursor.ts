@@ -10,6 +10,11 @@ export const SPEC = {
   // command. (Cursor is not installed locally — sourced from
   // https://cursor.com/docs/cli/reference/parameters and https://cursor.com/install.)
   defaultCommand: 'agent',
+  // Effort is encoded in the model id (`gpt-5.3-codex-high`), so there is no
+  // separate flag and asking for one is refused. The bracket form
+  // `model[effort=high]` that --help mentions has no official documentation
+  // and is reported to fail; it is not offered here.
+  modelArgs: (m) => `--model ${m}`,
   // --force (official alias --yolo) auto-approves all commands
   skipPermissionFlag: '--force',
   resumeArgs: (id) => `--resume=${id}`,

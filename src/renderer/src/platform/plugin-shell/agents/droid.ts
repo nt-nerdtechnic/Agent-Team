@@ -6,6 +6,10 @@ export const SPEC = {
   agentKey: 'droid',
   label: 'Droid',
   defaultCommand: 'droid',
+  // No model or effort flag: `droid --help` (the interactive command Navide
+  // spawns) declares neither, and its `-r` means --resume there while
+  // meaning --reasoning-effort under `droid exec`. Passing effort through
+  // would resume a session named after the level, so both are refused.
   // Droid has no boolean "skip every prompt" flag on its INTERACTIVE command:
   // `droid --help` (0.204.0) lists only `--auto <level>` with low|medium|high.
   // `--skip-permissions-unsafe` exists, but `droid exec --help` is the only

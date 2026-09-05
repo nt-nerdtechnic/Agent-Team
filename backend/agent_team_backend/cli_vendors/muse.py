@@ -679,6 +679,9 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="muse",
+    supports_model=True,
+    supports_effort=True,
+    known_efforts=('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'),
     # Verified 2026-08-15: `muse skills list --source user` reports skills
     # from ~/.claude/skills and ~/.agents/skills. Only HOME relocates those,
     # so this is the one vendor whose shim exists for skills alone.

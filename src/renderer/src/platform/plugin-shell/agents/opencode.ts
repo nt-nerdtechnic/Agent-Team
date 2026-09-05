@@ -6,6 +6,16 @@ export const SPEC = {
   agentKey: 'opencode',
   label: 'OpenCode',
   defaultCommand: 'opencode',
+  // The root command really does consume `--model` — it is declared on the
+  // root command, threaded into the TUI and parsed there. An earlier audit
+  // recorded this as silently swallowed; that was wrong. What it saw was
+  // opencode REJECTING the value (unknown provider, or an id missing its
+  // `provider/` prefix) through a three-second toast. Values must therefore
+  // be `provider/model` within a provider the user has configured;
+  // `opencode models` lists what that resolves to. Effort is not a flag here
+  // either — it is part of the model id (`-high`, `-fast`) or a config
+  // variant.
+  modelArgs: (m) => `--model ${m}`,
   // No skipPermissionFlag: the opencode TUI has no permission-bypass flag —
   // only the `opencode run` subcommand does, as `--dangerously-skip-permissions`
   // (still listed under `opencode run --help` on 1.15.12).

@@ -38,6 +38,7 @@
 import { AGENT_SPECS, REBUILD_CAPABLE_AGENTS, RESTORE_PIN_AGENTS } from '../agents'
 import type { AgentSpec } from '../agents/types'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '@navide/terminal'
+import { modelArgsFor, type CliModelRequest } from './cliModel'
 
 export { REBUILD_CAPABLE_AGENTS, RESTORE_PIN_AGENTS }
 
@@ -209,10 +210,20 @@ export function buildResumeCommand(
   agentKey: string,
   sessionId: string,
   skipFlag = '',
-  chatHistoryFile = ''
+  chatHistoryFile = '',
+  modelRequest: CliModelRequest = { model: '', effort: '' }
 ): string {
   const spec = AGENT_SPECS.find((v) => v.agentKey === agentKey)
-  const flag = skipFlag.trim()
+  // resolveCommand never runs on this path — the caller passes what we return
+  // as a commandOverride, and resolveCommand hands an override straight back
+  // untouched. So a pane opened with a model has to have that flag rebuilt
+  // here, or it silently reopens on the vendor default after a restart.
+  //
+  // A vendor that no longer accepts a model reopens on its default instead of
+  // refusing: failing to restore the pane at all would be the worse outcome,
+  // and the stored value is meaningless once the capability is gone.
+  const chosen = modelArgsFor({ spec, request: modelRequest })
+  const flag = [skipFlag.trim(), chosen.ok ? chosen.args : ''].filter(Boolean).join(' ')
   // Id-less vendors (aider): resume args come from the spec's resumeWithoutId
   // hook and the passed id — always empty there — is ignored.
   if (spec?.resumeWithoutId) {

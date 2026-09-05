@@ -28,6 +28,25 @@ export interface AgentSpec {
    *  skipPermissionFlag. Only aider defines one (its private chat-history
    *  file); no other CLI shares state across panes by default. */
   paneArg?: (ctx: PaneArgContext) => string
+  /** Vendor arguments that pick the model to run, WITHOUT the binary — e.g.
+   *  `--model <id>`. Undefined = this CLI cannot be told which model to use
+   *  at launch, and a spawn that asks for one is REFUSED rather than started
+   *  on the default: droid and opencode accept an unknown `--model` on their
+   *  interactive command and ignore it, so dropping the flag would look like
+   *  success until someone read the transcript. */
+  modelArgs?: (model: string) => string
+  /** Vendor arguments that pick a reasoning-effort level. Undefined = this
+   *  CLI has no separate effort flag. Some encode effort in the model id
+   *  instead (`gpt-5.3-codex-high`); those declare `modelArgs` only, and an
+   *  `effort` asked of them is refused so the caller learns to put it in the
+   *  model id. */
+  effortArgs?: (effort: string) => string
+  /** Effort values this CLI accepts. Unlike model ids — which change every
+   *  release, so validating them would reject valid values — this vocabulary
+   *  is small and closed, so it is checked before launch. Undefined with
+   *  `effortArgs` present = accept any value and let the CLI report its own
+   *  error. */
+  knownEfforts?: readonly string[]
   hint?: string
   /** Vendor resume arguments WITHOUT the binary (the binary comes from
    *  `defaultCommand`, or the caller's custom command override) — e.g.

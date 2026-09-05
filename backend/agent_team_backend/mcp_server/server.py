@@ -481,9 +481,72 @@ def resolve_spawn(request_id: str, verdict: dict[str, Any]) -> bool:
     return True
 
 
+# A value safe to place after a flag on a command line: no whitespace, no
+# shell metacharacters, and never a leading dash. Mirrors ARGUMENT_SAFE in
+# src/renderer/src/platform/plugin-shell/lib/cliModel.ts — the renderer builds
+# argv, this copy refuses the request before it is ever broadcast. The dash is
+# excluded from the first position deliberately: `[A-Za-z0-9._:/-]+` alone
+# matches `--dangerously-skip-permissions`, which is the whole attack.
+_ARGUMENT_SAFE = re.compile(r"^[A-Za-z0-9._:/][A-Za-z0-9._:/-]*$")
+
+
+def _refuse_unsupported_model(agent_key: str, model: str, effort: str) -> str:
+    """Why this CLI cannot be asked for that model or effort, or "" if it can.
+
+    Checked here, before the request is broadcast, so an unsupported ask is
+    answered at once instead of waiting out the spawn verdict and then
+    reporting a timeout that blames the window. The capability mirrors the
+    frontend spec, which owns the flags themselves; the guard test in
+    test_cli_vendors_registry.py keeps the two from drifting.
+    """
+    if not model and not effort:
+        return ""
+    from agent_team_backend.cli_vendors import registry
+
+    # Shape first, and regardless of what this vendor supports: a value that
+    # would split into extra arguments is malformed no matter who receives it,
+    # and saying "unsupported" here would send the caller off to try another
+    # CLI with the same injected string.
+    if model and not _ARGUMENT_SAFE.match(model):
+        return (
+            "model must be a single bare id — no spaces, and not starting with "
+            "'-'. A value like \"sonnet --some-flag\" would reach the CLI as two "
+            "arguments and pass it a flag you did not intend."
+        )
+    if effort and not _ARGUMENT_SAFE.match(effort):
+        return "effort must be a single bare word — no spaces, and not starting with '-'."
+    spec = registry.VENDORS.get(agent_key)
+    if spec is None:
+        return ""  # unknown agent key — the spawn gate reports that itself
+    if model and not spec.supports_model:
+        return (
+            f"{agent_key} cannot be told which model to run at launch, so this "
+            f"would have started on its default. Open it without `model`, or "
+            f"pick a CLI that takes one."
+        )
+    if effort and not spec.supports_effort:
+        if spec.supports_model:
+            return (
+                f"{agent_key} has no separate effort setting — it takes effort "
+                f"as part of the model id (like `gpt-5.3-codex-high`). Put it "
+                f"in `model` instead."
+            )
+        return f"{agent_key} cannot be told a reasoning effort at launch."
+    if effort and spec.known_efforts and effort not in spec.known_efforts:
+        accepted = ", ".join(spec.known_efforts)
+        return f"{agent_key} does not accept effort {effort!r}. It accepts: {accepted}."
+    return ""
+
+
 @server.tool()
 async def cli_open_agent(
-    agent: str, name: str, task: str, ctx: Context, workspace_path: str = ""
+    agent: str,
+    name: str,
+    task: str,
+    ctx: Context,
+    workspace_path: str = "",
+    model: str = "",
+    effort: str = "",
 ) -> dict[str, Any]:
     """Open a new CLI pane and give it a task.
 
@@ -523,6 +586,17 @@ async def cli_open_agent(
     Poll cli_get_status / cli_wait_idle whenever you need to be sure. An
     external or host caller gets no such message at all and must poll.
 
+    `model` names the model the new pane runs, and `effort` its reasoning
+    level. Both are optional and both are REFUSED rather than ignored when
+    that CLI cannot take them, so a pane never quietly starts on a different
+    model than you asked for. Which CLIs accept them differs: most take a
+    model, only some take a separate effort — the rest encode effort in the
+    model id itself (cursor's `gpt-5.3-codex-high`), and two take neither.
+    The refusal names what that CLI accepts, so ask for what you want and
+    read the error rather than guessing first. Model ids are not checked
+    here — an unknown one is the CLI's own error to report — but effort is
+    checked against that CLI's vocabulary before the pane opens.
+
     Use the returned name, not the one you asked for: a concurrent request may
     have taken that name, in which case yours gets a suffix.
 
@@ -548,6 +622,9 @@ async def cli_open_agent(
         return {"ok": False, "error": "name is required — it doubles as the pane's address"}
     if not (task or "").strip():
         return {"ok": False, "error": "task is empty"}
+    refusal = _refuse_unsupported_model(agent_key, (model or "").strip(), (effort or "").strip())
+    if refusal:
+        return {"ok": False, "error": refusal}
     target_workspace = ""
     if caller.kind == "pane":
         me = caller.pane_id
@@ -572,6 +649,12 @@ async def cli_open_agent(
             "name": pane_name,
             "task": task,
         }
+        # Only sent when asked for: a window on an older build ignores keys it
+        # does not know, and an empty one would be indistinguishable anyway.
+        if (model or "").strip():
+            spawn_payload["model"] = model.strip()
+        if (effort or "").strip():
+            spawn_payload["effort"] = effort.strip()
         if target_workspace:
             # No parent pane owns this request — the owning window is decided
             # by workspace match instead (see App.vue's agent_spawn.request

@@ -6,6 +6,9 @@ export const SPEC = {
   agentKey: 'qwen',
   label: 'Qwen Code',
   defaultCommand: 'qwen',
+  // Effort is settings-only (model.reasoningEffort) plus the in-session
+  // /effort command; no launch flag.
+  modelArgs: (m) => `--model ${m}`,
   skipPermissionFlag: '--yolo',
   resumeArgs: (id) => `--resume ${id}`,
   needsSessionMarker: true,

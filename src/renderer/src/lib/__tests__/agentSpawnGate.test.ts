@@ -9,14 +9,30 @@ import {
   spawnAdvisoriesFor,
   type SpawnGateContext,
 } from '../agentSpawnGate'
+import type { CliModelCapability } from '@navide/plugin-shell'
+
+/** Stand-ins for the three shapes AgentSpec takes in the real registry:
+ *  a vendor with both flags (codex), one that encodes effort in the model id
+ *  (cursor), and one that cannot be told a model at all (droid). */
+const CAPABILITIES: Record<string, CliModelCapability> = {
+  claude: { modelArgs: (m) => `--model ${m}` },
+  codex: {
+    modelArgs: (m) => `--model ${m}`,
+    effortArgs: (e) => `-c model_reasoning_effort="${e}"`,
+    knownEfforts: ['minimal', 'low', 'medium', 'high'],
+  },
+  cursor: { modelArgs: (m) => `--model ${m}` },
+  droid: {},
+}
 
 function ctx(overrides: Partial<SpawnGateContext> = {}): SpawnGateContext {
   return {
-    validAgentKeys: ['claude', 'codex'],
+    validAgentKeys: ['claude', 'codex', 'cursor', 'droid'],
     isNameTaken: () => false,
     parentDepth: 0,
     parentChildCount: 0,
     cliPaneCount: 1,
+    modelCapabilityFor: (key) => CAPABILITIES[key],
     ...overrides,
   }
 }
@@ -258,5 +274,146 @@ describe('evaluateTurnSpawns — names claimed within the turn', () => {
 
     expect(results[0].ok).toBe(false)
     expect(results[1].ok).toBe(true)
+  })
+})
+
+describe('evaluateSpawnRequest — model / effort capability', () => {
+  // The renderer's AgentSpec is what actually assembles argv, so this gate is
+  // the authoritative refusal even though the MCP tool also checks: the
+  // backend's capability table is a mirror and can drift from it.
+
+  it('is byte-for-byte unchanged when neither field is asked for (regression guard)', () => {
+    // The whole feature must be invisible to every caller that predates it —
+    // SPAWN blocks have no model field at all, so they land here as undefined.
+    expect(evaluateSpawnRequest(goodReq, ctx())).toEqual({
+      ok: true,
+      agentKey: 'claude',
+      name: 'worker-2',
+      task: 'do the thing',
+    })
+    expect(evaluateSpawnRequest({ ...goodReq, model: '', effort: '' }, ctx())).toEqual({
+      ok: true,
+      agentKey: 'claude',
+      name: 'worker-2',
+      task: 'do the thing',
+    })
+    // Whitespace is "not requested" too, not a model literally named " ".
+    expect(evaluateSpawnRequest({ ...goodReq, model: '  ' }, ctx())).toEqual({
+      ok: true,
+      agentKey: 'claude',
+      name: 'worker-2',
+      task: 'do the thing',
+    })
+  })
+
+  it('carries a supported model through to the result, trimmed', () => {
+    const res = evaluateSpawnRequest({ ...goodReq, model: '  opus  ' }, ctx())
+    expect(res).toEqual({
+      ok: true,
+      agentKey: 'claude',
+      name: 'worker-2',
+      task: 'do the thing',
+      model: 'opus',
+    })
+  })
+
+  it('carries a supported model + effort pair through to the result', () => {
+    const res = evaluateSpawnRequest(
+      { ...goodReq, agent: 'codex', model: 'gpt-5.3-codex', effort: 'high' },
+      ctx(),
+    )
+    expect(res).toEqual({
+      ok: true,
+      agentKey: 'codex',
+      name: 'worker-2',
+      task: 'do the thing',
+      model: 'gpt-5.3-codex',
+      effort: 'high',
+    })
+  })
+
+  it('rejects a model for a vendor that cannot be told one, naming the vendor', () => {
+    // droid accepts an unknown --model and ignores it, so a dropped flag would
+    // look like success until someone read the transcript.
+    const res = evaluateSpawnRequest({ ...goodReq, agent: 'droid', model: 'opus' }, ctx())
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toContain('droid')
+      expect(res.reason).toContain('model')
+      expect(res.reason).toContain('預設模型')
+    }
+  })
+
+  it('rejects effort for a vendor that has no separate effort flag, pointing at model', () => {
+    // cursor encodes effort in the model id (gpt-5.3-codex-high); the refusal
+    // has to say so or the caller retries with the same shape.
+    const res = evaluateSpawnRequest({ ...goodReq, agent: 'cursor', effort: 'high' }, ctx())
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toContain('cursor')
+      expect(res.reason).toContain('effort')
+      expect(res.reason).toContain('model')
+    }
+  })
+
+  it('rejects an effort value outside the vendor vocabulary and lists what is accepted', () => {
+    const res = evaluateSpawnRequest({ ...goodReq, agent: 'codex', effort: 'extreme' }, ctx())
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toContain('extreme')
+      for (const accepted of ['minimal', 'low', 'medium', 'high']) {
+        expect(res.reason).toContain(accepted)
+      }
+    }
+  })
+
+  it('accepts every value the vendor declares', () => {
+    for (const effort of ['minimal', 'low', 'medium', 'high']) {
+      const res = evaluateSpawnRequest({ ...goodReq, agent: 'codex', effort }, ctx())
+      expect(res.ok, effort).toBe(true)
+      if (res.ok) expect(res.effort).toBe(effort)
+    }
+  })
+
+  it('checks the agent key before the model, so a bad key is not masked', () => {
+    const res = evaluateSpawnRequest({ ...goodReq, agent: 'gpt', model: 'opus' }, ctx())
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.reason).toContain('agent')
+  })
+
+  it('refuses rather than dropping when the key has no spec at all', () => {
+    // A key on the whitelist whose spec lookup returns undefined would silently
+    // launch on the default if the refusal were skipped.
+    const res = evaluateSpawnRequest(
+      { ...goodReq, model: 'opus' },
+      ctx({ modelCapabilityFor: () => undefined }),
+    )
+    expect(res.ok).toBe(false)
+  })
+
+  it('still reports advisories alongside an accepted model', () => {
+    const res = evaluateSpawnRequest(
+      { ...goodReq, model: 'opus' },
+      ctx({ cliPaneCount: SPAWN_ADVISORY_CLI_PANES }),
+    )
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.model).toBe('opus')
+      expect(res.advisories).toHaveLength(1)
+    }
+  })
+
+  it('propagates the refusal through evaluateTurnSpawns without bumping counts', () => {
+    const results = evaluateTurnSpawns(
+      [
+        { agent: 'droid', name: 'a', task: 't', model: 'opus' },
+        { agent: 'claude', name: 'b', task: 't' },
+      ],
+      ctx({ parentChildCount: SPAWN_ADVISORY_CHILDREN_PER_PARENT - 1 }),
+    )
+    expect(results[0].ok).toBe(false)
+    expect(results[1].ok).toBe(true)
+    // The rejected request must not have consumed a child slot.
+    if (results[1].ok) expect(results[1].advisories).toBeUndefined()
   })
 })

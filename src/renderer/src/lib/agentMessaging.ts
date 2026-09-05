@@ -219,6 +219,12 @@ export interface ParsedSpawnRequest {
   name: string
   /** Task text from `task:` down to the block end (trimmed); '' when missing. */
   task: string
+  /** Model the new pane should run, when the caller named one. SPAWN blocks
+   *  have no `model:` field, so parseSpawns never sets it — it is here for the
+   *  cli_open_agent MCP path, which shares this shape with the spawn gate. */
+  model?: string
+  /** Reasoning-effort level, same provenance as {@link model}. */
+  effort?: string
 }
 
 const SPAWN_START_RE = /^---SPAWN-START---\s*$/

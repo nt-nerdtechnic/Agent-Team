@@ -6,6 +6,11 @@ export const SPEC = {
   agentKey: 'kilo',
   label: 'Kilo Code',
   defaultCommand: 'kilo',
+  // A fork of opencode with the same root-level `-m, --model` and the same
+  // `provider/model` shape; taken from its --help rather than its source, so
+  // it is the one model claim here not confirmed at the implementation
+  // level. `--variant` (its effort equivalent) exists only on `kilo run`.
+  modelArgs: (m) => `--model ${m}`,
   // `--auto` ("auto-approve permissions that are not explicitly denied
   // (dangerous!)") is listed on both the root TUI command and `kilo run`
   // (verified on 7.4.21).

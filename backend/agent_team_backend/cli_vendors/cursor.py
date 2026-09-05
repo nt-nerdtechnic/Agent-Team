@@ -767,6 +767,7 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="cursor",
+    supports_model=True,
     # Verified 2026-08-15 (docs): .cursor/skills and .agents/skills in the
     # project, ~/.cursor/skills globally, and no relocation variable at all —
     # the same corner its MCP wiring is in, so the workspace file is again the

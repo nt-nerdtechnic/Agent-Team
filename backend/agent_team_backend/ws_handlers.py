@@ -6551,6 +6551,8 @@ async def manual_pane_spawn(session: "Session", msg_id: str, msg_type: str, payl
         agent=payload.get("agent", ""),
         role=payload.get("role", ""),
         command=payload.get("command", ""),
+        model=payload.get("model", ""),
+        effort=payload.get("effort", ""),
         session_id=payload.get("session_id", ""),
         session_home_id=payload.get("session_home_id", ""),
         profile_id=_profile_pin_for_spawn(payload.get("agent", ""), payload.get("profile_id")),

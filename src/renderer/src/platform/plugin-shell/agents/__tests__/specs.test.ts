@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest'
 import { AGENT_SPECS, CLI_AGENT_SPECS, type AgentKey } from '../index'
 import type { AgentSpec } from '../types'
 import { buildResumeCommand } from '../../lib/resume-command'
+import { modelArgsFor } from '../../lib/cliModel'
 
 // ── compile-time invariant ─────────────────────────────────────────────────
 // Checked by `pnpm typecheck` (tsconfig.web.json includes this file), not at
@@ -126,5 +127,75 @@ describe('stateful-regex guard', () => {
     stateful.test('waiting')
 
     expect(stateful.test('waiting')).toBe(false)
+  })
+})
+
+describe('model selection contract', () => {
+  it('never declares an effort vocabulary without a flag to spend it on', () => {
+    // knownEfforts is only ever read after effortArgs has been found, so a
+    // spec carrying the list alone would validate values it then discards.
+    for (const spec of CLI_AGENT_SPECS) {
+      if (spec.knownEfforts) {
+        expect(Boolean(spec.effortArgs), `${spec.agentKey} lists efforts but takes none`).toBe(true)
+      }
+    }
+  })
+
+  it('accepts every value it advertises', () => {
+    // A vocabulary the vendor's own flag builder chokes on would refuse a
+    // value the spec promises, which no caller could diagnose.
+    for (const spec of CLI_AGENT_SPECS) {
+      for (const effort of spec.knownEfforts ?? []) {
+        const result = modelArgsFor({ spec, request: { model: '', effort } })
+        expect(result.ok, `${spec.agentKey} rejects its own "${effort}"`).toBe(true)
+        // ...and actually builds something for it. A builder that returns ''
+        // for an advertised value passes every other check and then launches
+        // with no flag at all — the silent miss this whole feature exists to
+        // prevent.
+        if (result.ok) {
+          expect(result.args, `${spec.agentKey} builds nothing for "${effort}"`).not.toBe('')
+        }
+      }
+    }
+  })
+
+  it('builds arguments that carry the value through verbatim', () => {
+    for (const spec of CLI_AGENT_SPECS) {
+      if (spec.modelArgs) expect(spec.modelArgs('sentinel-model')).toContain('sentinel-model')
+      if (spec.effortArgs) expect(spec.effortArgs('sentinel-effort')).toContain('sentinel-effort')
+    }
+  })
+
+  it('emits a single flag with no stray whitespace', () => {
+    for (const spec of CLI_AGENT_SPECS) {
+      for (const built of [spec.modelArgs?.('m'), spec.effortArgs?.('e')]) {
+        if (built === undefined) continue
+        expect(built, spec.agentKey).toBe(built.trim())
+        expect(built.split(/\s+/), spec.agentKey).toHaveLength(2)
+      }
+    }
+  })
+
+  it('refuses to give droid an effort flag', () => {
+    // droid's interactive command reads `-r` as --resume; only `droid exec`
+    // reads it as --reasoning-effort. An effort flag here would not set the
+    // effort — it would try to resume a session named after the level. This
+    // is the one vendor where declaring the capability is actively harmful,
+    // so it is asserted rather than left to review.
+    const droid = CLI_AGENT_SPECS.find((s) => s.agentKey === 'droid')
+    expect(droid, 'droid spec missing').toBeDefined()
+    expect(droid?.effortArgs).toBeUndefined()
+    expect(droid?.modelArgs).toBeUndefined()
+  })
+
+  it('asks nothing of a vendor that declares nothing', () => {
+    // The pre-existing launch path for every unsupported vendor: no flags,
+    // no refusal, because no model was requested.
+    for (const spec of CLI_AGENT_SPECS) {
+      expect(modelArgsFor({ spec, request: { model: '', effort: '' } })).toEqual({
+        ok: true,
+        args: '',
+      })
+    }
   })
 })

@@ -93,7 +93,7 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 | `cli_inbox_summary` | — | 你自己送出、目前卡住或失敗的訊息：`{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20`（上限 200） | **僅限 CLI Pane。** 目前排給*你*、還沒送進來的訊息：`{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
 | `cli_send_and_wait` | `to`、`text`、`timeout_s=60`（上限 120）、`pane_id?` | `cli_send` 再加上等待該回合結束；回傳 `cli_wait_idle` 的結果，外加 `{ok, target, msg_key}` |
-| `cli_open_agent` | `agent`、`name`、`task`、`workspace_path`（非 Pane 呼叫端必填） | 帶著一項任務 Spawn 新的 CLI Pane；回傳 `{ok, name, address}`，若該次 Spawn 跨過 Advisory 門檻則另附 `advisories` |
+| `cli_open_agent` | `agent`、`name`、`task`、`workspace_path`（非 Pane 呼叫端必填）、`model`、`effort` | 帶著一項任務 Spawn 新的 CLI Pane；回傳 `{ok, name, address}`，若該次 Spawn 跨過 Advisory 門檻則另附 `advisories`。`model` 與 `effort` 為選填，該 CLI 不支援時會「拒絕」而非忽略，Pane 不會悄悄用別的模型啟動。多數 CLI 接受 model；接受獨立 effort 的較少，其餘把 effort 編在 model id 裡（`gpt-5.3-codex-high`）。model id 不做驗證（每次改版都會變），effort 則會對照該 CLI 的合法值檢查 |
 
 `cli_send` 在訊息*被接受*遞送時就回傳，不是在另一個 Agent 讀到時才回傳。
 `cli_check_message` 補上這個閉環：`status` 可能是 `queued`（已廣播，尚無視窗
