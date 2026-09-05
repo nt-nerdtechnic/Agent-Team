@@ -23,7 +23,6 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import ValidationError
 from uvicorn.protocols.utils import ClientDisconnected
 
 from . import __version__
@@ -74,9 +73,6 @@ from .mcp_manager import MCPManager
 from .mcp_server import server as mcp_server
 from .mcp_server import wiring as mcp_server_wiring
 from .mcp_settings import (
-    MCPServersDocument,
-    MCPSettingsConflictError,
-    MCPSettingsError,
     MCPSettingsStore,
     redact_mcp_server_secrets,
 )
@@ -1807,124 +1803,6 @@ async def fs_page(ws_b64: str, rel: str) -> FileResponse:
     except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="invalid workspace encoding") from exc
     return await asyncio.to_thread(_serve_workspace_file, workspace, rel, allow_css=True)
-
-
-@app.get("/mcp/servers")
-async def list_mcp_servers() -> dict[str, Any]:
-    try:
-        servers = await asyncio.to_thread(mcp_settings_store.list_servers)
-    except MCPSettingsError as err:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "MCP_SETTINGS_INVALID",
-                "message": str(err),
-                "details": {"path": str(mcp_settings_store.path)},
-            },
-        ) from err
-    return {
-        "servers": servers,
-        "path": str(mcp_settings_store.path),
-        "revision": str(mcp_settings_store.revision),
-    }
-
-
-def _mcp_expected_revision(payload: dict[str, Any]) -> int:
-    raw = payload.get("expected_revision")
-    if raw is None:
-        raise HTTPException(
-            status_code=428,
-            detail={
-                "code": "MCP_REVISION_REQUIRED",
-                "message": "expected_revision is required",
-                "details": {"field": "expected_revision"},
-            },
-        )
-    if isinstance(raw, bool) or not isinstance(raw, (str, int)):
-        revision = None
-    else:
-        try:
-            revision = int(raw)
-        except ValueError:
-            revision = None
-    if revision is None:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "MCP_VALIDATION_ERROR",
-                "message": "expected_revision must be an integer revision string",
-                "details": {"field": "expected_revision"},
-            },
-        )
-    return revision
-
-
-def _raise_mcp_http_store_error(err: MCPSettingsError) -> None:
-    if isinstance(err, MCPSettingsConflictError):
-        detail = {
-            "code": "MCP_SETTINGS_CONFLICT",
-            "message": str(err),
-            "details": {
-                "expected_revision": str(err.expected_revision),
-                "actual_revision": str(err.actual_revision),
-                "path": str(mcp_settings_store.path),
-            },
-        }
-    else:
-        detail = {
-            "code": "MCP_SETTINGS_INVALID",
-            "message": str(err),
-            "details": {"path": str(mcp_settings_store.path)},
-        }
-    raise HTTPException(status_code=409, detail=detail) from err
-
-
-@app.put("/mcp/servers")
-async def replace_mcp_servers(payload: dict[str, Any]) -> dict[str, Any]:
-    expected_revision = _mcp_expected_revision(payload)
-    try:
-        document = MCPServersDocument.model_validate(payload)
-    except ValidationError as err:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "MCP_VALIDATION_ERROR",
-                "message": "invalid MCP server settings",
-                "details": {"errors": err.errors()},
-            },
-        ) from err
-    try:
-        servers = await asyncio.to_thread(
-            mcp_settings_store.replace_servers,
-            [server.model_dump() for server in document.servers],
-            expected_revision,
-        )
-    except MCPSettingsError as err:
-        _raise_mcp_http_store_error(err)
-    await mcp_manager.reload(mcp_settings_store.path)
-    return {
-        "ok": True,
-        "servers": servers,
-        "revision": str(mcp_settings_store.revision),
-    }
-
-
-@app.post("/mcp/servers/reset")
-async def reset_mcp_servers(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    expected_revision = _mcp_expected_revision(payload or {})
-    try:
-        servers = await asyncio.to_thread(
-            mcp_settings_store.reset,
-            expected_revision,
-        )
-    except MCPSettingsError as err:
-        _raise_mcp_http_store_error(err)
-    await mcp_manager.reload(mcp_settings_store.path)
-    return {
-        "ok": True,
-        "servers": servers,
-        "revision": str(mcp_settings_store.revision),
-    }
 
 
 # Derived, not listed: a vendor that installs hooks is exactly the one allowed
