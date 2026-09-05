@@ -110,6 +110,7 @@ async def test_cache_put_and_list_share_one_root(
 
 async def test_an_agents_plan_is_visible_from_the_subdirectory_workspace(
     repo_with_subdir: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End to end over the bug this exists for: an agent in a pane opened on a
     subdirectory creates a plan (which every writer puts in the repo root), and
@@ -119,10 +120,19 @@ async def test_an_agents_plan_is_visible_from_the_subdirectory_workspace(
     from types import SimpleNamespace
 
     from agent_team_backend import agent_messaging, fs_service
+    from agent_team_backend.mcp_server import server as plan_mcp
     from agent_team_backend.mcp_server import wiring as plan_mcp_wiring
     from agent_team_backend.plugins.builtin.navide_plans import plan_tools
 
     root, subdir = repo_with_subdir
+    async def route(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "ok": False,
+            "error": {"code": "BACKEND_UNAVAILABLE", "message": "test pre-dispatch failure"},
+            "recoveryDisposition": "legacy-safe-before-dispatch",
+        }
+
+    monkeypatch.setattr(plan_mcp, "request_host_agent_workspace_backend", route)
     agent_messaging._reset_for_test()
     try:
         agent_messaging.register("pa", "builder", str(subdir), agent_key="claude")

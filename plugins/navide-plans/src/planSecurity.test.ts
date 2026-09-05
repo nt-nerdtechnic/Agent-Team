@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   preparePlanDocHtml,
   createSafeTodoClickHandler,
-} from '../planSecurity'
+} from './planSecurity'
 
 describe('planSecurity', () => {
   const VALID_NONCE = '0123456789abcdef0123456789abcdef'
@@ -425,4 +425,3 @@ describe('planSecurity', () => {
     })
   })
 })
-

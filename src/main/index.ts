@@ -123,8 +123,28 @@ import {
 // the installed-plugin scan, plugin storage lifecycle) resolves userData
 // eagerly, so this has to run before any of it. The backend's state dir is
 // isolated separately (see backend.ts). Packaged builds are untouched.
+const requestedPlansDevProfile = process.env['NAVIDE_PLANS_DEV_PROFILE']
+const plansDevProfile =
+  !app.isPackaged &&
+  process.env['AGENT_TEAM_PLUGIN_DEV'] === '1' &&
+  typeof requestedPlansDevProfile === 'string' &&
+  /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(requestedPlansDevProfile)
+    ? requestedPlansDevProfile
+    : null
 if (!app.isPackaged) {
-  app.setPath('userData', `${app.getPath('userData')}-dev`)
+  app.setPath('userData',
+    `${app.getPath('userData')}${plansDevProfile ? `-dev-plans-${plansDevProfile}` : '-dev'}`,
+  )
+}
+if (
+  !app.isPackaged &&
+  process.env['AGENT_TEAM_PLUGIN_DEV'] === '1' &&
+  requestedPlansDevProfile !== undefined &&
+  plansDevProfile === null
+) {
+  console.warn(
+    '[main] NAVIDE_PLANS_DEV_PROFILE must be 1-64 ASCII letters, digits, underscores, or hyphens; using the standard dev profile',
+  )
 }
 
 if (process.platform === 'darwin') {
@@ -1036,6 +1056,18 @@ if (!bundledPlans.registered) {
   console.warn(`[main] bundled Plans unavailable: ${bundledPlans.reason}`)
 }
 const bundledPlansDescriptor = frontendPluginManager.getDescriptor('navide.plans')
+
+/** Development-only evidence for the exact package selected by the Host.
+ * The renderer has no authority to choose a package or report this identity. */
+function logPlansDevProvenance(reason: 'startup' | 'open'): void {
+  if (!plansDevProfile) return
+  frontendPluginManager.setPlansDiagnosticsEnabled(true)
+  const provenance = frontendPluginManager.getPlansProvenance()
+  warnMain(
+    `[main] navide.plans dev provenance (${reason}): ${JSON.stringify({ profile: plansDevProfile, ...provenance })}`,
+  )
+}
+
 if (
   bundledPlansDescriptor?.capabilityPolicy?.kind === 'manifest-v2' &&
   bundledPlansDescriptor.packageVersion
@@ -1072,6 +1104,7 @@ if (
     )
   }
 }
+logPlansDevProvenance('startup')
 
 ipcMain.handle('backend:info', () => backendInfoPayload())
 
@@ -2550,6 +2583,7 @@ function trustedPlansRecoveryWorkspace(event: IpcMainInvokeEvent): string | null
 }
 
 async function openPlanWindow(workspacePath: string, relPath?: string): Promise<boolean> {
+  logPlansDevProvenance('open')
   return plansWindowRouter.openPlanWindow(workspacePath, relPath)
 }
 
@@ -2698,26 +2732,26 @@ ipcMain.handle('window:openGitHistory', async (_event, args: { workspace_path?: 
 // payload; that renderer creates/reuses the agent pane and injects the
 // execution prompt. delivered:false when no main window is open for the
 // workspace (the renderer-side handler re-validates the workspace anyway).
-ipcMain.handle(
-  'plans:dispatch-execution',
-  (_event, args: { workspace_path?: string; rel_path?: string; agent_key?: string }): { delivered: boolean } => {
-    const workspacePath = String(args?.workspace_path ?? '').trim()
-    const relPath = String(args?.rel_path ?? '').trim()
-    const agentKey = String(args?.agent_key ?? '').trim()
-    if (!workspacePath || !relPath || !agentKey) return { delivered: false }
-    const win = findMainWindowForWorkspace(workspacePath)
-    if (!win || win.isDestroyed()) return { delivered: false }
-    if (win.isMinimized()) win.restore()
-    win.show()
-    win.focus()
-    win.webContents.send('plans:execute-dispatch', {
-      workspace_path: workspacePath,
-      rel_path: relPath,
-      agent_key: agentKey
-    })
-    return { delivered: true }
-  }
-)
+function dispatchPlanExecution(args: { workspace_path?: string; rel_path?: string; agent_key?: string }): { delivered: boolean } {
+  const workspacePath = String(args?.workspace_path ?? '').trim()
+  const relPath = String(args?.rel_path ?? '').trim()
+  const agentKey = String(args?.agent_key ?? '').trim()
+  if (!workspacePath || !relPath || !agentKey) return { delivered: false }
+  const win = findMainWindowForWorkspace(workspacePath)
+  if (!win || win.isDestroyed()) return { delivered: false }
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+  win.webContents.send('plans:execute-dispatch', {
+    workspace_path: workspacePath,
+    rel_path: relPath,
+    agent_key: agentKey
+  })
+  return { delivered: true }
+}
+
+ipcMain.handle('plans:dispatch-execution', (_event, args) => dispatchPlanExecution(args))
+frontendPluginManager.setPlansShellHandlers({ dispatchExecution: dispatchPlanExecution, openPath: openShellPath })
 
 // Dispatch outcome from the main window, forwarded to the workspace's plan
 // window so it can confirm (toast) or roll back the execution record. Silently
@@ -2725,10 +2759,20 @@ ipcMain.handle(
 // covers that case.
 ipcMain.on(
   'plans:execution-result',
-  (_event, args: { workspace_path?: string; rel_path?: string; ok?: boolean; reason?: string }) => {
+  (event, args: { workspace_path?: string; rel_path?: string; ok?: boolean; reason?: string }) => {
     const workspacePath = String(args?.workspace_path ?? '').trim()
     const relPath = String(args?.rel_path ?? '').trim()
     if (!workspacePath || !relPath) return
+    // Only the workspace's main renderer can acknowledge a dispatch. Plugin
+    // views receive the result through their sender-bound private event port.
+    const main = findMainWindowForWorkspace(workspacePath)
+    if (!main || main.webContents.id !== event.sender.id) return
+    frontendPluginManager.forwardPlansExecutionResult({
+      workspace_path: workspacePath,
+      rel_path: relPath,
+      ok: args?.ok === true,
+      ...(args?.reason ? { reason: String(args.reason) } : {}),
+    })
     const win = planWindows.get(workspacePath)
     if (!win) return
     win.webContents.send('plans:execution-result', {
@@ -3058,7 +3102,7 @@ ipcMain.handle('permissions:open-settings', async (_event, key: PermissionKey) =
   }
 })
 
-ipcMain.handle('shell:openPath', async (_event, target: string) => {
+async function openShellPath(target: string): Promise<{ ok: boolean; error?: string; revealed?: boolean }> {
   if (!target || typeof target !== 'string') return { ok: false, error: 'invalid path' }
   // shell.openPath returns an empty string on success, or an error message.
   const err = await shell.openPath(target)
@@ -3073,7 +3117,9 @@ ipcMain.handle('shell:openPath', async (_event, target: string) => {
     }
   }
   return { ok: true }
-})
+}
+
+ipcMain.handle('shell:openPath', (_event, target: string) => openShellPath(target))
 
 ipcMain.handle('shell:revealPath', async (_event, target: string) => {
   if (!target || typeof target !== 'string') return { ok: false, error: 'invalid path' }

@@ -289,6 +289,14 @@ interface RunningPlugin {
 
 type PlansBackendHealth = 'unknown' | 'ready' | 'unavailable'
 
+/** Host-minted only after the exact packaged Plans route failed before its
+ * child received the request. The Python MCP adapter must never infer this
+ * from a broad backend error. */
+const LEGACY_SAFE_BEFORE_DISPATCH = 'legacy-safe-before-dispatch' as const
+type PlansRecoveryResponse = CapabilityResponse & {
+  recoveryDisposition?: typeof LEGACY_SAFE_BEFORE_DISPATCH
+}
+
 interface GitContributionState {
   workspacePath: string
   analyzerModel: string
@@ -550,6 +558,37 @@ function workspaceOf(query: string): string {
   return new URLSearchParams(query).get('workspace_path') ?? ''
 }
 
+export type PlansPackageSource =
+  | 'official-registry'
+  | 'developer-local-unpacked'
+  | 'factory-bundled'
+  | 'factory-dev'
+  | 'host-bundled'
+  | 'installed'
+
+const PLANS_PACKAGE_SOURCES = new Set<PlansPackageSource>([
+  'official-registry',
+  'developer-local-unpacked',
+  'factory-bundled',
+  'factory-dev',
+  'host-bundled',
+  'installed',
+])
+
+/** Build the Plans DevTools provenance query from fixed Host vocabulary only.
+ * This accepts no filesystem identity, so the URL is safe to expose in every
+ * runtime while still identifying the selected package class and version. */
+export function appendPlansProvenanceQuery(
+  query: string,
+  packageVersion: string,
+  packageSource: PlansPackageSource,
+): string {
+  const params = new URLSearchParams(query.startsWith('?') ? query.slice(1) : query)
+  params.set('plans_package_version', packageVersion)
+  params.set('plans_package_source', PLANS_PACKAGE_SOURCES.has(packageSource) ? packageSource : 'host-bundled')
+  return `?${params.toString()}`
+}
+
 /** Entry query string → plain params record (as sent over IPC_OPEN_TARGET). */
 function queryToParams(query: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -761,6 +800,66 @@ export function sanitizeDiagnosticLines(raw: unknown): string[] {
 }
 
 export class FrontendPluginManager {
+  private readonly descriptorSources = new Map<string, 'installed-catalog' | 'factory-bundle' | 'host-bundled'>()
+  private plansDiagnosticsEnabled = false
+  private plansShellHandlers: {
+    dispatchExecution: (args: { workspace_path: string; rel_path: string; agent_key: string }) => { delivered: boolean }
+    openPath: (absolutePath: string) => Promise<{ ok: boolean; error?: string; revealed?: boolean }>
+  } | null = null
+
+  setPlansShellHandlers(handlers: NonNullable<FrontendPluginManager['plansShellHandlers']>): void {
+    this.plansShellHandlers = handlers
+  }
+
+  forwardPlansExecutionResult(payload: { workspace_path: string; rel_path: string; ok: boolean; reason?: string }): void {
+    for (const plugin of this.running.values()) {
+      if (plugin.id === PLANS_PLUGIN_ID && plugin.hasV2DescriptorIdentity &&
+        plugin.workspacePath && resolve(plugin.workspacePath) === resolve(payload.workspace_path)) {
+        this.emitToInstance(plugin.instanceId, 'plans.execution-result', payload)
+      }
+    }
+  }
+
+  /** Host-only switch: packaged startup never enables this diagnostic. */
+  setPlansDiagnosticsEnabled(enabled: boolean): void {
+    this.plansDiagnosticsEnabled = enabled
+  }
+
+  /** Inspect the exact selected frontend/backend tuple without granting access
+   * or starting a child. Filesystem identities remain inside the Host. */
+  getPlansProvenance(): {
+    descriptorSource: string
+    selectionOrigin: string
+    acquisitionProvenance: string | null
+    packageDirectory: string | null
+    packageVersion: string | null
+    frontendEntry: string
+    frontendEntries: Record<string, string>
+    backendExecutable: string | null
+  } | null {
+    const descriptor = this.descriptors.get(PLANS_PLUGIN_ID)
+    if (!descriptor) return null
+    const selectionOrigin = this.descriptorSources.get(PLANS_PLUGIN_ID) ?? 'host-bundled'
+    const packageDirectory = canonicalBackendPackageDir(descriptor.packageDir)
+    const activation = descriptor.packageVersion && packageDirectory
+      ? this.pluginBackendHost.activationFor(PLANS_PLUGIN_ID, descriptor.packageVersion, packageDirectory)
+      : undefined
+    const installed = selectionOrigin === 'installed-catalog'
+      ? this.installedPackages.get(PLANS_PLUGIN_ID)
+      : undefined
+    return {
+      descriptorSource: selectionOrigin,
+      selectionOrigin,
+      acquisitionProvenance: selectionOrigin === 'factory-bundle'
+        ? 'factory-bundled'
+        : installed?.provenance ?? null,
+      packageDirectory,
+      packageVersion: descriptor.packageVersion ?? null,
+      frontendEntry: descriptor.entryFile,
+      frontendEntries: Object.fromEntries((descriptor.views ?? []).map((view) => [view.contributionKey, view.entryFile])),
+      backendExecutable: activation?.entryFile ?? null,
+    }
+  }
   private readonly loggedDiagnosticCauses = new WeakSet<object>()
 
   private emitHostDiagnosticChunk(chunk: string): void {
@@ -1067,6 +1166,45 @@ export class FrontendPluginManager {
         descriptor.packageVersion,
         descriptor.packageDir,
       ) !== undefined
+  }
+
+  /**
+   * The Plans bundle exposes this Host-selected identity in DevTools so a
+   * developer can distinguish the package that was selected from an older
+   * bundle left in a profile. This deliberately carries only a closed source
+   * label, never the package directory or another filesystem-derived value.
+   */
+  private plansPackageSource(descriptor: PluginLaunchDescriptor): PlansPackageSource {
+    const selected = this.descriptors.get(PLANS_PLUGIN_ID)
+    const packageDirectory = canonicalBackendPackageDir(descriptor.packageDir)
+    const matchesSelection = selected?.id === descriptor.id &&
+      selected.packageVersion === descriptor.packageVersion &&
+      packageDirectory !== null &&
+      canonicalBackendPackageDir(selected.packageDir) === packageDirectory
+    if (!matchesSelection) return 'host-bundled'
+    if (this.descriptorSources.get(descriptor.id) === 'factory-bundle') return 'factory-bundled'
+    const installed = this.installedPackages.get(PLANS_PLUGIN_ID)
+    if (this.descriptorSources.get(descriptor.id) === 'installed-catalog' && installed && installed.packageVersion === descriptor.packageVersion) {
+      return installed.provenance ?? 'installed'
+    }
+    return 'host-bundled'
+  }
+
+  /** Add immutable Host provenance after caller-provided launch data. The
+   * selected descriptor is authoritative: caller query values cannot spoof
+   * the active Plans package identity. */
+  private plansProvenanceQuery(descriptor: PluginLaunchDescriptor, query: string): string {
+    if (descriptor.id !== PLANS_PLUGIN_ID || !nonEmptyString(descriptor.packageVersion)) return query
+    if (!this.plansDiagnosticsEnabled) {
+      const params = new URLSearchParams(query)
+      params.delete('plans_package_version')
+      params.delete('plans_package_source')
+      params.delete('plans_diagnostics')
+      return `?${params.toString()}`
+    }
+    const params = new URLSearchParams(query)
+    params.set('plans_diagnostics', '1')
+    return appendPlansProvenanceQuery(params.toString(), descriptor.packageVersion, this.plansPackageSource(descriptor))
   }
 
   private issueGitCredentialOwner(plugin: RunningPlugin): GitCredentialOwner | null {
@@ -2349,7 +2487,53 @@ export class FrontendPluginManager {
     if (!reqId || !action || typeof args !== 'object' || args === null || Array.isArray(args)) {
       return buildError(reqId, 'BAD_REQUEST', 'malformed Host action call')
     }
+    if (action === 'plans.shell') return this.runPlansShellAction(reqId, args as Record<string, unknown>, plugin)
     return this.runGitHostAction(reqId, action, args as Record<string, unknown>, plugin)
+  }
+
+  /** Private direct-user adapter for retained Plans shell actions. Like the
+   * v1 IPC, this is not an Agent/MCP method or a public capability namespace. */
+  private async runPlansShellAction(reqId: string, args: Record<string, unknown>, plugin: RunningPlugin): Promise<CapabilityResponse> {
+    const context = plugin.capabilityContext
+    const binding = context?.runtimeBinding
+    const policy = plugin.capabilityPolicy
+    const currentGrant = binding ? this.capabilityGrantResolver?.(PLANS_PLUGIN_ID, binding.packageVersion) : null
+    const required = args.operation === 'dispatch_execution' ? ['fs', 'ui', 'aiCli'] as const : ['fs', 'ui'] as const
+    if (!plugin.hasV2DescriptorIdentity || plugin.id !== PLANS_PLUGIN_ID || !plugin.workspacePath ||
+      !context?.publisherEligible || !binding || binding.pluginId !== PLANS_PLUGIN_ID ||
+      binding.instanceId !== plugin.instanceId || binding.workspaceId !== this.workspaceIdForPath(plugin.workspacePath) ||
+      !binding.audience || !['plans-window', 'plans-left'].includes(binding.audience) || policy.kind !== 'manifest-v2' ||
+      !currentGrant || currentGrant.storage !== true || currentGrant.packageVersion !== binding.packageVersion ||
+      !context.userGrant || context.userGrant.packageVersion !== binding.packageVersion ||
+      required.some((permission) => !policy.system.includes(permission) || !currentGrant.system.includes(permission) || !context.userGrant?.system.includes(permission))) {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'Plans shell action is unavailable')
+    }
+    const operation = args.operation
+    if (operation !== 'open_path' && operation !== 'dispatch_execution') {
+      return buildError(reqId, 'METHOD_NOT_FOUND', 'Plans shell action is not mapped')
+    }
+    const allowedKeys = operation === 'open_path' ? ['operation', 'rel_path'] : ['operation', 'rel_path', 'agent_key']
+    if (Object.keys(args).some((key) => !allowedKeys.includes(key)) || !nonEmptyString(args.rel_path)) {
+      return buildError(reqId, 'BAD_REQUEST', 'Plans shell payload is invalid')
+    }
+    const root = resolvePlansRootPath(plugin.workspacePath)
+    if (!isAllowedPlanDocumentPath(args.rel_path, root)) {
+      return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Plans shell path is outside the Plans directories')
+    }
+    if (!this.plansShellHandlers) return buildError(reqId, 'BACKEND_ERROR', 'Plans shell handlers are unavailable')
+    try {
+      if (operation === 'open_path') {
+        return buildSuccess(reqId, await this.plansShellHandlers.openPath(resolve(root, args.rel_path)))
+      }
+      if (!nonEmptyString(args.agent_key) || !Object.hasOwn(AI_CLI_PROFILES, args.agent_key)) {
+        return buildError(reqId, 'BAD_REQUEST', 'Plans execution agent is invalid')
+      }
+      return buildSuccess(reqId, this.plansShellHandlers.dispatchExecution({
+        workspace_path: plugin.workspacePath, rel_path: args.rel_path, agent_key: args.agent_key,
+      }))
+    } catch {
+      return buildError(reqId, 'BACKEND_ERROR', 'Plans shell action failed')
+    }
   }
 
   private exactBackendPayload(
@@ -3261,6 +3445,66 @@ export class FrontendPluginManager {
     return task
   }
 
+  /** Reuse the private Plans bridge's execution-policy evaluation for the
+   * headless MCP route. This makes policy a Host gate before either packaged
+   * dispatch or recovery is considered, while the bridge rechecks it at the
+   * actual filesystem boundary. */
+  private plansAgentFilesystemPolicyAllows(
+    workspacePath: string,
+    initiator: AuthenticatedInitiator,
+  ): boolean {
+    let snapshot: ExecutionPolicySnapshot | undefined
+    try {
+      snapshot = this.executionPolicyResolver?.(workspacePath)
+    } catch {
+      return false
+    }
+    return Boolean(
+      snapshot &&
+      snapshot.state !== 'corrupt' &&
+      executionPolicyAllows(initiator, snapshot, 'fs'),
+    )
+  }
+
+  /** Revalidate every security property immediately before authorizing the
+   * legacy adapter. This is deliberately independent of the broad error code:
+   * the caller proves the package child never received the request. */
+  private canMintPlansLegacyRecoveryDisposition(
+    descriptor: PluginLaunchDescriptor,
+    activation: BackendPluginLaunchSpec,
+    workspacePath: string,
+    method: string,
+    initiator: AuthenticatedInitiator,
+  ): boolean {
+    const selection = this.plansBackendSelection()
+    if (
+      !selection ||
+      selection.descriptor !== descriptor ||
+      selection.activation !== activation ||
+      !activation.agentMethods?.includes(method) ||
+      this.isPackageVersionStopping(PLANS_PLUGIN_ID, descriptor.packageVersion) ||
+      !this.plansCapabilityContext(descriptor.packageVersion!, workspacePath, 'plans-mcp') ||
+      !this.plansAgentFilesystemPolicyAllows(workspacePath, initiator)
+    ) return false
+    return this.plansBackendFallbackAllowed()
+  }
+
+  private plansPreDispatchFailureResponse(
+    reqId: string,
+    error: unknown,
+    descriptor: PluginLaunchDescriptor,
+    activation: BackendPluginLaunchSpec,
+    workspacePath: string,
+    method: string,
+    initiator: AuthenticatedInitiator,
+  ): PlansRecoveryResponse {
+    const response = this.backendError(reqId, error)
+    if (!this.canMintPlansLegacyRecoveryDisposition(
+      descriptor, activation, workspacePath, method, initiator,
+    )) return response
+    return { ...response, recoveryDisposition: LEGACY_SAFE_BEFORE_DISPATCH }
+  }
+
   /** Host entry point for an authenticated MCP request when the Plans window
    *  is closed. The package/version and workspace are selected from the
    *  transport target; the request body contains only a package method call. */
@@ -3288,42 +3532,53 @@ export class FrontendPluginManager {
 
     const descriptor = this.descriptors.get(PLANS_PLUGIN_ID)
     const packageVersion = descriptor?.packageVersion
-    const packageDir = descriptor?.packageDir
-    const activation =
-      packageVersion && packageDir
-        ? this.pluginBackendHost.activationFor(PLANS_PLUGIN_ID, packageVersion, packageDir)
-        : undefined
-    if (
-      descriptor?.capabilityPolicy?.kind !== 'manifest-v2' ||
-      !nonEmptyString(packageVersion) ||
-      !nonEmptyString(packageDir) ||
-      !activation
-    ) {
+    if (!descriptor || !nonEmptyString(packageVersion)) {
       return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable')
     }
+    // Revocation wins over all subsequent grant and policy checks. A package
+    // that is draining cannot receive a recovery disposition.
+    if (this.isPackageVersionStopping(PLANS_PLUGIN_ID, packageVersion)) {
+      return buildError(record.reqId, 'PLUGIN_STOPPING', 'Backend plugin is stopping.')
+    }
+    const selection = this.plansBackendSelection()
+    if (!selection || selection.descriptor !== descriptor) {
+      return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable')
+    }
+    const { activation } = selection
     if (!activation.agentMethods?.includes(record.name)) {
       return buildError(record.reqId, 'CAPABILITY_DENIED', 'Plans agent method is not allowlisted')
     }
     if (!this.plansCapabilityContext(packageVersion, workspacePath, 'plans-mcp')) {
       return buildError(record.reqId, 'CAPABILITY_DENIED', 'Plans package Grant is unavailable')
     }
-    if (!this.isPlansBackendAvailable()) {
-      return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable')
-    }
-    if (this.isPackageVersionStopping(PLANS_PLUGIN_ID, packageVersion)) {
-      return buildError(record.reqId, 'PLUGIN_STOPPING', 'Backend plugin is stopping.')
-    }
-    if (record.name === 'plans.create' && !(await this.provisionPlansAssets(workspacePath))) {
-      return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans assets are unavailable')
-    }
-
     const initiator: AuthenticatedInitiator = Object.freeze({
       kind: 'agent',
       source: 'mcp',
       id: randomUUID(),
     })
+    if (!this.plansAgentFilesystemPolicyAllows(workspacePath, initiator)) {
+      return buildError(record.reqId, 'CAPABILITY_DENIED', 'agent execution policy denied the operation')
+    }
+    if (!this.isPlansBackendAvailable()) {
+      return this.plansPreDispatchFailureResponse(
+        record.reqId,
+        new BackendPluginError('BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable'),
+        descriptor,
+        activation,
+        workspacePath,
+        record.name,
+        initiator,
+      )
+    }
+    if (record.name === 'plans.create' && !(await this.provisionPlansAssets(workspacePath))) {
+      return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans assets are unavailable')
+    }
+    let dispatched = false
     try {
       const instanceId = await this.bindHeadlessPlansBackend(descriptor, activation, workspacePath)
+      // Calling into the Host child marks a request as dispatched even if the
+      // Promise rejects immediately: a child may have accepted side effects.
+      dispatched = true
       const result = await this.pluginBackendHost.call(
         instanceId,
         record.name,
@@ -3337,6 +3592,11 @@ export class FrontendPluginManager {
     } catch (error) {
       if (this.isPlansBackendAvailabilityError(error)) {
         this.markPlansBackendUnavailable('child-unavailable')
+      }
+      if (!dispatched) {
+        return this.plansPreDispatchFailureResponse(
+          record.reqId, error, descriptor, activation, workspacePath, record.name, initiator,
+        )
       }
       return this.backendError(record.reqId, error)
     }
@@ -3507,19 +3767,12 @@ export class FrontendPluginManager {
 
   private plansBridgeCanDispatch(context: PlansBridgeContext): boolean {
     if (context.signal.aborted) return false
+    if (!nonEmptyString(context.workspacePath)) return false
     if (!this.plansFilesystemGrantAllows(context)) return false
     if (context.runtime.initiator.kind !== 'agent') return true
-    let snapshot: ExecutionPolicySnapshot | undefined
-    try {
-      snapshot = this.executionPolicyResolver?.(context.workspacePath)
-    } catch {
-      return false
-    }
-    if (!snapshot || snapshot.state === 'corrupt') return false
-    return executionPolicyAllows(
+    return this.plansAgentFilesystemPolicyAllows(
+      context.workspacePath,
       context.runtime.initiator,
-      snapshot,
-      'fs',
     )
   }
 
@@ -5464,7 +5717,7 @@ export class FrontendPluginManager {
     forceFile = false
   ): void {
     const devUrl = !forceFile && process.env['ELECTRON_RENDERER_URL'] ? descriptor.devUrl : null
-    const query = descriptor.query ?? ''
+    const query = this.plansProvenanceQuery(descriptor, descriptor.query ?? '')
     if (devUrl) void view.webContents.loadURL(devUrl + query)
     else void view.webContents.loadFile(descriptor.entryFile, query ? { search: query } : undefined)
   }
@@ -5597,6 +5850,7 @@ export class FrontendPluginManager {
       )
     }
     this.descriptors.set(descriptor.id, descriptor)
+    this.descriptorSources.set(descriptor.id, opts.builtin ? 'host-bundled' : 'installed-catalog')
   }
 
   /** Register one Host-approved package-local backend activation. */
@@ -5738,6 +5992,7 @@ export class FrontendPluginManager {
     this.clearTerminalRoutes(expectedPluginId)
     this.descriptors.delete(expectedPluginId)
     this.registerDescriptor(descriptor, { official: true })
+    this.descriptorSources.set(expectedPluginId, 'factory-bundle')
     this.recoveryPackageVersions.delete(expectedPluginId)
     this.builtinFallbacks.delete(expectedPluginId)
     return { restored: true, activation }
@@ -5905,6 +6160,7 @@ export class FrontendPluginManager {
     summary.provenance = 'factory-bundled'
     activation.provenance = 'factory-bundled'
     this.registerInstalledPackage(summary, scanned.descriptor, { official: true })
+    this.descriptorSources.set(expectedPluginId, 'factory-bundle')
     return {
       loaded: true,
       pluginId: activation.pluginId,
@@ -6033,7 +6289,8 @@ export class FrontendPluginManager {
     this.releaseGuestReservations(registryKey)
 
     const token = randomUUID()
-    const query = `${options.query}&nv_guest=${token}`
+    const guestQuery = `${options.query}&nv_guest=${token}`
+    const query = this.plansProvenanceQuery(descriptor, guestQuery)
     const entryFile = view.entryFile ?? descriptor.entryFile
     const pending: PendingGuest = {
       token,
@@ -6913,11 +7170,18 @@ export const PLANS_BACKEND_METHODS = [
   'plans.list',
   'plans.list_docs',
   'plans.read',
+  'plans.read_document',
+  'plans.write_document',
+  'plans.list_directory',
   'plans.cache_put',
   'plans.create',
   'plans.update_stage',
   'plans.update_todo',
   'plans.add_note',
+  'plans.review_note_add',
+  'plans.review_note_edit',
+  'plans.review_note_resolve',
+  'plans.review_note_delete',
   'plans.update_archive',
   'plans.promote',
   'plans.rename',

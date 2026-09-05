@@ -102,9 +102,19 @@ export function createPlansWindowRouter(options: PlansWindowRouterOptions): Plan
       plansDescriptor?.packageVersion &&
       plansDescriptor?.packageDir
     )
+    const hasAvailableV2Backend = frontendPluginManager.isPlansBackendAvailable()
     if (!hasCompleteV2Package || isPlansRecoveryEnabled()) {
       await openLegacyPlanWindow(workspacePath, relPath)
       return true
+    }
+
+    if (!hasAvailableV2Backend) {
+      if (frontendPluginManager.plansBackendFallbackAllowed()) {
+        await openLegacyPlanWindow(workspacePath, relPath)
+        return true
+      }
+      warnMain(`[main] ${PLANS_PLUGIN_ID} backend is unavailable for the selected package`)
+      return false
     }
 
     if (plansDescriptor?.packageVersion) {

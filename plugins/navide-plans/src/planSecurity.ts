@@ -1,8 +1,8 @@
 /**
  * planSecurity.ts
  *
- * Shared security primitives for `.agent-team/plans/*.html` document rendering
- * and host-frame event communication.
+ * Package-local security primitives for navide-plans (`.agent-team/plans/*.html`)
+ * document rendering and host-frame event communication.
  *
  * Security guarantees:
  * - Executable scripts are stripped; only the application/json data island is kept.
@@ -171,4 +171,3 @@ export function createSafeTodoClickHandler(
     return true
   }
 }
-

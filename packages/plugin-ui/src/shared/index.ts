@@ -105,15 +105,3 @@ export {
 } from './keybindings/useKeybindings'
 
 export { evaluateWhen } from './keybindings/whenEvaluator'
-
-export {
-  preparePlanDocHtml,
-  createSafeTodoClickHandler,
-  validatePlanMessageEvent,
-} from './planSecurity'
-export type {
-  PreparePlanDocHtmlOptions,
-  PreparedPlanDocHtml,
-  SafeTodoClickHandlerOptions,
-  PlanMessageValidationOptions,
-} from './planSecurity'

@@ -277,6 +277,49 @@ def test_health_and_agent_create_update_read_round_trip(
     assert reassigned_todo["result"]["value"]["status"] == "done"
     assert "owner" not in reassigned_todo["result"]["value"]
 
+    # Manual Review Notes are metadata-only transport adapters: an anchored
+    # write preserves the rendered body and does not synthesize iframe markup.
+    body_before_manual_note = stored[rel_path].split("</script>", 1)[1]
+    _send(
+        backend_process,
+        {
+            "jsonrpc": "2.0",
+            "id": "manual-note-add-1",
+            "method": "navide/call",
+            "params": {
+                "_meta": CLIENT_META,
+                "name": "plans.review_note_add",
+                "arguments": {"rel_path": rel_path, "text": "Anchor this", "anchor": "Todos"},
+                "runtime": RUNTIME,
+            },
+        },
+    )
+    added_note = service_until_response("manual-note-add-1")
+    assert added_note["result"]["value"] == {
+        "id": "n1", "author": "user", "text": "Anchor this", "resolved": False,
+        "reply": "", "anchor": "Todos",
+    }
+    assert '"anchor": "Todos"' in stored[rel_path]
+    assert stored[rel_path].split("</script>", 1)[1] == body_before_manual_note
+    assert "--bg:" in stored[rel_path]
+
+    _send(
+        backend_process,
+        {
+            "jsonrpc": "2.0",
+            "id": "manual-note-resolve-1",
+            "method": "navide/call",
+            "params": {
+                "_meta": CLIENT_META,
+                "name": "plans.review_note_resolve",
+                "arguments": {"rel_path": rel_path, "note_id": "n1"},
+                "runtime": RUNTIME,
+            },
+        },
+    )
+    resolved_note = service_until_response("manual-note-resolve-1")
+    assert resolved_note["result"]["value"]["resolved"] is True
+
     _send(
         backend_process,
         {

@@ -988,6 +988,131 @@ def _add_note(origin: dict[str, Any], arguments: dict[str, Any]) -> dict[str, An
     return note
 
 
+def _manual_review_note(origin: dict[str, Any], arguments: dict[str, Any], action: str) -> dict[str, Any]:
+    # Retained PlanStore retries one optimistic-lock conflict against fresh
+    # bytes. The mutation (including a new note id) must be recomputed too.
+    for attempt in range(2):
+        try:
+            return _manual_review_note_once(origin, arguments, action)
+        except BridgeFailure as error:
+            if error.code != "CONFLICT" or attempt == 1:
+                raise
+    raise AssertionError("unreachable")
+
+
+def _manual_review_note_once(origin: dict[str, Any], arguments: dict[str, Any], action: str) -> dict[str, Any]:
+    required = {
+        "add": {"rel_path", "text", "anchor"}, "edit": {"rel_path", "note_id", "text"},
+        "resolve": {"rel_path", "note_id"}, "delete": {"rel_path", "note_id"},
+    }[action]
+    if set(arguments) != required:
+        raise BridgeFailure("INVALID_ARGUMENT")
+    rel_path, content, meta, mtime = _load_for_write(origin, arguments.get("rel_path"))
+    notes = meta["reviewNotes"]
+    if action == "add":
+        text = arguments.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise BridgeFailure("INVALID_ARGUMENT")
+        max_num = max((int(match.group(1)) for note in notes if _is_record(note) and (match := NOTE_ID_RE.fullmatch(str(note.get("id") or "")))), default=0)
+        anchor = arguments.get("anchor")
+        if not isinstance(anchor, str):
+            raise BridgeFailure("INVALID_ARGUMENT")
+        note = {"id": f"n{max_num + 1}", "author": "user", "text": text.strip(), "resolved": False, "reply": "", "anchor": anchor}
+        notes.append(note)
+    else:
+        note_id = arguments.get("note_id")
+        if not isinstance(note_id, str) or not note_id:
+            raise BridgeFailure("INVALID_ARGUMENT")
+        note = next((item for item in notes if _is_record(item) and item.get("id") == note_id), None)
+        if note is None:
+            raise BridgeFailure("INVALID_ARGUMENT")
+        if action == "edit":
+            text = arguments.get("text")
+            if note.get("author") != "user" or not isinstance(text, str) or not text.strip():
+                raise BridgeFailure("INVALID_ARGUMENT")
+            note["text"] = text.strip()
+        elif action == "resolve":
+            note["resolved"] = True
+        else:
+            notes.remove(note)
+    updated = _write_meta_for_path(rel_path, content, meta)
+    # Match retained setNoteTextMarkup/removeNoteMarkup: synchronize a row
+    # only when the document already contains it. Never materialize notes.
+    if rel_path.endswith(".html") and action == "edit":
+        row = re.compile(
+            rf"(<li\b[^>]*data-note-id=[\"']{re.escape(note['id'])}[\"'][^>]*>"
+            r"[\s\S]*?<span\b[^>]*\bclass=[\"']who[\"'][^>]*>[\s\S]*?</span>)"
+            r"([\s\S]*?)(<div\b[^>]*\bclass=[\"']reply|</li>)", re.IGNORECASE,
+        )
+        updated = row.sub(lambda match: match[1] + html_escape(note["text"], quote=False) + match[3], updated, count=1)
+    elif rel_path.endswith(".html") and action == "delete":
+        row = re.compile(
+            rf"[^\S\n]*<li\b[^>]*data-note-id=[\"']{re.escape(note['id'])}[\"'][\s\S]*?</li>[^\S\n]*\n?",
+            re.IGNORECASE,
+        )
+        updated = row.sub("", updated, count=1)
+    _bridge_write(origin, rel_path, updated, mtime)
+    return dict(note)
+
+
+def _manual_document(origin: dict[str, Any], arguments: dict[str, Any], action: str) -> dict[str, Any]:
+    """Transport the retained PlanStore's bytes and optimistic-lock result.
+
+    Only the manual Host allowlist exposes these adapters. Paths remain
+    relative to the Host-bound plan root; history is read-only, and Git
+    sharing is limited to the retained .plans/<document> destination.
+    """
+    required = {"rel_path", "content"} if action == "write" else {"rel_path"}
+    optional = {"expected_mtime"} if action == "write" else set()
+    if not required <= set(arguments) or set(arguments) - required - optional:
+        raise BridgeFailure("INVALID_ARGUMENT")
+    path = arguments["rel_path"]
+    if not isinstance(path, str) or not path or "\\" in path:
+        raise BridgeFailure("INVALID_ARGUMENT")
+    segments = path.split("/")
+    if any(part in {"", ".", ".."} for part in segments) or ":" in path:
+        raise BridgeFailure("WORKSPACE_SCOPE_VIOLATION")
+    if "/.history/" in path:
+        parent, remainder = path.split("/.history/", 1)
+        parts = remainder.split("/")
+        _plan_path(f"{parent}/{parts[0]}.html")
+        if action == "write" or len(parts) != (1 if action == "list" else 2):
+            raise BridgeFailure("WORKSPACE_SCOPE_VIOLATION")
+        if action == "read" and not is_plan_doc_name(parts[-1]):
+            raise BridgeFailure("INVALID_ARGUMENT")
+    elif action == "list":
+        raise BridgeFailure("WORKSPACE_SCOPE_VIOLATION")
+    elif len(segments) == 2 and segments[0] == ".plans" and is_plan_doc_name(segments[1]):
+        pass
+    else:
+        path = _plan_path(path)
+
+    if action == "read":
+        content, mtime = _bridge_read(origin, path, include_mtime=True)
+        return {"ok": True, "content": content, **({"mtime": mtime} if mtime is not None else {})}
+    if action == "list":
+        result = _bridge_call(origin, "filesystem", "list_dir", {"rel_path": path})
+        if not _is_record(result) or not isinstance(result.get("entries"), list):
+            raise BridgeFailure("PROTOCOL_ERROR")
+        return {"ok": True, "entries": [
+            {"name": entry["name"], "is_dir": bool(entry.get("isDirectory", entry.get("is_dir", False)))}
+            for entry in result["entries"] if _is_record(entry) and isinstance(entry.get("name"), str)
+        ]}
+    content = arguments["content"]
+    mtime = arguments.get("expected_mtime")
+    if not isinstance(content, str) or (
+        mtime is not None and (isinstance(mtime, bool) or not isinstance(mtime, (int, float)) or not math.isfinite(mtime))
+    ):
+        raise BridgeFailure("INVALID_ARGUMENT")
+    try:
+        _bridge_write(origin, path, content, mtime)
+    except BridgeFailure as error:
+        if error.code == "CONFLICT":
+            return {"ok": False, "conflict": True}
+        raise
+    return {"ok": True}
+
+
 def _document_title(rel_path: str, content: str) -> str:
     filename = rel_path.rsplit("/", 1)[-1]
     if rel_path.endswith(".html"):
@@ -1145,6 +1270,12 @@ def _handle(frame: Any) -> None:
             result = _list_plans(origin)
         elif name == "plans.read":
             result = _read_plan(origin, arguments.get("rel_path"))
+        elif name == "plans.read_document":
+            result = _manual_document(origin, arguments, "read")
+        elif name == "plans.write_document":
+            result = _manual_document(origin, arguments, "write")
+        elif name == "plans.list_directory":
+            result = _manual_document(origin, arguments, "list")
         elif name == "plans.cache_put":
             result = {"ok": True}
         elif name == "plans.create":
@@ -1155,6 +1286,14 @@ def _handle(frame: Any) -> None:
             result = _update_todo(origin, arguments)
         elif name == "plans.add_note":
             result = _add_note(origin, arguments)
+        elif name == "plans.review_note_add":
+            result = _manual_review_note(origin, arguments, "add")
+        elif name == "plans.review_note_edit":
+            result = _manual_review_note(origin, arguments, "edit")
+        elif name == "plans.review_note_resolve":
+            result = _manual_review_note(origin, arguments, "resolve")
+        elif name == "plans.review_note_delete":
+            result = _manual_review_note(origin, arguments, "delete")
         elif name == "plans.update_archive":
             result = _update_archive(origin, arguments)
         elif name == "plans.promote":

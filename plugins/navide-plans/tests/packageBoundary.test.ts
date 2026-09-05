@@ -94,6 +94,39 @@ describe('navide.plans production package boundary', () => {
     }
   })
 
+  it('keeps Plans-specific Review Notes UI inside the Plans package', () => {
+    const pluginUiIndex = readFileSync(join(repositoryRoot, 'packages/plugin-ui/src/index.ts'), 'utf8')
+    expect(pluginUiIndex).not.toContain('ReviewNotesPanel')
+    expect(existsSync(join(repositoryRoot, 'packages/plugin-ui/src/ReviewNotesPanel.vue'))).toBe(false)
+    expect(existsSync(join(packageRoot, 'src/components/ReviewNotesPanel.vue'))).toBe(false)
+    expect(existsSync(join(packageRoot, 'src/retained/PlanReviewToolbar.vue'))).toBe(true)
+    expect(sourceText(join(packageRoot, 'src'))).toContain("./retained/PlanReviewToolbar.vue")
+  })
+
+  it('keeps Plans-specific security primitives package-local and decoupled from @navide/plugin-ui/shared', () => {
+    const pluginUiSharedIndex = readFileSync(
+      join(repositoryRoot, 'packages/plugin-ui/src/shared/index.ts'),
+      'utf8',
+    )
+    expect(pluginUiSharedIndex).not.toContain('preparePlanDocHtml')
+    expect(pluginUiSharedIndex).not.toContain('createSafeTodoClickHandler')
+    expect(pluginUiSharedIndex).not.toContain('validatePlanMessageEvent')
+    expect(pluginUiSharedIndex).not.toContain('planSecurity')
+    expect(existsSync(join(repositoryRoot, 'packages/plugin-ui/src/shared/planSecurity.ts'))).toBe(false)
+
+    expect(existsSync(join(packageRoot, 'src/planSecurity.ts'))).toBe(true)
+    const plansAppSource = readFileSync(join(packageRoot, 'src/PlansApp.vue'), 'utf8')
+    expect(plansAppSource).toContain('./planSecurity')
+    expect(plansAppSource).not.toContain('@navide/plugin-ui/shared')
+
+    const hostPlanRuntime = readFileSync(
+      join(repositoryRoot, 'src/renderer/src/editor/planRuntime.ts'),
+      'utf8',
+    )
+    expect(hostPlanRuntime).not.toContain('@navide/plugin-ui/shared')
+    expect(hostPlanRuntime).not.toContain('plugins/navide-plans')
+  })
+
   it('keeps the Backend Wire child on the Host-private filesystem Bridge', () => {
     const backend = readFileSync(join(packageRoot, 'backend/plans_backend.py'), 'utf8')
     expect(backend).toContain('navide/host/call')

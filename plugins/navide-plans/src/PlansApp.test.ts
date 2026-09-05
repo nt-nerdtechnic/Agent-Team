@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
-import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { createI18n } from 'vue-i18n'
 import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { bindPlansLocale, bootstrapPlansI18n } from './plansI18n'
+import { parseHtmlPlanMeta } from './retained/usePlanHtml'
 
 const state = vi.hoisted(() => ({
   preferences: {} as Record<string, unknown>,
@@ -16,6 +17,8 @@ const state = vi.hoisted(() => ({
   callCapability: vi.fn(),
   loadTheme: vi.fn(),
   toast: vi.fn(),
+  confirm: vi.fn(async () => true),
+  realNotify: false,
 }))
 
 const existingPath = '.agent-team/plans/existing_a1b2c3.html'
@@ -27,10 +30,14 @@ beforeAll(async () => {
     SafeAiCliPanel: { name: 'SafeAiCliPanel', template: '<div data-test="ai-panel" />' },
     createAiCliSessionController: vi.fn(() => ({ dispose: vi.fn() })),
   }))
-  vi.doMock('@navide/plugin-ui/foundation', () => ({
-    useNotify: () => ({ toast: state.toast }),
-    useTheme: () => ({ loadTheme: state.loadTheme }),
-  }))
+  vi.doMock('@navide/plugin-ui/foundation', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@navide/plugin-ui/foundation')>()
+    return {
+      ...actual,
+      useNotify: () => ({ ...actual.useNotify(), toast: state.toast, ...(state.realNotify ? {} : { confirm: state.confirm }) }),
+      useTheme: () => ({ loadTheme: state.loadTheme }),
+    }
+  })
   vi.doMock('vue-i18n', async (importOriginal) => {
     const actual = await importOriginal<typeof import('vue-i18n')>()
     return {
@@ -40,6 +47,7 @@ beforeAll(async () => {
           return actual.useI18n(options)
         } catch {
           return {
+            te: () => false,
             t: (key: string, params?: Record<string, unknown>) =>
               params ? `${key}:${JSON.stringify(params)}` : key,
           }
@@ -52,6 +60,7 @@ beforeAll(async () => {
 })
 
 beforeEach(() => {
+  state.realNotify = false
   window.history.replaceState({}, '', `/?workspace_path=%2Fworkspace&rel_path=${encodeURIComponent(existingPath)}`)
   state.preferences = {}
   state.sets.length = 0
@@ -59,7 +68,8 @@ beforeEach(() => {
   state.subscriptionListener = null
   state.subscribe.mockImplementation((event: string, listener: (payload: unknown) => void) => {
     expect(event).toBe('plans.changed')
-    state.subscriptionListener = listener
+    const previous = state.subscriptionListener
+    state.subscriptionListener = payload => { previous?.(payload); listener(payload) }
     return {
       ready: Promise.resolve(),
       settled: Promise.resolve(),
@@ -97,6 +107,42 @@ beforeEach(() => {
       if (name === 'plans.list') return { reqId, ok: true, result: state.list }
       if (name === 'plans.read') {
         return { reqId, ok: true, result: state.documents[String(args.rel_path)] }
+      }
+      if (name === 'plans.read_document') {
+        const document = state.documents[String(args.rel_path)]
+        return { reqId, ok: true, result: {
+          ok: true,
+          content: document?.raw ?? `<script id="plan-meta" type="application/json">${JSON.stringify(document?.meta)}</script>${document?.html ?? ''}`,
+          mtime: 1,
+        } }
+      }
+      if (name === 'plans.write_document') {
+        const document = state.documents[String(args.rel_path)]
+        const content = String(args.content)
+        document.raw = content
+        document.html = content
+        document.meta = parseHtmlPlanMeta(content)?.meta
+        return { reqId, ok: true, result: { ok: true } }
+      }
+      if (name.startsWith('plans.review_note_')) {
+        const relPath = String(args.rel_path)
+        const meta = state.documents[relPath]?.meta as { reviewNotes: Array<Record<string, unknown>> }
+        const notes = meta.reviewNotes
+        if (name === 'plans.review_note_add') {
+          const note = { id: `n${notes.length + 1}`, author: 'user', text: String(args.text), resolved: false, reply: '', anchor: String(args.anchor ?? '') }
+          notes.push(note)
+          return { reqId, ok: true, result: note }
+        }
+        const note = notes.find((item) => item.id === args.note_id)
+        if (name === 'plans.review_note_delete') {
+          meta.reviewNotes = notes.filter(item => item.id !== args.note_id)
+          return { reqId, ok: true, result: null }
+        }
+        const result = name === 'plans.review_note_edit'
+          ? { ...note, text: String(args.text) }
+          : { ...note, resolved: true }
+        if (note) Object.assign(note, result)
+        return { reqId, ok: true, result }
       }
       if (name === 'plans.create') {
         const relPath = '.agent-team/plans/new-plan_a1b2c3.html'
@@ -145,6 +191,8 @@ beforeEach(() => {
   })
   state.callCapability.mockReset()
   state.callCapability.mockResolvedValue({ opened: true })
+  state.confirm.mockReset()
+  state.confirm.mockResolvedValue(true)
   state.list = [{
     rel_path: existingPath,
     name: 'Existing plan',
@@ -173,9 +221,9 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-async function mountPlans(options: Parameters<typeof shallowMount>[1] = {}): Promise<VueWrapper> {
+async function mountPlans(options: Parameters<typeof mount>[1] = {}): Promise<VueWrapper> {
   const { global: globalOptions, ...rest } = options
-  wrapper = shallowMount(PlansApp, {
+  wrapper = mount(PlansApp, {
     ...rest,
     global: {
       stubs: { SafeAiCliPanel: true },
@@ -187,7 +235,464 @@ async function mountPlans(options: Parameters<typeof shallowMount>[1] = {}): Pro
   return wrapper
 }
 
+async function openToolbarOverflow(view: VueWrapper): Promise<void> {
+  await view.get('[data-test="review-notes-overflow"]').trigger('click')
+  await nextTick()
+}
+
 describe('PlansApp', () => {
+  function reviewFixture(): void {
+    Object.assign(state.list[0].meta as object, { stage: 'in-review', reviewNotes: [
+      { id: 'n1', author: 'user', text: 'Please clarify', resolved: false, reply: '', anchor: 'Scope' },
+      { id: 'n2', author: 'agent', text: 'Addressed', resolved: true, reply: 'Done' },
+    ] })
+    state.documents[existingPath].html = '<html><body><section><h2>Scope</h2><p>Body</p></section></body></html>'
+  }
+
+  it('parity: real Notes click opens the v1 panel inside the toolbar immediately above preview', async () => {
+    reviewFixture()
+    const view = await mountPlans({ attachTo: document.body })
+    expect(view.find('.prt-panel').exists()).toBe(false)
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    const panel = view.get('.prt-panel')
+    expect(panel.element.parentElement).toBe(view.get('.prt').element)
+    expect(panel.findAll('.prt-note')).toHaveLength(2)
+    expect(view.get('.prt').element.nextElementSibling).toBe(view.get('.plan-main-body').element)
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    expect(view.find('.prt-panel').exists()).toBe(false)
+  })
+
+  it('parity: real Edit enables and focuses the input and Save calls the immutable target exactly once', async () => {
+    reviewFixture()
+    const view = await mountPlans({ attachTo: document.body })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    const edit = view.get('[data-test="edit-n1"]')
+    expect(edit.attributes('disabled')).toBeUndefined()
+    await edit.trigger('click')
+    const input = view.get('[data-test="review-note-edit-input"]')
+    expect(input.attributes('disabled')).toBeUndefined()
+    expect(document.activeElement).toBe(input.element)
+    await input.setValue('Clarified')
+    await view.get('[data-test="review-note-edit-save"]').trigger('click')
+    await flushPromises()
+    expect(state.calls.filter(call => call.name === 'plans.review_note_edit')).toEqual([
+      { name: 'plans.review_note_edit', args: { rel_path: existingPath, note_id: 'n1', text: 'Clarified' } },
+    ])
+    expect(view.get('[data-test="edit-n1"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('parity: section comment refocuses an already open composer and retains the authenticated anchor', async () => {
+    reviewFixture()
+    const view = await mountPlans({ attachTo: document.body })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    const button = view.get('[data-test="review-notes-toggle"]')
+    ;(button.element as HTMLButtonElement).focus()
+    const frame = view.get('iframe').element as HTMLIFrameElement
+    const source = {} as Window
+    Object.defineProperty(frame, 'contentWindow', { value: source, configurable: true })
+    const documentToken = frame.getAttribute('srcdoc')?.match(/var documentToken = "([0-9a-f]{32})"/)?.[1]
+    expect(documentToken).toBeTruthy()
+    window.dispatchEvent(new MessageEvent('message', { source, data: { type: 'section-comment', anchor: 'Scope', documentToken } }))
+    await flushPromises()
+    const input = view.get('[data-test="review-note-input"]')
+    expect(view.get('.prt-note-anchor--pending').text()).toContain('Scope')
+    expect(document.activeElement).toBe(input.element)
+    await input.setValue('Anchored comment')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(state.calls.filter(call => call.name === 'plans.review_note_add')).toEqual([
+      { name: 'plans.review_note_add', args: { rel_path: existingPath, text: 'Anchored comment', anchor: 'Scope' } },
+    ])
+    expect(view.get('iframe').element).toBe(frame)
+  })
+
+  it('parity: toolbar retains v1 stage badge, Todos and disabled Approve controls', async () => {
+    reviewFixture()
+    const view = await mountPlans()
+    expect(view.get('.prt-stage').element.tagName).toBe('SPAN')
+    expect(view.find('.prt-bar .prt-todos-btn').exists()).toBe(true)
+    expect(view.get('.prt-bar .prt-approve').attributes('disabled')).toBeDefined()
+  })
+
+  it('parity: actual application confirmation Escape cancels only the dialog and Enter deletes once', async () => {
+    reviewFixture()
+    state.realNotify = true
+    const view = await mountPlans({ attachTo: document.body })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    await view.get('[data-test="delete-n1"]').trigger('click')
+    await flushPromises()
+    const modal = document.querySelector('.modal')!
+    expect(modal).not.toBeNull()
+    expect(state.calls.filter(call => call.name === 'plans.review_note_delete')).toHaveLength(0)
+    modal.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+    expect(document.querySelector('.modal')).toBeNull()
+    expect(view.find('.prt-note').exists()).toBe(true)
+    await view.get('[data-test="delete-n1"]').trigger('click')
+    await flushPromises()
+    document.querySelector('.modal')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushPromises()
+    expect(state.calls.filter(call => call.name === 'plans.review_note_delete')).toEqual([
+      { name: 'plans.review_note_delete', args: { rel_path: existingPath, note_id: 'n1' } },
+    ])
+    expect(view.find('[data-test="delete-n1"]').exists()).toBe(false)
+    expect(view.get('[data-test="review-note-input"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('parity: real outline control navigates the current iframe and scroll reports keep its identity', async () => {
+    reviewFixture()
+    const view = await mountPlans({ attachTo: document.body })
+    const frame = view.get('iframe').element as HTMLIFrameElement
+    const postMessage = vi.fn()
+    const source = { postMessage } as unknown as Window
+    Object.defineProperty(frame, 'contentWindow', { value: source, configurable: true })
+    await openToolbarOverflow(view)
+    await view.get('.prt-menu-outline').trigger('click')
+    await view.get('.prt-menu-anchor').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({ type: 'scroll-to', anchor: 'Scope' }, '*')
+    const srcdoc = frame.getAttribute('srcdoc')!
+    const documentToken = srcdoc.match(/var documentToken = "([0-9a-f]{32})"/)?.[1]
+    window.dispatchEvent(new MessageEvent('message', { source, data: { type: 'scroll-pos', y: 320, documentToken } }))
+    await flushPromises()
+    expect(view.get('iframe').element).toBe(frame)
+    expect(frame.getAttribute('srcdoc')).toBe(srcdoc)
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    window.dispatchEvent(new MessageEvent('message', { source, data: { type: 'section-editing', active: true, documentToken } }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+    expect(postMessage).toHaveBeenCalledWith({ type: 'cancel-edit' }, '*')
+    expect(view.find('.prt-note').exists()).toBe(true)
+  })
+
+  it('parity: real history Preview opens the retained read-only snapshot and Close returns to the plan', async () => {
+    reviewFixture()
+    const original = (window as any).nav.callBackend
+    ;(window as any).nav.callBackend = async (reqId: string, name: string, args: Record<string, unknown>) => {
+      if (name === 'plans.list_directory') return { reqId, ok: true, result: { ok: true, entries: [{ name: '20260905T010203_draft.html', is_dir: false }] } }
+      if (name === 'plans.read_document' && String(args.rel_path).includes('/.history/')) return { reqId, ok: true, result: { ok: true, content: `<html><body><script id="plan-meta" type="application/json">${JSON.stringify({ schemaVersion: 1, name: 'Snapshot', stage: 'draft', todos: [], reviewNotes: [{ id: 's1', author: 'user', text: 'One', resolved: false, anchor: 'Snapshot scope' }, { id: 's2', author: 'user', text: 'Two', resolved: false, anchor: 'Snapshot scope' }] })}</script><h2>Snapshot scope</h2><p>Earlier snapshot</p></body></html>`, mtime: 1 } }
+      return original(reqId, name, args)
+    }
+    const view = await mountPlans({ attachTo: document.body })
+    await openToolbarOverflow(view)
+    await view.get('.prt-history-btn').trigger('click')
+    await flushPromises()
+    await view.get('.prt-history-action').trigger('click')
+    await flushPromises()
+    expect(view.get('.plan-snapshot-note').text()).toBe('pane.plans.snapshot-readonly')
+    expect(view.find('.prt').exists()).toBe(false)
+    expect(view.get('iframe').attributes('srcdoc')).toContain('Earlier snapshot')
+    const snapshotInit = JSON.parse(view.get('iframe').attributes('srcdoc')!.match(/var INIT = (\{[^\n]+\});/)![1])
+    expect(snapshotInit.anchors).toEqual({ 'Snapshot scope': 2 })
+    await view.get('.plan-snapshot-close').trigger('click')
+    await flushPromises()
+    expect(view.find('.plan-snapshot-banner').exists()).toBe(false)
+    expect(view.find('.prt').exists()).toBe(true)
+    expect(view.get('iframe').attributes('srcdoc')).toContain('<h2>Scope</h2>')
+    const liveInit = JSON.parse(view.get('iframe').attributes('srcdoc')!.match(/var INIT = (\{[^\n]+\});/)![1])
+    expect(liveInit.anchors).toEqual({ Scope: 1 })
+  })
+
+  it('parity: failed document read replaces the old iframe with the retained reason and resolved path', async () => {
+    reviewFixture()
+    const pathB = '.agent-team/plans/missing.html'
+    state.list.push({ rel_path: pathB, name: 'Missing plan' })
+    const original = (window as any).nav.callBackend
+    ;(window as any).nav.callBackend = async (reqId: string, name: string, args: Record<string, unknown>) => {
+      if (name === 'plans.read' && args.rel_path === pathB) return { reqId, ok: false, error: { code: 'BACKEND_ERROR', message: 'missing' } }
+      return original(reqId, name, args)
+    }
+    const view = await mountPlans({ attachTo: document.body })
+    await view.findAll('.plan-row').find(row => row.text().includes('Missing plan'))!.trigger('click')
+    await flushPromises()
+    expect(view.find('iframe').exists()).toBe(false)
+    expect(view.get('.pdp-error').text()).toContain('pane.plans.doc-load-failed')
+    expect(view.get('.pdp-error-reason').text()).toBe('missing')
+    expect(view.get('.pdp-error-path').text()).toBe(`/workspace › ${pathB}`)
+    await view.findAll('.plan-row').find(row => row.text().includes('Existing plan'))!.trigger('click')
+    await flushPromises()
+    expect(view.find('.pdp-error').exists()).toBe(false)
+    expect(view.find('iframe').exists()).toBe(true)
+  })
+
+  it('parity: a real plans.changed broadcast after todo status persistence does not reload the preview', async () => {
+    reviewFixture()
+    ;(state.documents[existingPath].meta as any).todos = [{ id: 't1', content: 'Task', status: 'pending' }]
+    state.documents[existingPath].html = '<html><body><section><h2>Scope</h2><ul class="todos"><li data-todo-id="t1" data-status="pending"><span class="st">pending</span>Task</li></ul></section></body></html>'
+    const view = await mountPlans({ attachTo: document.body })
+    const frame = view.get('iframe').element as HTMLIFrameElement
+    const srcdoc = frame.getAttribute('srcdoc')
+    const postMessage = vi.fn()
+    Object.defineProperty(frame, 'contentWindow', { value: { postMessage }, configurable: true })
+    ;(state.documents[existingPath].meta as any).todos[0].status = 'done'
+    state.documents[existingPath].html = String(state.documents[existingPath].html).replaceAll('pending', 'done')
+    state.subscriptionListener?.({ workspace_path: '/workspace' })
+    await flushPromises()
+    expect(view.get('iframe').element).toBe(frame)
+    expect(frame.getAttribute('srcdoc')).toBe(srcdoc)
+    expect(view.get('.prt-progress').text()).toContain('"done":1')
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'todo-status-updated', todoId: 't1', status: 'done' }), '*')
+  })
+
+  it('parity: iframe runtime starts with the retained unresolved anchor counts', async () => {
+    reviewFixture()
+    const view = await mountPlans()
+    const init = JSON.parse(view.get('iframe').attributes('srcdoc')!.match(/var INIT = (\{[^\n]+\});/)![1])
+    expect(init.anchors).toEqual({ Scope: 1 })
+  })
+
+  it.each([
+    ['pending', false, 'in-progress'], ['in-progress', false, 'done'], ['done', false, 'pending'],
+    ['pending', true, 'skipped'], ['skipped', true, 'pending'],
+  ])('parity: iframe todo %s with alt=%s persists v1 status %s without reloading', async (status, alt, expected) => {
+    reviewFixture()
+    ;(state.documents[existingPath].meta as any).todos = [{ id: 't1', content: 'Task', status }]
+    const view = await mountPlans({ attachTo: document.body })
+    const frame = view.get('iframe').element as HTMLIFrameElement
+    const source = { postMessage: vi.fn() } as unknown as Window
+    Object.defineProperty(frame, 'contentWindow', { value: source, configurable: true })
+    const documentToken = frame.getAttribute('srcdoc')?.match(/var documentToken = "([0-9a-f]{32})"/)?.[1]
+    window.dispatchEvent(new MessageEvent('message', { source, data: { type: 'todo-clicked', todoId: 't1', alt, documentToken } }))
+    await flushPromises()
+    expect(state.calls.filter(call => call.name === 'plans.update_todo')).toEqual([
+      { name: 'plans.update_todo', args: { rel_path: existingPath, todo_id: 't1', status: expected } },
+    ])
+    expect(view.get('iframe').element).toBe(frame)
+  })
+
+  it('parity: real toolbar Todo cycle updates its status without reloading the preview', async () => {
+    reviewFixture()
+    ;(state.documents[existingPath].meta as any).todos = [{ id: 't1', content: 'Task', status: 'pending' }]
+    state.documents[existingPath].html = '<html><body><section><h2>Scope</h2><ul class="todos"><li data-todo-id="t1" data-status="pending"><span class="st">pending</span>Task</li></ul></section></body></html>'
+    const view = await mountPlans({ attachTo: document.body })
+    const frame = view.get('iframe').element
+    await view.get('.prt-todos-btn').trigger('click')
+    await view.get('.prt-todo').trigger('click')
+    await flushPromises()
+    expect(view.get('.prt-todo-status').text()).toBe('in-progress')
+    expect(view.get('iframe').element).toBe(frame)
+  })
+
+  it('parity: same-plan external body reload clears iframe editing before Escape reaches the toolbar', async () => {
+    reviewFixture()
+    const view = await mountPlans({ attachTo: document.body })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    const frame = view.get('iframe').element as HTMLIFrameElement
+    const source = { postMessage: vi.fn() } as unknown as Window
+    Object.defineProperty(frame, 'contentWindow', { value: source, configurable: true })
+    const documentToken = frame.getAttribute('srcdoc')?.match(/var documentToken = "([0-9a-f]{32})"/)?.[1]
+    window.dispatchEvent(new MessageEvent('message', { source, data: { type: 'section-editing', active: true, documentToken } }))
+    state.documents[existingPath].html = '<html><body><section><h2>Scope</h2><p>External body update</p></section></body></html>'
+    state.subscriptionListener?.({ workspace_path: '/workspace' })
+    await flushPromises()
+    expect(view.get('iframe').element).not.toBe(frame)
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+    expect(view.find('.prt-note').exists()).toBe(false)
+  })
+
+  it.each(['add', 'edit'])('parity: failed %s returns to idle and retains the draft for retry', async operation => {
+    reviewFixture()
+    const original = (window as any).nav.callBackend
+    ;(window as any).nav.callBackend = async (reqId: string, name: string, args: Record<string, unknown>) => {
+      if (name === `plans.review_note_${operation}`) return { reqId, ok: false, error: { code: 'CONFLICT', message: 'Concurrent write conflict' } }
+      return original(reqId, name, args)
+    }
+    const view = await mountPlans({ attachTo: document.body })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    if (operation === 'edit') await view.get('[data-test="edit-n1"]').trigger('click')
+    const input = view.get(operation === 'edit' ? '[data-test="review-note-edit-input"]' : '[data-test="review-note-input"]')
+    await input.setValue('Retry me')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect((input.element as HTMLInputElement).value).toBe('Retry me')
+    expect(input.attributes('disabled')).toBeUndefined()
+    const send = operation === 'edit' ? view.get('[data-test="review-note-edit-save"]') : view.get('.prt-new .prt-send')
+    expect(send.attributes('disabled')).toBeUndefined()
+    expect(state.toast).toHaveBeenCalled()
+  })
+
+  it.each(['add', 'edit'])('parity: committed %s clears its draft even when the followup metadata read fails', async operation => {
+    reviewFixture()
+    const original = (window as any).nav.callBackend
+    let committed = false
+    ;(window as any).nav.callBackend = async (reqId: string, name: string, args: Record<string, unknown>) => {
+      if (committed && name === 'plans.read_document') return { reqId, ok: false, error: { code: 'BACKEND_UNAVAILABLE', message: 'Refresh unavailable' } }
+      const result = await original(reqId, name, args)
+      if (name === `plans.review_note_${operation}`) committed = true
+      return result
+    }
+    const onError = vi.fn()
+    const view = await mountPlans({ attachTo: document.body, global: { config: { errorHandler: onError } } })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    if (operation === 'edit') await view.get('[data-test="edit-n1"]').trigger('click')
+    await view.get(operation === 'edit' ? '[data-test="review-note-edit-input"]' : '[data-test="review-note-input"]').setValue('Committed text')
+    await view.get(operation === 'edit' ? '[data-test="review-note-edit-save"]' : '.prt-new .prt-send').trigger('click')
+    await flushPromises()
+    expect(state.calls.filter(call => call.name === `plans.review_note_${operation}`)).toHaveLength(1)
+    expect(view.find('[data-test="review-note-edit-input"]').exists()).toBe(false)
+    expect((view.get('[data-test="review-note-input"]').element as HTMLInputElement).value).toBe('')
+    expect(view.get('[data-test="edit-n1"]').attributes('disabled')).toBeUndefined()
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  it.each(['add', 'edit'])('parity: delayed %s response from A cannot replace B drafts or pending state', async operation => {
+    reviewFixture()
+    const pathB = '.agent-team/plans/other.html'
+    const meta = { ...(state.list[0].meta as object), name: 'Other plan', reviewNotes: [{ id: 'n1', author: 'user', text: 'B note', resolved: false, reply: '' }] }
+    state.list.push({ rel_path: pathB, name: 'Other plan', meta })
+    state.documents[pathB] = { rel_path: pathB, meta, html: '<html><body>Other</body></html>' }
+    const original = (window as any).nav.callBackend
+    let finish!: () => void
+    const pending = new Promise<void>(resolve => { finish = resolve })
+    ;(window as any).nav.callBackend = async (reqId: string, name: string, args: Record<string, unknown>) => {
+      if (name === `plans.review_note_${operation}` && args.rel_path === existingPath) await pending
+      return original(reqId, name, args)
+    }
+    const view = await mountPlans({ attachTo: document.body })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    if (operation === 'edit') await view.get('[data-test="edit-n1"]').trigger('click')
+    const input = view.get(operation === 'edit' ? '[data-test="review-note-edit-input"]' : '[data-test="review-note-input"]')
+    await input.setValue('A write')
+    await input.trigger('keydown', { key: 'Enter' })
+    await view.findAll('.plan-row').find(row => row.text().includes('Other plan'))!.trigger('click')
+    await flushPromises()
+    expect(view.find('.prt-panel').exists()).toBe(false)
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    expect(view.find('[data-test="review-note-edit-input"]').exists()).toBe(false)
+    expect(view.find('.prt-note-anchor--pending').exists()).toBe(false)
+    const composer = view.get('[data-test="review-note-input"]')
+    expect((composer.element as HTMLInputElement).value).toBe('')
+    await composer.setValue('B draft')
+    finish()
+    await flushPromises()
+    expect((composer.element as HTMLInputElement).value).toBe('B draft')
+    expect(view.get('.prt-note-text').text()).toBe('B note')
+    expect(view.get('[data-test="edit-n1"]').attributes('disabled')).toBeUndefined()
+    expect(state.calls.filter(call => call.name === `plans.review_note_${operation}`)).toEqual([
+      { name: `plans.review_note_${operation}`, args: operation === 'edit' ? { rel_path: existingPath, note_id: 'n1', text: 'A write' } : { rel_path: existingPath, text: 'A write', anchor: '' } },
+    ])
+  })
+
+  it('parity: delayed Delete confirmation cannot delete a same-id note after switching plans', async () => {
+    reviewFixture()
+    const pathB = '.agent-team/plans/other.html'
+    const meta = { ...(state.list[0].meta as object), name: 'Other plan' }
+    state.list.push({ rel_path: pathB, name: 'Other plan', meta })
+    state.documents[pathB] = { rel_path: pathB, meta, html: '<html><body>Other</body></html>' }
+    let settle!: (accepted: boolean) => void
+    state.confirm.mockImplementationOnce(() => new Promise<boolean>(resolve => { settle = resolve }))
+    const view = await mountPlans({ attachTo: document.body })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    await view.get('[data-test="delete-n1"]').trigger('click')
+    expect(state.confirm).toHaveBeenCalledTimes(1)
+    expect(state.calls.filter(call => call.name === 'plans.review_note_delete')).toHaveLength(0)
+    await view.findAll('.plan-row').find(row => row.text().includes('Other plan'))!.trigger('click')
+    await flushPromises()
+    settle(true)
+    await flushPromises()
+    expect(state.calls.filter(call => call.name === 'plans.review_note_delete')).toHaveLength(0)
+  })
+
+  it.each(['resolved', 'empty'])('parity: %s notes appear only in overflow and toggle the real panel', async kind => {
+    reviewFixture()
+    const meta = state.list[0].meta as { reviewNotes: Array<{ resolved: boolean }> }
+    meta.reviewNotes = kind === 'empty' ? [] : meta.reviewNotes.map(note => ({ ...note, resolved: true }))
+    const view = await mountPlans({ attachTo: document.body })
+    expect(view.find('[data-test="review-notes-toggle"]').exists()).toBe(false)
+    await openToolbarOverflow(view)
+    expect(view.findAll('.prt-notes-btn')).toHaveLength(1)
+    await view.get('[data-test="review-notes-overflow-item"]').trigger('click')
+    expect(view.find('.prt-panel').exists()).toBe(true)
+    expect(view.find('.prt-menu-backdrop').exists()).toBe(false)
+    await openToolbarOverflow(view)
+    await view.get('[data-test="review-notes-overflow-item"]').trigger('click')
+    expect(view.find('.prt-panel').exists()).toBe(false)
+  })
+
+  it('parity: IME Enter does not send and ordinary Enter sends once then returns idle', async () => {
+    reviewFixture()
+    const view = await mountPlans({ attachTo: document.body })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    const input = view.get('[data-test="review-note-input"]')
+    await input.setValue('New note')
+    await input.trigger('keydown', { key: 'Enter', isComposing: true })
+    expect(state.calls.filter(call => call.name === 'plans.review_note_add')).toHaveLength(0)
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(state.calls.filter(call => call.name === 'plans.review_note_add')).toHaveLength(1)
+    expect((input.element as HTMLInputElement).value).toBe('')
+    expect(input.attributes('disabled')).toBeUndefined()
+    expect(view.get('[data-test="edit-n1"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('parity: Escape peels edit, composer, then the existing panel', async () => {
+    reviewFixture()
+    const view = await mountPlans({ attachTo: document.body })
+    await view.get('[data-test="review-notes-toggle"]').trigger('click')
+    await view.get('[data-test="review-note-input"]').setValue('Draft')
+    await view.get('[data-test="edit-n1"]').trigger('click')
+    await view.get('[data-test="review-note-edit-input"]').trigger('keydown', { key: 'Escape' })
+    expect(view.find('[data-test="review-note-edit-input"]').exists()).toBe(false)
+    expect((view.get('[data-test="review-note-input"]').element as HTMLInputElement).value).toBe('Draft')
+    await view.get('[data-test="review-note-input"]').trigger('keydown', { key: 'Escape' })
+    expect((view.get('[data-test="review-note-input"]').element as HTMLInputElement).value).toBe('')
+    await view.get('[data-test="review-note-input"]').trigger('keydown', { key: 'Escape' })
+    expect(view.find('.prt-panel').exists()).toBe(false)
+  })
+
+  it.each(['wrong-source', 'null-source', 'stale-window', 'stale-token', 'unknown-anchor', 'token-alias', 'nonce-alias'])(
+    'parity: rejects section-comment with %s before opening the composer', async kind => {
+      reviewFixture()
+      const view = await mountPlans({ attachTo: document.body })
+      const frame = view.get('iframe').element as HTMLIFrameElement
+      const source = {} as Window
+      Object.defineProperty(frame, 'contentWindow', { value: source, configurable: true })
+      const documentToken = frame.getAttribute('srcdoc')?.match(/var documentToken = "([0-9a-f]{32})"/)?.[1]
+      expect(documentToken).toBeTruthy()
+      const data: Record<string, unknown> = { type: 'section-comment', anchor: kind === 'unknown-anchor' ? 'Unknown' : 'Scope', documentToken: kind === 'stale-token' ? 'stale' : documentToken }
+      if (kind.endsWith('-alias')) { delete data.documentToken; data[kind.split('-')[0]] = documentToken }
+      const eventSource = kind === 'wrong-source' ? window : kind === 'null-source' ? null : kind === 'stale-window' ? {} as Window : source
+      window.dispatchEvent(new MessageEvent('message', { source: eventSource, data }))
+      await flushPromises()
+      expect(view.find('.prt-panel').exists()).toBe(false)
+      expect(state.calls.filter(call => call.name.startsWith('plans.review_note_'))).toHaveLength(0)
+    },
+  )
+
+  it('uses the v1-equivalent window hierarchy outside the left contribution', async () => {
+    const view = await mountPlans()
+
+    expect(view.find('.plan-window').exists()).toBe(true)
+    expect(view.find('.plan-window-side').exists()).toBe(true)
+    expect(view.find('.plan-window-main').exists()).toBe(true)
+    expect(view.find('.plans-surface').exists()).toBe(false)
+    expect(view.find('.plans-layout').exists()).toBe(false)
+  })
+
+  it('renders the normal plugin surface as the v1 Plans window without v2 sidebar chrome', async () => {
+    const view = await mountPlans()
+
+    expect(view.find('.plan-window > .plan-window-side > .plans-pane').exists()).toBe(true)
+    expect(view.find('.plan-window > .plan-window-main > .plan-window-doc').exists()).toBe(true)
+    expect(view.find('.plan-window-doc > .prt > .prt-bar').exists()).toBe(true)
+    expect(view.find('.plan-window-doc > .plan-main-body').exists()).toBe(true)
+    expect(view.find('.sidebar-create-section').exists()).toBe(false)
+    expect(view.find('.plans-head-actions').exists()).toBe(false)
+  })
+
+  it('keeps the embedded left contribution in its original Plans layout without window classes', async () => {
+    window.history.replaceState({}, '', '/?workspace_path=%2Fworkspace&contribution=left')
+
+    const view = await mountPlans()
+
+    expect(view.find('.plans-surface.plans-left-surface').exists()).toBe(true)
+    expect(view.find('.plans-layout.is-left-contribution').exists()).toBe(true)
+    expect(view.find('.plans-sidebar').exists()).toBe(true)
+    expect(view.find('.plan-window').exists()).toBe(false)
+    expect(view.find('.plan-window-side').exists()).toBe(false)
+    expect(view.find('.plan-window-main').exists()).toBe(false)
+  })
+
   it('renders translated Chinese Plans strings on first mount when bootstrapped with locale=zh-TW', async () => {
     window.history.replaceState(
       {},
@@ -229,8 +734,9 @@ describe('PlansApp', () => {
       },
     })
 
-    expect(view.text()).toContain('新增計畫')
+    expect(view.text()).not.toContain('新增計畫')
     expect(view.text()).toContain('所有文件')
+    await view.get('[data-test="review-notes-overflow"]').trigger('click')
     expect(view.text()).toContain('審查留言')
     expect(view.text()).not.toContain('pane.plans.v2.new-plan')
     expect(view.text()).not.toContain('pane.plans.review-notes')
@@ -283,8 +789,9 @@ describe('PlansApp', () => {
     })
 
     expect(hostEventListener).toBeTypeOf('function')
-    expect(view.text()).toContain('New plan')
+    expect(view.text()).not.toContain('New plan')
     expect(view.text()).toContain('All documents')
+    await view.get('[data-test="review-notes-overflow"]').trigger('click')
     expect(view.text()).toContain('Review Notes')
     expect(view.text()).not.toContain('新增計畫')
     expect(view.text()).not.toContain('所有文件')
@@ -307,7 +814,7 @@ describe('PlansApp', () => {
     expect(view.findAll('select')[0].element).toHaveProperty('value', 'approved')
     expect(view.findAll('select')[1].element).toHaveProperty('value', 'title')
     expect(state.sets).toEqual([])
-    expect(state.subscribe).toHaveBeenCalledOnce()
+    expect(state.subscribe).toHaveBeenCalledTimes(2)
     expect(state.calls.filter(({ name }) => name === 'plans.list')).toHaveLength(1)
 
     await state.subscriptionListener?.({ workspace_path: '/workspace' })
@@ -345,7 +852,7 @@ describe('PlansApp', () => {
       name: 'plans.read',
       args: { rel_path: existingPath },
     })
-    expect(view.find('.selected-document h2').text()).toBe('Existing plan')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Existing plan')
     expect(state.callCapability).not.toHaveBeenCalledWith('ui', 'openInEditor', expect.anything())
   })
 
@@ -384,21 +891,13 @@ describe('PlansApp', () => {
       name: 'plans.read',
       args: { rel_path: secondPath },
     })
-    expect(view.find('.selected-document h2').text()).toBe('Second plan')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Second plan')
     expect(state.callCapability).not.toHaveBeenCalledWith('ui', 'openInEditor', expect.anything())
   })
 
-  it('opens the selected document in editor only from explicit toolbar or context-menu actions', async () => {
+  it('opens the selected document in editor only from explicit context-menu actions', async () => {
     const view = await mountPlans()
     expect(state.callCapability).not.toHaveBeenCalledWith('ui', 'openInEditor', expect.anything())
-
-    const openButton = view.find('.content-toolbar .toolbar-actions button')
-    expect(openButton.text()).toBe('action.open-in-editor')
-    await openButton.trigger('click')
-    await flushPromises()
-
-    expect(state.callCapability).toHaveBeenCalledWith('ui', 'openInEditor', { path: existingPath })
-    state.callCapability.mockClear()
 
     const row = view.find('button.plan-row')
     await row.trigger('contextmenu', { clientX: 50, clientY: 50 })
@@ -424,26 +923,18 @@ describe('PlansApp', () => {
     expect(state.callCapability).not.toHaveBeenCalledWith('ui', 'openInEditor', expect.anything())
   })
 
-  it('creates a plan through the package backend', async () => {
+  it('does not render the removed v2 create-plan sidebar chrome', async () => {
     const view = await mountPlans()
-    const inputs = view.findAll('.create-form input')
-    await inputs[0].setValue('New plan')
-    await inputs[1].setValue('A new overview')
-    await view.find('.create-form textarea').setValue('First todo')
-    await view.find('.create-form').trigger('submit')
-    await flushPromises()
-
-    expect(state.calls.map(({ name }) => name)).toContain('plans.create')
-    expect(view.text()).toContain('.agent-team/plans/new-plan_a1b2c3.html')
+    expect(view.find('.sidebar-create-section').exists()).toBe(false)
+    expect(view.find('.create-form').exists()).toBe(false)
   })
 
   it('renames a plan through the package backend', async () => {
     const view = await mountPlans()
-    vi.spyOn(window, 'prompt').mockReturnValue('renamed_a1b2c3.html')
-    const renameButton = view.findAll('.content-toolbar .toolbar-actions button')
-      .find((button) => button.text() === 'action.rename')
-    expect(renameButton).toBeDefined()
-    await renameButton!.trigger('click')
+    await view.get('.plan-row').trigger('contextmenu', { clientX: 50, clientY: 50 })
+    await view.findAll('.context-menu button').find(button => button.text() === 'action.rename')!.trigger('click')
+    await view.get('.rename-dialog input').setValue('renamed_a1b2c3.html')
+    await view.get('.rename-dialog').trigger('submit')
     await flushPromises()
 
     expect(state.calls).toContainEqual({
@@ -452,14 +943,20 @@ describe('PlansApp', () => {
     })
   })
 
-  it('deletes a plan through the package backend', async () => {
+  it('confirms Plan deletion through the application confirmation service', async () => {
     const view = await mountPlans()
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
-    const deleteButton = view.find('.content-toolbar .toolbar-actions button.danger')
+    const nativeConfirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await openToolbarOverflow(view)
+    const deleteButton = view.get('.prt-delete')
     await deleteButton.trigger('click')
     await flushPromises()
     await nextTick()
 
+    expect(state.confirm).toHaveBeenCalledWith(
+      'pane.plans.delete-confirm:{"name":"Existing plan"}',
+      { title: 'pane.plans.menu-delete', confirmText: 'pane.plans.menu-delete' },
+    )
+    expect(nativeConfirm).not.toHaveBeenCalled()
     expect(state.calls).toContainEqual({
       name: 'plans.delete',
       args: { rel_path: existingPath },
@@ -504,6 +1001,96 @@ describe('PlansApp', () => {
     expect(srcdoc).toContain('data-todo-id')
   })
 
+  it('places the toolbar overflow overlay beside the clipped bar, not inside it', async () => {
+    const view = await mountPlans()
+    await openToolbarOverflow(view)
+
+    const toolbar = view.get('.prt')
+    const bar = view.get('.prt-bar')
+    const menu = view.get('.prt-menu')
+    const backdrop = view.get('.prt-menu-backdrop')
+
+    expect(menu.element.parentElement).toBe(toolbar.element)
+    expect(backdrop.element.parentElement).toBe(toolbar.element)
+    expect(bar.element.contains(menu.element)).toBe(false)
+    expect(bar.element.contains(backdrop.element)).toBe(false)
+  })
+
+  it('ports section Edit and Delete controls into the trusted iframe runtime', async () => {
+    state.documents[existingPath].html = [
+      '<html><body>',
+      '<section><h2>Editable section</h2><p>Editable prose.</p></section>',
+      '<section><h2>Todo section</h2><ul class="todos"><li data-todo-id="todo-1">T1</li></ul></section>',
+      '</body></html>',
+    ].join('')
+
+    const view = await mountPlans()
+    const srcdoc = view.get('iframe.plan-doc-frame').attributes('srcdoc') ?? ''
+
+    expect(srcdoc).toContain('plan-rt-secbar')
+    expect(srcdoc).toContain("type: 'section-edit'")
+    expect(srcdoc).toContain("type: 'section-delete'")
+    expect(srcdoc).toContain('contenteditable')
+    expect(srcdoc).toContain('Todo section')
+    expect(srcdoc).toContain('documentToken')
+  })
+
+  it('accepts only trusted, anchored section edit/delete messages and confirms deletes', async () => {
+    state.documents[existingPath].html = '<html><body><section><h2>Editable section</h2><p>Original prose.</p></section></body></html>'
+    const view = await mountPlans()
+    const iframeEl = view.get('iframe.plan-doc-frame').element as HTMLIFrameElement
+    const frameWin = {} as Window
+    Object.defineProperty(iframeEl, 'contentWindow', { value: frameWin, configurable: true })
+    const documentToken = (iframeEl.getAttribute('srcdoc') || '').match(/var documentToken = "([0-9a-f]{32})"/)?.[1]
+    expect(documentToken).toBeTruthy()
+
+    window.dispatchEvent(new MessageEvent('message', {
+      source: window,
+      data: { type: 'section-edit', anchor: 'Editable section', html: '<p>Rejected</p>', documentToken },
+    }))
+    window.dispatchEvent(new MessageEvent('message', {
+      source: frameWin,
+      data: { type: 'section-edit', anchor: 'Unknown anchor', html: '<p>Rejected</p>', documentToken },
+    }))
+    await flushPromises()
+    expect(state.calls.filter((call) => call.name === 'plans.write_document')).toHaveLength(0)
+
+    window.dispatchEvent(new MessageEvent('message', {
+      source: frameWin,
+      data: { type: 'section-delete', anchor: 'Editable section', documentToken },
+    }))
+    await flushPromises()
+    expect(state.confirm).toHaveBeenCalledWith(
+      'pane.plans.section-delete-confirm:{"anchor":"Editable section"}',
+      { title: 'pane.plans.delete', confirmText: 'pane.plans.delete' },
+    )
+    const writes = state.calls.filter(call => call.name === 'plans.write_document')
+    expect(writes).toHaveLength(1)
+    expect(writes[0].args).toMatchObject({ rel_path: existingPath, expected_mtime: 1 })
+    expect(writes[0].args.content).not.toContain('Original prose.')
+
+  })
+
+  it('sanitizes trusted anchored section edits before the private backend adapter', async () => {
+    state.documents[existingPath].html = '<html><body><section><h2>Editable section</h2><p>Original prose.</p></section></body></html>'
+    const view = await mountPlans()
+    const iframeEl = view.get('iframe.plan-doc-frame').element as HTMLIFrameElement
+    const frameWin = {} as Window
+    Object.defineProperty(iframeEl, 'contentWindow', { value: frameWin, configurable: true })
+    const documentToken = (iframeEl.getAttribute('srcdoc') || '').match(/var documentToken = "([0-9a-f]{32})"/)?.[1]
+    window.dispatchEvent(new MessageEvent('message', {
+      source: frameWin,
+      data: { type: 'section-edit', anchor: 'Editable section', html: '<p>Updated prose.</p><script>evil()</script>', documentToken },
+    }))
+    await flushPromises()
+    expect(state.toast).not.toHaveBeenCalled()
+    const writes = state.calls.filter(call => call.name === 'plans.write_document')
+    expect(writes).toHaveLength(1)
+    expect(writes[0].args).toMatchObject({ rel_path: existingPath, expected_mtime: 1 })
+    expect(writes[0].args.content).toContain('<p>Updated prose.</p>')
+    expect(writes[0].args.content).not.toContain('evil()')
+  })
+
   it('safely handles todo-clicked only from the preview frame with known todo ID', async () => {
     state.list[0].meta = {
       schemaVersion: 1,
@@ -524,7 +1111,7 @@ describe('PlansApp', () => {
     Object.defineProperty(iframeEl, 'contentWindow', { value: frameWin, configurable: true })
 
     const srcdoc = iframeEl.getAttribute('srcdoc') || ''
-    const tokenMatch = srcdoc.match(/documentToken:\s*"([0-9a-f]{32})"/)
+    const tokenMatch = srcdoc.match(/(?:var documentToken = |"documentToken":)"([0-9a-f]{32})"/)
     const validToken = tokenMatch ? tokenMatch[1] : ''
 
     // 1. Rejected: mismatched window source
@@ -578,9 +1165,178 @@ describe('PlansApp', () => {
       args: {
         rel_path: existingPath,
         todo_id: 'todo-1',
-        status: 'done',
+        status: 'in-progress',
       },
     })
+  })
+
+  it('acknowledges a successful todo update without replacing the preview iframe', async () => {
+    state.list[0].meta = {
+      schemaVersion: 1,
+      name: 'Existing plan',
+      overview: 'Existing overview',
+      stage: 'approved',
+      todos: [
+        { id: 'todo-1', content: 'T1', status: 'pending' },
+        { id: 'todo-2', content: 'T2', status: 'pending' },
+      ],
+      reviewNotes: [],
+    }
+    state.documents[existingPath].meta = state.list[0].meta
+    state.documents[existingPath].html = '<html><body><li data-todo-id="todo-1">T1</li></body></html>'
+
+    const view = await mountPlans()
+    const iframe = view.find('iframe.plan-doc-frame')
+    const iframeEl = iframe.element as HTMLIFrameElement
+    const acknowledgement = vi.fn()
+    const frameWin = { postMessage: acknowledgement } as unknown as Window
+    Object.defineProperty(iframeEl, 'contentWindow', { value: frameWin, configurable: true })
+    const documentToken = (iframeEl.getAttribute('srcdoc') || '').match(/(?:var documentToken = |"documentToken":)"([0-9a-f]{32})"/)?.[1]
+    expect(documentToken).toBeTruthy()
+
+    window.dispatchEvent(new MessageEvent('message', {
+      source: frameWin,
+      data: { type: 'todo-clicked', todoId: 'todo-1', documentToken },
+    }))
+    await flushPromises()
+    await nextTick()
+
+    expect(state.calls.filter((call) => call.name === 'plans.update_todo')).toEqual([{
+      name: 'plans.update_todo',
+      args: { rel_path: existingPath, todo_id: 'todo-1', status: 'in-progress' },
+    }])
+    expect(state.calls.filter((call) => call.name === 'plans.read')).toHaveLength(1)
+    expect(view.find('iframe.plan-doc-frame').element).toBe(iframeEl)
+    expect((view.find('iframe.plan-doc-frame').element as HTMLIFrameElement).contentWindow).toBe(frameWin)
+    expect((view.find('iframe.plan-doc-frame').element as HTMLIFrameElement).getAttribute('srcdoc')).toContain(`var documentToken = ${JSON.stringify(documentToken)}`)
+    expect(acknowledgement).toHaveBeenCalledWith({
+      type: 'todo-status-updated',
+      documentToken,
+      todoId: 'todo-1',
+      status: 'in-progress',
+    }, '*')
+    expect(view.find('.plan-toolbar-progress').text()).toContain('"done":0')
+  })
+
+  it('mounts the plugin-local Review Notes panel and completes manual CRUD without duplicate Enter submission', async () => {
+    const view = await mountPlans()
+    await view.get('[data-test="review-notes-overflow"]').trigger('click')
+    await view.get('[data-test="review-notes-overflow-item"]').trigger('click')
+    const input = view.get('[data-test="review-note-input"]')
+    expect(input.attributes('placeholder')).toBe('pane.plans.review-add-placeholder')
+    await input.setValue('Need one clarification')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(state.calls.filter((call) => call.name === 'plans.review_note_add')).toHaveLength(1)
+    expect(view.text()).toContain('Need one clarification')
+  })
+
+  it('keeps resolved-only Review Notes exclusively in the overflow and never exposes Reopen', async () => {
+    state.list[0].meta = {
+      schemaVersion: 1,
+      name: 'Existing plan',
+      overview: 'Existing overview',
+      stage: 'in-review',
+      todos: [],
+      reviewNotes: [{ id: 'n1', author: 'user', text: 'Already handled', resolved: true, reply: 'Done', anchor: 'Goals' }],
+    }
+    state.documents[existingPath].meta = state.list[0].meta
+
+    const view = await mountPlans()
+    expect(view.find('.review-notes-toggle').exists()).toBe(false)
+    await view.get('[data-test="review-notes-overflow"]').trigger('click')
+    const menuItem = view.get('[data-test="review-notes-overflow-item"]')
+    await menuItem.trigger('click')
+
+    expect(view.get('[data-test="review-note-anchor-n1"]').text()).toBe('Goals')
+    expect(view.get('[data-test="review-note-reply-n1"]').text()).toBe('Done')
+    expect(view.find('[data-test="resolve-n1"]').exists()).toBe(false)
+    expect(view.text()).not.toContain('pane.plans.review-reopen')
+  })
+
+  it('uses the application confirmation service and preserves the preview identity for Review Notes', async () => {
+    state.list[0].meta = {
+      schemaVersion: 1,
+      name: 'Existing plan',
+      overview: 'Existing overview',
+      stage: 'in-review',
+      todos: [],
+      reviewNotes: [{ id: 'n1', author: 'user', text: 'Delete me', resolved: false, reply: '', anchor: '' }],
+    }
+    state.documents[existingPath].meta = state.list[0].meta
+    state.documents[existingPath].html = '<html><body><h2>Goals</h2></body></html>'
+
+    const view = await mountPlans()
+    const iframe = view.get('iframe.plan-doc-frame').element as HTMLIFrameElement
+    const srcdoc = iframe.getAttribute('srcdoc')
+    const documentToken = srcdoc?.match(/(?:var documentToken = |"documentToken":)"([0-9a-f]{32})"/)?.[1]
+    expect(documentToken).toBeTruthy()
+
+    await view.get('.review-notes-toggle').trigger('click')
+    await view.get('[data-test="delete-n1"]').trigger('click')
+    await flushPromises()
+
+    expect(state.confirm).toHaveBeenCalledOnce()
+    expect(state.calls).toContainEqual({
+      name: 'plans.review_note_delete',
+      args: { rel_path: existingPath, note_id: 'n1' },
+    })
+    expect(view.get('iframe.plan-doc-frame').element).toBe(iframe)
+    expect(view.get('iframe.plan-doc-frame').attributes('srcdoc')).toContain(`var documentToken = ${JSON.stringify(documentToken)}`)
+  })
+
+  it('routes a validated section comment into an anchored Review Note without remounting the iframe', async () => {
+    state.documents[existingPath].html = '<html><body><section><h2>Goals</h2><p>Goal details</p></section></body></html>'
+    const view = await mountPlans()
+    const iframe = view.get('iframe.plan-doc-frame').element as HTMLIFrameElement
+    const frameWin = {} as Window
+    Object.defineProperty(iframe, 'contentWindow', { value: frameWin, configurable: true })
+    const token = iframe.getAttribute('srcdoc')?.match(/(?:var documentToken = |"documentToken":)"([0-9a-f]{32})"/)?.[1]
+    expect(token).toBeTruthy()
+
+    window.dispatchEvent(new MessageEvent('message', {
+      source: frameWin,
+      data: { type: 'section-comment', anchor: 'Goals', documentToken: token },
+    }))
+    await flushPromises()
+    await view.get('[data-test="review-note-input"]').setValue('Anchor this')
+    await view.get('[data-test="review-note-input"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(state.calls).toContainEqual({
+      name: 'plans.review_note_add',
+      args: { rel_path: existingPath, text: 'Anchor this', anchor: 'Goals' },
+    })
+    expect(view.get('iframe.plan-doc-frame').element).toBe(iframe)
+  })
+
+  it('does not apply a pending Plan A review-note response after Plan B is selected', async () => {
+    const planBPath = '.agent-team/plans/plan_b_112233.html'
+    state.list.push({
+      rel_path: planBPath, name: 'Plan B', stage: 'draft',
+      meta: { schemaVersion: 1, name: 'Plan B', overview: '', stage: 'draft', todos: [], reviewNotes: [] },
+    })
+    state.documents[planBPath] = { rel_path: planBPath, meta: state.list[1].meta, html: '<html><body>Plan B</body></html>' }
+    let resolveAdd!: () => void
+    const delayed = new Promise<void>((resolve) => { resolveAdd = resolve })
+    const original = (window as any).nav.callBackend
+    ;(window as any).nav.callBackend = async (reqId: string, name: string, args: Record<string, unknown>) => {
+      if (name === 'plans.review_note_add') await delayed
+      return original(reqId, name, args)
+    }
+
+    const view = await mountPlans()
+    await view.get('[data-test="review-notes-overflow"]').trigger('click')
+    await view.get('[data-test="review-notes-overflow-item"]').trigger('click')
+    await view.get('[data-test="review-note-input"]').setValue('Only A')
+    await view.get('[data-test="review-note-input"]').trigger('keydown', { key: 'Enter' })
+    await view.findAll('.plan-row')[1].trigger('click')
+    await flushPromises()
+    resolveAdd()
+    await flushPromises()
+
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Plan B')
+    expect(view.text()).not.toContain('Only A')
   })
 
   it('prevents cross-document todo mutation race when switching documents while plans.read is deferred', async () => {
@@ -638,7 +1394,7 @@ describe('PlansApp', () => {
     const initialReadsForA = readCallsForA()
 
     const srcdocA = iframeEl.getAttribute('srcdoc') || ''
-    const tokenMatchA = srcdocA.match(/documentToken:\s*"([0-9a-f]{32})"/)
+    const tokenMatchA = srcdocA.match(/(?:var documentToken = |"documentToken":)"([0-9a-f]{32})"/)
     const validTokenA = tokenMatchA ? tokenMatchA[1] : ''
 
     // 1. User initiates switch to Plan B
@@ -655,29 +1411,22 @@ describe('PlansApp', () => {
     )
     await flushPromises()
 
-    // Assertion 1: plans.update_todo targets Plan A, NOT Plan B
-    expect(state.calls).toContainEqual({
-      name: 'plans.update_todo',
-      args: {
-        rel_path: existingPath,
-        todo_id: 'todo-1',
-        status: 'done',
-      },
-    })
+    // A remains painted while B loads, but its generation no longer accepts writes.
+    expect(state.calls.filter(c => c.name === 'plans.update_todo')).toHaveLength(0)
     expect(state.calls.filter((c) => c.name === 'plans.update_todo' && c.args.rel_path === planBPath)).toHaveLength(0)
 
     // Assertion 2: No redundant plans.read(A) was called while B is pending
     expect(readCallsForA()).toBe(initialReadsForA)
 
     // Assertion 3: selected is still Plan A prior to B resolving
-    expect(view.find('.selected-document h2').text()).toBe('Existing plan')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Existing plan')
 
     // 3. Resolve Plan B's read
     resolveReadB()
     await flushPromises()
 
     // Assertion 4: Plan B is applied only after B resolves
-    expect(view.find('.selected-document h2').text()).toBe('Plan B')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Plan B')
   })
 
   it('prevents out-of-order plans.read results when B is read then C is read, and C resolves first', async () => {
@@ -770,7 +1519,7 @@ describe('PlansApp', () => {
     await flushPromises()
 
     // Verify C is displayed
-    expect(view.find('.selected-document h2').text()).toBe('Plan C')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Plan C')
     const iframeC = view.find('iframe.plan-doc-frame')
     const cSrcdoc = iframeC.attributes('srcdoc') ?? ''
     expect(cSrcdoc).toContain('Plan C')
@@ -780,7 +1529,7 @@ describe('PlansApp', () => {
     await flushPromises()
 
     // Stale B must NOT revert the UI from C
-    expect(view.find('.selected-document h2').text()).toBe('Plan C')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Plan C')
     const iframeAfterB = view.find('iframe.plan-doc-frame')
     expect(iframeAfterB.attributes('srcdoc')).toBe(cSrcdoc)
   })
@@ -833,7 +1582,7 @@ describe('PlansApp', () => {
     }
 
     const view = await mountPlans()
-    expect(view.find('.selected-document h2').text()).toBe('Plan A')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Plan A')
 
     // Start intercepting reads for A (simulating delayed refresh)
     interceptA = true
@@ -848,7 +1597,7 @@ describe('PlansApp', () => {
       const frameWin = {} as Window
       Object.defineProperty(frameEl, 'contentWindow', { value: frameWin, configurable: true })
       const srcdocA = frameEl.getAttribute('srcdoc') || ''
-      const tokenMatchA = srcdocA.match(/documentToken:\s*"([0-9a-f]{32})"/)
+      const tokenMatchA = srcdocA.match(/(?:var documentToken = |"documentToken":)"([0-9a-f]{32})"/)
       const validTokenA = tokenMatchA ? tokenMatchA[1] : ''
       window.dispatchEvent(
         new MessageEvent('message', {
@@ -864,7 +1613,7 @@ describe('PlansApp', () => {
     await flushPromises()
 
     // B is now selected and displayed
-    expect(view.find('.selected-document h2').text()).toBe('Plan B')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Plan B')
     const bSrcdoc = view.find('iframe.plan-doc-frame').attributes('srcdoc') ?? ''
     expect(bSrcdoc).toContain('Plan B')
 
@@ -873,7 +1622,7 @@ describe('PlansApp', () => {
     await flushPromises()
 
     // The UI must remain on Plan B and not revert to Plan A
-    expect(view.find('.selected-document h2').text()).toBe('Plan B')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Plan B')
     expect(view.find('iframe.plan-doc-frame').attributes('srcdoc')).toBe(bSrcdoc)
   })
 
@@ -971,10 +1720,10 @@ describe('PlansApp', () => {
     })
 
     const view = await mountPlans()
-    expect(view.find('.selected-document h2').text()).toBe('Plan A')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Plan A')
 
-    const openEditorBtn = view.find('button[title="action.open-in-editor"]')
-    expect(openEditorBtn.exists()).toBe(true)
+    await view.get('.plan-row').trigger('contextmenu', { clientX: 50, clientY: 50 })
+    const openEditorBtn = view.findAll('.context-menu button').find(button => button.text() === 'action.open-in-editor')!
     await openEditorBtn.trigger('click')
     await flushPromises()
 
@@ -983,6 +1732,6 @@ describe('PlansApp', () => {
       method: 'openInEditor',
       args: { path: existingPath },
     })
-    expect(view.find('.selected-document h2').text()).toBe('Plan A')
+    expect(view.get('.selected-document').attributes('aria-label')).toBe('Plan A')
   })
 })

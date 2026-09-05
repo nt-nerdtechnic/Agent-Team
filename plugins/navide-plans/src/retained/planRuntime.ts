@@ -87,6 +87,30 @@ export function extractPlanOutline(content: string): string[] {
   return anchors
 }
 
+/** Apply confirmed todo writes without replacing the iframe document. */
+export function buildTodoStatusRuntime(documentToken: string, todoIds: string[]): string {
+  return `;(function () {
+    var documentToken = ${JSON.stringify(documentToken)};
+    var validTodoIds = ${JSON.stringify(todoIds)};
+    window.addEventListener('message', function (event) {
+      if (event.source !== window.parent) return;
+      var message = event.data;
+      if (!message || message.type !== 'todo-status-updated' || message.documentToken !== documentToken) return;
+      if (validTodoIds.indexOf(message.todoId) === -1 || ['pending', 'in-progress', 'done', 'skipped'].indexOf(message.status) === -1) return;
+      var todo = document.querySelector('[data-todo-id="' + CSS.escape(message.todoId) + '"]');
+      if (!todo) return;
+      todo.setAttribute('data-status', message.status);
+      todo.setAttribute('data-todo-status', message.status);
+      todo.classList.toggle('is-complete', message.status === 'done');
+      var label = todo.querySelector('.st');
+      if (label) label.textContent = message.status;
+      var checkbox = todo.querySelector('input[type="checkbox"]');
+      if (checkbox) checkbox.checked = message.status === 'done';
+      if (checkbox) checkbox.setAttribute('aria-checked', message.status === 'done' ? 'true' : 'false');
+    });
+  })();`
+}
+
 export interface PlanRuntimeHostHooks {
   /** The plan preview iframe's contentWindow; messages from any other source are ignored. */
   getSourceWindow: () => Window | null | undefined

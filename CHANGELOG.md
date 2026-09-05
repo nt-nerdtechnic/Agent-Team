@@ -4,6 +4,12 @@ All notable released changes to Navide will be documented in this file. The form
 
 ## [Unreleased]
 
+### Changed
+
+- Document that Plans legacy recovery is authorized only by the Host-minted
+  pre-dispatch `legacy-safe-before-dispatch` disposition; post-dispatch errors,
+  stopping, Grant revocation, and policy denial do not retry legacy.
+
 ### Added
 
 - Add a dedicated Settings → Execution Policy editor for the Host default,
@@ -130,6 +136,11 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Fixed
 
+- Restore the retained Plans toolbar and Review Notes inside the packaged
+  Plans contribution, including overflow clicks, note editing focus,
+  application confirmation, anchored comments, and plan-switch isolation.
+  Opt-in development provenance and emitted-frontend integration checks now
+  distinguish the selected installed package from the current worktree build.
 - Prevent unintended editor opens from Plans navigation: standalone initial
   `rel_path` document loading and plan row clicks now only inspect and render
   the plan in the standalone view without invoking `ui.openInEditor`. Left-sidebar

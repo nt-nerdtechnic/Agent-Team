@@ -4,8 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { SafeAiCliPanel } from '@navide/plugin-ui'
 import {
   preparePlanDocHtml,
-  createSafeTodoClickHandler,
-} from '@navide/plugin-ui/shared'
+} from './planSecurity'
 import { useNotify, useTheme } from '@navide/plugin-ui/foundation'
 import {
   backendErrorMessage,
@@ -16,6 +15,13 @@ import {
   setWorkspacePreference,
   createPlansAiCliController,
 } from './backend'
+import PlanReviewToolbar from './retained/PlanReviewToolbar.vue'
+import NotificationHost from './retained/NotificationHost.vue'
+import { resolvePlanStore } from './retained/planStore'
+import { parseHtmlPlanMeta } from './retained/usePlanHtml'
+import { plansTransport } from './retained/transport'
+import type { ReviewNote, PlanTodo as RetainedTodo, PlanMeta as RetainedMeta } from './retained/planModel'
+import { buildPlanRuntimeScript, buildTodoStatusRuntime, createPlanRuntimeMessageHandler, sanitizePlanSectionHtml } from './retained/planRuntime'
 
 interface TodoSummary {
   total: number
@@ -36,7 +42,7 @@ interface PlanMeta {
   approvedAt?: string | null
   archivedAt?: string | null
   todos: PlanTodo[]
-  reviewNotes: Array<{ id: string; author: string; text: string; resolved?: boolean }>
+  reviewNotes: Array<{ id: string; author: string; text: string; resolved?: boolean; reply?: string; anchor?: string }>
   [key: string]: unknown
 }
 
@@ -78,7 +84,7 @@ function isLeftContribution(): boolean {
   return new URLSearchParams(window.location.search).get('contribution') === 'left'
 }
 const { loadTheme } = useTheme()
-const { toast } = useNotify()
+const { toast, confirm } = useNotify()
 const { t, te } = useI18n()
 
 function formatBackendError(cause: unknown): string {
@@ -86,10 +92,12 @@ function formatBackendError(cause: unknown): string {
 }
 
 const planDocFrame = ref<HTMLIFrameElement | null>(null)
+const reviewToolbar = ref<InstanceType<typeof PlanReviewToolbar> | null>(null)
 
 const plans = ref<PlanSummary[]>([])
 const selectedPath = ref(initialRelPath)
 const selected = ref<PlanDocument | null>(null)
+const documentLoadError = ref<{ relPath: string; reason: string } | null>(null)
 const searchQuery = ref('')
 const stageFilter = ref<StageFilter>('all')
 const sort = ref<SortMode>('updated')
@@ -102,8 +110,6 @@ const busy = ref(false)
 const newName = ref('')
 const newOverview = ref('')
 const newTodos = ref('')
-const noteText = ref('')
-const stage = ref<PlanStage>('draft')
 const todoStatus = ref('pending')
 const selectedTodoId = ref('')
 const recentPaths = ref<string[]>([])
@@ -119,81 +125,100 @@ const renameTarget = ref<string | null>(null)
 const renameValue = ref('')
 const aiPanelOpen = ref(false)
 const showCreateForm = ref(false)
-const notesDrawerOpen = ref(false)
 let stopTarget: (() => void) | null = null
 let plansSubscription: ReturnType<typeof plansBackend.subscribe> | null = null
 const aiCliController = createPlansAiCliController()
 
-const selectedSummary = computed<PlanSummary | null>(() => {
-  if (!selectedPath.value) return null
-  return plans.value.find((p) => p.rel_path === selectedPath.value) ?? null
-})
 
-const selectedStage = computed(() => {
-  if (selected.value?.meta?.stage) return selected.value.meta.stage
-  if (selectedSummary.value) return planStage(selectedSummary.value)
-  return null
-})
-
-const selectedProgress = computed(() => {
-  if (selected.value?.meta?.todos) {
-    const todos = selected.value.meta.todos
-    return {
-      done: todos.filter((t) => t.status === 'done').length,
-      total: todos.length,
+const reviewNoteAnchors = computed(() => {
+  const content = selected.value?.html
+  if (!content) return []
+  const document = new DOMParser().parseFromString(content, 'text/html')
+  const anchors: string[] = []
+  for (const heading of document.querySelectorAll('h2, .phase-head')) {
+    let text = ''
+    for (const node of heading.childNodes) {
+      if (node.nodeType === Node.ELEMENT_NODE) break
+      if (node.nodeType === Node.TEXT_NODE) text += node.textContent ?? ''
     }
+    const anchor = text.replace(/\s+/g, ' ').trim()
+    if (anchor && !anchors.includes(anchor)) anchors.push(anchor)
   }
-  if (selectedSummary.value) return planProgress(selectedSummary.value)
-  return { done: 0, total: 0 }
-})
-
-const selectedProgressPercent = computed(() => {
-  const { done, total } = selectedProgress.value
-  if (total <= 0) return 0
-  return Math.min(100, Math.round((done / total) * 100))
+  return anchors
 })
 
 const currentDocumentToken = ref<string | null>(null)
 
+let savedScrollY = 0
+let previewAnchorCounts: Record<string, number> = {}
+const sectionEditing = ref(false)
+const snapshotPreview = ref<{ relPath: string; label: string; html: string; anchors: Record<string, number> } | null>(null)
+const previewHtml = computed(() => snapshotPreview.value?.html ?? selected.value?.html ?? '')
+const previewTodoIds = computed(() => JSON.stringify(snapshotPreview.value ? [] : selected.value?.meta?.todos.map(todo => todo.id) ?? []))
 const preparedDoc = computed(() => {
-  if (!selected.value?.html) return null
-  return preparePlanDocHtml(selected.value.html, {
-    buildTrustedRuntimeScript: ({ documentToken }) => `(function() {
-  document.addEventListener('click', function(e) {
-    var li = e.target.closest('[data-todo-id]');
-    if (li) {
-      var todoId = li.getAttribute('data-todo-id');
-      if (todoId) {
-        window.parent.postMessage({ type: 'todo-clicked', todoId: todoId, documentToken: ${JSON.stringify(documentToken)} }, '*');
-      }
-    }
-  });
-})();`,
+  const html = previewHtml.value
+  if (!html) return null
+  const todoIds = JSON.parse(previewTodoIds.value) as string[]
+  return preparePlanDocHtml(html, {
+    buildTrustedRuntimeScript: ({ documentToken }) => buildPlanRuntimeScript({
+      documentToken,
+      anchors: snapshotPreview.value?.anchors ?? previewAnchorCounts,
+      commentLabel: t('pane.plans.doc-comment'),
+      editLabel: t('pane.plans.edit'), deleteLabel: t('pane.plans.delete'),
+      saveLabel: t('pane.plans.save'), cancelLabel: t('pane.plans.cancel'),
+      scrollY: savedScrollY,
+    }) + buildTodoStatusRuntime(documentToken, todoIds),
   })
 })
 
 watch(preparedDoc, (prepared) => {
+  sectionEditing.value = false
   currentDocumentToken.value = prepared?.documentToken ?? null
 }, { immediate: true })
 
 const iframeSrcdoc = computed(() => preparedDoc.value?.html ?? '')
 
-async function toggleDocTodo(todoId: string): Promise<void> {
+async function toggleDocTodo(todoId: string, alt = false): Promise<void> {
+  if (snapshotPreview.value) return
   const doc = selected.value
   const targetPath = doc?.rel_path
+  const documentToken = currentDocumentToken.value
+  const frameWindow = planDocFrame.value?.contentWindow
   if (!doc || !targetPath) return
   const currentTodo = doc.meta?.todos?.find((t) => t.id === todoId)
-  const nextStatus = currentTodo?.status === 'done' ? 'pending' : 'done'
+  const nextStatus = alt
+    ? currentTodo?.status === 'skipped' ? 'pending' : 'skipped'
+    : currentTodo?.status === 'pending' ? 'in-progress' : currentTodo?.status === 'in-progress' ? 'done' : 'pending'
   try {
     busy.value = true
-    await plansBackend.call('plans.update_todo', {
+    const result = await plansBackend.call('plans.update_todo', {
       rel_path: targetPath,
       todo_id: todoId,
       status: nextStatus,
-    })
-    if (selectedPath.value === targetPath && selected.value?.rel_path === targetPath) {
-      await readPlan(targetPath)
-    }
+    }) as unknown as PlanTodo
+    if (
+      selectedPath.value !== targetPath ||
+      selected.value !== doc ||
+      currentDocumentToken.value !== documentToken ||
+      planDocFrame.value?.contentWindow !== frameWindow ||
+      !frameWindow
+    ) return
+
+    const selectedTodo = doc.meta?.todos?.find((todo) => todo.id === todoId)
+    if (!selectedTodo) return
+    const confirmedStatus = typeof result?.status === 'string' ? result.status : nextStatus
+    selectedTodo.status = confirmedStatus
+    const listedTodo = plans.value
+      .find((plan) => plan.rel_path === targetPath)
+      ?.meta?.todos?.find((todo) => todo.id === todoId)
+    if (listedTodo && listedTodo !== selectedTodo) listedTodo.status = confirmedStatus
+
+    frameWindow.postMessage({
+      type: 'todo-status-updated',
+      documentToken,
+      todoId,
+      status: confirmedStatus,
+    }, '*')
   } catch (cause) {
     toast(formatBackendError(cause), { type: 'error' })
   } finally {
@@ -201,13 +226,58 @@ async function toggleDocTodo(todoId: string): Promise<void> {
   }
 }
 
-const onWindowMessage = createSafeTodoClickHandler({
+
+interface SectionTarget { path: string; generation: number; document: PlanDocument }
+function captureSectionTarget(): SectionTarget | null {
+  if (!selected.value || !selectedPath.value || selected.value.rel_path !== selectedPath.value) return null
+  return { path: selectedPath.value, generation: activeReadGeneration, document: selected.value }
+}
+function isActiveSectionTarget(target: SectionTarget): boolean {
+  return selectedPath.value === target.path && activeReadGeneration === target.generation && selected.value === target.document
+}
+async function replaceSectionBody(anchor: string, html: string): Promise<void> {
+  const target = captureSectionTarget()
+  if (!target) return
+  try {
+    const result = await resolvePlanStore(target.path).replaceSectionBody(
+      { backend: plansTransport, workspacePath, relPath: target.path },
+      anchor, { kind: 'html', sanitized: sanitizePlanSectionHtml(html) },
+    )
+    if (!result.ok) throw new Error(result.error || t('pane.plans.review-save-failed'))
+    if (isActiveSectionTarget(target)) await refreshSelected()
+  } catch (cause) { toast(formatBackendError(cause), { type: 'error' }) }
+}
+async function deleteSection(anchor: string): Promise<void> {
+  const target = captureSectionTarget()
+  if (!target) return
+  const accepted = await confirm(t('pane.plans.section-delete-confirm', { anchor }), {
+    title: t('pane.plans.delete'), confirmText: t('pane.plans.delete'),
+  })
+  if (!accepted || !isActiveSectionTarget(target)) return
+  try {
+    const result = await resolvePlanStore(target.path).deleteSection(
+      { backend: plansTransport, workspacePath, relPath: target.path }, anchor,
+    )
+    if (!result.ok) throw new Error(result.error || t('pane.plans.review-save-failed'))
+    if (isActiveSectionTarget(target)) await refreshSelected()
+  } catch (cause) { toast(formatBackendError(cause), { type: 'error' }) }
+}
+
+const onWindowMessage = createPlanRuntimeMessageHandler({
   getSourceWindow: () => planDocFrame.value?.contentWindow,
-  getValidTodoIds: () => selected.value?.meta?.todos?.map((t) => t.id) ?? [],
-  getDocumentToken: () => currentDocumentToken.value ?? '',
-  onTodoClicked: (todoId) => {
-    void toggleDocTodo(todoId)
+  getDocumentToken: () => selected.value?.rel_path === selectedPath.value ? currentDocumentToken.value ?? '' : '',
+  getTodoIds: () => selected.value?.meta?.todos.map(todo => todo.id) ?? [],
+  getAnchors: () => reviewNoteAnchors.value,
+  onTodoClicked: (todoId, alt) => { void toggleDocTodo(todoId, alt) },
+  onSectionComment: anchor => { if (!snapshotPreview.value && selected.value?.rel_path === selectedPath.value) reviewToolbar.value?.startNoteWithAnchor(anchor) },
+  onScrollPos: y => { savedScrollY = y },
+  onOpenCode: (path, line) => {
+    if (selected.value?.rel_path !== selectedPath.value) return
+    void callCapability('ui', 'openInEditor', { path, line }).catch(cause => toast(formatBackendError(cause), { type: 'error' }))
   },
+  onSectionEdit: (anchor, html) => { if (!snapshotPreview.value) void replaceSectionBody(anchor, html) },
+  onSectionDelete: anchor => { if (!snapshotPreview.value) void deleteSection(anchor) },
+  onSectionEditing: active => { sectionEditing.value = active },
 })
 
 function planTitle(plan: PlanSummary): string {
@@ -443,21 +513,58 @@ function isPinned(relPath: string): boolean {
 let activeReadGeneration = 0
 
 function applySelected(document: PlanDocument, relPath: string): void {
+  previewAnchorCounts = countNoteAnchors(document.meta?.reviewNotes ?? [])
   selected.value = { ...document, rel_path: document.rel_path || relPath }
   selectedPath.value = relPath
-  stage.value = (document.meta?.stage as PlanStage | undefined) ?? 'draft'
   selectedTodoId.value = document.meta?.todos[0]?.id ?? ''
   todoStatus.value = document.meta?.todos[0]?.status ?? 'pending'
 }
 
+function countNoteAnchors(notes: PlanMeta['reviewNotes']): Record<string, number> {
+  const counts: Record<string, number> = Object.create(null)
+  for (const note of notes) {
+    if (!note.resolved && note.anchor) counts[note.anchor] = (counts[note.anchor] ?? 0) + 1
+  }
+  return counts
+}
+
+function applyToolbarMetadata(meta: RetainedMeta): void {
+  if (!selected.value || selected.value.rel_path !== selectedPath.value) return
+  for (const todo of meta.todos) {
+    const previous = selected.value.meta?.todos.find(item => item.id === todo.id)
+    if (previous && previous.status !== todo.status) {
+      planDocFrame.value?.contentWindow?.postMessage({ type: 'todo-status-updated', documentToken: currentDocumentToken.value, todoId: todo.id, status: todo.status }, '*')
+    }
+  }
+  selected.value.meta = meta
+  const listed = plans.value.find(plan => plan.rel_path === selectedPath.value)
+  if (listed) listed.meta = meta
+}
+
 async function readPlan(relPath: string): Promise<void> {
   const currentGeneration = ++activeReadGeneration
-  selectedPath.value = relPath
-  const document = await plansBackend.call('plans.read', { rel_path: relPath }) as unknown as PlanDocument
-  if (currentGeneration !== activeReadGeneration || selectedPath.value !== relPath) {
-    return
+  // Close the Review Notes overlay before awaiting the next document. The
+  // panel owns drafts and pending edits, so unmounting it here prevents Plan
+  // A state (or a delayed Plan A request) from surfacing on Plan B.
+  if (selected.value?.rel_path !== relPath) {
+    reviewToolbar.value?.resetDocumentState()
+    snapshotPreview.value = null
+    savedScrollY = 0
+    sectionEditing.value = false
   }
-  applySelected(document, relPath)
+  selectedPath.value = relPath
+  try {
+    const document = await plansBackend.call('plans.read', { rel_path: relPath }) as unknown as PlanDocument
+    if (currentGeneration !== activeReadGeneration || selectedPath.value !== relPath) return
+    documentLoadError.value = null
+    applySelected(document, relPath)
+  } catch (cause) {
+    if (currentGeneration !== activeReadGeneration || selectedPath.value !== relPath) return
+    documentLoadError.value = { relPath, reason: cause instanceof Error ? cause.message : String(cause ?? '').trim() }
+    selected.value = null
+    snapshotPreview.value = null
+    sectionEditing.value = false
+  }
 }
 
 async function openInEditor(relPath: string): Promise<void> {
@@ -543,19 +650,6 @@ async function createPlan(): Promise<void> {
   }
 }
 
-async function updateStage(): Promise<void> {
-  if (!selectedPath.value || !selected.value?.meta) return
-  busy.value = true
-  try {
-    await plansBackend.call('plans.update_stage', { rel_path: selectedPath.value, stage: stage.value })
-    await loadPlans(false)
-    await refreshSelected()
-  } catch (cause) {
-    toast(formatBackendError(cause), { type: 'error' })
-  } finally {
-    busy.value = false
-  }
-}
 
 async function updateTodo(): Promise<void> {
   if (!selectedPath.value || !selectedTodoId.value) return
@@ -575,47 +669,86 @@ async function updateTodo(): Promise<void> {
   }
 }
 
-async function addNote(): Promise<void> {
-  if (!selectedPath.value || !noteText.value.trim()) return
-  busy.value = true
+interface ReviewTarget {
+  path: string
+  generation: number
+  document: PlanDocument
+}
+
+function captureReviewTarget(): ReviewTarget | null {
+  if (!selectedPath.value || !selected.value?.meta || selected.value.rel_path !== selectedPath.value) return null
+  return { path: selectedPath.value, generation: activeReadGeneration, document: selected.value }
+}
+
+function isActiveReviewTarget(target: ReviewTarget): boolean {
+  return selectedPath.value === target.path && activeReadGeneration === target.generation
+}
+
+async function addReviewNote(text: string, anchor = ''): Promise<boolean> {
+  const target = captureReviewTarget()
+  if (!target || !text.trim()) return false
   try {
-    await plansBackend.call('plans.add_note', {
-      rel_path: selectedPath.value,
-      text: noteText.value,
-      author: 'user',
+    const note = await plansBackend.call<PlanMeta['reviewNotes'][number]>('plans.review_note_add', {
+      rel_path: target.path,
+      text: text.trim(),
+      anchor,
     })
-    noteText.value = ''
-    await refreshSelected()
+    if (!isActiveReviewTarget(target) || !target.document.meta) return false
+    target.document.meta.reviewNotes.push(note)
+    const listed = plans.value.find((plan) => plan.rel_path === target.path)?.meta
+    if (listed && listed !== target.document.meta) listed.reviewNotes.push(note)
+    return true
   } catch (cause) {
     toast(formatBackendError(cause), { type: 'error' })
-  } finally {
-    busy.value = false
+    return false
   }
 }
 
-async function setArchived(relPath: string, archivedAt: string | null): Promise<void> {
-  busy.value = true
+async function editReviewNote(id: string, text: string): Promise<boolean> {
+  const target = captureReviewTarget()
+  if (!target) return false
   try {
-    await plansBackend.call('plans.update_archive', { rel_path: relPath, archived_at: archivedAt })
-    await loadPlans(false)
-    await refreshSelected()
-  } catch (cause) {
-    toast(formatBackendError(cause), { type: 'error' })
-  } finally {
-    busy.value = false
-  }
+    const note = await plansBackend.call<PlanMeta['reviewNotes'][number]>('plans.review_note_edit', { rel_path: target.path, note_id: id, text })
+    if (!isActiveReviewTarget(target)) return false
+    const current = target.document.meta?.reviewNotes.find((item) => item.id === id)
+    if (current) Object.assign(current, note)
+    return true
+  } catch (cause) { toast(formatBackendError(cause), { type: 'error' }); return false }
 }
 
-async function toggleArchive(): Promise<void> {
-  if (!selectedPath.value || !selected.value?.meta) return
-  const plan = plans.value.find((item) => item.rel_path === selectedPath.value)
-  const title = plan ? planTitle(plan) : selectedPath.value
-  if (!selected.value.meta.archivedAt && !window.confirm(t('pane.plans.archive-confirm', { name: title }))) return
-  await setArchived(selectedPath.value, selected.value.meta.archivedAt ? null : new Date().toISOString())
+async function resolveReviewNote(id: string): Promise<boolean> {
+  const target = captureReviewTarget()
+  if (!target) return false
+  try {
+    const note = await plansBackend.call<PlanMeta['reviewNotes'][number]>('plans.review_note_resolve', { rel_path: target.path, note_id: id })
+    if (!isActiveReviewTarget(target)) return false
+    const current = target.document.meta?.reviewNotes.find((item) => item.id === id)
+    if (current) Object.assign(current, note)
+    return true
+  } catch (cause) { toast(formatBackendError(cause), { type: 'error' }); return false }
 }
+
+async function deleteReviewNote(id: string): Promise<boolean> {
+  const target = captureReviewTarget()
+  if (!target) return false
+  try {
+    await plansBackend.call('plans.review_note_delete', { rel_path: target.path, note_id: id })
+    if (!isActiveReviewTarget(target) || !target.document.meta) return false
+    target.document.meta.reviewNotes = target.document.meta.reviewNotes.filter((note) => note.id !== id)
+    const listed = plans.value.find((plan) => plan.rel_path === target.path)?.meta
+    if (listed && listed !== target.document.meta) listed.reviewNotes = listed.reviewNotes.filter((note) => note.id !== id)
+    return true
+  } catch (cause) { toast(formatBackendError(cause), { type: 'error' }); return false }
+}
+
 
 async function archiveAllDone(): Promise<void> {
-  if (!archivableDone.value.length || !window.confirm(t('pane.plans.archive-all-confirm', { count: archivableDone.value.length }))) return
+  if (!archivableDone.value.length) return
+  const ok = await confirm(t('pane.plans.archive-all-confirm', { count: archivableDone.value.length }), {
+    title: t('pane.plans.archive-all-done'),
+    confirmText: t('pane.plans.archive-all-done'),
+  })
+  if (!ok) return
   busy.value = true
   try {
     for (const plan of archivableDone.value) {
@@ -635,7 +768,12 @@ async function archiveAllDone(): Promise<void> {
 
 async function deletePath(relPath: string): Promise<void> {
   const plan = plans.value.find((item) => item.rel_path === relPath)
-  if (!plan || !window.confirm(t('pane.plans.delete-confirm', { name: planTitle(plan) }))) return
+  if (!plan) return
+  const ok = await confirm(t('pane.plans.delete-confirm', { name: planTitle(plan) }), {
+    title: t('pane.plans.menu-delete'),
+    confirmText: t('pane.plans.menu-delete'),
+  })
+  if (!ok) return
   busy.value = true
   try {
     await plansBackend.call('plans.delete', { rel_path: relPath })
@@ -656,7 +794,12 @@ async function deletePath(relPath: string): Promise<void> {
 }
 
 async function deleteCompleted(): Promise<void> {
-  if (!deletablePlans.value.length || !window.confirm(t('pane.plans.delete-completed-confirm', { count: deletablePlans.value.length }))) return
+  if (!deletablePlans.value.length) return
+  const ok = await confirm(t('pane.plans.delete-completed-confirm', { count: deletablePlans.value.length }), {
+    title: t('pane.plans.delete-completed-title'),
+    confirmText: t('pane.plans.menu-delete'),
+  })
+  if (!ok) return
   busy.value = true
   try {
     for (const plan of deletablePlans.value) {
@@ -693,30 +836,6 @@ function isHtmlPath(relPath: string): boolean {
   return relPath.toLowerCase().endsWith('.html')
 }
 
-async function renamePlan(): Promise<void> {
-  if (!selectedPath.value || !isHtmlPath(selectedPath.value)) return
-  const currentName = selectedPath.value.split('/').pop() ?? ''
-  const nextName = window.prompt(t('pane.plans.rename-placeholder'), currentName)?.trim()
-  if (!nextName || nextName === currentName) return
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*_[0-9a-f]{6}\.html$/.test(nextName)) {
-    toast(t('pane.plans.rename-invalid'), { type: 'error' })
-    return
-  }
-  busy.value = true
-  try {
-    const result = await plansBackend.call<{ to: string }>('plans.rename', {
-      from: selectedPath.value,
-      to: `.agent-team/plans/${nextName}`,
-    })
-    selectedPath.value = result.to
-    await loadPlans(false)
-    await refreshSelected()
-  } catch (cause) {
-    toast(formatBackendError(cause), { type: 'error' })
-  } finally {
-    busy.value = false
-  }
-}
 
 async function copyPath(relPath: string): Promise<void> {
   try {
@@ -762,6 +881,10 @@ function closeContextMenu(): void {
   contextMenu.value = null
 }
 
+function closeTransientMenus(): void {
+  closeContextMenu()
+}
+
 function openQuickOpen(): void {
   quickOpenActive.value = true
   quickOpenQuery.value = ''
@@ -790,9 +913,45 @@ function onKeydown(event: KeyboardEvent): void {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'p') {
     event.preventDefault()
     openQuickOpen()
+  } else if (event.key === 'Escape' && sectionEditing.value) {
+    event.preventDefault()
+    planDocFrame.value?.contentWindow?.postMessage({ type: 'cancel-edit' }, '*')
+    sectionEditing.value = false
   } else if (event.key === 'Escape' && quickOpenActive.value) {
     closeQuickOpen()
+  } else if (event.key === 'Escape' && reviewToolbar.value?.closeActiveOverlay()) {
+    event.preventDefault()
+  } else if (event.key === 'Escape' && snapshotPreview.value) {
+    snapshotPreview.value = null
   }
+}
+
+function scrollToAnchor(anchor: string): void {
+  planDocFrame.value?.contentWindow?.postMessage({ type: 'scroll-to', anchor }, '*')
+}
+
+async function previewSnapshot(snapshot: { relPath: string; label: string }): Promise<void> {
+  const path = selectedPath.value
+  const generation = activeReadGeneration
+  try {
+    const response = await plansTransport.send<{ ok: boolean; content?: string; error?: string }>('fs.read_file', { rel_path: snapshot.relPath })
+    if (selectedPath.value !== path || activeReadGeneration !== generation) return
+    if (!response.payload.ok || response.payload.content === undefined) throw new Error(response.payload.error || t('pane.plans.history-diff-failed'))
+    snapshotPreview.value = {
+      ...snapshot,
+      html: response.payload.content,
+      anchors: countNoteAnchors(parseHtmlPlanMeta(response.payload.content)?.meta.reviewNotes ?? []),
+    }
+  } catch (cause) { toast(formatBackendError(cause), { type: 'error' }) }
+}
+
+async function onToolbarDeleted(path: string): Promise<void> {
+  if (selected.value?.rel_path === path) {
+    selected.value = null
+    selectedPath.value = ''
+    snapshotPreview.value = null
+  }
+  await loadPlans(false)
 }
 
 function receiveTarget(target: Record<string, string>): void {
@@ -847,7 +1006,7 @@ watch(quickOpenQuery, () => {
 onMounted(() => {
   loadTheme()
   window.addEventListener('keydown', onKeydown)
-  window.addEventListener('click', closeContextMenu)
+  window.addEventListener('click', closeTransientMenus)
   window.addEventListener('message', onWindowMessage)
   try {
     plansSubscription = plansBackend.subscribe('plans.changed', () => void loadPlans(false))
@@ -868,7 +1027,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
-  window.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('click', closeTransientMenus)
   window.removeEventListener('message', onWindowMessage)
   plansSubscription?.dispose()
   plansSubscription = null
@@ -878,33 +1037,32 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="plans-surface" :class="{ 'plans-left-surface': isLeftContribution() }">
-    <div class="plans-layout" :class="{ 'is-collapsed': sidebarCollapsed, 'is-left-contribution': isLeftContribution() }">
-      <aside v-if="!sidebarCollapsed" class="plans-sidebar">
+  <NotificationHost />
+  <div
+    :class="isLeftContribution()
+      ? ['plans-surface', 'plans-left-surface', 'plans-layout', 'is-left-contribution']
+      : ['plan-window']"
+  >
+      <aside
+        v-if="!sidebarCollapsed"
+        class="plans-sidebar"
+        :class="{ 'plan-window-side': !isLeftContribution() }"
+      >
+      <div class="plans-pane">
         <header class="plans-head">
           <div>
             <div class="plans-title">{{ t('pane.plans.title') }}</div>
           </div>
-          <div class="plans-head-actions">
-            <button
-              v-if="!isLeftContribution()"
-              class="plans-icon-btn"
-              type="button"
-              :title="t('pane.plans.v2.quick-open')"
-              :aria-label="t('pane.plans.v2.quick-open')"
-              @click="openQuickOpen"
-            >⌘K</button>
-            <button
-              class="plans-icon-btn"
-              type="button"
-              :title="t('pane.plans.refresh')"
-              :aria-label="t('pane.plans.refresh')"
-              @click="void loadPlans(false)"
-            >↻</button>
-          </div>
+          <button
+            class="plans-icon-btn"
+            type="button"
+            :title="t('pane.plans.refresh')"
+            :aria-label="t('pane.plans.refresh')"
+            @click="void loadPlans(false)"
+          >↻</button>
         </header>
 
-        <div class="sidebar-controls">
+        <div class="plans-toolbar">
           <div class="plans-search">
             <input
               v-model="searchQuery"
@@ -1146,59 +1304,37 @@ onUnmounted(() => {
           </section>
         </div>
 
-        <div v-if="!isLeftContribution()" class="sidebar-create-section">
-          <button type="button" class="sidebar-create-toggle" @click="showCreateForm = !showCreateForm">
-            <span class="create-toggle-icon">{{ showCreateForm ? '▾' : '▸' }}</span>
-            <span class="create-toggle-label">{{ t('pane.plans.v2.new-plan') }}</span>
-          </button>
-          <form v-show="showCreateForm" class="create-form" @submit.prevent="void createPlan()">
-            <h2>{{ t('pane.plans.v2.new-plan') }}</h2>
-            <input v-model="newName" required :placeholder="t('pane.plans.v2.plan-name')" />
-            <input v-model="newOverview" :placeholder="t('pane.plans.v2.overview-placeholder')" />
-            <textarea v-model="newTodos" rows="3" :placeholder="t('pane.plans.v2.todo-placeholder')" />
-            <button type="submit" :disabled="busy">{{ t('action.create') }}</button>
-          </form>
-        </div>
+      </div>
       </aside>
 
-      <main v-if="!isLeftContribution()" class="plan-content">
-        <div v-if="selected" class="selected-document">
-          <div class="content-toolbar">
-            <div class="toolbar-left">
-              <select
-                v-if="selected.meta"
-                v-model="stage"
-                class="plan-chip-select"
-                :class="`plan-chip-select--stage-${stage}`"
-                @change="void updateStage()"
-              >
-                <option v-for="value in PLAN_STAGES" :key="value" :value="value">{{ planStageLabel(value) }}</option>
-              </select>
-              <span v-else-if="selectedStage" class="plan-chip" :class="`plan-chip--stage-${selectedStage}`">
-                {{ planStageLabel(selectedStage) }}
-              </span>
-              <span class="plan-toolbar-progress">
-                {{ t('pane.plans.progress-done', { done: selectedProgress.done, total: selectedProgress.total }) }}
-              </span>
-              <span class="plan-progress-bar" :class="`plan-progress-bar--${stage || selectedStage || 'draft'}`">
-                <span class="plan-progress-fill" :style="{ width: `${selectedProgressPercent}%` }" />
-              </span>
-              <h2 class="document-title">{{ selected.meta?.name ?? selected.rel_path.split('/').pop() }}</h2>
-            </div>
-            <div class="toolbar-actions">
-              <button type="button" :title="t('action.open-in-editor')" @click="void openInEditor(selectedPath)">{{ t('action.open-in-editor') }}</button>
-              <button v-if="selected.meta" type="button" :title="selected.meta.archivedAt ? t('pane.plans.unarchive') : t('pane.plans.archive')" @click="void toggleArchive()">{{ selected.meta.archivedAt ? t('pane.plans.unarchive') : t('pane.plans.archive') }}</button>
-              <button v-if="!selected.meta" type="button" :title="t('pane.plans.menu-upgrade')" @click="void promoteSelected()">{{ t('pane.plans.menu-upgrade') }}</button>
-              <button v-if="isHtmlPath(selectedPath)" type="button" :title="t('action.rename')" @click="void renamePlan()">{{ t('action.rename') }}</button>
-              <button type="button" class="danger" :title="t('action.delete')" @click="void deletePath(selectedPath)">{{ t('action.delete') }}</button>
-              <button
-                type="button"
-                class="ai-toggle-btn"
-                :class="{ 'ai-toggle-btn--active': aiPanelOpen }"
-                title="AI CLI"
-                @click="aiPanelOpen = !aiPanelOpen"
-              >✦</button>
-            </div>
+      <main v-if="!isLeftContribution()" class="plan-window-main plan-content">
+        <div v-if="documentLoadError" class="pdp-error">
+          <span>{{ t('pane.plans.doc-load-failed') }}</span>
+          <span v-if="documentLoadError.reason" class="pdp-error-reason">{{ documentLoadError.reason }}</span>
+          <span class="pdp-error-path">{{ workspacePath }} › {{ documentLoadError.relPath }}</span>
+        </div>
+        <div v-else-if="selected" class="plan-window-doc selected-document" :aria-label="selected.meta?.name ?? selected.rel_path">
+          <PlanReviewToolbar
+            v-if="selected.meta && !snapshotPreview"
+            ref="reviewToolbar"
+            :key="selected.rel_path"
+            :workspace-path="workspacePath"
+            :rel-path="selected.rel_path"
+            :backend="plansTransport"
+            :store="resolvePlanStore(selected.rel_path)"
+            :notes="selected.meta.reviewNotes as ReviewNote[]"
+            :todos="selected.meta.todos as RetainedTodo[]"
+            :note-actions="{ add: addReviewNote, edit: editReviewNote, resolve: resolveReviewNote, remove: deleteReviewNote }"
+            @updated="void refreshSelected()"
+            @metadata="applyToolbarMetadata"
+            @scroll-to-anchor="scrollToAnchor"
+            @preview-snapshot="void previewSnapshot($event)"
+            @deleted="void onToolbarDeleted($event)"
+          />
+          <div v-if="snapshotPreview" class="plan-snapshot-banner">
+            <span class="plan-snapshot-label">{{ snapshotPreview.label }}</span>
+            <span class="plan-snapshot-note">{{ t('pane.plans.snapshot-readonly') }}</span>
+            <button class="plan-snapshot-close" @click="snapshotPreview = null">{{ t('pane.plans.snapshot-close') }}</button>
           </div>
 
           <div class="plan-main-body">
@@ -1235,36 +1371,9 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- Collapsible Review Notes Drawer at bottom -->
-            <div v-if="selected.meta" class="plan-notes-drawer" :class="{ 'is-open': notesDrawerOpen }">
-              <div class="notes-drawer-bar" @click="notesDrawerOpen = !notesDrawerOpen">
-                <span class="notes-drawer-title">
-                  <span class="notes-chevron">{{ notesDrawerOpen ? '▾' : '▴' }}</span>
-                  {{ t('pane.plans.review-notes') }}
-                  <span class="notes-count">({{ selected.meta.reviewNotes?.length ?? 0 }})</span>
-                </span>
-              </div>
-              <div v-show="notesDrawerOpen" class="notes-drawer-body">
-                <article class="plan-summary">
-                  <ul class="notes-list">
-                    <li v-for="note in selected.meta.reviewNotes" :key="note.id" class="note-item">
-                      <strong class="note-author">{{ note.author }}:</strong>
-                      <span class="note-text">{{ note.text }}</span>
-                    </li>
-                    <li v-if="!selected.meta.reviewNotes?.length" class="muted">
-                      {{ t('pane.plans.review-empty') }}
-                    </li>
-                  </ul>
-                </article>
-                <form class="note-form" @submit.prevent="void addNote()">
-                  <input v-model="noteText" :placeholder="t('pane.plans.review-add-placeholder')" />
-                  <button type="submit" :disabled="busy">{{ t('pane.plans.review-send') }}</button>
-                </form>
-              </div>
-            </div>
           </div>
         </div>
-        <div v-else class="empty-state">
+        <div v-else class="plan-window-empty empty-state">
           <h2>{{ t('pane.plans.v2.empty-title') }}</h2>
           <p>{{ t('pane.plans.v2.empty-description') }}</p>
         </div>
@@ -1273,8 +1382,6 @@ onUnmounted(() => {
       <aside v-if="!isLeftContribution() && aiPanelOpen" class="ai-sidebar">
         <SafeAiCliPanel :controller="aiCliController" />
       </aside>
-    </div>
-
     <div v-if="contextMenu" class="context-menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
       <button type="button" @click="void openInEditor(contextMenu.relPath); closeContextMenu()">{{ t('action.open-in-editor') }}</button>
       <button type="button" @click="void copyPath(contextMenu.relPath); closeContextMenu()">{{ t('action.copy-path') }}</button>
@@ -1292,12 +1399,29 @@ onUnmounted(() => {
     </div>
 
     <div v-if="renameTarget" class="overlay" @click.self="cancelRename">
-      <form class="rename-dialog" @submit.prevent="void submitRename()"><h2>{{ t('pane.plans.v2.rename-plan') }}</h2><input ref="renameInput" v-model="renameValue" @keydown.escape="cancelRename" /><div class="toolbar-actions"><button type="button" @click="cancelRename">{{ t('action.cancel') }}</button><button type="submit">{{ t('action.rename') }}</button></div></form>
+      <form class="rename-dialog" @submit.prevent="void submitRename()"><h2>{{ t('pane.plans.v2.rename-plan') }}</h2><input ref="renameInput" v-model="renameValue" @keydown.escape="cancelRename" /><div class="dialog-actions"><button type="button" @click="cancelRename">{{ t('action.cancel') }}</button><button type="submit">{{ t('action.rename') }}</button></div></form>
     </div>
   </div>
 </template>
 
 <style scoped>
+.pdp-error { align-items: center; color: var(--text-muted); display: flex; flex: 1; flex-direction: column; font-size: var(--font-sm); gap: 6px; justify-content: center; padding: 0 16px; text-align: center; }
+.pdp-error-reason, .pdp-error-path { font-size: var(--font-xs); opacity: 0.75; overflow-wrap: anywhere; }
+.pdp-error-path { font-family: var(--font-mono, monospace); }
+.plan-snapshot-banner { align-items: center; background: var(--bg-subtle); border-bottom: 1px solid var(--border-default); display: flex; flex-shrink: 0; font-size: var(--font-xs); gap: 10px; padding: 6px 12px; }
+.plan-snapshot-label { font-weight: 650; }
+.plan-snapshot-note { color: var(--text-muted); flex: 1; font-size: var(--font-2xs); }
+.plan-snapshot-close { background: var(--bg-muted); border: 1px solid var(--border-default); border-radius: 6px; color: var(--text-primary); cursor: pointer; font-size: var(--font-2xs); padding: 3px 10px; }
+.plan-snapshot-close:hover { background: var(--bg-hover-strong); }
+.plan-window {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  overflow: hidden;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  box-sizing: border-box;
+}
 .plans-surface {
   height: 100%;
   width: 100%;
@@ -1312,6 +1436,15 @@ onUnmounted(() => {
   width: 100%;
   max-width: 100%;
   height: 100%;
+}
+.plans-layout.is-left-contribution {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 .plans-head {
   align-items: center;
@@ -1329,11 +1462,6 @@ onUnmounted(() => {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.plans-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
 .plans-icon-btn {
   background: transparent;
   border: 1px solid var(--border-subtle);
@@ -1345,21 +1473,6 @@ onUnmounted(() => {
 }
 .plans-icon-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
 
-.plans-layout {
-  display: flex;
-  flex: 1 1 0;
-  min-height: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-}
-.plans-layout.is-left-contribution {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 0;
-  min-height: 0;
-  overflow: hidden;
-}
 .plans-layout.is-left-contribution .plans-sidebar {
   border-right: 0;
   flex: 1 1 0;
@@ -1384,13 +1497,30 @@ onUnmounted(() => {
   padding: 0;
   box-sizing: border-box;
 }
+.plan-window-side {
+  border-right: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  overflow: hidden;
+  width: 300px;
+}
+.plans-pane {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  font-size: var(--font-xs, 12px);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
 .plans-sidebar-list {
   flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   padding: 0;
 }
-.sidebar-controls {
+.plans-toolbar {
   flex: 0 0 auto;
   border-bottom: 1px solid var(--border-subtle);
   padding: 8px 12px;
@@ -1518,11 +1648,10 @@ onUnmounted(() => {
 .plan-row-progress { display: inline-flex; align-items: center; gap: 6px; }
 .plan-progress-bar {
   background: var(--bg-subtle);
-  border: 1px solid var(--border-default);
   border-radius: 999px;
   height: 4px;
   overflow: hidden;
-  width: 48px;
+  width: 90px;
   display: inline-block;
   vertical-align: middle;
 }
@@ -1605,53 +1734,6 @@ onUnmounted(() => {
 .plans-error { color: var(--text-danger, #d45b5b); }
 .completed-actions { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border-subtle); }
 
-.sidebar-create-section {
-  flex: 0 0 auto;
-  border-top: 1px solid var(--border-subtle);
-  padding: 8px 12px;
-  background: var(--bg-base);
-}
-.sidebar-create-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  background: transparent;
-  border: 1px dashed var(--border-subtle);
-  border-radius: 4px;
-  color: var(--text-muted);
-  font-size: var(--font-2xs, 11px);
-  padding: 4px 8px;
-  cursor: pointer;
-  text-align: left;
-}
-.sidebar-create-toggle:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-  border-color: var(--border-default);
-}
-.sidebar-create-section .create-form {
-  margin-top: 8px;
-  display: grid;
-  gap: 6px;
-}
-.sidebar-create-section .create-form h2 {
-  margin: 0;
-  font-size: var(--font-xs, 12px);
-  color: var(--text-secondary);
-}
-.sidebar-create-section .create-form input,
-.sidebar-create-section .create-form textarea {
-  font-size: var(--font-2xs, 11px);
-  padding: 4px 6px;
-  width: 100%;
-  box-sizing: border-box;
-}
-.sidebar-create-section .create-form button {
-  font-size: var(--font-2xs, 11px);
-  padding: 4px 8px;
-}
-
 .plan-content {
   flex: 1 1 0;
   min-width: 0;
@@ -1661,6 +1743,40 @@ onUnmounted(() => {
   overflow: hidden;
   background: var(--bg-base);
 }
+.plan-window-main {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.plan-window-main > * {
+  flex: 1 1 0;
+  min-height: 0;
+}
+.plan-window-doc {
+  display: flex;
+  flex-direction: column;
+}
+.plan-window-doc > :last-child {
+  flex: 1 1 0;
+  min-height: 0;
+}
+.plan-window-empty {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  font-size: var(--font-sm);
+  justify-content: center;
+}
+.selected-document {
+  display: flex;
+  flex-direction: column;
+}
+.selected-document > :last-child {
+  flex: 1 1 0;
+  min-height: 0;
+}
 .selected-document {
   display: flex;
   flex-direction: column;
@@ -1668,104 +1784,6 @@ onUnmounted(() => {
   width: 100%;
   overflow: hidden;
 }
-.content-toolbar {
-  flex: 0 0 auto;
-  height: 42px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-subtle);
-  box-sizing: border-box;
-}
-.toolbar-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1 1 0;
-  min-width: 0;
-  overflow: hidden;
-}
-.document-title {
-  font-size: var(--font-xs, 12px);
-  font-weight: 600;
-  margin: 0 0 0 4px;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.plan-toolbar-progress {
-  font-size: var(--font-2xs, 11px);
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-.toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-.toolbar-actions button {
-  background: var(--bg-subtle);
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: var(--font-2xs, 11px);
-  padding: 3px 8px;
-  cursor: pointer;
-  line-height: 1.2;
-}
-.toolbar-actions button:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-  border-color: var(--border-default);
-}
-.toolbar-actions button.danger {
-  color: var(--text-danger, #d45b5b);
-}
-.toolbar-actions button.danger:hover {
-  background: rgba(212, 91, 91, 0.15);
-  border-color: rgba(212, 91, 91, 0.3);
-}
-.ai-toggle-btn {
-  background: transparent !important;
-  border: 1px solid var(--border-subtle) !important;
-  border-radius: 4px;
-  color: var(--accent-color, #58a6ff) !important;
-  font-size: 13px !important;
-  padding: 2px 7px !important;
-  cursor: pointer;
-  line-height: 1.2 !important;
-}
-.ai-toggle-btn:hover, .ai-toggle-btn--active {
-  background: rgba(88, 166, 255, 0.15) !important;
-  border-color: var(--accent-color, #58a6ff) !important;
-  color: #fff !important;
-}
-
-.plan-chip-select {
-  appearance: none;
-  -webkit-appearance: none;
-  border-radius: 4px;
-  font-size: var(--font-3xs, 10px);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  padding: 2px 8px;
-  text-transform: uppercase;
-  background: var(--bg-subtle);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
-  cursor: pointer;
-}
-.plan-chip-select--stage-draft { background: rgba(139, 148, 158, 0.2); color: #8b949e; border-color: rgba(139, 148, 158, 0.3); }
-.plan-chip-select--stage-in-review { background: rgba(227, 179, 65, 0.2); color: #e3b341; border-color: rgba(227, 179, 65, 0.3); }
-.plan-chip-select--stage-approved { background: rgba(88, 166, 255, 0.2); color: #58a6ff; border-color: rgba(88, 166, 255, 0.3); }
-.plan-chip-select--stage-in-progress { background: rgba(240, 136, 62, 0.2); color: #f0883e; border-color: rgba(240, 136, 62, 0.3); }
-.plan-chip-select--stage-done { background: rgba(63, 185, 80, 0.2); color: #3fb950; border-color: rgba(63, 185, 80, 0.3); }
-.plan-chip-select--stage-abandoned { background: rgba(139, 148, 158, 0.15); color: #6e7681; border-color: rgba(139, 148, 158, 0.2); }
 
 .plan-main-body {
   flex: 1 1 0;
@@ -1781,7 +1799,7 @@ onUnmounted(() => {
   width: 100%;
   position: relative;
   overflow: hidden;
-  background: var(--bg-base);
+  background: transparent;
 }
 .plan-doc-frame {
   position: absolute;
@@ -1800,66 +1818,6 @@ onUnmounted(() => {
   flex-direction: column;
 }
 
-.plan-notes-drawer {
-  flex: 0 0 auto;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--bg-subtle);
-  display: flex;
-  flex-direction: column;
-  max-height: 40%;
-}
-.notes-drawer-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 16px;
-  cursor: pointer;
-  user-select: none;
-  font-size: var(--font-2xs, 11px);
-  color: var(--text-muted);
-}
-.notes-drawer-bar:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-.notes-drawer-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-}
-.notes-chevron {
-  font-size: 9px;
-}
-.notes-drawer-body {
-  flex: 1 1 0;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  padding: 8px 16px;
-  border-top: 1px solid var(--border-subtle);
-}
-.notes-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.note-item {
-  font-size: var(--font-2xs, 11px);
-  display: flex;
-  gap: 6px;
-}
-.note-author {
-  color: var(--text-secondary);
-}
-.note-text {
-  color: var(--text-primary);
-}
-
 .document-status {
   padding: 12px 24px;
   border-bottom: 1px solid var(--border-subtle);
@@ -1873,10 +1831,6 @@ onUnmounted(() => {
 .plan-summary h3 { margin: 22px 0 6px; font-size: 14px; }
 .plan-summary ul { padding-left: 20px; }
 .plan-summary li.complete { color: var(--success-fg, #5aba75); }
-.note-form { display: flex; gap: 8px; padding: 8px 0; border-top: 1px solid var(--border-subtle); margin-top: 8px; }
-.note-form input { flex: 1; font-size: var(--font-2xs, 11px); }
-.note-form button { font-size: var(--font-2xs, 11px); }
-
 .empty-state { margin: auto; padding: 40px; color: var(--text-muted); text-align: center; }
 
 .ai-sidebar {

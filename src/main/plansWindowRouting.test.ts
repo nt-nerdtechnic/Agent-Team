@@ -27,7 +27,7 @@ describe('Plans window production routing unit tests', () => {
       : {
           id: PLANS_PLUGIN_ID,
           packageVersion,
-          packageDir: '/path/to/plans',
+          packageDir: process.cwd(),
           requires: ['fs', 'ui', 'plans', 'terminal'],
           capabilityPolicy: {
             kind: 'manifest-v2',
@@ -57,9 +57,27 @@ describe('Plans window production routing unit tests', () => {
           ],
         }
 
-    if (descriptor) {
+    if (descriptor?.packageVersion && descriptor.packageDir) {
       manager.registerDescriptor(descriptor, { builtin: true })
-    }
+      manager.registerBackendActivation({
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion: descriptor.packageVersion,
+        packageDir: descriptor.packageDir,
+        entryFile: '/path/to/plans/backend/navide-plans',
+        protocolVersion: 1,
+        activation: 'startup',
+        approvedMethods: ['plans.list'],
+        agentMethods: ['plans.list'],
+        approvedEvents: ['plans.changed'],
+        approvedBridgePorts: ['filesystem'],
+      })
+      manager.setCapabilityGrantResolver(() => ({
+        packageVersion: descriptor.packageVersion!,
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+        storage: true,
+      }))
+    } else if (descriptor) manager.registerDescriptor(descriptor, { builtin: true })
 
     if (options.backendAvailable === false) {
       manager.markPlansBackendUnavailable('child-unavailable')
@@ -126,8 +144,8 @@ describe('Plans window production routing unit tests', () => {
     expect(openSpy).toHaveBeenCalledWith('/test-workspace', '.agent-team/plans/my-plan.html')
   })
 
-  it('delegates to injected openCatalogContributionWindow with navide.plans.window after migration', async () => {
-    const { router, migrations, openCatalogWindowSpy, workspacePath } = setupRouter()
+  it('routes a complete, healthy v2 package to navide.plans.window and never opens legacy', async () => {
+    const { router, migrations, openCatalogWindowSpy, legacyOpened, workspacePath } = setupRouter()
 
     const ok = await router.openPlanWindow(workspacePath, '.agent-team/plans/example.html')
     expect(ok).toBe(true)
@@ -137,6 +155,7 @@ describe('Plans window production routing unit tests', () => {
       workspacePath,
       { rel_path: '.agent-team/plans/example.html' },
     )
+    expect(legacyOpened).toHaveLength(0)
   })
 
   it('passes empty extra params if relPath is omitted', async () => {
@@ -179,6 +198,32 @@ describe('Plans window production routing unit tests', () => {
     expect(legacyOpened).toEqual([{ workspacePath, relPath: '.agent-team/plans/plan.html' }])
   })
 
+  it('routes to legacy plan window when the complete v2 package backend is unavailable', async () => {
+    const { router, legacyOpened, openCatalogWindowSpy, migrations, workspacePath } = setupRouter({
+      backendAvailable: false,
+    })
+
+    const ok = await router.openPlanWindow(workspacePath, '.agent-team/plans/plan.html')
+    expect(ok).toBe(true)
+    expect(migrations).toHaveLength(0)
+    expect(openCatalogWindowSpy).not.toHaveBeenCalled()
+    expect(legacyOpened).toEqual([{ workspacePath, relPath: '.agent-team/plans/plan.html' }])
+  })
+
+  it('does not hide an unavailable v2 backend behind legacy when fallback is denied', async () => {
+    const { router, legacyOpened, openCatalogWindowSpy, migrations, warnings, workspacePath } = setupRouter({
+      backendAvailable: false,
+      fallbackAllowed: false,
+    })
+
+    const ok = await router.openPlanWindow(workspacePath, '.agent-team/plans/plan.html')
+    expect(ok).toBe(false)
+    expect(migrations).toHaveLength(0)
+    expect(openCatalogWindowSpy).not.toHaveBeenCalled()
+    expect(legacyOpened).toHaveLength(0)
+    expect(warnings).toContainEqual(expect.stringContaining('backend is unavailable'))
+  })
+
   it('falls back to legacy plan window if migration puts plans in recovery', async () => {
     const manager = new FrontendPluginManager()
     const workspacePath = '/workspace'
@@ -186,7 +231,7 @@ describe('Plans window production routing unit tests', () => {
       {
         id: PLANS_PLUGIN_ID,
         packageVersion: '0.1.0',
-        packageDir: '/path/to/plans',
+        packageDir: process.cwd(),
         requires: ['fs', 'ui', 'plans', 'terminal'],
         capabilityPolicy: {
           kind: 'manifest-v2',
@@ -217,6 +262,24 @@ describe('Plans window production routing unit tests', () => {
       },
       { builtin: true },
     )
+    manager.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion: '0.1.0',
+      packageDir: process.cwd(),
+      entryFile: '/path/to/plans/backend/navide-plans',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.list'],
+      agentMethods: ['plans.list'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    manager.setCapabilityGrantResolver(() => ({
+      packageVersion: '0.1.0',
+      system: ['fs', 'ui', 'aiCli'],
+      shell: 'allowlist',
+      storage: true,
+    }))
     let recoveryState = false
     const legacyOpened: Array<{ workspacePath: string; relPath?: string }> = []
     const openCatalogWindowSpy = vi.fn(async () => ({ ok: true }))

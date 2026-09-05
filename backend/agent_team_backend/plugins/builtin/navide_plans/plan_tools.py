@@ -39,14 +39,13 @@ from agent_team_backend.plan_provisioning import TEMPLATE_FILENAME, ensure_plan_
 from mcp.server.fastmcp import Context
 
 PLANS_REL_DIR = ".agent-team/plans"
-_HOST_ROUTE_AVAILABILITY_ERRORS = frozenset({
-    "BACKEND_UNAVAILABLE",
-    "INVALID_RUNTIME",
-    "NOT_READY",
-    "PROTOCOL_ERROR",
-    "PLUGIN_STOPPING",
-    "host_timeout",
-    "host_unavailable",
+_LEGACY_SAFE_BEFORE_DISPATCH = "legacy-safe-before-dispatch"
+_READ_ONLY_PLAN_METHODS = frozenset({"plans.list", "plans.read"})
+_MUTATING_PLAN_METHODS = frozenset({
+    "plans.create",
+    "plans.update_stage",
+    "plans.update_todo",
+    "plans.add_note",
 })
 
 
@@ -56,7 +55,12 @@ async def _host_agent_plan_call(
     name: str,
     arguments: dict[str, Any],
 ) -> Any:
-    """Use the production package and fall back only on availability errors."""
+    """Route through the Host; recover only from its pre-dispatch verdict.
+
+    Read-only operations deliberately use the same Host-minted disposition as
+    mutations: a generic availability response cannot prove the current agent
+    Execution Policy still permits the filesystem operation.
+    """
     from agent_team_backend.mcp_server.server import request_host_agent_workspace_backend
 
     response = await request_host_agent_workspace_backend(
@@ -65,21 +69,36 @@ async def _host_agent_plan_call(
         {"reqId": f"mcp:{secrets.token_hex(16)}", "name": name, "args": arguments},
         caller=caller,
     )
-    if response.get("ok") is not True:
-        error = response.get("error")
-        error_code = response.get("error_code")
-        if isinstance(error, dict):
-            error_code = error.get("code") or error_code
-            message = error.get("message")
-        else:
-            message = error
-        if error_code in _HOST_ROUTE_AVAILABILITY_ERRORS:
-            return _NO_HOST_ROUTE
-        raise FsError(
-            str(message or "production Plans backend request was denied"),
-            code=str(error_code) if isinstance(error_code, str) else None,
-        )
-    return response.get("result")
+    if not isinstance(response, dict):
+        raise FsError("production Plans Host reply was malformed", code="BACKEND_UNAVAILABLE")
+    if response.get("ok") is True:
+        if "result" not in response:
+            raise FsError("production Plans Host reply was malformed", code="BACKEND_UNAVAILABLE")
+        return response["result"]
+    if response.get("ok") is not False:
+        raise FsError("production Plans Host reply was malformed", code="BACKEND_UNAVAILABLE")
+
+    error = response.get("error")
+    error_code = response.get("error_code")
+    if isinstance(error, dict):
+        error_code = error.get("code") or error_code
+        message = error.get("message")
+    else:
+        message = error
+    if (
+        name in _READ_ONLY_PLAN_METHODS | _MUTATING_PLAN_METHODS and
+        response.get("recoveryDisposition") == _LEGACY_SAFE_BEFORE_DISPATCH
+    ):
+        if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+            raise FsError("production Plans Host reply was malformed", code="BACKEND_UNAVAILABLE")
+        # This exact value is a Host capability verdict, never an inference
+        # from an error code. It is required for both the read-only recovery
+        # path and every mutation path.
+        return _NO_HOST_ROUTE
+    raise FsError(
+        str(message or "production Plans backend request was denied"),
+        code=error_code if isinstance(error_code, str) else "BACKEND_UNAVAILABLE",
+    )
 
 
 _NO_HOST_ROUTE = object()

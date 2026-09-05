@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import type {} from '../../plugins/navide-plans/src/provenance'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
-import { i18n } from '@navide/plugin-ui/foundation'
+import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
+import { i18n, useNotify } from '@navide/plugin-ui/foundation'
 import { manifestV2CapabilityPolicy } from '../../src/main/plugins/pluginPermissions'
 
 type IpcEvent = { sender: { id: number } }
@@ -19,6 +21,7 @@ const electronMock = vi.hoisted(() => {
   class FakeWebContents {
     readonly id = nextWebContentsId++
     readonly sent: Array<{ channel: string; args: unknown[] }> = []
+    loadedFile?: { path: string; search: string }
     private destroyed = false
 
     isDestroyed(): boolean {
@@ -35,7 +38,8 @@ const electronMock = vi.hoisted(() => {
 
     focus(): void {}
 
-    loadFile(): Promise<void> {
+    loadFile(path: string, options?: { search?: string }): Promise<void> {
+      this.loadedFile = { path, search: options?.search ?? '' }
       return Promise.resolve()
     }
 
@@ -253,7 +257,10 @@ vi.mock('ws', () => ({ WebSocket: coreWsMock.FakeNodeWebSocket }))
 import * as electron from 'electron'
 import {
   FrontendPluginManager,
+  PLANS_AGENT_BACKEND_METHODS,
+  PLANS_BACKEND_METHODS,
   PLANS_PLUGIN_ID,
+  registerBundledPlans,
   type PluginLaunchDescriptor,
 } from '../../src/main/plugins/frontendPluginManager'
 import { createPlansWindowRouter } from '../../src/main/plansWindowRouting'
@@ -264,6 +271,7 @@ import {
   type BackendPluginLaunchSpec,
   type BackendRuntimeContext,
 } from '../../src/main/plugins/pluginBackendSupervisor'
+import { PluginBackendHost } from '../../src/main/plugins/pluginBackendHost'
 import {
   createProductionPlansBridgeDispatcher,
   createTestPlansFilesystemPort,
@@ -272,6 +280,7 @@ import {
 interface FakeWebContentsViewLike {
   webContents: {
     id: number
+    loadedFile?: { path: string; search: string }
   }
   options: {
     webPreferences?: { additionalArguments?: string[] }
@@ -734,9 +743,26 @@ describe('Plans packaged backend composition', () => {
         manager.registerDescriptor(descriptor, { builtin: true })
         manager.setBackendWsUrl('ws://plans-core-test')
         const filesystemPort = createTestPlansFilesystemPort()
+        const writeFile = filesystemPort.writeFile.bind(filesystemPort)
+        let delayMutationResponse = false
+        let committedDelayedWrites = 0
+        filesystemPort.writeFile = async (arguments_, context) => {
+          const result = await writeFile(arguments_, context)
+          if (!delayMutationResponse) return result
+          committedDelayedWrites++
+          return await new Promise((_, reject) => {
+            const abort = () => reject(new Error('test: delay response after committed write'))
+            if (context.signal.aborted) {
+              abort()
+              return
+            }
+            context.signal.addEventListener('abort', abort, { once: true })
+          })
+        }
         manager.configurePlansFilesystemService(filesystemPort)
+        let packageGrantActive = true
         manager.setCapabilityGrantResolver((pluginId, version) => {
-          if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+          if (packageGrantActive && pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
             return {
               packageVersion,
               system: ['fs', 'ui', 'aiCli'],
@@ -1042,8 +1068,532 @@ describe('Plans packaged backend composition', () => {
         })
         expect(manualResult).toMatchObject({ stage: 'done' })
         expect(readFileSync(createdDiskPath, 'utf8')).toMatch(/"stage":\s*"done"/)
+
+        // The packaged child commits one bridge write, but its parent response
+        // is deliberately lost until the Host call times out. This must never
+        // become a second legacy write or a Host recovery disposition.
+        agentFsAllowed = true
+        delayMutationResponse = true
+        const responseLost = await manager.executeAgentBackendCallForWorkspace(
+          PLANS_PLUGIN_ID,
+          tempWorkspace,
+          {
+            reqId: 'agent-response-lost-1',
+            name: 'plans.update_stage',
+            args: { rel_path: createdRelPath, stage: 'in-progress' },
+            timeoutMs: 100,
+          },
+        )
+        expect(responseLost).toMatchObject({
+          reqId: 'agent-response-lost-1',
+          ok: false,
+          error: { code: 'TIMEOUT' },
+        })
+        expect(responseLost).not.toHaveProperty('recoveryDisposition')
+        expect(committedDelayedWrites).toBe(1)
+        expect(readFileSync(createdDiskPath, 'utf8')).toMatch(/"stage":\s*"in-progress"/)
+
+        // During revocation no mutation reaches either packaged or legacy
+        // filesystem code; after the Grant is gone it remains denied.
+        const diskBeforeRevocation = readFileSync(createdDiskPath, 'utf8')
+        let finishRevocation!: () => void
+        const revoke = vi.spyOn(PluginBackendHost.prototype, 'revokePackageVersion')
+          .mockImplementation(() => new Promise<void>((resolve) => { finishRevocation = resolve }))
+        const revocation = manager.revokePackageVersion(PLANS_PLUGIN_ID, packageVersion)
+        await Promise.resolve()
+        const stoppingResponse = await manager.executeAgentBackendCallForWorkspace(
+          PLANS_PLUGIN_ID,
+          tempWorkspace,
+          {
+            reqId: 'agent-revoking-1',
+            name: 'plans.update_stage',
+            args: { rel_path: createdRelPath, stage: 'done' },
+          },
+        )
+        expect(stoppingResponse).toMatchObject({
+          ok: false,
+          error: { code: 'PLUGIN_STOPPING' },
+        })
+        expect(stoppingResponse).not.toHaveProperty('recoveryDisposition')
+        expect(readFileSync(createdDiskPath, 'utf8')).toBe(diskBeforeRevocation)
+        finishRevocation()
+        await revocation
+        revoke.mockRestore()
+
+        packageGrantActive = false
+        const revokedGrantResponse = await manager.executeAgentBackendCallForWorkspace(
+          PLANS_PLUGIN_ID,
+          tempWorkspace,
+          {
+            reqId: 'agent-grant-revoked-1',
+            name: 'plans.update_stage',
+            args: { rel_path: createdRelPath, stage: 'done' },
+          },
+        )
+        expect(revokedGrantResponse).toMatchObject({
+          ok: false,
+          error: { code: 'CAPABILITY_DENIED' },
+        })
+        expect(revokedGrantResponse).not.toHaveProperty('recoveryDisposition')
+        expect(readFileSync(createdDiskPath, 'utf8')).toBe(diskBeforeRevocation)
         manager.destroyInstance(handle.instanceId)
       } finally {
+        rmSync(tempWorkspace, { recursive: true, force: true })
+      }
+    },
+    60_000,
+  )
+
+  runProductionBackendTest(
+    'loads the Host-selected worktree frontend artifact and exercises real review controls',
+    async () => {
+      const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'plans-artifact-review-')))
+      const relPath = '.agent-team/plans/artifact.html'
+      const planPath = join(workspace, relPath)
+      mkdirSync(dirname(planPath), { recursive: true })
+      const metadata = {
+        schemaVersion: 1, name: 'Artifact Review', overview: '', stage: 'in-review', approvedAt: null,
+        todos: [{ id: 'todo-1', content: 'Keep preview stable', status: 'pending' }],
+        reviewNotes: [
+          { id: 'n1', author: 'user', text: 'Original note', resolved: false, reply: '', anchor: 'Goals' },
+          { id: 'n2', author: 'ai', text: 'Resolved note', resolved: true, reply: 'Reply retained', anchor: 'Goals' },
+        ],
+      }
+      writeFileSync(planPath, `<!doctype html><html><head><script id="plan-meta" type="application/json">${JSON.stringify(metadata)}</script></head><body><section><h2>Goals</h2><p>Scope</p></section><ul class="todos"><li data-status="pending" data-todo-id="todo-1">Keep preview stable</li></ul></body></html>`)
+      const root = document.createElement('div')
+      root.id = 'app'
+      document.body.appendChild(root)
+      const styles: HTMLStyleElement[] = []
+      let app: { unmount(): void } | undefined
+      const manager = new FrontendPluginManager()
+      managers.push(manager)
+      try {
+        manager.setPlansDiagnosticsEnabled(true)
+        expect(registerBundledPlans(manager, { isPackaged: false, resourcesPath: '', devRoot: process.cwd() })).toEqual({ registered: true })
+        const descriptor = manager.getDescriptor(PLANS_PLUGIN_ID)!
+        const view = descriptor.views!.find((candidate) => candidate.contributionKey === 'navide.plans.window')!
+        const packageDirectory = realpathSync(join(process.cwd(), 'dist-plugins/navide-plans'))
+        const packageVersion = JSON.parse(readFileSync(join(packageDirectory, 'manifest.json'), 'utf8')).version
+        expect(manager.getPlansProvenance()).toMatchObject({
+          selectionOrigin: 'factory-bundle', packageDirectory, packageVersion,
+          backendExecutable: realpathSync(productionBackend),
+          frontendEntries: { 'navide.plans.window': view.entryFile },
+        })
+        manager.setBackendWsUrl('ws://plans-core-test')
+        manager.configurePlansFilesystemService(createTestPlansFilesystemPort())
+        manager.setCapabilityGrantResolver(() => ({ packageVersion, system: ['fs', 'ui', 'aiCli'], storage: true }))
+        manager.setExecutionPolicyResolver(() => ({
+          policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] }, revision: 1, state: 'user',
+        }))
+        const hostWindow = new electronMock.FakeHostWindow()
+        const capabilityContext = manager.plansCapabilityContext(packageVersion, workspace, view.contributionKey)
+        const handle = await manager.openView(descriptor, view, {
+          hostWindow: hostWindow as never, bounds: 'fill', workspacePath: workspace,
+          query: `?workspace_path=${encodeURIComponent(workspace)}&rel_path=${encodeURIComponent(relPath)}&contribution=window&locale=en-US`,
+          ...(capabilityContext ? { capabilityContext } : {}),
+        })
+        await manager.waitForBackendBinding(handle.instanceId)
+        const contents = (hostWindow.children[0] as FakeWebContentsViewLike).webContents
+        mock.setSender(contents.id)
+        expect(contents.loadedFile?.path).toBe(view.entryFile)
+        process.argv.splice(0, process.argv.length, ...originalArgv, `--plugin-id=${PLANS_PLUGIN_ID}`, '--plugin-backend=1')
+        await import('../../src/preload/plugin-preload')
+        Object.defineProperty(window, 'nav', { value: mock.exposed.nav, configurable: true })
+        Object.defineProperty(globalThis, 'nav', { value: mock.exposed.nav, configurable: true })
+        window.history.replaceState({}, '', `/${contents.loadedFile!.search}`)
+
+        // Execute the entry emitted by Vite, including its bundled Vue/SDK and
+        // production composition. This does not import PlansApp source or stub
+        // a component. Electron/OS edges are the only simulated surfaces.
+        const entry = readFileSync(contents.loadedFile!.path, 'utf8')
+        for (const match of entry.matchAll(/<link[^>]+href="([^"]+\.css)"/g)) {
+          const style = document.createElement('style')
+          style.textContent = readFileSync(resolve(dirname(view.entryFile), match[1]), 'utf8')
+          document.head.appendChild(style)
+          styles.push(style)
+        }
+        const script = entry.match(/<script[^>]+src="([^"]+)"/)
+        expect(script, 'built frontend entry must select an emitted script').not.toBeNull()
+        await import(/* @vite-ignore */ pathToFileURL(resolve(dirname(view.entryFile), script![1])).href)
+        app = (root as typeof root & { __vue_app__?: { unmount(): void } }).__vue_app__
+        expect(app, 'production entry must mount its app').toBeDefined()
+        const config = (await import('../../plugins/navide-plans/vite.config')).default
+        expect(window.__NAVIDE_PLANS_PROVENANCE__).toMatchObject({
+          packageVersion,
+          packageSource: 'factory-bundled',
+          buildId: JSON.parse(config.define!.__NAVIDE_PLANS_BUILD_ID__),
+        })
+        await vi.waitFor(() => expect(root.querySelector('.prt-notes-btn')).not.toBeNull())
+        const get = (selector: string) => {
+          const element = root.querySelector(selector)
+          expect(element, selector).not.toBeNull()
+          return new DOMWrapper(element!)
+        }
+        const calls = (name: string) => mock.invocations.filter((entry) => entry.channel === 'plugin:backend:call' && (entry.payload as { name?: string })?.name === name)
+        const frame = get('.plan-doc-frame').element as HTMLIFrameElement
+        const originalSrcdoc = frame.srcdoc
+        expect(get('.prt-bar .prt-notes-btn').attributes('disabled'), 'Notes must be enabled').toBeUndefined()
+        await get('.prt-bar .prt-notes-btn').trigger('click')
+        await vi.waitFor(() => expect(root.querySelector('.prt > .prt-panel > .prt-new')).not.toBeNull())
+        expect(root.textContent).toContain('Reply retained')
+        expect(get('.prt-approve').attributes('disabled')).toBeDefined()
+        await get('[data-test="edit-n1"]').trigger('click')
+        await vi.waitFor(() => expect(document.activeElement === root.querySelector('[data-test="review-note-edit-input"]')).toBe(true))
+        const editsBefore = calls('plans.review_note_edit').length
+        await get('[data-test="review-note-edit-input"]').setValue('Edited artifact')
+        await get('[data-test="review-note-edit-save"]').trigger('click')
+        await vi.waitFor(() => expect(readFileSync(planPath, 'utf8')).toContain('Edited artifact'))
+        expect(calls('plans.review_note_edit').length - editsBefore).toBe(1)
+        expect(calls('plans.review_note_edit').at(-1)?.payload).toMatchObject({ args: { rel_path: relPath, note_id: 'n1', text: 'Edited artifact' } })
+        await vi.waitFor(() => expect(get('[data-test="delete-n1"]').attributes('disabled')).toBeUndefined())
+        const deletesBefore = calls('plans.review_note_delete').length
+        await get('[data-test="delete-n1"]').trigger('click')
+        await vi.waitFor(() => expect(document.querySelector('.modal .card.confirm')).not.toBeNull())
+        expect(calls('plans.review_note_delete')).toHaveLength(deletesBefore)
+        await new DOMWrapper(document.querySelector('.modal .ghost')!).trigger('click')
+        expect(calls('plans.review_note_delete')).toHaveLength(deletesBefore)
+        await get('[data-test="delete-n1"]').trigger('click')
+        await vi.waitFor(() => expect(document.querySelector('.modal .primary')).not.toBeNull())
+        await new DOMWrapper(document.querySelector('.modal .primary')!).trigger('click')
+        await vi.waitFor(() => expect(calls('plans.review_note_delete')).toHaveLength(deletesBefore + 1))
+        await vi.waitFor(() => expect(readFileSync(planPath, 'utf8')).not.toContain('Edited artifact'))
+        expect(get('.plan-doc-frame').element).toBe(frame)
+        expect(frame.srcdoc === originalSrcdoc, 'note changes must not reload the preview').toBe(true)
+
+        // Authenticate the actual preview message, rather than calling an
+        // exposed Vue method. The emitted runtime supplies this exact token.
+        const documentToken = frame.srcdoc.match(/var documentToken = "([0-9a-f]{32})"/)?.[1]
+        expect(Boolean(documentToken), 'built preview must have a document token').toBe(true)
+        window.dispatchEvent(new MessageEvent('message', {
+          source: frame.contentWindow,
+          data: { type: 'section-comment', anchor: 'Goals', documentToken },
+        }))
+        await vi.waitFor(() => expect(root.querySelector('.prt-note-anchor--pending')?.textContent).toContain('Goals'))
+        await vi.waitFor(() => expect(document.activeElement === root.querySelector('[data-test="review-note-input"]')).toBe(true))
+        const addsBefore = calls('plans.review_note_add').length
+        await get('[data-test="review-note-input"]').setValue('Anchored artifact comment')
+        await get('[data-test="review-note-input"]').trigger('keydown', { key: 'Enter', isComposing: true })
+        expect(calls('plans.review_note_add')).toHaveLength(addsBefore)
+        await get('[data-test="review-note-input"]').trigger('keydown', { key: 'Enter' })
+        await vi.waitFor(() => expect(readFileSync(planPath, 'utf8')).toContain('Anchored artifact comment'))
+        expect(calls('plans.review_note_add')).toHaveLength(addsBefore + 1)
+        expect(calls('plans.review_note_add').at(-1)?.payload).toMatchObject({
+          args: { rel_path: relPath, text: 'Anchored artifact comment', anchor: 'Goals' },
+        })
+        expect(readFileSync(planPath, 'utf8')).toMatch(/"anchor":\s*"Goals"/)
+        await vi.waitFor(() => expect(get('[data-test="review-note-input"]').attributes('disabled')).toBeUndefined())
+        const diskBeforeDenied = readFileSync(planPath, 'utf8')
+        for (const method of ['review_note_add', 'review_note_edit', 'review_note_delete', 'review_note_resolve', 'read_document', 'write_document', 'list_directory']) {
+          expect(await manager.executeAgentBackendCallForWorkspace(PLANS_PLUGIN_ID, workspace, {
+            reqId: `agent-denied-${method}`, name: `plans.${method}`, args: { rel_path: relPath },
+          })).toMatchObject({ ok: false, error: { code: 'CAPABILITY_DENIED' } })
+        }
+        expect(readFileSync(planPath, 'utf8')).toBe(diskBeforeDenied)
+        manager.destroyInstance(handle.instanceId)
+      } finally {
+        app?.unmount()
+        root.remove()
+        styles.forEach((style) => style.remove())
+        rmSync(workspace, { recursive: true, force: true })
+      }
+    },
+    60_000,
+  )
+
+  runProductionBackendTest(
+    'mounts the real PlansApp window and persists Review Notes through the packaged child',
+    async () => {
+      const tempWorkspace = realpathSync(mkdtempSync(join(tmpdir(), 'navide-plans-review-workspace-')))
+      const plansDir = join(tempWorkspace, '.agent-team', 'plans')
+      mkdirSync(plansDir, { recursive: true })
+      const planFile = join(plansDir, 'real-review-plan.html')
+      const initialMeta = {
+        schemaVersion: 1,
+        name: 'Real Review Plan',
+        overview: 'Plan for testing review notes integration',
+        stage: 'in-review',
+        todos: [
+          { id: 'todo-1', content: 'Task 1', status: 'pending' },
+        ],
+        reviewNotes: [],
+      }
+      const initialHtml = `<!DOCTYPE html><html><head><script id="plan-meta" type="application/json">${JSON.stringify(initialMeta)}</script></head><body><h1>Real Review Plan</h1><section><h2>Review Notes</h2><ul class="notes"></ul><p class="note">No review notes.</p></section></body></html>`
+      writeFileSync(planFile, initialHtml, 'utf8')
+
+      let app: { unmount(): void } | undefined
+      try {
+        const manager = new FrontendPluginManager()
+        managers.push(manager)
+        const expectedPlanRoot = tempWorkspace
+        const packageVersion = '0.1.0'
+        const view = {
+          id: 'window',
+          contributionKey: `${PLANS_PLUGIN_ID}.window`,
+          kind: 'custom' as const,
+          location: 'window' as const,
+          title: 'Plans',
+          entryFile: join(expectedPlanRoot, 'src/renderer/plugins/plans/index.html'),
+        }
+        const descriptor: PluginLaunchDescriptor = {
+          id: PLANS_PLUGIN_ID,
+          packageVersion,
+          packageDir: expectedPlanRoot,
+          requires: [...PLANS_PLUGIN_REQUIRES],
+          capabilityPolicy: manifestV2CapabilityPolicy({
+            system: ['fs', 'ui', 'aiCli'],
+          }),
+          devUrl: '',
+          entryFile: view.entryFile,
+          views: [view],
+        }
+        manager.registerDescriptor(descriptor, { builtin: true })
+        manager.setBackendWsUrl('ws://plans-core-test')
+        const filesystemPort = createTestPlansFilesystemPort()
+        manager.configurePlansFilesystemService(filesystemPort)
+        manager.setCapabilityGrantResolver((pluginId, version) => {
+          if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+            return {
+              packageVersion,
+              system: ['fs', 'ui', 'aiCli'],
+              storage: true,
+            }
+          }
+          return null
+        })
+        manager.setExecutionPolicyResolver((_workspacePath) => ({
+          policy: {
+            schemaVersion: 1,
+            mode: 'allowlist',
+            system: ['fs'],
+            shell: [],
+          },
+          revision: 1,
+          state: 'user',
+        }))
+
+        const activation: BackendPluginLaunchSpec = {
+          pluginId: descriptor.id,
+          packageVersion,
+          packageDir: expectedPlanRoot,
+          entryFile: productionBackend,
+          protocolVersion: 1,
+          activation: 'startup',
+          approvedMethods: [...PLANS_BACKEND_METHODS],
+          agentMethods: [...PLANS_AGENT_BACKEND_METHODS],
+          approvedEvents: ['plans.changed'],
+          approvedBridgePorts: ['filesystem'],
+        }
+        manager.registerBackendActivation(activation)
+
+        const supervisor = new PluginBackendSupervisor(activation, {
+          environment: packagedBackendEnvironment,
+          bridgeDispatcher: createProductionPlansBridgeDispatcher({
+            filesystem: filesystemPort,
+          }),
+          authorizedPlanRoot: { value: expectedPlanRoot },
+          resolveExecutionPolicy: (_runtime, _workspacePath) => ({
+            policy: {
+              schemaVersion: 1,
+              mode: 'allowlist',
+              system: ['fs'],
+              shell: [],
+            },
+            revision: 1,
+            state: 'user',
+          }),
+        })
+        supervisors.push(supervisor)
+        await supervisor.start()
+
+        const hostWindow = new electronMock.FakeHostWindow()
+        const capabilityContext = manager.plansCapabilityContext(packageVersion, tempWorkspace, view.contributionKey)
+        const relPath = '.agent-team/plans/real-review-plan.html'
+        const handle = await manager.openView(descriptor, view, {
+          hostWindow: hostWindow as never,
+          bounds: 'fill',
+          workspacePath: tempWorkspace,
+          query: `?window=plans&workspace_path=${encodeURIComponent(tempWorkspace)}&rel_path=${encodeURIComponent(relPath)}`,
+          ...(capabilityContext ? { capabilityContext } : {}),
+        })
+        await manager.waitForBackendBinding(handle.instanceId)
+        const webContents = (hostWindow.children[0] as FakeWebContentsViewLike).webContents
+        mock.setSender(webContents.id)
+
+        process.argv.splice(
+          0,
+          process.argv.length,
+          ...originalArgv,
+          `--plugin-id=${PLANS_PLUGIN_ID}`,
+          '--plugin-backend=1',
+        )
+        await import('../../src/preload/plugin-preload')
+        const nav = mock.exposed.nav
+        expect(nav).toBeDefined()
+        window.history.replaceState(
+          {},
+          '',
+          `/?window=plans&workspace_path=${encodeURIComponent(tempWorkspace)}&rel_path=${encodeURIComponent(relPath)}`,
+        )
+        Object.defineProperty(globalThis, 'window', { value: window, configurable: true })
+        Object.defineProperty(window, 'nav', { value: nav, configurable: true })
+        Object.defineProperty(globalThis, 'nav', { value: nav, configurable: true })
+
+        const { default: PlansApp } = (await import('../../plugins/navide-plans/src/PlansApp.vue')) as {
+          default: any
+        }
+        const mountedApp = mount(PlansApp, {
+          attachTo: document.body,
+          global: {
+            plugins: [i18n],
+            stubs: {
+              SafeAiCliPanel: true,
+            },
+          },
+        })
+        app = mountedApp
+
+        for (let i = 0; i < 50; i++) {
+          await flushPromises()
+          if (mountedApp.find('.selected-document').exists()) break
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        expect(mountedApp.find('.selected-document').exists()).toBe(true)
+
+        // Verify todo toggle preserves iframe identity and documentToken without remount/flash
+        const frameElBefore = mountedApp.find('.plan-doc-frame').element
+        const tokenBefore = (mountedApp.vm as any).currentDocumentToken
+        expect(tokenBefore).toBeDefined()
+        const postMessageMock = vi.fn()
+        Object.defineProperty(frameElBefore, 'contentWindow', {
+          value: { postMessage: postMessageMock },
+          configurable: true,
+        })
+        await (mountedApp.vm as any).toggleDocTodo('todo-1')
+        await flushPromises()
+        expect(mountedApp.find('.plan-doc-frame').element).toBe(frameElBefore)
+        expect((mountedApp.vm as any).currentDocumentToken).toBe(tokenBefore)
+        expect(postMessageMock).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'todo-status-updated',
+          todoId: 'todo-1',
+          status: 'in-progress',
+        }), '*')
+
+        // Open Review Notes Panel
+        const reviewNotesOverflow = mountedApp.get('[data-test="review-notes-overflow"]')
+        await reviewNotesOverflow.trigger('click')
+        await mountedApp.get('[data-test="review-notes-overflow-item"]').trigger('click')
+        await flushPromises()
+
+        const panel = mountedApp.find('.prt > .prt-panel')
+        expect(panel.exists()).toBe(true)
+
+        const input = mountedApp.find('[data-test="review-note-input"]')
+        expect(input.exists()).toBe(true)
+        expect(input.attributes('disabled')).toBeUndefined()
+
+        // Enter with IME composing does not submit
+        await input.setValue('Draft text')
+        await input.trigger('keydown', { key: 'Enter', isComposing: true })
+        await flushPromises()
+        expect(mountedApp.findAll('.prt-panel .prt-note')).toHaveLength(0)
+
+        // Real Enter submits exactly once through the packaged backend child
+        await input.trigger('keydown', { key: 'Enter' })
+        for (let i = 0; i < 50; i++) {
+          await flushPromises()
+          if (mountedApp.findAll('.prt-panel .prt-note').length > 0) break
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+
+        expect(mountedApp.text()).toContain('Draft text')
+        expect(mountedApp.findAll('.prt-panel .prt-note')).toHaveLength(1)
+
+        // Drive the controls rather than exposed component methods. A rendered
+        // button is not evidence that its edit or confirmation UI is usable.
+        await mountedApp.get('[data-test="edit-n1"]').trigger('click')
+        const editInput = mountedApp.get('[data-test="review-note-edit-input"]')
+        expect(editInput.attributes('disabled')).toBeUndefined()
+        expect.soft(document.activeElement, 'Edit must focus its input').toBe(editInput.element)
+        await editInput.setValue('Edited through the UI')
+        await mountedApp.get('[data-test="review-note-edit-save"]').trigger('click')
+        await vi.waitFor(() => expect(mountedApp.text()).toContain('Edited through the UI'))
+        await mountedApp.get('[data-test="delete-n1"]').trigger('click')
+        await flushPromises()
+        expect.soft(document.querySelector('.modal .card.confirm'), 'Delete must render the application confirmation').not.toBeNull()
+        expect(readFileSync(planFile, 'utf8')).toContain('Edited through the UI')
+        // Cancel via the application service so a red assertion cannot leave
+        // an unresolved confirmation leaking into the rest of the suite.
+        useNotify().resolveDialog(false)
+        await flushPromises()
+        await mountedApp.get('[data-test="edit-n1"]').trigger('click')
+        await mountedApp.get('[data-test="review-note-edit-input"]').setValue('Draft text')
+        await mountedApp.get('[data-test="review-note-edit-save"]').trigger('click')
+        await vi.waitFor(() => expect(mountedApp.text()).toContain('Draft text'))
+
+        // Review Notes are metadata-only. They must not cause an incidental iframe
+        // reread/remount or materialize note markup into the plan body.
+        const liveSrcdoc = mountedApp.find('.plan-doc-frame').attributes('srcdoc') ?? ''
+        expect(liveSrcdoc).not.toContain('Draft text')
+        expect(liveSrcdoc).not.toContain('data-note-id="n1"')
+        expect(mountedApp.find('.plan-doc-frame').element).toBe(frameElBefore)
+        expect((mountedApp.vm as any).currentDocumentToken).toBe(tokenBefore)
+
+        // Close and reopen panel retains the note
+        const toggleBtn = mountedApp.get('.review-notes-toggle')
+        await toggleBtn.trigger('click')
+        await flushPromises()
+        expect(mountedApp.find('.prt-panel').exists()).toBe(false)
+        await toggleBtn.trigger('click')
+        await flushPromises()
+        expect(mountedApp.findAll('.prt-panel .prt-note')).toHaveLength(1)
+        expect(mountedApp.text()).toContain('Draft text')
+
+        // Re-read document through the UI retains the note in the panel
+        const planRow = mountedApp.find('.plan-row')
+        expect(planRow.exists()).toBe(true)
+        await planRow.trigger('click')
+        for (let i = 0; i < 50; i++) {
+          await flushPromises()
+          if (mountedApp.findAll('.prt-panel .prt-note').length > 0) break
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        expect(mountedApp.findAll('.prt-panel .prt-note')).toHaveLength(1)
+        expect(mountedApp.text()).toContain('Draft text')
+
+        // Reading the document again returns metadata persisted by the packaged child.
+        const diskContent = readFileSync(planFile, 'utf8')
+        expect(diskContent).toContain('Draft text')
+        expect(diskContent).toMatch(/"id":\s*"n1"/)
+        expect(diskContent).not.toContain('data-note-id="n1"')
+
+        // An anchored manual note crosses the packaged transport unchanged.
+        expect(await (mountedApp.vm as any).addReviewNote('Anchor preserved', 'Goals')).toBe(true)
+        const diskWithAnchor = readFileSync(planFile, 'utf8')
+        expect(diskWithAnchor).toContain('Anchor preserved')
+        expect(diskWithAnchor).toMatch(/"anchor":\s*"Goals"/)
+
+        // Verify MCP/Agent ingress capability denial:
+        const agentResponse = await manager.executeAgentBackendCallForWorkspace(
+          PLANS_PLUGIN_ID,
+          tempWorkspace,
+          {
+            reqId: 'agent-review-note-add-1',
+            name: 'plans.review_note_add',
+            args: { rel_path: relPath, text: 'Agent injected note', anchor: '' },
+          },
+        )
+        expect(agentResponse).toMatchObject({
+          ok: false,
+          error: { code: 'CAPABILITY_DENIED' },
+        })
+
+        // Zero disk modification from rejected agent call
+        const diskAfterDenied = readFileSync(planFile, 'utf8')
+        expect(diskAfterDenied).not.toContain('Agent injected note')
+
+        manager.destroyInstance(handle.instanceId)
+      } finally {
+        app?.unmount()
         rmSync(tempWorkspace, { recursive: true, force: true })
       }
     },
