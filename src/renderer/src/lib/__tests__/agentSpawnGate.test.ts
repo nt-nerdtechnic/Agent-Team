@@ -11,9 +11,15 @@ import {
 } from '../agentSpawnGate'
 import type { CliModelCapability } from '@navide/plugin-shell'
 
-/** Stand-ins for the three shapes AgentSpec takes in the real registry:
- *  a vendor with both flags (codex), one that encodes effort in the model id
- *  (cursor), and one that cannot be told a model at all (droid). */
+/** Synthetic capabilities covering the three shapes AgentSpec can take: both
+ *  flags, model only (the vendor encodes effort in the model id), and neither.
+ *
+ *  The keys are real agent names so the gate's own key whitelist accepts them,
+ *  but the SHAPES are not those vendors' — the real codex declares no
+ *  effortArgs at all, because it takes effort as a config override rather than
+ *  a flag. Read these as fixtures, not as a mirror of the registry; the
+ *  frontend/backend registry pair is what test_cli_vendors_registry.py
+ *  compares. */
 const CAPABILITIES: Record<string, CliModelCapability> = {
   claude: { modelArgs: (m) => `--model ${m}` },
   codex: {

@@ -125,6 +125,79 @@ describe('every buildResumeCommand call site carries the model', () => {
   )
 })
 
+describe('every rebuild/restore spawnPane call site carries the model', () => {
+  // The buildResumeCommand walk above only covers the half of the problem that
+  // goes through a resume command string. The other half is spawnPane's own
+  // model/effort options: a call that reconstructs an EXISTING pane must relaunch
+  // it on the model it was already running. Omitting them there is a LEGAL shape
+  // — resolveCommand reads it as "no model requested" and returns the vendor
+  // default without even a console.warn — so nothing but this guard notices.
+  //
+  // A reconstruction is identified by the options only an already-existing pane
+  // can supply: replacePaneId (swapping into a live pane's slot), resumeSessionId
+  // and restoreMode (reopening a session that already exists). A fresh spawn
+  // carries none of them and has no model to inherit, so it is not asked for one.
+  const MARKERS = ['replacePaneId', 'resumeSessionId', 'restoreMode']
+
+  /** The `{ ... }` options literal of the spawnPane call starting at `at`. */
+  function optionsOf(at: number): string {
+    const open = appSource.indexOf('{', at)
+    let depth = 0
+    for (let i = open; i < appSource.length; i++) {
+      const ch = appSource[i]
+      if (ch === '{') depth++
+      else if (ch === '}' && --depth === 0) return appSource.slice(open, i + 1)
+    }
+    throw new Error(`unbalanced spawnPane options object at ${at}`)
+  }
+
+  const rebuildSites: Array<readonly [string, string]> = []
+  for (let i = appSource.indexOf('spawnPane({'); i > -1;
+       i = appSource.indexOf('spawnPane({', i + 1)) {
+    const options = optionsOf(i)
+    if (MARKERS.some((marker) => options.includes(`${marker}:`))) {
+      const line = appSource.slice(0, i).split('\n').length
+      rebuildSites.push([`App.vue:${line}`, options] as const)
+    }
+  }
+
+  it('finds every reconstruction call site', () => {
+    // onManualResume, rebuildPaneViaResume, rebuildPaneClean, spawnRestoredPane.
+    // Exact, not a floor: a new reconstruction path has to come here and be
+    // added to the walk rather than quietly launching on the vendor default.
+    expect(rebuildSites.map(([where]) => where)).toHaveLength(4)
+  })
+
+  it.each(rebuildSites)('%s asks spawnPane for the pane\'s model', (_where, options) => {
+    expect(options).toMatch(/\bmodel:\s*\S/)
+    expect(options).toMatch(/\beffort:\s*\S/)
+  })
+})
+
+describe('onManualResume — launching on the model is not enough', () => {
+  // This path gets a FRESH pane id and sends no previous_pane_id, so the
+  // backend's _find_manual_pane misses every matcher and creates a NEW record.
+  // Whatever the payload omits is blank on that record for good: saved.command
+  // cannot stand in, because the restore path recognises a resume command
+  // (looksLikeResumeCommand) and refuses to reuse it as a fallback.
+  const body = fn('onManualResume')
+
+  it('launches the resumed pane on the source pane\'s model', () => {
+    expect(body).toContain("model: historyPane?.model ?? ''")
+    expect(body).toContain("effort: historyPane?.effort ?? ''")
+    expect(body).toContain('model: modelRequest.model || undefined')
+    expect(body).toContain('effort: modelRequest.effort || undefined')
+  })
+
+  it('persists them onto the new pane record it creates', () => {
+    const spawnIdx = body.indexOf("'manual_pane.spawn'")
+    expect(spawnIdx).toBeGreaterThan(-1)
+    const payload = body.slice(spawnIdx)
+    expect(payload).toContain('model: modelRequest.model')
+    expect(payload).toContain('effort: modelRequest.effort')
+  })
+})
+
 describe('the model/effort contract fields', () => {
   it('ActivePane keeps what the pane is running', () => {
     const body = iface('ActivePane')
@@ -201,14 +274,16 @@ describe('cli_open_agent — the MCP path from event to persistence', () => {
   )
 
   it.each(['createRequestedPane', 'createStandaloneRequestedPane'])(
-    '%s persists them through manual_pane.spawn — the only write',
+    '%s persists them through manual_pane.spawn — the only write on the MCP path',
     (name) => {
       const body = fn(name)
       const spawnIdx = body.indexOf("'manual_pane.spawn'")
       expect(spawnIdx, name).toBeGreaterThan(-1)
       const payload = body.slice(spawnIdx)
       // Without this the pane record keeps the vendor default and the next app
-      // restart silently reopens on the wrong model.
+      // restart silently reopens on the wrong model. onManualResume writes the
+      // same two fields on the resume path (see its own describe); these two
+      // are the only writes a cli_open_agent spawn ever gets.
       expect(payload).toContain("model: req.model ?? ''")
       expect(payload).toContain("effort: req.effort ?? ''")
     },

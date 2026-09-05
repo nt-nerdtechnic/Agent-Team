@@ -129,6 +129,15 @@ describe('argument-shape guard', () => {
     }
   })
 
+  it('trims surrounding whitespace instead of refusing it, as the backend does', () => {
+    // The backend helper trims too, so both sides answer the same for this.
+    // An interior newline is a different matter and is refused below.
+    expect(modelArgsFor({ spec: full, request: req('  sonnet\n') })).toEqual({
+      ok: true,
+      args: '--model sonnet',
+    })
+  })
+
   it('refuses shell metacharacters and separators', () => {
     for (const attack of ['a;b', 'a|b', 'a&b', '$(whoami)', '`id`', 'a>b', "a'b", 'a\nb']) {
       expect(modelArgsFor({ spec: full, request: req(attack) }), attack).toEqual({

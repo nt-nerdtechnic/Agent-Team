@@ -2268,9 +2268,10 @@ async function createRequestedPane(
     agent: req.agentKey,
     role: '',
     command: '',
-    // The only write of these two: without them the pane record keeps the
-    // vendor default and the next restart reopens on the wrong model. The
-    // backend writes them only when non-empty, so '' leaves the record alone.
+    // The only write of these two on the MCP spawn path: without them the pane
+    // record keeps the vendor default and the next restart reopens on the wrong
+    // model. The backend writes them only when non-empty, so '' leaves the
+    // record alone.
     model: req.model ?? '',
     effort: req.effort ?? '',
     session_id: panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? '',
@@ -2345,8 +2346,8 @@ async function createStandaloneRequestedPane(
     agent: req.agentKey,
     role: '',
     command: '',
-    // Same as createRequestedPane: the only place a spawn's model reaches the
-    // pane record. '' means "not requested" and does not overwrite.
+    // Same as createRequestedPane: the only place an MCP spawn's model reaches
+    // the pane record. '' means "not requested" and does not overwrite.
     model: req.model ?? '',
     effort: req.effort ?? '',
     session_id: panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? '',
@@ -5385,9 +5386,15 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
     ? await savedHistoryFile(agentKey, workspacePath, payload.historyPaneId)
     : ''
   // Model/effort come from the pane this session belongs to when it is still
-  // open (Agent History knows its id). A resume of a session whose pane is
-  // gone has no in-memory source and reopens on the vendor default — the
-  // persisted record is the restore path's job, not this one's.
+  // open (Agent History knows its id), and this path both launches on them and
+  // writes them onto the new pane record below — the resume gets a fresh pane
+  // id with no previous_pane_id, so the backend creates a NEW record and
+  // nothing else would ever fill its model in.
+  //
+  // Known limitation: resuming a session whose pane is already CLOSED (the
+  // common case from Agent History) has no in-memory source, so it reopens on
+  // the vendor default. The old pane's record on disk still carries the model,
+  // but no path reads it back here.
   const historyPane = payload.historyPaneId
     ? panes.value.find((p) => p.id === payload.historyPaneId)
     : undefined
@@ -5427,6 +5434,12 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
       agent: agentKey,
       role: '',
       command: commandOverride,
+      // saved.command cannot stand in for these on the next restart: the
+      // restore path classifies a resume command with looksLikeResumeCommand
+      // and blanks it out, so the record's own model column is the only thing
+      // that survives. The backend writes them only when non-empty.
+      model: modelRequest.model,
+      effort: modelRequest.effort,
       session_id: sessionId,
       session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
       run_group_id: runGroupId || spawnGroupId || undefined,
@@ -6216,6 +6229,13 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
     origin: pane.origin,
     spawnedBy: pane.spawnedBy,
     runGroupId: pane.runGroupId,
+    // Same reason as the resume rebuild's snapshot: a clean rebuild is still
+    // the SAME pane, so it has to relaunch on the model it was running. Drop
+    // these and resolveCommand sees "no model requested" — a legal shape, so
+    // not even a console warning — and the pane silently restarts on the
+    // vendor default while its record on disk still says otherwise.
+    model: pane.model,
+    effort: pane.effort,
   }
   for (const key of lockKeys) rebuildingPanes.add(key)
   try {
@@ -6234,6 +6254,8 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
       spawnedBy: snap.spawnedBy,
       runGroupId: snap.runGroupId || undefined,
       isResume: false,
+      model: snap.model,
+      effort: snap.effort,
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {

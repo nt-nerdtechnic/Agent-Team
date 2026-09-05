@@ -8,6 +8,8 @@ list on their own and route through the same registry.
 from __future__ import annotations
 
 import asyncio
+import pathlib
+import re
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -1866,3 +1868,54 @@ def test_shape_guard_still_accepts_every_real_model_id() -> None:
 def test_shape_guard_rejects_shell_metacharacters() -> None:
     for attack in ("a;b", "a|b", "a&b", "$(whoami)", "`id`", "a>b", "a b", "a\nb"):
         assert plan_mcp._refuse_unsupported_model("claude", attack, "") != "", attack
+
+
+def test_shape_guard_answers_exactly_as_the_renderer_does() -> None:
+    """This guard's value is that both engines agree, so the two things that
+    could make them differ are pinned here: surrounding whitespace is trimmed
+    on both sides (so it is accepted, not refused), while an interior newline
+    is refused on both. The pattern is anchored \\A/\\Z rather than ^/$ because
+    Python's `$` also matches before a trailing newline and JavaScript's does
+    not — belt and braces with the trim above."""
+    assert plan_mcp._refuse_unsupported_model("claude", "  sonnet\n", "") == ""
+    assert plan_mcp._refuse_unsupported_model("claude", "", " high\n") == ""
+    assert plan_mcp._refuse_unsupported_model("claude", "a\nb", "") != ""
+    assert plan_mcp._refuse_unsupported_model("claude", "a b", "") != ""
+
+
+def test_shape_guard_agrees_with_the_renderers_copy() -> None:
+    """The pattern is deliberately duplicated: the renderer builds argv, this
+    side refuses before broadcasting. Duplication only helps while the two
+    agree, so the renderer's literal is read here and both are run over the
+    same vectors.
+
+    The anchors differ on purpose — `^/$` in JavaScript, `\\A/\\Z` in Python —
+    because Python's `$` also matches before a trailing newline. Translating
+    them is what makes the comparison meaningful rather than textual."""
+    source = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "src/renderer/src/platform/plugin-shell/lib/cliModel.ts"
+    ).read_text(encoding="utf-8")
+    literal = re.search(r"const ARGUMENT_SAFE = /(.+)/\n", source)
+    assert literal, "ARGUMENT_SAFE literal not found — did cliModel.ts move?"
+    translated = literal.group(1).replace("\\/", "/")
+    assert translated.startswith("^") and translated.endswith("$")
+    renderer = re.compile(r"\A" + translated[1:-1] + r"\Z")
+
+    for value in (
+        "sonnet",
+        "openai/gpt-5.6-sol",
+        "gpt-5.3-codex-high",
+        "anthropic/claude:thinking",
+        "-r",
+        "--some-flag",
+        "sonnet --some-flag",
+        "a b",
+        "a\nb",
+        "a;b",
+        "$(whoami)",
+        "",
+    ):
+        mine = plan_mcp._ARGUMENT_SAFE.match(value) is not None
+        theirs = renderer.match(value) is not None
+        assert mine == theirs, f"{value!r}: backend={mine} renderer={theirs}"

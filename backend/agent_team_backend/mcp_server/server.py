@@ -486,8 +486,12 @@ def resolve_spawn(request_id: str, verdict: dict[str, Any]) -> bool:
 # src/renderer/src/platform/plugin-shell/lib/cliModel.ts — the renderer builds
 # argv, this copy refuses the request before it is ever broadcast. The dash is
 # excluded from the first position deliberately: `[A-Za-z0-9._:/-]+` alone
-# matches `--dangerously-skip-permissions`, which is the whole attack.
-_ARGUMENT_SAFE = re.compile(r"^[A-Za-z0-9._:/][A-Za-z0-9._:/-]*$")
+# matches a leading-dash flag, which is the whole attack. Anchored with
+# \A/\Z rather than ^/$ because Python's `$` also matches just before a
+# trailing newline while JavaScript's does not — with ^/$ the two engines
+# would disagree on "sonnet\n", and this pattern's only value is that they
+# agree.
+_ARGUMENT_SAFE = re.compile(r"\A[A-Za-z0-9._:/][A-Za-z0-9._:/-]*\Z")
 
 
 def _refuse_unsupported_model(agent_key: str, model: str, effort: str) -> str:
@@ -499,6 +503,12 @@ def _refuse_unsupported_model(agent_key: str, model: str, effort: str) -> str:
     frontend spec, which owns the flags themselves; the guard test in
     test_cli_vendors_registry.py keeps the two from drifting.
     """
+    # Trimmed here rather than trusting the caller, so this helper gives the
+    # same answer as the renderer's modelArgsFor for any input. cli_open_agent
+    # already strips; a future caller that forgets would otherwise get a
+    # backend/renderer disagreement instead of a refusal.
+    model = model.strip()
+    effort = effort.strip()
     if not model and not effort:
         return ""
     from agent_team_backend.cli_vendors import registry

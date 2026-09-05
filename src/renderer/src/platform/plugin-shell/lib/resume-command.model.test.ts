@@ -1,12 +1,12 @@
 // buildResumeCommand × cliModel, exercised against vendor specs that actually
 // declare the model/effort hooks.
 //
-// The shipped AGENT_SPECS declare none yet (that vocabulary is being filled in
-// per vendor), so resume-command.test.ts can only ever show the "no vendor
-// supports a model" half of the contract. This file mocks the spec registry so
-// the other half — the flag really reaching the argv, in the right order, and
-// a refusal degrading to the vendor default rather than losing the pane — is
-// executed rather than assumed.
+// resume-command.test.ts runs against the real registry, where every spec is a
+// moving target: a vendor gaining or losing a flag would silently change what
+// those tests exercise. This file mocks the registry instead, so each shape of
+// the contract — the flag reaching argv, the order it lands in, and a refusal
+// degrading per field rather than costing the pane its model — is pinned to a
+// spec that cannot drift.
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../agents', () => ({
@@ -28,6 +28,17 @@ vi.mock('../agents', () => ({
       resumeArgs: (id: string) => `--resume ${id}`,
     },
     {
+      // Effort but no model — the combination the type system permits and no
+      // shipped vendor uses, which is exactly where per-field degradation has
+      // to be proven.
+      agentKey: 'effortcli',
+      label: 'EffortCLI',
+      defaultCommand: 'effortcli',
+      resumeArgs: (id: string) => `--resume ${id}`,
+      effortArgs: (effort: string) => `--effort ${effort}`,
+      knownEfforts: ['low', 'high'] as const,
+    },
+    {
       // aider's shape: no session ids at all, resume args come from the spec.
       agentKey: 'idlesscli',
       label: 'IdlessCLI',
@@ -36,7 +47,7 @@ vi.mock('../agents', () => ({
       modelArgs: (model: string) => `--model ${model}`,
     },
   ],
-  REBUILD_CAPABLE_AGENTS: ['modelcli', 'plaincli', 'idlesscli'],
+  REBUILD_CAPABLE_AGENTS: ['modelcli', 'plaincli', 'effortcli', 'idlesscli'],
   RESTORE_PIN_AGENTS: [],
 }))
 
@@ -78,9 +89,17 @@ describe('buildResumeCommand model/effort flags', () => {
       .toBe('plaincli --resume abc')
   })
 
-  it('drops an effort the vendor does not accept rather than passing it on', () => {
+  it('drops an unacceptable effort but KEEPS the model', () => {
+    // Per-field degradation. Resolving both together would make a retired
+    // effort level cost the pane its model too, reopening it on the vendor
+    // default — a much larger surprise than losing the effort.
     expect(buildResumeCommand('modelcli', 'abc', '', '', { model: 'opus-9', effort: 'ultra' }))
-      .toBe('modelcli --resume abc')
+      .toBe('modelcli --resume abc --model opus-9')
+  })
+
+  it('drops an unsupported model but KEEPS an acceptable effort', () => {
+    expect(buildResumeCommand('effortcli', 'abc', '', '', { model: 'opus-9', effort: 'high' }))
+      .toBe('effortcli --resume abc --effort high')
   })
 
   it('applies the model flag on the id-less resume path too', () => {
