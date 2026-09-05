@@ -43,6 +43,11 @@ jobs:
         run: pnpm test:run
 
       - name: Build application and bundled plugins
+        # The mini-IDE bundle (Monaco in one rollup graph) peaks above the
+        # runner's ~2GB default V8 heap and aborts with exit 134. Same cap the
+        # release build already uses.
+        env:
+          NODE_OPTIONS: "--max-old-space-size=4096"
         run: pnpm build
 
   backend:
