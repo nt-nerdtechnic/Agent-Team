@@ -15,10 +15,13 @@ import {
   createRail,
   deleteRail,
   filterRowsByRail,
+  nextRailColor,
   parseRails,
   railIdOf,
+  RAIL_PALETTE,
   renameRail,
   serializeRails,
+  setRailColor,
   type RailCell,
   type WorkspaceRail,
 } from '../lib/workspaceRails'
@@ -35,7 +38,7 @@ import type { DisplayStatus } from '@navide/terminal'
 import type { Role, RoleKey } from '../data/roles'
 import type { Stage, StageId } from '../data/stages'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
-import { registerCommand } from '@navide/plugin-ui/shared'
+import { onSettingsChanged, registerCommand, settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { useUpdater } from '../composables/useUpdater'
 import { i18n } from '@navide/plugin-ui/foundation'
 import { useNotify } from '@navide/plugin-ui/foundation'
@@ -397,34 +400,73 @@ const hasWorkspaceRows = computed(() => localWorkspaceRows.value.some((w) => w))
  *  over the list, not a project switcher — which is why the rail holding the
  *  current workspace keeps a dot even while you look at another.
  *
- *  Per window and in sessionStorage, the same judgement `workspaceOrder`
- *  makes. A restart therefore starts with no rails; that is the accepted cost
- *  of not making one window's grouping the other's. Moving to one shared set
- *  is a swap of these two reads/writes for a kv call.
+ *  TWO LAYERS, TWO LIFETIMES — the split is the point:
+ *
+ *  - WHICH GROUPS EXIST is a property of the projects, so it goes through
+ *    `settings*` into the global navide.db (kv → `ui_settings`). It outlives
+ *    the window and every window sees the same set.
+ *  - WHICH GROUP YOU ARE LOOKING AT is a property of this view, so it stays in
+ *    sessionStorage. Sharing it would make one window jump when another
+ *    switched, and a restart is better off showing the whole list than a
+ *    filtered subset nobody remembers choosing.
+ *
+ *  This mirrors what the sidebar already does one level down: run groups are
+ *  persisted per project, while `collapsedWorkspaces` is not persisted at all.
  */
 const RAILS_KEY = 'agentTeam.workspaceRails'
 const ACTIVE_RAIL_KEY = 'agentTeam.activeWorkspaceRail'
 
-function readStored(key: string): string | null {
+/** Rails as stored: the serialized list, or '' when nothing is stored yet. */
+function storedRails(): string {
+  return settingsGet<string>(RAILS_KEY, '')
+}
+
+function readViewState(key: string): string | null {
   try {
     return sessionStorage.getItem(key)
   } catch {
     return null
   }
 }
-function writeStored(key: string, value: string): void {
+function writeViewState(key: string, value: string): void {
   try {
     sessionStorage.setItem(key, value)
   } catch {
-    /* sessionStorage unavailable — the rails just won't survive a reload */
+    /* sessionStorage unavailable — the chosen rail just won't survive a reload */
   }
 }
 
-const workspaceRails = ref<WorkspaceRail[]>(parseRails(readStored(RAILS_KEY)))
-const activeRailId = ref<string>(readStored(ACTIVE_RAIL_KEY) ?? ALL_RAIL_ID)
+/** Seeded synchronously from the settings cache, which the window fills from
+ *  its bootstrap snapshot before first paint — so the rails are already right
+ *  on the first render rather than appearing a beat later. The authoritative
+ *  value arrives on connect-time reconcile and lands through the subscription
+ *  below, which is also what makes a first run (no snapshot) fill in. */
+const workspaceRails = ref<WorkspaceRail[]>(parseRails(storedRails()))
+const activeRailId = ref<string>(readViewState(ACTIVE_RAIL_KEY) ?? ALL_RAIL_ID)
 
-watch(workspaceRails, (rails) => writeStored(RAILS_KEY, serializeRails(rails)), { deep: true })
-watch(activeRailId, (id) => writeStored(ACTIVE_RAIL_KEY, id))
+watch(
+  workspaceRails,
+  (rails) => {
+    const next = serializeRails(rails)
+    // A list that arrived FROM settings must not be written straight back:
+    // the value is already stored, and echoing it would have two windows
+    // ping-pong the same list between them.
+    if (next === storedRails()) return
+    settingsSet(RAILS_KEY, next)
+  },
+  { deep: true }
+)
+watch(activeRailId, (id) => writeViewState(ACTIVE_RAIL_KEY, id))
+
+/** Another window regrouped, or the connect-time reconcile brought the stored
+ *  list in. Either way this window's strip follows. */
+const stopRailSync = onSettingsChanged((keys) => {
+  if (!keys.includes(RAILS_KEY)) return
+  const incoming = storedRails()
+  if (incoming === serializeRails(workspaceRails.value)) return
+  workspaceRails.value = parseRails(incoming)
+})
+onUnmounted(stopRailSync)
 
 /** The real headings, without the `null` that stands for the ungrouped list. */
 const railRows = computed<WorkspaceGroupRow[]>(() =>
@@ -477,29 +519,83 @@ function assignWorkspaceToRail(path: string, railId: string): void {
   closeWsMenu()
 }
 
-/* Naming a rail. An inline field rather than `window.prompt`, which blocks the
- * whole renderer in Electron — the terminals included. */
-const railInput = ref<{ mode: 'create' | 'rename'; id: string; text: string } | null>(null)
+/* Naming a rail.
+ *
+ *  A real dialog, and `position: fixed` — the same call `.ws-ctx-menu` makes
+ *  and for the same reason. The first version was an inline field positioned
+ *  `absolute` inside the strip: it was created correctly and was never once
+ *  visible, because the pane list scrolls under `overflow-y: auto` (which
+ *  clips it) and the status bar sits at z-index 200 (which covers it).
+ *  Clicking ＋ therefore looked like a dead button.
+ *
+ *  Not `window.prompt` either — that blocks the whole renderer in Electron,
+ *  terminals included — and a prompt could not offer the colour, which on an
+ *  8px bar is the group's only label and so has to be the user's choice. */
+const railDialog = ref<{
+  mode: 'create' | 'rename'
+  id: string
+  text: string
+  color: number
+  x: number
+  y: number
+} | null>(null)
 
-function startCreateRail(): void {
-  railMenu.value = null
-  railInput.value = { mode: 'create', id: '', text: '' }
+/** Roughly what the dialog occupies, for the same edge flip the menus do. */
+const RAIL_DLG_H = 168
+const RAIL_DLG_W = 232
+
+function railDialogAt(ev: MouseEvent | undefined): { x: number; y: number } {
+  // Anchored to the pointer when there is one, top-left of the sidebar when
+  // the caller had no event (keyboard activation).
+  const cx = ev?.clientX ?? 60
+  const cy = ev?.clientY ?? 80
+  return {
+    x: Math.max(8, Math.min(cx, window.innerWidth - RAIL_DLG_W - 8)),
+    y: Math.max(8, Math.min(cy, window.innerHeight - RAIL_DLG_H - 8)),
+  }
 }
-function startRenameRail(id: string): void {
-  const rail = workspaceRails.value.find((r) => r.id === id)
+
+function startCreateRail(ev?: MouseEvent): void {
   railMenu.value = null
-  if (rail) railInput.value = { mode: 'rename', id, text: rail.name }
+  railDialog.value = {
+    mode: 'create',
+    id: '',
+    text: '',
+    color: nextRailColor(workspaceRails.value),
+    ...railDialogAt(ev),
+  }
+}
+function startRenameRail(id: string, ev?: MouseEvent): void {
+  const rail = workspaceRails.value.find((r) => r.id === id)
+  const at = railMenu.value ? { x: railMenu.value.x, y: railMenu.value.y } : railDialogAt(ev)
+  railMenu.value = null
+  if (!rail) return
+  railDialog.value = {
+    mode: 'rename',
+    id,
+    text: rail.name,
+    color: rail.color ?? 0,
+    x: Math.min(at.x, window.innerWidth - RAIL_DLG_W - 8),
+    y: Math.min(at.y, window.innerHeight - RAIL_DLG_H - 8),
+  }
 }
 function commitRailInput(): void {
-  const input = railInput.value
+  const input = railDialog.value
   if (!input) return
-  railInput.value = null
+  // A blank name keeps the dialog open rather than silently doing nothing:
+  // the Create button is disabled, and Enter on an empty field is a no-op.
   if (!input.text.trim()) return
+  railDialog.value = null
+  railOpen.value = false
   if (input.mode === 'rename') {
-    workspaceRails.value = renameRail(workspaceRails.value, input.id, input.text)
+    workspaceRails.value = setRailColor(
+      renameRail(workspaceRails.value, input.id, input.text),
+      input.id,
+      input.color
+    )
     return
   }
-  const next = createRail(workspaceRails.value, input.text)
+  const next = createRail(workspaceRails.value, input.text, Date.now(), input.color)
   workspaceRails.value = next
   // Show the new rail at once. Creating a group and being left looking at
   // another one reads as the button having done nothing.
@@ -507,17 +603,38 @@ function commitRailInput(): void {
   if (made) activeRailId.value = made.id
 }
 function cancelRailInput(): void {
-  railInput.value = null
+  railDialog.value = null
+  railOpen.value = false
 }
 
 /** Focus the field the moment it appears. A naming box you have to click into
  *  first is one the keyboard cannot finish. */
 const railInputEl = ref<HTMLInputElement | null>(null)
-watch(railInput, async (open) => {
+watch(railDialog, async (open) => {
   if (!open) return
   await nextTick()
   railInputEl.value?.focus()
   railInputEl.value?.select()
+})
+
+/** Escape closes it; a click outside does too. Same shape as the context
+ *  menus above, minus the scroll listener — the dialog is fixed, so scrolling
+ *  the list underneath does not strand it. */
+function onRailDialogKeydown(ev: KeyboardEvent): void {
+  if (ev.key === 'Escape') cancelRailInput()
+}
+watch(railDialog, (open) => {
+  if (open) {
+    document.addEventListener('click', cancelRailInput)
+    document.addEventListener('keydown', onRailDialogKeydown)
+  } else {
+    document.removeEventListener('click', cancelRailInput)
+    document.removeEventListener('keydown', onRailDialogKeydown)
+  }
+})
+onUnmounted(() => {
+  document.removeEventListener('click', cancelRailInput)
+  document.removeEventListener('keydown', onRailDialogKeydown)
 })
 
 function removeRail(id: string): void {
@@ -533,6 +650,38 @@ function removeRail(id: string): void {
  * outside the list, and detach still keys off the pointer leaving the window. */
 const railDropId = ref<string | null>(null)
 
+/** Whether the flyout — names, counts, ＋ — is out over the list.
+ *
+ *  The 8px strip alone cannot say which colour is which group, so everything
+ *  wider than a bar lives here and appears only while the pointer is on the
+ *  edge or a drag is looking for a target. It overlays rather than pushes:
+ *  the whole point of the strip is that the groups cost the workspace names
+ *  no width. */
+const railOpen = ref(false)
+
+function onStripLeave(): void {
+  // Two reasons to stay out after the pointer goes: a drag still hunting for
+  // a target, and a half-typed group name that would vanish under the cursor.
+  if (railDropId.value !== null || railDialog.value) return
+  railOpen.value = false
+}
+
+/** A workspace heading dragged near the edge opens the flyout, which turns a
+ *  row of 8px bars into targets big enough to actually hit. */
+function onStripDragOver(e: DragEvent): void {
+  if (!e.dataTransfer?.types.includes('application/x-workspace-path')) return
+  e.preventDefault()
+  railOpen.value = true
+}
+function onStripDragLeave(e: DragEvent): void {
+  // dragleave also fires moving BETWEEN children; only a leave that lands
+  // outside the strip is the drag actually going away.
+  const to = e.relatedTarget as Node | null
+  if (to && (e.currentTarget as HTMLElement).contains(to)) return
+  railDropId.value = null
+  railOpen.value = false
+}
+
 function onRailDragOver(e: DragEvent, id: string): void {
   if (!e.dataTransfer?.types.includes('application/x-workspace-path')) return
   e.preventDefault()
@@ -543,6 +692,7 @@ function onRailDragLeave(id: string): void {
 }
 function onRailDrop(e: DragEvent, id: string): void {
   railDropId.value = null
+  railOpen.value = false
   const from = e.dataTransfer?.getData('application/x-workspace-path') ?? ''
   if (!from) return
   workspaceRails.value = assignToRail(workspaceRails.value, from, id)
@@ -1519,6 +1669,9 @@ function onWsDragStart(e: DragEvent, path: string): void {
 function onWsDragEnd(e: DragEvent, path: string): void {
   wsDragOverPath.value = ''
   draggingWorkspacePath = ''
+  // A drag released anywhere else leaves no dragleave on the strip.
+  railDropId.value = null
+  railOpen.value = false
   if (!canDragWorkspace.value) return
   const outside =
     e.clientX < 0 || e.clientY < 0 || e.clientX > window.innerWidth || e.clientY > window.innerHeight
@@ -2263,51 +2416,85 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       <div v-else class="ws-rail-wrap">
         <!-- One glyph per group of workspaces, All pinned first. Filters the
              list beside it; moves nothing else. -->
-        <!-- A group of filter toggles, not a tablist: the ＋ shares the strip
-             with them, and a tablist may only contain tabs. -->
-        <div v-if="showRail" class="ws-rail" role="group" :aria-label="$t('label.workspace-groups')">
-          <button
-            v-for="cell in (workspaceRails.length ? railCells : [])"
-            :key="cell.id || 'all'"
-            class="ws-rcell"
-            :class="{ on: cell.active, drop: railDropId === cell.id, dim: cell.empty && !cell.active }"
-            :aria-pressed="cell.active"
-            :title="`${cell.name} · ${cell.count}`"
-            @click="selectRail(cell.id)"
-            @contextmenu="openRailMenu($event, cell.id)"
-            @dragover="onRailDragOver($event, cell.id)"
-            @dragenter="onRailDragOver($event, cell.id)"
-            @dragleave="onRailDragLeave(cell.id)"
-            @drop.prevent="onRailDrop($event, cell.id)"
-          >
-            <span class="ws-rglyph">{{ cell.glyph }}</span>
-            <span v-if="cell.count" class="ws-rbump">{{ cell.count }}</span>
-            <!-- You are still working in this group even while looking at
-                 another one. Nothing else on screen would say so. -->
-            <span v-if="cell.hasCurrent" class="ws-rdot"></span>
-          </button>
-          <button
-            class="ws-rcell ws-radd"
-            :title="$t('action.new-workspace-group')"
-            :aria-label="$t('action.new-workspace-group')"
-            @click.stop="startCreateRail"
-          >＋</button>
-        </div>
+        <!-- An 8px strip on the very edge: one bar per group, the colour
+             standing in for the name. Everything wider than that — names,
+             counts, the ＋ — lives in a flyout that OVERLAYS the list on
+             hover, so the groups cost the workspace names no width at all.
 
-        <!-- Naming field. Inline rather than window.prompt, which blocks the
-             whole renderer in Electron — terminals included. -->
-        <div v-if="railInput" class="ws-rname" @click.stop>
-          <input
-            ref="railInputEl"
-            v-model="railInput.text"
-            class="ws-rname-in"
-            type="text"
-            maxlength="24"
-            :placeholder="$t('label.workspace-group-name')"
-            @keydown.enter.stop="commitRailInput"
-            @keydown.esc.stop="cancelRailInput"
-            @blur="commitRailInput"
-          />
+             `v-show` on the flyout, not `v-if`: it is the keyboard-reachable
+             copy of the strip, and a menu that does not exist until the
+             pointer arrives cannot be tabbed to. -->
+        <div
+          v-if="showRail"
+          class="ws-strip"
+          :class="{ open: railOpen }"
+          @mouseenter="railOpen = true"
+          @mouseleave="onStripLeave"
+          @dragover="onStripDragOver"
+          @dragleave="onStripDragLeave"
+        >
+          <div class="ws-stick">
+            <div class="ws-bars" role="group" :aria-label="$t('label.workspace-groups')">
+              <button
+                v-for="cell in (workspaceRails.length ? railCells : [])"
+                :key="cell.id || 'all'"
+                class="ws-bar"
+                :class="{
+                  on: cell.active,
+                  drop: railDropId === cell.id,
+                  dim: cell.empty && !cell.active,
+                  cur: cell.hasCurrent,
+                  all: !cell.id,
+                }"
+                :style="cell.color ? { background: cell.color } : undefined"
+                :aria-pressed="cell.active"
+                :title="`${cell.name} · ${cell.count}`"
+                @click="selectRail(cell.id)"
+                @contextmenu="openRailMenu($event, cell.id)"
+                @dragover="onRailDragOver($event, cell.id)"
+                @dragenter="onRailDragOver($event, cell.id)"
+                @dragleave="onRailDragLeave(cell.id)"
+                @drop.prevent="onRailDrop($event, cell.id)"
+              ></button>
+              <button
+                class="ws-bar ws-bar-add"
+                :title="$t('action.new-workspace-group')"
+                :aria-label="$t('action.new-workspace-group')"
+                @click.stop="startCreateRail($event)"
+              ></button>
+            </div>
+
+            <div v-show="railOpen" class="ws-flyout">
+              <button
+                v-for="cell in (workspaceRails.length ? railCells : [])"
+                :key="cell.id || 'all'"
+                class="ws-rcell"
+                :class="{ on: cell.active, drop: railDropId === cell.id, dim: cell.empty && !cell.active }"
+                :aria-pressed="cell.active"
+                @click="selectRail(cell.id)"
+                @contextmenu="openRailMenu($event, cell.id)"
+                @dragover="onRailDragOver($event, cell.id)"
+                @dragenter="onRailDragOver($event, cell.id)"
+                @dragleave="onRailDragLeave(cell.id)"
+                @drop.prevent="onRailDrop($event, cell.id)"
+              >
+                <span
+                  class="ws-rswatch"
+                  :class="{ tint: !!cell.color }"
+                  :style="cell.color ? { '--tint': cell.color } : undefined"
+                ><span class="ws-rglyph">{{ cell.glyph }}</span></span>
+                <span class="ws-rname-t">{{ cell.name }}</span>
+                <!-- You are still working in this group even while looking at
+                     another one. Nothing else on screen would say so. -->
+                <span v-if="cell.hasCurrent" class="ws-rdot"></span>
+                <span v-if="cell.count" class="ws-rbump">{{ cell.count }}</span>
+              </button>
+              <button class="ws-rcell ws-radd" @click.stop="startCreateRail($event)">
+                <span class="ws-rswatch ws-rswatch--add">＋</span>
+                <span class="ws-rname-t">{{ $t('action.new-workspace-group') }}</span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <div class="ws-rail-body">
@@ -2527,13 +2714,57 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         </div><!-- /ws-rail-body -->
       </div><!-- /ws-rail-wrap -->
 
+      <!-- Naming a group. Fixed and high, like the context menus: anything
+           positioned inside the list is clipped by its scroller and painted
+           over by the status bar. -->
+      <div
+        v-if="railDialog"
+        class="ws-gdlg"
+        :style="{ top: `${railDialog.y}px`, left: `${railDialog.x}px` }"
+        @click.stop
+      >
+        <div class="ws-gdlg-t">
+          {{ railDialog.mode === 'create' ? $t('action.new-workspace-group') : $t('action.rename-workspace-group') }}
+        </div>
+        <input
+          ref="railInputEl"
+          v-model="railDialog.text"
+          class="ws-gdlg-in"
+          type="text"
+          maxlength="24"
+          :placeholder="$t('label.workspace-group-name')"
+          @keydown.enter.stop="commitRailInput"
+          @keydown.esc.stop="cancelRailInput"
+        />
+        <div class="ws-gdlg-l">{{ $t('label.workspace-group-colour') }}</div>
+        <div class="ws-gdlg-sw">
+          <button
+            v-for="(c, i) in RAIL_PALETTE"
+            :key="c"
+            class="ws-gsw"
+            :class="{ on: railDialog.color === i }"
+            :style="{ background: c }"
+            :aria-pressed="railDialog.color === i"
+            @click="railDialog.color = i"
+          ></button>
+        </div>
+        <div class="ws-gdlg-a">
+          <button class="ws-gbtn" @click="cancelRailInput">{{ $t('action.cancel') }}</button>
+          <button
+            class="ws-gbtn primary"
+            :disabled="!railDialog.text.trim()"
+            @click="commitRailInput"
+          >{{ railDialog.mode === 'create' ? $t('action.create') : $t('action.save') }}</button>
+        </div>
+      </div>
+
       <div
         v-if="railMenu"
         class="ws-ctx-menu"
         :style="{ top: `${railMenu.y}px`, left: `${railMenu.x}px` }"
         @click.stop
       >
-        <button class="ws-ctx-opt" @click="startRenameRail(railMenu.id)">
+        <button class="ws-ctx-opt" @click="startRenameRail(railMenu.id, $event)">
           {{ $t('action.rename-workspace-group') }}
         </button>
         <div class="ws-add-div"></div>
@@ -3813,9 +4044,13 @@ button.icon-btn.muted:hover {
 /* Collapsed rows are borderless one-liners; the card chrome only appears on
  * the single expanded item so a long list scans as compact rows. */
 /* ── Workspace rail ──────────────────────────────────────────────────────
-   A strip of one-glyph cells down the left edge, one per group of workspaces.
-   Sticky at the same offset the group headings use, so it stays reachable
-   while the list scrolls under it. */
+   Eight pixels on the very edge. One bar per group, the colour standing in
+   for the name; everything wider — names, counts, ＋ — lives in a flyout that
+   OVERLAYS the list rather than pushing it.
+
+   The width is the whole point. The sidebar runs 273–315px, and a pane row
+   already spends 22px on indent plus 13px per lineage level, so the 40px
+   strip this replaced was taking the workspace names' last usable inches. */
 .ws-rail-wrap {
   display: flex;
   align-items: flex-start;
@@ -3827,121 +4062,257 @@ button.icon-btn.muted:hover {
 }
 .ws-rail-body {
   flex: 1;
-  /* Without this a long pane name sets the track's width and the rail gets
+  /* Without this a long pane name sets the track's width and the strip gets
      squeezed out — flex items floor at their content size, not at zero. */
   min-width: 0;
 }
-.ws-rail {
-  flex: none;
-  width: 40px;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 5px 6px 3px;
-  border-right: 1px solid var(--border-muted);
-  /* Same offset and layer as .ws-grp: clears the section header, sits under
-     it, over the rows going past. */
-  position: sticky;
-  top: 29px;
-  z-index: 1;
-  background: var(--bg-base);
-}
-.ws-rcell {
+.ws-strip {
   position: relative;
   flex: none;
-  width: 28px;
-  height: 28px;
+  width: 8px;
+  box-sizing: border-box;
+  /* Over the list, so the flyout is not clipped by the rows it covers. */
+  z-index: 4;
+}
+.ws-stick {
+  /* Same offset and layer logic as .ws-grp: clears the section header. */
+  position: sticky;
+  top: 29px;
+}
+.ws-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 2px;
+}
+.ws-bar {
+  width: 8px;
+  height: 24px;
   padding: 0;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--border-default);
+  opacity: 0.42;
+  cursor: pointer;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.ws-bar:hover { opacity: 0.85; }
+.ws-bar.on { opacity: 1; }
+/* Nothing in this group is open in this window. Faint, never gone: the bar is
+   the way back to the projects it holds. */
+.ws-bar.dim { opacity: 0.16; }
+/* The group you are still working in, while looking at another one. An
+   outline rather than a dot — 8px has no room for a second mark. */
+.ws-bar.cur {
+  outline: 1.5px solid var(--success-fg);
+  outline-offset: 1.5px;
+}
+.ws-bar.drop {
+  outline: 1.5px solid var(--accent-fg);
+  outline-offset: 1.5px;
+  opacity: 1;
+}
+/* All is every group at once, so it takes the neutral ink rather than
+   claiming one of the hues. */
+.ws-bar.all { background: var(--text-muted); }
+.ws-bar-add {
+  height: 12px;
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  opacity: 0.7;
+}
+.ws-bar-add:hover {
+  box-shadow: inset 0 0 0 1px var(--accent-fg);
+  opacity: 1;
+}
+
+/* Absolute is safe HERE, unlike the dialog: the strip plus this is 186px and
+   the left slot's floor is 240px (SLOT_LIMITS.left.min), so it can never reach
+   the scroller's right edge to be clipped. Vertically it grows with the group
+   count, hence the cap — a long list scrolls inside itself rather than running
+   off the bottom of the pane list. */
+.ws-flyout {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  left: 0;
+  min-width: 178px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 5px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-base);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 32%);
+}
+.ws-rcell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 7px 3px 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-primary);
+  font-size: var(--font-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.ws-rcell:hover { background: var(--bg-hover); }
+.ws-rcell.on {
+  background: var(--bg-subtle);
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.ws-rcell.dim { opacity: 0.55; }
+.ws-rcell.drop { border-color: var(--accent-fg); background: var(--bg-hover); }
+.ws-rswatch {
+  flex: none;
+  width: 18px;
+  height: 18px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: var(--bg-subtle);
-  color: var(--text-secondary);
-  font-size: var(--font-sm);
-  font-weight: 700;
-  line-height: 1;
-  cursor: pointer;
-  user-select: none;
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out);
-}
-.ws-rcell:hover { background: var(--bg-hover); color: var(--text-bright); }
-.ws-rcell.on { background: var(--accent-fg); color: var(--bg-base); }
-/* Nothing in this group is open in this window. Dimmed, never hidden: the
-   cell is the way back to the projects it holds. */
-.ws-rcell.dim { opacity: 0.55; }
-.ws-rcell.drop { border-color: var(--accent-fg); background: var(--bg-hover); }
-.ws-rglyph { pointer-events: none; }
-.ws-rbump {
-  position: absolute;
-  top: -3px;
-  right: -4px;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 3px;
-  box-sizing: border-box;
-  border-radius: var(--radius-pill);
-  /* Ringed in the sidebar's own background so the badge reads as sitting on
-     top of the cell rather than being clipped by it. */
-  border: 1.5px solid var(--bg-base);
+  border-radius: var(--radius-xs);
   background: var(--bg-muted);
-  color: var(--text-muted);
-  font-size: var(--font-3xs);
+  color: var(--text-secondary);
+  font-size: var(--font-2xs);
   font-weight: 700;
-  line-height: 11px;
-  font-variant-numeric: tabular-nums;
-  pointer-events: none;
 }
-.ws-rcell.on .ws-rbump { background: var(--bg-base); color: var(--text-primary); }
-/* You are still working in this group while looking at another one. */
+/* Tinted rather than filled: the hue has to carry the group's identity here
+   the same way it does on the bar, but a name still has to be readable on it,
+   and white-on-amber is not. */
+.ws-rswatch.tint {
+  background: color-mix(in srgb, var(--tint) 20%, transparent);
+  color: var(--tint);
+}
+.ws-rswatch--add {
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--font-sm);
+  font-weight: 400;
+}
+.ws-rglyph { line-height: 1; pointer-events: none; }
+.ws-rname-t {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ws-rdot {
-  position: absolute;
-  bottom: -2px;
-  left: 50%;
-  transform: translateX(-50%);
+  flex: none;
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: var(--success-fg);
-  box-shadow: 0 0 0 1.5px var(--bg-base);
-  pointer-events: none;
 }
-.ws-radd {
-  background: transparent;
-  color: var(--text-muted);
-  font-size: var(--font-md);
-  font-weight: 400;
-}
-.ws-radd:hover { background: var(--bg-hover); color: var(--text-bright); }
-/* Floats over the list rather than pushing it: naming a group must not
-   reflow everything underneath it. */
-.ws-rname {
-  position: absolute;
-  z-index: 3;
-  top: 2px;
-  left: 44px;
-}
-.ws-rname-in {
-  width: 148px;
+.ws-rbump {
+  flex: none;
+  min-width: 16px;
+  padding: 0 4px;
   box-sizing: border-box;
-  padding: 3px 7px;
-  border: 1px solid var(--accent-fg);
+  border-radius: var(--radius-pill);
+  background: var(--bg-muted);
+  color: var(--text-muted);
+  font-size: var(--font-3xs);
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.ws-rcell.on .ws-rbump { background: var(--bg-base); color: var(--text-primary); }
+/* Group dialog — naming and colour.
+   Fixed and at menu height for the same reason .ws-ctx-menu is: the pane list
+   scrolls under overflow-y:auto (which clips) and the status bar sits at
+   z-index 200 (which covers). The first version of this was positioned inside
+   the strip and was never visible once. */
+.ws-gdlg {
+  position: fixed;
+  z-index: 300;
+  width: 232px;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated, var(--bg-secondary));
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+.ws-gdlg-t {
+  font-size: var(--font-xs);
+  font-weight: 700;
+  color: var(--text-bright);
+  margin-bottom: 8px;
+}
+.ws-gdlg-in {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-base);
   color: var(--text-primary);
   font-size: var(--font-xs);
   outline: none;
 }
+.ws-gdlg-in:focus { border-color: var(--accent-fg); }
+.ws-gdlg-l {
+  margin: 10px 0 5px;
+  font-size: var(--font-3xs);
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.ws-gdlg-sw { display: flex; gap: 6px; }
+.ws-gsw {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+/* The ring is drawn outside the swatch so the colour itself stays whole —
+   an inset marker on a 24px chip eats the very thing being picked. */
+.ws-gsw.on {
+  border-color: var(--bg-elevated, var(--bg-secondary));
+  box-shadow: 0 0 0 2px var(--accent-fg);
+}
+.ws-gdlg-a {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+.ws-gbtn {
+  padding: 4px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-primary);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+.ws-gbtn:hover { background: var(--bg-hover); }
+.ws-gbtn.primary {
+  border-color: var(--accent-fg);
+  background: var(--accent-fg);
+  color: var(--bg-base);
+  font-weight: 600;
+}
+.ws-gbtn.primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 .ws-rail-empty {
   padding: 10px 12px;
   font-size: var(--font-2xs);
   color: var(--text-muted);
 }
+
 /* Section label inside the workspace context menu, above the group list. */
 .ws-ctx-lbl {
   padding: 5px 12px 2px;
