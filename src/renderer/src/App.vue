@@ -5601,8 +5601,18 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
   if (ref?.sessionId) {
     try {
       await ref.kill({ force: force })
-    } catch {
-      /* ignore */
+    } catch (err) {
+      // The pane leaves the list either way — keeping it would strand the
+      // workspace on a pane the user already dismissed. But a swallowed failure
+      // here is exactly how a PTY outlives its own pane record, so it is
+      // recorded instead of dropped; the backend's unspawn path kills what this
+      // missed.
+      recordDiagnostic({
+        level: 'warn',
+        code: 'pane.killFailed',
+        message: `terminal kill failed while closing pane: ${String(err)}`,
+        paneId,
+      })
     }
   }
   if (markRemoved && pane?.origin === 'pipeline' && pane.slotLabel && stageIndex >= 0) {

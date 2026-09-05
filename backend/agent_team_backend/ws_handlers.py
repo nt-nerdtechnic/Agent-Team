@@ -5486,7 +5486,13 @@ async def terminal_kill(session: "Session", msg_id: str, msg_type: str, payload:
     term_session_id = payload["terminal_session_id"]
     force = bool(payload.get("force", False))
     owner = app._PTY_OWNERS.get(term_session_id)
-    if owner is not session:
+    # An ownerless PTY is killable by anyone. The owner entry is dropped when a
+    # connection goes away, so refusing every caller once it was gone left a
+    # live PTY nothing could reach: the renderer had already dropped the pane
+    # record, and the process only died with the hourly ownerless sweep. A
+    # different LIVE connection still blocks the kill, which is the
+    # cross-window guard this check exists for.
+    if owner is not None and owner is not session:
         await session.send_json(
             make_error(
                 msg_id,
@@ -6570,9 +6576,21 @@ async def manual_pane_spawn(session: "Session", msg_id: str, msg_type: str, payl
 async def manual_pane_unspawn(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    # Unspawn is the renderer saying this pane is gone for good, so a PTY still
+    # running under it goes with it. The renderer kills through its own terminal
+    # ref first and this loop then finds nothing; it is the panes without one —
+    # a restore placeholder, or a pane whose kill was refused — that would
+    # otherwise have their record removed below while the process kept running
+    # with nothing left pointing at it.
+    pane_id = payload["pane_id"]
+    for term_session_id in session.terminals.live_session_ids_for_pane(pane_id):
+        await session.terminals.kill(term_session_id, force=True)
+        app._PTY_OWNERS.pop(term_session_id, None)
+        app.attribution.unregister_pane(pane_id)
+
     project = app.project_store.record_manual_pane_unspawn(
         payload["workspace_path"],
-        pane_id=payload["pane_id"],
+        pane_id=pane_id,
         session_id=payload.get("session_id", "") or "",
     )
     await session.send_json(

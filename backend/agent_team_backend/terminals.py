@@ -692,6 +692,22 @@ class TerminalService:
             groups[session.id] = (session.pane_id, pids)
         return groups
 
+    def live_session_ids_for_pane(self, pane_id: str) -> list[str]:
+        """Every still-running terminal session belonging to a pane.
+
+        Closing a pane normally kills its PTY through the renderer's own
+        terminal ref. A pane that never realized has no ref to kill through,
+        and its unspawn record is the only signal the backend gets — this is
+        what lets that path reach a process the renderer could not.
+        """
+        if not pane_id:
+            return []
+        return [
+            session.id
+            for session in self._sessions.values()
+            if session.pane_id == pane_id and not session.closed
+        ]
+
     def find_live_by_resume_id(
         self,
         agent_key: str,
