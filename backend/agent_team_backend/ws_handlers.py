@@ -6571,6 +6571,18 @@ async def pipeline_auto_answer(session: "Session", msg_id: str, msg_type: str, p
 @handler("manual_pane.spawn")
 async def manual_pane_spawn(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
+    from .model_args import refuse_unsafe_shape
+
+    # Checked before the store sees it, not only where argv is built. A stored
+    # model is replayed on every restore, far from any assembly site, so this
+    # has to hold as an invariant of what is persisted rather than a habit of
+    # everything that later reads it.
+    unsafe = refuse_unsafe_shape(
+        str(payload.get("model") or ""), str(payload.get("effort") or "")
+    )
+    if unsafe:
+        await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", unsafe))
+        return
 
     project = app.project_store.record_manual_pane_spawn(
         payload["workspace_path"],

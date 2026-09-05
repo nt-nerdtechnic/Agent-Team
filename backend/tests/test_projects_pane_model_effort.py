@@ -261,3 +261,79 @@ async def test_spawn_handler_tolerates_a_null_model(tmp_path: Path) -> None:
 
     panes = session.websocket.sent[0]["payload"]["project"]["panes"]  # type: ignore[attr-defined]
     assert [(p["model"], p["effort"]) for p in panes] == [("", "")]
+
+
+@pytest.mark.asyncio
+async def test_spawn_handler_refuses_an_injectable_model_without_storing_it(
+    tmp_path: Path
+) -> None:
+    """The ws entry is guarded, not just the MCP one.
+
+    What matters is the second assertion: a stored model is replayed on every
+    restore, far from anywhere argv is built, so a value that got in here
+    would be safe only for as long as every future reader remembered to check
+    it. Refusing before the store makes "a stored model is argument-safe" a
+    property of the store instead.
+    """
+    ws = str(tmp_path)
+    session = _session()
+    await app.handle_message(session, {
+        "id": "m1",
+        "type": "manual_pane.spawn",
+        "payload": {
+            "workspace_path": ws, "pane_id": "P1", "agent": "claude",
+            "command": "claude", "model": "sonnet --dangerously-skip-permissions",
+        },
+    })
+
+    sent = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert sent.get("error"), f"expected a refusal, got {sent}"
+
+    # Nothing reached the store — not the pane, not an empty stub of it.
+    reloaded = ProjectStore().peek(ws)
+    assert reloaded is None or [p.pane_id for p in reloaded.panes] == []
+
+
+@pytest.mark.asyncio
+async def test_spawn_handler_refuses_an_injectable_effort_without_storing_it(
+    tmp_path: Path
+) -> None:
+    ws = str(tmp_path)
+    session = _session()
+    await app.handle_message(session, {
+        "id": "m1",
+        "type": "manual_pane.spawn",
+        "payload": {
+            "workspace_path": ws, "pane_id": "P1", "agent": "claude",
+            "command": "claude", "effort": "--yolo",
+        },
+    })
+
+    assert session.websocket.sent[0].get("error")  # type: ignore[attr-defined]
+    reloaded = ProjectStore().peek(ws)
+    assert reloaded is None or [p.pane_id for p in reloaded.panes] == []
+
+
+@pytest.mark.asyncio
+async def test_spawn_handler_refusal_does_not_erase_an_earlier_pick(
+    tmp_path: Path
+) -> None:
+    """A rejected second message must leave the first one's record intact —
+    the refusal returns before the store is touched at all."""
+    ws = str(tmp_path)
+    await app.handle_message(_session(), {
+        "id": "m1", "type": "manual_pane.spawn",
+        "payload": {
+            "workspace_path": ws, "pane_id": "P1", "agent": "claude",
+            "command": "claude", "model": "opus-4",
+        },
+    })
+    await app.handle_message(_session(), {
+        "id": "m2", "type": "manual_pane.spawn",
+        "payload": {
+            "workspace_path": ws, "pane_id": "P1", "agent": "claude",
+            "command": "claude", "model": "opus-4 --oops",
+        },
+    })
+
+    assert _pane(ProjectStore(), ws, "P1").model == "opus-4"

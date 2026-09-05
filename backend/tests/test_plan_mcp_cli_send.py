@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from agent_team_backend import agent_messaging, app
+from agent_team_backend import agent_messaging, model_args, app
 from agent_team_backend.mcp_server import server as plan_mcp, auth as plan_mcp_auth, wiring as plan_mcp_wiring
 
 
@@ -1916,6 +1916,6 @@ def test_shape_guard_agrees_with_the_renderers_copy() -> None:
         "$(whoami)",
         "",
     ):
-        mine = plan_mcp._ARGUMENT_SAFE.match(value) is not None
+        mine = model_args.ARGUMENT_SAFE.match(value) is not None
         theirs = renderer.match(value) is not None
         assert mine == theirs, f"{value!r}: backend={mine} renderer={theirs}"

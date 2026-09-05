@@ -481,19 +481,6 @@ def resolve_spawn(request_id: str, verdict: dict[str, Any]) -> bool:
     return True
 
 
-# A value safe to place after a flag on a command line: no whitespace, no
-# shell metacharacters, and never a leading dash. Mirrors ARGUMENT_SAFE in
-# src/renderer/src/platform/plugin-shell/lib/cliModel.ts — the renderer builds
-# argv, this copy refuses the request before it is ever broadcast. The dash is
-# excluded from the first position deliberately: `[A-Za-z0-9._:/-]+` alone
-# matches a leading-dash flag, which is the whole attack. Anchored with
-# \A/\Z rather than ^/$ because Python's `$` also matches just before a
-# trailing newline while JavaScript's does not — with ^/$ the two engines
-# would disagree on "sonnet\n", and this pattern's only value is that they
-# agree.
-_ARGUMENT_SAFE = re.compile(r"\A[A-Za-z0-9._:/][A-Za-z0-9._:/-]*\Z")
-
-
 def _refuse_unsupported_model(agent_key: str, model: str, effort: str) -> str:
     """Why this CLI cannot be asked for that model or effort, or "" if it can.
 
@@ -507,6 +494,10 @@ def _refuse_unsupported_model(agent_key: str, model: str, effort: str) -> str:
     # same answer as the renderer's modelArgsFor for any input. cli_open_agent
     # already strips; a future caller that forgets would otherwise get a
     # backend/renderer disagreement instead of a refusal.
+    from agent_team_backend.model_args import refuse_unsafe_shape
+
+    # Trimmed here rather than trusting the caller, so this helper gives the
+    # same answer as the renderer's modelArgsFor for any input.
     model = model.strip()
     effort = effort.strip()
     if not model and not effort:
@@ -517,14 +508,9 @@ def _refuse_unsupported_model(agent_key: str, model: str, effort: str) -> str:
     # would split into extra arguments is malformed no matter who receives it,
     # and saying "unsupported" here would send the caller off to try another
     # CLI with the same injected string.
-    if model and not _ARGUMENT_SAFE.match(model):
-        return (
-            "model must be a single bare id — no spaces, and not starting with "
-            "'-'. A value like \"sonnet --some-flag\" would reach the CLI as two "
-            "arguments and pass it a flag you did not intend."
-        )
-    if effort and not _ARGUMENT_SAFE.match(effort):
-        return "effort must be a single bare word — no spaces, and not starting with '-'."
+    unsafe = refuse_unsafe_shape(model, effort)
+    if unsafe:
+        return unsafe
     spec = registry.VENDORS.get(agent_key)
     if spec is None:
         return ""  # unknown agent key — the spawn gate reports that itself
