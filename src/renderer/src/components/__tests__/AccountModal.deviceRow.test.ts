@@ -2,13 +2,13 @@
 // What a device row actually says, by rendering one.
 //
 // The rest of this modal's coverage is source-scan, on the belief that it could
-// not be mounted. It takes two props. The four things reported about the
-// offline row — a name clipped to "M…", a status sentence on two lines, a raw
-// ISO timestamp, and six elements of equal weight on one line — are all facts
-// about output, and three of the four are checkable here. The fourth (the
-// clipping itself) is layout, which no DOM-less renderer can answer; what is
-// checkable is that the name is no longer competing with anything for the row,
-// and that is asserted below.
+// not be mounted. It takes two props. The things reported about the offline row
+// — a name clipped to "M…", a raw ISO timestamp, a status sentence that wrapped,
+// and English text in a Chinese window — are facts about output, and all but
+// one are checkable here. The exception is the clipping itself, which is layout:
+// happy-dom does no layout and a scoped stylesheet is not applied to a mounted
+// component, so what holds that is a source assertion at the bottom, labelled
+// as one.
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,6 +25,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const MODAL = readFileSync(resolve(here, '../AccountModal.vue'), 'utf8')
 
 const NAME = 'MacBook Pro 16 吋'
+const THIRTY_EIGHT_MINUTES = 38 * 60_000
 const EIGHT_MINUTES = 8 * 60_000
 
 let wrapper: VueWrapper | undefined
@@ -95,6 +96,20 @@ describe('the offline device row', () => {
     expect(head.find('.dev-tag').text()).toBe(t('settings.p2p.trust.state-trusted'))
   })
 
+  it('keeps everything on one line', async () => {
+    // It was split into two, and a row per machine became two rows per machine.
+    // What makes it one line is that the secondary text is a span inside the
+    // head, not a paragraph after it.
+    await mountModal()
+    const meta = offline().find('.dev-meta')
+
+    expect(meta.exists()).toBe(true)
+    expect(meta.element.tagName).toBe('SPAN')
+    expect(offline().find('.dev-head').find('.dev-meta').exists()).toBe(true)
+    // Nothing block-level between the name and the end of the row.
+    expect(offline().findAll('.dev-head p')).toHaveLength(0)
+  })
+
   it('says when it was last here in words, not as an ISO timestamp', async () => {
     // It printed `Last seen 2026-09-05T02:39:47.539Z`.
     await mountModal()
@@ -140,15 +155,44 @@ describe('the offline device row', () => {
 })
 
 describe('the device row in Chinese', () => {
-  it('translates the pairing state and the time, both of which were English', async () => {
-    // The pill was reported as reading "Paired" in a Chinese window. Both keys
-    // exist in both locales; this is what proves the row uses them.
+  it('translates the pairing state and the time, both of which were reported as English', async () => {
+    // Reported twice: the pill reading "Paired", and the time reading
+    // "38 minute(s) ago". Both keys exist in both locales and the row composes
+    // them dynamically; this is what proves the composition resolves. Note what
+    // it therefore means when a window shows English: that window's locale is
+    // en-US. `fallbackLocale` is zh-TW, so a missing key falls back to Chinese
+    // — English is never what a lookup failure produces here.
     await mountModal('zh-TW')
 
     expect(offline().find('.dev-tag').text()).toBe('已配對')
     expect(offline().find('.dev-meta').text()).toBe('離線 · 8 分鐘前')
     expect(wrapper!.text()).not.toContain('Paired')
     expect(wrapper!.text()).not.toContain('minute')
+  })
+
+  it('needs no plural form, and gets the one form it has', async () => {
+    await mountModal('zh-TW', { lastSeenAt: lastSeen(THIRTY_EIGHT_MINUTES) })
+    expect(offline().find('.dev-meta').text()).toBe('離線 · 38 分鐘前')
+
+    wrapper!.unmount()
+    await mountModal('zh-TW', { lastSeenAt: lastSeen(60_000) })
+    expect(offline().find('.dev-meta').text()).toBe('離線 · 1 分鐘前')
+  })
+})
+
+describe('English says minute and minutes, not minute(s)', () => {
+  it('picks the singular for one', async () => {
+    await mountModal('en-US', { lastSeenAt: lastSeen(60_000) })
+    expect(offline().find('.dev-meta').text()).toBe('Offline · 1 minute ago')
+  })
+
+  it('picks the plural for thirty-eight', async () => {
+    // The reported string was "38 minute(s) ago" — a form written to avoid
+    // choosing, which no one says out loud.
+    await mountModal('en-US', { lastSeenAt: lastSeen(THIRTY_EIGHT_MINUTES) })
+    const text = offline().find('.dev-meta').text()
+    expect(text).toBe('Offline · 38 minutes ago')
+    expect(text).not.toContain('(s)')
   })
 })
 
@@ -169,7 +213,81 @@ describe('the rule that actually stops the clipping', () => {
     expect(rule).toMatch(/text-overflow:\s*ellipsis/)
     // And nothing else on the row may take the free space, or the name is back
     // to fighting for it.
-    expect(MODAL).not.toMatch(/\.dev-trust \{[^}]*margin-left: auto/)
+    expect(MODAL).not.toMatch(/\.dev-review \{[^}]*margin-left: auto/)
     expect(MODAL).toMatch(/\.dev-head \.dot \{[^}]*flex: none/)
+    // The row must not wrap, and the secondary text must give way before the
+    // name does — a shrink factor above the name's 1.
+    const head = MODAL.slice(MODAL.indexOf('.dev-head {'), MODAL.indexOf('}', MODAL.indexOf('.dev-head {')))
+    expect(head).toMatch(/flex-wrap:\s*nowrap/)
+    expect(head).toMatch(/white-space:\s*nowrap/)
+    const meta = MODAL.slice(MODAL.indexOf('.dev-meta {'), MODAL.indexOf('}', MODAL.indexOf('.dev-meta {')))
+    const shrink = Number(meta.match(/flex:\s*0 (\d+) auto/)![1])
+    expect(shrink).toBeGreaterThan(1)
+    expect(meta).toMatch(/min-width:\s*0/)
+  })
+})
+
+describe('the three actions on a row are one size', () => {
+  // "Pair with this device…" in a `btn ghost small` was the widest thing on
+  // every unpaired row, and read as the row's primary action. The other two are
+  // `dev-review`; sharing the class is what makes "same size" a fact rather
+  // than two rules that happen to look alike today.
+  async function mountWith(device: object) {
+    ;(window as unknown as Record<string, unknown>).agentTeam = {
+      trustConfirm: vi.fn().mockResolvedValue({ token: 't' }),
+    }
+    const mock = createMockBackend('connected')
+    mock.setResponse('p2p.link.status', {
+      status: { state: 'connected', accountEmail: 'a@b.c', serverUrl: 'wss://x', emailVerified: true },
+    })
+    mock.setResponse('p2p.network.snapshot', {
+      state: 'connected',
+      deviceId: 'me',
+      devices: [
+        { deviceId: 'me', deviceName: 'This one', isLocal: true, online: true, paneCount: 0, panes: [] },
+        { deviceId: 'd2', deviceName: NAME, isLocal: false, online: true, paneCount: 0, panes: [], ...device },
+      ],
+    })
+    wrapper = mount(AccountModal, {
+      props: { open: true, backend: mock.backend as never },
+      global: { plugins: [i18n] },
+    })
+    await flushPromises()
+    return wrapper.findAll('.dev')[1]
+  }
+
+  it('gives the pairing button the same class as unpair', async () => {
+    i18n.global.locale.value = 'en-US'
+    const pairRow = await mountWith({ canTrust: true, trustState: 'pending' })
+    const pair = pairRow.findAll('button').find((b) => b.text() === t('settings.p2p.pair.start'))!
+    expect([...pair.classes()].sort()).toEqual(['dev-review'])
+    wrapper!.unmount()
+
+    const pairedRow = await mountWith({ trustState: 'trusted' })
+    const unpair = pairedRow.findAll('button').find((b) => b.text() === t('settings.p2p.trust.unpair'))!
+    // Same base class, plus the one modifier that says it is destructive.
+    expect(unpair.classes()).toContain('dev-review')
+    expect([...unpair.classes()].sort()).toEqual(['dev-review', 'dev-undo'])
+  })
+
+  it('labels it with one word, and keeps the explanation in the tooltip', async () => {
+    i18n.global.locale.value = 'en-US'
+    const row = await mountWith({ canTrust: true, trustState: 'pending' })
+    const pair = row.findAll('button').find((b) => b.classes('dev-review'))!
+
+    expect(pair.text()).toBe('Pair')
+    expect(pair.text().split(/\s+/)).toHaveLength(1)
+    // Nothing is lost: the sentence it used to be is still one hover away.
+    expect(pair.attributes('title')).toBe(t('settings.p2p.pair.start-title'))
+    expect((pair.attributes('title') ?? '').length).toBeGreaterThan(40)
+  })
+
+  it('says 配對 in a Chinese window', async () => {
+    i18n.global.locale.value = 'zh-TW'
+    const row = await mountWith({ canTrust: true, trustState: 'pending' })
+    const pair = row.findAll('button').find((b) => b.classes('dev-review'))!
+
+    expect(pair.text()).toBe('配對')
+    expect(row.text()).not.toContain('Pair')
   })
 })

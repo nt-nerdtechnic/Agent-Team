@@ -923,6 +923,45 @@ describe('why the link is not usable', () => {
   })
 })
 
+describe('the two title-bar windows are loaded before they are asked for', () => {
+  // Measured on this machine from the production build: SettingsModal is 507 KB
+  // of JavaScript (~315 ms to parse) plus a 150 KB stylesheet, the account
+  // window 67 KB (~25 ms) plus 18 KB. All of it used to be paid after the click
+  // and before anything was drawn.
+  it('uses one module specifier per window, shared by the prewarm and the component', () => {
+    // The failure this guards is silent: a second arrow function with the same
+    // path still works, until one of them is edited and the prewarm starts
+    // warming something nobody opens.
+    for (const name of ['SettingsModal', 'AccountModal']) {
+      const uses = APP.match(new RegExp(`import\\('\\./components/${name}\\.vue'\\)`, 'g')) ?? []
+      expect(uses).toHaveLength(1)
+    }
+    expect(APP).toContain('const SettingsModal = defineAsyncComponent(loadSettingsModal)')
+    expect(APP).toContain('const AccountModal = defineAsyncComponent(loadAccountModal)')
+    expect(APP).toMatch(/schedulePrewarm\([\s\S]{0,120}loadSettingsModal\(\)[\s\S]{0,40}loadAccountModal\(\)/)
+  })
+
+  it('warms at idle with a deadline, and cancels with the window', () => {
+    // Eager loading would move half a megabyte of parsing into the seconds the
+    // app is spawning panes; a fixed delay would postpone it past the early
+    // clicks it exists for. The scheduling itself is tested in prewarm.test.ts;
+    // what belongs here is that this caller asks for that form and disposes it.
+    expect(APP).toMatch(/schedulePrewarm\([\s\S]{0,240}idleTimeoutMs: 4000/)
+    expect(APP).toMatch(/schedulePrewarm\([\s\S]{0,280}fallbackDelayMs: 2500/)
+    expect(APP).toMatch(/const cancel = schedulePrewarm\([\s\S]{0,900}onUnmounted\(cancel\)/)
+    // And there is one mechanism, not two: the inline warm this replaced is gone.
+    expect(APP).not.toContain('const warmSettings')
+  })
+
+  it('does not make the account window wait for its first read', () => {
+    // Reported as a suspect and it is not one: the poll is started, not
+    // awaited, and the template has a "reading" state for the gap.
+    expect(MODAL).toContain('void refresh()')
+    expect(MODAL).not.toMatch(/watch\(\(\) => props\.open[\s\S]{0,200}await refresh\(\)/)
+    expect(MODAL).toMatch(/v-else-if="!network"[\s\S]{0,160}settings\.p2p\.network\.loading/)
+  })
+})
+
 describe('a device that is not there', () => {
   const LIST = MODAL.slice(
     MODAL.indexOf('v-for="device in devices"'),

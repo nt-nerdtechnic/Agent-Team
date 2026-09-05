@@ -736,6 +736,12 @@ function lastSeenLabel(iso: string | undefined): string {
   const at = iso ? Date.parse(iso) : Number.NaN
   if (!Number.isFinite(at)) return t('settings.p2p.network.last-seen-unknown')
   const { unit, count } = relativeTime(at, Date.now())
+  // `count` is both the placeholder and the plural choice — vue-i18n reads it
+  // as the number to select on — so this call was already right and only the
+  // message was wrong: English said "38 minute(s) ago", a form written to avoid
+  // choosing that nobody says out loud. It now carries both cases. Chinese
+  // declines nothing and supplies one, which is what gets picked when there is
+  // only one.
   return t(`time.ago-${unit}`, { count })
 }
 
@@ -1654,6 +1660,13 @@ onUnmounted(() => {
                   <span v-if="device.isLocal" class="dev-tag">
                     {{ t('settings.p2p.network.this-device') }}
                   </span>
+                  <!-- Where the machine is, or what it is running. Beside the
+                       name rather than under it: a second line turned every row
+                       into two, which is a lot of height for the secondary
+                       half of the sentence. -->
+                  <span class="dev-meta" :title="deviceMetaTitle(device)">
+                    {{ deviceMeta(device) }}
+                  </span>
                   <!-- Without this the list said nothing about trust, so a
                        device you had never vouched for looked exactly like one
                        you had — while the card above was asking you to confirm
@@ -1676,7 +1689,7 @@ onUnmounted(() => {
                        people have compared the same six digits. -->
                   <button
                     v-if="device.canTrust"
-                    class="btn ghost small dev-trust"
+                    class="dev-review"
                     :disabled="!!pending || !linkReady"
                     :title="linkWaitReason || t('settings.p2p.pair.start-title')"
                     @click="startPairing(device)"
@@ -1712,12 +1725,6 @@ onUnmounted(() => {
                     {{ t('settings.p2p.trust.unpair') }}
                   </button>
                 </div>
-                <!-- Second line, small and grey: where the machine is, or what
-                     it is running. Two facts that were competing with the name
-                     for the same row. -->
-                <p class="hint dev-meta" :title="deviceMetaTitle(device)">
-                  {{ deviceMeta(device) }}
-                </p>
                 <ul v-if="device.panes.length" class="panes">
                   <li v-for="pane in device.panes" :key="pane.sessionId" class="pane">
                     <span class="pane-agent">{{ pane.agentKey || '—' }}</span>
@@ -2003,7 +2010,13 @@ input:focus {
 .net-card { min-height: 62px; padding: 10px 14px; }
 .net-note { margin: 0; }
 .dev + .dev { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-muted); }
-.dev-head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+/* One line, never two. `nowrap` on the container stops the items wrapping and
+   on the text stops a long label breaking mid-row; what gives instead is the
+   name, which truncates. */
+.dev-head {
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 6px;
+  font-size: 12px; white-space: nowrap;
+}
 /* The shared .dot carries a margin for the footer status line; here the flex gap does that job. */
 .dev-head .dot { margin-right: 0; flex: none; }
 /* The only element allowed to give up space, and the last one that should have
@@ -2083,9 +2096,16 @@ input:focus {
 .dev-tag.ts-trusted { color: var(--success-fg); }
 .dev-tag.ts-pending { color: var(--attention-fg); }
 .dev-tag.ts-blocked { color: var(--danger-fg); }
-/* Indented to the name above it — dot plus gap — so it reads as that row
-   saying something rather than as a new item. */
-.dev-meta { margin: 2px 0 0 14px; font-size: 11.5px; }
+/* Secondary, so it is the first thing to give way when the row runs out of
+   room — that is what the large shrink factor buys. The name has shrink 1 and
+   is therefore the last thing clipped, which is the whole point: a row reading
+   "M… · 38 minutes ago" tells you when something you cannot identify was last
+   seen. */
+.dev-meta {
+  flex: 0 999 auto; min-width: 0;
+  color: var(--text-secondary); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .solo-guide { margin-top: 4px; }
 .solo-title { margin: 10px 0 4px; font-size: 12px; color: var(--text-primary); font-weight: 500; }
 .solo-steps {
@@ -2111,11 +2131,12 @@ input:focus {
    does not look alarming for simply existing. */
 .dev-undo { color: var(--text-muted, var(--text-secondary)); }
 .dev-undo:hover { color: var(--danger-fg); border-color: var(--danger-fg); }
-/* A real button, unlike the bare text it started as: this one writes trust,
-   and a person has to be able to see that it is something you press. It no
-   longer needs an auto margin: the name absorbs the free space, so everything
-   after it is already against the right edge. */
-.dev-trust { flex: none; }
+/* The pairing button used to be `btn ghost small`, which is a slightly larger
+   shape than the other two actions on this row and read as the primary thing to
+   do on every unpaired device. It now shares .dev-review with them: same
+   padding, same size, same weight. The label went with it — "Pair with this
+   device…" took the width of the row to say what one word says, and the full
+   sentence lives in the tooltip where it costs nothing. */
 /* The question the button opens, inside the row it is about. Indented to the
    name above it so it reads as that row saying something, not as a new item. */
 /* Big, because it is read aloud across a desk or over a call — and because two

@@ -1055,8 +1055,8 @@
         "refused": "{device} refused the pairing",
         "revoked": "{device} unpaired from this device",
         "sending": "Confirming…",
-        "start": "Pair with this device…",
-        "start-title": "Ask to pair. Nothing changes until both sides confirm.",
+        "start": "Pair",
+        "start-title": "Ask to pair with this device. Both screens show six digits to compare, and nothing changes until both sides confirm.",
         "step-sent": "Sent",
         "step-waiting-them": "Waiting for them",
         "step-you-confirmed": "You confirmed",
@@ -1811,6 +1811,7 @@
     "all-workspaces": "All",
     "workspace-groups": "Workspace groups",
     "workspace-group-name": "Group name",
+    "workspace-group-colour": "Colour",
     "workspace-group-empty": "No open projects in this group.",
     "move-to-workspace-group": "Move to group",
     "no-workspace-group": "None",
@@ -2411,10 +2412,10 @@
   },
   "time": {
     "ago-just-now": "Just now",
-    "ago-minutes": "{count} minute(s) ago",
-    "ago-hours": "{count} hour(s) ago",
-    "ago-days": "{count} day(s) ago",
-    "ago-months": "{count} month(s) ago"
+    "ago-minutes": "{count} minute ago | {count} minutes ago",
+    "ago-hours": "{count} hour ago | {count} hours ago",
+    "ago-days": "{count} day ago | {count} days ago",
+    "ago-months": "{count} month ago | {count} months ago"
   },
   "mention": {
     "group-recent": "Recent",
