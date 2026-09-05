@@ -30,6 +30,7 @@ const cliTools: ToolRow[] = [
   { name: 'cli_check_message', what: '用 msg_key 查一則送出的訊息後來如何：排隊中、已送達、或失敗與原因（只留最近一小時）' },
   { name: 'cli_open_agent', what: '開一個新的 CLI pane 並指派任務，完成後它會回報；可指定 model 與 effort，該 CLI 不支援時會拒絕而非忽略' },
   { name: 'cli_read_incoming', what: '讀取寄給自己的訊息全文；預設讀了就不再注入輸入框，peek 可只讀不消費' },
+  { name: 'cli_cancel_message', what: '收回一則還沒送進去的訊息；已經開始投遞就收不回來，會告訴你它最終如何' },
   { name: 'cli_read_log', what: '讀取另一個 pane 對話紀錄的結尾（預設 200 行），也可帶游標只讀新增的部分' },
   { name: 'cli_get_status', what: '查另一個 pane 是否忙碌、最近一次活動' },
   { name: 'cli_wait_idle', what: '等到另一個 pane 閒置或逾時（最長 120 秒）；逾時會說明是卡在權限提示、還在做事、還是連不上' },

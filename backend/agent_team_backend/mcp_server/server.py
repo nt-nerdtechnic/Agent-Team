@@ -1178,8 +1178,16 @@ def record_delivery_result(msg_key: str, ok: bool, reason: str) -> bool:
     entry = _mcp_message_status.get(msg_key)
     if entry is None:
         return False
-    entry["status"] = "delivered" if ok else "failed"
-    entry["reason"] = _decode_reason(reason) if reason else None
+    decoded = _decode_reason(reason) if reason else None
+    # A withdrawal comes back down the delivered path with ok=False, but it is
+    # not a failure: nothing went wrong and nothing should be resent. Collapsing
+    # it into "failed" would invite exactly the resend the withdrawal was meant
+    # to prevent — the same reason "read" is reported as delivered.
+    if not ok and decoded == "cancelled":
+        entry["status"] = "cancelled"
+    else:
+        entry["status"] = "delivered" if ok else "failed"
+    entry["reason"] = decoded
     entry["delivered_at"] = time.monotonic()
     _clear_hold(entry)
     _settle_status_waiters(msg_key)
@@ -1295,12 +1303,18 @@ async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
                       pane policy refuses this sender. Re-sending refuses
                       again; this is a permission question for a human, not
                       something to retry.
+      - "cancelled" — withdrawn before it went in, by cli_cancel_message or by
+                      someone using the Messages panel. Nothing went wrong and
+                      nothing is waiting; resend only if you still mean it.
 
     `reason` values come from the receiving window: "rate-limit" (too many
     messages between the same pair too quickly), "queue-full" (the target's
     pending-message queue is at its cap), "inject-failed" (typing it into the
     pane did not take), "pane-closed" (the target went away before delivery),
-    "no-report" (the delivery attempt never reported an outcome).
+    "no-report" (the delivery attempt never reported an outcome). Two reasons
+    do NOT mean something went wrong: "read" pairs with "delivered" and means
+    the recipient took the message with cli_read_incoming instead of having it
+    typed in, and "cancelled" pairs with the status of the same name.
 
     On a "queued" message, `hold` is why it has not gone in yet — {key, n?},
     the same reason the Messages panel shows — and `held_for_s` is how long it
@@ -1655,6 +1669,99 @@ async def cli_read_incoming(
             "could not confirm. They stay queued and will reach your pane."
         )
     return answer
+
+
+# How long to wait for the owning window to say whether a withdrawal landed.
+# Short: the answer comes from a window that already has the queue in memory,
+# so it is a round trip rather than a piece of work — and a caller that has
+# just changed its mind should not be parked for long.
+_CANCEL_VERDICT_TIMEOUT_S = 5.0
+
+
+@server.tool()
+async def cli_cancel_message(msg_key: str, ctx: Context) -> dict[str, Any]:
+    """Withdraw a message you sent, if it has not gone in yet.
+
+    A message sits in the recipient's queue until that pane is between turns,
+    which is often a long time. Until now a sender that changed its mind — the
+    wrong target, a premise that stopped being true, a task already done by
+    someone else — could only watch it go in and then send a correction, which
+    costs the recipient a whole turn to work out that the first message no
+    longer applies.
+
+    `msg_key` is what cli_send returned. Withdrawal is decided by the window
+    that owns the queue, because only it knows whether the message is still
+    waiting: if it is, the message is dropped and the status becomes
+    "cancelled"; if delivery already started, the withdrawal is ignored and the
+    delivery reports its own outcome as usual. Either way you get the settled
+    status back, so a "delivered" answer here means you were too late rather
+    than that something failed.
+
+    Withdrawing is not failing. The status is "cancelled" and no failure notice
+    is written back to you — there is nothing to explain to the pane that just
+    changed its mind. Resend with cli_send if you still mean it.
+
+    Only messages this server sent can be withdrawn, and only for about an
+    hour, which is how long their keys are tracked. An unknown key means "not
+    tracked any more", not "never sent" — the same caveat cli_check_message
+    carries.
+
+    Returns {ok, msg_key, status, reason?} or {ok: false, error}.
+    """
+    from agent_team_backend import app
+    from agent_team_backend.ipc import make_event
+
+    try:
+        _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    key = (msg_key or "").strip()
+    if not key:
+        return {"ok": False, "error": "msg_key is required — it is what cli_send returned"}
+
+    entry = _mcp_message_status.get(key)
+    if entry is None:
+        return {
+            "ok": False,
+            "error": (
+                f"unknown msg_key {key!r} — it was never sent from here, or it is older "
+                "than the hour these are tracked for. An untracked key says nothing "
+                "about whether the message arrived; ask cli_check_message."
+            ),
+        }
+    if entry["status"] != "queued":
+        # Already settled. Say what it settled as rather than refusing flatly:
+        # "delivered" is the answer to "can I still take it back", not an error.
+        answer: dict[str, Any] = {
+            "ok": False,
+            "msg_key": key,
+            "status": entry["status"],
+            "error": f"too late — this message is already {entry['status']}",
+        }
+        if entry.get("reason"):
+            answer["reason"] = entry["reason"]
+        return answer
+
+    await app.broadcast(make_event("agent_msg.cancel", {"msg_key": key}))
+    # The owning window answers over the ordinary delivered path, so waiting for
+    # a settled status is the same wait a send with wait_for_delivery_s does.
+    await _await_delivery(key, _CANCEL_VERDICT_TIMEOUT_S)
+
+    settled = _mcp_message_status.get(key)
+    status = settled["status"] if settled else "unknown"
+    result: dict[str, Any] = {"ok": status == "cancelled", "msg_key": key, "status": status}
+    if settled and settled.get("reason"):
+        result["reason"] = settled["reason"]
+    if status == "queued":
+        # No window claimed it within the timeout. The message is still on its
+        # way, so say that rather than implying the withdrawal took.
+        result["error"] = (
+            "no window answered in time; the message is still queued and may yet "
+            "be delivered. Check cli_check_message before assuming it was withdrawn."
+        )
+    elif status != "cancelled":
+        result["error"] = f"too late — the message was already {status}"
+    return result
 
 
 # ── Reading another pane (cli_read_log / cli_get_status / cli_wait_idle) ────
