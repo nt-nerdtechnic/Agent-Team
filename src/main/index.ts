@@ -5,9 +5,16 @@ import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
-import { startBackend, getResolvedUserPath, readWsToken, type BackendHandle } from './backend'
+import {
+  startBackend,
+  getResolvedUserPath,
+  readWsToken,
+  mintTrustConfirmation,
+  type BackendHandle,
+} from './backend'
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
+import { LEGAL_LINKS, isLegalRoute } from '../shared/legalLinks'
 import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, registerBundledMiniIde, registerBundledPlans, registerLegacyBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
 import {
   isTrustedPluginManagementSender,
@@ -2670,6 +2677,40 @@ ipcMain.handle('shell:revealPath', async (_event, target: string) => {
   }
 })
 
+// A one-time confirmation for one trust-changing action, minted here because
+// the key that signs it never leaves the main process. Only a window can reach
+// this — MCP and the plugin broker talk to the backend directly and have no
+// path to it, which is exactly the difference the backend is checking for.
+//
+// The action list is closed: a caller naming anything else gets nothing, so a
+// compromised renderer cannot mint a confirmation for a message type this was
+// never meant to cover.
+const TRUST_CONFIRM_ACTIONS = new Set([
+  'p2p.policy.set',
+  'p2p.trust.device.unpair',
+  'p2p.trust.device.defer',
+  'p2p.trust.block',
+  'p2p.trust.unblock',
+  'p2p.pair.start',
+  'p2p.pair.confirm',
+])
+ipcMain.handle('trust:confirm', async (_event, action: unknown, deviceId: unknown) => {
+  if (typeof action !== 'string' || !TRUST_CONFIRM_ACTIONS.has(action)) return null
+  return mintTrustConfirmation(action, typeof deviceId === 'string' ? deviceId : '')
+})
+
+// The legal pages by route name, so the renderer never assembles the URL.
+// A route outside the table is refused rather than guessed at.
+ipcMain.handle('legal:open', async (_event, route: unknown) => {
+  if (!isLegalRoute(route)) return { ok: false, error: 'unknown legal route' }
+  try {
+    await shell.openExternal(LEGAL_LINKS[route])
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+})
+
 ipcMain.handle('shell:openExternal', async (_event, url: string) => {
   if (!url || typeof url !== 'string') return { ok: false, error: 'invalid url' }
   if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'only http/https allowed' }
@@ -3160,6 +3201,7 @@ app.whenReady().then(async () => {
     onOpenRepo: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide'),
     onReportIssue: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide/issues'),
     onShowShortcuts: () => sendMenuAction('show-shortcuts'),
+    onOpenLegal: (route) => void shell.openExternal(LEGAL_LINKS[route]),
     ...(pluginDevEnabled
       ? {
           onOpenNoopPlugin: () => {

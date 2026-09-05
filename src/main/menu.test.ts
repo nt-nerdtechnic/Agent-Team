@@ -24,6 +24,7 @@ vi.mock('electron', () => ({
 }))
 
 import { installApplicationMenu, type AppMenuHooks } from './menu'
+import { LEGAL_LABELS, LEGAL_ROUTES } from '../shared/legalLinks'
 
 const clipboardWrites = h.clipboardWrites
 
@@ -85,7 +86,8 @@ function makeHooks(): AppMenuHooks & { calls: string[] } {
     onOpenAccount: () => calls.push('account'),
     onOpenRepo: () => calls.push('open-repo'),
     onReportIssue: () => calls.push('report-issue'),
-    onShowShortcuts: () => calls.push('show-shortcuts')
+    onShowShortcuts: () => calls.push('show-shortcuts'),
+    onOpenLegal: (route) => calls.push('legal:' + route)
   }
 }
 
@@ -171,6 +173,18 @@ describe('installApplicationMenu', () => {
     fire(itemIn(menu, 'Report an Issue…'))
     fire(itemIn(menu, 'Keyboard Shortcuts'))
     expect(hooks.calls).toEqual(['open-repo', 'report-issue', 'show-shortcuts'])
+  })
+
+  it('Help menu lists every legal page, in table order, each passing its route to the hook', () => {
+    const help = h.template.find((i) => i.role === 'help')
+    if (!help || !Array.isArray(help.submenu)) throw new Error('no Help menu with submenu')
+    const menu = help.submenu as MenuItemConstructorOptions[]
+    for (const route of LEGAL_ROUTES) fire(itemIn(menu, LEGAL_LABELS[route]))
+    expect(hooks.calls).toEqual(LEGAL_ROUTES.map((r) => 'legal:' + r))
+    // The legal block sits after its own separator, below Keyboard Shortcuts.
+    const labels = menu.map((i) => i.label ?? (i.type === 'separator' ? '—' : '?'))
+    expect(labels.indexOf('Keyboard Shortcuts')).toBeLessThan(labels.indexOf('Privacy'))
+    expect(labels[labels.indexOf('Privacy') - 1]).toBe('—')
   })
 
   it('Window has Pipeline Manager wired to its hook', () => {

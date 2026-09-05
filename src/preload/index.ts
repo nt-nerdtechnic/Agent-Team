@@ -5,6 +5,7 @@ import type {
   UpdaterSettings,
   UpdateState,
 } from '../shared/updater'
+import { LEGAL_LINKS, type LegalRoute } from '../shared/legalLinks'
 
 /** Which Electron-owned cache groups to clear. Never touches user state. */
 export interface ClearElectronCachesOptions {
@@ -368,6 +369,25 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.invoke('dialog:pickFiles', args),
   openExternal: (url: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('shell:openExternal', url),
+  /** The legal pages on navide.dev, by route; the same table main's Help menu uses. */
+  legalLinks: { ...LEGAL_LINKS } as Readonly<Record<LegalRoute, string>>,
+  /**
+   * A one-time confirmation for one trust-changing action.
+   *
+   * Only a window can get one: the key that signs it lives in the main process
+   * and never reaches the backend's socket, which MCP and the plugin broker
+   * also hold. Null when there is no backend yet, or when the action is not one
+   * of the six this covers.
+   */
+  trustConfirm: (
+    action: string,
+    deviceId: string,
+  ): Promise<{ nonce: string; expires: string; mac: string } | null> =>
+    ipcRenderer.invoke('trust:confirm', action, deviceId),
+
+  /** Open one legal page in the default browser; the URL is main's, not the caller's. */
+  openLegal: (route: LegalRoute): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('legal:open', route),
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   stabilizeDroppedPaths: (paths: string[]): Promise<{ ok: boolean; paths: string[] }> =>
     ipcRenderer.invoke('drop:stabilize', paths),
