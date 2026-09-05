@@ -59,6 +59,7 @@ export default defineConfig({
       { find: '@navide/plugin-ui/foundation', replacement: resolve(repositoryRoot, 'packages/plugin-ui/src/foundation/index.ts') },
       { find: '@navide/plugin-ui', replacement: resolve(repositoryRoot, 'packages/plugin-ui/src/index.ts') },
       { find: '@navide/plugin-sdk', replacement: resolve(repositoryRoot, 'packages/plugin-sdk/src/index.ts') },
+      { find: '@navide/plugin-contracts', replacement: resolve(repositoryRoot, 'packages/plugin-contracts/src/index.ts') },
     ],
   },
   build: {

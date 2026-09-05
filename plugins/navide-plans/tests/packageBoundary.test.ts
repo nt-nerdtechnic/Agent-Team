@@ -185,6 +185,8 @@ describe('navide.plans production package boundary', () => {
     expect(viteConfig).toMatch(/outDir:\s*(?:frontendOutDir|resolve\([^)]*['"]frontend['"]\))/)
     expect(viteConfig).toContain('emptyOutDir: true')
     expect(viteConfig).not.toContain('emptyOutDir: false')
+    expect(viteConfig).toContain("find: '@navide/plugin-contracts'")
+    expect(viteConfig).toContain("packages/plugin-contracts/src/index.ts")
 
     const realDistBackend = join(repositoryRoot, 'dist-plugins/navide-plans/backend/navide-plans')
     const realBackendStatBefore = existsSync(realDistBackend)
