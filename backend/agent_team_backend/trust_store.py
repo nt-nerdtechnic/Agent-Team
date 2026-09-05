@@ -119,6 +119,17 @@ NOTICE_MEMBER_CHANGED = "member-changed"
 #: far end had no rule against accepting.
 NOTICE_PLAINTEXT_REFUSED = "plaintext-refused"
 
+#: What happened to a pairing: it completed, the other side refused, or the
+#: other side later revoked it. All three are things the person at *this*
+#: machine did not do and would otherwise have no way to learn — which is the
+#: whole complaint the pairing exchange exists to answer.
+NOTICE_PAIRING = "device-pairing"
+
+#: A remote device sent a command to a pane here. One line per delivery, kept
+#: because "who has been driving my machines" was answerable only from a log
+#: file nobody opens.
+NOTICE_REMOTE_COMMAND = "remote-command"
+
 #: Only a first sighting may be dismissed. A key change is not a notification
 #: to acknowledge — it is a refusal in force, and a button that made it go away
 #: would let the answer to "somebody may be standing in for that machine" be one
@@ -194,6 +205,18 @@ def _blank() -> dict[str, Any]:
         # single counter would make one device's write look like a rollback of
         # another's. In production this map holds exactly one entry.
         "policySeqs": {},
+        # A local copy of the block list, which otherwise exists only inside the
+        # server-held policy document. Blocking is the one decision here that
+        # has to survive that document being unreadable: the policy is refused
+        # wholesale when its signature does not verify, and the first version of
+        # this let that refusal *unblock* every device — the panel put them back
+        # on the "waiting for you to vouch" card, and the delivery path stopped
+        # refusing them. A server that wants a block gone could therefore get it
+        # by making the policy fail to verify, which is far easier than forging
+        # one that verifies without it. Entries are {deviceId, memberId}; either
+        # may be empty, and they are read as alternatives, exactly as the
+        # policy's own list is.
+        "blocked": [],
         "encryptedPeers": [],
         # msg_key -> unix seconds when it was first delivered. Persisted because
         # the in-memory version expired at every restart, and a backend restart
@@ -529,6 +552,193 @@ def approve_device(device_id: str) -> bool:
         return True
 
 
+def note_blocked(device_id: str, member_id: str) -> bool:
+    """Keep a local copy of a block. Blocking; call off the event loop.
+
+    The policy on the server stays the enforcement record; this is the copy that
+    is still here when that document cannot be read. Returns whether anything
+    changed, so a repeat block is not an error.
+    """
+    with _lock:
+        device_id = str(device_id or "")
+        member_id = str(member_id or "")
+        if not device_id and not member_id:
+            return False
+        state = _load_locked()
+        blocked = state.setdefault("blocked", [])
+        for entry in blocked:
+            if not isinstance(entry, dict):
+                continue
+            if device_id and entry.get("deviceId") == device_id:
+                return False
+            if member_id and not device_id and entry.get("memberId") == member_id:
+                return False
+        blocked.append({"deviceId": device_id, "memberId": member_id})
+        _save_locked(state)
+        return True
+
+
+def note_unblocked(device_id: str, member_id: str) -> bool:
+    """Drop a local block. Blocking; call off the event loop.
+
+    Lifting is a decision too, and it has to reach the same place the block did
+    — otherwise a device unblocked in the policy would stay refused here for
+    ever, with nothing on screen to explain it.
+    """
+    with _lock:
+        device_id = str(device_id or "")
+        member_id = str(member_id or "")
+        state = _load_locked()
+        blocked = state.setdefault("blocked", [])
+        kept = [
+            entry
+            for entry in blocked
+            if not (
+                isinstance(entry, dict)
+                and (
+                    (device_id and entry.get("deviceId") == device_id)
+                    or (member_id and entry.get("memberId") == member_id)
+                )
+            )
+        ]
+        if len(kept) == len(blocked):
+            return False
+        state["blocked"] = kept
+        _save_locked(state)
+        return True
+
+
+def is_blocked_locally(*, device_id: str, member_id: str) -> bool:
+    """Whether this machine's own copy names this sender.
+
+    Never raises; this sits on the delivery path. An unreadable store is not
+    read as "nothing is blocked": ``locked_reason`` already stops all
+    cross-device traffic in that state, so the safe answer here is the one that
+    refuses, and the caller reaching this at all means the store opened.
+    """
+    try:
+        with _lock:
+            state = _try_load() if _state is None else _state
+            for entry in (state or {}).get("blocked") or []:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("deviceId") and entry["deviceId"] == device_id:
+                    return True
+                if entry.get("memberId") and entry["memberId"] == member_id:
+                    return True
+    except Exception:  # noqa: BLE001 - a delivery decision, never a crash
+        log.exception("could not read the local block list")
+    return False
+
+
+def defer_device(device_id: str) -> bool:
+    """Stop asking about a pinned device until it knocks again.
+
+    Blocking; call off the event loop. Returns whether anything changed.
+
+    Deliberately *not* a decision. Approving and blocking both answer the
+    question and are recorded where the answer is enforced — the pin and the
+    policy. This records only that a person looked and moved on, so the pin is
+    left exactly as it was: still pinned, still unapproved, still held to the
+    ordinary rules, which deny by default. What it buys is that the panel
+    stops presenting an open question as if it were new every three seconds.
+
+    It is cleared by ``note_knock``, so the row comes back the moment that
+    device actually tries to reach this one. A dismissal that survived the next
+    attempt would be a way to silence a machine without ever deciding about it.
+    """
+    with _lock:
+        if not device_id:
+            return False
+        state = _load_locked()
+        pin = state["pins"].get(device_id)
+        if not isinstance(pin, dict) or pin.get("approved") is True:
+            return False
+        if pin.get("dismissedAt"):
+            return False
+        pin["dismissedAt"] = int(time.time())
+        _save_locked(state)
+        return True
+
+
+def note_knock(device_id: str) -> bool:
+    """A message from *device_id* just verified. Undo any "not now".
+
+    Blocking; call off the event loop. Returns whether anything changed, so the
+    caller only re-announces when a row is actually coming back.
+
+    Called on every verified message rather than only on the first, because
+    "not now" is scoped to the attempts a person has already seen. An approved
+    device has nothing to undo and is left alone.
+    """
+    with _lock:
+        if not device_id:
+            return False
+        state = _load_locked()
+        pin = state["pins"].get(device_id)
+        if not isinstance(pin, dict) or not pin.get("dismissedAt"):
+            return False
+        pin.pop("dismissedAt", None)
+        _save_locked(state)
+        return True
+
+
+def pin_paired_device(
+    device_id: str, *, sign_key: str, member_id: str, own_member_id: str = ""
+) -> bool:
+    """Write the pin a completed pairing earns. Blocking; call off the loop.
+
+    **The only place a pin is written.** It used to have company: a message
+    arriving from an unknown device took one (whoever spoke first got the key
+    slot), and a button in the device list took one from whatever key the
+    directory advertised. Both are gone, so "which key does this machine trust
+    for that device, and who decided" has one answer and one moment.
+
+    The key comes from the pairing frames rather than from the directory,
+    because the directory is the relay's word and the six digits two people
+    compared are what checked it. An existing pin is never revised: one attempt
+    per device id still holds, and a device whose key later changes becomes
+    unreachable rather than impersonable.
+
+    Returns whether anything changed.
+    """
+    with _lock:
+        if not device_id or not sign_key:
+            return False
+        state = _load_locked()
+        pins = state["pins"]
+        existing = pins.get(device_id)
+        if isinstance(existing, dict):
+            if existing.get("approved") is True:
+                return False
+            existing["approved"] = True
+            _save_locked(state)
+            return True
+        if len(pins) >= MAX_DEVICES:
+            raise TrustStoreFull(f"this machine already pins {len(pins)} devices")
+        pins[device_id] = {
+            "signKey": sign_key,
+            "memberId": member_id,
+            "at": int(time.time()),
+            # Approved in the same breath: the approval *is* the pairing, and a
+            # pin left unapproved here would be a state nobody asked for.
+            "approved": True,
+        }
+        _record_locked(
+            state,
+            NOTICE_FIRST_SEEN,
+            device_id=device_id,
+            detail={
+                "memberId": member_id,
+                "fingerprint": device_signing.fingerprint(sign_key),
+                "ownMember": bool(own_member_id and member_id == own_member_id),
+                "paired": True,
+            },
+        )
+        _save_locked(state)
+        return True
+
+
 def unapproved_devices() -> list[dict[str, Any]]:
     """Pinned devices still waiting for someone to vouch for them.
 
@@ -555,10 +765,127 @@ def unapproved_devices() -> list[dict[str, Any]]:
                     "memberId": str(pin.get("memberId") or ""),
                     "at": pin.get("at"),
                     "fingerprint": device_signing.fingerprint(str(pin.get("signKey") or "")),
+                    # When somebody said "not now". The question is still open —
+                    # that is why the row is still here — but the panel stops
+                    # asking it until the device knocks again.
+                    "dismissedAt": pin.get("dismissedAt"),
                 }
             )
         out.sort(key=lambda row: (row.get("at") or 0))
         return out
+
+
+def forget_device(device_id: str) -> dict[str, Any]:
+    """Undo a pairing: forget what this machine decided about *device_id*.
+
+    Blocking; call off the event loop. Returns how many entries went, per
+    category, plus whether anything was there at all — so "unpaired" and "there
+    was nothing here to unpair" are different answers. A call that always
+    reported success would make a mistyped device id look like a completed act.
+
+    Four things go, and one deliberately stays.
+
+    *The pin*, which is the pairing itself. Without it the next message from
+    that device is a first sighting again: pinned anew, unapproved, announced.
+    That is the point — everything approval released is gone, and getting it
+    back costs a person another fingerprint comparison.
+
+    *Its notices.* Leaving them would leave the panel asking about a device this
+    machine no longer knows, and a "compare these two fingerprints" notice whose
+    pinned key has been dropped cannot be acted on any more.
+
+    *Not* its place in the encrypted-peers list either, and for the same reason
+    as the sequence. That entry is a promise about a peer — this one has had
+    ciphertext, so never accept plaintext from it — and dropping it was
+    justified by the rule re-establishing itself the first time the device is
+    sealed for again. Between the unpair and that moment, though, the promise is
+    simply gone, and the window is one a relay can arrange: downgrade the next
+    message to plaintext and it is no longer refused. Keeping a stale entry
+    costs nothing but a refusal a person can see and fix.
+
+    *Not* the policy sequence, and this one was the other way round until now.
+    That number is what makes an older signed policy unreplayable, so clearing
+    it let a device paired again under the same id start from zero — and every
+    policy document signed before the unpair verify once more. A server holding
+    an old document only had to wait for an unpair, which is a thing users do
+    for unrelated reasons. It was dropped to keep the ordinary case tidy: a
+    re-paired machine numbering its own new policy below a mark it no longer
+    remembers setting. That is a worse trade than it looked, because the tidy
+    case is recoverable by saving the rules once and the replay is not
+    recoverable at all.
+
+    *Not* ``seenMessages``. Those keys are per message, not per device, and they
+    exist so a relay cannot replay something already delivered. Unpairing is not
+    a reason to make a delivered message deliverable again, and that ledger
+    expires on its own.
+
+    A block is policy rather than pairing and is not touched here: unpairing a
+    blocked device leaves it blocked.
+    """
+    with _lock:
+        # policySeqs and encryptedPeers are reported so the caller's shape does
+        # not change, and are always zero: both are deliberately kept — see the
+        # docstring for what each one protects.
+        removed = {"pins": 0, "notices": 0, "encryptedPeers": 0, "policySeqs": 0}
+        if not device_id:
+            return {**removed, "found": False}
+        state = _load_locked()
+        if state["pins"].pop(device_id, None) is not None:
+            removed["pins"] = 1
+        kept_notices = [n for n in state["notices"] if n.get("deviceId") != device_id]
+        removed["notices"] = len(state["notices"]) - len(kept_notices)
+        if removed["notices"]:
+            state["notices"] = kept_notices
+        found = any(removed.values())
+        if found:
+            _save_locked(state)
+            # The device id and the counts, and nothing else. The pin held a
+            # signing key, and a log line is the one place it could outlive the
+            # state document it was removed from.
+            log.info("forgot device %s: %s", device_id, removed)
+        return {**removed, "found": found}
+
+
+def note_pairing(device_id: str, *, kind: str, device_name: str = "") -> None:
+    """Record how a pairing ended. Never raises; this feeds a panel.
+
+    ``kind`` is "paired", "refused" or "revoked". All three describe something
+    the *other* machine did, which is exactly the class of event the old
+    one-sided pairing had no way to report: it granted access without anybody
+    at the far end being asked, and without telling them afterwards.
+    """
+    with _lock:
+        state = _load_locked()
+        _record_locked(
+            state,
+            NOTICE_PAIRING,
+            device_id=device_id,
+            detail={"pairing": kind, "deviceName": device_name},
+        )
+        _save_locked(state)
+
+
+def note_remote_command(device_id: str, *, device_name: str, workspace: str, pane_name: str) -> None:
+    """Record that a paired device drove a pane here. Never raises.
+
+    Deliberately after the fact rather than a prompt: a device that has been
+    paired *is* allowed to do this, and asking every time would train people to
+    click through. What was missing was any way to answer "has anything been
+    driving my machines", which a log file nobody opens does not.
+    """
+    with _lock:
+        state = _load_locked()
+        _record_locked(
+            state,
+            NOTICE_REMOTE_COMMAND,
+            device_id=device_id,
+            detail={
+                "deviceName": device_name,
+                "workspace": workspace,
+                "paneName": pane_name,
+            },
+        )
+        _save_locked(state)
 
 
 def note_key_change(device_id: str, *, pinned_key: str, offered_key: str, member_id: str) -> None:

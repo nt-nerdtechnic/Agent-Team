@@ -28,6 +28,7 @@ const LOCALES = ['en-US', 'zh-TW'] as const
 const here = dirname(fileURLToPath(import.meta.url))
 const SETTINGS = readFileSync(resolve(here, '../SettingsModal.vue'), 'utf8')
 const MODAL = readFileSync(resolve(here, '../AccountModal.vue'), 'utf8')
+const APP = readFileSync(resolve(here, '../../App.vue'), 'utf8')
 const MAIN = readFileSync(resolve(here, '../../main.ts'), 'utf8')
 
 function block(locale: (typeof LOCALES)[number], path: string[]): Record<string, string> {
@@ -92,7 +93,9 @@ describe('account modal', () => {
     // Anchored on the display name rather than the role: role went with the
     // identity convergence (the server stopped returning it), so an assertion
     // that kept naming it would be pinning down a row that cannot render.
-    expect(MODAL).toMatch(/v-if="signedIn"[\s\S]{0,1200}status\.displayName/)
+    // The window grew a connection row above these; what this pins is that the
+    // account details are inside the signed-in branch, not how far down.
+    expect(MODAL).toMatch(/v-if="signedIn"[\s\S]{0,2000}status\.displayName/)
     expect(MODAL).toMatch(/@click="signOut"/)
     expect(MODAL).toContain("emit('changed')")
   })
@@ -126,7 +129,9 @@ describe('account modal', () => {
     expect(MODAL).toContain("'p2p.account.resend_verification'")
     expect(MODAL).toMatch(/v-if="signedIn && verifyPending"[\s\S]{0,400}account\.verify-sent/)
     expect(MODAL).toMatch(/account\.verify-resend[\s\S]{0,120}<\/button>/)
-    expect(MODAL).toMatch(/:disabled="resending"[\s\S]{0,200}resendVerification/)
+    // The link-readiness gate rides on the same attribute now: a resend that
+    // cannot leave the machine is a button that answers after the click.
+    expect(MODAL).toMatch(/:disabled="resending \|\| !linkReady"[\s\S]{0,200}resendVerification/)
   })
 
   it('only ticks an email the server actually confirmed', () => {
@@ -191,5 +196,244 @@ describe('settings — read-only link status', () => {
       const p2p = block(locale, ['settings', 'p2p'])
       for (const gone of ['server-url', 'server-url-placeholder']) expect(p2p[gone], `${locale}/${gone}`).toBeUndefined()
     }
+  })
+})
+
+describe('re-signing the pane-authorization rules', () => {
+  it('has an action for it, because this section has no save button', () => {
+    // Every change here writes as it is made — there is no save. So the
+    // account window's "open the rules and save them once" described an act
+    // that did not exist anywhere in the app, and the only way to perform it
+    // was to add a rule and remove it again.
+    expect(SETTINGS).toContain('resignP2pPolicy')
+    expect(SETTINGS).toContain('settings.p2p.policy.resign')
+    // Unchanged rules, new signature: that is the whole repair.
+    expect(SETTINGS).toMatch(
+      /async function resignP2pPolicy\(\)[\s\S]{0,200}saveP2pPolicy\(policyDoc\.value\)/,
+    )
+  })
+
+  it('explains what saving does, next to the button', () => {
+    expect(SETTINGS).toContain('settings.p2p.policy.resign-hint')
+    expect(SETTINGS).toContain('p2pPolicyResigned')
+  })
+
+  it('can be scrolled to from outside this window', () => {
+    // The account view points here now, so "which tab" is not enough — the
+    // rules are one section of a page.
+    expect(SETTINGS).toMatch(/setSection: async \(tab: Tab, section: string\)/)
+    expect(SETTINGS).toContain('data-settings-section="general-p2p-policy"')
+  })
+
+  it('lives on its own page, not at the bottom of General', () => {
+    // Two cards at the end of the longest page in this window is where somebody
+    // told "open the rules" went looking and did not find them.
+    expect(SETTINGS).toContain("activeTab === 'cross-device'")
+    expect(SETTINGS).toContain("settings.nav.crossDevice")
+    const general = SETTINGS.slice(
+      SETTINGS.indexOf(`v-show="activeTab === 'general'"`),
+      SETTINGS.indexOf(`v-show="activeTab === 'cross-device'"`),
+    )
+    expect(general).not.toContain('data-settings-section="general-p2p"')
+    expect(general).not.toContain('data-settings-section="general-p2p-policy"')
+  })
+
+  it('sends every entry point to the new page', () => {
+    // A search result or an "open rules" click that still named General would
+    // land on a page these cards are no longer on.
+    expect(SETTINGS).toMatch(/id: 'general-p2p',\n\s*tab: 'cross-device',/)
+    expect(SETTINGS).toMatch(/id: 'general-p2p-policy',\n\s*tab: 'cross-device',/)
+    expect(APP).toContain("setSection('cross-device', 'general-p2p-policy')")
+  })
+
+  it('polls the link while the page showing it is open', () => {
+    // The poll followed the cards, not the page they used to be on: left on
+    // General it would keep asking for something nobody is looking at, and stop
+    // the moment somebody actually opened it.
+    expect(SETTINGS).toMatch(/if \(p2pTimer\)[\s\S]{0,400}if \(tab !== 'cross-device'\) return/)
+  })
+
+  for (const locale of LOCALES) {
+    it(`names the page in ${locale}`, () => {
+      const messages = i18n.global.getLocaleMessage(locale) as Record<string, unknown>
+      const nav = (messages.settings as Record<string, unknown>).nav as Record<string, string>
+      expect(nav.crossDevice).toBeTruthy()
+    })
+  }
+
+  for (const locale of LOCALES) {
+    it(`names the re-sign action in ${locale}`, () => {
+      const messages = i18n.global.getLocaleMessage(locale) as Record<string, unknown>
+      const policy = (
+        ((messages.settings as Record<string, unknown>).p2p as Record<string, unknown>)
+          .policy as Record<string, string>
+      )
+      expect(policy.resign).toBeTruthy()
+      expect(policy['resign-hint']).toBeTruthy()
+      expect(policy.resigned).toBeTruthy()
+    })
+  }
+})
+
+describe('the published legal pages', () => {
+  it('links to them from the page that agrees to them', () => {
+    // Both surfaces resolve the address through preload rather than writing
+    // one: there is exactly one table of these, in src/shared/legalLinks.ts.
+    expect(SETTINGS).toContain("openLegal('privacy')")
+    expect(SETTINGS).toContain("openLegal('boundaries')")
+    expect(MODAL).toContain("openLegal('privacy')")
+    // No terms page: Navide is MIT-licensed software with a free account, so
+    // there is no contract for a reader to agree to — and that page was the
+    // only one that would have needed company details and a governing law.
+    expect(SETTINGS).not.toContain("openLegal('terms')")
+    expect(MODAL).not.toContain("openLegal('terms')")
+  })
+
+  it('never assembles a URL of its own', () => {
+    // A hand-written address is one that goes stale silently, and this is the
+    // one kind of link where a wrong page is a legal problem rather than a 404.
+    expect(SETTINGS).not.toMatch(/https:\/\/navide\.dev\/(privacy|terms|boundaries)/)
+    expect(MODAL).not.toMatch(/https:\/\/navide\.dev\/(privacy|terms|boundaries)/)
+    expect(SETTINGS).toContain('window.agentTeam?.openLegal(route)')
+    expect(MODAL).toContain('window.agentTeam?.openLegal(route)')
+  })
+
+  for (const locale of LOCALES) {
+    it(`labels them in ${locale}`, () => {
+      const messages = i18n.global.getLocaleMessage(locale) as Record<string, unknown>
+      const p2p = (messages.settings as Record<string, unknown>).p2p as Record<string, string>
+      expect(p2p['legal-privacy']).toBeTruthy()
+      expect(p2p['legal-boundaries']).toBeTruthy()
+    })
+  }
+})
+
+describe('nobody writes the site address by hand', () => {
+  // Claimed in an earlier round and not actually enforced — the audit was
+  // right. These are the two surfaces that link to the published pages, and a
+  // literal here is the failure mode that costs most: it goes stale silently,
+  // and a wrong legal page is not a 404.
+  const SITE = 'https://navide' + '.dev'
+
+  it('never appears in the account window', () => {
+    expect(MODAL).not.toContain(SITE)
+  })
+
+  it('never appears in the settings window', () => {
+    expect(SETTINGS).not.toContain(SITE)
+  })
+
+  it('lives in exactly one module, which both of them ask', () => {
+    const shared = readFileSync(resolve(here, '../../../../shared/legalLinks.ts'), 'utf8')
+    expect(shared).toContain(`export const LEGAL_SITE = '${SITE}'`)
+    expect(MODAL).toContain('openLegal(')
+    expect(SETTINGS).toContain('openLegal(')
+  })
+})
+
+describe('the cross-device page after the UX pass', () => {
+  it('says why each control is disabled', () => {
+    // A greyed control with no reason is the same puzzle one level down. Which
+    // reason it is, is asserted by the re-audit block below.
+    expect(SETTINGS.match(/:title="p2pDisabledReason \|\| undefined"/g)?.length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('reads the same state vocabulary as the account window', () => {
+    // Two sets of words for one fact, on two screens, is how "unauthorized"
+    // came to read as one thing here and another there.
+    expect(SETTINGS).toContain("settings.p2p.state-' + p2pState")
+    expect(SETTINGS).not.toContain('settings.p2p.link.state-')
+  })
+
+  it('uses only tokens the design system defines', () => {
+    for (const token of ['--warn-fg', '--ok-fg', '--bg-default', '--border)', '--accent)']) {
+      expect(SETTINGS, token).not.toContain(`var(${token}`)
+    }
+  })
+})
+
+describe('the rules list after the UX pass', () => {
+  it('has two columns with a header', () => {
+    // As one run of text separated by a middle dot and an arrow, "who" and
+    // "what they may reach" had to be parsed apart on every line.
+    expect(SETTINGS).toContain('settings.p2p.policy.col-source')
+    expect(SETTINGS).toContain('settings.p2p.policy.col-target')
+    // The header row itself, not just the class name: renaming the class in
+    // the template alone left this green.
+    expect(SETTINGS).toMatch(
+      /<li class="policy-rule policy-rule-head">[\s\S]{0,300}col-source[\s\S]{0,200}col-target/,
+    )
+    expect(SETTINGS).toContain('policy-rule-from')
+    expect(SETTINGS).toContain('policy-rule-to')
+    // The single-run version is gone rather than unused.
+    expect(SETTINGS).not.toContain('policy-rule-text')
+  })
+
+  it('does not stack two sentences about the same fact', () => {
+    // "These rules live on the server" and "the link is not connected" are one
+    // fact from two sides; stacked they read as two separate problems.
+    expect(SETTINGS).toContain('!p2pPolicy?.editable && !p2pWaitReason')
+  })
+
+  it('leaves the address to the window that can act on it', () => {
+    // It was labelled here first; then C2 removed the whole duplicated block,
+    // because a second read-only copy is a second place for the two to
+    // disagree. The account window shows it, and can change it.
+    expect(SETTINGS).not.toContain('p2pStatus.serverUrl')
+    expect(SETTINGS).toContain('settings.p2p.account.hint-titlebar')
+  })
+
+  it('has a container class of its own', () => {
+    expect(SETTINGS).toContain("class=\"s-body cross-device-body\"")
+    expect(SETTINGS).toMatch(/\.cross-device-body \{/)
+  })
+
+  it('files the cross-device search entries under the page they are on', () => {
+    expect(SETTINGS).toMatch(/id: 'general-p2p',[\s\S]{0,200}group: 'Accounts & Agents'/)
+    expect(SETTINGS).toMatch(/id: 'general-p2p-policy',[\s\S]{0,260}group: 'Accounts & Agents'/)
+  })
+})
+
+describe('the cross-device page after the re-audit', () => {
+  it('gives each disabled reason its own sentence', () => {
+    // *Which* state produces which sentence is asserted in
+    // lib/__tests__/linkStatus.test.ts, by calling the function. This file can
+    // only see strings, and a condition wired to `false` keeps every string it
+    // had — which is exactly how the first version of this test passed.
+    expect(SETTINGS).toContain("import { disabledReasonKey } from '../lib/linkStatus'")
+    expect(SETTINGS).toMatch(/const reason = disabledReasonKey\(\{[\s\S]{0,200}busy: p2pPolicyBusy\.value/)
+    expect(SETTINGS).toMatch(/editable: p2pPolicy\.value\?\.editable === true/)
+    expect(SETTINGS.match(/:title="p2pDisabledReason \|\| undefined"/g)?.length).toBeGreaterThanOrEqual(4)
+    expect(SETTINGS).not.toContain(':title="p2pWaitReason || undefined"')
+  })
+
+  it('demotes the re-sign action below editing the rules', () => {
+    // It repairs a warning that appears rarely; at the same weight as "add
+    // rule" it looked like part of editing.
+    expect(SETTINGS).toMatch(/class="policy-secondary"[\s\S]{0,200}resignP2pPolicy/)
+    expect(SETTINGS).toMatch(/\.policy-secondary \{/)
+  })
+
+  it('does not print the account facts the other window already owns', () => {
+    // A second read-only copy is a second thing to keep in sync and a second
+    // place for the two to disagree.
+    expect(SETTINGS).not.toContain('p2pStatus.serverUrl')
+    expect(SETTINGS).not.toContain('p2pStatus.deviceId')
+    expect(SETTINGS).not.toContain('p2pStatus.detail')
+  })
+
+  it('says "nothing is allowed by default" only when there are rules', () => {
+    // With none, this and the "no rules yet" line said the same thing twice.
+    expect(SETTINGS).toMatch(/v-if="policyDoc\.rules\.length" class="policy-deny"/)
+  })
+
+  it('renders the wildcard more quietly than a real name', () => {
+    expect(SETTINGS).toContain('function isAnyField(')
+    expect(SETTINGS).toContain("'policy-any': isAnyField(rule.to.workspace)")
+    expect(SETTINGS).toMatch(/\.policy-any \{ color: var\(--text-secondary\)/)
+  })
+
+  it('has no leftover styles for a class the template dropped', () => {
+    expect(SETTINGS).not.toContain('p2p-tabs')
   })
 })

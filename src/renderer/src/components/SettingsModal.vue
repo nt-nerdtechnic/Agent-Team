@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { disabledReasonKey } from '../lib/linkStatus'
+import type { LegalRoute } from '../../../shared/legalLinks'
 import type { useBackend } from '../composables/useBackend'
 import type { useRoles } from '../composables/useRoles'
 import type { useStages } from '../composables/useStages'
@@ -179,7 +181,7 @@ const reclaimNowCount = computed(() => props.reclaimableNowCount ?? 0)
 const reclaimNowSize = computed(() => formatBytes(props.reclaimableNowBytes ?? 0))
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'prompts' | 'memory' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'statusBadges' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
+type Tab = 'mcp' | 'skills' | 'prompts' | 'memory' | 'analyzer' | 'cliAgents' | 'general' | 'cross-device' | 'updates' | 'appearance' | 'statusBadges' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
 type HelpTopic = 'messaging' | 'mcp'
@@ -204,6 +206,18 @@ watch(() => props.tabRequest, () => {
 defineExpose({
   setTab: (tab: Tab): void => {
     activeTab.value = tab
+  },
+  // Same two steps the search results take, for a caller outside this window
+  // that knows which section it means — the account view pointing at the rules,
+  // for one, which it used to do in prose and with nowhere to click.
+  setSection: async (tab: Tab, section: string): Promise<void> => {
+    activeTab.value = tab
+    await nextTick()
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(`[data-settings-section="${section}"]`)
+        ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    })
   },
 })
 
@@ -442,19 +456,19 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
   },
   {
     id: 'general-p2p',
-    tab: 'general',
+    tab: 'cross-device',
     section: 'general-p2p',
     title: 'Cross-device Messaging / 跨裝置傳訊',
-    group: 'General',
+    group: 'Accounts & Agents',
     summary: 'Link this machine to a Navide-Server so agents can message agents on your other devices.',
     keywords: 'p2p cross device remote server url access token navide-server connect link relay 跨裝置 遠端 伺服器 網址 權杖 連線 傳訊',
   },
   {
     id: 'general-p2p-policy',
-    tab: 'general',
+    tab: 'cross-device',
     section: 'general-p2p-policy',
     title: 'Cross-device Authorization / 跨裝置授權',
-    group: 'General',
+    group: 'Accounts & Agents',
     summary: 'Choose which remote devices may send instructions to panes on this machine. Everything is refused until a rule allows it.',
     keywords: 'policy permission authorization allow rule deny default pane cross device remote rejected 政策 權限 授權 允許 規則 拒絕 跨裝置 被擋',
   },
@@ -865,6 +879,10 @@ const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof Se
   analyzer: { scope: 'User', storage: 'analyzer' },
   cliAgents: { scope: 'User', storage: 'localStorage' },
   general: { scope: 'User', storage: 'localStorage' },
+  // Neither half of this page is a local setting: the access token is in
+  // the credential vault and the authorization rules live on the server,
+  // which is why the cards say so themselves rather than showing a path.
+  'cross-device': { scope: 'Account / Server', storage: 'safeStorage' },
   updates: { scope: 'User', storage: 'mainProcess' },
   appearance: { scope: 'User', storage: 'localStorage' },
   // The user's own names and colours for the pane status badges.
@@ -1025,7 +1043,13 @@ const THEME_SWATCHES: Record<string, string[]> = {
 // vault, but both go out through one backend call so the link reconnects once,
 // with the final pair, instead of dialling on a half-edited configuration.
 interface P2pLinkStatus {
-  state: 'unconfigured' | 'connecting' | 'connected' | 'unreachable' | 'unauthorized'
+  state:
+    | 'unconfigured'
+    | 'connecting'
+    | 'waiting-for-keychain'
+    | 'connected'
+    | 'unreachable'
+    | 'unauthorized'
   serverUrl: string
   hasToken: boolean
   detail: string
@@ -1036,6 +1060,8 @@ interface P2pLinkStatus {
    *  this decides which face the card shows, not whether it works. */
   accountEmail?: string
   displayName?: string
+  /** Why the last dial failed, verbatim from the socket. */
+  lastError?: string
 }
 /** "Connecting" has to resolve on its own, so the section re-asks while it is
  *  on screen rather than freezing on whatever the save call answered. */
@@ -1087,7 +1113,51 @@ const newRulePaneName = ref('')
 const policyDoc = computed<PolicyDocument>(() => readPolicy(p2pPolicy.value?.policy))
 const policyMemberId = computed(() => p2pPolicy.value?.memberId ?? '')
 const policyDevices = computed<P2pPolicyDevice[]>(() => p2pPolicy.value?.devices ?? [])
-const policyEditable = computed(() => p2pPolicy.value?.editable === true && !p2pPolicyBusy.value)
+/**
+ * Whether an action that needs the server can be attempted at all.
+ *
+ * Everything in this section goes to the relay, and a link that is still
+ * dialling answers with "configured but not connected right now, retry
+ * shortly" — a sentence that arrives *after* the click, so the button looks
+ * broken rather than unavailable.
+ */
+const p2pLinkReady = computed(() => p2pState.value === 'connected')
+/** The socket's own words. "Not connected" is the half already on screen;
+ *  which kind it is decides whether waiting is the right thing to do. */
+const p2pLinkError = computed(() =>
+  p2pLinkReady.value ? '' : (p2pStatus.value?.lastError ?? '')
+)
+/**
+ * Why a control on this page is off, in the order somebody can act on.
+ *
+ * Three different reasons wore one sentence: the link is not up, a save is in
+ * flight, or the policy is not ours to edit. Telling all three "not connected"
+ * sends two of them to check the network.
+ */
+const p2pDisabledReason = computed(() => {
+  // Decided by a pure function in lib/linkStatus so it can be tested by what it
+  // returns: inline, the only available check was "the key is mentioned
+  // somewhere", which a condition wired to `false` still passes.
+  const reason = disabledReasonKey({
+    linkReason: p2pWaitReason.value,
+    busy: p2pPolicyBusy.value,
+    editable: p2pPolicy.value?.editable === true,
+  })
+  if (!reason) return ''
+  return reason.startsWith('policy.') ? t(`settings.p2p.${reason}`) : reason
+})
+const p2pWaitReason = computed(() =>
+  p2pLinkReady.value
+    ? ''
+    : p2pState.value === 'waiting-for-keychain'
+      ? t('settings.p2p.link-waiting-keychain')
+      : p2pState.value === 'connecting'
+        ? t('settings.p2p.link-connecting')
+        : t('settings.p2p.link-not-connected'),
+)
+const policyEditable = computed(
+  () => p2pPolicy.value?.editable === true && !p2pPolicyBusy.value && p2pLinkReady.value
+)
 const policyAllowsOwnDevices = computed(() =>
   allowsOwnDevices(policyDoc.value, policyMemberId.value)
 )
@@ -1107,7 +1177,15 @@ async function saveP2pPolicy(next: PolicyDocument): Promise<boolean> {
   p2pPolicyBusy.value = true
   p2pPolicyError.value = ''
   try {
-    const resp = await props.backend.send<P2pPolicyState>('p2p.policy.set', { policy: next })
+    // The backend refuses this without a one-time confirmation from main. Only
+    // a window can obtain one — MCP and the plugin broker hold the same socket
+    // and have no path to the key — which is what separates a person editing
+    // the rules from an agent being talked into it by a remote peer.
+    const confirm = await window.agentTeam?.trustConfirm('p2p.policy.set', '')
+    const resp = await props.backend.send<P2pPolicyState>('p2p.policy.set', {
+      policy: next,
+      confirm,
+    })
     if (!resp.ok) {
       p2pPolicyError.value = resp.error?.message ?? 'Failed to save the authorization rules'
       return false
@@ -1120,6 +1198,27 @@ async function saveP2pPolicy(next: PolicyDocument): Promise<boolean> {
   } finally {
     p2pPolicyBusy.value = false
   }
+}
+
+/** Open one of the published legal pages. The addresses live in the shared
+ *  table and are resolved in main, so nothing here builds a URL. */
+function openLegal(route: LegalRoute): void {
+  void window.agentTeam?.openLegal(route)
+}
+
+/** Whether the last re-sign succeeded, so the button can say it did. */
+const p2pPolicyResigned = ref(false)
+
+/**
+ * Write the rules back unchanged, which signs them again.
+ *
+ * The signature covers the document and a counter this machine keeps, so the
+ * same rules produce a new signature and an older one stops verifying. That is
+ * the whole repair for "your rules could not be verified", and until this
+ * existed the only way to perform it was to add a rule and remove it again.
+ */
+async function resignP2pPolicy(): Promise<void> {
+  p2pPolicyResigned.value = await saveP2pPolicy(policyDoc.value)
 }
 
 async function toggleOwnDevices(input: HTMLInputElement): Promise<void> {
@@ -1154,6 +1253,13 @@ function policyFieldLabel(value: string): string {
   return value === POLICY_ANY ? t('settings.p2p.policy.any') : value
 }
 
+/** Whether a rule field is the wildcard. "Any" is the absence of a constraint,
+ *  and printing it at the same weight as a real name makes a broad rule look
+ *  as specific as a narrow one. */
+function isAnyField(value: string): boolean {
+  return value === POLICY_ANY
+}
+
 function policyMemberLabel(memberId: string): string {
   if (memberId === POLICY_ANY) return t('settings.p2p.policy.any-member')
   if (memberId === policyMemberId.value) return t('settings.p2p.policy.my-account')
@@ -1168,7 +1274,10 @@ function policyDeviceLabel(deviceId: string): string {
 
 watch(activeTab, (tab) => {
   if (p2pTimer) { clearInterval(p2pTimer); p2pTimer = null }
-  if (tab !== 'general') return
+  // Follows the cards, not the page they used to be on: polling the link while
+  // General is open would keep asking for something nobody is looking at, and
+  // stop the moment somebody actually opened it.
+  if (tab !== 'cross-device') return
   void loadP2pStatus()
   void loadP2pPolicy()
   p2pTimer = setInterval(() => {
@@ -1688,6 +1797,11 @@ watch(activeTab, (tab) => {
               <SettingsNavItem :label="$t('settings.nav.layout')" :active="activeTab === 'layout'" @select="activeTab = 'layout'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M5.5 2.5v11M14.5 6h-9"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.crossDevice')" :active="activeTab === 'cross-device'" @select="activeTab = 'cross-device'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.3" y="3" width="7" height="5.5" rx="1.2"/><rect x="8.7" y="7.5" width="6" height="5.5" rx="1.2"/><path d="M4.8 8.5v2a1.5 1.5 0 0 0 1.5 1.5h2.4"/></svg>
                 </template>
               </SettingsNavItem>
             </div>
@@ -2645,7 +2759,14 @@ watch(activeTab, (tab) => {
               </div>
             </SettingsCard>
           </SettingsSection>
+        </div>
 
+        <!-- ══ CROSS-DEVICE TAB ══ -->
+        <!-- Lifted out of General unchanged. It was two cards at the bottom
+             of the longest page in this window, which is where somebody
+             told "open the rules" went looking and did not find them. -->
+        <div v-show="activeTab === 'cross-device'" class="s-body cross-device-body">
+          <h1 class="s-page-title">{{ $t('settings.nav.crossDevice') }}</h1>
           <SettingsSection :label="$t('settings.p2p.title')">
             <SettingsCard>
               <div class="s-fullrow" data-settings-section="general-p2p">
@@ -2658,10 +2779,14 @@ watch(activeTab, (tab) => {
                   <span class="p2p-dot" :class="p2pDotClass"></span>
                   <span>{{ $t('settings.p2p.state-' + p2pState) }}</span>
                 </p>
-                <p v-if="p2pStatus?.accountEmail" class="p2p-detail">{{ $t('settings.p2p.account.email') }}: {{ p2pStatus.accountEmail }}</p>
-                <p v-if="p2pStatus?.serverUrl" class="p2p-detail">{{ p2pStatus.serverUrl }}</p>
-                <p v-if="p2pStatus?.detail" class="p2p-detail">{{ p2pStatus.detail }}</p>
-                <p v-if="p2pStatus?.deviceId" class="p2p-detail">{{ $t('settings.p2p.device-id') }}: {{ p2pStatus.deviceId }}</p>
+                <!-- One line and a door. The four rows that used to be here —
+                     email, address, detail, device id — are all shown in the
+                     account window, which is where they can also be acted on. A
+                     second read-only copy is a second thing to keep in sync and
+                     a second place for the two to disagree. -->
+                <p v-if="p2pStatus?.accountEmail" class="p2p-detail">
+                  {{ $t('settings.p2p.account.email') }}: {{ p2pStatus.accountEmail }}
+                </p>
                 <p class="ap-hint p2p-titlebar-hint">{{ $t('settings.p2p.account.hint-titlebar') }}</p>
               </div>
             </SettingsCard>
@@ -2672,15 +2797,31 @@ watch(activeTab, (tab) => {
             <SettingsCard v-if="p2pState !== 'unconfigured'">
               <div class="s-fullrow" data-settings-section="general-p2p-policy">
                 <h3 class="policy-title">{{ $t('settings.p2p.policy.title') }}</h3>
+                <!-- Said once, above everything it disables: the state belongs
+                     to the section rather than to any one button. -->
+                <p v-if="p2pWaitReason" class="policy-readonly">
+                  {{ p2pWaitReason }}
+                  <span v-if="p2pLinkError" class="link-detail">{{ p2pLinkError }}</span>
+                </p>
                 <p class="ap-hint">{{ $t('settings.p2p.policy.hint') }}</p>
-                <p class="policy-deny">{{ $t('settings.p2p.policy.default-deny') }}</p>
-                <p v-if="!p2pPolicy?.editable" class="policy-readonly">{{ $t('settings.p2p.policy.readonly') }}</p>
+                <!-- Only when there are rules to qualify. With none, this and
+                     the "no rules yet" line below said the same thing twice. -->
+                <p v-if="policyDoc.rules.length" class="policy-deny">
+                  {{ $t('settings.p2p.policy.default-deny') }}
+                </p>
+                <!-- One line, not two. "These rules live on the server" and
+                     "the link is not connected" are the same fact told from two
+                     sides, and stacked they read as two separate problems. -->
+                <p v-if="!p2pPolicy?.editable && !p2pWaitReason" class="policy-readonly">
+                  {{ $t('settings.p2p.policy.readonly') }}
+                </p>
 
                 <label class="policy-switch">
                   <input
                     type="checkbox"
                     :checked="policyAllowsOwnDevices"
                     :disabled="!policyEditable || !policyMemberId"
+                    :title="p2pDisabledReason || undefined"
                     @change="toggleOwnDevices($event.target as HTMLInputElement)"
                   />
                   <span>
@@ -2691,14 +2832,29 @@ watch(activeTab, (tab) => {
 
                 <p class="policy-section-label">{{ $t('settings.p2p.policy.rules') }}</p>
                 <p v-if="!policyDoc.rules.length" class="policy-empty">{{ $t('settings.p2p.policy.empty') }}</p>
+                <!-- Two columns with a header. As one run of text separated by
+                     a middle dot and an arrow, "who" and "what they may reach"
+                     had to be parsed apart on every line. -->
                 <ul v-else class="policy-rules">
+                  <li class="policy-rule policy-rule-head">
+                    <span class="policy-rule-from">{{ $t('settings.p2p.policy.col-source') }}</span>
+                    <span class="policy-rule-to">{{ $t('settings.p2p.policy.col-target') }}</span>
+                  </li>
                   <li v-for="(rule, index) in policyDoc.rules" :key="index" class="policy-rule">
-                    <span class="policy-rule-text">
+                    <span class="policy-rule-from">
                       {{ policyMemberLabel(rule.from.memberId) }} · {{ policyDeviceLabel(rule.from.deviceId) }}
-                      →
-                      {{ policyFieldLabel(rule.to.workspace) }} / {{ policyFieldLabel(rule.to.paneName) }}
                     </span>
-                    <button class="ap-reset" :disabled="!policyEditable" @click="removeP2pPolicyRule(index)">
+                    <span class="policy-rule-to">
+                      <span :class="{ 'policy-any': isAnyField(rule.to.workspace) }">
+                        {{ policyFieldLabel(rule.to.workspace) }}
+                      </span>
+                      /
+                      <span :class="{ 'policy-any': isAnyField(rule.to.paneName) }">
+                        {{ policyFieldLabel(rule.to.paneName) }}
+                      </span>
+                    </span>
+                    <button class="ap-reset" :disabled="!policyEditable"
+                    :title="p2pDisabledReason || undefined" @click="removeP2pPolicyRule(index)">
                       {{ $t('settings.p2p.policy.remove') }}
                     </button>
                   </li>
@@ -2708,14 +2864,16 @@ watch(activeTab, (tab) => {
                 <div class="policy-add">
                   <div class="field">
                     <label class="lbl" for="policy-member">{{ $t('settings.p2p.policy.source-member') }}</label>
-                    <select id="policy-member" v-model="newRuleMemberScope" :disabled="!policyEditable || !policyMemberId">
+                    <select id="policy-member" v-model="newRuleMemberScope" :disabled="!policyEditable || !policyMemberId"
+                    :title="p2pDisabledReason || undefined">
                       <option value="mine">{{ $t('settings.p2p.policy.my-account') }}</option>
                       <option value="any">{{ $t('settings.p2p.policy.any-member') }}</option>
                     </select>
                   </div>
                   <div class="field">
                     <label class="lbl" for="policy-device">{{ $t('settings.p2p.policy.source-device') }}</label>
-                    <select id="policy-device" v-model="newRuleDeviceId" :disabled="!policyEditable">
+                    <select id="policy-device" v-model="newRuleDeviceId" :disabled="!policyEditable"
+                    :title="p2pDisabledReason || undefined">
                       <option value="">{{ $t('settings.p2p.policy.any-device') }}</option>
                       <option v-for="device in policyDevices" :key="device.deviceId" :value="device.deviceId">
                         {{ device.deviceName || device.deviceId }}
@@ -2731,6 +2889,7 @@ watch(activeTab, (tab) => {
                       spellcheck="false"
                       autocomplete="off"
                       :disabled="!policyEditable"
+                    :title="p2pDisabledReason || undefined"
                       :placeholder="$t('settings.p2p.policy.blank-is-any')"
                     />
                   </div>
@@ -2743,16 +2902,40 @@ watch(activeTab, (tab) => {
                       spellcheck="false"
                       autocomplete="off"
                       :disabled="!policyEditable"
+                    :title="p2pDisabledReason || undefined"
                       :placeholder="$t('settings.p2p.policy.blank-is-any')"
                     />
                   </div>
                 </div>
                 <div class="row-g gap p2p-actions">
-                  <button class="ap-reset" :disabled="!policyEditable" @click="addP2pPolicyRule">
+                  <button class="ap-reset" :disabled="!policyEditable"
+                    :title="p2pDisabledReason || undefined" @click="addP2pPolicyRule">
                     {{ $t('settings.p2p.policy.add') }}
                   </button>
+                  <!-- There is no save button here — every change above writes
+                       as you make it — so a warning that says "open the rules
+                       and save" described an act this section does not have.
+                       This is that act, on its own: the same document, a new
+                       signature. -->
+                  <!-- Secondary: this repairs a warning that appears rarely,
+                       and sitting at the same weight as "add rule" made it look
+                       like part of editing the rules. -->
+                  <button class="policy-secondary" :disabled="!policyEditable"
+                    :title="p2pDisabledReason || undefined" @click="resignP2pPolicy">
+                    {{ $t('settings.p2p.policy.resign') }}
+                  </button>
                 </div>
+                <p class="ap-hint">{{ $t('settings.p2p.policy.resign-hint') }}</p>
+                <p v-if="p2pPolicyResigned" class="ap-hint">{{ $t('settings.p2p.policy.resigned') }}</p>
                 <p v-if="p2pPolicyError" class="err-msg">{{ p2pPolicyError }}</p>
+                <!-- What this page is actually agreeing to, on the page that
+                     does it. The addresses come from the shared table through
+                     preload; nothing here assembles a URL. -->
+                <p class="legal-row">
+                  <button class="legal-link" @click="openLegal('privacy')">{{ $t('settings.p2p.legal-privacy') }}</button>
+                  <span aria-hidden="true">·</span>
+                  <button class="legal-link" @click="openLegal('boundaries')">{{ $t('settings.p2p.legal-boundaries') }}</button>
+                </p>
               </div>
             </SettingsCard>
           </SettingsSection>
@@ -3736,7 +3919,6 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 /* Cross-device link */
 /* Sign-in tabs. No width/box-sizing here on purpose: these panels have no
    border-box, so a width:100% would push the card past its grid track. */
-.p2p-tabs { display: flex; gap: 2px; margin: 14px 0 4px; border-bottom: 1px solid var(--border-default); }
 .p2p-tab {
   appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
   padding: 6px 12px; font-size: var(--font-xs); color: var(--text-secondary); cursor: pointer;
@@ -3755,6 +3937,26 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .p2p-detail { margin: 4px 0 0; font-size: var(--font-2xs); color: var(--text-secondary); word-break: break-all; }
 
 /* Cross-device authorization (pane policy) */
+/* Same shape as the account window's footer: one muted row, no underline until
+   hover. Two stacked lines with an underlined link read as a web page. */
+/* The transport's own words, quieter than the sentence explaining them. */
+.link-detail { display: block; margin-top: 2px; color: var(--text-secondary); word-break: break-word; }
+/* Its own container class, with the same box the other tab bodies have. It
+   borrowed the appearance tab's, which is a name that says nothing about this
+   page and a rule anybody editing that tab would reasonably assume they
+   owned. */
+.cross-device-body { overflow-y: auto; padding: 18px 22px; }
+.legal-row {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-muted);
+  font-size: 12.5px; color: var(--text-secondary);
+}
+.legal-link {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font: inherit; color: var(--text-secondary); text-decoration: none;
+}
+.legal-link:hover { color: var(--text-primary); text-decoration: underline; }
+.legal-link:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
 .policy-title { margin: 0 0 6px; font-size: 12.5px; color: var(--text-bright); }
 .policy-deny { margin: 8px 0 0; font-size: var(--font-2xs); color: var(--attention-fg); }
 .policy-readonly { margin: 6px 0 0; font-size: var(--font-2xs); color: var(--text-secondary); }
@@ -3766,7 +3968,27 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .policy-empty { margin: 0; font-size: 11.5px; color: var(--text-secondary); }
 .policy-rules { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .policy-rule { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-muted); }
-.policy-rule-text { font-size: 11.5px; color: var(--text-bright); word-break: break-all; }
+.policy-rule-from, .policy-rule-to {
+  flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-bright);
+  word-break: break-all;
+}
+/* The header is a row without the box: it labels the columns rather than
+   claiming to be a rule. */
+.policy-rule-head {
+  border: 0; background: none; padding: 2px 8px;
+  font-size: var(--font-3xs); text-transform: uppercase; letter-spacing: 0.06em;
+}
+.policy-rule-head span { color: var(--text-secondary); }
+.policy-any { color: var(--text-secondary); }
+/* Secondary: this repairs a rare warning, and at the same weight as "add rule"
+   it looked like part of editing. */
+.policy-secondary {
+  background: none; border: 1px solid var(--border-default); color: var(--text-secondary);
+  font-size: 11.5px; padding: 4px 10px; border-radius: var(--radius-control, 6px);
+  cursor: pointer;
+}
+.policy-secondary:hover:not(:disabled) { color: var(--text-primary); }
+.policy-secondary:disabled { opacity: 0.5; cursor: default; }
 .policy-add { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .hint-msg { color: var(--text-secondary); font-size: var(--font-2xs); margin: 0; }
 

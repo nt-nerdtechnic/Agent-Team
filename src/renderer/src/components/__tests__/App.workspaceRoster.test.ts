@@ -538,12 +538,15 @@ describe('several workspaces in one window', () => {
   })
 
   it('does not leave the focus on a pane it just hid', () => {
-    // Grid mode would cope, but sidebar and spotlight render the focused pane
-    // and nothing else — they would come up blank.
+    // The focus follows the workspace: a pane that survived the filter keeps
+    // it, and otherwise nothing is selected. Not the first pane of the entered
+    // workspace — selecting a pane focuses its terminal, so a switch would
+    // redirect the keyboard into an agent nobody opened. The stage still draws
+    // a pane; effectiveFocusPaneId falls back on its own.
     const start = appSource.indexOf('async function switchToWorkspace')
     const body = appSource.slice(start, appSource.indexOf('\n}', start))
     expect(body).toContain('tabVisiblePanes.value')
-    expect(body).toContain('selectPane(first')
+    expect(body).toContain('selectPane(null, { userInitiated: false })')
   })
 
   it('keeps hidden panes alive rather than tearing them down', () => {

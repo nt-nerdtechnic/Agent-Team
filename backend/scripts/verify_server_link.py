@@ -654,10 +654,13 @@ async def main() -> int:
         check(len(delivered(dup_key)) == 1, "重複的 msgKey 只注入一次", delivered(dup_key))
 
         print("\n== 10. 政策拒絕／允許的真實往返 ==")
-        # Two things are checked here, and they are opposites on purpose:
-        #   * a deny-everything policy does NOT stand between two machines of
-        #     the same person (A and B are both signed in as this run's admin) —
-        #     signing one account in on a second device is itself the grant;
+        # Three things are checked here, and they are opposites on purpose:
+        #   * an unvouched-for machine of your own is held to the rules like
+        #     anyone else — signing the account in on a second device is no
+        #     longer the grant by itself, because the identity in that first
+        #     message came over the wire;
+        #   * once vouched for, a deny-everything policy does NOT stand between
+        #     two machines of the same person;
         #   * a *different* account does not get as far as the policy at all,
         #     so this section registers one and checks it is turned away.
         deny_set = await write_policy(
@@ -681,7 +684,51 @@ async def main() -> int:
             await until(lambda: link_b._policy_revision == 2, "B 的政策升到 revision 2"),
             "policy.changed 讓 B 換上新政策",
         )
-        # --- your own second machine is exempt, even under deny-everything ---
+        # --- your own second machine, before and after somebody vouches for it ---
+        # Two halves, and the first one is the reason this section was rewritten.
+        # Pinning settles *which key* a device id may use from here on; it does
+        # not settle that the machine behind it is the one you have in mind,
+        # because the member id in that first message was written by the relay.
+        # So an unvouched-for device does not get the own-device ring: it is held
+        # to the ordinary rules, which here deny everything.
+        #
+        # Asserting only the second half would leave this line green after
+        # somebody removed the gate — and removing it is exactly the tempting
+        # "fix" when this section goes red, because the old label said signing in
+        # was itself the grant. It no longer is.
+        unvouched_key = f"verify:{RUN}:own-unvouched"
+        unvouched_send = await link_a.send_message(
+            to=TO_B, sender=SENDER, text="before anyone vouched", msg_key=unvouched_key
+        )
+        check(
+            isinstance(unvouched_send, dict) and unvouched_send.get("ok") is True,
+            "server 接受送出（政策是收端的事，不是 server 的）",
+            unvouched_send,
+        )
+        check(
+            await until(
+                lambda: any(m.get("msgKey") == unvouched_key for m in rec_a.acked),
+                "A 收到未核准裝置的 acked",
+            ),
+            "未核准的自家裝置也會回報結果",
+        )
+        unvouched_ack = next((m for m in rec_a.acked if m.get("msgKey") == unvouched_key), {})
+        check(
+            unvouched_ack.get("reason") == "policy-denied",
+            "未核准的自家裝置照一般規則辦，不進 own-device 環",
+            unvouched_ack,
+        )
+        check(
+            delivered(unvouched_key) == [],
+            "而且沒有送進 pane",
+            delivered(unvouched_key),
+        )
+
+        # Now vouch for it, the way a person does in the account view once they
+        # have compared the fingerprint against the other machine.
+        vouched = await asyncio.to_thread(trust_store.approve_device, DEVICE_A)
+        check(vouched is True, "（前置）核准裝置 A，等同在帳號視圖裡按下確認", vouched)
+
         own_key = f"verify:{RUN}:own-device"
         own_send = await link_a.send_message(
             to=TO_B, sender=SENDER, text="from my other machine", msg_key=own_key
@@ -693,7 +740,7 @@ async def main() -> int:
         )
         check(
             await until(lambda: len(delivered(own_key)) == 1, "B 注入了自己另一台機器送來的訊息"),
-            "同一個帳號的兩台裝置不受 pane 政策約束（登入即授權）",
+            "已核准的自家第二台機器不受 pane 政策約束",
             delivered(own_key),
         )
         check(

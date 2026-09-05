@@ -109,7 +109,20 @@ def is_blocked(policy: Any, *, member_id: str, device_id: str) -> bool:
             return True
         if _usable(entry.get("memberId")) and entry["memberId"] == member_id:
             return True
-    return False
+    # And this machine's own copy, which is the half that survives the policy
+    # being unreadable. ``_entries`` returns nothing for a policy of None — the
+    # state a refused signature leaves behind — and reading that as "nothing is
+    # blocked" made a failed verification into a way to lift every block: the
+    # devices came back onto the "waiting for you to vouch" card and the
+    # delivery path stopped refusing them. Breaking the signature is much
+    # cheaper for a server than forging one without the block in it, so the
+    # decision has to be recorded somewhere the server cannot reach.
+    #
+    # Imported here rather than at module scope: this module is the rule, and
+    # the store is where one of its inputs happens to live.
+    from agent_team_backend import trust_store
+
+    return trust_store.is_blocked_locally(device_id=device_id, member_id=member_id)
 
 
 def blocked_entries(policy: Any) -> list[dict[str, Any]]:

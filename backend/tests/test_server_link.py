@@ -16,6 +16,7 @@ import pytest
 from agent_team_backend import (
     agent_messaging,
     app,
+    confirm_token,
     device_identity,
     device_signing,
     remote_roster,
@@ -26,6 +27,48 @@ from agent_team_backend.credential_vault import CredentialVault, CredentialVault
 from agent_team_backend.server_link import ServerLink, ServerLinkConfig
 
 CONFIG = ServerLinkConfig(url="ws://localhost:8787/ws", token="tok-abc")
+
+
+#: The key these tests pretend the main process handed over on stdin, so the
+#: six trust-changing handlers behave the way they do under a real window.
+_CONFIRM_KEY = "test-confirmation-key"
+
+
+@pytest.fixture(autouse=True)
+def _confirmable():
+    confirm_token._reset_for_test(_CONFIRM_KEY)
+    yield
+    confirm_token._reset_for_test()
+
+
+def _confirmation(action: str, device_id: str = "") -> dict[str, str]:
+    import hashlib
+    import hmac
+    import time
+    import uuid
+
+    nonce = uuid.uuid4().hex
+    expires = str(time.time() + 30.0)
+    payload = "\x00".join(("navide/trust-confirm/v1", nonce, expires, action, device_id))
+    return {
+        "nonce": nonce,
+        "expires": expires,
+        "mac": hmac.new(_CONFIRM_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest(),
+    }
+
+
+@pytest.fixture(autouse=True)
+def _paired_peer():
+    """PEER as a machine this one has already paired with.
+
+    Pins are written only by the pairing exchange now, so a test about what
+    happens to a *message* has to start from a relationship: without one every
+    push below is refused as `not-paired` before it reaches the thing the test
+    is actually about. Tests that introduce their own peer pin it themselves.
+    """
+    trust_store.load()
+    trust_store.pin_device(PEER.device_id, sign_key=PEER.sign_key, member_id="m1")
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -415,14 +458,22 @@ async def test_authenticates_and_publishes_the_roster():
             "agentKey": "claude",
             "status": "waiting",
             "taskId": "",
-            "workspacePath": "/tmp/proj-a",
+            # Not "/tmp/proj-a". The absolute path is no longer published --
+            # see server_link.workspace_digest for why it went and why it went
+            # as a digest rather than as nothing at all.
+            "workspacePath": server_link.workspace_digest("/tmp/proj-a"),
             "workspace": "proj-a",
             "paneId": "p1",
         }
         # The workspace label is the folder basename even for a nested path,
         # and deviceId is never sent (the server takes it from the connection).
         assert by_pane["p2"]["workspace"] == "proj-b"
-        assert by_pane["p2"]["workspacePath"] == "/tmp/nest/proj-b"
+        assert by_pane["p2"]["workspacePath"] == server_link.workspace_digest(
+            "/tmp/nest/proj-b"
+        )
+        # The point of the change, stated as an assertion rather than left to
+        # the reader: nothing on the wire contains the path.
+        assert "/tmp/nest" not in str(by_pane["p2"])
         assert "deviceId" not in by_pane["p2"]
     finally:
         await link.stop()
@@ -1024,7 +1075,14 @@ async def test_a_disconnected_link_fails_fast_and_recovers_on_its_own():
         )
         assert reply["ok"] is False
         assert reply["error"]["code"] == server_link.LINK_OFFLINE
-        assert "not connected" in reply["error"]["message"]
+        # Names which kind of "not connected" this is: "retry shortly" is the
+        # right advice for exactly one of the three states this covers, and a
+        # rejected token or a wrong address is not it.
+        assert reply["error"]["state"] in (
+            server_link.STATE_CONNECTING,
+            server_link.STATE_UNREACHABLE,
+        )
+        assert reply["error"]["state"] in reply["error"]["message"]
 
         # The reconnect loop is what changes the answer, and it does so without
         # anything reaching in to restart it.
@@ -2163,7 +2221,8 @@ async def test_policy_get_and_set_round_trip_through_the_handlers(module_link):
         document = _allow_own_devices()
         await app.handle_message(
             session,
-            {"id": "s1", "type": "p2p.policy.set", "payload": {"policy": document}},
+            {"id": "s1", "type": "p2p.policy.set",
+             "payload": {"policy": document, "confirm": _confirmation("p2p.policy.set")}},
         )
         reply = session.websocket.sent[1]
         assert reply["ok"] is True
@@ -2205,7 +2264,10 @@ async def test_a_policy_this_build_would_not_honour_never_reaches_the_server(mod
                                 "action": "allow",
                             }
                         ],
-                    }
+                    },
+                    # Present and valid, so what this test refuses is the rule
+                    # rather than the missing confirmation.
+                    "confirm": _confirmation("p2p.policy.set"),
                 },
             },
         )
@@ -2221,7 +2283,8 @@ async def test_writing_a_policy_with_no_server_says_so_instead_of_failing_silent
     session = _ws_session()
     await app.handle_message(
         session,
-        {"id": "s1", "type": "p2p.policy.set", "payload": {"policy": _allow_own_devices()}},
+        {"id": "s1", "type": "p2p.policy.set",
+         "payload": {"policy": _allow_own_devices(), "confirm": _confirmation("p2p.policy.set")}},
     )
     reply = session.websocket.sent[0]
     assert reply["ok"] is False

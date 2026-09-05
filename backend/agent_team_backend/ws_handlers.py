@@ -28,6 +28,7 @@ from pydantic import ValidationError
 
 from . import (
     agent_messaging,
+    confirm_token,
     device_trust,
     executions_service,
     native_mcp,
@@ -79,6 +80,10 @@ _REGISTRY: dict[str, Handler] = {}
 # Its own logger so a reader can tell at a glance which half of the app a line
 # came from, since the two halves now share one file.
 client_log = logging.getLogger("agent_team_backend.client")
+#: This module's own log, for decisions it makes rather than for what a
+#: client said. Kept separate so a client cannot make its own noise look
+#: like the backend's.
+log = logging.getLogger(__name__)
 
 # Dedicated pool for onboarding.status, whose dep probing (version subprocesses
 # + config-home scans) can run for seconds. Keeping it off asyncio's shared
@@ -2948,6 +2953,52 @@ async def p2p_account_login(session: "Session", msg_id: str, msg_type: str, payl
     await _account_call(session, msg_id, msg_type, payload, "auth.login")
 
 
+@handler("p2p.account.check_verification")
+async def p2p_account_check_verification(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """"Clicked the link and nothing happened?" — ask the server right now.
+
+    The link learns whether an address is confirmed at ``auth.hello`` and had no
+    second read, so somebody who confirmed in their browser watched "we sent you
+    a link" until the next restart. A push and a poll both cover that now; this
+    is the same question asked on demand, because the wait is otherwise up to
+    half a minute of a person staring at a stale sentence.
+
+    Never an error when the answer is simply "still no": the reply carries what
+    this machine now believes, and the caller shows it.
+    """
+    reply = await server_link.check_verification()
+    if reply is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so there is no account to check",
+            )
+        )
+        return
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_LINK_OFFLINE"),
+                str(error.get("message") or "the navide-server link is not available"),
+            )
+        )
+        return
+    result = reply.get("payload")
+    result = result if isinstance(result, dict) else {}
+    await session.send_json(
+        make_response(
+            msg_id, msg_type, {"emailVerified": bool(result.get("emailVerified"))}
+        )
+    )
+
+
 @handler("p2p.account.resend_verification")
 async def p2p_account_resend_verification(
     session: "Session", msg_id: str, msg_type: str, payload: dict
@@ -3043,11 +3094,34 @@ async def p2p_policy_set(session: "Session", msg_id: str, msg_type: str, payload
     write: it stores the policy verbatim and never merges. The editor therefore
     sends back the rules it was shown plus its edit.
     """
+    # No device in this one, so "" is what the confirmation is bound to. It
+    # still binds the action, which is what stops a token minted to approve a
+    # device being spent to replace the rules.
+    if not await _confirmed(session, msg_id, msg_type, payload):
+        return
     policy = payload.get("policy")
     problem = pane_policy.validate(policy) or device_trust.validate_blocked(policy)
     if problem:
         await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", problem))
         return
+
+    # A document with no `blocked` key is an editor that never had one to send,
+    # not somebody asking for the list to be emptied — and the server stores
+    # what it is given verbatim, so the difference decides whether every block
+    # survives the write. The rules editor composes from the whole cached
+    # document and keeps it; the account view's "sign rules now" composes the
+    # default for a machine that has no rules at all, and would have dropped it.
+    # Absent means keep; only an explicit list clears one.
+    if isinstance(policy, dict) and "blocked" not in policy:
+        cached = (await server_link.policy_state()).get("policy")
+        carried = cached.get("blocked") if isinstance(cached, dict) else None
+        if carried:
+            log.warning(
+                "a policy write arrived with no blocked list; keeping the %d "
+                "existing entries rather than clearing them",
+                len(carried),
+            )
+            policy = {**policy, "blocked": carried}
 
     reply = await server_link.set_policy(policy)
     if reply is None:
@@ -3184,21 +3258,122 @@ async def p2p_trust_notices_dismiss(
     await session.send_json(make_response(msg_id, msg_type, {"dismissed": True}))
 
 
-@handler("p2p.trust.device.approve")
-async def p2p_trust_device_approve(
+async def _confirmed(
+    session: "Session", msg_id: str, msg_type: str, payload: dict, *, device_id: str = ""
+) -> bool:
+    """Whether this trust-changing request carries a live confirmation.
+
+    Answers the caller with an error and returns False when it does not, so a
+    handler's whole use of this is one guard at the top.
+
+    The action name is the message type, and it is signed along with the device
+    the request names: a confirmation minted to approve one machine cannot be
+    spent to block another. See ``confirm_token`` for what this is for — it is
+    the MCP and plugin paths, not a process running as this user.
+    """
+    reason = confirm_token.check(payload.get("confirm"), action=msg_type, device_id=device_id)
+    if not reason:
+        return True
+    log.warning("refusing %s: %s", msg_type, reason)
+    await session.send_json(make_error(msg_id, msg_type, "CONFIRMATION_REQUIRED", reason))
+    return False
+
+
+@handler("p2p.pair.start")
+async def p2p_pair_start(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Ask another device to pair.
+
+    This is a request, not a grant: nothing changes here or there until a person
+    at *each* machine has compared the same six digits. The button it replaces
+    did the opposite — it let one side decide, and the other side found out when
+    something started running on it.
+    """
+    device_id = str(payload.get("deviceId") or "").strip()
+    if not device_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "deviceId is required")
+        )
+        return
+    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
+        return
+    reply = await server_link.start_pairing(device_id)
+    if reply is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so there is no device to pair with",
+            )
+        )
+        return
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_PAIRING_FAILED"),
+                str(error.get("message") or "the pairing request could not be sent"),
+            )
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, reply.get("payload") or {}))
+
+
+@handler("p2p.pair.confirm")
+async def p2p_pair_confirm(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """"The digits match" — or they do not.
+
+    Both answers are decisions and both need a confirmation token: refusing is
+    as much a thing a remote agent must not be able to do on somebody's behalf
+    as accepting is. A refusal tells the other side, so their card leaves the
+    screen instead of waiting out the five minutes.
+    """
+    device_id = str(payload.get("deviceId") or "").strip()
+    if not device_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "deviceId is required")
+        )
+        return
+    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
+        return
+    reply = await server_link.confirm_pairing(device_id, accept=bool(payload.get("accept")))
+    if reply is None:
+        await session.send_json(
+            make_error(msg_id, msg_type, "P2P_NOT_CONFIGURED", "no navide-server is configured")
+        )
+        return
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_PAIRING_FAILED"),
+                str(error.get("message") or "that pairing could not be answered"),
+            )
+        )
+        return
+    await _announce_trust_notices()
+    await session.send_json(make_response(msg_id, msg_type, reply.get("payload") or {}))
+
+
+@handler("p2p.trust.device.defer")
+async def p2p_trust_device_defer(
     session: "Session", msg_id: str, msg_type: str, payload: dict
 ) -> None:
-    """Vouch for a first-seen device: this is the machine it says it is.
+    """"Not now": stop showing a pinned device until it knocks again.
 
-    This is the strongest button in the trust panel and it is deliberately not
-    the same one as answering a knock. Granting a knock lets a device reach one
-    pane under the rules; approving a device says it is *ours*, which puts it in
-    the ring that consults no rules at all. So it is addressed by device id and
-    the caller is expected to have compared the fingerprint from the first-seen
-    notice against the other machine, somewhere this program is not.
+    Deliberately weaker than every other button on that card. Approving and
+    blocking are decisions and are written where they are enforced; this one
+    changes nothing about what that device may reach — it stays pinned,
+    unapproved, and held to rules that deny by default. All it does is take an
+    already-answered-once question off a panel that would otherwise re-ask it
+    every three seconds for as long as the pin exists.
 
-    Approving does not touch the pinned key. A device whose key later changes is
-    still refused, approved or not, and that refusal is still not dismissible.
+    ``trust_store.note_knock`` clears it on the next verified message, so this
+    cannot be used to make a machine quietly go away.
     """
     device_id = str(payload.get("deviceId") or "")
     if not device_id:
@@ -3206,10 +3381,65 @@ async def p2p_trust_device_approve(
             make_error(msg_id, msg_type, "BAD_REQUEST", "deviceId is required")
         )
         return
-    approved = await asyncio.to_thread(trust_store.approve_device, device_id)
-    if approved:
+    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
+        return
+    deferred = await asyncio.to_thread(trust_store.defer_device, device_id)
+    if deferred:
         await _announce_trust_notices()
-    await session.send_json(make_response(msg_id, msg_type, {"approved": approved}))
+    await session.send_json(make_response(msg_id, msg_type, {"deferred": deferred}))
+
+
+@handler("p2p.trust.device.unpair")
+async def p2p_trust_device_unpair(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Forget a device: drop its pin and everything decided alongside it.
+
+    The other half of approve, and the only way back out of a pairing this
+    program had. Without it a pin taken on a first sighting was permanent — a
+    device id seen once was pinned forever, and the panel could ask about it but
+    never finish with it.
+
+    Addressed by device id alone, deliberately. Unpairing grants nothing, so it
+    does not need the fingerprint comparison approving does; what it costs is
+    that the next message from that device is a first sighting again, which is
+    visible and reversible by a person.
+
+    It does not lift a block. A block is policy — a refusal ahead of every rule
+    — and pairing is identity; a device that was blocked stays blocked with no
+    pin, which is strictly the more careful of the two states.
+    """
+    device_id = str(payload.get("deviceId") or "").strip()
+    if not device_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "deviceId is required")
+        )
+        return
+    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
+        return
+    # Never this machine. The device list hides the button on its own row, and
+    # that was the only thing enforcing it — anything that can reach this socket
+    # could hand over this machine's own id. There is no pairing with yourself
+    # to undo, so this is not a decision being refused; it is a request that
+    # means nothing and takes real state with it.
+    local = server_link.local_device_id()
+    if local and device_id == local:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "FORBIDDEN", "this machine cannot be unpaired from itself"
+            )
+        )
+        return
+    removed = await asyncio.to_thread(trust_store.forget_device, device_id)
+    # Told, not just forgotten. Two machines disagreeing about whether they are
+    # paired is a state where one silently refuses everything the other sends,
+    # and the sender's only symptom is silence.
+    await server_link.revoke_pairing(device_id)
+    if removed.get("found"):
+        # The pin and its notices both feed this event, so the panel that was
+        # showing the device empties in the same tick it is forgotten.
+        await _announce_trust_notices()
+    await session.send_json(make_response(msg_id, msg_type, {"removed": removed}))
 
 
 @handler("p2p.trust.block")
@@ -3227,6 +3457,8 @@ async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payloa
         await session.send_json(
             make_error(msg_id, msg_type, "BAD_REQUEST", "block needs a deviceId or a memberId")
         )
+        return
+    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
         return
     entry = {
         "deviceId": device_id,
@@ -3248,6 +3480,11 @@ async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payloa
 
     if await _write_policy(session, msg_id, msg_type, add_block):
         return
+    # Recorded here as well as in the policy, and only after the policy write
+    # succeeded so the two cannot disagree about a block that was never made.
+    # The local copy is what still refuses this device when the policy document
+    # cannot be verified — see device_trust.is_blocked.
+    await asyncio.to_thread(trust_store.note_blocked, device_id, member_id)
     if device_id and server_link.forget_access_requests_for_device(device_id):
         await _announce_requests()
     await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
@@ -3259,6 +3496,17 @@ async def p2p_trust_unblock(session: "Session", msg_id: str, msg_type: str, payl
     being decided by the rules, which deny by default."""
     device_id = str(payload.get("deviceId") or "").strip()
     member_id = str(payload.get("memberId") or "").strip()
+    # The same check block has. Without it an empty request rewrote the policy
+    # to say exactly what it already said — a signed write, a revision bump and
+    # a success, for a request that named nobody.
+    if not device_id and not member_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "unblock needs a deviceId or a memberId")
+        )
+        return
+
+    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
+        return
 
     def drop_block(policy: dict) -> None:
         policy["blocked"] = [
@@ -3275,6 +3523,9 @@ async def p2p_trust_unblock(session: "Session", msg_id: str, msg_type: str, payl
 
     if await _write_policy(session, msg_id, msg_type, drop_block):
         return
+    # Lifting has to reach the local copy too, or a device unblocked in the
+    # policy stays refused here with nothing on screen to explain it.
+    await asyncio.to_thread(trust_store.note_unblocked, device_id, member_id)
     await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
 
 
@@ -6428,7 +6679,14 @@ async def usage_get(session: "Session", msg_id: str, msg_type: str, payload: dic
 async def usage_refresh(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from .usage_service import service
 
-    service.request_refresh()
+    # Scoped by the account card that asked; absent, the header button's
+    # "every CLI" refresh.
+    agent_key = payload.get("agentKey")
+    slot_id = payload.get("slotId")
+    service.request_refresh(
+        provider=str(agent_key) if agent_key else None,
+        slot_id=str(slot_id) if slot_id else None,
+    )
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 

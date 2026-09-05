@@ -40,10 +40,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import platform
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -54,6 +56,7 @@ from . import (
     agent_messaging,
     device_crypto,
     device_identity,
+    device_pairing,
     device_signing,
     device_trust,
     pane_policy,
@@ -114,6 +117,19 @@ ROSTER_SWEEP_S = 30.0
 #: Coalescing pause after a report. A window reconnecting re-registers every
 #: pane it mirrors, which would otherwise be one upsert per pane per nudge.
 ROSTER_DEBOUNCE_S = 0.5
+
+#: How often to ask the server whether the account's email has been confirmed,
+#: while it has not been. Nothing tells this machine on its own: the link learns
+#: the answer at auth.hello and never again, so a person who clicked the link in
+#: their browser sat in front of "we sent you a link" until they restarted.
+#: Polling stops the moment the answer is yes, so this runs only during the
+#: minutes right after signing up.
+VERIFY_POLL_S = 30.0
+
+#: The same question against a server too old to answer it. Still asked, so a
+#: server upgraded under a running link is noticed without restarting anything,
+#: but at a gap that makes the wasted round trip not worth counting.
+VERIFY_RETRY_S = 60.0
 
 #: The fallback vocabulary, used only when the owning window has not reported a
 #: badge word — see ``_pane_status``. It used to be the *whole* vocabulary: the
@@ -180,6 +196,20 @@ LINK_TRUST_UNAVAILABLE = "p2p-trust-unavailable"
 #: unauthorized: telling a sender *which* of "no signature", "unknown key" and
 #: "wrong key" applied would let the relay map out this machine's pin table.
 REASON_UNAUTHENTICATED = "unauthenticated"
+
+#: Where a pairing frame is addressed. The relay requires a workspace and a
+#: pane name on every message, and a pairing frame has neither — it addresses a
+#: machine. So it carries a reserved pair that cannot collide: both halves start
+#: with an underscore, which no workspace folder or pane name does. The receiver
+#: routes on the body's kind and never looks at these, but the wire needs them
+#: filled and the relay is not ours to change.
+PAIRING_WORKSPACE = "_navide"
+PAIRING_PANE = "_pairing"
+
+#: What a device that has never been paired with is told. Distinct from
+#: "policy-denied" on purpose: the rules are not what refused it, and the sender
+#: needs to know that the fix is a pairing rather than a rule.
+REASON_NOT_PAIRED = "not-paired"
 #: The field of a message the signature covers. Signed alongside the digest so
 #: a ciphertext cannot be re-presented as plaintext under a valid signature.
 BODY_CIPHER = "cipher"
@@ -197,6 +227,27 @@ STATE_CONNECTING = "connecting"
 STATE_CONNECTED = "connected"
 STATE_UNREACHABLE = "unreachable"
 STATE_UNAUTHORIZED = "unauthorized"
+
+#: Reading the stored credential is taking long enough that something is asking
+#: a person for permission. On macOS the Keychain prompts the first time a newly
+#: signed build reads an item the previous signature created, and ``security``
+#: simply waits — so the link sits before its first dial with nothing to report:
+#: no error, no attempt on the server, and a "connecting" that had already run
+#: for twelve minutes when this was found. It is its own state because the
+#: answer is "go and click Allow", which no amount of waiting produces.
+STATE_WAITING_KEYCHAIN = "waiting-for-keychain"
+
+#: How long a credential read may take before it is assumed to be waiting on a
+#: person rather than on a disk.
+CONFIG_READ_PATIENCE_S = 3.0
+
+#: An auth.hello that has not been answered by here is not going to be. The dial
+#: itself is bounded by the websockets client's own open timeout; this covers
+#: the gap after it, where a socket that opened and then said nothing would
+#: otherwise hold the loop for ever — no error, no retry, and from outside
+#: indistinguishable from the Keychain wait above, which it is not: there is
+#: nobody to click anything.
+DIAL_TIMEOUT_S = 45.0
 
 
 class ServerLinkTerminated(RuntimeError):
@@ -300,15 +351,84 @@ def _pane_status(entry: agent_messaging.RegisteredPane) -> str:
     return STATUS_BUSY if entry.busy else STATUS_IDLE
 
 
+#: Where the salt behind ``workspace_digest`` lives. In the vault rather than
+#: beside the settings because it is the only thing standing between a digest
+#: and the path it was made from: a path is short, structured and highly
+#: guessable (``/Users/<name>/Desktop/<project>``), so an unsalted digest of one
+#: is reversible by anybody willing to run a dictionary. Salted with a secret
+#: that never leaves this machine, it is not.
+WORKSPACE_SALT_SECRET = "navide-workspace-digest-salt"
+
+_workspace_salt_cache: bytes = b""
+
+
+def _workspace_salt() -> bytes:
+    """This machine's digest salt, minted on first use.
+
+    A vault that cannot be read falls back to a salt this process invented,
+    which changes on every restart. That degrades one thing — two panes in the
+    same workspace stop looking related to a remote viewer — and protects the
+    thing that matters, which is that the path never leaves in a readable form.
+    Failing towards *less* linkability is the right direction for this.
+    """
+    global _workspace_salt_cache
+    if _workspace_salt_cache:
+        return _workspace_salt_cache
+    try:
+        stored = _vault().read_app_secret(WORKSPACE_SALT_SECRET)
+        if not stored:
+            stored = secrets.token_hex(32)
+            _vault().write_app_secret(WORKSPACE_SALT_SECRET, stored)
+    except Exception as err:  # noqa: BLE001
+        log.warning("workspace digest salt is unavailable (%s); using a per-run one", err)
+        stored = secrets.token_hex(32)
+    _workspace_salt_cache = stored.encode("utf-8")
+    return _workspace_salt_cache
+
+
+def workspace_digest(path: str) -> str:
+    """A stable, non-reversible stand-in for an absolute workspace path.
+
+    The path used to be published verbatim. That was the single largest thing
+    the relay learned about a person's work: ``sessions.workspacePath`` is free
+    text and in practice holds the whole local path, username included — the
+    server's own source notes a pane observed as
+    ``/Users/<name>/Downloads/<file>.pdf``.
+
+    Nothing reads it. The remote roster carries it into ``RemotePane`` and the
+    account view declares a field for it, and no surface in this codebase
+    renders it — so it was pure disclosure with no feature attached.
+
+    A digest rather than an empty string, for one specific reason: the server
+    merges this field with ``COALESCE``, so sending nothing would *preserve*
+    whatever a previous version already published. A non-empty value overwrites
+    it, which means upgrading actually withdraws the old path instead of
+    leaving it sitting in the table.
+    """
+    if not path:
+        return ""
+    return hashlib.sha256(
+        _workspace_salt() + b"\x00" + path.encode("utf-8")
+    ).hexdigest()[:16]
+
+
 def _session_payload(entry: agent_messaging.RegisteredPane) -> dict[str, Any]:
     """One pane as ``sessions.upsert`` wants it.
 
     ``deviceId`` is deliberately absent: the server takes it from the
     authenticated connection, and sending our own would let a client claim
-    another device's sessions. ``workspace`` is the device-local folder
-    basename used in ``<workspace>/<pane>`` addresses, ``workspacePath`` the
-    absolute path — the first is what a remote agent types, the second what a
-    human recognises.
+    another device's sessions.
+
+    ``workspace`` is the device-local folder basename, and it stays in the
+    clear because it is half of the ``<workspace>/<pane>`` address a remote
+    agent has to type. ``workspacePath`` no longer carries the absolute path —
+    see ``workspace_digest``.
+
+    ``title`` also stays in the clear, and that is a limit rather than an
+    oversight: it is the other half of the address. A digest cannot be typed by
+    the person addressing the pane, so hiding it would mean giving up
+    cross-device addressing by name. Reducing it needs a user-chosen alias,
+    which is a feature rather than a redaction.
     """
     return {
         "title": entry.name,
@@ -317,7 +437,7 @@ def _session_payload(entry: agent_messaging.RegisteredPane) -> dict[str, Any]:
         # No task concept exists on this side yet; the field is part of the
         # agreed request shape, so it is sent empty rather than omitted.
         "taskId": "",
-        "workspacePath": entry.workspace_path,
+        "workspacePath": workspace_digest(entry.workspace_path),
         "workspace": entry.workspace_label,
         "paneId": entry.pane_id,
     }
@@ -429,6 +549,10 @@ class ServerLink:
         # on every reconnect and by a resend reply, because the confirming
         # click happens in a browser this process never sees.
         self.email_verified = False
+        #: Set when the server does not know ``account.status``, so the poll
+        #: below stops asking and re-authenticates instead. Logged once, not
+        #: per attempt: it is a fact about the server, not an event.
+        self._verify_fallback = False
         # The whole session directory as the server last described it, this
         # device's own rows included. ``remote_roster`` deliberately drops the
         # local ones — an address aimed back at this machine has to resolve
@@ -448,6 +572,19 @@ class ServerLink:
         # server that is not answering apart from one that has not been tried
         # yet. Cleared the moment a connection authenticates.
         self.last_error = ""
+        #: When ``last_error`` was recorded, and when the loop will dial again.
+        #: A refusal that says only "not connected" leaves a person with no way
+        #: to tell "starting up" from "the address is wrong" from "your token
+        #: was rejected" — three problems with three different answers, only one
+        #: of which is to wait.
+        self.last_error_at = 0.0
+        self.next_retry_at = 0.0
+        #: When the current dial started. Set when dialling actually begins, not
+        #: at construction: it used to include the credential read, so "started
+        #: 739s ago" was counting time the link had not yet spent connecting.
+        self.connecting_since = 0.0
+        #: When the in-flight credential read began, or 0.0 when none is.
+        self.config_read_started = 0.0
 
     # ---- lifecycle ----
 
@@ -504,6 +641,14 @@ class ServerLink:
             return STATE_UNAUTHORIZED
         if self._authenticated:
             return STATE_CONNECTED
+        # Before the socket errors, because a read that is waiting on a person
+        # has not reached the socket at all — and reporting it as "connecting"
+        # is what made this invisible for twelve minutes.
+        if (
+            self.config_read_started
+            and time.time() - self.config_read_started > CONFIG_READ_PATIENCE_S
+        ):
+            return STATE_WAITING_KEYCHAIN
         if self.last_error:
             return STATE_UNREACHABLE
         return STATE_CONNECTING
@@ -513,7 +658,7 @@ class ServerLink:
     async def _run(self) -> None:
         delay = RECONNECT_BASE_S
         while not self._stopped:
-            config = await asyncio.to_thread(self._load_config)
+            config = await self._read_config()
             if not config.configured:
                 log.info(
                     "navide-server link stopping: the server URL or access token "
@@ -523,6 +668,7 @@ class ServerLink:
                 # out there"; with no server, there is no one else.
                 remote_roster.clear()
                 return
+            self.connecting_since = time.time()
             try:
                 authenticated = await self._session(config)
             except asyncio.CancelledError:
@@ -534,6 +680,7 @@ class ServerLink:
             except Exception as err:  # noqa: BLE001
                 authenticated = False
                 self.last_error = str(err) or type(err).__name__
+                self.last_error_at = time.time()
                 log.warning("navide-server link failed (%s)", err)
             if self.terminated_reason:
                 # Set by a server push (auth.revoked) rather than raised.
@@ -546,8 +693,48 @@ class ServerLink:
                 # the backoff exists to damp; start over from the short delay.
                 delay = RECONNECT_BASE_S
             log.info("navide-server link retrying in %.0fs", delay)
+            self.next_retry_at = time.time() + delay
             await asyncio.sleep(delay)
             delay = min(delay * 2, RECONNECT_MAX_S)
+
+    def keychain_wait_reason(self) -> str:
+        """The sentence for a credential read that is waiting on a person, or
+        "" when none is. Shared by the status the panel polls and the refusal a
+        caller gets, so the two never disagree about where the link is."""
+        if self.state() != STATE_WAITING_KEYCHAIN:
+            return ""
+        waited = max(0, int(time.time() - self.config_read_started))
+        return (
+            "waiting for Keychain access — a macOS permission dialog may be "
+            f"open ({waited}s so far); the link has not dialled yet"
+        )
+
+    async def _read_config(self) -> Any:
+        """Read the stored credential, visibly.
+
+        Deliberately not given a timeout. On macOS this can be waiting for a
+        person to click Allow on a Keychain prompt, and cancelling that is the
+        wrong answer — the read is legitimate and will succeed the moment they
+        do. What was wrong was that it was *silent*: the link reported
+        "connecting" while it had not yet tried to connect to anything, so a
+        machine that never reached the server looked identical to one that was
+        merely slow.
+        """
+        self.config_read_started = time.time()
+        log.info("reading the navide-server credential")
+        try:
+            return await asyncio.to_thread(self._load_config)
+        finally:
+            took = time.time() - self.config_read_started
+            self.config_read_started = 0.0
+            if took > CONFIG_READ_PATIENCE_S:
+                log.warning(
+                    "reading the navide-server credential took %.1fs — on macOS "
+                    "that usually means a Keychain permission dialog was open",
+                    took,
+                )
+            else:
+                log.info("read the navide-server credential in %.2fs", took)
 
     async def _session(self, config: ServerLinkConfig) -> bool:
         """One connection, from dial to close. Returns whether it authenticated."""
@@ -556,10 +743,22 @@ class ServerLink:
             self._ws = ws
             reader = asyncio.create_task(self._read_loop(ws))
             try:
-                await self._authenticate(config)
+                # Only the hello is on a clock. The session that follows is
+                # supposed to last as long as the connection does — the first
+                # version of this put the whole of `_session` under the timeout,
+                # which quietly killed every link after forty-five seconds.
+                #
+                # A socket that opens and then says nothing is the case this
+                # covers: without it the loop waits for ever, with no error and
+                # no retry, which from outside looks like the Keychain wait
+                # above and is not — there is nobody to click anything.
+                async with asyncio.timeout(DIAL_TIMEOUT_S):
+                    await self._authenticate(config)
                 authenticated = True
                 self._authenticated = True
                 self.last_error = ""
+                self.last_error_at = 0.0
+                self.next_retry_at = 0.0
                 # A fresh connection knows nothing about what this backend told
                 # the previous one, so the whole roster is flattened again.
                 self._reported.clear()
@@ -575,6 +774,15 @@ class ServerLink:
                 # connection and kept current by the push after that.
                 await self._refresh_directory()
                 reporter = asyncio.create_task(self._report_loop())
+                # Deliberately *not* in the wait below. That set means "the
+                # connection is over when any of these finishes", and this task
+                # is designed to finish: it returns the moment the address is
+                # confirmed, which for an already-verified account is
+                # immediately. Putting it there tore the session down a
+                # millisecond after it authenticated, and `_run` dialled again
+                # one second later, for ever — a reconnect loop on every normal
+                # account, caused by the one task whose whole point was to end.
+                verifier = asyncio.create_task(self._verify_loop())
                 try:
                     done, _ = await asyncio.wait(
                         {reader, reporter}, return_when=asyncio.FIRST_COMPLETED
@@ -584,6 +792,8 @@ class ServerLink:
                 finally:
                     reporter.cancel()
                     await _quiet(reporter)
+                    verifier.cancel()
+                    await _quiet(verifier)
             finally:
                 reader.cancel()
                 await _quiet(reader)
@@ -633,6 +843,12 @@ class ServerLink:
             return
         if msg_type == "presence.changed":
             self._on_presence_changed(message.get("payload"))
+            return
+        if msg_type == "account.verified":
+            # The browser tab that confirmed the address is not this process, so
+            # this push is the only thing that connects the two. Polling below
+            # covers the server that cannot send it.
+            self._spawn(self._on_account_verified())
             return
         log.debug("navide-server event %r is not wired yet; ignoring it", msg_type)
 
@@ -730,6 +946,10 @@ class ServerLink:
         await self._adopt_member(config, str(payload.get("memberId") or ""))
         self.display_name = str(payload.get("displayName") or "")
         self.email_verified = bool(payload.get("emailVerified"))
+        # Per connection, not per process: the server this dialled may be a
+        # newer one than the last. A sticky flag meant a machine that met an old
+        # server once kept the fallback for ever, and never noticed the upgrade.
+        self._verify_fallback = False
         log.info(
             "navide-server link authenticated as member %s (%s) for device %s",
             self.member_id or "unknown",
@@ -1101,6 +1321,105 @@ class ServerLink:
                 self.email_verified = True
         return reply
 
+    async def _on_account_verified(self) -> None:
+        """The server says this account's address is confirmed."""
+        if self.email_verified:
+            return
+        self.email_verified = True
+        log.info("navide-server says this account's email address is verified")
+        await self._announce_link_changed()
+
+    async def _announce_link_changed(self) -> None:
+        """Tell every window the account header changed under it.
+
+        The account view polls ``p2p.link.status`` while it is open, so this is
+        not the only way the news travels — but polling is what made the
+        verification notice stale for as long as it was, and a surface that is
+        not polling (or is polling something else) has no other signal.
+        """
+        from . import app
+        from .ipc import make_event
+
+        await app.broadcast(make_event("p2p.link.changed", {"status": await status()}))
+
+    async def check_verification(self) -> dict[str, Any]:
+        """Ask the server now whether the address has been confirmed.
+
+        The button behind "clicked the link and nothing happened?". Same answer
+        shape as the other request wrappers: the server's reply, or a locally
+        minted error naming the link state.
+        """
+        if self._ws is None or not self._authenticated:
+            return self._unavailable()
+        verified = await self._read_account_status()
+        if verified is None:
+            # Either the server cannot answer this or the request failed. What
+            # this machine currently believes is the honest answer; inventing a
+            # reconnect here to go and find a better one is what turned the
+            # first version of this into a loop.
+            return {"ok": True, "payload": {"emailVerified": self.email_verified}}
+        return {"ok": True, "payload": {"emailVerified": verified}}
+
+    async def _read_account_status(self) -> bool | None:
+        """``account.status``, or None when this server cannot answer it.
+
+        None covers both "too old to know the verb" and "the request failed",
+        because the caller does the same thing with either: fall back, and leave
+        what this machine already believes alone. Distinguishing them here would
+        only matter if one of them were recoverable by asking again, and neither
+        is within the same connection.
+        """
+        try:
+            reply = await self._request("account.status", {})
+        except Exception as err:  # noqa: BLE001
+            log.debug("navide-server account.status failed: %s", err)
+            return None
+        if reply.get("ok"):
+            payload = reply.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            return bool(payload.get("emailVerified"))
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        if str(error.get("code") or "") == "UNKNOWN_TYPE":
+            if not self._verify_fallback:
+                self._verify_fallback = True
+                log.info(
+                    "navide-server does not know account.status; asking every "
+                    "%.0fs instead of every %.0fs until it does",
+                    VERIFY_RETRY_S,
+                    VERIFY_POLL_S,
+                )
+        return None
+
+    async def _verify_loop(self) -> None:
+        """Keep asking whether the address is confirmed, until it is.
+
+        Nothing pushed the answer before this existed: ``auth.hello`` carried it
+        and there was no second read, so somebody who confirmed in their browser
+        watched "we sent you a link" until the next restart. ``account.verified``
+        is the real fix and this is what covers the server that cannot send it.
+
+        Returns rather than idles once the answer is yes, which ends the task
+        for the life of the connection.
+        """
+        while not self.email_verified:
+            await asyncio.sleep(
+                VERIFY_RETRY_S if self._verify_fallback else VERIFY_POLL_S
+            )
+            if self.email_verified:
+                return
+            # Asked again even on a server that did not know the verb last time,
+            # just less often. The first version dropped the connection instead,
+            # to force a fresh auth.hello — which put a reconnect on a timer
+            # inside a loop that reconnects on its own, and there is no version
+            # of that idea that is worth what it costs. A server that gets
+            # upgraded under a running link starts answering this on its own.
+            verified = await self._read_account_status()
+            if verified:
+                self.email_verified = True
+                log.info("navide-server says this account's email address is verified")
+                await self._announce_link_changed()
+                return
+
     async def _on_policy_changed(self, payload: Any) -> None:
         """The server says this device's policy moved. Re-fetch only if the
         revision differs from the cached one — the event is a nudge, not the
@@ -1299,6 +1618,14 @@ class ServerLink:
             )
         for row in devices.values():
             row["paneCount"] = len(row["panes"])
+            # The newest thing the directory says about this machine. The server
+            # publishes no device-level last-seen, so the freshest session start
+            # is the closest honest answer — and an offline row with no date at
+            # all reads as "gone", which is not what the roster means.
+            row["lastSeenAt"] = max(
+                (pane["startedAt"] for pane in row["panes"] if pane["startedAt"]),
+                default="",
+            )
             row["panes"].sort(key=lambda pane: (pane["workspace"], pane["title"]))
             if row["isLocal"]:
                 # Presence is what the *server* can see, and the only thing it
@@ -1310,6 +1637,38 @@ class ServerLink:
                 # No presence.changed has arrived yet, so the per-session flag
                 # is the only thing that has been said about this machine.
                 row["online"] = any(pane["hostOnline"] for pane in row["panes"])
+            # Where this device stands with *this* machine. The list used to say
+            # nothing about it, so a device you had never vouched for looked
+            # exactly like one you had — same row, same unpair button — while
+            # the card above was asking you to confirm it. Two surfaces, one
+            # device, opposite stories.
+            device_id = str(row.get("deviceId") or "")
+            row["trustState"] = self._trust_state(device_id, is_local=bool(row.get("isLocal")))
+            # Whether this row can be paired from here, without waiting for the
+            # other machine to send anything. True needs three things: it is
+            # undecided, the directory advertises a key to pin, and that key is
+            # attributed to this account — pairing on sight is for your own
+            # machines, and anyone else's still has to knock first.
+            advertised = remote_roster.sign_public_key_for(device_id)
+            row["canTrust"] = (
+                # Pairing needs both machines present: the exchange is four
+                # frames and two people. Offering it against a device that is
+                # offline produces a card that waits five minutes and expires,
+                # which reads as the button being broken.
+                bool(row["online"])
+                and row["trustState"] == "pending"
+                and bool(advertised)
+                and bool(self._own_member)
+                and self._member_id_for(device_id) == self._own_member
+            )
+            # The one part of a pairing a server cannot fake, so it has to reach
+            # the surface where the pairing is offered. Same digest the pending
+            # card compares — vouching from here is the same act, and two
+            # different-looking fingerprints for one machine would make the
+            # comparison impossible to trust.
+            row["signFingerprint"] = (
+                device_signing.fingerprint(advertised) if row["canTrust"] else ""
+            )
         return {
             "state": self.state(),
             "deviceId": local,
@@ -1332,7 +1691,12 @@ class ServerLink:
             # Pinned devices nobody has vouched for yet. Separate from the
             # notices because a notice can be dismissed and this question
             # cannot be retired by dismissing anything.
-            "trustPending": trust_store.unapproved_devices(),
+            "trustPending": self._pending_approvals(),
+            # Exchanges waiting on a person, at either end. Folded into the same
+            # read as everything else for the reason given above them: a card
+            # asking "do these digits match" must not be half a poll behind the
+            # device list it is about.
+            "pairings": self.pairing_rows(),
             "trustLocked": self._trust_locked,
             # This device first, then by label: the row a user recognises is
             # the one that should not move as other machines come and go.
@@ -1468,25 +1832,62 @@ class ServerLink:
         the reconnect loop is the only thing that can change the answer, and it
         runs on its own schedule, so blocking the sender for REQUEST_TIMEOUT_S
         would only turn a clear error into a slow one.
+
+        **The message names which kind of "not connected" this is.** It used to
+        say only that the link was configured and not connected, and to retry
+        shortly — advice that is right for exactly one of the three states it
+        covered. Somebody whose token had been rejected, or whose server address
+        was wrong, was told to wait, and waiting was never going to fix it. The
+        parts also travel as fields, so a caller that renders its own sentence
+        does not have to match on this one's prose.
         """
+        state = self.state()
+        now = time.time()
         if self.terminated_reason:
             return {
                 "ok": False,
                 "error": {
                     "code": LINK_UNAUTHORIZED,
                     "message": (
-                        f"the navide-server link stopped for good: "
-                        f"{self.terminated_reason}"
+                        f"the navide-server link is unauthorized: "
+                        f"{self.terminated_reason} — sign in again"
                     ),
+                    "state": state,
+                    "lastError": self.terminated_reason,
+                    "nextRetryInS": None,
                 },
             }
+        if state == STATE_WAITING_KEYCHAIN:
+            detail = self.keychain_wait_reason()
+            return {
+                "ok": False,
+                "error": {
+                    "code": LINK_OFFLINE,
+                    "message": detail,
+                    "state": state,
+                    "lastError": detail,
+                    "nextRetryInS": None,
+                },
+            }
+        if state == STATE_UNREACHABLE:
+            since = max(0, int(now - self.last_error_at)) if self.last_error_at else 0
+            retry_in = max(0, int(self.next_retry_at - now)) if self.next_retry_at else 0
+            detail = (
+                f"the navide-server link is unreachable: {self.last_error} "
+                f"(last try {since}s ago, next in {retry_in}s)"
+            )
+        else:
+            waited = max(0, int(now - self.connecting_since))
+            detail = f"the navide-server link is connecting (started {waited}s ago)"
         return {
             "ok": False,
             "error": {
                 "code": LINK_OFFLINE,
-                "message": (
-                    "the navide-server link is configured but not connected right "
-                    "now; it reconnects on its own, so retry shortly"
+                "message": detail,
+                "state": state,
+                "lastError": self.last_error,
+                "nextRetryInS": (
+                    max(0, int(self.next_retry_at - now)) if self.next_retry_at else None
                 ),
             },
         }
@@ -1560,14 +1961,13 @@ class ServerLink:
         unreachable, which is the failure that can be seen, rather than
         impersonable, which is the one that cannot.
 
-        First contact is trust-on-first-use, and that is a real limit rather
-        than a formality: the first key offered for a device this machine has
-        never heard of is believed, so a relay that gets in before the real
-        device does gets pinned in its place. What pinning buys is that it only
-        gets one attempt per device id, it cannot revise it afterwards, and the
-        attempt leaves a notice with a fingerprint on it. Closing the rest needs
-        a person to compare fingerprints out of band, which is the surface this
-        version does not build.
+**A device with no pin is refused, not pinned.** This used to take a pin
+        on first contact — trust on first use — which meant a relay that got in
+        before the real device did was pinned in its place, and the only thing
+        standing between that and the own-device ring was somebody noticing a
+        notice. Pins are now written in exactly one place, when a pairing
+        completes and two people have compared six digits, so there is no
+        longer a path by which merely sending a message earns a key slot.
         """
         signature = str(data.get("sig") or "")
         cipher = str(data.get("cipher") or "")
@@ -1600,14 +2000,15 @@ class ServerLink:
                 )
                 return None
         else:
-            key = advertised
-            if not key:
-                log.warning(
-                    "refusing message %s: no signing key is known for device %s",
-                    msg_key,
-                    device_id,
-                )
-                return None
+            # Nothing pinned for this device, so there is no relationship to
+            # carry a message through. The pairing exchange is the only thing
+            # that runs before one exists, and it is routed away from here.
+            log.info(
+                "refusing message %s: device %s is not paired with this machine",
+                msg_key,
+                device_id,
+            )
+            return None
 
         if not device_signing.verify_message(
             signature,
@@ -1621,24 +2022,10 @@ class ServerLink:
             log.warning("refusing message %s: its signature does not verify", msg_key)
             return None
 
-        if pin is None:
-            # Pinned only now, after the signature checked out, so the relay
-            # cannot seed this map with keys nobody holds by naming device ids.
-            try:
-                pin = await asyncio.to_thread(
-                    lambda: trust_store.pin_device(
-                        device_id,
-                        sign_key=key,
-                        member_id=member_id,
-                        own_member_id=self._own_member,
-                    )
-                )
-            except trust_store.TrustStoreFull as err:
-                log.error("refusing message %s: %s", msg_key, err)
-                return None
-            except Exception as err:  # noqa: BLE001
-                log.error("refusing message %s: could not pin device %s (%s)", msg_key, device_id, err)
-                return None
+        # It reached us again. Whoever said "not now" was answering the attempts
+        # they had already seen, so a fresh one puts the row back in front of
+        # them; ``note_knock`` is a no-op on every other pin.
+        if await asyncio.to_thread(trust_store.note_knock, device_id):
             await self._announce_trust_notices()
 
         return self._own_device(pin)
@@ -1674,6 +2061,127 @@ class ServerLink:
         # are not grandfathered.
         return pin.get("approved") is True
 
+    def _trust_state(self, device_id: str, *, is_local: bool) -> str:
+        """One word for where a device stands: self, blocked, trusted, pending.
+
+        **This machine is always ``self``, even if the policy names it.** That
+        looks like it contradicts the delivery path, where ``blocked`` is
+        checked ahead of the own-device shortcut, and it does not: the two
+        "own device" are different questions. In ``device_trust.ring`` it means
+        *another* machine on your account, which can be blocked and has to be
+        refused first. Here it means the machine you are sitting at, which is
+        never a remote sender — ``device_trust`` says so in as many words — so
+        nothing enforces a block against it. Showing "blocked" on this row would
+        be a label with no behaviour behind it, which on a security surface is
+        worse than no label at all.
+
+        Everything else is ordered the way the delivery path orders its rings.
+        """
+        if is_local:
+            return "self"
+        pin = trust_store.pin_for(device_id)
+        member_id = str((pin or {}).get("memberId") or "") or member_id_for(device_id)
+        if device_trust.is_blocked(self._policy, member_id=member_id, device_id=device_id):
+            return "blocked"
+        if pin is not None and pin.get("approved") is True:
+            return "trusted"
+        return "pending"
+
+    def _device_online(self, device_id: str) -> bool:
+        """Whether the server currently sees that machine.
+
+        Read from the presence set when there is one, falling back to whether
+        any of its panes reported a live host — the same two sources the device
+        list itself uses, so the button and the row can never disagree.
+        """
+        if self._online_devices is not None:
+            return device_id in self._online_devices
+        return any(
+            p.host_online for p in remote_roster.list_panes() if p.device_id == device_id
+        )
+
+    def _member_id_for(self, device_id: str) -> str:
+        """Which member this link's own directory attributes *device_id* to.
+
+        The module-level ``member_id_for`` answers the same question through the
+        process-wide link; this reads the instance it is called on, which is the
+        one whose snapshot is being built.
+        """
+        for row in self._directory or []:
+            if str(row.get("deviceId") or "") == device_id:
+                return str(row.get("hostMemberId") or row.get("memberId") or "")
+        return ""
+
+    def _pending_context(self, device_id: str) -> dict[str, Any]:
+        """What this machine knows about a device waiting to be vouched for.
+
+        "Is this f9c30189-79e6-…?" is not a question anybody can answer, so the
+        row carries the name the machine calls itself and enough to place it.
+
+        Read from ``remote_roster`` — the *same* source that put the device on
+        this list — rather than from ``self._directory``. They come apart, and
+        the first version of this read the wrong one: the roster is module-level
+        and deliberately survives a disconnect, while ``_directory`` belongs to
+        one link instance and starts empty on every reconnect. Enriching from a
+        source that can be empty while the candidate list is not is how every
+        field came back blank beside a device list that was showing the name.
+
+        The roster is one row per *pane*, so this groups by device.
+        """
+        panes = [p for p in remote_roster.list_panes() if p.device_id == device_id]
+        workspaces: list[str] = []
+        for pane in panes:
+            if pane.workspace and pane.workspace not in workspaces:
+                workspaces.append(pane.workspace)
+        name = next((p.device_name for p in panes if p.device_name), "")
+        return {
+            # Falling back to the raw directory covers a device the roster has
+            # dropped but the last payload still mentions.
+            "deviceName": name or self._device_name_for(device_id),
+            "online": any(p.host_online for p in panes),
+            "paneCount": len(panes),
+            "workspaces": workspaces,
+        }
+
+    def _pending_approvals(self) -> list[dict[str, Any]]:
+        """Devices that have knocked and are waiting for someone to vouch.
+
+        Pinned-but-unapproved, and *only* that. A pin is taken when a message
+        from that device verifies, so every row here is a machine that actually
+        tried to reach this one.
+
+        In practice this is now almost always empty: pins are written by the
+        pairing exchange and pairing writes them approved, so the only rows left
+        are pins taken under the older rule, on a machine that has been upgraded.
+        Those are worth showing — they were never vouched for by anybody — but
+        the answer to them is to pair again, not to approve them where they sit.
+        """
+        pending = []
+        for row in trust_store.unapproved_devices():
+            device_id = str(row.get("deviceId") or "")
+            member_id = str(row.get("memberId") or "")
+            # Blocking is an answer to the question this list is asking, so a
+            # blocked device has to leave it. Without this the row came back on
+            # the next poll three seconds later and the button read as broken —
+            # the refusal had in fact been recorded, in the policy, where the
+            # list was not looking.
+            if device_trust.is_blocked(
+                self._policy, member_id=member_id, device_id=device_id
+            ):
+                continue
+            # "Not now" is not an answer, so the pin stays; it only takes the
+            # row off the panel until that device knocks again.
+            if row.get("dismissedAt"):
+                continue
+            # The pin records a key and a member, never a name — there was no
+            # name to record when it was taken. Asking the directory here is
+            # what turns "Is this f9c30189-79e6-…?" into a question somebody can
+            # actually answer; a raw uuid is not a machine anyone recognises.
+            # ``row`` already carries ``at``: when this machine took the pin,
+            # and therefore when that device first reached it.
+            pending.append({**row, **self._pending_context(device_id)})
+        return pending
+
     async def _announce_trust_notices(self) -> None:
         """Tell every window that the trust notices changed.
 
@@ -1694,6 +2202,280 @@ class ServerLink:
                 },
             )
         )
+
+    # ---- pairing -------------------------------------------------------------
+
+    async def _send_pair_frame(self, device_id: str, kind: str, **fields: Any) -> bool:
+        """Put one pairing frame on the wire. Returns whether the relay took it.
+
+        Signed like any other message and sent in the clear like no other one:
+        see device_pairing for why sealing is the wrong tool for the exchange
+        that establishes the relationship sealing depends on.
+        """
+        if self._ws is None or not self._authenticated:
+            return False
+        text = device_pairing.envelope(kind, **fields)
+        msg_key = f"pair-{secrets.token_hex(8)}"
+        to = {
+            "deviceId": device_id,
+            "workspace": PAIRING_WORKSPACE,
+            "paneName": PAIRING_PANE,
+        }
+        try:
+            signature = await asyncio.to_thread(
+                device_signing.sign_message,
+                msg_key=msg_key,
+                from_device=self._device_id,
+                to_device=device_id,
+                kind=BODY_TEXT,
+                body=text,
+            )
+        except device_signing.SigningError as err:
+            log.warning("could not sign a %s for %s: %s", kind, device_id, err)
+            return False
+        payload = {
+            "to": to,
+            "msgKey": msg_key,
+            "sig": signature,
+            "text": text,
+            "from": {"deviceId": self._device_id, "memberId": self.member_id},
+        }
+        try:
+            reply = await self._request("messages.send", payload)
+        except Exception as err:  # noqa: BLE001
+            log.warning("could not send a %s to %s: %s", kind, device_id, err)
+            return False
+        return bool(reply.get("ok"))
+
+    async def _on_pair_frame(
+        self,
+        frame: dict[str, Any],
+        data: dict[str, Any],
+        *,
+        msg_key: str,
+        device_id: str,
+        member_id: str,
+    ) -> None:
+        """One pairing frame from *device_id*.
+
+        Every branch acks: an unanswered frame looks to the sender exactly like
+        a machine that is switched off, and "they never replied" is a thing a
+        person will wait on rather than retry.
+        """
+        kind = str(frame.get("kind") or "")
+        # Blocked devices are dropped without a word. Answering would tell a
+        # machine you refused that you are still here and still listening,
+        # which is the one thing a block is supposed to stop.
+        if device_trust.is_blocked(
+            self._policy, member_id=member_id, device_id=device_id
+        ):
+            log.info("dropping a %s from blocked device %s", kind, device_id)
+            await self._ack(msg_key, "rejected", reason="policy-denied")
+            return
+
+        their_key = str(frame.get("signKey") or "")
+        existing = device_pairing.get(device_id)
+        # Which key this frame has to verify against. The first frame of an
+        # exchange carries its own — that is unauthenticated, and the six digits
+        # two people compare are what authenticate it afterwards. Every frame
+        # after that is checked against the key the exchange already fixed, so
+        # the relay cannot swap it once a code is on somebody's screen.
+        pin = trust_store.pin_for(device_id)
+        key = (
+            str((pin or {}).get("signKey") or "")
+            or (existing.their_key if existing else "")
+            or their_key
+        )
+        if not key or not device_signing.verify_message(
+            str(data.get("sig") or ""),
+            public_key_b64=key,
+            msg_key=msg_key,
+            from_device=device_id,
+            to_device=self._device_id,
+            kind=BODY_TEXT,
+            body=str(data.get("text") or ""),
+        ):
+            log.warning("refusing a %s from %s: its signature does not verify", kind, device_id)
+            await self._ack(msg_key, "rejected", reason=REASON_UNAUTHENTICATED)
+            return
+
+        name = self._device_name_for(device_id)
+        try:
+            if kind == device_pairing.PAIR_REQUEST:
+                pairing = device_pairing.accept_request(
+                    device_id,
+                    device_name=name,
+                    their_key=key,
+                    their_nonce=str(frame.get("nonce") or ""),
+                )
+                await self._send_pair_frame(
+                    device_id,
+                    device_pairing.PAIR_RESPONSE,
+                    nonce=pairing.our_nonce,
+                    signKey=await asyncio.to_thread(device_signing.public_key),
+                )
+            elif kind == device_pairing.PAIR_RESPONSE:
+                device_pairing.accept_response(
+                    device_id, their_key=key, their_nonce=str(frame.get("nonce") or "")
+                )
+            elif kind == device_pairing.PAIR_CONFIRM:
+                # Recorded first, completed second. They may have confirmed
+                # before this side's person did, in which case there is nothing
+                # to finish yet and the card here stays up.
+                device_pairing.note_peer_confirmed(device_id)
+                await self._finish_pairing(device_id, member_id=member_id)
+            elif kind == device_pairing.PAIR_REJECT:
+                if device_pairing.cancel(device_id) is not None:
+                    await asyncio.to_thread(
+                        trust_store.note_pairing, device_id, kind="refused", device_name=name
+                    )
+            elif kind == device_pairing.PAIR_REVOKED:
+                # They unpaired. Dropping our side too keeps the two machines
+                # from disagreeing about whether they are paired — a state in
+                # which one of them silently refuses everything the other sends.
+                device_pairing.cancel(device_id)
+                removed = await asyncio.to_thread(trust_store.forget_device, device_id)
+                if removed.get("found"):
+                    await asyncio.to_thread(
+                        trust_store.note_pairing, device_id, kind="revoked", device_name=name
+                    )
+        except device_pairing.PairingError as err:
+            log.info("refusing a %s from %s: %s", kind, device_id, err)
+            await self._ack(msg_key, "rejected", reason="pairing-refused")
+            return
+
+        await self._announce_trust_notices()
+        await self._ack(msg_key, "delivered")
+
+    async def _finish_pairing(self, device_id: str, *, member_id: str) -> bool:
+        """Both sides said the digits match. Write the pin, once.
+
+        This is the only place a pin is taken. Everything else that used to
+        write one — a first message arriving, a button in a list — is gone, so
+        "which key does this machine trust for that device" has exactly one
+        answer and one moment at which it was decided.
+        """
+        pairing = device_pairing.complete(device_id)
+        if pairing is None:
+            return False
+        try:
+            await asyncio.to_thread(
+                trust_store.pin_paired_device,
+                device_id,
+                sign_key=pairing.their_key,
+                member_id=member_id or member_id_for(device_id),
+                own_member_id=self._own_member,
+            )
+        except Exception as err:  # noqa: BLE001
+            log.error("could not pin %s after pairing: %s", device_id, err)
+            return False
+        await asyncio.to_thread(
+            trust_store.note_pairing,
+            device_id,
+            kind="paired",
+            device_name=pairing.device_name or self._device_name_for(device_id),
+        )
+        log.info("paired with device %s", device_id)
+        return True
+
+    async def start_pairing(self, device_id: str) -> dict[str, Any]:
+        """Ask another device to pair. The local half of the exchange."""
+        if self._ws is None or not self._authenticated:
+            return self._unavailable()
+        if trust_store.pin_for(device_id) is not None:
+            return {"ok": False, "error": {"code": "ALREADY_PAIRED",
+                                           "message": "that device is already paired"}}
+        # Both machines, or neither. The exchange is four frames and two people;
+        # started against a machine that is not there it produces a card that
+        # waits five minutes and expires, and the person who clicked has no way
+        # to tell that from a button that does nothing.
+        if not self._device_online(device_id):
+            name = self._device_name_for(device_id) or device_id
+            return {
+                "ok": False,
+                "error": {
+                    "code": "TARGET_OFFLINE",
+                    "message": f"{name} is offline; pairing needs both machines online",
+                },
+            }
+        try:
+            pairing = device_pairing.begin(
+                device_id, device_name=self._device_name_for(device_id)
+            )
+        except device_pairing.PairingError as err:
+            return {"ok": False, "error": {"code": "PAIRING_BUSY", "message": str(err)}}
+        sent = await self._send_pair_frame(
+            device_id,
+            device_pairing.PAIR_REQUEST,
+            nonce=pairing.our_nonce,
+            signKey=await asyncio.to_thread(device_signing.public_key),
+        )
+        if not sent:
+            # Nothing is left half-started: the other side has heard nothing, so
+            # a card here waiting on a reply would be waiting for ever.
+            device_pairing.cancel(device_id)
+            return self._unavailable()
+        return {"ok": True, "payload": {"state": pairing.state}}
+
+    async def confirm_pairing(self, device_id: str, *, accept: bool) -> dict[str, Any]:
+        """This side's answer.
+
+        For the responder that is "do the digits match?"; for the initiator the
+        only answer left is to withdraw, because pressing "Pair with…" already
+        said what that side wants — see ``device_pairing.complete``.
+        """
+        if not accept:
+            pairing = device_pairing.cancel(device_id)
+            if pairing is not None:
+                await self._send_pair_frame(device_id, device_pairing.PAIR_REJECT)
+            await self._announce_trust_notices()
+            return {"ok": True, "payload": {"state": "rejected"}}
+        pairing = device_pairing.get(device_id)
+        if pairing is not None and pairing.role == device_pairing.ROLE_INITIATOR:
+            # Nothing to confirm on this side. Answering here would be asking
+            # the same person the same question twice, and the exchange treats
+            # the initiator's intent as already given.
+            return {
+                "ok": False,
+                "error": {
+                    "code": "PAIRING_STATE",
+                    "message": "the initiator does not confirm; it waits for the other side",
+                },
+            }
+        try:
+            device_pairing.confirm(device_id)
+        except device_pairing.PairingError as err:
+            return {"ok": False, "error": {"code": "PAIRING_STATE", "message": str(err)}}
+        await self._send_pair_frame(device_id, device_pairing.PAIR_CONFIRM)
+        # Only completes if their confirm already arrived. Otherwise the card
+        # stays up saying so — the pin waits for both, which is the difference
+        # between this and the one-sided button it replaced.
+        await self._finish_pairing(device_id, member_id=member_id_for(device_id))
+        await self._announce_trust_notices()
+        return {"ok": True, "payload": {"state": "confirmed"}}
+
+    async def revoke_pairing(self, device_id: str) -> None:
+        """Tell the other side we unpaired, so the two do not disagree."""
+        device_pairing.cancel(device_id)
+        await self._send_pair_frame(device_id, device_pairing.PAIR_REVOKED)
+
+    def pairing_rows(self) -> list[dict[str, Any]]:
+        """The in-flight exchanges, as the account view draws them."""
+        our_key = device_signing.public_key()
+        rows = []
+        for pairing in device_pairing.active():
+            rows.append(
+                {
+                    "deviceId": pairing.device_id,
+                    "deviceName": pairing.device_name or self._device_name_for(pairing.device_id),
+                    "role": pairing.role,
+                    "state": pairing.state,
+                    "code": device_pairing.code_for(pairing, our_key=our_key),
+                    "fingerprint": device_signing.fingerprint(pairing.their_key),
+                    "startedAt": pairing.started_at,
+                }
+            )
+        return rows
 
     async def _on_message_pending(self, payload: Any) -> None:
         """A message for a pane on this machine.
@@ -1727,6 +2509,36 @@ class ServerLink:
         sender_member = str(source.get("memberId") or "")
         sender_device = str(source.get("deviceId") or "")
 
+        # Pairing frames leave here first. They are the one kind that arrives
+        # before any relationship exists, so they cannot go through the check
+        # below — which now refuses every unpaired sender — and they address a
+        # machine rather than a pane, so nothing further down applies to them.
+        # They are plain text by design: nothing in them is secret, and sealing
+        # would need a key learned through the relationship they establish.
+        frame = device_pairing.parse(data.get("text"))
+        if frame is not None:
+            await self._on_pair_frame(
+                frame,
+                data,
+                msg_key=msg_key,
+                device_id=sender_device,
+                member_id=sender_member,
+            )
+            return
+
+        # Nothing but a pairing frame may use the reserved address. Without this
+        # the two halves disagree: the body decides the routing, so a message
+        # aimed at the pairing pane with an ordinary body would fall through to
+        # pane resolution and look for a pane called "_pairing" — a confusing
+        # failure for something that should simply be refused.
+        if workspace == PAIRING_WORKSPACE or pane_name == PAIRING_PANE:
+            log.warning(
+                "refusing message %s: the pairing address carries no pairing frame",
+                msg_key,
+            )
+            await self._ack(msg_key, "rejected", reason="pairing-refused")
+            return
+
         # Authenticity before authorization. Everything below this line reads
         # fields the relay writes; the signature is what says the relay only
         # *carried* them. A message that does not verify never reaches a trust
@@ -1737,7 +2549,16 @@ class ServerLink:
             data, msg_key=msg_key, device_id=sender_device, member_id=sender_member
         )
         if own_device is None:
-            await self._ack(msg_key, "rejected", reason=REASON_UNAUTHENTICATED)
+            # One wire reason for two different states — no pin at all, or a
+            # signature that did not verify — for the same reason the refusal
+            # below has one: telling a sender which of those it hit is telling
+            # it whether the device id it guessed exists here.
+            reason = (
+                REASON_NOT_PAIRED
+                if trust_store.pin_for(sender_device) is None
+                else REASON_UNAUTHENTICATED
+            )
+            await self._ack(msg_key, "rejected", reason=reason)
             return
         await self._ensure_policy()
         # Three rings, not one condition: your own machines are one trust
@@ -1808,6 +2629,19 @@ class ServerLink:
         if result.pane is None:
             await self._ack(msg_key, "failed", reason=result.code or "unknown-target")
             return
+
+        # Recorded here, once the message is going to land: "has anything been
+        # driving my machines" was answerable only from a log file nobody opens.
+        # Not a prompt — a paired device is allowed to do this, and asking every
+        # time is how people learn to click through — but not silent either.
+        await asyncio.to_thread(
+            trust_store.note_remote_command,
+            sender_device,
+            device_name=self._device_name_for(sender_device),
+            workspace=workspace,
+            pane_name=pane_name,
+        )
+        await self._announce_trust_notices()
 
         # Decrypt only after the pane resolved: a message this machine was not
         # going to deliver anyway is one it has no reason to open, and doing the
@@ -2042,6 +2876,26 @@ async def status() -> dict[str, Any]:
             "accountEmail": await asyncio.to_thread(account_email),
             "displayName": getattr(link, "display_name", ""),
             "emailVerified": bool(getattr(link, "email_verified", False)),
+            "selfFingerprint": await asyncio.to_thread(self_fingerprint),
+            # Read by every surface that has to explain a refusal. The error
+            # message above already carries whichever of these was most recent,
+            # but it is one string; these are the parts, so a caller can say
+            # "still connecting" without matching on prose.
+            # The Keychain wait outranks the socket error: it describes where
+            # the link actually is, and a stale error from a previous attempt
+            # would send somebody looking at the network instead of at the
+            # dialog in front of them.
+            "lastError": (
+                link.keychain_wait_reason()
+                or link.terminated_reason
+                or link.last_error
+            ),
+            "lastErrorAt": link.last_error_at or None,
+            "nextRetryInS": (
+                max(0, int(link.next_retry_at - time.time()))
+                if link.next_retry_at
+                else None
+            ),
         }
     config = await asyncio.to_thread(load_config)
     return {
@@ -2059,6 +2913,13 @@ async def status() -> dict[str, Any]:
         # No link means no account to judge; the UI only shows the verification
         # notice for an account it can actually see.
         "emailVerified": False,
+        "lastError": "",
+        "lastErrorAt": None,
+        "nextRetryInS": None,
+        # Reported with no link and no account, unlike everything above it: this
+        # is the machine's own key, and somebody reading it off this screen for
+        # another machine's confirmation box should not have to sign in first.
+        "selfFingerprint": await asyncio.to_thread(self_fingerprint),
     }
 
 
@@ -2096,6 +2957,59 @@ async def policy_state() -> dict[str, Any]:
         "deviceId": link._device_id,
         "memberId": link.member_id,
     }
+
+
+def self_fingerprint() -> str:
+    """This machine's signing key, as the short digest people compare.
+
+    Blocking; call off the event loop. Deliberately the *same* function the
+    pending card and the pairing confirmation use — two surfaces rendering one
+    key differently would make the comparison they exist for impossible to
+    trust, and a person cannot tell a different format from a different key.
+    """
+    return device_signing.fingerprint(device_signing.public_key())
+
+
+async def start_pairing(device_id: str) -> dict[str, Any] | None:
+    """Ask another device to pair, or None with no server configured."""
+    return None if _link is None else await _link.start_pairing(device_id)
+
+
+async def confirm_pairing(device_id: str, *, accept: bool) -> dict[str, Any] | None:
+    """Answer "do the digits match?", or None with no server configured."""
+    return None if _link is None else await _link.confirm_pairing(device_id, accept=accept)
+
+
+async def revoke_pairing(device_id: str) -> None:
+    """Tell a device we unpaired. Silent with no link: there is nobody to tell."""
+    if _link is not None:
+        await _link.revoke_pairing(device_id)
+
+
+def own_member_id() -> str:
+    """The member id pinned for this link's credential, or "" with no link."""
+    return _link._own_member if _link is not None else ""
+
+
+def local_device_id() -> str:
+    """This machine's device id, or "" before a link has one."""
+    return _link._device_id if _link is not None else ""
+
+
+def member_id_for(device_id: str) -> str:
+    """Which member the directory says owns *device_id*.
+
+    Only ever used to fill in a pin's memberId. It comes from the server and is
+    treated as such: what it decides is whether a device lands in the own-device
+    ring, and that ring is gated on approval precisely because this value is the
+    server's word rather than proof of anything.
+    """
+    if _link is None:
+        return ""
+    for row in _link._directory or []:
+        if str(row.get("deviceId") or "") == device_id:
+            return str(row.get("hostMemberId") or row.get("memberId") or "")
+    return ""
 
 
 def access_requests() -> list[dict[str, Any]]:
@@ -2147,6 +3061,16 @@ async def resend_verification() -> dict[str, Any] | None:
     if _link is None:
         return None
     return await _link.resend_verification()
+
+
+async def check_verification() -> dict[str, Any] | None:
+    """Ask the server now whether this account's address is confirmed.
+
+    None with no server configured, same as ``resend_verification``.
+    """
+    if _link is None:
+        return None
+    return await _link.check_verification()
 
 
 def roster_changed() -> None:

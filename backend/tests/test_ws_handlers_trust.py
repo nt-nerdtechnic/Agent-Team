@@ -6,11 +6,22 @@ was never registered fails here rather than silently in production.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import time
+import uuid
 from typing import Any
 
 import pytest
 
-from agent_team_backend import app, device_trust, server_link, trust_store, ws_handlers
+from agent_team_backend import (
+    app,
+    confirm_token,
+    device_trust,
+    server_link,
+    trust_store,
+    ws_handlers,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,10 +43,62 @@ class FakeWebSocket:
         self.sent.append(payload)
 
 
+async def _quiet(event: dict, **_kwargs) -> None:
+    """Broadcasts are not what these tests are about."""
+
+
+#: The key these tests pretend the main process handed over on stdin.
+_CONFIRM_KEY = "test-confirmation-key"
+
+
+@pytest.fixture(autouse=True)
+def _confirmable():
+    """Every test here drives a handler the way a window does, so each one has
+    a key to sign with. The tests that are *about* the confirmation reset this
+    themselves."""
+    confirm_token._reset_for_test(_CONFIRM_KEY)
+    yield
+    confirm_token._reset_for_test()
+
+
+def _confirmation(action: str, device_id: str = "", *, ttl: float = 30.0) -> dict[str, str]:
+    """What the main process mints, computed the same way it does."""
+    nonce = uuid.uuid4().hex
+    expires = str(time.time() + ttl)
+    payload = "\x00".join(("navide/trust-confirm/v1", nonce, expires, action, device_id))
+    return {
+        "nonce": nonce,
+        "expires": expires,
+        "mac": hmac.new(
+            _CONFIRM_KEY.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest(),
+    }
+
+
 async def _call(msg_type: str, payload: dict) -> dict:
+    """One request, with a fresh confirmation folded in when the handler wants
+    one. Tests that care about a *missing* confirmation call _raw instead."""
+    if msg_type in _CONFIRMED_ACTIONS and "confirm" not in payload:
+        device_id = str(payload.get("deviceId") or "")
+        payload = {**payload, "confirm": _confirmation(msg_type, device_id)}
+    return await _raw(msg_type, payload)
+
+
+async def _raw(msg_type: str, payload: dict) -> dict:
     session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
     await app.handle_message(session, {"id": "x1", "type": msg_type, "payload": payload})
     return session.websocket.sent[-1]  # type: ignore[attr-defined]
+
+
+_CONFIRMED_ACTIONS = {
+    "p2p.pair.start",
+    "p2p.pair.confirm",
+    "p2p.policy.set",
+    "p2p.trust.device.unpair",
+    "p2p.trust.device.defer",
+    "p2p.trust.block",
+    "p2p.trust.unblock",
+}
 
 
 class FakeLink:
@@ -345,3 +408,492 @@ async def test_a_changed_key_cannot_be_clicked_away(monkeypatch) -> None:
     assert events == [], "nothing changed, so nothing is announced"
 
 
+
+
+# ---- unpairing ---------------------------------------------------------------
+
+
+async def test_unpairing_walks_the_whole_handler_and_tells_the_windows(monkeypatch) -> None:
+    """Registration, the store call and the announcement in one pass: the
+    broadcast runs only after something was actually removed, so a test that
+    stopped at the reply would never reach it."""
+    events: list[dict] = []
+
+    async def capture(event: dict, **_kwargs) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+    trust_store.load()
+    trust_store.pin_device("dev-new", sign_key=_A_KEY, member_id="m-mine")
+
+    reply = await _call("p2p.trust.device.unpair", {"deviceId": "dev-new"})
+
+    assert reply["ok"] is True
+    assert reply["payload"]["removed"]["pins"] == 1
+    assert reply["payload"]["removed"]["found"] is True
+    assert trust_store.pin_for("dev-new") is None
+    assert [e["type"] for e in events] == ["p2p.trust_notices.changed"]
+    assert events[0]["payload"]["notices"] == []
+    assert events[0]["payload"]["pending"] == []
+
+
+async def test_unpairing_an_unknown_device_announces_nothing(monkeypatch) -> None:
+    """It answers, and the answer says nothing went. Broadcasting anyway would
+    redraw every window for an act that did not happen."""
+    events: list[dict] = []
+
+    async def capture(event: dict, **_kwargs) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+    trust_store.load()
+
+    reply = await _call("p2p.trust.device.unpair", {"deviceId": "dev-never-here"})
+
+    assert reply["ok"] is True
+    assert reply["payload"]["removed"]["found"] is False
+    assert events == []
+
+
+async def test_unpairing_needs_a_device_id() -> None:
+    reply = await _call("p2p.trust.device.unpair", {})
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "BAD_REQUEST"
+
+
+async def test_unpairing_a_blocked_device_leaves_the_block_standing(link) -> None:
+    """Two different things: a block is a policy refusal ahead of every rule,
+    pairing is identity. Unpairing a blocked device must not quietly readmit it
+    — no pin and still blocked is the more careful of the two states, and it is
+    the one a person asked for."""
+    trust_store.load()
+    trust_store.pin_device(THEIR_BOX, sign_key=_A_KEY, member_id=THEIRS)
+    await _call("p2p.trust.block", {"deviceId": THEIR_BOX, "memberId": THEIRS})
+    assert device_trust.blocked_entries(link.policy)
+
+    reply = await _call("p2p.trust.device.unpair", {"deviceId": THEIR_BOX})
+
+    assert reply["ok"] is True
+    assert trust_store.pin_for(THEIR_BOX) is None
+    assert [e["deviceId"] for e in device_trust.blocked_entries(link.policy)] == [THEIR_BOX]
+    assert link.writes, "the block was written by the block handler, not undone here"
+
+
+# ---- "not now" ---------------------------------------------------------------
+
+
+async def test_deferring_walks_the_whole_handler_and_tells_the_windows(monkeypatch) -> None:
+    """Registration, the store call and the announcement in one pass. The
+    broadcast is what takes the row off the card that is already open."""
+    events: list[dict] = []
+
+    async def capture(event: dict, **_kwargs) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+    trust_store.load()
+    trust_store.pin_device("dev-not-now", sign_key=_A_KEY, member_id="m-mine")
+
+    reply = await _call("p2p.trust.device.defer", {"deviceId": "dev-not-now"})
+
+    assert reply["ok"] is True
+    assert reply["payload"]["deferred"] is True
+    assert [e["type"] for e in events] == ["p2p.trust_notices.changed"]
+
+
+async def test_deferring_grants_nothing(monkeypatch) -> None:
+    """The weakest button on the card. Whatever that device could reach before
+    it is exactly what it can reach after — the pin is untouched and still
+    unapproved, so the ordinary rules apply and those deny by default."""
+    async def capture(event: dict, **_kwargs) -> None:
+        pass
+
+    monkeypatch.setattr(app, "broadcast", capture)
+    trust_store.load()
+    trust_store.pin_device("dev-still-held", sign_key=_A_KEY, member_id="m-mine")
+
+    await _call("p2p.trust.device.defer", {"deviceId": "dev-still-held"})
+
+    pin = trust_store.pin_for("dev-still-held")
+    assert pin is not None
+    assert pin["approved"] is False
+    assert pin["signKey"] == _A_KEY
+
+
+async def test_deferring_an_unknown_device_announces_nothing(monkeypatch) -> None:
+    events: list[dict] = []
+
+    async def capture(event: dict, **_kwargs) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+    trust_store.load()
+
+    reply = await _call("p2p.trust.device.defer", {"deviceId": "dev-nowhere"})
+
+    assert reply["ok"] is True
+    assert reply["payload"]["deferred"] is False
+    assert events == []
+
+
+async def test_deferring_needs_a_device_id() -> None:
+    reply = await _call("p2p.trust.device.defer", {})
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "BAD_REQUEST"
+
+
+# ---- who may write a pin ------------------------------------------------------
+
+
+def test_pinning_has_exactly_one_entry_point_in_production_code() -> None:
+    """The claim the whole pairing model rests on, checked rather than asserted.
+
+    Three things used to write a pin: a message arriving from an unknown device,
+    a button in the device list, and — now — a completed pairing. The first two
+    are gone, and a grep is what notices if one comes back, because nothing else
+    would: adding a caller breaks no test and changes no behaviour anybody sees
+    until the day it matters.
+    """
+    import pathlib
+    import re
+
+    package = pathlib.Path(trust_store.__file__).parent
+    callers: list[str] = []
+    for path in sorted(package.rglob("*.py")):
+        enclosing = ""
+        for line in path.read_text(encoding="utf-8").splitlines():
+            found = re.match(r"\s*(?:async )?def (\w+)", line)
+            if found:
+                enclosing = found.group(1)
+            if re.search(r"\bpin_paired_device\b|\bpin_device\b", line) and not found:
+                callers.append(f"{path.name}:{enclosing}")
+
+    # Named by function rather than by line: a line number fails on every
+    # unrelated edit above it, which teaches people to update the number without
+    # reading what it was for.
+    assert callers == ["server_link.py:_finish_pairing"], callers
+
+
+def test_the_old_approve_route_is_gone_rather_than_guarded() -> None:
+    """A handler that answers at all is a handler somebody can call. This one
+    pinned whatever key the directory advertised, with no six digits compared by
+    anybody — which is the exact shortcut the pairing exchange replaced."""
+    import pathlib
+
+    source = pathlib.Path(ws_handlers.__file__).read_text(encoding="utf-8")
+    assert '@handler("p2p.trust.device.approve")' not in source
+    assert not hasattr(trust_store, "approve_from_directory")
+
+
+# ---- a policy write that names no block list ---------------------------------
+
+
+async def test_a_write_with_no_blocked_list_keeps_the_blocks(link) -> None:
+    """Absent means "the editor had none to send", not "empty this".
+
+    The server stores the document verbatim, so the difference decides whether
+    every block survives the write. The rules editor composes from the whole
+    cached document and keeps the list; the account view's "sign rules now"
+    composes the default for a machine with no rules at all — and that document
+    has no blocked key.
+    """
+    link.policy = {
+        "version": 1, "default": "deny", "rules": [],
+        "blocked": [{"deviceId": "dev-banned", "memberId": ""}],
+    }
+
+    reply = await _call(
+        "p2p.policy.set", {"policy": {"version": 1, "default": "deny", "rules": []}}
+    )
+
+    assert reply["ok"] is True
+    assert link.writes[-1]["blocked"] == [{"deviceId": "dev-banned", "memberId": ""}]
+
+
+async def test_an_explicit_empty_list_still_clears_them(link) -> None:
+    """Only saying so clears one. Absent and empty have to stay different, or
+    unblocking would have no way to express itself."""
+    link.policy = {
+        "version": 1, "default": "deny", "rules": [],
+        "blocked": [{"deviceId": "dev-banned", "memberId": ""}],
+    }
+
+    reply = await _call(
+        "p2p.policy.set",
+        {"policy": {"version": 1, "default": "deny", "rules": [], "blocked": []}},
+    )
+
+    assert reply["ok"] is True
+    assert link.writes[-1]["blocked"] == []
+
+
+async def test_blocking_records_a_local_copy_as_well(link, monkeypatch) -> None:
+    """The copy that still refuses this device when the policy cannot be
+    verified. Written only after the policy write succeeded, so the two cannot
+    disagree about a block that was never made."""
+    trust_store.load()
+
+    reply = await _call("p2p.trust.block", {"deviceId": "dev-both", "memberId": "m-both"})
+
+    assert reply["ok"] is True
+    assert device_trust.is_blocked(None, member_id="", device_id="dev-both") is True
+
+    await _call("p2p.trust.unblock", {"deviceId": "dev-both", "memberId": "m-both"})
+    assert device_trust.is_blocked(None, member_id="", device_id="dev-both") is False
+
+
+# ---- the second check on the six ---------------------------------------------
+#
+# ws_auth answers "may you open this socket". Everything past it may send
+# anything, and Navide hands that socket to more than the window: the plugin
+# broker holds one, and MCP reaches these handlers on behalf of a CLI agent that
+# may be taking instructions from a remote peer. These pin down the check that
+# separates the two.
+
+
+async def test_a_trust_change_with_no_confirmation_is_refused(monkeypatch) -> None:
+    """The MCP and plugin case, exactly: they reach the handler and have no way
+    to obtain a confirmation, because the key that signs one lives in the main
+    process and never reaches this socket."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    trust_store.pin_device("dev-unconfirmed", sign_key=_A_KEY, member_id="m-mine")
+
+    reply = await _raw("p2p.pair.start", {"deviceId": "dev-unconfirmed"})
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
+    assert trust_store.pin_for("dev-unconfirmed")["approved"] is False
+
+
+async def test_every_one_of_the_six_is_covered(monkeypatch) -> None:
+    """A handler added to this family without the guard is the whole hole back.
+    Named individually rather than looped over a list the code also owns."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    for action, payload in (
+        ("p2p.pair.start", {"deviceId": "d1"}),
+        ("p2p.pair.confirm", {"deviceId": "d1", "accept": True}),
+        ("p2p.policy.set", {"policy": {"version": 1, "default": "deny", "rules": []}}),
+        ("p2p.trust.device.unpair", {"deviceId": "d1"}),
+        ("p2p.trust.device.defer", {"deviceId": "d1"}),
+        ("p2p.trust.block", {"deviceId": "d1"}),
+        ("p2p.trust.unblock", {"deviceId": "d1"}),
+    ):
+        reply = await _raw(action, payload)
+        assert reply["ok"] is False, action
+        assert reply["error"]["code"] == "CONFIRMATION_REQUIRED", action
+
+
+async def test_a_confirmation_is_spent_the_first_time(monkeypatch) -> None:
+    """Replay is the obvious attack on a token that travels in a message the
+    same socket can read back."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    trust_store.pin_device("dev-replay", sign_key=_A_KEY, member_id="m-mine")
+    token = _confirmation("p2p.trust.device.defer", "dev-replay")
+
+    first = await _raw("p2p.trust.device.defer", {"deviceId": "dev-replay", "confirm": token})
+    second = await _raw("p2p.trust.device.defer", {"deviceId": "dev-replay", "confirm": token})
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert second["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+async def test_an_expired_confirmation_is_refused(monkeypatch) -> None:
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    trust_store.pin_device("dev-stale", sign_key=_A_KEY, member_id="m-mine")
+
+    reply = await _raw(
+        "p2p.trust.device.defer",
+        {"deviceId": "dev-stale", "confirm": _confirmation("p2p.trust.device.defer", "dev-stale", ttl=-1)},
+    )
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+async def test_a_confirmation_for_another_action_is_refused(monkeypatch) -> None:
+    """Binding the action is what stops the weakest button in the panel minting
+    a token for the strongest one."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    trust_store.pin_device("dev-swap", sign_key=_A_KEY, member_id="m-mine")
+
+    reply = await _raw(
+        "p2p.pair.start",
+        {"deviceId": "dev-swap", "confirm": _confirmation("p2p.trust.device.defer", "dev-swap")},
+    )
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+async def test_a_confirmation_for_another_device_is_refused(monkeypatch) -> None:
+    """And binding the device is what stops one minted to approve your own
+    laptop being spent to unpair somebody else's."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    trust_store.pin_device("dev-a", sign_key=_A_KEY, member_id="m-mine")
+
+    reply = await _raw(
+        "p2p.trust.device.unpair",
+        {"deviceId": "dev-a", "confirm": _confirmation("p2p.trust.device.unpair", "dev-b")},
+    )
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+async def test_a_backend_with_no_key_refuses_rather_than_waves_through(monkeypatch) -> None:
+    """Fails closed. A backend that received no key is not one a person's window
+    is driving — the main process hands it over before anything else — so the
+    honest answer is to refuse rather than to quietly become the surface this
+    check exists to remove."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    confirm_token._reset_for_test()
+    trust_store.load()
+    trust_store.pin_device("dev-keyless-backend", sign_key=_A_KEY, member_id="m-mine")
+
+    reply = await _raw(
+        "p2p.trust.device.defer",
+        {"deviceId": "dev-keyless-backend", "confirm": _confirmation("p2p.trust.device.defer", "dev-keyless-backend")},
+    )
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+async def test_the_ordinary_window_path_goes_through(monkeypatch) -> None:
+    """The other half. A check that refused everything would also pass every
+    test above."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    trust_store.pin_device("dev-normal", sign_key=_A_KEY, member_id="m-mine")
+
+    reply = await _raw(
+        "p2p.trust.device.defer",
+        {"deviceId": "dev-normal", "confirm": _confirmation("p2p.trust.device.defer", "dev-normal")},
+    )
+
+    assert reply["ok"] is True
+    assert reply["payload"]["deferred"] is True
+
+
+# ---- the premise the whole check rests on ------------------------------------
+#
+# "The key is only in the main process, never on disk, never in the
+# environment." Everything above assumes it; until now only a comment and one
+# manual sweep said so, and neither fails when somebody adds the convenient
+# line.
+
+
+def test_the_confirmation_module_cannot_reach_a_file_or_the_environment() -> None:
+    """Read from the parse tree rather than by grepping text, so a name reached
+    through an alias or an attribute is still caught.
+
+    What this protects is not a clever attack — it is the ordinary afternoon
+    where somebody makes the key survive a backend restart by writing it
+    somewhere. A file this process can read is a file a CLI agent running as the
+    same user can read, and that is precisely the reader this check exists to
+    tell apart from a person's window.
+    """
+    import ast
+    import pathlib
+
+    source = pathlib.Path(confirm_token.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    forbidden_modules = {"os", "pathlib", "shutil", "tempfile", "subprocess", "io"}
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert not (imported & forbidden_modules), f"reaches the filesystem: {imported}"
+
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "open" not in called
+    assert "getenv" not in called
+    # environ is an attribute rather than a call, so it needs its own sweep —
+    # and it has to come from the tree, not the text: the word appears in this
+    # module's own docstring, and a check that read the file as a string would
+    # be failing on prose while missing `o.environ` reached through an alias.
+    attributes = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+    assert "environ" not in attributes
+    assert "getenv" not in attributes
+
+
+def test_no_mcp_tool_can_address_a_trust_changing_type() -> None:
+    """The other half of "only a window can do this".
+
+    MCP tools call in-process functions; they do not dispatch WebSocket message
+    types, so today they cannot reach these handlers at all. That is a property
+    of how the package is wired rather than a rule anyone wrote down, which is
+    exactly the kind that gets undone by a later commit adding one convenient
+    tool. This fails on the day that happens.
+    """
+    import pathlib
+
+    package = pathlib.Path(confirm_token.__file__).parent / "mcp_server"
+    hits = [
+        (path.name, action)
+        for path in package.rglob("*.py")
+        for action in sorted(_CONFIRMED_ACTIONS)
+        if action in path.read_text(encoding="utf-8")
+    ]
+    assert hits == [], f"an MCP tool now names a trust-changing type: {hits}"
+
+
+async def test_the_plugin_broker_entry_is_the_one_that_is_guarded(monkeypatch) -> None:
+    """The socket a plugin holds and the socket a window holds are the same
+    socket, and both arrive here. This drives that entry directly — no test
+    helper folding a confirmation in — and asserts the refusal.
+    """
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    trust_store.pin_device("dev-broker", sign_key=_A_KEY, member_id="m-mine")
+
+    session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
+    await app.handle_message(
+        session,
+        {"id": "b1", "type": "p2p.pair.start", "payload": {"deviceId": "dev-broker"}},
+    )
+
+    reply = session.websocket.sent[-1]  # type: ignore[attr-defined]
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
+    assert trust_store.pin_for("dev-broker")["approved"] is False
+
+
+async def test_unblocking_needs_something_to_unblock(link) -> None:
+    """The same check block has. Without it an empty request rewrote the policy
+    to say exactly what it already said — a signed write, a revision bump and a
+    success, for a request that named nobody."""
+    reply = await _call("p2p.trust.unblock", {})
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "BAD_REQUEST"
+    assert link.writes == []
+
+
+async def test_refusing_a_pairing_needs_a_confirmation_too(monkeypatch) -> None:
+    """Refusing is a decision. A remote agent talked into clicking "they do not
+    match" cancels a pairing somebody was in the middle of, and the person at
+    the other end sees only that it was refused."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+
+    reply = await _raw("p2p.pair.confirm", {"deviceId": "dev-x", "accept": False})
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
