@@ -4,6 +4,7 @@ import {
   entryBelongsToWorkspace,
   filterHistoryEntries,
   filterWorkspaceEntries,
+  groupHistory,
   groupHistoryByDay,
   historyCleanupCutoffIso,
   historyCleanupMatches,
@@ -308,6 +309,43 @@ describe('groupHistoryByDay', () => {
 
   it('returns no groups for an empty list', () => {
     expect(groupHistoryByDay([], now)).toEqual([])
+  })
+})
+
+describe('groupHistory', () => {
+  const now = new Date(2026, 6, 22, 15, 30, 0)
+  const localIso = (d: number, h: number, m = 0): string =>
+    new Date(2026, 6, d, h, m).toISOString()
+  const entries = [
+    { paneId: 'busy-today', spawnedAt: localIso(22, 14) },
+    { paneId: 'quiet-today', spawnedAt: localIso(22, 9) },
+    { paneId: 'busy-old', spawnedAt: localIso(20, 9) },
+    { paneId: 'quiet-old', spawnedAt: localIso(20, 8) },
+  ]
+
+  it('pins the working panes on top, newest-first order preserved', () => {
+    const groups = groupHistory(entries, now, new Set(['busy-today', 'busy-old']))
+
+    expect(groups.map((g) => g.key)).toEqual(['active', 'today', 'earlier'])
+    expect(groups[0].entries.map((e) => e.paneId)).toEqual(['busy-today', 'busy-old'])
+  })
+
+  it('moves them out of their day group rather than copying them', () => {
+    const groups = groupHistory(entries, now, new Set(['busy-today', 'busy-old']))
+
+    expect(groups[1].entries.map((e) => e.paneId)).toEqual(['quiet-today'])
+    expect(groups[2].entries.map((e) => e.paneId)).toEqual(['quiet-old'])
+    const all = groups.flatMap((g) => g.entries.map((e) => e.paneId))
+    expect(new Set(all).size).toBe(all.length)
+  })
+
+  it('falls back to the plain day grouping when nothing is working', () => {
+    expect(groupHistory(entries, now, new Set())).toEqual(groupHistoryByDay(entries, now))
+  })
+
+  it('omits the active group when no listed entry matches a working pane', () => {
+    const groups = groupHistory(entries, now, new Set(['a-pane-not-in-this-list']))
+    expect(groups.map((g) => g.key)).toEqual(['today', 'earlier'])
   })
 })
 

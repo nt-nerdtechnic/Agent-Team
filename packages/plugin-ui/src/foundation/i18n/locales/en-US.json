@@ -1919,6 +1919,7 @@
     "history-filter-origin-all": "All origins",
     "history-filter-manual": "Manual",
     "history-filter-pipeline": "Pipeline",
+    "history-group-active": "Working now",
     "history-group-today": "Today",
     "history-group-yesterday": "Yesterday",
     "history-group-earlier": "Earlier",

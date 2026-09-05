@@ -11,11 +11,11 @@ import {
 import {
   countHistoryCleanupEntries,
   filterHistoryEntries,
-  groupHistoryByDay,
+  groupHistory,
   historyCleanupCutoffIso,
   historyEntryLabel,
   type HistoryCleanupMode,
-  type HistoryDayGroupKey,
+  type HistoryGroupKey,
   type HistoryDeletePreview,
   type HistoryDeleteTarget,
   type HistoryOriginFilter,
@@ -39,6 +39,10 @@ const props = defineProps<{
   paneCount: number
   revivingPaneId: string
   unavailablePaneIds: Set<string>
+  /** Panes whose CLI is working right now (running / starting / awaiting
+   *  input). Their entries are lifted out of the day groups into a pinned
+   *  'active' group at the top of the list. */
+  activePaneIds: Set<string>
   previewOpen: boolean
   previewTitle: string
   previewContent: string
@@ -164,7 +168,7 @@ function onBrowseKeydown(e: KeyboardEvent): void {
     // Rows are <button>s: Enter must keep its native "select this row".
     if (e.key === 'Enter') return
   }
-  const entries = filteredSessionHistory.value
+  const entries = browseOrder.value
   if (entries.length === 0) return
   const idx = entries.findIndex((entry) => entry.paneId === selectedPaneId.value)
   if (e.key === 'Enter') {
@@ -262,15 +266,24 @@ const filteredSessionHistory = computed(() =>
   })
 )
 
-const groupedHistory = computed(() => groupHistoryByDay(filteredSessionHistory.value, new Date()))
+const groupedHistory = computed(() =>
+  groupHistory(filteredSessionHistory.value, new Date(), props.activePaneIds)
+)
+
+/** The rows in the order they are rendered. Arrow keys walk this, not
+*  `filteredSessionHistory`, so the pinned active group does not make the
+*  selection jump around the list. */
+const browseOrder = computed(() => groupedHistory.value.flatMap((group) => group.entries))
 
 const selectedEntry = computed(() =>
   filteredSessionHistory.value.find((entry) => entry.paneId === selectedPaneId.value) ?? null
 )
 
-// Default-select the first (newest) entry when the modal opens, and re-select
-// the first entry whenever filtering drops the current selection.
-watch([() => props.show, filteredSessionHistory], ([open, entries]) => {
+// Default-select the first rendered entry when the modal opens, and re-select
+// the first entry whenever filtering drops the current selection. Rendered
+// order, not filtered order, so the selection lands on the row the user sees
+// at the top — the pinned active group changes which one that is.
+watch([() => props.show, browseOrder], ([open, entries]) => {
   if (!open) return
   if (!entries.some((entry) => entry.paneId === selectedPaneId.value)) {
     selectedPaneId.value = entries[0]?.paneId ?? ''
@@ -288,7 +301,7 @@ function formatTimestamp(iso?: string): string {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString()
 }
 
-function listTime(entry: SpawnHistoryEntry, groupKey: HistoryDayGroupKey): string {
+function listTime(entry: SpawnHistoryEntry, groupKey: HistoryGroupKey): string {
   if (!entry.spawnedAt) return '—'
   const d = new Date(entry.spawnedAt)
   if (Number.isNaN(d.getTime())) return '—'
@@ -662,7 +675,9 @@ async function copyLogText(): Promise<void> {
                 {{ $t('label.no-matching-history') }}
               </div>
               <template v-for="group in groupedHistory" :key="group.key">
-                <div class="ah-group-title">{{ $t(`label.history-group-${group.key}`) }}</div>
+                <div class="ah-group-title" :class="{ running: group.key === 'active' }">
+                  {{ $t(`label.history-group-${group.key}`) }}
+                </div>
                 <button
                   v-for="entry in group.entries"
                   :key="entry.paneId"
@@ -1143,6 +1158,9 @@ async function copyLogText(): Promise<void> {
   text-transform: uppercase;
   letter-spacing: 0.4px;
   color: var(--text-muted);
+}
+.ah-group-title.running {
+  color: var(--success-fg);
 }
 .agent-history-row {
   display: flex;

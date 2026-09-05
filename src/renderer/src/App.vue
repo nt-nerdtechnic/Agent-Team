@@ -8661,6 +8661,27 @@ const reconnectPickerPaneId = ref('')
 const reconnectOrphans = ref<OrphanSession[]>([])
 const reconnectLoading = ref(false)
 
+// ── Panes whose CLI is working right now (for AgentHistoryModal's pinned
+// "running" group) ──────────────────────────────────────────────────────────
+// Two computeds on purpose: paneViews is replaced every 400ms by syncViews, so
+// deriving the Set directly would regroup the whole history list four times a
+// second. The key is a plain string, so the Set below only rebuilds when the
+// membership actually changes. Same shape as stageTabs, same reason.
+const activeHistoryPaneKey = computed(() => {
+  const disconnected = new Set(disconnectedPaneIds.value)
+  const ids: string[] = []
+  for (const view of paneViews.value) {
+    if (disconnected.has(view.id)) continue
+    if (view.status === 'running' || view.status === 'starting' || view.status === 'awaiting') {
+      ids.push(view.id)
+    }
+  }
+  return ids.sort().join(',')
+})
+const activeHistoryPaneIds = computed(
+  () => new Set(activeHistoryPaneKey.value ? activeHistoryPaneKey.value.split(',') : [])
+)
+
 async function resolveReconnectForPane(
   saved: ProjectPane,
   workspacePath: string,
@@ -14725,6 +14746,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :pane-count="panes.length"
       :reviving-pane-id="revivingHistoryPaneId"
       :unavailable-pane-ids="unavailableHistoryPaneIds"
+      :active-pane-ids="activeHistoryPaneIds"
       :preview-open="previewLogOpen"
       :preview-title="previewLogTitle"
       :preview-content="previewLogContent"

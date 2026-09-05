@@ -162,6 +162,32 @@ export function groupHistoryByDay<T extends { spawnedAt?: string }>(
     .map((key) => ({ key, entries: buckets[key] }))
 }
 
+export type HistoryGroupKey = 'active' | HistoryDayGroupKey
+
+export interface HistoryGroup<T> {
+  key: HistoryGroupKey
+  entries: T[]
+}
+
+/** Same buckets as `groupHistoryByDay`, plus an 'active' group pinned on top
+ *  holding the entries whose pane is working right now. Those entries are
+ *  moved, not copied, so a pane appears exactly once in the list. */
+export function groupHistory<T extends { paneId: string; spawnedAt?: string }>(
+  entries: T[],
+  now: Date,
+  activePaneIds: ReadonlySet<string>
+): HistoryGroup<T>[] {
+  if (activePaneIds.size === 0) return groupHistoryByDay(entries, now)
+  const active: T[] = []
+  const rest: T[] = []
+  for (const entry of entries) {
+    if (activePaneIds.has(entry.paneId)) active.push(entry)
+    else rest.push(entry)
+  }
+  const days = groupHistoryByDay(rest, now)
+  return active.length > 0 ? [{ key: 'active' as const, entries: active }, ...days] : days
+}
+
 export type HistoryCleanupMode = 'removed' | 'older_than'
 
 /** What a delete asks the backend to remove — the renderer half of a
