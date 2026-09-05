@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from agent_team_backend import agent_messaging, hook_drain
 from agent_team_backend import app as app_module
 from agent_team_backend.app import app
+from agent_team_backend import hook_auth
 
 
 class FakeWindow:
@@ -45,7 +46,11 @@ class FakeWindow:
 def client() -> TestClient:
     # base_url pinned to loopback: the default "testserver" Host is exactly
     # what reject_foreign_host refuses.
-    return TestClient(app, base_url="http://127.0.0.1")
+    client = TestClient(app, base_url="http://127.0.0.1")
+    # What an installed hook presents (read out of the 0600 header file at
+    # fire time); without it the endpoint answers 403 to everyone.
+    client.headers[hook_auth.HEADER] = hook_auth.token()
+    return client
 
 
 @pytest.fixture()

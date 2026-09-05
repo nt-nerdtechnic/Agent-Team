@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_team_backend import app as app_module
-from agent_team_backend import claude_hooks, push_delivery
+from agent_team_backend import claude_hooks, hook_auth, push_delivery
 from agent_team_backend.app import app
 
 
@@ -29,7 +29,11 @@ from agent_team_backend.app import app
 def client() -> TestClient:
     # base_url pinned to loopback: the default "testserver" Host is exactly
     # what reject_foreign_host refuses.
-    return TestClient(app, base_url="http://127.0.0.1")
+    client = TestClient(app, base_url="http://127.0.0.1")
+    # What the installed hook presents, read out of the 0600 header file when
+    # it fires. Tests about a missing or wrong secret override it per request.
+    client.headers[hook_auth.HEADER] = hook_auth.token()
+    return client
 
 
 @pytest.fixture()
@@ -53,13 +57,20 @@ def clean_state(monkeypatch):
     push_delivery._reset_for_test()
 
 
-def _url(token: str | None = None) -> str:
-    """The endpoint as the installed hook addresses it, freshness token and all."""
-    return f"/hooks/claude/rewake?t={token if token is not None else push_delivery.rewake_token()}"
+def _url() -> str:
+    """The endpoint as the installed hook addresses it. The secret travels in a
+    header, never in the URL — see hook_auth."""
+    return "/hooks/claude/rewake"
+
+
+def _auth() -> dict[str, str]:
+    """The header the installed hook presents; the raw httpx clients below do
+    not go through the `client` fixture that carries it by default."""
+    return {hook_auth.HEADER: hook_auth.token()}
 
 
 def _park(client: TestClient, session_id: str = "s-1"):
-    return client.post(_url(), json={"session_id": session_id})
+    return client.post(_url(), headers=_auth(), json={"session_id": session_id})
 
 
 # ── the endpoint ────────────────────────────────────────────────────────────
@@ -80,7 +91,7 @@ async def test_a_parked_hook_is_answered_with_the_envelope(events) -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as http:
         pusher = asyncio.create_task(push_once())
-        resp = await http.post(_url(), json={"session_id": "s-1"})
+        resp = await http.post(_url(), headers=_auth(), json={"session_id": "s-1"})
         await pusher
     assert resp.status_code == 200
     body = resp.text
@@ -108,7 +119,7 @@ async def test_a_waiter_is_answered_only_once(events) -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as http:
         pusher = asyncio.create_task(push_twice())
-        resp = await http.post(_url(), json={"session_id": "s-1"})
+        resp = await http.post(_url(), headers=_auth(), json={"session_id": "s-1"})
         await pusher
     assert "first" in resp.text
     assert "second" not in resp.text
@@ -125,7 +136,7 @@ def test_a_session_no_pane_owns_is_declined_at_once(
 
 
 def test_a_payload_without_a_session_is_declined_at_once(client: TestClient, events) -> None:
-    resp = client.post(_url(), json={})
+    resp = client.post(_url(), headers=_auth(), json={})
     assert resp.status_code == 200
     assert resp.text == ""
 
@@ -174,19 +185,40 @@ async def test_an_envelope_past_the_cli_cap_is_left_to_the_typed_path() -> None:
     assert await push_delivery.deliver("pane-1", "ok") == (True, "")
 
 
-def test_a_request_without_the_run_token_is_refused(client: TestClient, events) -> None:
-    """A hook left over from an earlier backend run, or anything that never
-    went through the installer, must not be able to park on someone's pane."""
-    resp = client.post("/hooks/claude/rewake", json={"session_id": "s-1"})
+def _no_parking(monkeypatch) -> None:
+    """Make a refusal test fail closed.
+
+    A test that says "this request is refused" must go red the moment the gate
+    is missing — not wait on whatever the request does next. Without this, an
+    unauthenticated request that slipped through would park a waiter for
+    HOOK_WAIT_S (thirty minutes) and the test would hang: no result at all,
+    which every runner reads as "still going" rather than "broken". So the
+    first thing past the gate that changes state is replaced with an immediate
+    failure; a refused request never reaches it."""
+    def reached(*_args, **_kwargs):
+        raise AssertionError("the gate is missing: an unauthenticated request reached the waiter")
+
+    monkeypatch.setattr(push_delivery, "register_hook_pane", reached)
+    monkeypatch.setattr(push_delivery, "wait_for_hook", reached)
+
+
+def test_a_request_without_the_hook_secret_is_refused(
+    client: TestClient, events, monkeypatch
+) -> None:
+    """Anything that never went through this machine's installer — another
+    local account included — must not be able to park on someone's pane."""
+    _no_parking(monkeypatch)
+    resp = client.post(_url(), headers={hook_auth.HEADER: ""}, json={"session_id": "s-1"})
     assert resp.status_code == 403
     assert resp.text == ""
     assert not push_delivery.is_ready("pane-1")
 
 
-def test_a_request_with_the_wrong_run_token_is_refused(
-    client: TestClient, events
+def test_a_request_with_the_wrong_hook_secret_is_refused(
+    client: TestClient, events, monkeypatch
 ) -> None:
-    resp = client.post(_url("stale-token"), json={"session_id": "s-1"})
+    _no_parking(monkeypatch)
+    resp = client.post(_url(), headers={hook_auth.HEADER: "stale-token"}, json={"session_id": "s-1"})
     assert resp.status_code == 403
     assert resp.text == ""
 
@@ -280,9 +312,13 @@ def test_the_waiter_declares_a_timeout_outside_the_backends_own(tmp_path) -> Non
     assert claude_hooks._REWAKE_CURL_TIMEOUT_S > push_delivery.HOOK_WAIT_S
 
 
-def test_the_waiter_carries_this_runs_freshness_token(tmp_path) -> None:
+def test_the_waiter_names_the_secret_file_and_never_the_secret(tmp_path) -> None:
+    """The command goes into a world-readable settings file; only the path of
+    the 0600 header file may appear in it, and curl reads that when it fires."""
     hook = _rewake_hooks(_installed(tmp_path), "SessionStart")[0]
-    assert f"?t={push_delivery.rewake_token()}" in hook["command"]
+    assert f"-H @{hook_auth.header_file()}" in hook["command"] or f"-H @'{hook_auth.header_file()}'" in hook["command"]
+    assert hook_auth.token() not in hook["command"]
+    assert "?t=" not in hook["command"]
 
 
 def test_the_waiter_exits_zero_when_the_backend_has_nothing_to_say(tmp_path) -> None:

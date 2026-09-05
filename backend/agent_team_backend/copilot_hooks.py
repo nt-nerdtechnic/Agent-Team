@@ -49,12 +49,17 @@ def _build_command(port_file: str) -> str:
     failure, and curl exits non-zero whenever the backend is down — which is
     the normal state when Navide is not running.
     """
+    from . import hook_auth
+
     safe_port_file = shlex.quote(port_file)
+    # The secret comes out of a 0600 file at fire time (`-H @file`); see hook_auth.
+    safe_auth_file = shlex.quote(str(hook_auth.header_file()))
     return (
         f"PORT=$(cat {safe_port_file} 2>/dev/null); "
         f"[ -n \"$PORT\" ] && curl -fsS -m 2 -o /dev/null -X POST "
         f"-H 'Content-Type: application/json' "
         f"-H 'X-Agent-Team-Event: notification' "
+        f"-H @{safe_auth_file} "
         f"--data-binary @- "
         f"\"http://127.0.0.1:$PORT/hooks/copilot\" >/dev/null 2>&1; exit 0"
     )

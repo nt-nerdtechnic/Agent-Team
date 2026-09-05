@@ -31,7 +31,6 @@ import shlex
 import shutil
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 log = logging.getLogger("agent_team_backend.claude_hooks")
 
@@ -107,7 +106,13 @@ def _build_curl_command(port_file: str, event_kind: str, endpoint: str = "claude
     installer compares by marker, but an unchanged command also means an
     unchanged settings.json diff).
     """
+    from . import hook_auth
+
     safe_port_file = shlex.quote(port_file)
+    # The secret is read out of a 0600 file when the hook fires (`-H @file`),
+    # never written into this command: settings.json is world readable and
+    # `ps` would show an argument. See hook_auth.
+    safe_auth_file = shlex.quote(str(hook_auth.header_file()))
     # Claude's Stop hook only: qwen borrows this builder, and nothing has
     # established that its CLI reads a hook's stdout the same way.
     keeps_body = event_kind == "stop" and endpoint == "claude"
@@ -119,6 +124,7 @@ def _build_curl_command(port_file: str, event_kind: str, endpoint: str = "claude
         f"[ -n \"$PORT\" ] && curl -fsS -m {timeout} {sink}-X POST "
         f"-H 'Content-Type: application/json' "
         f"-H 'X-Agent-Team-Event: {event_kind}' "
+        f"-H @{safe_auth_file} "
         f"--data-binary @- "
         f"\"http://127.0.0.1:$PORT/hooks/{endpoint}\" || true"
     )
@@ -136,16 +142,18 @@ def _build_rewake_command(port_file: str) -> str:
     a backend that is not running (no port file, connection refused) leaves the
     hook exiting 0, which is "nothing to report" and costs the pane nothing.
 
-    The `t` parameter says the hook came from this machine's installer, not
-    that its caller is authorised: it lives in this settings file, which
-    anything running as this user can read. It is kept in the app data
-    directory and survives a backend restart, so a pane that is still running
-    keeps working with the command it was given.
+    Authenticated the same way as every other hook — the header curl reads out
+    of the 0600 file in the app data directory when it fires (see hook_auth).
+    This used to be a `?t=` written into the command text instead; that put
+    the secret in a settings file every account on the machine can read, so
+    it never proved even the weaker thing it claimed (that the caller had been
+    through this machine's installer). Reading the file at fire time also
+    keeps a pane that was started before a backend restart working.
     """
-    from . import push_delivery
+    from . import hook_auth
 
     safe_port_file = shlex.quote(port_file)
-    token = quote(push_delivery.rewake_token(), safe="")
+    safe_auth_file = shlex.quote(str(hook_auth.header_file()))
     return (
         f"{_AGENT_TEAM_MARKER} kind=rewake\n"
         f"PORT=$(cat {safe_port_file} 2>/dev/null); "
@@ -153,8 +161,9 @@ def _build_rewake_command(port_file: str) -> str:
         f"BODY=$(curl -fsS -m {_REWAKE_CURL_TIMEOUT_S} -X POST "
         f"-H 'Content-Type: application/json' "
         f"-H 'X-Agent-Team-Event: rewake' "
+        f"-H @{safe_auth_file} "
         f"--data-binary @- "
-        f"\"http://127.0.0.1:$PORT/hooks/claude/rewake?t={token}\" || true)\n"
+        f"\"http://127.0.0.1:$PORT/hooks/claude/rewake\" || true)\n"
         f"[ -n \"$BODY\" ] || exit 0\n"
         f"printf '%s\\n' \"$BODY\" >&2\n"
         f"exit 2"

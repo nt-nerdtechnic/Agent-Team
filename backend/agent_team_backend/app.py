@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import secrets
 import base64
 import functools
 import logging
@@ -27,6 +26,7 @@ from uvicorn.protocols.utils import ClientDisconnected
 
 from . import __version__
 from . import agent_messaging
+from . import hook_auth
 from . import hook_drain
 from . import ws_auth
 from . import loop_watchdog
@@ -1920,6 +1920,12 @@ async def cli_hook(vendor: str, request: Request) -> Any:
     """
     if vendor not in _HOOK_VENDORS:
         return {"ok": False, "reason": f"unknown hook vendor: {vendor!r}"}
+    if not hook_auth.presented(request.headers.get(hook_auth.HEADER)):
+        # Not installed by this machine's backend — another local account, or a
+        # hook written by a build before the secret existed. Empty 403 so a
+        # Stop hook reading the body still sees "no decision" rather than an
+        # error object it would show the user.
+        return Response(status_code=403)
     event_kind = request.headers.get("X-Agent-Team-Event", "").strip()
     try:
         payload = await request.json()
@@ -2107,12 +2113,11 @@ async def claude_rewake_hook(request: Request) -> Response:
     agent anywhere near it, and that is exactly what a user running `/exit`
     inside a pane they leave open produces.
     """
-    if not secrets.compare_digest(
-        request.query_params.get("t", ""), push_delivery.rewake_token()
-    ):
-        # A request from a previous backend run, or from something that never
-        # went through the installer. Empty body: a hook reading a 403 must
-        # still exit without a decision rather than showing the user an error.
+    if not hook_auth.presented(request.headers.get(hook_auth.HEADER)):
+        # Not installed by this machine's backend — another local account, or
+        # a hook written before the header file existed. Empty body: a hook
+        # reading a 403 must still exit without a decision rather than showing
+        # the user an error.
         return Response(status_code=403)
     if push_delivery.channel_for("claude") is None:
         # Answered before the attribution wait below rather than after it: a
