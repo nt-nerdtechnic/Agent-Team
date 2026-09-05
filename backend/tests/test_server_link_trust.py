@@ -2425,48 +2425,11 @@ async def test_the_socket_error_reaches_the_status_untouched(monkeypatch):
             await task
 
 
-async def test_the_initiator_is_paired_by_the_other_side_alone():
-    """Pressing "Pair with…" already said what this side wants; the exchange
-    finishes when the other end answers.
-
-    The cost is real and deliberate: somebody can start a pairing and walk away,
-    and whoever is at the other machine completes it without them. That is what
-    the second button was buying, at the price of a step most people would learn
-    to click through.
-    """
-    device_pairing._reset_for_test()
-    server = FakeServer(policy=ALLOW_ALL_POLICY)
-    link = await _connected(server)
-    try:
-        conn = server.opened[0]
-        link._online_devices = {PEER.device_id}
-        await link.start_pairing(PEER.device_id)
-        device_pairing.accept_response(
-            PEER.device_id, their_key=PEER.sign_key, their_nonce="bm9uY2U="
-        )
-        # Their answer has not arrived: nothing is trusted.
-        assert trust_store.pin_for(PEER.device_id) is None
-
-        await conn.push(
-            {
-                "type": "messages.pending",
-                "payload": _pair_frame(PEER, device_pairing.PAIR_CONFIRM),
-            }
-        )
-        await _until(lambda: trust_store.pin_for(PEER.device_id) is not None)
-
-        assert trust_store.pin_for(PEER.device_id)["approved"] is True
-    finally:
-        device_pairing._reset_for_test()
-        await link.stop()
-
-
 def _confirms_sent(conn, since: int = 0) -> list[dict]:
     """The PAIR_CONFIRM frames this machine put on the wire, in order.
 
-    Counting them is the guard against the obvious way to fix a missing answer:
-    answer from both branches, and the two machines confirm at each other for
-    ever.
+    Counting them is how "one confirm from each side" stays true: each end sends
+    its own when its person presses, and nothing answers an answer.
     """
     out = []
     for frame in conn.sent[since:]:
@@ -2478,16 +2441,17 @@ def _confirms_sent(conn, since: int = 0) -> list[dict]:
     return out
 
 
-async def test_the_initiator_answers_the_confirm_it_was_sent():
-    """The half that was missing, and it left the two machines disagreeing.
+async def test_a_relay_cannot_pair_itself_with_the_initiator():
+    """This test used to be the proof-of-concept for a CRITICAL.
 
-    The asymmetry is that the initiator does not ask *its own person* twice —
-    pressing "Pair with…" already said what this side wants. It was built as the
-    initiator not *telling the other side*: it recorded the confirm, pinned, and
-    sent nothing. So the responder's `peer_confirmed` never became true, its
-    `complete()` kept returning None, and the machine whose human had just
-    pressed Allow stayed on "Not paired" for ever while this one showed
-    "Paired" — the exact state the revoke branch exists to prevent.
+    It asserted that the initiator pinned on the far end's confirm alone — and
+    it was green, which is to say a relay that never forwarded the request could
+    answer with its own key and be pinned, approved, in RING_SELF, with every
+    policy rule skipped. Nobody at this machine had compared anything.
+
+    What is asserted now is the refusal. The frames are exactly the ones a relay
+    can produce on its own: a response carrying a key it holds, then a confirm
+    signed with the same key.
     """
     device_pairing._reset_for_test()
     server = FakeServer(policy=ALLOW_ALL_POLICY)
@@ -2496,36 +2460,41 @@ async def test_the_initiator_answers_the_confirm_it_was_sent():
         conn = server.opened[0]
         link._online_devices = {PEER.device_id}
         await link.start_pairing(PEER.device_id)
+        # Everything below this line is within a relay's power to synthesise.
         device_pairing.accept_response(
             PEER.device_id, their_key=PEER.sign_key, their_nonce="bm9uY2U="
         )
-        sent_before = len(conn.sent)
-
         await conn.push(
             {
                 "type": "messages.pending",
                 "payload": _pair_frame(PEER, device_pairing.PAIR_CONFIRM),
             }
         )
-        await _until(lambda: trust_store.pin_for(PEER.device_id) is not None)
-        await _until(lambda: bool(_confirms_sent(conn, sent_before)), timeout=2.0)
+        await _until(lambda: device_pairing.get(PEER.device_id).peer_confirmed)
 
-        # Exactly one, addressed at them. Not answering left them waiting;
-        # answering twice would be a machine talking to itself.
-        answers = _confirms_sent(conn, sent_before)
-        assert len(answers) == 1
+        # Nothing is written, and nothing is granted: no pin means no ring and
+        # no policy exception, so that device is a stranger like any other.
+        assert trust_store.pin_for(PEER.device_id) is None
+        assert device_pairing.get(PEER.device_id).state == device_pairing.STATE_AWAITING_LOCAL
+
+        # And the person at this machine is what finishes it.
+        await link.confirm_pairing(PEER.device_id, accept=True)
+
+        pin = trust_store.pin_for(PEER.device_id)
+        assert pin is not None and pin["approved"] is True
     finally:
         device_pairing._reset_for_test()
         await link.stop()
 
 
-async def test_the_initiator_says_nothing_when_its_own_side_did_not_pair(monkeypatch):
-    """The answer means "we are paired", so it must not go out when we are not.
+async def test_a_failed_pin_is_not_reported_as_a_pairing(monkeypatch):
+    """A side that could not write its own pin must not end up claiming one.
 
-    Sending it regardless would swap which machine is wrong rather than fix it:
-    they would pin on the strength of a confirm from a machine that failed to
-    pin, and the two would disagree in the other direction — with the side that
-    knows something went wrong being the silent one.
+    This used to guard a reply the initiator sent on receiving a confirm — that
+    branch is gone, because each side now sends exactly one confirm when its own
+    person presses and nothing answers an answer. What survives is the property
+    underneath it: if the record cannot be written, this machine is not paired,
+    and nothing here may pretend otherwise.
     """
     device_pairing._reset_for_test()
 
@@ -2542,8 +2511,6 @@ async def test_the_initiator_says_nothing_when_its_own_side_did_not_pair(monkeyp
         device_pairing.accept_response(
             PEER.device_id, their_key=PEER.sign_key, their_nonce="bm9uY2U="
         )
-        sent_before = len(conn.sent)
-
         await conn.push(
             {
                 "type": "messages.pending",
@@ -2551,9 +2518,12 @@ async def test_the_initiator_says_nothing_when_its_own_side_did_not_pair(monkeyp
             }
         )
         await _until(lambda: bool(conn.acks))
+        await link.confirm_pairing(PEER.device_id, accept=True)
 
         assert trust_store.pin_for(PEER.device_id) is None
-        assert _confirms_sent(conn, sent_before) == []
+        assert not [
+            n for n in trust_store.notices() if n.get("pairing") == "paired"
+        ], "a machine that failed to pin must not announce a pairing"
     finally:
         device_pairing._reset_for_test()
         await link.stop()
@@ -2764,23 +2734,43 @@ async def test_the_responder_is_not_paired_by_the_other_side_alone():
         await link.stop()
 
 
-async def test_the_initiator_has_nothing_to_confirm():
-    """Answering here would ask the same person the same question twice."""
+async def test_the_initiator_confirms_too_and_sends_exactly_one(monkeypatch):
+    """Answering here used to be refused with PAIRING_STATE. It is the check.
+
+    One confirm from each side, whichever order the two people press in: each
+    end sends its own when its person presses, so nothing has to answer an
+    answer. A reply-on-receipt would be a third frame repeating what this side
+    already said.
+    """
     device_pairing._reset_for_test()
     server = FakeServer(policy=ALLOW_ALL_POLICY)
     link = await _connected(server)
     try:
+        conn = server.opened[0]
         link._online_devices = {PEER.device_id}
         await link.start_pairing(PEER.device_id)
         device_pairing.accept_response(
             PEER.device_id, their_key=PEER.sign_key, their_nonce="bm9uY2U="
         )
+        sent_before = len(conn.sent)
 
         reply = await link.confirm_pairing(PEER.device_id, accept=True)
 
-        assert reply["ok"] is False
-        assert reply["error"]["code"] == "PAIRING_STATE"
+        assert reply["ok"] is True
+        # Still nothing pinned: this side has answered, the other has not.
         assert trust_store.pin_for(PEER.device_id) is None
+        assert len(_confirms_sent(conn, sent_before)) == 1
+
+        await conn.push(
+            {
+                "type": "messages.pending",
+                "payload": _pair_frame(PEER, device_pairing.PAIR_CONFIRM, msg_key="pair-k9"),
+            }
+        )
+        await _until(lambda: trust_store.pin_for(PEER.device_id) is not None)
+
+        # Their answer completes it, and this side does not answer the answer.
+        assert len(_confirms_sent(conn, sent_before)) == 1
     finally:
         device_pairing._reset_for_test()
         await link.stop()

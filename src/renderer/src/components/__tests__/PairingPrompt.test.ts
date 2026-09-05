@@ -112,179 +112,43 @@ describe('PairingPrompt', () => {
   }
 })
 
-describe('the initiator no longer confirms', () => {
+describe('both ends confirm, and the card says whose turn it is', () => {
   const CARD = MODAL.slice(
     MODAL.indexOf('settings.p2p.pair.title'),
     MODAL.indexOf('settings.p2p.trust.needs-you'),
   )
 
-  it('offers withdrawing instead of confirming', () => {
-    // Pressing "Pair with…" already said what this side wants; a second button
-    // asked the same person the same question twice.
-    expect(CARD).toMatch(/v-if="row\.role === 'initiator'"/)
-    expect(CARD).toMatch(
-      /row\.role === 'initiator'[\s\S]{0,600}settings\.p2p\.pair\.cancel-request/,
-    )
-    const branch = CARD.slice(
-      CARD.indexOf("row.role === 'initiator'"),
-      CARD.indexOf("row.state === 'awaiting-remote'"),
-    )
-    expect(branch).not.toContain('settings.p2p.pair.match')
-    expect(branch).toContain('answerPairing(row, false)')
-  })
-
-  it('still asks the responder', () => {
+  it('offers the same two answers whichever end you are', () => {
+    // The initiator used to have only "Cancel request" here, on the reasoning
+    // that comparing digits is one act by one person at two screens. That holds
+    // only when there is another machine and another person: a relay can answer
+    // with its own key without forwarding anything, and this side would pin it
+    // having compared nothing. The digits cannot be the check either — a relay
+    // knows them — so the button is the only place the property lives.
+    expect(CARD).not.toMatch(/v-if="row\.role === 'initiator'"/)
     expect(CARD).toContain('settings.p2p.pair.match')
+    expect(CARD).toContain('settings.p2p.pair.mismatch')
     expect(CARD).toContain('answerPairing(row, true)')
-  })
-})
-
-// ---- mounted, because pressing a button is what was broken -------------------
-//
-// The bug: `answer()` sent the confirmation and ignored the reply. A reply of
-// `{ok: false}` is not an exception, so the catch never ran, the error was
-// never shown, and the same unanswered question was re-rendered — indis-
-// tinguishable from a button that does nothing. A successful answer was barely
-// better: the card left only when a later poll happened to stop listing it.
-
-const RESPONDER = {
-  deviceId: 'dev-asking',
-  deviceName: 'M4',
-  role: 'responder',
-  state: 'awaiting-local',
-  code: '482 913',
-  fingerprint: '8fe21661 6449c594',
-  startedAt: 1_000,
-}
-
-/** Long enough to outlast the settled card, whatever its exact duration. */
-const AFTER_SETTLED_MS = 10_000
-
-let wrapper: VueWrapper | undefined
-
-afterEach(() => {
-  wrapper?.unmount()
-  wrapper = undefined
-  _resetForTest()
-  vi.useRealTimers()
-  delete (window as unknown as Record<string, unknown>).agentTeam
-})
-
-async function mountPrompt(pairings: unknown[] = [RESPONDER]) {
-  ;(window as unknown as Record<string, unknown>).agentTeam = {
-    trustConfirm: vi.fn().mockResolvedValue({ token: 't', issuedAt: 1 }),
-  }
-  const mock = createMockBackend('connected')
-  mock.setResponse('p2p.network.snapshot', { pairings })
-  wrapper = mount(PairingPrompt, {
-    props: { backend: mock.backend as never },
-    global: { plugins: [i18n] },
-  })
-  await flushPromises()
-  return mock
-}
-
-const t = (key: string, args?: Record<string, unknown>): string => i18n.global.t(key, args ?? {})
-const buttons = () => wrapper!.findAll('.pp-btn')
-const allow = () => buttons().find((b) => b.classes('pp-primary'))!
-
-describe('PairingPrompt — answering', () => {
-  it('draws the question with the digits to compare', async () => {
-    await mountPrompt()
-    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(1)
-    expect(wrapper!.find('.pp-code').text()).toBe('482 913')
+    // And the branch that shows them is reached by role and state alike: the
+    // only thing gating it is whether this side has already answered.
+    expect(CARD).toMatch(/v-if="row\.state === 'awaiting-remote'"/)
   })
 
-  it('replaces the question with the outcome, then takes it away by itself', async () => {
-    // The reported failure: pressing Allow paired the devices and left the same
-    // card on screen. Nothing about the press was visible.
-    vi.useFakeTimers()
-    const mock = await mountPrompt()
-    mock.setResponse('p2p.pair.confirm', { state: 'confirmed' })
-
-    await allow().trigger('click')
-    await flushPromises()
-    // The backend has already dropped the pairing by the time it answers, so
-    // the card cannot be driven by the list any more.
-    mock.setResponse('p2p.network.snapshot', { pairings: [] })
-    await flushPromises()
-
-    expect(wrapper!.text()).toContain(t('settings.p2p.pair.paired', { device: 'M4' }))
-    expect(buttons()).toHaveLength(0)
-
-    vi.advanceTimersByTime(AFTER_SETTLED_MS)
-    await flushPromises()
-
-    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+  it('says the wait is on the person, not on the other machine', () => {
+    // The heading still reads "waiting for them" from before they answered.
+    // Left as the only status, somebody would wait for a machine that is
+    // waiting for them.
+    expect(CARD).toMatch(/pair\.step-your-turn[\s\S]{0,200}pair\.your-turn/)
+    expect(CARD).toMatch(/pair\.your-turn[\s\S]{0,400}answerPairing\(row, true\)/)
   })
 
-  it('says so when the answer was refused, rather than looking the same as allowing', async () => {
-    vi.useFakeTimers()
-    const mock = await mountPrompt()
-    mock.setResponse('p2p.pair.confirm', { state: 'rejected' })
-
-    await buttons().find((b) => b.classes('pp-danger'))!.trigger('click')
-    await flushPromises()
-
-    expect(wrapper!.text()).toContain(t('settings.p2p.pair.done-refused'))
-    expect(wrapper!.text()).not.toContain(t('settings.p2p.pair.paired', { device: 'M4' }))
-  })
-
-  it('shows the backend’s refusal verbatim and keeps the question open', async () => {
-    // `{ok: false}` is a resolved promise. Nothing here used to look at it.
-    const mock = await mountPrompt()
-    mock.setResponse('p2p.pair.confirm', null, {
-      ok: false,
-      error: { code: 'CONFIRMATION_REQUIRED', message: 'this action needs a confirmation token' },
+  for (const locale of LOCALES) {
+    it(`never calls an unconfirmed exchange paired in ${locale}`, () => {
+      const pair = (i18n.global.getLocaleMessage(locale) as Record<string, any>).settings.p2p.pair
+      for (const key of ['your-turn', 'step-your-turn', 'waiting-remote']) {
+        expect(pair[key]).toBeTruthy()
+        expect(pair[key]).not.toMatch(/Paired|已配對/)
+      }
     })
-
-    await allow().trigger('click')
-    await flushPromises()
-
-    expect(wrapper!.find('.pp-err').text()).toBe('this action needs a confirmation token')
-    // Still answerable: a refusal that removed the card would lose the request.
-    expect(wrapper!.find('.pp-code').exists()).toBe(true)
-    expect(allow().attributes('disabled')).toBeUndefined()
-  })
-
-  it('shows a dropped connection too, not just a refusal', async () => {
-    const mock = await mountPrompt()
-    mock.setRejection('p2p.pair.confirm', 'ws not open')
-
-    await allow().trigger('click')
-    await flushPromises()
-
-    expect(wrapper!.find('.pp-err').text()).toContain('ws not open')
-  })
-
-  it('says it is working while the answer is in flight, and locks the row', async () => {
-    // The whole round trip is an IPC for the token plus a socket call. Without
-    // this there is nothing between the press and the outcome.
-    const mock = await mountPrompt()
-    let release!: () => void
-    ;(window as unknown as Record<string, unknown>).agentTeam = {
-      trustConfirm: vi.fn(() => new Promise((resolve) => { release = () => resolve({ token: 't' }) })),
-    }
-    mock.setResponse('p2p.pair.confirm', { state: 'confirmed' })
-
-    await allow().trigger('click')
-    await flushPromises()
-
-    expect(allow().text()).toBe(t('settings.p2p.pair.sending'))
-    for (const button of buttons()) expect(button.attributes('disabled')).toBeDefined()
-
-    release()
-    await flushPromises()
-    expect(wrapper!.text()).toContain(t('settings.p2p.pair.paired', { device: 'M4' }))
-  })
-
-  it('does not answer for the person when they only asked for it later', async () => {
-    const mock = await mountPrompt()
-
-    await buttons().find((b) => b.classes('pp-quiet'))!.trigger('click')
-    await flushPromises()
-
-    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
-    expect(mock.sent.some((s) => s.type === 'p2p.pair.confirm')).toBe(false)
-  })
+  }
 })

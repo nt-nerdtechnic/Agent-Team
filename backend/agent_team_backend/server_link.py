@@ -2280,6 +2280,14 @@ class ServerLink:
         # two people compare are what authenticate it afterwards. Every frame
         # after that is checked against the key the exchange already fixed, so
         # the relay cannot swap it once a code is on somebody's screen.
+        #
+        # "Two people", on both sides, is load-bearing and was not always true.
+        # The initiator used to finish on the other end's confirm alone, so on
+        # that side nobody ever compared anything and this sentence described a
+        # check that did not happen — a relay could answer with its own key and
+        # be pinned, approved, having spoken to no one. Both ends confirm now
+        # (device_pairing.complete), which is what makes this comment accurate
+        # rather than aspirational.
         pin = trust_store.pin_for(device_id)
         key = (
             str((pin or {}).get("signKey") or "")
@@ -2323,23 +2331,13 @@ class ServerLink:
                 # before this side's person did, in which case there is nothing
                 # to finish yet and the card here stays up.
                 #
-                # The role has to be read before completing, because completing
-                # takes the pairing out of the table.
-                was_initiator = bool(existing) and existing.role == device_pairing.ROLE_INITIATOR
+                # No answer is sent from here. Each side sends exactly one
+                # confirm, when its own person presses — so whichever order the
+                # two arrive in, both ends have heard from the other by the time
+                # either completes. An answer here would be a third frame
+                # repeating what this side already said.
                 device_pairing.note_peer_confirmed(device_id)
-                paired = await self._finish_pairing(device_id, member_id=member_id)
-                if paired and was_initiator:
-                    # And answer. The asymmetry is that the initiator does not
-                    # ask *its own person* a second time — pressing "Pair with…"
-                    # already said what this side wants — not that it stays
-                    # silent. Without this the other machine waits for a confirm
-                    # that never comes: this side pins, that side never does,
-                    # and the two disagree about being paired, which is exactly
-                    # the state the revoke branch below exists to prevent.
-                    #
-                    # It cannot loop. Only the initiator answers, and the side
-                    # receiving this answer is by definition the responder.
-                    await self._send_pair_frame(device_id, device_pairing.PAIR_CONFIRM)
+                await self._finish_pairing(device_id, member_id=member_id)
             elif kind == device_pairing.PAIR_REJECT:
                 if device_pairing.cancel(device_id) is not None:
                     await asyncio.to_thread(
@@ -2446,24 +2444,10 @@ class ServerLink:
                 await self._send_pair_frame(device_id, device_pairing.PAIR_REJECT)
             await self._announce_trust_notices()
             return {"ok": True, "payload": {"state": "rejected"}}
-        pairing = device_pairing.get(device_id)
-        if pairing is not None and pairing.role == device_pairing.ROLE_INITIATOR:
-            # Nothing to confirm on this side. Answering here would be asking
-            # the same person the same question twice, and the exchange treats
-            # the initiator's intent as already given.
-            #
-            # Defensive only, now: the initiator's card offers "Cancel request"
-            # and nothing else, so no surface in this app reaches here. It stays
-            # because the handler is reachable over the socket by anything
-            # holding a confirmation token, and "the initiator confirms" must
-            # fail loudly rather than half-complete an exchange from one side.
-            return {
-                "ok": False,
-                "error": {
-                    "code": "PAIRING_STATE",
-                    "message": "the initiator does not confirm; it waits for the other side",
-                },
-            }
+        # Both roles answer here. The initiator used to be refused — its intent
+        # was treated as given by pressing "Pair with…" — and that is exactly
+        # what a relay exploited: it never had to face a person comparing
+        # digits. See device_pairing.complete.
         try:
             device_pairing.confirm(device_id)
         except device_pairing.PairingError as err:

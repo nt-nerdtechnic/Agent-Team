@@ -1207,31 +1207,31 @@ onUnmounted(() => {
                 <p class="pend-facts"><code>{{ grouped(row.fingerprint) }}</code></p>
                 <!-- This side answered; the other has not. Still not paired,
                      which is why this says waiting rather than done. -->
-                <!-- The initiator has nothing to confirm. Comparing the digits
-                     is one act by one person looking at two screens, and
-                     pressing "Pair with…" already said what this side wants; a
-                     second button here asked them the same question twice.
-                     The cost is real: somebody can start this and walk away,
-                     and whoever is at the other machine finishes it. -->
-                <template v-if="row.role === 'initiator'">
-                  <p class="hint">{{ t('settings.p2p.pair.auto-updates') }}</p>
-                  <div class="req-acts">
-                    <button
-                      class="btn ghost small"
-                      :disabled="!!pending || !linkReady"
-                      :title="linkWaitReason || undefined"
-                      @click="answerPairing(row, false)"
-                    >
-                      {{ t('settings.p2p.pair.cancel-request') }}
-                    </button>
-                  </div>
-                </template>
-                <template v-else-if="row.state === 'awaiting-remote'">
+                <!-- Both roles answer, and the same way. The initiator used to
+                     have no button here — comparing digits is one act by one
+                     person at two screens, and pressing "Pair with…" had
+                     already said what this side wanted. That reasoning assumes
+                     there is another machine and another person at it. A relay
+                     is what breaks the assumption: it can answer with its own
+                     key and never forward the request, and this side would pin
+                     it having compared nothing with nobody. The digits cannot
+                     rescue it — a relay supplies half of what they are derived
+                     from and receives the other half, so it knows them. Only a
+                     person reading two screens is out of its reach.
+                     See device_pairing.complete. -->
+                <template v-if="row.state === 'awaiting-remote'">
                   <span class="dev-tag pair-step">{{ t('settings.p2p.pair.step-you-confirmed') }}</span>
                   <p class="req-what">{{ t('settings.p2p.pair.waiting-remote') }}</p>
                   <p class="hint">{{ t('settings.p2p.pair.auto-updates') }}</p>
                 </template>
-                <div v-else class="req-acts">
+                <!-- Whose turn it is, said plainly. The heading above still
+                     reads "waiting for them" from before they answered, and
+                     leaving that as the only status would have somebody waiting
+                     for a machine that is waiting for them. -->
+                <template v-else>
+                <span class="dev-tag pair-step">{{ t('settings.p2p.pair.step-your-turn') }}</span>
+                <p class="req-what">{{ t('settings.p2p.pair.your-turn') }}</p>
+                <div class="req-acts">
                   <button class="btn small" :disabled="!!pending || !linkReady" @click="answerPairing(row, true)" :title="linkWaitReason || undefined">
                     {{ t('settings.p2p.pair.match') }}
                   </button>
@@ -1244,6 +1244,7 @@ onUnmounted(() => {
                     {{ t('settings.p2p.pair.mismatch') }}
                   </button>
                 </div>
+                </template>
               </template>
             </div>
           </div>

@@ -1060,9 +1060,11 @@
         "step-sent": "Sent",
         "step-waiting-them": "Waiting for them",
         "step-you-confirmed": "You confirmed",
+        "step-your-turn": "Waiting for you",
         "title": "Pairing",
         "waiting-remote": "You confirmed. Waiting for the other device.",
-        "waiting-response": "Sent. Open the account window on that device to answer."
+        "waiting-response": "Sent. Open the account window on that device to answer.",
+        "your-turn": "The digits are on both screens. Nothing is paired until you say they match."
       },
       "fingerprint-copy": "Copy",
       "fingerprint-copied": "Copied",

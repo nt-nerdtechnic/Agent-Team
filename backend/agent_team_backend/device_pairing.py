@@ -325,35 +325,41 @@ def note_peer_confirmed(device_id: str) -> Pairing | None:
 def complete(device_id: str) -> Pairing | None:
     """The finished exchange, or None while it is still waiting on somebody.
 
-    **Who still has to answer depends on which side this is**, and that is the
-    one asymmetry in the whole exchange:
+    **Both sides confirm.** Neither is written until a person at that machine
+    has said the six digits match the ones on the other screen.
 
-    *The responder* needs both. Somebody asked to come in; a person here says
-    whether the digits match, and until they do nothing is written. This is the
-    half that carries the security property — the initiator's own click could
-    never be the check, because the initiator is the party being authenticated.
+    This was asymmetric once: the initiator needed only the other side's
+    confirm, on the reasoning that comparing digits is one act performed by one
+    person looking at two screens, and that pressing "Pair with…" had already
+    said what this side wanted. The reasoning holds — *when there is another
+    machine and another person*. A relay is what breaks that premise, and it
+    breaks it completely: it can decline to forward the request at all and
+    answer with its own key, because the first frame of an exchange is verified
+    against the key it carries. The initiator would then pin the relay, approved
+    and in ``RING_SELF``, with every policy rule skipped, having compared
+    nothing with nobody.
 
-    *The initiator* needs only theirs. Comparing the digits is one act performed
-    by one person looking at two screens, and pressing "Pair with…" already
-    said what this side wants. A second button here asked the same person the
-    same question twice.
+    So the earlier trade was not wrong about its shape — "press Pair and walk
+    away and the other end finishes it" — it was wrong about the size. The other
+    end is not necessarily a machine you own.
 
-    **The cost, stated plainly because it is real**: somebody can press Pair and
-    walk away, and whoever is standing at the other machine can complete the
-    pairing without them. That is the trade the second button was buying, and it
-    was bought at the price of a step most people would learn to click through.
+    **And the check cannot be automated.** The SAS is derived from two public
+    keys and two nonces; a relay supplies half of them and receives the other
+    half, so it *knows the six digits*. Anything that asks the far side to prove
+    it saw them — signing them back, echoing them — a relay can compute and
+    sign. The whole security property comes from one person reading two screens.
+    A button is not ceremony here; it is the only place the property lives.
+
+    What this costs is the step the asymmetry was avoiding: somebody who presses
+    Pair and walks away comes back to a card still waiting. Nothing is granted
+    in the meantime — no pin, no ring, no exception — which is the point.
     """
     with _lock:
         _sweep(time.time())
         pairing = _pairings.get(device_id)
         if pairing is None:
             return None
-        needed = (
-            pairing.peer_confirmed
-            if pairing.role == ROLE_INITIATOR
-            else pairing.we_confirmed and pairing.peer_confirmed
-        )
-        if not needed:
+        if not (pairing.we_confirmed and pairing.peer_confirmed):
             return None
         _pairings.pop(device_id, None)
         return pairing

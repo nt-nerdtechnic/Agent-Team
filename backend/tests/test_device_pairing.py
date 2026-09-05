@@ -264,26 +264,49 @@ def test_the_peer_confirming_does_not_answer_for_the_responder() -> None:
     assert device_pairing.get("dev-a") is not None
 
 
-def test_the_initiator_is_finished_by_the_other_side_alone() -> None:
-    """The one asymmetry, and it is deliberate.
+def test_the_initiator_is_not_finished_by_the_other_side_alone() -> None:
+    """The asymmetry this replaced was a CRITICAL, and the reason is the relay.
 
-    Comparing the digits is one act by one person looking at two screens, and
-    pressing "Pair with…" already said what this side wants; a second button
-    here asked the same person the same question twice.
+    It used to finish on the far end's confirm alone, reasoning that comparing
+    digits is one act by one person at two screens. That holds when there *is*
+    another machine and another person. A relay can decline to forward the
+    request and answer with its own key — the first frame of an exchange is
+    verified against the key it carries — and the initiator would pin it,
+    approved, having compared nothing with nobody.
 
-    **The cost, which is real**: somebody can press Pair and walk away, and
-    whoever is standing at the other machine completes it without them.
+    The digits cannot rescue it either: the SAS comes from two public keys and
+    two nonces, and a relay supplies half and receives the other half, so it
+    knows them. Only a person reading two screens is outside its reach.
     """
     device_pairing.begin("dev-b", device_name="M3")
     device_pairing.accept_response("dev-b", their_key=KEY_B, their_nonce=NONCE_B)
 
-    # Nothing yet — the other side has not answered.
-    assert device_pairing.complete("dev-b") is None
-
+    # The far side answers. On its own that used to be enough.
     device_pairing.note_peer_confirmed("dev-b")
+    assert device_pairing.complete("dev-b") is None, "nobody here compared anything yet"
+
+    device_pairing.confirm("dev-b")
     finished = device_pairing.complete("dev-b")
     assert finished is not None and finished.their_key == KEY_B
-    assert finished.we_confirmed is False, "the initiator never had to confirm"
+    assert finished.we_confirmed and finished.peer_confirmed
+
+
+def test_the_initiator_grants_nothing_while_it_waits() -> None:
+    """What the extra step buys: pressing Pair and walking away is safe.
+
+    Not "less is granted" — *nothing* is. No pin, so no ring and no policy
+    exception; a message from that device is refused as unpaired like any
+    stranger's.
+    """
+    device_pairing.begin("dev-wait", device_name="M3")
+    device_pairing.accept_response("dev-wait", their_key=KEY_B, their_nonce=NONCE_B)
+    device_pairing.note_peer_confirmed("dev-wait")
+
+    assert device_pairing.complete("dev-wait") is None
+    pending = device_pairing.get("dev-wait")
+    assert pending is not None and pending.we_confirmed is False
+    # And the digits are on the card, which is the whole point of the wait.
+    assert device_pairing.code_for(pending, our_key=KEY_A)
 
 
 def test_both_confirming_pairs_the_responder_once_in_either_order() -> None:
