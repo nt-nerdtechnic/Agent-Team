@@ -317,6 +317,10 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="kilo",
+    # Confirmed in source (Kilo-Org/kilocode): the root command declares
+    # --model and applies it at the highest priority. No effort flag —
+    # --variant exists only on `kilo run`. Details in agents/kilo.ts, which
+    # owns the flags themselves.
     supports_model=True,
     # Verified 2026-08-15: kilo's bundle carries no SKILL.md handling at all.
     skills_supported=False,

@@ -597,9 +597,15 @@ async def cli_open_agent(
     external or host caller gets no such message at all and must poll.
 
     `model` names the model the new pane runs, and `effort` its reasoning
-    level. Both are optional and both are REFUSED rather than ignored when
-    that CLI cannot take them, so a pane never quietly starts on a different
-    model than you asked for. Which CLIs accept them differs: most take a
+    level. Both are optional, and asking a CLI that cannot take them is
+    REFUSED rather than ignored — otherwise the pane would start on the
+    default and look no different from one that got what it asked for.
+
+    That guarantee covers the vendor, not the value: a CLI that accepts
+    `--model` may still reject the id itself, and several report that only
+    briefly before continuing on their default. So a refusal here means the
+    pane did not open, while silence means it opened — not that the model was
+    recognised. Which CLIs accept them differs: most take a
     model, only some take a separate effort — the rest encode effort in the
     model id itself (cursor's `gpt-5.3-codex-high`), and two take neither.
     The refusal names what that CLI accepts, so ask for what you want and
