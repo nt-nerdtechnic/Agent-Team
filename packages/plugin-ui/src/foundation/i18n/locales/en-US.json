@@ -59,7 +59,7 @@
     "reason-unknown-pane-id": "No pane with id “{pane_id}” on this machine",
     "reason-ambiguous-target": "{n} panes in “{ws}” are named “{name}” — rename one of them",
     "reason-target-offline": "“{to}” is offline — its window disconnected {seconds}s ago; the pane still exists",
-    "reason-unknown-device": "Unknown device “{device}” — addressing another machine needs the cross-device roster, which is not available yet",
+    "reason-unknown-device": "Unknown device “{device}” — this machine is not linked to a Navide-Server, so it can only address panes on itself",
     "rename-collision-title": "Messaging name in use",
     "rename-collision-body": "The name “{name}” is already used by another CLI. Choose a different messaging name:",
     "rename-collision-confirm": "Rename",
@@ -1206,7 +1206,13 @@
         "plaintext-refused-what-to-do": "Nothing to do — it was refused. If that device is legitimate, unpair it and pair again.",
         "member-changed": "{device} now answers to a different account",
         "member-changed-body": "Same pinned key, so the same device — but the server now says it belongs to a different account.",
-        "unknown-notice": "Security notice this version cannot display ({kind})"
+        "unknown-notice": "Security notice this version cannot display ({kind})",
+        "rebuild": "Start over",
+        "rebuild-title": "Clear this machine’s trust record and start again. Every pairing is lost.",
+        "rebuild-warn": "This erases every pairing on this machine. Each of your other devices must be paired again, from both ends. Do this only if you know why the record cannot be read — if you do not, it is worth finding out first.",
+        "rebuild-confirm": "Yes, erase and start over",
+        "rebuild-cancel": "Keep it stopped",
+        "rebuild-done": "The trust record was cleared. Pair your devices again when you are ready."
       },
       "link": {
         "pause": "Turn off",

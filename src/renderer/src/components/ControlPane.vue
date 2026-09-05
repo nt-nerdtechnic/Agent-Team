@@ -673,6 +673,44 @@ function onStripDragOver(e: DragEvent): void {
   e.preventDefault()
   railOpen.value = true
 }
+
+/** A workspace drag is in flight. Lights the bars up: nothing else says the
+ *  strip is a place you can drop a project, and the gesture is invisible
+ *  otherwise. */
+const wsDragActive = ref(false)
+
+/** How close to the left edge a drag has to come to open the flyout — and how
+ *  far it may then wander before it closes again.
+ *
+ *  Two numbers, not one. The strip is 8px wide, so hitting it to open the
+ *  flyout is a pixel-hunt nobody wins; 44px is a target you can actually aim
+ *  at. But the flyout it opens is 178px wide, so a single threshold would
+ *  close it the moment the pointer moved onto the thing it just opened. The
+ *  wider figure is hysteresis, not slop. */
+const RAIL_DRAG_OPEN_PX = 44
+const RAIL_DRAG_KEEP_PX = 200
+
+/** Opens the flyout when a workspace drag comes near the sidebar's left edge.
+ *
+ *  Bound to the whole row rather than the strip: dragover on an 8px column
+ *  means the drop targets are only reachable by first hitting a target the
+ *  same size, which is the problem the flyout exists to solve.
+ *
+ *  Deliberately narrow at rest — the same drag also reorders headings and
+ *  detaches a workspace by leaving the window, and a flyout that opened across
+ *  the whole list would cover the rows those two need to land on. */
+function onWrapDragOver(e: DragEvent): void {
+  if (!wsDragActive.value) return
+  if (!e.dataTransfer?.types.includes('application/x-workspace-path')) return
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const from = e.clientX - rect.left
+  if (from < (railOpen.value ? RAIL_DRAG_KEEP_PX : RAIL_DRAG_OPEN_PX)) {
+    e.preventDefault()
+    railOpen.value = true
+  } else if (railDropId.value === null) {
+    railOpen.value = false
+  }
+}
 function onStripDragLeave(e: DragEvent): void {
   // dragleave also fires moving BETWEEN children; only a leave that lands
   // outside the strip is the drag actually going away.
@@ -693,6 +731,7 @@ function onRailDragLeave(id: string): void {
 function onRailDrop(e: DragEvent, id: string): void {
   railDropId.value = null
   railOpen.value = false
+  wsDragActive.value = false
   const from = e.dataTransfer?.getData('application/x-workspace-path') ?? ''
   if (!from) return
   workspaceRails.value = assignToRail(workspaceRails.value, from, id)
@@ -1549,20 +1588,39 @@ const wsMenu = ref<{ path: string; canClose: boolean; x: number; y: number } | n
 // Only when this window holds more than one: dragging out the only workspace
 // would empty this window to fill a new one, which is a no-op the long way
 // round. A detached window is already one group of one workspace.
-/** Whether a workspace heading can be dragged at all.
+/** Whether dragging a heading OUT of the window is meaningful.
  *
- *  One gesture, two outcomes — the same split the stage tabs make: released on
- *  another heading it reorders, released outside the window it detaches. Both
- *  need a second workspace to be meaningful: there is nothing to reorder
- *  against, and pulling out the only one empties this window to fill a new. */
-const canDragWorkspace = computed(
+ *  Needs a second workspace: pulling out the only one empties this window to
+ *  fill a new one. Reordering has the same floor for its own reason — there is
+ *  nothing to reorder against. */
+const canDetachWorkspace = computed(
   () => !props.detachedWindow && localWorkspaceRows.value.length > 1
 )
 
+/** Whether a workspace heading can be dragged at all.
+ *
+ *  One gesture, THREE outcomes now: released on another heading it reorders,
+ *  released on the rail it files the project into that group, released outside
+ *  the window it detaches.
+ *
+ *  The first and last need a second workspace, and this used to require one
+ *  too. Filing does not — a window holding a single project can perfectly well
+ *  put it in a group — and the stale floor made the whole heading undraggable
+ *  in exactly that case, so the rail could never be given anything. Hence the
+ *  extra clause rather than a shared one: the outcomes have different
+ *  preconditions and each is checked where it happens. */
+const canDragWorkspace = computed(
+  () =>
+    !props.detachedWindow &&
+    (localWorkspaceRows.value.length > 1 || workspaceRails.value.length > 0)
+)
+
 /** Whether the workspace on screen has somewhere to land if it is closed.
- *  Same shape as canDragWorkspace and for the same reason — both need a second
- *  workspace to be meaningful — but kept apart: they answer different questions
- *  and one of them changing should not silently change the other. */
+ *  Same shape as canDetachWorkspace and for the same reason — both need a
+ *  second workspace to be meaningful — but kept apart: they answer different
+ *  questions and one of them changing should not silently change the other.
+ *  (That split is exactly what let the drag floor be relaxed for filing
+ *  without also letting a window close its last workspace.) */
 const canCloseCurrent = computed(
   () => !props.detachedWindow && localWorkspaceRows.value.length > 1
 )
@@ -1646,7 +1704,7 @@ function wsHeadTitle(path: string): string {
   if (!props.detachedWindow && path !== workspacePath.value) {
     parts.push(i18n.global.t('label.workspace-switch-hint'))
   }
-  if (canDragWorkspace.value) parts.push(i18n.global.t('label.workspace-detach-hint'))
+  if (canDetachWorkspace.value) parts.push(i18n.global.t('label.workspace-detach-hint'))
   // Filing a project into a group is otherwise an invisible affordance: the
   // cells look like filters, and nothing says a heading can be dropped on one.
   if (canDragWorkspace.value && workspaceRails.value.length) {
@@ -1665,14 +1723,16 @@ function onWsDragStart(e: DragEvent, path: string): void {
   e.dataTransfer?.setData('application/x-workspace-path', path)
   if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
   draggingWorkspacePath = path
+  wsDragActive.value = true
 }
 function onWsDragEnd(e: DragEvent, path: string): void {
   wsDragOverPath.value = ''
   draggingWorkspacePath = ''
+  wsDragActive.value = false
   // A drag released anywhere else leaves no dragleave on the strip.
   railDropId.value = null
   railOpen.value = false
-  if (!canDragWorkspace.value) return
+  if (!canDetachWorkspace.value) return
   const outside =
     e.clientX < 0 || e.clientY < 0 || e.clientX > window.innerWidth || e.clientY > window.innerHeight
   if (outside) emit('detach-workspace', path, e.screenX, e.screenY)
@@ -2413,7 +2473,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
            one that is empty, because those rows hold the ＋ that opens an
            agent — the sidebar must never lose its own entry point. -->
       <div v-if="panes.length === 0 && !hasWorkspaceRows" class="empty">{{ $t('label.no-agents-running') }}</div>
-      <div v-else class="ws-rail-wrap">
+      <div v-else class="ws-rail-wrap" @dragover="onWrapDragOver">
         <!-- One glyph per group of workspaces, All pinned first. Filters the
              list beside it; moves nothing else. -->
         <!-- An 8px strip on the very edge: one bar per group, the colour
@@ -2434,7 +2494,12 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           @dragleave="onStripDragLeave"
         >
           <div class="ws-stick">
-            <div class="ws-bars" role="group" :aria-label="$t('label.workspace-groups')">
+            <div
+              class="ws-bars"
+              :class="{ hot: wsDragActive }"
+              role="group"
+              :aria-label="$t('label.workspace-groups')"
+            >
               <button
                 v-for="cell in (workspaceRails.length ? railCells : [])"
                 :key="cell.id || 'all'"
@@ -4094,9 +4159,19 @@ button.icon-btn.muted:hover {
   background: var(--border-default);
   opacity: 0.42;
   cursor: pointer;
-  transition: opacity var(--motion-fast) var(--ease-out);
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
 }
 .ws-bar:hover { opacity: 0.85; }
+/* A workspace is being dragged. The bars are the only thing on screen that
+   could take it, and at 8px and 42% opacity they read as decoration — so they
+   come forward for the length of the gesture. */
+.ws-bars.hot .ws-bar {
+  opacity: 0.9;
+  transform: scaleX(1.4);
+}
+.ws-bars.hot .ws-bar-add { opacity: 0.9; }
 .ws-bar.on { opacity: 1; }
 /* Nothing in this group is open in this window. Faint, never gone: the bar is
    the way back to the projects it holds. */

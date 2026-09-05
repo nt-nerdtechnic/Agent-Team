@@ -510,16 +510,52 @@ describe('account modal — your network', () => {
     }
   })
 
-  it('gives no way to clear a trust lock', () => {
-    // Starting over is precisely what deleting that state was meant to achieve.
-    // Sliced from the section's own markup, not from the first mention of
-    // `trustLocked` — that is the type declaration, and a slice starting there
-    // sweeps in every button between it and the template.
-    const start = MODAL.indexOf('settings.p2p.trust.locked-title')
+  // The card's own markup. Not sliced to `</section>` any more: the card now
+  // lives inside the network section, so that tag is the end of the whole
+  // section with the connection card and the entire device list in between.
+  function lockedMarkup(): string {
+    const start = MODAL.indexOf('class="card locked-card"')
     expect(start).toBeGreaterThan(-1)
-    const locked = MODAL.slice(start, MODAL.indexOf('</section>', start))
+    const end = MODAL.indexOf('<div class="card net-card"', start)
+    expect(end).toBeGreaterThan(start)
+    return MODAL.slice(start, end)
+  }
+
+  it('cannot clear a trust lock in one press', () => {
+    // This used to assert the card had no button at all, and that was true
+    // until "start over" shipped. The guarantee it was really holding is the
+    // one kept here: starting over is exactly what an attacker who deleted
+    // that state is waiting for, so it must never be one click away.
+    //
+    // The behavioural half of this lives in AccountModal.deviceRow.test.ts
+    // ("sends nothing until the second press"). It does not replace this one:
+    // that test clicks the FIRST button it finds, so a template that grew a
+    // second button wired straight to rebuildTrust would still leave it green.
+    // This is the structural half — what the markup is allowed to contain.
+    const locked = lockedMarkup()
     expect(locked).toContain('settings.p2p.trust.locked-body')
-    expect(locked).not.toMatch(/<button/)
+
+    // The resting state arms the decision; it does not take it.
+    const resting = locked.slice(locked.indexOf('v-else class="locked-acts"'))
+    expect(resting).toMatch(/<button/)
+    expect(resting.match(/<button/g)).toHaveLength(1)
+    expect(resting).toContain('rebuildArmed = true')
+    expect(resting).not.toContain('rebuildTrust')
+
+    // And the only call that actually sends it is behind the cost.
+    expect(locked.indexOf('trust.rebuild-warn')).toBeLessThan(locked.indexOf('rebuildTrust()'))
+  })
+
+  it('puts the trust lock between the connection and the directory', () => {
+    // Placement is the message: the device list below cannot be trusted while
+    // this is unresolved, so the warning has to be read before the list, not
+    // scrolled past above it.
+    const link = MODAL.indexOf('class="card link-card"')
+    const locked = MODAL.indexOf('class="card locked-card"')
+    const list = MODAL.indexOf('<div class="card net-card"', link)
+    expect(link).toBeGreaterThan(-1)
+    expect(locked).toBeGreaterThan(link)
+    expect(list).toBeGreaterThan(locked)
   })
 
   it('has every link string it shows, in both locales', () => {

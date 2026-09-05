@@ -59,7 +59,7 @@
     "reason-unknown-pane-id": "本機找不到 id 為「{pane_id}」的 pane",
     "reason-ambiguous-target": "工作區「{ws}」中有 {n} 個 pane 都叫「{name}」 — 請重新命名其中一個",
     "reason-target-offline": "「{to}」目前離線 — 所屬視窗已斷線 {seconds} 秒，該 pane 仍然存在",
-    "reason-unknown-device": "找不到裝置「{device}」 — 定址到其他機器需要跨裝置名冊，目前尚未可用",
+    "reason-unknown-device": "找不到裝置「{device}」 — 這台機器沒有連上 Navide-Server，只能定址自己機器上的面板",
     "rename-collision-title": "訊息名稱重複",
     "rename-collision-body": "名稱「{name}」已被其他 CLI 使用。請設定另一個訊息名稱：",
     "rename-collision-confirm": "確認",
@@ -1206,7 +1206,13 @@
         "plaintext-refused-what-to-do": "不用做什麼，它已被拒收。若那台裝置是正常的，解除配對後重新配對。",
         "member-changed": "{device} 現在掛在另一個帳號下",
         "member-changed-body": "釘選的金鑰沒變，所以還是那台裝置，但伺服器說它屬於另一個帳號。",
-        "unknown-notice": "這個版本無法顯示的安全通知（{kind}）"
+        "unknown-notice": "這個版本無法顯示的安全通知（{kind}）",
+        "rebuild": "重新開始",
+        "rebuild-title": "清除這台機器的信任記錄並重新開始，所有配對都會消失。",
+        "rebuild-warn": "這會清除這台機器上的所有配對。你的每一台其他裝置都必須重新配對，而且兩邊都要操作。只有在你清楚記錄為什麼讀不出來時才這麼做——如果不清楚，先查清楚比較值得。",
+        "rebuild-confirm": "確定，清除並重新開始",
+        "rebuild-cancel": "維持停止狀態",
+        "rebuild-done": "信任記錄已清除。準備好之後再重新配對你的裝置。"
       },
       "link": {
         "pause": "關閉",

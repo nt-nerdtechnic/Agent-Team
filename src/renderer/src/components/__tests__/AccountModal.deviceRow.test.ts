@@ -291,3 +291,119 @@ describe('the three actions on a row are one size', () => {
     expect(row.text()).not.toContain('Pair')
   })
 })
+
+// ── The way out of a fail-closed trust lock ─────────────────────────────────
+//
+// The lock exists so a silent reset cannot happen, and it had no recovery at
+// all — on a machine that hit it the only exit was Keychain Access, which is
+// the same reset performed with less information. These pin the shape that
+// makes a deliberate one safe: two clicks, the cost stated before the control,
+// and a confirmation token so nothing but a window can ask for it.
+
+async function mountLocked(reason = 'the record was created by __main__.py') {
+  ;(window as unknown as Record<string, unknown>).agentTeam = {
+    trustConfirm: vi.fn().mockResolvedValue({ token: 't', issuedAt: 1 }),
+  }
+  const mock = createMockBackend('connected')
+  mock.setResponse('p2p.link.status', {
+    status: { state: 'connected', accountEmail: 'a@b.c', serverUrl: 'wss://x', emailVerified: true },
+  })
+  mock.setResponse('p2p.network.snapshot', {
+    state: 'connected', deviceId: 'me', devices: [], trustLocked: reason,
+  })
+  wrapper = mount(AccountModal, {
+    props: { open: true, backend: mock.backend as never },
+    global: { plugins: [i18n] },
+  })
+  await flushPromises()
+  return mock
+}
+
+const lockedCard = () => wrapper!.find('.locked-card')
+
+describe('recovering from a locked trust store', () => {
+  it('shows the lock and offers a way out, without offering it as one click', async () => {
+    i18n.global.locale.value = 'en-US'
+    await mountLocked()
+
+    expect(lockedCard().exists()).toBe(true)
+    expect(lockedCard().text()).toContain('__main__.py')
+    const start = lockedCard().findAll('button')
+    expect(start).toHaveLength(1)
+    expect(start[0].text()).toBe(t('settings.p2p.trust.rebuild'))
+    // Pressing it decides nothing: it reveals what the decision costs.
+    expect(lockedCard().text()).not.toContain(t('settings.p2p.trust.rebuild-warn'))
+  })
+
+  it('states the cost before the button that pays it', async () => {
+    i18n.global.locale.value = 'en-US'
+    await mountLocked()
+    const mock = createMockBackend('connected')
+    void mock
+
+    await lockedCard().find('button').trigger('click')
+
+    const warn = lockedCard().find('.locked-warn')
+    expect(warn.exists()).toBe(true)
+    expect(warn.text()).toBe(t('settings.p2p.trust.rebuild-warn'))
+    // Both halves of the cost are named: everything is lost, and the other
+    // machine has work to do too.
+    expect(warn.text()).toContain('every pairing')
+    expect(warn.text()).toContain('both ends')
+    // And backing out is offered beside going ahead.
+    const labels = lockedCard().findAll('button').map((b) => b.text())
+    expect(labels).toContain(t('settings.p2p.trust.rebuild-confirm'))
+    expect(labels).toContain(t('settings.p2p.trust.rebuild-cancel'))
+  })
+
+  it('sends nothing until the second press, and sends a confirmation with it', async () => {
+    i18n.global.locale.value = 'en-US'
+    const mock = await mountLocked()
+
+    await lockedCard().find('button').trigger('click')
+    expect(mock.sent.some((s) => s.type === 'p2p.trust.rebuild')).toBe(false)
+
+    const go = lockedCard().findAll('button')
+      .find((b) => b.text() === t('settings.p2p.trust.rebuild-confirm'))!
+    await go.trigger('click')
+    await flushPromises()
+
+    const sent = mock.sent.find((s) => s.type === 'p2p.trust.rebuild')!
+    expect(sent).toBeTruthy()
+    // The token is minted in the main process and nowhere else, which is what
+    // keeps MCP and the plugin broker out of this.
+    expect(sent.payload.confirm).toEqual({ token: 't', issuedAt: 1 })
+    expect(
+      (window as unknown as { agentTeam: { trustConfirm: ReturnType<typeof vi.fn> } })
+        .agentTeam.trustConfirm,
+    ).toHaveBeenCalledWith('p2p.trust.rebuild', '')
+  })
+
+  it('backing out leaves the lock in place', async () => {
+    i18n.global.locale.value = 'en-US'
+    const mock = await mountLocked()
+
+    await lockedCard().find('button').trigger('click')
+    const cancel = lockedCard().findAll('button')
+      .find((b) => b.text() === t('settings.p2p.trust.rebuild-cancel'))!
+    await cancel.trigger('click')
+
+    expect(lockedCard().find('.locked-warn').exists()).toBe(false)
+    expect(mock.sent.some((s) => s.type === 'p2p.trust.rebuild')).toBe(false)
+  })
+
+  it('says what happens next when it worked', async () => {
+    // "It is gone" is not the useful half; "pair them again" is.
+    i18n.global.locale.value = 'en-US'
+    const mock = await mountLocked()
+    mock.setResponse('p2p.trust.rebuild', { rebuilt: true, was: 'unreadable' })
+
+    await lockedCard().find('button').trigger('click')
+    await lockedCard().findAll('button')
+      .find((b) => b.text() === t('settings.p2p.trust.rebuild-confirm'))!
+      .trigger('click')
+    await flushPromises()
+
+    expect(lockedCard().text()).toContain(t('settings.p2p.trust.rebuild-done'))
+  })
+})

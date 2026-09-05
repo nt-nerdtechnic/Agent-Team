@@ -410,6 +410,41 @@ async function refresh(): Promise<void> {
 const trustNotices = computed<TrustNotice[]>(() => network.value?.trustNotices ?? [])
 const trustPending = computed<PendingDevice[]>(() => network.value?.trustPending ?? [])
 const trustLocked = computed(() => network.value?.trustLocked ?? '')
+/** Two clicks, not one: the first only reveals what the second costs. A single
+ *  button beside an explanation of a lock is a button people press to make the
+ *  red text go away. */
+const rebuildArmed = ref(false)
+const rebuildDone = ref(false)
+
+/**
+ * Erase this machine's trust record and start again.
+ *
+ * Carries a confirmation token like every other trust-changing act, which is
+ * what keeps it out of reach of MCP and the plugin broker — they talk to the
+ * backend directly and cannot mint one. The backend refuses it outright unless
+ * the store is genuinely locked.
+ */
+async function rebuildTrust(): Promise<void> {
+  if (pending.value) return
+  pending.value = 'trust-rebuild'
+  try {
+    const resp = await props.backend.send(
+      'p2p.trust.rebuild',
+      await withConfirmation('p2p.trust.rebuild', '', {}),
+    )
+    if (!resp.ok) {
+      error.value = resp.error?.message ?? t('account.err-generic')
+      return
+    }
+    rebuildArmed.value = false
+    rebuildDone.value = true
+    await loadNetwork()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    pending.value = ''
+  }
+}
 const paused = computed(() => status.value?.paused === true)
 
 /** Which switch or notice is mid-flight, so a double click cannot act twice. */
@@ -1130,17 +1165,6 @@ onUnmounted(() => {
           </span>
         </p>
 
-        <!-- The link has lost trust state it once had. First, above everything,
-             and with no button: "start over" is precisely what an attacker who
-             deleted that state is waiting for. -->
-        <section v-if="signedIn && trustLocked" class="net">
-          <div class="card locked-card">
-            <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
-            <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>
-            <p class="hint">{{ trustLocked }}</p>
-          </div>
-        </section>
-
         <!-- Pairings in flight, at either end. Above everything else in this
              panel: it is the only thing here that another person is currently
              standing in front of, waiting on. -->
@@ -1633,6 +1657,48 @@ onUnmounted(() => {
               <dt>{{ t('settings.p2p.link.server') }}</dt>
               <dd><code>{{ status?.serverUrl }}</code></dd>
             </dl>
+          </div>
+
+          <!-- The link has lost trust state it once had. It sits between the
+               connection and the directory because that is what it is about:
+               the list below cannot be trusted while this is unresolved. There
+               is a way out, and it is one click behind a warning: "start over"
+               is what an attacker who deleted that state is waiting for, so it
+               must never happen by itself — but the only alternative on a
+               machine that hits this was Keychain Access, which is the same
+               reset performed with less information and leaves the two halves
+               disagreeing. Loud and deliberate beats undiscoverable. -->
+          <div v-if="trustLocked" class="card locked-card">
+            <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
+            <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>
+            <p class="hint">{{ trustLocked }}</p>
+            <p v-if="rebuildDone" class="hint ok-text">
+              {{ t('settings.p2p.trust.rebuild-done') }}
+            </p>
+            <template v-else-if="rebuildArmed">
+              <p class="hint locked-warn">{{ t('settings.p2p.trust.rebuild-warn') }}</p>
+              <div class="locked-acts">
+                <button
+                  class="dev-review locked-go"
+                  :disabled="!!pending"
+                  @click="rebuildTrust()"
+                >
+                  {{ t('settings.p2p.trust.rebuild-confirm') }}
+                </button>
+                <button class="dev-review" :disabled="!!pending" @click="rebuildArmed = false">
+                  {{ t('settings.p2p.trust.rebuild-cancel') }}
+                </button>
+              </div>
+            </template>
+            <div v-else class="locked-acts">
+              <button
+                class="dev-review"
+                :title="t('settings.p2p.trust.rebuild-title')"
+                @click="rebuildArmed = true"
+              >
+                {{ t('settings.p2p.trust.rebuild') }}
+              </button>
+            </div>
           </div>
 
           <div class="card net-card">
@@ -2153,6 +2219,12 @@ input:focus {
   user-select: text;
 }
 .dev-review:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; }
+/* The warning reads as one, and the button that acts on it is the only red
+   thing on the card — so the eye lands on the cost before the control. */
+.locked-warn { color: var(--danger-fg); line-height: 1.55; margin-top: 8px; }
+.locked-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.locked-go { color: var(--danger-fg); border-color: var(--danger-fg); }
+.locked-go:hover { background: var(--danger-subtle); }
 /* Same hollow treatment as disconnected: neither pane is doing anything, and
    the eye should skip both to find the ones that are. */
 .pane-pill.st-not-opened { background: none; border-color: var(--border-default); }

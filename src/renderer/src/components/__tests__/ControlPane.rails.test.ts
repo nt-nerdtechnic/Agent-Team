@@ -88,6 +88,45 @@ async function makeRail(wrapper: VueWrapper, name: string, color?: number): Prom
 const railsOf = (): { id: string; name: string; members: string[]; color?: number }[] =>
   JSON.parse(stored() || '[]')
 
+/** One gesture, one DataTransfer — the way a real drag works.
+ *
+ *  Handing each event its own object hides bugs: the first check in every
+ *  handler is `types.includes(...)`, and a fresh object that was never
+ *  setData'd fails it, so the assertion passes without the rule ever running. */
+function makeDataTransfer() {
+  const store: Record<string, string> = {}
+  return {
+    types: [] as string[],
+    effectAllowed: '',
+    setData(key: string, value: string) {
+      store[key] = value
+      if (!this.types.includes(key)) this.types.push(key)
+    },
+    getData(key: string) {
+      return store[key] ?? ''
+    },
+  }
+}
+
+/** Step onto All. Creating a group switches to it, and a brand new group has
+ *  no members — so the list is empty and there is no heading to drag. */
+async function showAll(wrapper: VueWrapper): Promise<void> {
+  await wrapper.findAll('.ws-bar')[0].trigger('click')
+}
+
+/** Start dragging a workspace heading, returning the gesture's DataTransfer. */
+async function startWsDrag(wrapper: VueWrapper, index = 0) {
+  const dt = makeDataTransfer()
+  await wrapper.findAll('.ws-head')[index].trigger('dragstart', { dataTransfer: dt })
+  return dt
+}
+
+/** Move the pointer to `clientX` over the sidebar row. happy-dom reports a
+ *  zeroed rect, so clientX IS the distance from the left edge. */
+async function dragTo(wrapper: VueWrapper, dt: unknown, clientX: number) {
+  await wrapper.find('.ws-rail-wrap').trigger('dragover', { dataTransfer: dt, clientX })
+}
+
 /** Drop a workspace heading onto a cell — the drag the sidebar already
  *  supports, landing on a new target. */
 async function dropOnCell(wrapper: VueWrapper, cellIndex: number, path: string): Promise<void> {
@@ -497,6 +536,123 @@ describe('ControlPane – workspace rails', () => {
     await wrapper.find('.ws-strip').trigger('mouseleave')
     // Closing it here would take the half-typed name with it.
     expect(wrapper.find('.ws-gdlg-in').exists()).toBe(true)
+  })
+
+  /* ── dragging a workspace into a group ─────────────────────────────────
+     The strip is 8px. If the flyout only opened when the pointer hit it, the
+     drop targets would be reachable only by first hitting a target the same
+     size — which is the problem the flyout exists to solve. */
+
+  it('lets a lone workspace be dragged once a group exists', async () => {
+    // The drag floor was written for reorder and detach, which both need a
+    // second workspace. Filing into a group does not — and while the old floor
+    // stood, a window holding one project could never give the rail anything.
+    wrapper = mountWith({ workspaces: [wsRow(A, 'Agent-Team')] })
+    // The ATTRIBUTE, not el.draggable: Vue deliberately writes `draggable` as
+    // an attribute rather than a DOM property (that property is a boolean, so
+    // the string "false" would coerce to true), and happy-dom does not
+    // implement the property at all. The attribute is what the browser reads.
+    const draggable = () => wrapper.find('.ws-head').attributes('draggable')
+
+    expect(draggable()).toBe('false') // no groups yet: nothing to drag it to
+    await makeRail(wrapper, '客戶')
+    await showAll(wrapper)
+    expect(draggable()).toBe('true')
+  })
+
+  it('still refuses to detach the only workspace', async () => {
+    wrapper = mountWith({ workspaces: [wsRow(A, 'Agent-Team')] })
+    await makeRail(wrapper, '客戶')
+    await showAll(wrapper)
+    const head = wrapper.find('.ws-head')
+
+    await head.trigger('dragstart', { dataTransfer: makeDataTransfer() })
+    // Released far outside the window — the gesture that detaches.
+    await head.trigger('dragend', { clientX: -50, clientY: -50, screenX: 0, screenY: 0 })
+    // Draggable for filing, but pulling the last one out would empty the window.
+    expect(wrapper.emitted('detach-workspace')).toBeUndefined()
+  })
+
+  it('files the lone workspace into a group end to end', async () => {
+    wrapper = mountWith({ workspaces: [wsRow(A, 'Agent-Team')] })
+    await makeRail(wrapper, '客戶')
+    await showAll(wrapper)
+    const dt = await startWsDrag(wrapper)
+    await dragTo(wrapper, dt, 20)
+    await wrapper.findAll('.ws-rcell')[1].trigger('drop', { dataTransfer: dt })
+    expect(railsOf()[0].members).toEqual([A])
+  })
+
+  it('lights the bars up while a workspace is being dragged', async () => {
+    wrapper = mountWith()
+    await makeRail(wrapper, '客戶')
+    await showAll(wrapper)
+    expect(wrapper.find('.ws-bars').classes()).not.toContain('hot')
+
+    await startWsDrag(wrapper)
+    expect(wrapper.find('.ws-bars').classes()).toContain('hot')
+
+    await wrapper.findAll('.ws-head')[0].trigger('dragend')
+    expect(wrapper.find('.ws-bars').classes()).not.toContain('hot')
+  })
+
+  it('opens the flyout when the drag comes near the left edge', async () => {
+    wrapper = mountWith()
+    await makeRail(wrapper, '客戶')
+    await showAll(wrapper)
+    const dt = await startWsDrag(wrapper)
+    expect(flyoutHidden(wrapper)).toBe(true)
+
+    await dragTo(wrapper, dt, 20)
+    expect(flyoutHidden(wrapper)).toBe(false)
+  })
+
+  it('leaves the flyout shut for a drag out in the list, where reordering happens', async () => {
+    wrapper = mountWith()
+    await makeRail(wrapper, '客戶')
+    await showAll(wrapper)
+    const dt = await startWsDrag(wrapper)
+    await dragTo(wrapper, dt, 160)
+    // Opening here would cover the very rows a reorder has to land on.
+    expect(flyoutHidden(wrapper)).toBe(true)
+  })
+
+  it('keeps the flyout open once the pointer is on it', async () => {
+    wrapper = mountWith()
+    await makeRail(wrapper, '客戶')
+    await showAll(wrapper)
+    const dt = await startWsDrag(wrapper)
+    await dragTo(wrapper, dt, 20)
+    // The flyout it just opened is 178px wide; one threshold would close it
+    // the moment the pointer moved onto the thing it opened.
+    await dragTo(wrapper, dt, 150)
+    expect(flyoutHidden(wrapper)).toBe(false)
+    // Far enough away and it does close.
+    await dragTo(wrapper, dt, 260)
+    expect(flyoutHidden(wrapper)).toBe(true)
+  })
+
+  it('ignores pointer movement when no workspace is being dragged', async () => {
+    wrapper = mountWith()
+    await makeRail(wrapper, '客戶')
+    const dt = makeDataTransfer()
+    dt.setData('application/x-workspace-path', A)
+    await dragTo(wrapper, dt, 10)
+    // No dragstart happened — a stray dragover must not open it.
+    expect(flyoutHidden(wrapper)).toBe(true)
+  })
+
+  it('files the workspace when it lands, end to end', async () => {
+    wrapper = mountWith()
+    await makeRail(wrapper, '客戶')
+    await showAll(wrapper)
+    const dt = await startWsDrag(wrapper, 1) // the Navide-Server heading
+    await dragTo(wrapper, dt, 20)
+    await wrapper.findAll('.ws-rcell')[1].trigger('drop', { dataTransfer: dt })
+
+    expect(railsOf()[0].members).toEqual([B])
+    expect(flyoutHidden(wrapper)).toBe(true)
+    expect(wrapper.find('.ws-bars').classes()).not.toContain('hot')
   })
 
   /* ── where each half lives ─────────────────────────────────────────────
