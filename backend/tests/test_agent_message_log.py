@@ -527,3 +527,149 @@ def test_pending_incoming_survives_a_broken_database(tmp_path):
     with broken._db.transaction() as cur:
         cur.execute("DROP TABLE agent_message_log")
     assert broken.pending_incoming("me") == []
+
+
+# ── incoming: the recipient reading its own mail in full ────────────────────
+
+
+# What the MCP layer does to a body to build cli_pending_incoming's `excerpt`:
+# collapse every run of whitespace, then keep the first 200 characters.
+_EXCERPT_CHARS = 200
+
+
+def _as_excerpt(content: str) -> str:
+    return "".join(list(" ".join(content.split()))[:_EXCERPT_CHARS])
+
+
+def test_incoming_returns_the_whole_body_where_an_excerpt_would_cut_it(log):
+    body = "".join(f"line {i} of a long report. " for i in range(60))
+    assert len(body) > _EXCERPT_CHARS  # otherwise this proves nothing
+    log.append([_row("a", 1000, recipient="me", status="queued", content=body)])
+
+    full = log.incoming("me")[0]["content"]
+
+    assert full == body
+    # The same row seen through the excerpt rule loses everything past 200
+    # characters — that loss is what this method exists to undo.
+    assert len(_as_excerpt(log.pending_incoming("me")[0]["content"])) == _EXCERPT_CHARS
+    assert len(full) > _EXCERPT_CHARS
+
+
+def test_incoming_preserves_whitespace_and_newlines(log):
+    body = "step one\n\n    indented\tblock\n\nstep two\n"
+    log.append([_row("a", 1000, recipient="me", status="queued", content=body)])
+
+    full = log.incoming("me")[0]["content"]
+
+    assert full == body
+    # The excerpt rule flattens all of that into one line; this must not.
+    assert "\n" in full
+    assert "    indented\tblock" in full
+    assert _as_excerpt(body) != body
+
+
+def test_incoming_round_trips_cjk_content(log):
+    body = "審查結果：第三段落需要重寫。\n理由：語意與程式碼不符。"
+    log.append([_row("a", 1000, recipient="me", status="queued", content=body)])
+
+    row = log.incoming("me")[0]
+
+    assert row["content"] == body
+    assert len(row["content"]) == len(body)  # characters, not bytes
+
+
+def test_incoming_hides_delivered_history_until_asked(log):
+    log.append(
+        [
+            _row("q", 1000, recipient="me", status="queued"),
+            _row("d", 2000, recipient="me", status="delivered"),
+        ]
+    )
+
+    assert [r["uid"] for r in log.incoming("me")] == ["q"]
+    assert [r["uid"] for r in log.incoming("me", include_delivered=True)] == ["q", "d"]
+
+
+def test_incoming_never_returns_a_message_that_was_not_put_in_front_of_you(log):
+    """`failed` and `cancelled` stay out even with history on: one never
+    arrived, the other the sender took back."""
+    log.append(
+        [
+            _row("f", 1000, recipient="me", status="failed"),
+            _row("c", 2000, recipient="me", status="cancelled"),
+            _row("g", 3000, recipient="me", status="delivered"),
+        ]
+    )
+
+    assert [r["uid"] for r in log.incoming("me", include_delivered=True)] == ["g"]
+
+
+def test_incoming_returns_only_this_recipients_mail(log):
+    log.append(
+        [
+            _row("mine", 1000, recipient="me", status="queued", content="for me"),
+            _row("theirs", 2000, recipient="you", status="queued", content="secret"),
+        ]
+    )
+
+    rows = log.incoming("me", include_delivered=True)
+
+    assert [r["uid"] for r in rows] == ["mine"]
+    assert all("secret" not in r["content"] for r in rows)
+    assert [r["uid"] for r in log.incoming("you")] == ["theirs"]
+
+
+def test_incoming_limit_keeps_the_newest(log):
+    log.append([_row(str(i), 1000 + i, recipient="me", status="queued") for i in range(5)])
+
+    assert [r["uid"] for r in log.incoming("me", limit=2)] == ["3", "4"]
+
+
+def test_incoming_is_oldest_first_and_breaks_created_at_ties_by_insertion(log):
+    """A fan-out queued in one tick shares `created_at`, so `seq` is what keeps
+    the reader's order the order they were sent in."""
+    log.append(
+        [
+            _row("late", 9000, recipient="me", status="queued"),
+            _row("early", 1000, recipient="me", status="queued"),
+        ]
+    )
+    log.append([_row(f"tie-{i}", 5000, recipient="me", status="queued") for i in range(3)])
+
+    assert [r["uid"] for r in log.incoming("me")] == [
+        "early", "tie-0", "tie-1", "tie-2", "late",
+    ]
+
+
+def test_incoming_for_an_unknown_recipient_is_empty_not_an_error(log):
+    log.append([_row("a", 1000, recipient="me", status="queued")])
+
+    assert log.incoming("nobody") == []
+    assert log.incoming("nobody", include_delivered=True) == []
+    assert log.incoming("") == []
+
+
+def test_incoming_carries_the_fields_a_caller_needs_to_tell_navide_from_a_peer(log):
+    log.append(
+        [
+            _row("n", 1000, recipient="me", status="queued", kind="notice"),
+            _row("p", 2000, recipient="me", status="queued", sender="alpha/claude-1"),
+        ]
+    )
+
+    rows = {r["uid"]: r for r in log.incoming("me")}
+
+    assert rows["n"]["kind"] == "notice"
+    assert rows["p"]["kind"] is None
+    assert rows["p"]["sender"] == "alpha/claude-1"
+    assert rows["p"]["status"] == "queued"
+    assert rows["p"]["created_at"] == 2000
+
+
+def test_incoming_survives_a_broken_database(tmp_path):
+    broken = AgentMessageLog(db=Database(tmp_path / "navide.db"))
+    broken.append([_row("a", 1000, recipient="me", status="queued")])
+    with broken._db.transaction() as cur:
+        cur.execute("DROP TABLE agent_message_log")
+
+    assert broken.incoming("me") == []

@@ -50,6 +50,7 @@
     "reason-route-unavailable": "跨工作區路由失敗",
     "reason-no-report": "目標視窗始終沒有回報",
     "reason-delivery-failed": "投遞失敗",
+    "reason-read": "已被收件 agent 主動讀取，未注入其輸入框",
     "reason-window-reloaded": "視窗在投遞前重新載入",
     "reason-empty-target": "沒有指定目標",
     "reason-missing-pane-name": "「{to}」缺少 pane 名稱",

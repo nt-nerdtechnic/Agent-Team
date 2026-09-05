@@ -6985,6 +6985,68 @@ registerCommand('ui.pane.focus', (args) => {
   if (!paneId) throw new Error(`ui.pane.focus requires ${PANE_ID_HINT}`)
   onFocusPane(paneId)
 })
+registerCommand('ui.messaging.readIncoming', (args) => {
+  const a = (args ?? {}) as {
+    paneId?: string
+    uids?: string[]
+    limit?: number
+    includeDelivered?: boolean
+    reserve?: boolean
+    maxChars?: number
+  }
+  const paneId = a.paneId
+  if (!paneId) throw new Error(`ui.messaging.readIncoming requires ${PANE_ID_HINT}`)
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane) throw new Error(`ui.messaging.readIncoming: pane "${paneId}" not found`)
+  const me = pane.messagingName as string | undefined
+  if (!me) throw new Error(`ui.messaging.readIncoming: pane "${paneId}" has no messaging name`)
+
+  // Mail is matched by the recipient's CURRENT name, the same rule the queue
+  // and cli_pending_incoming use — a message queued for a name this pane has
+  // since been renamed away from is not its to read.
+  const wanted = new Set((a.uids ?? []).filter(Boolean))
+  const openStatuses = new Set(['queued', 'delivering'])
+  const rows = messaging.messages.value
+    .filter((m) => m.to === me)
+    .filter((m) => (wanted.size ? wanted.has(m.uid) : true))
+    .filter((m) => (a.includeDelivered ? true : openStatuses.has(m.status)))
+    .slice(-Math.max(1, a.limit ?? 5))
+
+  // Reserve only what is still waiting. Delivered history is readable but
+  // cannot be consumed — it already was.
+  const reserved = a.reserve === false
+    ? []
+    : messaging.reserveIncoming(paneId, rows.filter((m) => m.status === 'queued').map((m) => m.uid))
+
+  const cap = Math.max(1, a.maxChars ?? 64 * 1024)
+  return {
+    messages: rows.map((m) => ({
+      uid: m.uid,
+      sender: m.from,
+      status: m.status,
+      kind: m.kind ?? null,
+      content: m.content.slice(0, cap),
+      createdAt: m.createdAt,
+    })),
+    reserved: reserved.map((r) => r.uid),
+    // Delivery being paused is why a read can come back empty while messages
+    // are in fact waiting. Saying so keeps "cannot take it right now" from
+    // reading as "you have no mail".
+    paused: messaging.paused.value,
+  }
+})
+
+registerCommand('ui.messaging.settleRead', (args) => {
+  const a = (args ?? {}) as { paneId?: string; uids?: string[]; ok?: boolean }
+  const paneId = a.paneId
+  if (!paneId) throw new Error(`ui.messaging.settleRead requires ${PANE_ID_HINT}`)
+  const uids = (a.uids ?? []).filter(Boolean)
+  // ok:false is the caller telling us the text never arrived; the reservation
+  // is released and the message goes back to its place in the queue.
+  messaging.settleIncomingRead(paneId, uids, a.ok !== false)
+  return { settled: a.ok === false ? [] : uids }
+})
+
 registerCommand('ui.groupPeers', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
   if (!paneId) throw new Error(`ui.groupPeers requires ${PANE_ID_HINT}`)

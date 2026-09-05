@@ -241,6 +241,30 @@ Oldest first. `status` is `queued` (waiting for you to be between turns) or
 than an agent — `notice` for delivery feedback about your own send, `fallback`
 for a [stand-in report](#spawning-a-pane) from a pane you spawned.
 
+`excerpt` is 200 characters with the whitespace flattened — enough to tell what
+a message is about, not enough to act on. `cli_read_incoming` returns what was
+actually written:
+
+```
+cli_read_incoming(uid="", limit=5, include_delivered=false, peek=false)
+→ {ok, count, messages: [{uid, sender, status, kind?, content, age_seconds, consumed}], note?}
+```
+
+**Reading consumes by default.** A message you read here is not typed into your
+pane afterwards — you have it, so delivering it again would repeat it. Pass
+`peek: true` to read without consuming, and `include_delivered: true` to look
+back at messages that already reached you (those are never consumed, because
+they already were).
+
+Consuming is two steps: the message is reserved, handed to you, and only then
+released. If the release is lost the reservation expires and the message goes
+**back** to the queue, so it may reach you a second time. That is the safe
+direction — a duplicate is visible and a loss is not — so treat a message you
+have already handled as something to recognise rather than something that
+cannot arrive twice. `consumed` is reported per message, and `note` says why
+any of them were left alone: a peek, an already-delivered message, delivery
+paused in that window, or a release the window could not confirm.
+
 Call it between pieces of your own work when something may be waiting on you —
 after dispatching a task with `cli_open_agent`, or during a long run someone
 might need to interrupt. A non-empty answer is grounds to wrap up the turn you

@@ -1483,6 +1483,175 @@ async def cli_pending_incoming(ctx: Context, limit: int = 20) -> dict[str, Any]:
     return {"ok": True, "count": len(messages), "messages": messages}
 
 
+# The full text of one incoming message, bounded by what the log itself stores
+# (agent_message_log clamps content at 64K chars on the way in, so anything
+# longer was already truncated before this tool could see it).
+_INCOMING_FULL_MAX_CHARS = 64 * 1024
+
+# How many messages one read may take at once. Small on purpose: each one is up
+# to 64K of the caller's context, and taking more than a handful in a single
+# call is a sign of an agent draining a backlog it should be answering.
+_INCOMING_READ_MAX = 20
+
+
+@server.tool()
+async def cli_read_incoming(
+    ctx: Context,
+    uid: str = "",
+    limit: int = 5,
+    include_delivered: bool = False,
+    peek: bool = False,
+) -> dict[str, Any]:
+    """Read the full text of messages sent TO you.
+
+    cli_pending_incoming tells you a message exists and shows 200 characters
+    of it with the whitespace flattened. This returns what was actually
+    written. Until it existed you could read another pane's entire log but not
+    one message addressed to yourself.
+
+    BY DEFAULT READING CONSUMES. A message you read here is not typed into
+    your input box afterwards — you have it, so delivering it again would
+    repeat it. Pass `peek: true` to read without consuming, which leaves
+    delivery exactly as it was.
+
+    `uid` reads one message (the uid comes from cli_pending_incoming);
+    omitting it reads the oldest `limit` waiting for you. `include_delivered`
+    also returns messages already typed into your pane, for looking back at
+    what someone said — those are never consumed, because they already were.
+
+    Consuming is two steps, and the failure mode is deliberate: the message is
+    reserved, handed to you, and only then released. If the release is lost
+    the reservation expires and the message goes BACK to the queue, so it may
+    reach you a second time. That is the safe direction — a duplicate is
+    visible and a loss is not. Treat a message you have already handled as
+    something to recognise, not something that cannot arrive twice.
+
+    Returns {ok, count, messages: [{uid, sender, status, kind?, content,
+    age_seconds, consumed}]}. `consumed` is per message and is false when the
+    read was a peek, when the message was already delivered, or when the
+    window could not be reached to release the reservation — in that last case
+    you have the text but delivery was left alone, so expect it in your pane.
+
+    Only a Navide CLI pane has an inbox. Messages are matched by your current
+    messaging name, so anything queued for a name you have been renamed away
+    from is not yours to see.
+    """
+    from agent_team_backend import agent_messaging
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    if caller.kind != "pane":
+        return {
+            "ok": False,
+            "error": (
+                "only a Navide CLI pane has an inbox — a host or external caller "
+                "has no messaging name for anything to be addressed to."
+            ),
+        }
+    me = agent_messaging.get(caller.pane_id)
+    if me is None:
+        return {"ok": False, "error": "this pane is no longer registered for messaging"}
+
+    wanted = [uid.strip()] if uid.strip() else []
+    count = max(1, min(int(limit), _INCOMING_READ_MAX))
+    args: dict[str, Any] = {
+        "paneId": caller.pane_id,
+        "uids": wanted,
+        "limit": count,
+        "includeDelivered": bool(include_delivered),
+        "reserve": not peek,
+        "maxChars": _INCOMING_FULL_MAX_CHARS,
+    }
+    reply = await _ui_request(
+        me.workspace_path,
+        "invoke",
+        caller=_pane_caller(caller.pane_id),
+        action="ui.messaging.readIncoming",
+        args=args,
+    )
+    degraded = ""
+    paused = False
+    if reply.get("ok"):
+        result = reply.get("result") or {}
+        rows = result.get("messages") or []
+        reserved = [str(u) for u in (result.get("reserved") or [])]
+        paused = bool(result.get("paused"))
+    else:
+        # The window did not answer. Read from the log instead of failing: the
+        # text is what was asked for and the log has it. Nothing is reserved,
+        # so delivery is untouched and the message still reaches the pane —
+        # answering with the text and saying so beats refusing outright.
+        from agent_team_backend import app
+
+        rows = await asyncio.to_thread(
+            app.agent_message_log.incoming, me.name, bool(include_delivered), count
+        )
+        if wanted:
+            rows = [r for r in rows if str(r.get("uid") or "") in set(wanted)]
+        reserved = []
+        degraded = str(reply.get("error") or "the window owning this pane did not answer")
+
+    # Second step. Nothing is consumed until the window is told the text
+    # reached us; if this call fails the reservation expires on its own and the
+    # message returns to the queue, which is why `consumed` is reported per
+    # message rather than assumed.
+    released: set[str] = set()
+    if reserved:
+        settle = await _ui_request(
+            me.workspace_path,
+            "invoke",
+            caller=_pane_caller(caller.pane_id),
+            action="ui.messaging.settleRead",
+            args={"paneId": caller.pane_id, "uids": reserved, "ok": True},
+        )
+        if settle.get("ok"):
+            released = {str(u) for u in ((settle.get("result") or {}).get("settled") or [])}
+
+    now_ms = time.time() * 1000.0
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        row_uid = str(row.get("uid") or "")
+        created = float(row.get("createdAt") or row.get("created_at") or now_ms)
+        message: dict[str, Any] = {
+            "uid": row_uid,
+            "sender": str(row.get("sender") or ""),
+            "status": str(row.get("status") or ""),
+            "content": str(row.get("content") or "")[:_INCOMING_FULL_MAX_CHARS],
+            "age_seconds": round(max(0.0, now_ms - created) / 1000.0, 1),
+            "consumed": row_uid in released,
+        }
+        if row.get("kind"):
+            message["kind"] = row["kind"]
+        messages.append(message)
+
+    answer: dict[str, Any] = {"ok": True, "count": len(messages), "messages": messages}
+    if degraded:
+        answer["note"] = (
+            f"read from the message log because the window did not answer ({degraded}); "
+            "nothing was consumed, so these still reach your pane."
+        )
+        return answer
+    if paused and not reserved:
+        # Delivery being paused is why a read can come back with nothing while
+        # messages are in fact waiting. An empty answer would read as "you have
+        # no mail", which is the one thing this tool must never imply.
+        answer["note"] = (
+            "delivery is paused in this window, so nothing could be taken. Any "
+            "messages listed were read only; more may be waiting behind the pause."
+        )
+        return answer
+    stranded = [u for u in reserved if u not in released]
+    if stranded:
+        # Say it plainly rather than leaving the agent to compare two lists.
+        answer["note"] = (
+            f"{len(stranded)} message(s) were read but not consumed — the window "
+            "could not confirm. They stay queued and will reach your pane."
+        )
+    return answer
+
+
 # ── Reading another pane (cli_read_log / cli_get_status / cli_wait_idle) ────
 
 # Bounds one read of an arbitrarily large conversation log. The cost here is

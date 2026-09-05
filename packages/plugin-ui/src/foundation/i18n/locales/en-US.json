@@ -50,6 +50,7 @@
     "reason-route-unavailable": "Cross-workspace routing failed",
     "reason-no-report": "The target window never reported back",
     "reason-delivery-failed": "Delivery failed",
+    "reason-read": "Read by the recipient agent instead of being typed into its pane",
     "reason-window-reloaded": "The window reloaded before delivery",
     "reason-empty-target": "No target given",
     "reason-missing-pane-name": "No pane name in “{to}”",

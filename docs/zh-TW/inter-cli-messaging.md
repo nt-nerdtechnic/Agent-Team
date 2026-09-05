@@ -218,6 +218,24 @@ cli_pending_incoming()
 自己送出的那則訊息的投遞回饋，`fallback` 則是你 spawn 出來的 Pane 的
 [代轉回報](#spawn-一個-pane)。
 
+`excerpt` 是壓平空白後的 200 字元 —— 足以判斷一則訊息在講什麼，不足以據以行動。
+`cli_read_incoming` 回傳的是真正寫了什麼：
+
+```
+cli_read_incoming(uid="", limit=5, include_delivered=false, peek=false)
+→ {ok, count, messages: [{uid, sender, status, kind?, content, age_seconds, consumed}], note?}
+```
+
+**預設讀取即消費。** 在這裡讀過的訊息不會再被輸入進你的 Pane —— 你已經拿到了，再
+投遞一次只是重複。傳 `peek: true` 可以只讀不消費，傳 `include_delivered: true` 則
+能回頭看已經送達過的訊息（那些永遠不會被消費，因為它們已經被消費過了）。
+
+消費分兩步：訊息先被保留、交給你，然後才釋放。萬一釋放的回應遺失，保留會過期而訊
+息**退回**佇列，因此它可能第二次抵達你這裡。這是比較安全的方向 —— 重複看得見，遺
+失看不見 —— 所以對已經處理過的訊息，要當成需要辨識的東西，而不是當成不可能再來一
+次。`consumed` 逐則回報，`note` 則說明為什麼有些沒有被消費：可能是 peek、已送達的
+歷史訊息、該視窗的投遞被暫停，或是視窗無法確認釋放。
+
 在自己的工作告一段落之間呼叫它 —— 用 `cli_open_agent` 派出任務之後，或是在一段可
 能有人需要打斷你的長時間執行途中。答案不是空的，就足以構成把手上這個回合收尾的理
 由，而那正是讓訊息進得來的條件。
