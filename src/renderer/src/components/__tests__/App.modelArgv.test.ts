@@ -289,3 +289,88 @@ describe('cli_open_agent — the MCP path from event to persistence', () => {
     },
   )
 })
+
+describe('a remote caller cannot supply a raw command', () => {
+  // resolveCommand hands a commandOverride straight back untouched — no flag
+  // assembly, no model guard, no shape check. That is deliberate: it is the
+  // command a user typed for their own machine.
+  //
+  // The reason it is safe is NOT that the path is old. It is that nothing
+  // reachable from outside this machine can reach it: every spawn originating
+  // from MCP or the websocket hardcodes an empty override. "Old" decays;
+  // "remote cannot reach it" is a property, so it is pinned here.
+
+  /** The `{ ... }` options literal of the spawnPane call starting at `at`. */
+  function optionsAt(at: number): string {
+    const open = appSource.indexOf('{', at)
+    let depth = 0
+    for (let i = open; i < appSource.length; i++) {
+      const ch = appSource[i]
+      if (ch === '{') depth++
+      else if (ch === '}' && --depth === 0) return appSource.slice(open, i + 1)
+    }
+    throw new Error(`unbalanced spawnPane options object at ${at}`)
+  }
+
+  /** Name of the named function containing offset `at`.
+   *
+   *  Arrow-function handlers (ui.pane.create is one) have no name to find, so
+   *  this reports the previous named function for them. That is why the
+   *  externally-reachable check below anchors ui.pane.create on its own text
+   *  rather than trusting this label. */
+  function ownerOf(at: number): string {
+    const before = appSource.slice(0, at)
+    const decls = [...before.matchAll(/(?:async\s+)?function\s+(\w+)/g)]
+    return decls.length ? decls[decls.length - 1][1] : '<unknown>'
+  }
+
+  const sites: Array<{ owner: string; line: number; override: string }> = []
+  for (let i = appSource.indexOf('spawnPane({'); i > -1;
+       i = appSource.indexOf('spawnPane({', i + 1)) {
+    const options = optionsAt(i)
+    // Both spellings count: `commandOverride: x` and the shorthand
+    // `commandOverride,` that passes a same-named variable. Missing the
+    // shorthand would silently exempt exactly the paths that fill one.
+    const match = options.match(/\bcommandOverride\s*(?::\s*([^,\n]+?))?\s*[,\n}]/)
+    if (!match) continue
+    sites.push({
+      owner: ownerOf(i),
+      line: appSource.slice(0, i).split('\n').length,
+      override: match[1] ? match[1].trim() : '<shorthand variable>',
+    })
+  }
+
+  it('hardcodes an empty override on every externally reachable spawn', () => {
+    // createRequestedPane / createStandaloneRequestedPane are cli_open_agent
+    // (and the SPAWN block, which routes through the first). ui.pane.create is
+    // reachable through ui_invoke. These three are the ways a caller that is
+    // not sitting at this machine can open a pane.
+    const reachable = ['createRequestedPane', 'createStandaloneRequestedPane']
+    for (const owner of reachable) {
+      const site = sites.find((s) => s.owner === owner)
+      expect(site, `${owner} no longer calls spawnPane`).toBeDefined()
+      expect(site?.override, `${owner} (App.vue:${site?.line})`).toBe("''")
+    }
+
+    // ui.pane.create is an arrow-function handler with no name to match on, so
+    // it is anchored on its own error text instead.
+    const anchor = appSource.indexOf('ui.pane.create requires an agent')
+    expect(anchor, 'ui.pane.create handler not found').toBeGreaterThan(-1)
+    const call = appSource.indexOf('spawnPane({', anchor)
+    expect(call, 'ui.pane.create no longer spawns').toBeGreaterThan(-1)
+    expect(optionsAt(call)).toMatch(/\bcommandOverride:\s*''/)
+  })
+
+  it('lets only local and restore paths supply one', () => {
+    // A site that passes anything other than '' has to appear here, so adding
+    // one is a decision someone makes on purpose rather than a default they
+    // inherit. If a new name shows up, the question to answer before adding it
+    // is whether MCP or the websocket can reach it.
+    const filled = sites.filter((s) => s.override !== "''").map((s) => s.owner)
+    expect([...new Set(filled)].sort()).toEqual([
+      'onManualResume', // the user pressing resume, with their own binary choice
+      'rebuildPaneViaResume', // rebuild of a live pane; buildResumeCommand made it
+      'spawnRestoredPane', // restore; the override arrives already rebuilt
+    ])
+  })
+})
