@@ -886,6 +886,9 @@ for (let i = 1; i <= 9; i++) {
     const spec = manualAgentSpecs.value[i - 1]
     if (spec) {
       pickedAgent.value = spec.agentKey
+      // Also the dialog's own pick: with it already open the seeding watch does
+      // not fire, and the dropdown this shortcut exists to move would not move.
+      modalAgent.value = spec.agentKey
       manualSpawnOpen.value = true
       selectSidebarTab('agents')
     }
@@ -994,6 +997,15 @@ watch(() => props.pipelines?.length, () => { pipelinePage.value = 0 })
 
 const previewOpen = ref<boolean>(false)
 const manualSpawnOpen = ref<boolean>(false)
+/** The dialog's own CLI pick, seeded from pickedAgent each time it opens and
+ *  never written back. The ＋ menu's ✓ is the default for the next spawn from
+ *  the menu itself, so trying another CLI inside the dialog must not move it. */
+const modalAgent = ref<string>(pickedAgent.value)
+/** Which CLI the spawn actions run: the dialog's pick while it is open, the
+ *  menu's default otherwise. */
+const activeSpawnAgent = computed(() =>
+  manualSpawnOpen.value ? modalAgent.value : pickedAgent.value
+)
 const pipelineOpen = ref<boolean>(true)
 // Manual spawn used to be a card, and a spawn-mode workspace opened with it
 // already expanded. As a dialog that same default means it appears over the
@@ -1043,7 +1055,7 @@ const resumeOptions = computed<{ sessionId: string; label: string; workspacePath
   const out: { sessionId: string; label: string; workspacePath: string }[] = []
   for (const entry of [...(props.spawnHistory ?? [])].reverse()) {
     const sid = (entry.sessionId ?? '').trim()
-    if (!sid || entry.agentKey !== pickedAgent.value) continue
+    if (!sid || entry.agentKey !== activeSpawnAgent.value) continue
     if (seen.has(sid)) continue
     seen.add(sid)
     const when = entry.spawnedAt.slice(0, 16).replace('T', ' ')
@@ -1072,7 +1084,7 @@ function resumeAgent(): void {
   // manually-pasted id with no history match falls back to the current one.
   const origin = resumeOptions.value.find((o) => o.sessionId === sid)?.workspacePath
   emit('spawn-resume', {
-    agentKey: pickedAgent.value,
+    agentKey: activeSpawnAgent.value,
     sessionId: sid,
     workspacePath: origin ?? workspacePath.value
   })
@@ -1115,9 +1127,9 @@ const spawnWorkspaceOverride = ref<string>('')
  *  active tab points". */
 const spawnGroupOverride = ref<string>('')
 
-function emitSpawn(): void {
+function emitSpawn(agentKey: string): void {
   emit('spawn', {
-    agentKey: pickedAgent.value,
+    agentKey,
     roleKey: pickedRole.value,
     stageId: '',
     workspacePath: spawnWorkspaceOverride.value || workspacePath.value,
@@ -1134,9 +1146,10 @@ const pickedAgentLabel = computed(
 )
 
 // ── The ＋ menu on this window's workspace heading ────────────────────────────
-// A second way into the spawn card's CLI and role, for when the card is folded
-// shut. It reads and writes pickedAgent/pickedRole directly rather than keeping
-// its own copy — two stores would let the card say Codex while ＋ opens Claude.
+// The default CLI and role for a one-click spawn: it reads and writes
+// pickedAgent/pickedRole, which is what its ✓ marks. The Manual spawn dialog
+// keeps its own CLI pick (modalAgent) instead — it is where you go to run
+// something other than the default, and doing so must not reset the default.
 const addMenuOpen = ref<boolean>(false)
 /** Which workspace heading opened the menu, so a pick starts there. */
 const addMenuWorkspace = ref<string>('')
@@ -1384,7 +1397,7 @@ function spawnAs(agentKey: string): void {
   spawnWorkspaceOverride.value = addMenuWorkspace.value
   spawnGroupOverride.value = addMenuGroup.value
   addMenuOpen.value = false
-  spawn()
+  spawn(agentKey)
 }
 
 /** The plain-shell spec, kept out of manualAgentSpecs because the agent
@@ -1423,8 +1436,10 @@ function onSpawnModalKeydown(ev: KeyboardEvent): void {
   if (ev.key === 'Escape') manualSpawnOpen.value = false
 }
 watch(manualSpawnOpen, (open) => {
-  if (open) document.addEventListener('keydown', onSpawnModalKeydown)
-  else document.removeEventListener('keydown', onSpawnModalKeydown)
+  if (open) {
+    modalAgent.value = pickedAgent.value
+    document.addEventListener('keydown', onSpawnModalKeydown)
+  } else document.removeEventListener('keydown', onSpawnModalKeydown)
 })
 onUnmounted(() => document.removeEventListener('keydown', onSpawnModalKeydown))
 function closeAddMenu(): void {
@@ -1454,29 +1469,29 @@ onUnmounted(() => {
   document.removeEventListener('scroll', closeAddMenu, true)
 })
 
-function spawn(): void {
+function spawn(agentKey: string = activeSpawnAgent.value): void {
   if (!canSpawn.value) return
   // Spawning a CLI we know is missing only produces a pane that dies with 127.
   // Offer the guided install instead of that dead end — but re-detect first,
   // since the cached status may predate an install the user just finished.
-  if (missingClis.value.has(pickedAgent.value)) {
-    void spawnOrOfferInstall()
+  if (missingClis.value.has(agentKey)) {
+    void spawnOrOfferInstall(agentKey)
     return
   }
-  emitSpawn()
+  emitSpawn(agentKey)
 }
 
-async function spawnOrOfferInstall(): Promise<void> {
+async function spawnOrOfferInstall(agentKey: string): Promise<void> {
   cliStatusFetchedAt = 0
   await refreshCliStatus()
-  if (!missingClis.value.has(pickedAgent.value)) {
-    emitSpawn()
+  if (!missingClis.value.has(agentKey)) {
+    emitSpawn(agentKey)
     return
   }
-  const spec = manualAgentSpecs.value.find((s) => s.agentKey === pickedAgent.value)
+  const spec = manualAgentSpecs.value.find((s) => s.agentKey === agentKey)
   spawnWorkspaceOverride.value = ''
   spawnGroupOverride.value = ''
-  emit('install-cli', { agentKey: pickedAgent.value, label: spec?.label ?? pickedAgent.value })
+  emit('install-cli', { agentKey, label: spec?.label ?? agentKey })
 }
 
 function openTerminal(): void {
@@ -2295,7 +2310,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         </div>
         <div class="spawn-card-body">
           <div class="row two-col">
-            <select v-model="pickedAgent" @focus="refreshCliStatus">
+            <select v-model="modalAgent" @focus="refreshCliStatus">
               <option v-for="spec in manualAgentSpecs" :key="spec.agentKey" :value="spec.agentKey">
                 {{ missingClis.has(spec.agentKey) ? $t('label.agent-not-installed', { label: spec.label }) : spec.label }}
               </option>
@@ -2306,7 +2321,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             </select>
           </div>
           <div class="row spawn-actions">
-            <button class="primary wide" :disabled="!canSpawn" @click="spawn">{{ $t('action.add-to-grid') }}</button>
+            <button class="primary wide" :disabled="!canSpawn" @click="spawn()">{{ $t('action.add-to-grid') }}</button>
             <button class="ghost wide terminal-btn" :disabled="!canSpawn" @click="openTerminal">{{ $t('action.open-terminal') }}</button>
           </div>
           <div class="row resume-actions">
