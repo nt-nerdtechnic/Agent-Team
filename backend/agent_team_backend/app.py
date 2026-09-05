@@ -1778,9 +1778,23 @@ def _serve_workspace_file(workspace: str, rel: str, *, allow_css: bool = False) 
     return FileResponse(target, media_type=media_type, headers=headers)
 
 
+def _require_ws_token(t: str) -> None:
+    """The HTTP file routes share the ws token as their credential.
+
+    Without it, /fs/raw was reachable by any local account: the backend binds
+    loopback but never asked who was calling, and ``workspace=/`` turned the
+    escape check into a no-op. The ws token file is 0600 — that permission is
+    the one boundary between this user's processes and everyone else on the
+    machine, and this route sat outside it. Same shape as /hooks/claude/rewake.
+    """
+    if not ws_auth.token_matches(t):
+        raise HTTPException(status_code=403, detail="missing or invalid token")
+
+
 @app.get("/fs/raw")
-async def fs_raw(workspace: str, rel: str) -> FileResponse:
+async def fs_raw(workspace: str, rel: str, t: str = "") -> FileResponse:
     """Serve a raw workspace file (query-addressed). See _serve_workspace_file."""
+    _require_ws_token(t)
     # The helper is pure-sync and does real syscalls (_resolve_safe → resolve(),
     # is_dir, is_file) that block for minutes on a stalled network/cloud mount.
     # An `async def` route is not handed to FastAPI's threadpool, so it would
@@ -1788,15 +1802,24 @@ async def fs_raw(workspace: str, rel: str) -> FileResponse:
     return await asyncio.to_thread(_serve_workspace_file, workspace, rel)
 
 
-@app.get("/fs/page/{ws_b64}/{rel:path}")
-async def fs_page(ws_b64: str, rel: str) -> FileResponse:
+@app.get("/fs/page/{cap}/{ws_b64}/{rel:path}")
+async def fs_page(cap: str, ws_b64: str, rel: str) -> FileResponse:
     """Serve a workspace file path-addressed so relative subresources resolve.
 
     ``ws_b64`` is the URL-safe base64 of the absolute workspace path (padding
     optional). Same policy as /fs/raw, plus text/css inline — an HTML preview
     loaded from this route can fetch its ./style.css, images, and fonts via
     relative URLs.
+
+    ``cap`` is the per-workspace capability from ``ws_auth.page_capability``
+    (the renderer asks for it over the socket, ``fs.page_capability``). It sits
+    in the path, ahead of the workspace, so the relative subresources a
+    previewed page loads carry it automatically — and it is deliberately not
+    the ws token itself; see ``page_capability`` for why a token in this path
+    would leave the machine.
     """
+    if not ws_auth.page_capability_matches(ws_b64, cap):
+        raise HTTPException(status_code=403, detail="missing or invalid capability")
     try:
         padded = ws_b64 + "=" * (-len(ws_b64) % 4)
         workspace = base64.urlsafe_b64decode(padded).decode("utf-8")

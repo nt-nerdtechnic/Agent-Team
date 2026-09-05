@@ -65,24 +65,40 @@ export function isMarkdownFile(relPath: string): boolean {
   return relPath.endsWith('.md') && !relPath.endsWith('.plan.md')
 }
 
+// The ws token rides on the socket URL the main process hands the renderer
+// (`ws://host:port/ws?t=…`). The HTTP file routes share it as their
+// credential, so the renderer pulls it back out of that URL rather than
+// carrying a second copy.
+export function wsTokenFromUrl(wsUrl: string): string {
+  const m = /[?&]t=([^&#]*)/.exec(wsUrl || '')
+  return m ? decodeURIComponent(m[1]) : ''
+}
+
 // URL for the backend's raw-file endpoint (GET /fs/raw, Range-capable).
-export function buildRawUrl(httpUrl: string, workspacePath: string, relPath: string): string {
+// `token` is the ws token; /fs/raw refuses without it. This URL is only ever
+// used by the trusted renderer (img/video/audio/font src, fetch) — never by
+// content inside the sandboxed HTML preview, which is why the token may sit
+// in the query here and must not in buildPageUrl.
+export function buildRawUrl(httpUrl: string, workspacePath: string, relPath: string, token: string): string {
   const base = httpUrl.replace(/\/+$/, '')
-  return `${base}/fs/raw?workspace=${encodeURIComponent(workspacePath)}&rel=${encodeURIComponent(relPath)}`
+  return (
+    `${base}/fs/raw?workspace=${encodeURIComponent(workspacePath)}` +
+    `&rel=${encodeURIComponent(relPath)}&t=${encodeURIComponent(token)}`
+  )
 }
 
 // URL for the backend's path-addressed page endpoint
-// (GET /fs/page/{ws_b64}/{rel:path}), used by the HTML preview so relative
-// subresources (./style.css, images) resolve against the same route. ws_b64
-// is the unpadded URL-safe base64 of the UTF-8 workspace path — matching
-// Python's base64.urlsafe_b64encode (the backend re-pads before decoding).
-// Rel path segments are percent-encoded individually so slashes survive.
-export function buildPageUrl(httpUrl: string, workspacePath: string, relPath: string): string {
-  const bytes = new TextEncoder().encode(workspacePath)
-  let bin = ''
-  for (const b of bytes) bin += String.fromCharCode(b)
-  const wsB64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+// (GET /fs/page/{cap}/{ws_b64}/{rel:path}), used by the HTML preview so
+// relative subresources (./style.css, images) resolve against the same route.
+// `cap` is the per-workspace capability from `fs.page_capability` — not the
+// ws token: the previewed document is untrusted and can leak its own URL
+// through Referer. `wsB64` is the unpadded URL-safe base64 of the UTF-8
+// workspace path — matching Python's base64.urlsafe_b64encode (the backend
+// re-pads before decoding); the backend returns it alongside the cap so both
+// ends agree byte-for-byte on the scope the cap was computed over. Rel path
+// segments are percent-encoded individually so slashes survive.
+export function buildPageUrl(httpUrl: string, cap: string, wsB64: string, relPath: string): string {
   const rel = relPath.split('/').map(encodeURIComponent).join('/')
   const base = httpUrl.replace(/\/+$/, '')
-  return `${base}/fs/page/${wsB64}/${rel}`
+  return `${base}/fs/page/${cap}/${wsB64}/${rel}`
 }

@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_team_backend import app as app_module
+from agent_team_backend import ws_auth
 from agent_team_backend.app import app
 
 
@@ -39,8 +40,60 @@ def workspace(tmp_path):
     return ws
 
 
+
+
+@pytest.fixture(autouse=True)
+def ws_token():
+    # The HTTP file routes share the ws token as their credential. Every test
+    # here runs with one issued; the refusal tests then drop or corrupt it.
+    ws_auth._reset_for_test("test-ws-token")
+    yield "test-ws-token"
+    ws_auth._reset_for_test("")
+
+
 def _get(client, ws, rel, **kwargs):
-    return client.get("/fs/raw", params={"workspace": str(ws), "rel": rel}, **kwargs)
+    return client.get("/fs/raw", params={"workspace": str(ws), "rel": rel, "t": "test-ws-token"}, **kwargs)
+
+
+def test_raw_without_a_token_is_refused(client, workspace):
+    # The route used to be reachable by any local account: loopback is not a
+    # credential, and workspace=/ made the escape check moot. The token file is
+    # 0600 — that permission is the boundary, and this route must sit inside it.
+    resp = client.get("/fs/raw", params={"workspace": str(workspace), "rel": "video.mp4"})
+    assert resp.status_code == 403
+
+
+def test_raw_with_a_wrong_token_is_refused(client, workspace):
+    resp = client.get("/fs/raw", params={"workspace": str(workspace), "rel": "video.mp4", "t": "nope"})
+    assert resp.status_code == 403
+
+
+def test_raw_refuses_everyone_when_no_token_was_issued(client, workspace):
+    # An unissued token must not match an empty query: fail closed.
+    ws_auth._reset_for_test("")
+    resp = client.get("/fs/raw", params={"workspace": str(workspace), "rel": "video.mp4", "t": ""})
+    assert resp.status_code == 403
+
+
+def test_raw_agent_team_dir_protected_under_any_spelling(client, workspace):
+    """On a case-insensitive filesystem `.Agent-Team` opens the same directory
+    as `.agent-team`; the guard must ask the filesystem, not compare strings."""
+    variant = workspace / ".Agent-Team" / "secret.txt"
+    if not variant.exists():
+        pytest.skip("filesystem is case-sensitive; the variant is a different path here")
+    resp = _get(client, workspace, ".Agent-Team/secret.txt")
+    assert resp.status_code == 400
+    resp = _get(client, workspace, ".AGENT-TEAM/secret.txt")
+    assert resp.status_code == 400
+
+
+def test_raw_agent_team_dir_protected_through_a_symlink(client, workspace, tmp_path):
+    # A link named anything, pointing at the internal dir, is still the
+    # internal dir on disk.
+    link = workspace / "shortcut"
+    link.symlink_to(workspace / ".agent-team")
+    resp = _get(client, workspace, "shortcut/secret.txt")
+    assert resp.status_code == 400
 
 
 def test_raw_happy_path_mp4(client, workspace):
@@ -165,7 +218,7 @@ def test_raw_nonexistent_workspace_rejected(client, tmp_path):
     # valid workspace; a non-existent one fails _resolve_safe with 400.
     resp = client.get(
         "/fs/raw",
-        params={"workspace": str(tmp_path / "no-such-ws"), "rel": "a.txt"},
+        params={"workspace": str(tmp_path / "no-such-ws"), "rel": "a.txt", "t": "test-ws-token"},
     )
     assert resp.status_code == 400
 

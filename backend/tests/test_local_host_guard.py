@@ -16,7 +16,17 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
 from agent_team_backend import app as app_module
+from agent_team_backend import ws_auth
 from agent_team_backend.app import app
+
+
+@pytest.fixture(autouse=True)
+def ws_token():
+    # The HTTP file routes share the ws token as their credential. Every test
+    # here runs with one issued; the refusal tests then drop or corrupt it.
+    ws_auth._reset_for_test("test-ws-token")
+    yield "test-ws-token"
+    ws_auth._reset_for_test("")
 
 
 @pytest.fixture()
@@ -41,13 +51,13 @@ def workspace(tmp_path):
 
 def test_a_rebinding_host_is_refused(rebinding_client, workspace) -> None:
     resp = rebinding_client.get(
-        "/fs/raw", params={"workspace": str(workspace), "rel": "note.txt"}
+        "/fs/raw", params={"workspace": str(workspace), "rel": "note.txt", "t": "test-ws-token"}
     )
     assert resp.status_code == 403
 
 
 def test_a_loopback_host_still_serves(client, workspace) -> None:
-    resp = client.get("/fs/raw", params={"workspace": str(workspace), "rel": "note.txt"})
+    resp = client.get("/fs/raw", params={"workspace": str(workspace), "rel": "note.txt", "t": "test-ws-token"})
     assert resp.status_code == 200
     assert resp.content == b"hello"
 
@@ -59,7 +69,7 @@ def test_a_the_other_loopback_spellings_are_allowed(host, workspace) -> None:
     # either would look like "the backend will not start" rather than like a
     # security control.
     named = TestClient(app, base_url=f"http://{host}")
-    resp = named.get("/fs/raw", params={"workspace": str(workspace), "rel": "note.txt"})
+    resp = named.get("/fs/raw", params={"workspace": str(workspace), "rel": "note.txt", "t": "test-ws-token"})
     assert resp.status_code == 200
 
 

@@ -40,6 +40,9 @@ from __future__ import annotations
 
 import logging
 import os
+import base64
+import hashlib
+import hmac
 import secrets
 import stat
 from urllib.parse import urlsplit
@@ -89,6 +92,47 @@ def issue_token() -> str:
 
 def current_token() -> str:
     return _token
+
+
+def token_matches(token: str) -> bool:
+    """Whether ``token`` is this run's ws token. Constant-time, false when
+    either side is empty — an unissued token must never match an empty query."""
+    if not _token or not token:
+        return False
+    return secrets.compare_digest(token, _token)
+
+
+_PAGE_CAP_CONTEXT = b"navide/fs-page-capability/v1\x00"
+
+
+def page_capability(scope: str) -> str:
+    """A capability for the path-addressed /fs/page route, scoped to one workspace.
+
+    /fs/page cannot carry the ws token itself: the route serves untrusted HTML
+    in a sandboxed iframe, and that document can set
+    ``<meta name="referrer" content="unsafe-url">`` and load an external image
+    — the request's Referer would then hand the URL path, token included, to
+    a host of the file's choosing. A token in the path is a token that leaves
+    the machine the first time someone previews a hostile HTML file.
+
+    So the path carries this instead: HMAC of the workspace's URL segment under
+    the ws token. It cannot be forged without the token, and if it leaks it
+    grants exactly what the preview was already showing — files under that one
+    workspace — not the socket, not the token file, not another directory.
+    Relative subresources (./style.css) resolve under the same prefix, which
+    is the whole reason the route is path-addressed.
+    """
+    if not _token:
+        return ""
+    digest = hmac.new(_token.encode("utf-8"), _PAGE_CAP_CONTEXT + scope.encode("utf-8"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")[:32]
+
+
+def page_capability_matches(scope: str, cap: str) -> bool:
+    expected = page_capability(scope)
+    if not expected or not cap:
+        return False
+    return secrets.compare_digest(cap, expected)
 
 
 def _hostile_origin(origin: str) -> bool:

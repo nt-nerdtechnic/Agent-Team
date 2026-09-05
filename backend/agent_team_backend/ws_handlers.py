@@ -330,6 +330,28 @@ async def fs_stat_path(session: "Session", msg_id: str, msg_type: str, payload: 
     await session.send_json(make_response(msg_id, msg_type, result))
 
 
+@handler("fs.page_capability")
+async def fs_page_capability(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """The capability the renderer needs to build a /fs/page URL for one workspace.
+
+    Answered over the socket, so only a client that already holds the ws token
+    can obtain it; the capability itself is scoped to this workspace's URL
+    segment and is what goes into the path instead of the token
+    (ws_auth.page_capability explains why the token must not).
+    """
+    import base64
+
+    from . import ws_auth
+
+    ws_path = str(payload.get("workspace_path") or "")
+    if not ws_path:
+        await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", "workspace_path is required"))
+        return
+    ws_b64 = base64.urlsafe_b64encode(ws_path.encode("utf-8")).decode("ascii").rstrip("=")
+    cap = ws_auth.page_capability(ws_b64)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "ws_b64": ws_b64, "cap": cap}))
+
+
 @handler("fs.read_image")
 async def fs_read_image(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app

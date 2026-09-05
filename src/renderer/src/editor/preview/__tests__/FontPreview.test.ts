@@ -49,7 +49,11 @@ function mountFont(relPath = 'assets/custom.woff2') {
       workspacePath: '/ws',
       relPath,
       name: relPath.split('/').pop()!,
-      backend: { httpUrl: ref('http://127.0.0.1:8123'), send: vi.fn() } as never,
+      backend: {
+        httpUrl: ref('http://127.0.0.1:8123'),
+        wsUrl: ref('ws://127.0.0.1:8123/ws?t=tok'),
+        send: vi.fn(),
+      } as never,
     },
     global: { plugins: [i18n] },
   })
@@ -61,7 +65,7 @@ describe('FontPreview', () => {
     await flushPromises()
     expect(created).toHaveLength(1)
     expect(created[0].source).toBe(
-      'url("http://127.0.0.1:8123/fs/raw?workspace=%2Fws&rel=assets%2Fcustom.woff2")',
+      'url("http://127.0.0.1:8123/fs/raw?workspace=%2Fws&rel=assets%2Fcustom.woff2&t=tok")',
     )
     expect(fontsAdd).toHaveBeenCalledWith(created[0])
     const specimen = wrapper.find('.fontp-specimen')

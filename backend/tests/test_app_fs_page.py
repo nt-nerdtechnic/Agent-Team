@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_team_backend import app as app_module
+from agent_team_backend import ws_auth
 from agent_team_backend.app import app
 
 
@@ -44,8 +45,57 @@ def _ws_b64(ws) -> str:
     return base64.urlsafe_b64encode(str(ws).encode()).decode().rstrip("=")
 
 
+
+
+@pytest.fixture(autouse=True)
+def ws_token():
+    # The HTTP file routes share the ws token as their credential. Every test
+    # here runs with one issued; the refusal tests then drop or corrupt it.
+    ws_auth._reset_for_test("test-ws-token")
+    yield "test-ws-token"
+    ws_auth._reset_for_test("")
+
+
+def _cap(ws) -> str:
+    return ws_auth.page_capability(_ws_b64(ws))
+
+
 def _get(client, ws, rel, **kwargs):
-    return client.get(f"/fs/page/{_ws_b64(ws)}/{rel}", **kwargs)
+    return client.get(f"/fs/page/{_cap(ws)}/{_ws_b64(ws)}/{rel}", **kwargs)
+
+
+def test_page_without_a_capability_is_refused(client, workspace):
+    # No cap segment at all: the old two-segment shape no longer routes.
+    resp = client.get(f"/fs/page/{_ws_b64(workspace)}/page.html")
+    assert resp.status_code in (403, 404)
+    # A cap segment that is not the capability.
+    resp = client.get(f"/fs/page/not-a-cap/{_ws_b64(workspace)}/page.html")
+    assert resp.status_code == 403
+
+
+def test_page_capability_is_scoped_to_its_workspace(client, workspace, tmp_path):
+    # The cap for A must not open B: if it leaks out of a previewed page it
+    # grants that one workspace, nothing else.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "page.html").write_text("<p>b</p>")
+    resp = client.get(f"/fs/page/{_cap(workspace)}/{_ws_b64(other)}/page.html")
+    assert resp.status_code == 403
+
+
+def test_page_capability_is_not_the_ws_token(client, workspace):
+    # The token itself in the path is exactly what a hostile previewed page
+    # could leak through Referer; the route must not accept it as the cap.
+    resp = client.get(f"/fs/page/test-ws-token/{_ws_b64(workspace)}/page.html")
+    assert resp.status_code == 403
+
+
+def test_page_relative_subresource_inherits_the_capability(client, workspace):
+    # ./sub/style.css from /fs/page/{cap}/{ws}/page.html resolves under the
+    # same cap prefix — the reason the route is path-addressed.
+    resp = _get(client, workspace, "sub/style.css")
+    assert resp.status_code == 200
+    assert resp.text == "h1 { color: red }"
 
 
 def test_page_html_inline_with_csp_sandbox(client, workspace):
@@ -118,13 +168,15 @@ def test_page_path_escape_rejected(client, workspace):
 
 
 def test_page_bad_base64_returns_400(client, workspace):
-    resp = client.get("/fs/page/!!!invalid!!!/style.css")
+    bad = "!!!invalid!!!"
+    resp = client.get(f"/fs/page/{ws_auth.page_capability(bad)}/{bad}/style.css")
     assert resp.status_code == 400
 
 
 def test_page_padded_base64_accepted(client, workspace):
+    # The cap is computed over the segment exactly as sent, padding included.
     padded = base64.urlsafe_b64encode(str(workspace).encode()).decode()
-    resp = client.get(f"/fs/page/{padded}/style.css")
+    resp = client.get(f"/fs/page/{ws_auth.page_capability(padded)}/{padded}/style.css")
     assert resp.status_code == 200
 
 
