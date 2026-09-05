@@ -661,11 +661,24 @@ async def _send_to_device(
         detail = str(error.get("message") or "")
         mapped = _RELAY_ERROR_CODES.get(code, code)
         if mapped in _LINK_STATE_CODES:
+            # The link's own words plus what to do about them. "Not connected"
+            # alone sent an agent looking at the address it typed, when the
+            # address was never the problem — and worse, told it to retry in
+            # the two states where retrying cannot help.
+            state = str(error.get("state") or "")
+            what_to_do = {
+                "unauthorized": "this machine has to sign in to the server again",
+                "unreachable": "the server address is not answering from here",
+                "connecting": "the link is still starting up; this one is worth retrying",
+            }.get(state, "")
             return {
                 "ok": False,
                 "error": f'"{address.to_string()}" could not be reached — '
-                + (detail or code),
+                + (detail or code)
+                + (f". {what_to_do}" if what_to_do else ""),
                 "error_code": mapped,
+                "link_state": state,
+                "last_error": str(error.get("lastError") or ""),
             }
         return {
             "ok": False,
@@ -882,9 +895,16 @@ async def cli_send(
     the message even leaves here, and only the first is about the address:
     "unknown-device" (no server is configured on this machine, so no device but
     this one can be named), "link-offline" (a server is configured but this
-    machine is not connected to it — the address may be perfectly good, retry
-    shortly) and "link-unauthorized" (this machine's server credential was
-    rejected or revoked; retrying cannot help until it is signed in again).
+    machine is not connected to it — the address may be perfectly good) and
+    "link-unauthorized" (this machine's server credential was rejected or
+    revoked; retrying cannot help until it is signed in again).
+
+    The two link errors also carry ``link_state`` and ``last_error``, and the
+    message says what to do: "connecting" is the only one worth retrying,
+    "unreachable" means the address is not answering from here, and
+    "unauthorized" means somebody has to sign in again. Telling all three to
+    retry shortly — which is what this used to do — is advice that works for
+    one of them.
     """
     from agent_team_backend import agent_messaging, app
     from agent_team_backend.ipc import make_event

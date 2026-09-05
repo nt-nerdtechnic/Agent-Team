@@ -440,10 +440,32 @@ class CredentialVault:
     def app_secret_path(self, name: str) -> Path:
         return self._root / _APP_SECRET_DIRNAME / name
 
+    def app_secret_service(self, name: str) -> str:
+        """Keychain service for a backend-owned secret, per data directory.
+
+        The file fallback has always been under ``self._root``; the Keychain
+        name was not, so two backends with different data directories shared one
+        entry and macOS prefers Keychain over the file. Running a dev build
+        beside the installed app therefore overwrote the installed app's
+        Navide-Server token: the next reconnect answered AUTH_REJECTED, the
+        roster collapsed to this machine alone, and the account view went on
+        showing the old account because nothing had told it otherwise.
+
+        The default root keeps the unsuffixed name it already has. That is the
+        whole reason for the branch: suffixing everything would be tidier and
+        would sign out every shipped install exactly once, to fix a collision
+        only a second data directory can cause.
+        """
+        base = _APP_SECRET_SERVICE_PREFIX + name
+        if self._root == Path(canonical_path_str(default_profiles_root())):
+            return base
+        digest = hashlib.sha256(str(self._root).encode("utf-8")).hexdigest()
+        return f"{base}@{digest[:8]}"
+
     def read_app_secret(self, name: str) -> str | None:
         """Read a backend-owned secret, or None when it was never stored."""
         if self._is_macos:
-            secret = self._keychain_read(_APP_SECRET_SERVICE_PREFIX + name)
+            secret = self._keychain_read(self.app_secret_service(name))
             if secret is not None:
                 return secret
         return _read_text(self.app_secret_path(name))
@@ -454,11 +476,11 @@ class CredentialVault:
         line."""
         if secret is None:
             if self._is_macos:
-                self._keychain_delete(_APP_SECRET_SERVICE_PREFIX + name)
+                self._keychain_delete(self.app_secret_service(name))
             self.app_secret_path(name).unlink(missing_ok=True)
             return
         if self._is_macos:
-            self._keychain_write(_APP_SECRET_SERVICE_PREFIX + name, secret)
+            self._keychain_write(self.app_secret_service(name), secret)
             # A leftover file from a run on another platform would shadow the
             # Keychain item on the next read.
             self.app_secret_path(name).unlink(missing_ok=True)

@@ -79,8 +79,20 @@ The `pnpm dev` command starts Electron, Vite dev server, and the Python FastAPI 
    ```bash
    pnpm typecheck
    ```
-5. Commit your changes following the [commit format](#commit-format) below.
-6. Push and open a pull request against `main`.
+5. If you touched the cross-device path (`server_link.py`, `remote_roster.py`,
+   `trust_store.py`, or the Navide-Server wire protocol), run the end-to-end
+   check against a local server. The in-process tests use a fake server, so they
+   agree with whatever this repository believes the contract is — including
+   where it is wrong. This one talks to the real thing:
+   ```bash
+   NAVIDE_WS=ws://localhost:8787/ws \
+     uv --project backend run python backend/scripts/verify_server_link.py
+   ```
+
+   > 動到跨裝置那條路徑時必跑。in-process 測試用的是假 server，會照著我們對契約
+   > 的理解回應——包含理解錯的地方；這一支打的是真的對端。
+6. Commit your changes following the [commit format](#commit-format) below.
+7. Push and open a pull request against `main`.
 
 Please fill in the pull request template — include a summary of changes and how you tested them.
 

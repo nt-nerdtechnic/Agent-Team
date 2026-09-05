@@ -7,6 +7,7 @@ import {
   formatRemaining,
   formatResetCountdown,
   initUsage,
+  refreshUsage,
   remainingPercent,
   remainingTier,
   usageFor,
@@ -75,6 +76,28 @@ describe('useUsage store', () => {
     )
     emit('usage.changed', { providers: { claude: snap() } })
     expect(usageFor('claude')?.windows[0].usedPercent).toBe(42)
+  })
+
+  it('scopes usage.refresh to one account, or to every CLI when unscoped', () => {
+    const { backend } = fakeBackend()
+    initUsage(backend as never)
+
+    expect(refreshUsage()).toBe(true)
+    expect(backend.send).toHaveBeenLastCalledWith('usage.refresh', {})
+
+    // A card asks only for its own CLI — the built-in Default row carries no
+    // profile id and addresses the backend's `__default__` slot.
+    expect(refreshUsage('claude', null)).toBe(true)
+    expect(backend.send).toHaveBeenLastCalledWith('usage.refresh', {
+      agentKey: 'claude',
+      slotId: '__default__'
+    })
+
+    expect(refreshUsage('claude', 'p1')).toBe(true)
+    expect(backend.send).toHaveBeenLastCalledWith('usage.refresh', {
+      agentKey: 'claude',
+      slotId: 'p1'
+    })
   })
 
   it('usageFor maps only supported agent keys', () => {

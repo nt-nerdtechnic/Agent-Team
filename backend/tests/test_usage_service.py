@@ -3280,3 +3280,76 @@ async def test_a_second_announcement_clears_a_mark_it_no_longer_owns(
     assert svc.account_snapshots["claude"]["acct-b"]["refreshPending"] is True
     await svc.announce_claude_switch("acct-b", reading=False)
     assert "refreshPending" not in svc.account_snapshots["claude"]["acct-b"]
+
+
+# ── Scoped refresh (one account card's own Refresh button) ──────────────────
+
+
+def test_request_refresh_without_a_provider_clears_every_cooldown():
+    svc = us.UsageService()
+    svc._blocked_until = {"codex": 100.0, ("claude", "__default__"): 200.0}
+
+    svc.request_refresh()
+
+    assert svc._blocked_until == {}
+
+
+def test_request_refresh_for_one_provider_leaves_the_others_waiting():
+    """A card's Refresh must not buy every other CLI a read as a side effect —
+    for Claude that means launching its CLI, which is what the cooldown is
+    there to ration."""
+    svc = us.UsageService()
+    svc._blocked_until = {
+        "codex": 100.0,
+        "kimi": 150.0,
+        ("claude", "__default__"): 200.0,
+    }
+
+    svc.request_refresh("codex")
+
+    assert svc._blocked_until == {"kimi": 150.0, ("claude", "__default__"): 200.0}
+
+
+def test_request_refresh_for_claude_clears_only_the_named_slot():
+    svc = us.UsageService()
+    svc._active_claude_slot = "p1"
+    svc._blocked_until = {
+        "codex": 100.0,
+        ("claude", "__default__"): 200.0,
+        ("claude", "p1"): 300.0,
+    }
+
+    svc.request_refresh("claude", "__default__")
+    assert svc._blocked_until == {"codex": 100.0, ("claude", "p1"): 300.0}
+
+    # No slot named: the active account, the only one the CLI can report on.
+    svc.request_refresh("claude")
+    assert svc._blocked_until == {"codex": 100.0}
+
+
+async def test_usage_refresh_handler_forwards_the_card_scope(monkeypatch):
+    from agent_team_backend import ws_handlers
+
+    calls: list[tuple[str | None, str | None]] = []
+    monkeypatch.setattr(
+        us.service,
+        "request_refresh",
+        lambda provider=None, slot_id=None: calls.append((provider, slot_id)),
+    )
+
+    class _Session:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, message: dict) -> None:
+            self.sent.append(message)
+
+    session = _Session()
+    await ws_handlers.usage_refresh(
+        session, "m1", "usage.refresh", {"agentKey": "claude", "slotId": "p1"}
+    )
+    await ws_handlers.usage_refresh(session, "m2", "usage.refresh", {"agentKey": "codex"})
+    await ws_handlers.usage_refresh(session, "m3", "usage.refresh", {})
+
+    assert calls == [("claude", "p1"), ("codex", None), (None, None)]
+    assert [m["payload"]["ok"] for m in session.sent] == [True, True, True]

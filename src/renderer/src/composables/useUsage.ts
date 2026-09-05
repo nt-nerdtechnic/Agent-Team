@@ -165,12 +165,17 @@ export function setUsageRefreshSec(sec: number): void {
 }
 
 /** Force an immediate re-poll (clears provider cooldowns backend-side).
+ *  With `agentKey` only that provider's cooldown is cleared, so one account
+ *  card can be refreshed without also paying for the others (reading Claude
+ *  boots a whole Claude Code). `slotId` addresses a Claude account slot,
+ *  whose cooldowns are kept per account.
  *  Returns false when there is no connected backend to ask — a caller showing
  *  a "refreshing…" state has nothing to wait for in that case. */
-export function refreshUsage(): boolean {
+export function refreshUsage(agentKey?: string, slotId?: string | null): boolean {
   const b = backend
   if (!b || b.status.value !== 'connected') return false
-  void b.send('usage.refresh', {}).catch(() => {})
+  const scope = agentKey ? { agentKey, slotId: slotId ?? '__default__' } : {}
+  void b.send('usage.refresh', scope).catch(() => {})
   return true
 }
 

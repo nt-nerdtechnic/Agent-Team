@@ -841,8 +841,26 @@ class UsageService:
             self._task = asyncio.create_task(self._run())
         self._wake.set()
 
-    def request_refresh(self) -> None:
-        self._blocked_until.clear()
+    def request_refresh(
+        self, provider: str | None = None, slot_id: str | None = None
+    ) -> None:
+        """Clear read cooldowns and wake the poller.
+
+        Without ``provider`` every cooldown goes — the "re-read every CLI"
+        button. With one, only that provider's cooldown is cleared: the cycle
+        still runs, but providers still inside their cooldown are skipped by
+        ``poll_once`` as usual, so refreshing one account does not pay for a
+        Claude Code launch nobody asked for. ``slot_id`` picks the Claude
+        account slot (Claude's cooldowns are keyed per account); it defaults to
+        the active one, the only slot the CLI can report on."""
+        if provider is None:
+            self._blocked_until.clear()
+        elif provider == "claude":
+            self._blocked_until.pop(
+                ("claude", slot_id or self._active_claude_slot), None
+            )
+        else:
+            self._blocked_until.pop(provider, None)
         self._wake.set()
 
     async def announce_claude_switch(

@@ -1638,3 +1638,68 @@ def test_write_slot_rejects_a_multiline_secret_without_touching_the_item(
 
     assert len(sec.stdin_commands) == writes_before  # never reached `security`
     assert vault.read_slot("claude", "acct1").secret == good
+
+
+# ---- app secrets are per data directory, in Keychain as well as on disk ------
+
+
+def test_two_data_directories_do_not_share_one_keychain_secret(tmp_path):
+    """A dev build beside the installed app must not overwrite its token.
+
+    The file fallback was always under the vault's own root; the Keychain name
+    was not, and on macOS Keychain wins. So the second backend to write clobbered
+    the first, and the symptom appeared somewhere else entirely — AUTH_REJECTED
+    on the next reconnect, a roster holding only this machine, and an account
+    view still naming the account whose token had just been replaced.
+    """
+    sec = FakeSecurity()
+    one = CredentialVault(
+        root=tmp_path / "dir-one",
+        real_home=tmp_path / "home",
+        security_runner=sec,
+        platform="darwin",
+    )
+    two = CredentialVault(
+        root=tmp_path / "dir-two",
+        real_home=tmp_path / "home",
+        security_runner=sec,
+        platform="darwin",
+    )
+    one.write_app_secret("navide-server-token", "tok-installed")
+    two.write_app_secret("navide-server-token", "tok-dev")
+
+    assert one.read_app_secret("navide-server-token") == "tok-installed"
+    assert two.read_app_secret("navide-server-token") == "tok-dev"
+    assert one.app_secret_service("navide-server-token") != two.app_secret_service(
+        "navide-server-token"
+    )
+
+
+def test_the_default_data_directory_keeps_its_existing_keychain_name(tmp_path):
+    """Suffixing every install would sign each one out exactly once, to fix a
+    collision only a second data directory can cause. So the default root keeps
+    the unsuffixed name, and the discriminator is what a *second* root gets."""
+    from agent_team_backend.credential_vault import (
+        _APP_SECRET_SERVICE_PREFIX,
+        default_profiles_root,
+    )
+
+    shipped = CredentialVault(
+        root=default_profiles_root(),
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (1, ""),
+        platform="darwin",
+    )
+    assert shipped.app_secret_service("navide-server-token") == (
+        _APP_SECRET_SERVICE_PREFIX + "navide-server-token"
+    )
+
+    other = CredentialVault(
+        root=tmp_path / "elsewhere",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (1, ""),
+        platform="darwin",
+    )
+    assert other.app_secret_service("navide-server-token").startswith(
+        _APP_SECRET_SERVICE_PREFIX + "navide-server-token@"
+    )
