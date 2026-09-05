@@ -37,6 +37,9 @@ from agent_team_backend import (
 
 from .test_server_link import (  # noqa: F401 - broadcasts is a fixture
     ALLOW_ALL_POLICY,
+    _CONFIRM_KEY,
+    _confirmation,
+    _ws_session,
     PEER,
     FakeConnection,
     FakeServer,
@@ -1989,7 +1992,13 @@ async def test_a_revoke_drops_this_side_of_the_pairing_too():
                 "payload": _pair_frame(PEER, device_pairing.PAIR_REVOKED),
             }
         )
-        await _until(lambda: trust_store.pin_for(PEER.device_id) is None)
+        await _until(
+            lambda: trust_store.pin_for(PEER.device_id) is None
+            and any(
+                n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "revoked"
+                for n in trust_store.notices()
+            )
+        )
 
         assert any(
             n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "revoked"
@@ -2138,7 +2147,13 @@ async def test_a_refusal_from_the_other_side_cancels_and_says_so():
                 "payload": _pair_frame(PEER, device_pairing.PAIR_REJECT),
             }
         )
-        await _until(lambda: device_pairing.get(PEER.device_id) is None)
+        await _until(
+            lambda: device_pairing.get(PEER.device_id) is None
+            and any(
+                n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "refused"
+                for n in trust_store.notices()
+            )
+        )
 
         assert trust_store.pin_for(PEER.device_id) is None
         assert any(
@@ -2933,3 +2948,154 @@ def test_a_keychain_that_stays_shut_settles_instead_of_asking_for_ever(monkeypat
     assert trust_store.transient_lock() is False, "it has settled"
     # And now the way out is offered, because now there is a decision to make.
     assert trust_store.rebuild_locked_store()["rebuilt"] is True
+
+
+# ── One truth about whether this machine is stopped ───────────────────────────
+
+
+async def test_a_rebuild_makes_the_link_settle_who_this_machine_is_again(monkeypatch):
+    """The store and the link each held a copy, and only one of them was reset.
+
+    Reported from a real machine: Start over answered "the trust record was
+    cleared", and the red card stayed exactly as it was — because the card reads
+    `ServerLink._trust_locked`, which is written once during authentication and
+    by nothing else. The store was clean and the link still said stopped.
+
+    Not a display bug: the same field refuses outbound messages, refuses policy
+    writes and gates the roster, so what the person saw was accurate. And that
+    machine's link had not reconnected for hours, so the one thing that rewrites
+    the field was never going to run again on its own.
+
+    **What this test can and cannot see.** `reconfigure()` works on the module's
+    own link, built from real configuration; a test link is not that object and
+    there is no configuration to dial. So the end-to-end "the card goes away"
+    is not reachable from here, and asserting it would mean re-implementing the
+    mechanism inside the test. What is asserted instead is the wiring — that a
+    successful rebuild reconnects, and a refused one does not — with the other
+    half of the chain in the test below.
+    """
+    from agent_team_backend import confirm_token
+
+    # The autouse fixture that installs this lives in the module `_confirmation`
+    # comes from; importing the helper alone is not enough.
+    confirm_token._reset_for_test(_CONFIRM_KEY)
+    calls: list[int] = []
+
+    async def spy() -> None:
+        calls.append(1)
+
+    monkeypatch.setattr(server_link, "reconfigure", spy)
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    link = await _connected(server)
+    try:
+        _lock_the_store()
+        link._trust_locked = trust_store.locked_reason()
+        assert link._trust_locked, "the precondition: the link is showing a stop"
+
+        session = _ws_session()
+        await app.handle_message(session, {
+            "id": "r1",
+            "type": "p2p.trust.rebuild",
+            "payload": {"confirm": _confirmation("p2p.trust.rebuild")},
+        })
+        await _until(lambda: bool(session.websocket.sent))
+
+        assert session.websocket.sent[0].get("payload", {}).get("rebuilt") is True
+        assert trust_store.locked_reason() == ""
+        assert calls, "a rebuild that does not reconnect leaves the link saying stopped"
+    finally:
+        confirm_token._reset_for_test()
+        trust_store._reset_for_test()
+        await link.stop()
+
+
+async def test_a_refused_rebuild_does_not_reconnect(monkeypatch):
+    """Reconnecting is not free — it drops the link and re-authenticates. A
+    request that changed nothing must not cost that."""
+    from agent_team_backend import confirm_token
+
+    confirm_token._reset_for_test(_CONFIRM_KEY)
+    calls: list[int] = []
+
+    async def spy() -> None:
+        calls.append(1)
+
+    monkeypatch.setattr(server_link, "reconfigure", spy)
+    trust_store.load()  # readable, so the rebuild is refused
+    session = _ws_session()
+    try:
+        await app.handle_message(session, {
+            "id": "r2",
+            "type": "p2p.trust.rebuild",
+            "payload": {"confirm": _confirmation("p2p.trust.rebuild")},
+        })
+        await _until(lambda: bool(session.websocket.sent))
+
+        assert session.websocket.sent[0]["error"]["code"] == "NOT_LOCKED"
+        assert not calls
+    finally:
+        confirm_token._reset_for_test()
+
+
+async def test_settling_the_identity_again_is_what_clears_the_stop():
+    """The other half of the chain: reconnecting has to actually help.
+
+    A link carrying the stop, put through the same adoption the `auth.hello`
+    reply triggers, comes out with the stop gone — because adoption is the only
+    writer of that field and it reads the store, which the rebuild cleaned.
+    """
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    link = await _connected(server)
+    try:
+        link._trust_locked = "left over from before the record was rebuilt"
+        config = await link._read_config()
+
+        await link._adopt_member(config, link.member_id or "m1")
+
+        assert link._trust_locked == ""
+        assert link._own_member, "and it names this machine again, from the pin"
+    finally:
+        await link.stop()
+
+
+async def test_a_stop_that_arrives_after_adoption_is_still_recovered(monkeypatch):
+    """The case a conditional reconnect would skip, and the reason there is no
+    condition.
+
+    A store that becomes unreadable *after* a successful adoption leaves the
+    cache empty and the link up — so "only reconnect when the link looks
+    stopped" would do nothing here, and the rebuild would erase the member pin
+    while `_own_member` went on naming it. A machine that looks recovered and
+    answers "yes, that is one of mine" from a record that was deleted.
+    """
+    from agent_team_backend import confirm_token
+
+    confirm_token._reset_for_test(_CONFIRM_KEY)
+    calls: list[int] = []
+
+    async def spy() -> None:
+        calls.append(1)
+
+    monkeypatch.setattr(server_link, "reconfigure", spy)
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    link = await _connected(server)
+    try:
+        # Adopted cleanly, and only then does the record become unreadable.
+        assert link._trust_locked == ""
+        assert link._own_member
+        _lock_the_store()
+
+        session = _ws_session()
+        await app.handle_message(session, {
+            "id": "r3",
+            "type": "p2p.trust.rebuild",
+            "payload": {"confirm": _confirmation("p2p.trust.rebuild")},
+        })
+        await _until(lambda: bool(session.websocket.sent))
+
+        assert session.websocket.sent[0].get("payload", {}).get("rebuilt") is True
+        assert calls, "the link looked fine, and its member pin was just erased"
+    finally:
+        confirm_token._reset_for_test()
+        trust_store._reset_for_test()
+        await link.stop()

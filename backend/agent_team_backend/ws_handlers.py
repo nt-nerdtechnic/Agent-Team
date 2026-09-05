@@ -3518,6 +3518,27 @@ async def p2p_trust_rebuild(
             make_error(msg_id, msg_type, "REBUILD_FAILED", str(err))
         )
         return
+    # Reconnect, rather than clear the stop and call it done.
+    #
+    # The store is only half of it: the link caches the store's answer in
+    # `_trust_locked`, written once during authentication and by nothing else,
+    # and four paths read that cache — message delivery, policy writes, the
+    # roster and the snapshot. A rebuild that only cleared the store left the
+    # card on screen saying the record was unreadable, and cross-device traffic
+    # genuinely still refused, until the link happened to reconnect. On the
+    # machine this was reported from it had not reconnected for hours.
+    #
+    # And clearing the cache alone would be worse than leaving it: the rebuild
+    # erases the member pin too, so `_own_member` would go on naming a pin that
+    # no longer exists — a machine that looks recovered and answers "yes, that
+    # is one of mine" from a record that was deleted. Only re-authenticating
+    # settles both, because `_adopt_member` runs on the `auth.hello` reply and
+    # cannot be invoked without one.
+    #
+    # Unconditional. Getting here means the store was locked, and the case that
+    # a condition would skip — locked *after* a successful adoption, so the
+    # cache is empty and the link is up — is exactly the case that needs it.
+    await server_link.reconfigure()
     # The panel is showing the lock; this is what empties it.
     await _announce_trust_notices()
     await session.send_json(make_response(msg_id, msg_type, result))

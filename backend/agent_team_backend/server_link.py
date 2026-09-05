@@ -983,6 +983,17 @@ class ServerLink:
             # is settled, which is what keeps `_own_device` from ever answering
             # yes on a machine whose identity is in doubt.
             self._own_member = self.member_id
+            # A cache of the store's answer, and the only place it is written.
+            # It needs its own sentence because the one above is about
+            # `_own_member` and nothing else: that field is per credential and
+            # genuinely belongs to the link, while this one is a property of the
+            # store — whether this machine may do cross-device traffic at all.
+            # It lives here because four hot paths read it (message delivery,
+            # policy writes, the roster, the snapshot) and none of them should
+            # touch the Keychain. The cost of caching it is that something has
+            # to refresh it: adoption is the only writer, so anything that
+            # changes the store's answer has to make adoption run again. That is
+            # why `p2p.trust.rebuild` reconnects rather than clearing a string.
             self._trust_locked = ""
         except trust_store.TrustStoreLocked as err:
             # The link stays up: the account view, the roster and the team
