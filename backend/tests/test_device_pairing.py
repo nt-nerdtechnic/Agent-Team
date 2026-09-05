@@ -10,6 +10,7 @@ different key pairs produce the same six digits.
 
 from __future__ import annotations
 
+import contextlib
 import time
 
 import pytest
@@ -152,14 +153,75 @@ def test_only_one_exchange_per_device_at_a_time() -> None:
         )
 
 
+@contextlib.contextmanager
+def _frozen(when: float):
+    """Run the block as if it were *when*. The clock is what these tests are
+    about, so it has to be an input rather than however long the test took."""
+    real = time.time
+    device_pairing.time.time = lambda: when  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        device_pairing.time.time = real  # type: ignore[assignment]
+
+
 def test_a_request_expires_and_stops_being_answerable() -> None:
-    """A request nobody remembers starting must not be confirmable later."""
+    """A request nobody remembers starting must not be confirmable later.
+
+    Driven by ``deadline``, not by ``started_at``: the clock restarts once when
+    the digits appear, and expiry has to follow the clock that is running rather
+    than the one it replaced.
+    """
     pairing = device_pairing.begin("dev-b", device_name="M3")
-    pairing.started_at = time.time() - device_pairing.REQUEST_TTL_S - 1
+    pairing.deadline = time.time() - 1
 
     assert device_pairing.get("dev-b") is None
     with pytest.raises(device_pairing.PairingError):
         device_pairing.confirm("dev-b")
+
+
+def test_an_unanswered_request_still_expires_on_the_original_clock() -> None:
+    """The half that must not get longer. Nobody answered, so nothing was ever
+    on a second screen — a mistaken or hostile request goes away exactly as
+    fast as it did before."""
+    pairing = device_pairing.begin("dev-quiet", device_name="M3")
+
+    assert pairing.deadline == pytest.approx(pairing.started_at + device_pairing.REQUEST_TTL_S)
+    assert pairing.extended is False
+    assert pairing.expired(pairing.started_at + device_pairing.REQUEST_TTL_S + 1)
+
+
+def test_the_clock_restarts_when_the_digits_appear() -> None:
+    """Five minutes from pressing Pair is the wrong window for the thing the
+    initiator is now asked to do: press, walk to the other machine, compare.
+    Most of that window used to run out while there was nothing to compare."""
+    pairing = device_pairing.begin("dev-late", device_name="M3")
+    original = pairing.deadline
+    late = pairing.started_at + device_pairing.REQUEST_TTL_S - 1
+
+    with _frozen(late):
+        device_pairing.accept_response("dev-late", their_key=KEY_B, their_nonce=NONCE_B)
+
+    assert pairing.deadline > original
+    assert pairing.deadline == pytest.approx(late + device_pairing.REQUEST_TTL_S)
+    # Comfortably past the original deadline, and still answerable.
+    assert not pairing.expired(original + 1)
+
+
+def test_the_clock_restarts_once_and_not_per_frame() -> None:
+    """Otherwise a device that keeps sending holds the exchange open for ever,
+    which is not a longer expiry — it is the absence of one."""
+    pairing = device_pairing.accept_request(
+        "dev-chatty", device_name="M4", their_key=KEY_A, their_nonce=NONCE_A
+    )
+    after_first = pairing.deadline
+
+    # Every later frame goes through the same call; none of them may move it.
+    for offset in (60, 120, 240):
+        pairing.extend_once(pairing.started_at + offset)
+
+    assert pairing.deadline == after_first
+    assert pairing.expired(after_first + 1)
 
 
 def test_a_response_out_of_order_is_refused() -> None:

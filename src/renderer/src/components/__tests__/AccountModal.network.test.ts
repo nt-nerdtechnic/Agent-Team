@@ -222,6 +222,12 @@ describe('account modal — your network', () => {
     expect(MODAL.match(/:disabled="!!deciding \|\| !linkReady"/g)?.length).toBe(4)
   })
 
+  it('approving a knock carries a window-minted confirmation, like any policy write', () => {
+    expect(MODAL).toMatch(/withConfirmation\('p2p\.access_requests\.approve', '', \{ key: req\.key \}, req\.key\)/)
+    // ...and the two policy writers bind the document itself.
+    expect(MODAL).toMatch(/withConfirmation\('p2p\.policy\.set', '', \{ policy: doc \}, canonicalJson\(doc\)\)/)
+  })
+
   it('re-reads after every decision, so a row leaves only when it really did', () => {
     expect(MODAL).toMatch(/await props\.backend\.send\(type, args\)[\s\S]{0,60}await loadNetwork\(\)/)
   })
@@ -521,6 +527,27 @@ describe('account modal — your network', () => {
     return MODAL.slice(start, end)
   }
 
+  it('offers no way out at all while the read is still being retried', () => {
+    // The dangerous state, and the one that used to be indistinguishable from a
+    // record that is really gone: a locked keychain, a dismissed authorisation
+    // dialog and a `security` timeout all read the same from here. Offering to
+    // erase every pairing on the strength of one of those is offering to
+    // destroy something nothing is wrong with, so the buttons are not merely
+    // disabled — the whole branch is absent.
+    const locked = lockedMarkup()
+    const transient = locked.slice(
+      locked.indexOf('v-if="trustLockedTransient"'),
+      locked.indexOf('v-else-if="rebuildDone"'),
+    )
+    expect(transient).toContain('settings.p2p.trust.locked-retrying')
+    expect(transient).not.toMatch(/<button/)
+    // Written as one chain, so "not transient" is stated once rather than
+    // repeated on every branch that has to stay in step with it.
+    expect(locked).toMatch(
+      /v-if="trustLockedTransient"[\s\S]*v-else-if="rebuildDone"[\s\S]*v-else-if="rebuildArmed"[\s\S]*<div v-else class="locked-acts">/,
+    )
+  })
+
   it('cannot clear a trust lock in one press', () => {
     // This used to assert the card had no button at all, and that was true
     // until "start over" shipped. The guarantee it was really holding is the
@@ -535,8 +562,10 @@ describe('account modal — your network', () => {
     const locked = lockedMarkup()
     expect(locked).toContain('settings.p2p.trust.locked-body')
 
-    // The resting state arms the decision; it does not take it.
-    const resting = locked.slice(locked.indexOf('v-else class="locked-acts"'))
+    // The resting state — the read has settled, so there is a decision to make.
+    // Anchored on the last branch of the chain, which is the only one reached
+    // when nothing else applies.
+    const resting = locked.slice(locked.indexOf('<div v-else class="locked-acts">'))
     expect(resting).toMatch(/<button/)
     expect(resting.match(/<button/g)).toHaveLength(1)
     expect(resting).toContain('rebuildArmed = true')
@@ -544,6 +573,15 @@ describe('account modal — your network', () => {
 
     // And the only call that actually sends it is behind the cost.
     expect(locked.indexOf('trust.rebuild-warn')).toBeLessThan(locked.indexOf('rebuildTrust()'))
+  })
+
+  it('keeps the gap the layout asks for', () => {
+    // The card sits between the connection card and the directory because the
+    // warning has to be read before the list it makes untrustworthy. The gap is
+    // part of that arrangement, not decoration — it was lost to a parallel edit
+    // once already, without any test noticing.
+    const css = MODAL.slice(MODAL.indexOf('.locked-card {'))
+    expect(css.slice(0, css.indexOf('}'))).toMatch(/margin-bottom:\s*10px/)
   })
 
   it('puts the trust lock between the connection and the directory', () => {
@@ -706,7 +744,7 @@ describe('the unverified-rules notice', () => {
       /async function signPolicyNow\(\)[\s\S]{0,600}send<\{ policy\?: unknown \}>\('p2p\.policy\.get'/,
     )
     expect(MODAL).toMatch(
-      /p2p\.policy\.get[\s\S]{0,800}withConfirmation\('p2p\.policy\.set', '', \{ policy: doc \}\)/,
+      /p2p\.policy\.get[\s\S]{0,800}withConfirmation\('p2p\.policy\.set', '', \{ policy: doc \}, canonicalJson\(doc\)\)/,
     )
   })
 
@@ -740,7 +778,7 @@ describe('what a trust-changing click carries', () => {
     // The backend refuses all six without one, and only a window can obtain it:
     // MCP and the plugin broker hold the same socket and have no path to the
     // key. That is the whole difference the check is drawing.
-    expect(MODAL).toContain("window.agentTeam?.trustConfirm(action, deviceId)")
+    expect(MODAL).toContain("window.agentTeam?.trustConfirm(action, deviceId, subject)")
     for (const action of [
       'p2p.pair.start',
       'p2p.pair.confirm',

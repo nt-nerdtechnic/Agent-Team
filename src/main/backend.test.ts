@@ -120,14 +120,15 @@ describe('the trust-confirmation key', () => {
     } as unknown as Parameters<typeof handConfirmKey>[0])
     const key = writes[0].trim()
 
-    const token = mintTrustConfirmation('p2p.trust.device.approve', 'dev-1')
+    const token = mintTrustConfirmation('p2p.trust.device.approve', 'dev-1', 'subject-1')
     expect(token).not.toBeNull()
     const payload = [
-      'navide/trust-confirm/v1',
+      'navide/trust-confirm/v2',
       token!.nonce,
       token!.expires,
       'p2p.trust.device.approve',
       'dev-1',
+      'subject-1',
     ].join('\u0000')
     expect(token!.mac).toBe(createHmac('sha256', key).update(payload).digest('hex'))
   })
@@ -139,7 +140,9 @@ describe('the trust-confirmation key', () => {
     const approve = mintTrustConfirmation('p2p.trust.device.approve', 'dev-1')!
     const block = mintTrustConfirmation('p2p.trust.block', 'dev-1')!
     const other = mintTrustConfirmation('p2p.trust.device.approve', 'dev-2')!
-    expect(new Set([approve.mac, block.mac, other.mac]).size).toBe(3)
+    const subjectA = mintTrustConfirmation('p2p.policy.set', '', '{"default":"deny"}')!
+    const subjectB = mintTrustConfirmation('p2p.policy.set', '', '{"default":"allow"}')!
+    expect(new Set([approve.mac, block.mac, other.mac, subjectA.mac, subjectB.mac]).size).toBe(5)
     // And a fresh nonce each time, which is what makes one-time use possible.
     expect(approve.nonce).not.toBe(other.nonce)
   })

@@ -1214,7 +1214,8 @@
         "rebuild-warn": "This erases every pairing on this machine. Each of your other devices must be paired again, from both ends. Do this only if you know why the record cannot be read — if you do not, it is worth finding out first.",
         "rebuild-confirm": "Yes, erase and start over",
         "rebuild-cancel": "Keep it stopped",
-        "rebuild-done": "The trust record was cleared. Pair your devices again when you are ready."
+        "rebuild-done": "The trust record was cleared. Pair your devices again when you are ready.",
+        "locked-retrying": "This may be temporary — a locked keychain or a dismissed permission dialog reads the same way from here. It is still being retried; if it clears, nothing was lost."
       },
       "link": {
         "pause": "Turn off",

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { canonicalJson } from '../../../shared/canonicalJson'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { disabledReasonKey } from '../lib/linkStatus'
@@ -1181,7 +1182,9 @@ async function saveP2pPolicy(next: PolicyDocument): Promise<boolean> {
     // a window can obtain one — MCP and the plugin broker hold the same socket
     // and have no path to the key — which is what separates a person editing
     // the rules from an agent being talked into it by a remote peer.
-    const confirm = await window.agentTeam?.trustConfirm('p2p.policy.set', '')
+    // Bound to this exact document (canonical spelling), so the token cannot
+    // be lifted and spent on a different rule set.
+    const confirm = await window.agentTeam?.trustConfirm('p2p.policy.set', '', canonicalJson(next))
     const resp = await props.backend.send<P2pPolicyState>('p2p.policy.set', {
       policy: next,
       confirm,

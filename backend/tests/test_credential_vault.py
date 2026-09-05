@@ -1738,3 +1738,80 @@ def test_the_profiles_root_is_not_what_separates_two_backends(tmp_path, monkeypa
     assert a.app_secret_service("navide-server-token") == b.app_secret_service(
         "navide-server-token"
     )
+
+
+def test_a_transient_keychain_failure_is_not_read_as_signed_out(tmp_path, monkeypatch):
+    """A locked keychain, a dismissed dialog and a `security` timeout all used
+    to come back as None — the same answer as "never stored".
+
+    The two demand opposite responses and cost different amounts to get wrong:
+    reading a transient failure as "nothing" sends the caller down a path that
+    erases real state, while reading a genuine absence as a failure costs one
+    retry. So anything that is not an unambiguous "no such item" raises.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dd"))
+    calls: list[list[str]] = []
+
+    def flaky(args, input_text=None):
+        calls.append(args)
+        return (51, "User interaction is not allowed.")
+
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=flaky,
+        platform="darwin",
+    )
+    with pytest.raises(CredentialVaultError):
+        vault.read_app_secret("navide-device-trust")
+    assert calls, "it did ask the keychain"
+
+
+def test_a_genuine_absence_is_still_just_absent(tmp_path, monkeypatch):
+    """The other direction, so the strictness cannot be "raise on everything":
+    exit code 44 is the keychain saying the item is not there, and a machine
+    that never stored one has to be able to say so."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dd"))
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (44, "could not be found"),
+        platform="darwin",
+    )
+    assert vault.read_app_secret("navide-device-trust") is None
+
+
+def test_a_planted_file_cannot_stand_in_for_the_keychain(tmp_path, monkeypatch):
+    """On macOS the file is never *written* — `write_app_secret` deletes it
+    after every keychain write, so a leftover cannot shadow the real item. A
+    file present on this platform is therefore a leftover from another one or
+    something somebody put there, and reading it was the only thing giving it
+    any authority. There is no MAC because there is nothing to authenticate:
+    the answer is not to read it.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dd"))
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (44, "could not be found"),
+        platform="darwin",
+    )
+    planted = vault.app_secret_path("navide-device-trust")
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text('{"pins":{"attacker":{"approved":true}}}', encoding="utf-8")
+
+    assert vault.read_app_secret("navide-device-trust") is None
+
+
+def test_a_platform_without_a_keychain_still_uses_the_file(tmp_path, monkeypatch):
+    """The file is not dead code — it is the whole story where there is no
+    keychain to prefer over it."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dd"))
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (1, ""),
+        platform="linux",
+    )
+    vault.write_app_secret("navide-server-token", "tok")
+    assert vault.read_app_secret("navide-server-token") == "tok"

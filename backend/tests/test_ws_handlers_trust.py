@@ -61,11 +61,13 @@ def _confirmable():
     confirm_token._reset_for_test()
 
 
-def _confirmation(action: str, device_id: str = "", *, ttl: float = 30.0) -> dict[str, str]:
+def _confirmation(
+    action: str, device_id: str = "", subject: str = "", *, ttl: float = 30.0
+) -> dict[str, str]:
     """What the main process mints, computed the same way it does."""
     nonce = uuid.uuid4().hex
     expires = str(time.time() + ttl)
-    payload = "\x00".join(("navide/trust-confirm/v1", nonce, expires, action, device_id))
+    payload = "\x00".join(("navide/trust-confirm/v2", nonce, expires, action, device_id, subject))
     return {
         "nonce": nonce,
         "expires": expires,
@@ -80,8 +82,20 @@ async def _call(msg_type: str, payload: dict) -> dict:
     one. Tests that care about a *missing* confirmation call _raw instead."""
     if msg_type in _CONFIRMED_ACTIONS and "confirm" not in payload:
         device_id = str(payload.get("deviceId") or "")
-        payload = {**payload, "confirm": _confirmation(msg_type, device_id)}
+        payload = {**payload, "confirm": _confirmation(msg_type, device_id, _subject_of(msg_type, payload))}
     return await _raw(msg_type, payload)
+
+
+def _subject_of(msg_type: str, payload: dict) -> str:
+    """The subject the window binds for each action — mirrors what the modal
+    passes to trustConfirm, and what the handler passes to confirm_token.check."""
+    if msg_type == "p2p.policy.set":
+        return confirm_token.canonical_json(payload.get("policy"))
+    if msg_type == "p2p.access_requests.approve":
+        return str(payload.get("key") or "")
+    if msg_type in ("p2p.trust.block", "p2p.trust.unblock"):
+        return str(payload.get("memberId") or "").strip()
+    return ""
 
 
 async def _raw(msg_type: str, payload: dict) -> dict:
@@ -98,6 +112,7 @@ _CONFIRMED_ACTIONS = {
     "p2p.trust.device.defer",
     "p2p.trust.block",
     "p2p.trust.unblock",
+    "p2p.access_requests.approve",
 }
 
 
@@ -679,6 +694,8 @@ async def test_every_one_of_the_six_is_covered(monkeypatch) -> None:
         ("p2p.trust.device.defer", {"deviceId": "d1"}),
         ("p2p.trust.block", {"deviceId": "d1"}),
         ("p2p.trust.unblock", {"deviceId": "d1"}),
+        # No such key on purpose: the refusal must come before the lookup.
+        ("p2p.access_requests.approve", {"key": "no-such-knock"}),
     ):
         reply = await _raw(action, payload)
         assert reply["ok"] is False, action
@@ -897,3 +914,54 @@ async def test_refusing_a_pairing_needs_a_confirmation_too(monkeypatch) -> None:
 
     assert reply["ok"] is False
     assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+# ---------------------------------------------------------------- subject binding (M6)
+
+
+async def test_a_confirmation_for_one_policy_document_cannot_sign_another(monkeypatch, link) -> None:
+    """The MAC covers the canonical text of the document, not just the action:
+    a token lifted from one save cannot replace the rules with different ones."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    allow_nothing = {"version": 1, "default": "deny", "rules": []}
+    allow_all = {"version": 1, "default": "allow", "rules": []}
+    token = _confirmation("p2p.policy.set", "", confirm_token.canonical_json(allow_nothing))
+
+    swapped = await _raw("p2p.policy.set", {"policy": allow_all, "confirm": token})
+    assert swapped["ok"] is False
+    assert swapped["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+    # Key order and whitespace are not part of the document, so the same rules
+    # spelled differently still match — the binding is to meaning, not bytes.
+    reordered = {"rules": [], "default": "deny", "version": 1}
+    honest = await _raw("p2p.policy.set", {"policy": reordered, "confirm": token})
+    assert honest["ok"] is True, honest
+
+
+async def test_a_confirmation_for_one_knock_cannot_approve_another(monkeypatch) -> None:
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    token = _confirmation("p2p.access_requests.approve", "", "knock-a")
+    reply = await _raw("p2p.access_requests.approve", {"key": "knock-b", "confirm": token})
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+async def test_a_confirmation_to_unblock_one_member_cannot_unblock_another(monkeypatch) -> None:
+    """Unblock by member carries no device, so before the subject binding the
+    device slot was empty and any member id would ride on the same token."""
+    monkeypatch.setattr(app, "broadcast", _quiet)
+    trust_store.load()
+    token = _confirmation("p2p.trust.unblock", "", "member-a")
+    reply = await _raw("p2p.trust.unblock", {"deviceId": "", "memberId": "member-b", "confirm": token})
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+def test_canonical_json_matches_the_renderer_fixture_literally() -> None:
+    """The renderer computes the same string in TypeScript (src/shared/canonicalJson.ts).
+    Both tests pin this one literal; if either side drifts, one of them goes red
+    instead of every policy save quietly refusing."""
+    fixture = {'version': 1, 'default': 'deny', 'rules': [{'to': {'paneName': '審查者', 'workspace': '/w/α'}, 'from': {'deviceId': 'd-1', 'memberId': 'm-1'}, 'action': 'allow'}], 'blocked': [], 'note': 'tab\there "q" \\ /slash\u2028😀\x7f'}
+    assert confirm_token.canonical_json(fixture) == '{"blocked":[],"default":"deny","note":"tab\\there \\"q\\" \\\\ /slash\\u2028\\ud83d\\ude00\\u007f","rules":[{"action":"allow","from":{"deviceId":"d-1","memberId":"m-1"},"to":{"paneName":"\\u5be9\\u67e5\\u8005","workspace":"/w/\\u03b1"}}],"version":1}'

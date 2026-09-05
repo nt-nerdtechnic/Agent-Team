@@ -1698,6 +1698,11 @@ class ServerLink:
             # device list it is about.
             "pairings": self.pairing_rows(),
             "trustLocked": self._trust_locked,
+            # Whether that stop is a read that may succeed next time. The card
+            # says the same thing either way; what waits on this is the offer to
+            # erase everything, which has nothing to erase when the keychain was
+            # merely locked for a moment.
+            "trustLockedTransient": trust_store.transient_lock(),
             # This device first, then by label: the row a user recognises is
             # the one that should not move as other machines come and go.
             "devices": sorted(

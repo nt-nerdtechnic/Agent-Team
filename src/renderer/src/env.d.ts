@@ -174,6 +174,7 @@ declare global {
       trustConfirm: (
         action: string,
         deviceId: string,
+        subject?: string,
       ) => Promise<{ nonce: string; expires: string; mac: string } | null>
       openLegal: (route: LegalRoute) => Promise<{ ok: boolean; error?: string }>
       onSwitchEditorSidebar: (cb: (sidebar: string) => void) => void

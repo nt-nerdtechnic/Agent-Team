@@ -41,7 +41,7 @@ def _confirmable():
     confirm_token._reset_for_test()
 
 
-def _confirmation(action: str, device_id: str = "") -> dict[str, str]:
+def _confirmation(action: str, device_id: str = "", subject: str = "") -> dict[str, str]:
     import hashlib
     import hmac
     import time
@@ -49,7 +49,7 @@ def _confirmation(action: str, device_id: str = "") -> dict[str, str]:
 
     nonce = uuid.uuid4().hex
     expires = str(time.time() + 30.0)
-    payload = "\x00".join(("navide/trust-confirm/v1", nonce, expires, action, device_id))
+    payload = "\x00".join(("navide/trust-confirm/v2", nonce, expires, action, device_id, subject))
     return {
         "nonce": nonce,
         "expires": expires,
@@ -2222,7 +2222,8 @@ async def test_policy_get_and_set_round_trip_through_the_handlers(module_link):
         await app.handle_message(
             session,
             {"id": "s1", "type": "p2p.policy.set",
-             "payload": {"policy": document, "confirm": _confirmation("p2p.policy.set")}},
+             "payload": {"policy": document,
+                         "confirm": _confirmation("p2p.policy.set", subject=confirm_token.canonical_json(document))}},
         )
         reply = session.websocket.sent[1]
         assert reply["ok"] is True
@@ -2246,6 +2247,17 @@ async def test_a_policy_this_build_would_not_honour_never_reaches_the_server(mod
         await _until(lambda: bool(server.opened and server.opened[0].syncs))
         session = _ws_session()
 
+        rejected = {
+            "version": 1,
+            "default": "deny",
+            "rules": [
+                {
+                    "from": {"memberId": "m1", "deviceId": ""},
+                    "to": {"workspace": "*", "paneName": "*"},
+                    "action": "allow",
+                }
+            ],
+        }
         await app.handle_message(
             session,
             {
@@ -2254,20 +2266,10 @@ async def test_a_policy_this_build_would_not_honour_never_reaches_the_server(mod
                 # An empty deviceId is exactly what a rule the delivery path
                 # would silently skip looks like.
                 "payload": {
-                    "policy": {
-                        "version": 1,
-                        "default": "deny",
-                        "rules": [
-                            {
-                                "from": {"memberId": "m1", "deviceId": ""},
-                                "to": {"workspace": "*", "paneName": "*"},
-                                "action": "allow",
-                            }
-                        ],
-                    },
+                    "policy": rejected,
                     # Present and valid, so what this test refuses is the rule
                     # rather than the missing confirmation.
-                    "confirm": _confirmation("p2p.policy.set"),
+                    "confirm": _confirmation("p2p.policy.set", subject=confirm_token.canonical_json(rejected)),
                 },
             },
         )
@@ -2284,7 +2286,8 @@ async def test_writing_a_policy_with_no_server_says_so_instead_of_failing_silent
     await app.handle_message(
         session,
         {"id": "s1", "type": "p2p.policy.set",
-         "payload": {"policy": _allow_own_devices(), "confirm": _confirmation("p2p.policy.set")}},
+         "payload": {"policy": (doc := _allow_own_devices()),
+                     "confirm": _confirmation("p2p.policy.set", subject=confirm_token.canonical_json(doc))}},
     )
     reply = session.websocket.sent[0]
     assert reply["ok"] is False

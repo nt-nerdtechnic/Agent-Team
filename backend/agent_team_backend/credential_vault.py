@@ -484,11 +484,30 @@ class CredentialVault:
         return _APP_SECRET_SERVICE_PREFIX + name + self._app_secret_suffix()
 
     def read_app_secret(self, name: str) -> str | None:
-        """Read a backend-owned secret, or None when it was never stored."""
+        """Read a backend-owned secret, or None when it was never stored.
+
+        **Strict, and on macOS the file is not a fallback.** Both halves of that
+        sentence were the other way round, and together they made one hole.
+
+        Strict, because a locked keychain, a dismissed authorisation dialog and
+        a ``security`` timeout all used to come back as ``None`` — the same
+        answer as "never stored". A caller cannot tell those apart and the two
+        demand opposite responses: one is "wait and try again", the other is
+        "this machine has nothing". The two misreadings do not cost the same
+        either, which is what settles the direction: reading a transient failure
+        as "nothing" sends a caller down a path that erases real state, while
+        reading a genuine absence as a failure costs one retry. Anything that is
+        not an unambiguous "no such item" is therefore a failure.
+
+        And on macOS the file is not consulted at all, because on macOS the file
+        is never *written*: ``write_app_secret`` deletes it after every Keychain
+        write, precisely so a leftover cannot shadow the real item. A file
+        present on this platform is therefore a leftover from another one or
+        something somebody put there — never content this program authenticated.
+        Reading it was the only thing giving it any authority.
+        """
         if self._is_macos:
-            secret = self._keychain_read(self.app_secret_service(name))
-            if secret is not None:
-                return secret
+            return self._keychain_read(self.app_secret_service(name), strict=True)
         return _read_text(self.app_secret_path(name))
 
     def write_app_secret(self, name: str, secret: str | None) -> None:

@@ -376,7 +376,7 @@ describe('recovering from a locked trust store', () => {
     expect(
       (window as unknown as { agentTeam: { trustConfirm: ReturnType<typeof vi.fn> } })
         .agentTeam.trustConfirm,
-    ).toHaveBeenCalledWith('p2p.trust.rebuild', '')
+    ).toHaveBeenCalledWith('p2p.trust.rebuild', '', '')
   })
 
   it('backing out leaves the lock in place', async () => {

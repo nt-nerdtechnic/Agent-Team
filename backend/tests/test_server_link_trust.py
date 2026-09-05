@@ -2571,13 +2571,15 @@ async def test_the_responder_completes_when_that_answer_arrives():
                 ),
             }
         )
-        await _until(lambda: trust_store.pin_for("dev-answers") is not None)
+        await _until(
+            lambda: trust_store.pin_for("dev-answers") is not None
+            and any(
+                n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "paired"
+                for n in trust_store.notices()
+            )
+        )
 
         assert trust_store.pin_for("dev-answers")["approved"] is True
-        assert any(
-            n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "paired"
-            for n in trust_store.notices()
-        ), "the person who pressed Allow has to be told it worked"
         # And this side does not answer the answer. Only the initiator replies,
         # so the handshake carries exactly one confirm from each machine.
         assert len(_confirms_sent(conn, sent_before)) == 1
@@ -2861,3 +2863,73 @@ def test_a_rebuilt_store_can_pair_again() -> None:
         "dev-after-rebuild", sign_key=key, member_id="m1", own_member_id="m1"
     ) is True
     assert trust_store.pin_for("dev-after-rebuild") is not None
+
+
+# ── A read that failed once is not a record that is gone ─────────────────────
+
+
+class _FlakyVault:
+    """A vault whose reads fail a fixed number of times, then work."""
+
+    def __init__(self, real, failures: int) -> None:
+        self._real = real
+        self._left = failures
+
+    def read_app_secret(self, name: str):
+        if self._left > 0:
+            self._left -= 1
+            raise RuntimeError("User interaction is not allowed")
+        return self._real.read_app_secret(name)
+
+    def __getattr__(self, item):
+        return getattr(self._real, item)
+
+
+def _with_flaky_vault(monkeypatch, failures: int) -> None:
+    trust_store.load()          # make sure a real record exists to come back to
+    trust_store._state = None
+    # One instance, not one per call: `_vault()` is called on every read, and a
+    # fresh wrapper each time would reset the failure budget and never recover —
+    # the test would then pass against code that never retried at all.
+    flaky = _FlakyVault(trust_store._vault(), failures)
+    monkeypatch.setattr(trust_store, "_vault", lambda: flaky)
+
+
+def test_one_failed_read_does_not_settle_into_a_lock(monkeypatch) -> None:
+    """The whole point. A locked keychain, a dismissed authorisation dialog and
+    a `security` timeout all arrive here identically, and none of them says
+    anything about the record — it used to latch on the first one and stay
+    locked until the process restarted."""
+    _with_flaky_vault(monkeypatch, failures=1)
+
+    assert trust_store.locked_reason() != ""
+    assert trust_store.transient_lock() is True
+
+    # The next read gets through, and the store is simply fine.
+    assert trust_store.locked_reason() == ""
+    assert trust_store.transient_lock() is False
+    assert trust_store.load()["pins"] == {}
+
+
+def test_start_over_is_refused_while_it_is_still_retrying(monkeypatch) -> None:
+    """The dangerous half: that button erases every pairing, and on a keychain
+    that was locked for a moment there is nothing wrong to erase."""
+    _with_flaky_vault(monkeypatch, failures=1)
+    assert trust_store.locked_reason() != ""
+
+    with pytest.raises(trust_store.TrustStoreNotLocked):
+        trust_store.rebuild_locked_store()
+
+
+def test_a_keychain_that_stays_shut_settles_instead_of_asking_for_ever(monkeypatch) -> None:
+    """Retrying without a limit means shelling out to `security` on every trust
+    operation — which on a locked keychain is another authorisation dialog. A
+    machine that will not stop asking is its own failure."""
+    _with_flaky_vault(monkeypatch, failures=trust_store.TRANSIENT_RETRY_LIMIT + 5)
+
+    for _ in range(trust_store.TRANSIENT_RETRY_LIMIT):
+        assert trust_store.locked_reason() != ""
+
+    assert trust_store.transient_lock() is False, "it has settled"
+    # And now the way out is offered, because now there is a decision to make.
+    assert trust_store.rebuild_locked_store()["rebuilt"] is True

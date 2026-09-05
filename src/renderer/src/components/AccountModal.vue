@@ -10,6 +10,7 @@
 // (server_link.DEFAULT_SERVER_URL). A typo'd address used to produce a link
 // that silently never dialled, and there was no correct value a user could
 // have discovered on their own.
+import { canonicalJson } from '../../../shared/canonicalJson'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { LegalRoute } from '../../../shared/legalLinks'
@@ -234,6 +235,9 @@ interface NetworkSnapshot {
    * an attacker who deleted that state wants next.
    */
   trustLocked?: string
+  /** True when that stop is a read that may succeed next time — the offer to
+   *  erase everything waits on this being false. */
+  trustLockedTransient?: boolean
 }
 
 /** The four the server defines; anything else is shown as the server spelled it. */
@@ -410,6 +414,10 @@ async function refresh(): Promise<void> {
 const trustNotices = computed<TrustNotice[]>(() => network.value?.trustNotices ?? [])
 const trustPending = computed<PendingDevice[]>(() => network.value?.trustPending ?? [])
 const trustLocked = computed(() => network.value?.trustLocked ?? '')
+/** The stop is a read that may succeed on the next try. Same card, but no offer
+ *  to erase everything: a keychain locked for a moment has nothing wrong with
+ *  it to erase, and that offer is the one act here nobody can undo. */
+const trustLockedTransient = computed(() => network.value?.trustLockedTransient === true)
 /** Two clicks, not one: the first only reveals what the second costs. A single
  *  button beside an explanation of a lock is a button people press to make the
  *  red text go away. */
@@ -564,8 +572,9 @@ async function withConfirmation(
   action: string,
   deviceId: string,
   payload: Record<string, unknown> = {},
+  subject = '',
 ): Promise<Record<string, unknown>> {
-  const confirm = await window.agentTeam?.trustConfirm(action, deviceId)
+  const confirm = await window.agentTeam?.trustConfirm(action, deviceId, subject)
   // Sent through even when null: the backend's refusal names the reason, and
   // inventing a different one here would hide it.
   return { ...payload, confirm }
@@ -816,8 +825,12 @@ async function decide(key: string, type: string, args: Record<string, unknown>):
   }
 }
 
-function approveRequest(req: AccessRequest): void {
-  void decide(req.key, 'p2p.access_requests.approve', { key: req.key })
+async function approveRequest(req: AccessRequest): Promise<void> {
+  await decide(
+    req.key,
+    'p2p.access_requests.approve',
+    await withConfirmation('p2p.access_requests.approve', '', { key: req.key }, req.key),
+  )
 }
 
 function dismissRequest(req: AccessRequest): void {
@@ -860,7 +873,7 @@ function unblock(entry: BlockedEntry): void {
       await withConfirmation('p2p.trust.unblock', entry.deviceId, {
         deviceId: entry.deviceId,
         memberId: entry.memberId,
-      }),
+      }, entry.memberId),
     ))()
 }
 
@@ -1013,7 +1026,7 @@ async function signPolicyNow(): Promise<void> {
     const doc = usingDefault ? { version: 1, default: 'deny', rules: [] } : held
     const resp = await props.backend.send(
       'p2p.policy.set',
-      await withConfirmation('p2p.policy.set', '', { policy: doc }),
+      await withConfirmation('p2p.policy.set', '', { policy: doc }, canonicalJson(doc)),
     )
     if (!resp.ok) {
       policySignError.value = resp.error?.message ?? t('account.err-generic')
@@ -1673,7 +1686,10 @@ onUnmounted(() => {
             <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
             <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>
             <p class="hint">{{ trustLocked }}</p>
-            <p v-if="rebuildDone" class="hint ok-text">
+            <p v-if="trustLockedTransient" class="hint locked-warn">
+              {{ t('settings.p2p.trust.locked-retrying') }}
+            </p>
+            <p v-else-if="rebuildDone" class="hint ok-text">
               {{ t('settings.p2p.trust.rebuild-done') }}
             </p>
             <template v-else-if="rebuildArmed">
@@ -2147,7 +2163,11 @@ input:focus {
 .fp dt { color: var(--text-secondary); }
 .fp dd { margin: 0; }
 .fp code { font-size: 12px; letter-spacing: 0.04em; }
-.locked-card { border-color: var(--danger-fg); }
+/* It sits between the connection card and the directory — the position the
+   warning has to be read from — so it needs the same gap the connection card
+   carries. Restored: the rule was written when the card moved there and was
+   lost to a parallel edit before it reached any commit. */
+.locked-card { border-color: var(--danger-fg); margin-bottom: 10px; }
 .req { padding: 8px 0; border-bottom: 1px solid var(--border-muted); }
 .req:last-child { border-bottom: none; }
 .req:first-child { padding-top: 0; }

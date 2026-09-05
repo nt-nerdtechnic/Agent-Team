@@ -3119,9 +3119,14 @@ async def p2p_policy_set(session: "Session", msg_id: str, msg_type: str, payload
     # No device in this one, so "" is what the confirmation is bound to. It
     # still binds the action, which is what stops a token minted to approve a
     # device being spent to replace the rules.
-    if not await _confirmed(session, msg_id, msg_type, payload):
-        return
+    # Bound to the document as sent: a confirmation minted to sign one rule set
+    # cannot be spent on another. The window canonicalises the same object it
+    # then sends, so the two spellings meet here.
     policy = payload.get("policy")
+    if not await _confirmed(
+        session, msg_id, msg_type, payload, subject=confirm_token.canonical_json(policy)
+    ):
+        return
     problem = pane_policy.validate(policy) or device_trust.validate_blocked(policy)
     if problem:
         await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", problem))
@@ -3194,8 +3199,17 @@ async def p2p_access_requests_approve(
     The grant is as narrow as the knock was — this member, this device, this
     workspace, this pane. Widening it to a wildcard is an edit the user makes
     in the editor, where they can see what they are widening.
+
+    Guarded like ``policy.set`` because it *is* a policy write: an allow rule
+    for a remote sender, minus the editor. Checked before the key is looked
+    up, so a socket without a confirmation learns nothing about which knocks
+    are waiting. Bound to the knock's key rather than a device: the key names
+    member, device, workspace and pane at once, so a confirmation minted for
+    one knock cannot approve another.
     """
     key = str(payload.get("key") or "")
+    if not await _confirmed(session, msg_id, msg_type, payload, subject=key):
+        return
     request = next((r for r in server_link.access_requests() if r["key"] == key), None)
     if request is None:
         await session.send_json(
@@ -3281,7 +3295,13 @@ async def p2p_trust_notices_dismiss(
 
 
 async def _confirmed(
-    session: "Session", msg_id: str, msg_type: str, payload: dict, *, device_id: str = ""
+    session: "Session",
+    msg_id: str,
+    msg_type: str,
+    payload: dict,
+    *,
+    device_id: str = "",
+    subject: str = "",
 ) -> bool:
     """Whether this trust-changing request carries a live confirmation.
 
@@ -3293,7 +3313,9 @@ async def _confirmed(
     spent to block another. See ``confirm_token`` for what this is for — it is
     the MCP and plugin paths, not a process running as this user.
     """
-    reason = confirm_token.check(payload.get("confirm"), action=msg_type, device_id=device_id)
+    reason = confirm_token.check(
+        payload.get("confirm"), action=msg_type, device_id=device_id, subject=subject
+    )
     if not reason:
         return True
     log.warning("refusing %s: %s", msg_type, reason)
@@ -3517,7 +3539,9 @@ async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payloa
             make_error(msg_id, msg_type, "BAD_REQUEST", "block needs a deviceId or a memberId")
         )
         return
-    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
+    if not await _confirmed(
+        session, msg_id, msg_type, payload, device_id=device_id, subject=member_id
+    ):
         return
     entry = {
         "deviceId": device_id,
@@ -3564,7 +3588,9 @@ async def p2p_trust_unblock(session: "Session", msg_id: str, msg_type: str, payl
         )
         return
 
-    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
+    if not await _confirmed(
+        session, msg_id, msg_type, payload, device_id=device_id, subject=member_id
+    ):
         return
 
     def drop_block(policy: dict) -> None:

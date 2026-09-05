@@ -96,13 +96,48 @@ class Pairing:
     our_nonce: str
     their_nonce: str = ""
     started_at: float = field(default_factory=time.time)
+    #: When this exchange stops being answerable. Initialised to
+    #: ``started_at + REQUEST_TTL_S`` and moved once — see ``extend_once``.
+    #:
+    #: Deliberately one field rather than a start time and a flag that
+    #: ``expired`` has to combine: the question "is this still answerable" has
+    #: one answer, and two time values compared at the point of asking is the
+    #: shape the next off-by-one comes in.
+    deadline: float = 0.0
+    #: Whether the clock has already been restarted. Once, not per frame: a
+    #: relay that keeps sending could otherwise hold an exchange open for ever.
+    extended: bool = False
     #: Set once this side's person has said the digits match.
     we_confirmed: bool = False
     #: Set when their ``pair-confirm`` arrives.
     peer_confirmed: bool = False
 
+    def __post_init__(self) -> None:
+        if not self.deadline:
+            self.deadline = self.started_at + REQUEST_TTL_S
+
     def expired(self, now: float | None = None) -> bool:
-        return (now or time.time()) - self.started_at > REQUEST_TTL_S
+        return (now or time.time()) > self.deadline
+
+    def extend_once(self, now: float) -> None:
+        """Restart the clock when the digits first become displayable here.
+
+        Five minutes from *pressing Pair* is the wrong window for the thing the
+        initiator is now asked to do. It has to press, walk to the other
+        machine, and compare — and the old clock was already running through the
+        part where there was nothing to compare yet. Restarting when the SAS
+        appears gives the comparison its own full window; a request nobody
+        answers still expires on the original one, so a mistaken or hostile
+        request does not sit on somebody's screen any longer than before.
+
+        Once. Extending per frame would let a device that keeps sending hold the
+        exchange open indefinitely, which is a denial of the expiry rather than
+        a longer one.
+        """
+        if self.extended:
+            return
+        self.extended = True
+        self.deadline = now + REQUEST_TTL_S
 
 
 _pairings: dict[str, Pairing] = {}
@@ -269,6 +304,13 @@ def accept_request(device_id: str, *, device_name: str, their_key: str, their_no
             our_nonce=new_nonce(),
             their_nonce=their_nonce,
         )
+        # Both ends restart the clock when the digits appear on *their* screen,
+        # and the person who has to walk over exists at either end. For this one
+        # the two moments coincide — the request arrives with their nonce, so
+        # the SAS is displayable the instant the exchange exists — but going
+        # through the same call is what keeps the rule in one place instead of
+        # being an argument about why one side does not need it.
+        pairing.extend_once(now)
         _pairings[device_id] = pairing
         return pairing
 
@@ -292,6 +334,10 @@ def accept_response(device_id: str, *, their_key: str, their_nonce: str) -> Pair
         pairing.their_key = pairing.their_key or their_key
         pairing.their_nonce = their_nonce
         pairing.state = STATE_AWAITING_LOCAL
+        # The moment this side has six digits to show. Not "they confirmed" —
+        # that is a different event and a later one, and by then the window this
+        # restarts is the one already running.
+        pairing.extend_once(time.time())
         return pairing
 
 
