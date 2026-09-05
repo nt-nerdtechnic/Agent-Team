@@ -3442,6 +3442,43 @@ async def p2p_trust_device_unpair(
     await session.send_json(make_response(msg_id, msg_type, {"removed": removed}))
 
 
+@handler("p2p.trust.rebuild")
+async def p2p_trust_rebuild(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Start the trust record over after it has failed closed.
+
+    The one way out of a lock, and deliberately the only one. Everything about
+    it is shaped by what a lock means: this machine holds a marker saying it
+    once had cross-device trust, and cannot read the record — which is either a
+    real attack (somebody removed the state so the machine would re-pin their
+    keys) or, far more often, a Keychain item this build can no longer open.
+    Nothing here can tell those apart, and neither can the person; what it can
+    do is make sure the choice is theirs.
+
+    So it needs a confirmation token, which is minted in the renderer and
+    nowhere else: an MCP tool, a plugin, or anything else holding this socket
+    cannot perform it, however convincing its argument. And it refuses when the
+    store is healthy — a rebuild costs every pairing on this machine, and a
+    caller that asks for one against a readable store has misunderstood it.
+    """
+    if not await _confirmed(session, msg_id, msg_type, payload):
+        return
+    try:
+        result = await asyncio.to_thread(trust_store.rebuild_locked_store)
+    except trust_store.TrustStoreNotLocked as err:
+        await session.send_json(make_error(msg_id, msg_type, "NOT_LOCKED", str(err)))
+        return
+    except Exception as err:  # noqa: BLE001 - a vault that will not answer is worth saying
+        await session.send_json(
+            make_error(msg_id, msg_type, "REBUILD_FAILED", str(err))
+        )
+        return
+    # The panel is showing the lock; this is what empties it.
+    await _announce_trust_notices()
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
 @handler("p2p.trust.block")
 async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Refuse a device outright, ahead of every rule.
@@ -7040,7 +7077,7 @@ async def agent_msg_list(session: "Session", msg_id: str, msg_type: str, payload
 
 @handler("agent_msg.route")
 async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    from . import app
+    from . import app, message_routing
 
     from_pane_id = str(payload.get("from_pane_id") or "")
     to = str(payload.get("to") or "")
@@ -7061,8 +7098,47 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
         )
         return
 
-    result = agent_messaging.resolve(from_pane_id, to)
-    if result.pane is None:
+    # The same resolver cli_send uses, so one address cannot mean two different
+    # things depending on whether an agent printed a block or called the tool.
+    # It answered "unknown device … not available yet" here for a target the
+    # tool delivered, because cross-device addressing was only ever wired into
+    # the tool (see message_routing).
+    routed = message_routing.route(from_pane_id, to)
+    if routed.remote is not None:
+        # `reply_to` does not travel. The relay frame carries to/sender/text/
+        # msg_key and nothing else (server_link.send_message), so threading a
+        # reply across machines would need a wire field the server and the far
+        # side both understand — a protocol change, not a routing one. The
+        # receiver still mints a correlation id from this msg_key, so the thread
+        # holds on its side; what is lost is the link back to the row on this
+        # one. Said here rather than left to be discovered from a missing field.
+        relayed = await message_routing.relay(
+            routed.remote, content, from_pane_id=from_pane_id, msg_key=msg_key
+        )
+        if relayed is not None:
+            await session.send_json(
+                make_response(
+                    msg_id,
+                    msg_type,
+                    {
+                        "ok": relayed.ok,
+                        "error": relayed.error or None,
+                        "code": relayed.code or None,
+                        "params": {},
+                        # No local pane to report: the window that owns the
+                        # target is on another machine and delivers it there.
+                        "target_display": routed.remote.to_string(),
+                        "target_workspace_path": routed.remote.workspace,
+                        "target_agent_key": "",
+                        "cross_workspace": True,
+                    },
+                )
+            )
+            return
+        # No link configured on this machine: fall through to the answer this
+        # handler gave before, which `route` carried along with the address.
+
+    if routed.pane is None:
         # `code`/`params` let the sending window show the failure in the user's
         # language instead of parsing the English sentence in `error`.
         await session.send_json(
@@ -7071,13 +7147,16 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
                 msg_type,
                 {
                     "ok": False,
-                    "error": result.error or "unresolved",
-                    "code": result.code,
-                    "params": result.params or {},
+                    "error": routed.error or "unresolved",
+                    "code": routed.code or None,
+                    "params": routed.params or {},
                 },
             )
         )
         return
+    result = agent_messaging.ResolveResult(
+        pane=routed.pane, cross_workspace=routed.cross_workspace
+    )
 
     if result.pane.pane_id == from_pane_id:
         await session.send_json(

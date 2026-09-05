@@ -602,91 +602,38 @@ async def cli_open_agent(
     return result
 
 
-# Server-side refusals of messages.send, in the vocabulary the local resolver
-# already uses. DEVICE_OFFLINE stays distinct from "target-offline": one is the
-# whole machine unreachable, the other one window disconnected, and only the
-# second is worth waiting out.
-_RELAY_ERROR_CODES = {
-    "DEVICE_OFFLINE": "device-offline",
-    "NOT_FOUND": "unknown-target",
-    # Minted by the link itself (server_link.LINK_OFFLINE / LINK_UNAUTHORIZED),
-    # not by the server: the message never left this machine. Spelled out rather
-    # than imported to keep this module free of a server_link import at import
-    # time; server_link defines the same two strings.
-    "LINK_OFFLINE": "link-offline",
-    "LINK_UNAUTHORIZED": "link-unauthorized",
-}
-
-# The subset of the above that describes *this machine's* link, not the target.
-# They get a different sentence because "refused" would point the agent at its
-# address when the address was never the problem.
-_LINK_STATE_CODES = frozenset({"link-offline", "link-unauthorized"})
-
-
 async def _send_to_device(
     address: Any, text: str, *, caller: Any, me: str
 ) -> dict[str, Any] | None:
     """Relay a `<device>/<workspace>/<pane>` message through the server link.
 
+    The relay itself is shared with the bare-line path (see message_routing);
+    what is MCP's own is the msg_key bookkeeping that cli_check_message reads
+    back, which exists nowhere else in the backend.
+
     Returns None when there is no link to relay over, so the caller can answer
     the way it always did for an unknown device.
     """
-    from agent_team_backend import agent_messaging, server_link
+    from agent_team_backend import message_routing
 
-    sender = agent_messaging.get(me) if me else None
-    msg_key = f"{me or caller.kind}:mcp:{secrets.token_hex(8)}"
-    reply = await server_link.send_message(
-        to={
-            "deviceId": address.device_id,
-            "workspace": address.workspace,
-            "paneName": address.pane_name,
-        },
-        sender=(
-            {
-                "workspace": sender.workspace_label,
-                "paneName": sender.name,
-                "paneId": sender.pane_id,
-            }
-            if sender
-            else None
-        ),
-        text=text,
-        msg_key=msg_key,
+    origin = me or caller.kind
+    msg_key = f"{origin}:mcp:{secrets.token_hex(8)}"
+    relayed = await message_routing.relay(
+        address, text, from_pane_id=me, msg_key=msg_key
     )
-    if reply is None:
+    if relayed is None:
         return None
-    if not reply.get("ok"):
-        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
-        code = str(error.get("code") or "SEND_FAILED")
-        detail = str(error.get("message") or "")
-        mapped = _RELAY_ERROR_CODES.get(code, code)
-        if mapped in _LINK_STATE_CODES:
-            # The link's own words plus what to do about them. "Not connected"
-            # alone sent an agent looking at the address it typed, when the
-            # address was never the problem — and worse, told it to retry in
-            # the two states where retrying cannot help.
-            state = str(error.get("state") or "")
-            what_to_do = {
-                "unauthorized": "this machine has to sign in to the server again",
-                "unreachable": "the server address is not answering from here",
-                "connecting": "the link is still starting up; this one is worth retrying",
-            }.get(state, "")
-            return {
-                "ok": False,
-                "error": f'"{address.to_string()}" could not be reached — '
-                + (detail or code)
-                + (f". {what_to_do}" if what_to_do else ""),
-                "error_code": mapped,
-                "link_state": state,
-                "last_error": str(error.get("lastError") or ""),
-            }
-        return {
+    if not relayed.ok:
+        answer: dict[str, Any] = {
             "ok": False,
-            "error": f'sending to "{address.to_string()}" was refused ({code})'
-            + (f": {detail}" if detail else ""),
-            "error_code": mapped,
+            "error": relayed.error,
+            "error_code": relayed.code,
         }
-    _record_message_sent(msg_key, address.to_string(), me or caller.kind, text)
+        if relayed.code in message_routing.LINK_STATE_CODES:
+            answer["link_state"] = relayed.link_state
+            answer["last_error"] = relayed.last_error
+        return answer
+    _record_message_sent(msg_key, address.to_string(), origin, text)
     return {
         "ok": True,
         "target": address.to_string(),
@@ -906,7 +853,7 @@ async def cli_send(
     retry shortly — which is what this used to do — is advice that works for
     one of them.
     """
-    from agent_team_backend import agent_messaging, app
+    from agent_team_backend import agent_messaging, app, message_routing
     from agent_team_backend.ipc import make_event
 
     try:
@@ -943,36 +890,26 @@ async def cli_send(
                 "error_code": result.code or "unknown-pane-id",
             }
     else:
-        address = agent_messaging.parse_target(to)
-        if address.device_id and not agent_messaging.is_local_device(address.device_id):
-            relayed = await _send_to_device(address, text, caller=caller, me=me)
+        # The resolution order lives in message_routing, shared with the
+        # bare-line path so the two cannot answer the same address differently.
+        routed = message_routing.route(me, to)
+        if routed.remote is not None:
+            relayed = await _send_to_device(routed.remote, text, caller=caller, me=me)
             # None means no server was ever configured on this machine; falling
             # through leaves the answer exactly what it was before cross-device
             # addressing existed. A configured-but-unreachable server does not come
             # back as None — it answers "link-offline" above.
             if relayed is not None:
                 return await _with_delivery_wait(relayed, wait_s)
-
-        result = agent_messaging.resolve(me, to)
-        if result.pane is None:
-            # Only now is the leading segment reconsidered as a device *name*. A
-            # target that resolves on this machine never reaches here, so naming a
-            # laptop after a folder can never redirect an address that works today
-            # (see agent_messaging.parse_remote_target). With no server configured
-            # the roster is empty and this is a no-op, leaving the answer below
-            # exactly what it always was.
-            remote = agent_messaging.parse_remote_target(to)
-            if remote.error:
-                return {"ok": False, "error": remote.error, "error_code": remote.code}
-            if remote.address is not None:
-                relayed = await _send_to_device(remote.address, text, caller=caller, me=me)
-                if relayed is not None:
-                    return await _with_delivery_wait(relayed, wait_s)
+        if routed.pane is None:
             return {
                 "ok": False,
-                "error": result.error or f'unknown target "{to}"',
-                "error_code": result.code or "unknown-target",
+                "error": routed.error or f'unknown target "{to}"',
+                "error_code": routed.code or "unknown-target",
             }
+        result = agent_messaging.ResolveResult(
+            pane=routed.pane, cross_workspace=routed.cross_workspace
+        )
     if me and result.pane.pane_id == me:
         return {"ok": False, "error": "that is your own pane"}
 

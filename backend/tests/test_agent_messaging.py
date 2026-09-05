@@ -396,8 +396,8 @@ def test_this_device_segment_also_carries_an_absolute_workspace_path() -> None:
 
 
 def test_unknown_device_is_reported_apart_from_unknown_target() -> None:
-    """A foreign device may well be the right address — it just cannot be
-    looked up here — so it must not read as "that pane does not exist"."""
+    """A foreign device may well be the right address — this registry simply has
+    no way to reach it — so it must not read as "that pane does not exist"."""
     _seed_two_workspaces()
     result = agent_messaging.resolve("p1", f"{FOREIGN_DEVICE}/beta/reviewer")
     assert result.pane is None
@@ -406,7 +406,12 @@ def test_unknown_device_is_reported_apart_from_unknown_target() -> None:
         "device": FOREIGN_DEVICE,
         "to": f"{FOREIGN_DEVICE}/beta/reviewer",
     }
-    assert "roster" in result.error
+    # It used to say the roster was "not available yet", written before the
+    # roster existed and left there after it was added. Every caller that can
+    # relay now does so before this is shown, so the only way to see it is to
+    # have no link at all — and that is what it has to say.
+    assert "not linked to a Navide-Server" in result.error
+    assert "not available yet" not in result.error
     assert agent_messaging.resolve("p1", "beta/nobody").code == "unknown-target-in-workspace"
 
 
@@ -1310,3 +1315,243 @@ def test_a_rename_keeps_the_badge_word():
     agent_messaging.register("p1", "reviewer-renamed", "/tmp/proj", agent_key="claude")
     assert agent_messaging.list_panes()[0].display_status == "awaiting"
 
+
+
+async def _noop_broadcast(_event: dict[str, Any], **_kwargs: Any) -> None:
+    """Swallow the deliver broadcast in tests that are about routing, not it."""
+
+
+def _mcp_ctx(pane_id: str) -> Any:
+    """A cli_send caller identified as *pane_id*, the way the MCP URL does."""
+    from types import SimpleNamespace
+
+    from agent_team_backend.mcp_server import wiring as plan_mcp_wiring
+
+    return SimpleNamespace(
+        request_context=SimpleNamespace(
+            request=SimpleNamespace(
+                query_params={"pane": pane_id, "t": plan_mcp_wiring.caller_token()}
+            )
+        )
+    )
+
+
+# ── The bare-line path and cli_send answer one address the same way ──────────
+#
+# They did not. Cross-device addressing was built onto cli_send (8cca3aed) and
+# the device-name roster came later (a0358412); neither touched agent_msg.route,
+# so a `<device>/<ws>/<pane>` target delivered from the tool and answered
+# "unknown device" from a printed block, at the same moment, for the same
+# string. Both now go through message_routing.route, and these are what say so.
+
+
+async def _route(session: Any, to: str, *, content: str = "hi") -> dict[str, Any]:
+    """One bare-line send through the real handler."""
+    await app.handle_message(session, {
+        "id": "r1",
+        "type": "agent_msg.route",
+        "payload": {
+            "from_pane_id": "p1",
+            "to": to,
+            "content": content,
+            "msg_key": "mk1",
+        },
+    })
+    await asyncio.sleep(0)
+    return session.websocket.sent[0]["payload"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_line_block_reaches_another_device(
+    monkeypatch: pytest.MonkeyPatch, remote_roster_clean
+) -> None:
+    """The reported bug: cli_send delivered, the printed block did not."""
+    from agent_team_backend import server_link
+
+    sent: list[dict[str, Any]] = []
+
+    async def fake_send_message(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        return {"ok": True, "payload": {"msgKey": kwargs["msg_key"], "state": "pending"}}
+
+    monkeypatch.setattr(server_link, "send_message", fake_send_message)
+    events: list[dict[str, Any]] = []
+
+    async def fake_broadcast(event: dict[str, Any], **_kwargs: Any) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", fake_broadcast)
+    _seed_two_workspaces()
+
+    payload = await _route(_session(), f"{FOREIGN_DEVICE}/beta/reviewer")
+
+    assert payload["ok"] is True
+    assert payload["target_display"] == f"{FOREIGN_DEVICE}/beta/reviewer"
+    assert payload["cross_workspace"] is True
+    # Relayed, not injected into a pane on this machine.
+    assert events == []
+    assert sent[0]["to"] == {
+        "deviceId": FOREIGN_DEVICE,
+        "workspace": "beta",
+        "paneName": "reviewer",
+    }
+    assert sent[0]["text"] == "hi"
+    # The sender travels with it, or the far side cannot address a reply back.
+    assert sent[0]["sender"]["paneId"] == "p1"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_line_block_reaches_a_device_by_name(
+    monkeypatch: pytest.MonkeyPatch, remote_roster_clean
+) -> None:
+    """The second half of cross-device addressing: a name, resolved through the
+    roster only after the local reading has failed."""
+    from agent_team_backend import server_link
+
+    sent: list[dict[str, Any]] = []
+
+    async def fake_send_message(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        return {"ok": True, "payload": {"msgKey": kwargs["msg_key"], "state": "pending"}}
+
+    monkeypatch.setattr(server_link, "send_message", fake_send_message)
+    monkeypatch.setattr(app, "broadcast", _noop_broadcast)
+    _seed_two_workspaces()
+    _seed_remote()
+
+    payload = await _route(_session(), "laptop-b/beta/reviewer")
+
+    assert payload["ok"] is True
+    assert sent[0]["to"]["deviceId"] == "far-device"
+
+
+@pytest.mark.asyncio
+async def test_a_local_workspace_still_beats_a_device_of_the_same_name(
+    monkeypatch: pytest.MonkeyPatch, remote_roster_clean
+) -> None:
+    """The invariant a shared resolver must not lose: a target that resolves on
+    this machine never reaches the roster, so naming a laptop after a folder
+    cannot move an address that works today."""
+    from agent_team_backend import server_link
+
+    async def fail_if_called(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("a local target must never be relayed")
+
+    monkeypatch.setattr(server_link, "send_message", fail_if_called)
+    events: list[dict[str, Any]] = []
+
+    async def fake_broadcast(event: dict[str, Any], **_kwargs: Any) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", fake_broadcast)
+    _seed_two_workspaces()
+    # Two shapes, because they fail differently. A two-segment target is never
+    # read as a device at all; a three-segment one is, but only after the
+    # workspace reading has been tried and failed.
+    agent_messaging.register("p9", "target", "/two/proj")
+    _seed_remote(deviceName="beta", workspace="beta", title="reviewer")
+
+    payload = await _route(_session(), "beta/reviewer")
+
+    assert payload["ok"] is True
+    assert payload["target_pane_id"] == "p3"
+    assert len(events) == 1
+
+    _seed_remote(deviceName="two", workspace="proj", title="target")
+    three = await _route(_session(), "two/proj/target")
+
+    assert three["ok"] is True
+    assert three["target_pane_id"] == "p9"
+    assert len(events) == 2
+
+
+@pytest.mark.asyncio
+async def test_both_paths_refuse_an_ambiguous_device_name_the_same_way(
+    monkeypatch: pytest.MonkeyPatch, remote_roster_clean
+) -> None:
+    """Delivering an instruction to the wrong machine is not something a sender
+    can undo after reading about it — and the two paths must not disagree about
+    which sends are safe."""
+    from agent_team_backend import remote_roster, server_link
+    from agent_team_backend.mcp_server import server as plan_mcp
+
+    async def fail_if_called(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("an ambiguous device must never be relayed")
+
+    monkeypatch.setattr(server_link, "send_message", fail_if_called)
+    monkeypatch.setattr(app, "broadcast", _noop_broadcast)
+    _seed_two_workspaces()
+    remote_roster.replace(
+        [
+            {"sessionId": "s1", "deviceId": "d1", "deviceName": "twin",
+             "workspace": "beta", "title": "reviewer", "status": "idle",
+             "hostOnline": True},
+            {"sessionId": "s2", "deviceId": "d2", "deviceName": "twin",
+             "workspace": "beta", "title": "reviewer", "status": "idle",
+             "hostOnline": True},
+        ],
+        local_device_id="this-device",
+    )
+
+    payload = await _route(_session(), "twin/beta/reviewer")
+    tool = await plan_mcp.cli_send("twin/beta/reviewer", "hi", _mcp_ctx("p1"))
+
+    assert payload["ok"] is False
+    assert payload["code"] == "ambiguous-device"
+    assert tool["ok"] is False
+    assert tool["error_code"] == "ambiguous-device"
+
+
+@pytest.mark.asyncio
+async def test_both_paths_report_an_unreachable_link_the_same_way(
+    monkeypatch: pytest.MonkeyPatch, remote_roster_clean
+) -> None:
+    """A link that is down is not an unknown address, and an agent told the
+    wrong one of those looks in the wrong place."""
+    from agent_team_backend import server_link
+    from agent_team_backend.mcp_server import server as plan_mcp
+
+    async def offline(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": {"code": "LINK_OFFLINE", "message": "not connected",
+                      "state": "unreachable", "lastError": "timed out"},
+        }
+
+    monkeypatch.setattr(server_link, "send_message", offline)
+    monkeypatch.setattr(app, "broadcast", _noop_broadcast)
+    _seed_two_workspaces()
+
+    payload = await _route(_session(), f"{FOREIGN_DEVICE}/beta/reviewer")
+    tool = await plan_mcp.cli_send(f"{FOREIGN_DEVICE}/beta/reviewer", "hi", _mcp_ctx("p1"))
+
+    assert payload["ok"] is False
+    assert payload["code"] == "link-offline"
+    assert tool["error_code"] == "link-offline"
+    # And it is reported at once, in the answer to the send itself.
+    assert payload["error"] and "could not be reached" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_with_no_link_at_all_both_paths_still_say_unknown_device(
+    monkeypatch: pytest.MonkeyPatch, remote_roster_clean
+) -> None:
+    """The no-server regression line. `send_message` returning None means this
+    machine was never configured, and the answer stays what it was before
+    cross-device addressing existed — for both paths."""
+    from agent_team_backend import server_link
+    from agent_team_backend.mcp_server import server as plan_mcp
+
+    async def unconfigured(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(server_link, "send_message", unconfigured)
+    monkeypatch.setattr(app, "broadcast", _noop_broadcast)
+    _seed_two_workspaces()
+
+    payload = await _route(_session(), f"{FOREIGN_DEVICE}/beta/reviewer")
+    tool = await plan_mcp.cli_send(f"{FOREIGN_DEVICE}/beta/reviewer", "hi", _mcp_ctx("p1"))
+
+    assert payload["ok"] is False
+    assert payload["code"] == "unknown-device"
+    assert tool["error_code"] == "unknown-device"
