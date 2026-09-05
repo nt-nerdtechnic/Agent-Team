@@ -2322,8 +2322,24 @@ class ServerLink:
                 # Recorded first, completed second. They may have confirmed
                 # before this side's person did, in which case there is nothing
                 # to finish yet and the card here stays up.
+                #
+                # The role has to be read before completing, because completing
+                # takes the pairing out of the table.
+                was_initiator = bool(existing) and existing.role == device_pairing.ROLE_INITIATOR
                 device_pairing.note_peer_confirmed(device_id)
-                await self._finish_pairing(device_id, member_id=member_id)
+                paired = await self._finish_pairing(device_id, member_id=member_id)
+                if paired and was_initiator:
+                    # And answer. The asymmetry is that the initiator does not
+                    # ask *its own person* a second time — pressing "Pair with…"
+                    # already said what this side wants — not that it stays
+                    # silent. Without this the other machine waits for a confirm
+                    # that never comes: this side pins, that side never does,
+                    # and the two disagree about being paired, which is exactly
+                    # the state the revoke branch below exists to prevent.
+                    #
+                    # It cannot loop. Only the initiator answers, and the side
+                    # receiving this answer is by definition the responder.
+                    await self._send_pair_frame(device_id, device_pairing.PAIR_CONFIRM)
             elif kind == device_pairing.PAIR_REJECT:
                 if device_pairing.cancel(device_id) is not None:
                     await asyncio.to_thread(
@@ -2435,6 +2451,12 @@ class ServerLink:
             # Nothing to confirm on this side. Answering here would be asking
             # the same person the same question twice, and the exchange treats
             # the initiator's intent as already given.
+            #
+            # Defensive only, now: the initiator's card offers "Cancel request"
+            # and nothing else, so no surface in this app reaches here. It stays
+            # because the handler is reachable over the socket by anything
+            # holding a confirmation token, and "the initiator confirms" must
+            # fail loudly rather than half-complete an exchange from one side.
             return {
                 "ok": False,
                 "error": {

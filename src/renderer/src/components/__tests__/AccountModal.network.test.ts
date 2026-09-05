@@ -65,7 +65,10 @@ describe('account modal — your network', () => {
   })
 
   it('renders a row per device with an online dot and a pane count', () => {
-    expect(MODAL).toMatch(/v-for="device in devices"[\s\S]{0,600}deviceLabel\(device\)/)
+    // The window is generous because what sits between the loop and the name
+    // is comment, and this is not the test that pins the row's shape — that is
+    // AccountModal.deviceRow.test.ts, which renders it.
+    expect(MODAL).toMatch(/v-for="device in devices"[\s\S]{0,1400}deviceLabel\(device\)/)
     expect(MODAL).toMatch(/class="dot"\s*:class="device\.online \? 'ok' : 'idle'"/)
     expect(MODAL).toContain('paneCountLabel(device.paneCount)')
     // The label falls back to the id, shortened — a server that sends no
@@ -401,7 +404,7 @@ describe('account modal — your network', () => {
     // without this the only surface offering unpair would be the one a paired
     // device has already left.
     const start = MODAL.indexOf('v-for="device in devices"')
-    const row = MODAL.slice(start, MODAL.indexOf('</div>', MODAL.indexOf('dev-count', start)))
+    const row = MODAL.slice(start, MODAL.indexOf('</div>', MODAL.indexOf('dev-meta', start)))
     expect(row).toContain('unpairDevice(device.deviceId)')
     // Not on this machine's own row: there is no pairing with yourself to undo.
     // Nor on a row still waiting to be vouched for — there is no pin to forget
@@ -930,19 +933,27 @@ describe('a device that is not there', () => {
     // "Waiting for you to vouch" beside a machine that cannot answer reads as
     // an invitation to do something that will not work. Which of the two
     // matters right now is whether it is there at all.
-    // Two axes side by side, not a v-else-if chain: presence answers "is it
-    // there", trust answers "may it drive this machine". Chained, an offline
-    // row lost its trust state entirely, so a paired machine and a stranger
-    // looked identical the moment either went away.
-    expect(LIST).toMatch(/device\.online \? 'is-on' : 'is-off'/)
-    expect(LIST).toContain('settings.p2p.network.device-unreachable')
-    expect(LIST).toMatch(/device-unreachable[\s\S]{0,400}v-if="!device\.isLocal && device\.trustState"/)
+    // Two axes, not a v-else-if chain: presence answers "is it there", trust
+    // answers "may it drive this machine". Chained, an offline row lost its
+    // trust state entirely, so a paired machine and a stranger looked identical
+    // the moment either went away. They are now on two lines rather than side
+    // by side — the trust pill beside the name, presence under it — so what
+    // this holds is that both are still drawn for an offline device.
+    expect(LIST).toMatch(/v-if="!device\.isLocal && device\.trustState"/)
+    expect(LIST).toContain('deviceMeta(device)')
+    // Rendered proof that both survive an offline row, since a slice of source
+    // cannot tell a drawn element from a dead branch: see
+    // AccountModal.deviceRow.test.ts, "gives the name the whole line".
   })
 
   it('says when it was last seen, so offline does not read as gone', () => {
-    // The roster is the server's memory of machines that have signed in.
-    expect(LIST).toContain('device.lastSeenAt')
-    expect(LIST).toContain('settings.p2p.network.last-seen')
+    // The roster is the server's memory of machines that have signed in. The
+    // formatting is in a pure function with its own test; what belongs here is
+    // that the row asks for it at all.
+    expect(MODAL).toContain('device.lastSeenAt')
+    expect(MODAL).toContain('relativeTime(at, Date.now())')
+    // Never the raw value: it printed `Last seen 2026-09-05T02:39:47.539Z`.
+    expect(MODAL).not.toContain("t('settings.p2p.network.last-seen', { when:")
   })
 
   it('offers no pairing button at all — hidden, not disabled', () => {

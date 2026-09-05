@@ -15,6 +15,7 @@ import { useI18n } from 'vue-i18n'
 import type { LegalRoute } from '../../../shared/legalLinks'
 import { linkErrorKey } from '../lib/linkStatus'
 import { usePairingState } from '../composables/usePairingState'
+import { relativeTime } from '../lib/relativeTime'
 import type { useBackend } from '../composables/useBackend'
 
 const props = defineProps<{
@@ -713,6 +714,37 @@ function paneCountLabel(count: number): string {
   if (count === 0) return t('settings.p2p.network.panes-none')
   if (count === 1) return t('settings.p2p.network.panes-one')
   return t('settings.p2p.network.panes', { count })
+}
+
+/**
+ * The second line of a device row.
+ *
+ * A machine that is not there has no current panes to report, so the two cases
+ * say different things: offline rows answer "when was it last here", online
+ * rows "what is it running".
+ */
+function deviceMeta(device: NetworkDevice): string {
+  if (device.isLocal || device.online) return paneCountLabel(device.paneCount)
+  const seen = lastSeenLabel(device.lastSeenAt)
+  const off = t('settings.p2p.network.device-offline')
+  return seen ? `${off} · ${seen}` : off
+}
+
+/** "8 minutes ago", in the window's language — the row printed the ISO string
+ *  the server sent, which is not an answer to "when". */
+function lastSeenLabel(iso: string | undefined): string {
+  const at = iso ? Date.parse(iso) : Number.NaN
+  if (!Number.isFinite(at)) return t('settings.p2p.network.last-seen-unknown')
+  const { unit, count } = relativeTime(at, Date.now())
+  return t(`time.ago-${unit}`, { count })
+}
+
+/** The exact moment, on hover. "8 minutes ago" is the right answer to read and
+ *  the wrong one to compare against a log. */
+function deviceMetaTitle(device: NetworkDevice): string {
+  if (device.isLocal || device.online) return ''
+  const at = device.lastSeenAt ? Date.parse(device.lastSeenAt) : Number.NaN
+  return Number.isFinite(at) ? new Date(at).toLocaleString() : ''
 }
 
 const devices = computed<NetworkDevice[]>(() => network.value?.devices ?? [])
@@ -1612,6 +1644,12 @@ onUnmounted(() => {
                     :class="device.online ? 'ok' : 'idle'"
                     :title="t(device.online ? 'settings.p2p.network.device-online' : 'settings.p2p.network.device-offline')"
                   ></span>
+                  <!-- The one thing on this row a person is looking for, so it
+                       is the one thing allowed to take the space: it stretches,
+                       everything else is its natural width. It used to share a
+                       line with five other elements and was clipped to "M…"
+                       while a two-line sentence about being offline sat beside
+                       it. -->
                   <span class="dev-name">{{ deviceLabel(device) }}</span>
                   <span v-if="device.isLocal" class="dev-tag">
                     {{ t('settings.p2p.network.this-device') }}
@@ -1620,16 +1658,9 @@ onUnmounted(() => {
                        device you had never vouched for looked exactly like one
                        you had — while the card above was asking you to confirm
                        it. Two surfaces, one device, opposite stories. -->
-                  <!-- Two axes, side by side, because they answer different
-                       questions: presence is "is it there", trust is "may it
-                       drive this machine". Chained with v-else-if, an offline
-                       row lost its trust state entirely — so a paired machine
-                       and a stranger looked identical the moment either went
-                       away. -->
-                  <span v-else class="dev-presence" :class="device.online ? 'is-on' : 'is-off'">
-                    {{ t(device.online ? 'settings.p2p.network.device-online'
-                                       : 'settings.p2p.network.device-unreachable') }}
-                  </span>
+                  <!-- Presence moved to the line below. It is a fact that
+                       changes on its own; trust is a decision somebody made,
+                       and only the second one belongs beside the name. -->
                   <span
                     v-if="!device.isLocal && device.trustState"
                     class="dev-tag"
@@ -1637,7 +1668,6 @@ onUnmounted(() => {
                   >
                     {{ t('settings.p2p.trust.state-' + device.trustState) }}
                   </span>
-                  <span class="dev-count">{{ paneCountLabel(device.paneCount) }}</span>
                   <!-- Asking, not granting. This used to pair the other
                        machine outright once you had typed four characters of
                        its fingerprint — one side deciding, the other finding
@@ -1682,10 +1712,11 @@ onUnmounted(() => {
                     {{ t('settings.p2p.trust.unpair') }}
                   </button>
                 </div>
-                <p v-if="!device.isLocal && !device.online" class="hint dev-lastseen">
-                  {{ device.lastSeenAt
-                    ? t('settings.p2p.network.last-seen', { when: device.lastSeenAt })
-                    : t('settings.p2p.network.last-seen-unknown') }}
+                <!-- Second line, small and grey: where the machine is, or what
+                     it is running. Two facts that were competing with the name
+                     for the same row. -->
+                <p class="hint dev-meta" :title="deviceMetaTitle(device)">
+                  {{ deviceMeta(device) }}
                 </p>
                 <ul v-if="device.panes.length" class="panes">
                   <li v-for="pane in device.panes" :key="pane.sessionId" class="pane">
@@ -1974,13 +2005,20 @@ input:focus {
 .dev + .dev { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-muted); }
 .dev-head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 /* The shared .dot carries a margin for the footer status line; here the flex gap does that job. */
-.dev-head .dot { margin-right: 0; }
-.dev-name { color: var(--text-bright); font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-head .dot { margin-right: 0; flex: none; }
+/* The only element allowed to give up space, and the last one that should have
+   to. `min-width: 0` is what lets it shrink at all — a flex item's floor is its
+   content, so without it the name pushes the row wider and the pill wraps. */
+.dev-name {
+  flex: 1 1 auto; min-width: 0;
+  color: var(--text-bright); font-size: 14px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* One capsule shape for every pill. The trust pills were bare coloured text,
    which reads as prose rather than as a state. */
 .dev-tag {
   padding: 1px 6px; border-radius: var(--radius-pill, 999px); font-size: var(--font-3xs);
-  background: var(--bg-inset); color: var(--text-secondary); flex-shrink: 0;
+  background: var(--bg-inset); color: var(--text-secondary); flex: none;
 }
 .dev-count { margin-left: auto; font-size: 11px; color: var(--text-secondary); flex-shrink: 0; }
 .panes { list-style: none; margin: 6px 0 0; padding: 0; }
@@ -2045,11 +2083,9 @@ input:focus {
 .dev-tag.ts-trusted { color: var(--success-fg); }
 .dev-tag.ts-pending { color: var(--attention-fg); }
 .dev-tag.ts-blocked { color: var(--danger-fg); }
-/* Presence is a fact about the network, not a decision anybody made, so it is
-   plain text beside the lamp rather than a third coloured pill. */
-.dev-presence { color: var(--text-secondary); }
-.dev-presence.is-on { color: var(--success-fg); }
-.dev-lastseen { margin: 2px 0 0 14px; font-size: 11.5px; }
+/* Indented to the name above it — dot plus gap — so it reads as that row
+   saying something rather than as a new item. */
+.dev-meta { margin: 2px 0 0 14px; font-size: 11.5px; }
 .solo-guide { margin-top: 4px; }
 .solo-title { margin: 10px 0 4px; font-size: 12px; color: var(--text-primary); font-weight: 500; }
 .solo-steps {
@@ -2063,7 +2099,7 @@ input:focus {
    word with a transparent border, which on a row of text is indistinguishable
    from a label. */
 .dev-review {
-  margin-left: auto;
+  flex: none;
   background: none; border: 1px solid var(--border-default); color: var(--text-secondary);
   font-size: 12px; padding: 2px 8px; border-radius: var(--radius-control, 6px);
   cursor: pointer;
@@ -2076,8 +2112,10 @@ input:focus {
 .dev-undo { color: var(--text-muted, var(--text-secondary)); }
 .dev-undo:hover { color: var(--danger-fg); border-color: var(--danger-fg); }
 /* A real button, unlike the bare text it started as: this one writes trust,
-   and a person has to be able to see that it is something you press. */
-.dev-trust { margin-left: auto; }
+   and a person has to be able to see that it is something you press. It no
+   longer needs an auto margin: the name absorbs the free space, so everything
+   after it is already against the right edge. */
+.dev-trust { flex: none; }
 /* The question the button opens, inside the row it is about. Indented to the
    name above it so it reads as that row saying something, not as a new item. */
 /* Big, because it is read aloud across a desk or over a call — and because two
