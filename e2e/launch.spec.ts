@@ -43,7 +43,7 @@ test.afterAll(async () => {
 })
 
 test('launches and shows the Welcome entry screen', async () => {
-  await expect(page.locator('h1', { hasText: 'Agent-Team' })).toBeVisible({ timeout: 20_000 })
+  await expect(page.locator('h1', { hasText: 'Navide' })).toBeVisible({ timeout: 20_000 })
   await expect(page.getByText('Open Workspace')).toBeVisible()
 })
 

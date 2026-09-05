@@ -96,6 +96,11 @@ The `pnpm dev` command starts Electron, Vite dev server, and the Python FastAPI 
 
 Please fill in the pull request template — include a summary of changes and how you tested them.
 
+CI runs frontend checks and the application/plugin build, macOS backend checks,
+and marketplace registry/contract checks in parallel. The `Lint and test` status
+passes only when all three jobs succeed. CI does not run Electron UI automation;
+test UI changes manually. To reproduce the build check locally, run `pnpm build`.
+
 > Fork 後建立 feature branch，跑測試與型別檢查無誤後，依照下方 commit 格式提交，並開 PR 至 `main`。
 
 ---

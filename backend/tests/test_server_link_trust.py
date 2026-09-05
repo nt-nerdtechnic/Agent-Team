@@ -2454,6 +2454,50 @@ async def test_the_initiator_is_paired_by_the_other_side_alone():
         await link.stop()
 
 
+async def test_a_pairing_row_carries_when_the_exchange_began():
+    """The field the account window tells two requests apart by.
+
+    Nothing else in the payload distinguishes them: a request that expires and
+    is sent again comes back on the same device id, with the same name and the
+    same role. The window keys "later" on `deviceId:startedAt`, and it reads
+    `startedAt` as optional — so dropping it from here would not break a type,
+    it would collapse every key to `deviceId:0` and quietly restore the old
+    behaviour where dismissing one request silenced that machine for good. That
+    failure is invisible from the front end, whose tests build their own rows,
+    which is why the guard belongs on this side.
+    """
+    device_pairing._reset_for_test()
+    asker = Peer("dev-when")
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    server.directory = [asker.session_row()]
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        before = time.time()
+        await conn.push(
+            {
+                "type": "messages.pending",
+                "payload": _pair_frame(
+                    asker,
+                    device_pairing.PAIR_REQUEST,
+                    nonce="bm9uY2U=",
+                    signKey=asker.sign_key,
+                ),
+            }
+        )
+        await _until(lambda: device_pairing.get("dev-when") is not None)
+
+        # Through the snapshot the window actually reads, not just the helper.
+        row = next(
+            r for r in link.network_snapshot()["pairings"] if r["deviceId"] == "dev-when"
+        )
+        assert row["startedAt"] == device_pairing.get("dev-when").started_at
+        assert before <= row["startedAt"] <= time.time()
+    finally:
+        device_pairing._reset_for_test()
+        await link.stop()
+
+
 async def test_the_responder_is_not_paired_by_the_other_side_alone():
     """The half that carries the security property.
 

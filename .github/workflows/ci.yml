@@ -6,15 +6,17 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  lint-and-test:
-    name: Lint and test
-    # macos-14 mirrors the release gates (release.yml); backend tests exercise
-    # PTY/zsh behavior that only holds on macOS.
+  frontend:
+    name: Frontend checks and build
+    # Keep the desktop checks on the release platform.
     runs-on: macos-14
     timeout-minutes: 30
 
@@ -24,14 +26,34 @@ jobs:
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10.0.0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Frontend tests
+        run: pnpm test:run
+
+      - name: Build application and bundled plugins
+        run: pnpm build
+
+  backend:
+    name: Backend checks
+    # Backend tests exercise macOS PTY/zsh behavior.
+    runs-on: macos-14
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -42,30 +64,65 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+          cache-suffix: backend
 
       - name: Install dependencies
-        run: |
-          pnpm install --frozen-lockfile
-          uv --project backend sync --locked
-          uv --project marketplace/registry sync --locked
+        run: uv --project backend sync --locked
 
       - name: Lint backend (event-loop guardrail)
-        run: uv --project backend run ruff check backend
-
-      - name: Lint marketplace registry
-        run: uv --project marketplace/registry run ruff check marketplace/registry/registry marketplace/registry/tests
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Frontend tests
-        run: pnpm test:run
+        run: uv --project backend run --locked ruff check backend
 
       - name: Backend tests
-        run: uv --project backend run pytest backend/tests
+        run: uv --project backend run --locked pytest backend/tests
+
+  registry:
+    name: Marketplace registry and contract checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: marketplace/registry/uv.lock
+          cache-suffix: registry
+
+      - name: Install dependencies
+        run: uv --project marketplace/registry sync --locked
+
+      - name: Lint marketplace registry
+        run: uv --project marketplace/registry run --locked ruff check marketplace/registry/registry marketplace/registry/tests
 
       - name: Marketplace registry tests
-        run: uv --project marketplace/registry run pytest marketplace/registry/tests
+        run: uv --project marketplace/registry run --locked pytest marketplace/registry/tests
 
       - name: Plugin contract fixtures
-        run: uv --project marketplace/registry run python docs/plugin-contracts/validate-fixtures.py
+        run: uv --project marketplace/registry run --locked python docs/plugin-contracts/validate-fixtures.py
+
+  lint-and-test:
+    # Preserve the existing required-check name for branch protection.
+    name: Lint and test
+    if: ${{ always() }}
+    needs: [frontend, backend, registry]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every check to succeed
+        env:
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          REGISTRY_RESULT: ${{ needs.registry.result }}
+        run: |
+          test "$FRONTEND_RESULT" = success
+          test "$BACKEND_RESULT" = success
+          test "$REGISTRY_RESULT" = success
