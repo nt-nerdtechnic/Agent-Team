@@ -116,7 +116,58 @@ log = logging.getLogger("agent_team_backend")
 
 STARTED_AT = datetime.now(timezone.utc).isoformat()
 
-app = FastAPI(title="navide-backend", version=__version__)
+app = FastAPI(
+    title="navide-backend",
+    version=__version__,
+    # The schema and its viewers are an unauthenticated route table plus a
+    # product name, served to anything that finds the port. Nothing in the app
+    # reads them.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+#: Hostnames this loopback server answers to. A browser cannot forge Host (it
+#: is a forbidden header name), so a DNS-rebinding page that has made itself
+#: same-origin with 127.0.0.1 still arrives here as ``Host: evil.com``. The
+#: /ws handshake already refuses a web Origin (see ws_auth); this is the same
+#: defence for the HTTP routes, which non-browser clients reach without ever
+#: sending an Origin at all.
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def is_local_host_header(host_header: str) -> bool:
+    """Whether a Host header names this loopback server.
+
+    Parsed rather than compared as a string so ``[::1]:1234`` and a bare
+    ``localhost`` both resolve to a hostname; splitting on ':' by hand gets
+    IPv6 wrong. A missing Host resolves to None and is refused.
+
+    The port is deliberately not compared. Hook commands baked into a user's
+    ``~/.claude/settings.json`` resolve the port from the port file at run
+    time, and one pointing at a previous run must fail as a connection error
+    rather than be rejected here as the wrong host.
+    """
+    return urlparse(f"//{host_header or ''}").hostname in _LOCAL_HOSTS
+
+
+@app.middleware("http")
+async def reject_foreign_host(request: Request, call_next: Any) -> Response:
+    """Refuse a request whose Host is not this loopback server.
+
+    A DNS-rebinding page can make itself same-origin with 127.0.0.1 and read
+    our replies, but it cannot forge Host — it is a forbidden header name — so
+    it still arrives as ``Host: evil.com``. The /ws handshake already refuses a
+    web Origin (see ws_auth); this is the same defence for the HTTP routes,
+    which non-browser clients reach without sending an Origin at all.
+
+    Registered on the app rather than per-route because plugin routes are
+    appended straight to ``app.router`` at startup (see plugins/wiring.py) and
+    never pass through FastAPI's dependency system.
+    """
+    if not is_local_host_header(request.headers.get("host", "")):
+        return Response(status_code=403)
+    return await call_next(request)
 
 database = Database(app_data_dir() / DB_FILENAME)
 workspace_databases = WorkspaceDatabases()
@@ -1667,11 +1718,13 @@ async def _stop_log_watcher() -> None:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    # backend_log is deliberately absent: the absolute path carries the account
+    # name, and this is the one route that answers without a credential. The
+    # clients that need it read it from the ws settings.paths reply instead.
     return {
         "status": "ok",
         "version": __version__,
         "started_at": STARTED_AT,
-        "backend_log": str(backend_log_path()),
     }
 
 

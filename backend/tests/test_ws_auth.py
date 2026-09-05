@@ -178,7 +178,9 @@ def client():
 
     ``websocket_connect`` does not need the lifespan; it runs on its own portal.
     """
-    return TestClient(app_module.app)
+    # base_url pinned to loopback: the default "testserver" Host is exactly
+    # what reject_foreign_host refuses.
+    return TestClient(app_module.app, base_url="http://127.0.0.1")
 
 
 def test_a_page_without_the_token_never_reaches_the_dispatch_loop(client) -> None:

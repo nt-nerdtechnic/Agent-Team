@@ -27,7 +27,9 @@ from agent_team_backend.app import app
 
 @pytest.fixture()
 def client() -> TestClient:
-    return TestClient(app)
+    # base_url pinned to loopback: the default "testserver" Host is exactly
+    # what reject_foreign_host refuses.
+    return TestClient(app, base_url="http://127.0.0.1")
 
 
 @pytest.fixture()
@@ -76,7 +78,7 @@ async def test_a_parked_hook_is_answered_with_the_envelope(events) -> None:
         ) == (True, "")
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as http:
         pusher = asyncio.create_task(push_once())
         resp = await http.post(_url(), json={"session_id": "s-1"})
         await pusher
@@ -104,7 +106,7 @@ async def test_a_waiter_is_answered_only_once(events) -> None:
         assert await push_delivery.deliver("pane-1", "second") == (False, "not-armed")
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as http:
         pusher = asyncio.create_task(push_twice())
         resp = await http.post(_url(), json={"session_id": "s-1"})
         await pusher

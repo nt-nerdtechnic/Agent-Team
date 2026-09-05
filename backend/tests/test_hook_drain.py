@@ -43,7 +43,9 @@ class FakeWindow:
 
 @pytest.fixture()
 def client() -> TestClient:
-    return TestClient(app)
+    # base_url pinned to loopback: the default "testserver" Host is exactly
+    # what reject_foreign_host refuses.
+    return TestClient(app, base_url="http://127.0.0.1")
 
 
 @pytest.fixture()
