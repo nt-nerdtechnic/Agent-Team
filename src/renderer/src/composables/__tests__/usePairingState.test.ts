@@ -34,14 +34,63 @@ afterEach(() => {
 })
 
 describe('usePairingState', () => {
-  it('prompts only for the side that has something to decide', async () => {
-    // Interrupting the initiator with a prompt about their own request would be
-    // telling somebody what they just did.
+  it('prompts both ends, because both of them have something to decide', async () => {
+    // It served the responder alone, back when the initiator did not confirm at
+    // all. Both confirm now — the six digits are the only part of the exchange
+    // a relay cannot produce, so somebody compares them at each end — and the
+    // reason the responder needed a popup applies unchanged to the initiator:
+    // the account window may be closed while the one button that finishes the
+    // exchange waits inside it.
     const state = usePairingState(asBackend(backendReturning({ pairings: [RESPONDER, INITIATOR] })))
     await state.refresh()
 
     expect(state.pairings.value.map((r) => r.deviceId)).toEqual(['dev-asking', 'dev-asked'])
-    expect(state.prompts.value.map((r) => r.deviceId)).toEqual(['dev-asking'])
+    expect(state.prompts.value.map((r) => r.deviceId)).toEqual(['dev-asking', 'dev-asked'])
+  })
+
+  it('acknowledges a press before anything has been sent', async () => {
+    // "Pair" produced nothing until the far machine answered — seconds of a
+    // button that has visibly done nothing. The snapshot is polled, so even the
+    // local record of "we asked" is up to a poll away.
+    const state = usePairingState(asBackend(backendReturning({ pairings: [] })))
+
+    state.noteAsked('dev-new', 'M5')
+
+    expect(state.asked.value).toEqual([{ deviceId: 'dev-new', deviceName: 'M5', error: '' }])
+  })
+
+  it('hands the request over to the snapshot the moment it is real', async () => {
+    // Two cards for one exchange would be the snapshot and the optimistic note
+    // disagreeing about the same thing.
+    const state = usePairingState(
+      asBackend(backendReturning({ pairings: [{ ...RESPONDER, deviceId: 'dev-new' }] })),
+    )
+    state.noteAsked('dev-new', 'M5')
+    await state.refresh()
+
+    expect(state.asked.value).toEqual([])
+    expect(state.prompts.value.map((r) => r.deviceId)).toEqual(['dev-new'])
+  })
+
+  it('says a failed send failed, rather than going quiet', async () => {
+    const state = usePairingState(asBackend(backendReturning({ pairings: [] })))
+    state.noteAsked('dev-new', 'M5')
+
+    state.noteAskFailed('dev-new', 'that device is offline')
+
+    expect(state.asked.value[0].error).toBe('that device is offline')
+    // And it stays on screen: clearing it would return to the silence this
+    // replaced, with the failure only in a panel nobody has open.
+    expect(state.asked.value).toHaveLength(1)
+  })
+
+  it('forgets a press that was given up on', async () => {
+    const state = usePairingState(asBackend(backendReturning({ pairings: [] })))
+    state.noteAsked('dev-new', 'M5')
+
+    state.forgetAsked('dev-new')
+
+    expect(state.asked.value).toEqual([])
   })
 
   it('keeps a dismissed request out of the prompt and in the list', async () => {

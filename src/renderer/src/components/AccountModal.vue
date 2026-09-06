@@ -615,18 +615,29 @@ async function startPairing(device: NetworkDevice): Promise<void> {
   if (pending.value) return
   pending.value = device.deviceId
   error.value = ''
+  // Before the token is minted and before anything is sent. The confirmation is
+  // an IPC round trip of its own, so acknowledging after it would still leave a
+  // gap — and the gap is the whole complaint: the press produced nothing until
+  // the far machine answered.
+  pairingState.noteAsked(device.deviceId, deviceLabel(device))
   try {
     const resp = await props.backend.send(
       'p2p.pair.start',
       await withConfirmation('p2p.pair.start', device.deviceId, { deviceId: device.deviceId }),
     )
     if (!resp.ok) {
-      error.value = resp.error?.message ?? t('account.err-generic')
+      const message = resp.error?.message ?? t('account.err-generic')
+      error.value = message
+      // Said on the card too. Clearing it instead would return the screen to
+      // the silence this replaced, with the failure only in the panel below.
+      pairingState.noteAskFailed(device.deviceId, message)
       return
     }
     await refresh()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err)
+    const message = err instanceof Error ? err.message : String(err)
+    error.value = message
+    pairingState.noteAskFailed(device.deviceId, message)
   } finally {
     pending.value = ''
   }

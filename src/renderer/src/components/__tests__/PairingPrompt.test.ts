@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { nextTick } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 
@@ -17,7 +18,7 @@ import { i18n } from '@navide/plugin-ui/foundation'
 
 import PairingPrompt from '../PairingPrompt.vue'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
-import { _resetForTest } from '../../composables/usePairingState'
+import { _resetForTest, usePairingState } from '../../composables/usePairingState'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PROMPT = readFileSync(resolve(here, '../PairingPrompt.vue'), 'utf8')
@@ -44,16 +45,17 @@ describe('PairingPrompt', () => {
     expect(MODAL).toContain('pairingState.pairings.value')
   })
 
-  it('only asks the side that has something to decide', () => {
-    // Interrupting the initiator with a prompt about their own request would be
-    // telling somebody what they just did. The filter lives in the composable,
-    // so this checks the component asks for the filtered list and the
-    // composable is the thing that filters.
+  it('asks both ends, and does not filter by role', () => {
+    // The filter used to be `row.role === 'responder'`. Removing it is the
+    // change: both ends confirm now, and the initiator's account window is as
+    // likely to be closed as the responder's was.
     expect(PROMPT).toContain('state.prompts.value')
     const composable = readFileSync(
       resolve(here, '../../composables/usePairingState.ts'), 'utf8',
     )
-    expect(composable).toContain("row.role === 'responder'")
+    expect(composable).not.toContain("row.role === 'responder'")
+    // What it does still filter on is whether the person has waved it away.
+    expect(composable).toMatch(/prompts:[\s\S]{0,400}dismissed\.value\.has\(requestKey\(row\)\)/)
   })
 
   it('shows nothing until there are digits to compare', () => {
@@ -151,4 +153,232 @@ describe('both ends confirm, and the card says whose turn it is', () => {
       }
     })
   }
+})
+
+// ---- mounted, because pressing a button is what was broken -------------------
+//
+// This block was deleted by accident in 9a976ea8: a rewrite of the section
+// above replaced everything to the end of the file, and seven behaviour tests
+// went with it. Nothing noticed — the suite stayed green, because a deleted
+// test is not a failing one. Restored here, unchanged apart from this note.
+//
+// The bug: `answer()` sent the confirmation and ignored the reply. A reply of
+// `{ok: false}` is not an exception, so the catch never ran, the error was
+// never shown, and the same unanswered question was re-rendered — indis-
+// tinguishable from a button that does nothing. A successful answer was barely
+// better: the card left only when a later poll happened to stop listing it.
+
+const RESPONDER = {
+  deviceId: 'dev-asking',
+  deviceName: 'M4',
+  role: 'responder',
+  state: 'awaiting-local',
+  code: '482 913',
+  fingerprint: '8fe21661 6449c594',
+  startedAt: 1_000,
+}
+
+/** Long enough to outlast the settled card, whatever its exact duration. */
+const AFTER_SETTLED_MS = 10_000
+
+let wrapper: VueWrapper | undefined
+
+afterEach(() => {
+  wrapper?.unmount()
+  wrapper = undefined
+  _resetForTest()
+  vi.useRealTimers()
+  delete (window as unknown as Record<string, unknown>).agentTeam
+})
+
+async function mountPrompt(pairings: unknown[] = [RESPONDER]) {
+  ;(window as unknown as Record<string, unknown>).agentTeam = {
+    trustConfirm: vi.fn().mockResolvedValue({ token: 't', issuedAt: 1 }),
+  }
+  const mock = createMockBackend('connected')
+  mock.setResponse('p2p.network.snapshot', { pairings })
+  wrapper = mount(PairingPrompt, {
+    props: { backend: mock.backend as never },
+    global: { plugins: [i18n] },
+  })
+  await flushPromises()
+  return mock
+}
+
+const t = (key: string, args?: Record<string, unknown>): string => i18n.global.t(key, args ?? {})
+const buttons = () => wrapper!.findAll('.pp-btn')
+const allow = () => buttons().find((b) => b.classes('pp-primary'))!
+
+describe('PairingPrompt — answering', () => {
+  it('draws the question with the digits to compare', async () => {
+    await mountPrompt()
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(1)
+    expect(wrapper!.find('.pp-code').text()).toBe('482 913')
+  })
+
+  it('replaces the question with the outcome, then takes it away by itself', async () => {
+    // The reported failure: pressing Allow paired the devices and left the same
+    // card on screen. Nothing about the press was visible.
+    vi.useFakeTimers()
+    const mock = await mountPrompt()
+    mock.setResponse('p2p.pair.confirm', { state: 'confirmed' })
+
+    await allow().trigger('click')
+    await flushPromises()
+    // The backend has already dropped the pairing by the time it answers, so
+    // the card cannot be driven by the list any more.
+    mock.setResponse('p2p.network.snapshot', { pairings: [] })
+    await flushPromises()
+
+    expect(wrapper!.text()).toContain(t('settings.p2p.pair.paired', { device: 'M4' }))
+    expect(buttons()).toHaveLength(0)
+
+    vi.advanceTimersByTime(AFTER_SETTLED_MS)
+    await flushPromises()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+  })
+
+  it('says so when the answer was refused, rather than looking the same as allowing', async () => {
+    vi.useFakeTimers()
+    const mock = await mountPrompt()
+    mock.setResponse('p2p.pair.confirm', { state: 'rejected' })
+
+    await buttons().find((b) => b.classes('pp-danger'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper!.text()).toContain(t('settings.p2p.pair.done-refused'))
+    expect(wrapper!.text()).not.toContain(t('settings.p2p.pair.paired', { device: 'M4' }))
+  })
+
+  it('shows the backend’s refusal verbatim and keeps the question open', async () => {
+    // `{ok: false}` is a resolved promise. Nothing here used to look at it.
+    const mock = await mountPrompt()
+    mock.setResponse('p2p.pair.confirm', null, {
+      ok: false,
+      error: { code: 'CONFIRMATION_REQUIRED', message: 'this action needs a confirmation token' },
+    })
+
+    await allow().trigger('click')
+    await flushPromises()
+
+    expect(wrapper!.find('.pp-err').text()).toBe('this action needs a confirmation token')
+    // Still answerable: a refusal that removed the card would lose the request.
+    expect(wrapper!.find('.pp-code').exists()).toBe(true)
+    expect(allow().attributes('disabled')).toBeUndefined()
+  })
+
+  it('shows a dropped connection too, not just a refusal', async () => {
+    const mock = await mountPrompt()
+    mock.setRejection('p2p.pair.confirm', 'ws not open')
+
+    await allow().trigger('click')
+    await flushPromises()
+
+    expect(wrapper!.find('.pp-err').text()).toContain('ws not open')
+  })
+
+  it('says it is working while the answer is in flight, and locks the row', async () => {
+    // The whole round trip is an IPC for the token plus a socket call. Without
+    // this there is nothing between the press and the outcome.
+    const mock = await mountPrompt()
+    let release!: () => void
+    ;(window as unknown as Record<string, unknown>).agentTeam = {
+      trustConfirm: vi.fn(() => new Promise((resolve) => { release = () => resolve({ token: 't' }) })),
+    }
+    mock.setResponse('p2p.pair.confirm', { state: 'confirmed' })
+
+    await allow().trigger('click')
+    await flushPromises()
+
+    expect(allow().text()).toBe(t('settings.p2p.pair.sending'))
+    for (const button of buttons()) expect(button.attributes('disabled')).toBeDefined()
+
+    release()
+    await flushPromises()
+    expect(wrapper!.text()).toContain(t('settings.p2p.pair.paired', { device: 'M4' }))
+  })
+
+  it('does not answer for the person when they only asked for it later', async () => {
+    const mock = await mountPrompt()
+
+    await buttons().find((b) => b.classes('pp-quiet'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+    expect(mock.sent.some((s) => s.type === 'p2p.pair.confirm')).toBe(false)
+  })
+})
+
+describe('PairingPrompt — the end that asked', () => {
+  const INITIATOR_ROW = {
+    deviceId: 'dev-asked',
+    deviceName: 'M5',
+    role: 'initiator',
+    state: 'awaiting-local',
+    code: '271 604',
+    fingerprint: 'aaaa bbbb cccc dddd',
+    startedAt: 2_000,
+  }
+
+  it('pops up for the initiator too, once there are digits', async () => {
+    // The account window may be closed or scrolled elsewhere, and that button
+    // is the whole exchange — the same reason the responder got a popup.
+    await mountPrompt([INITIATOR_ROW])
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(1)
+    expect(wrapper!.find('.pp-code').text()).toBe('271 604')
+    const labels = buttons().map((b) => b.text())
+    // "Allow pairing" belongs to the end that was asked. This end is saying the
+    // digits match, which is the only claim either button ever makes.
+    expect(labels).toContain(t('settings.p2p.pair.match'))
+    expect(labels).not.toContain(t('settings.p2p.pair.allow'))
+    expect(labels).toContain(t('settings.p2p.pair.mismatch'))
+  })
+
+  it('does not tell the asker that somebody asked them', async () => {
+    // "X wants to pair with you" is true only at the end that was asked.
+    await mountPrompt([INITIATOR_ROW])
+
+    expect(wrapper!.text()).toContain(t('settings.p2p.pair.with-device', { device: 'M5' }))
+    expect(wrapper!.text()).not.toContain(t('settings.p2p.pair.asked-by', { device: 'M5' }))
+  })
+
+  it('shows nothing before the far machine has answered', async () => {
+    // No digits means no question to ask. What fills the gap is the "sent"
+    // card, which comes from the press rather than from the snapshot.
+    await mountPrompt([{ ...INITIATOR_ROW, code: '', state: 'awaiting-response' }])
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+  })
+
+  it('acknowledges the press without waiting for anything', async () => {
+    // The complaint was "空空的等" — pressing Pair and watching nothing happen.
+    // Asserted with no refresh and no resolved promise in between: if this
+    // needed a round trip, the card would not be there yet.
+    const mock = await mountPrompt([])
+    const state = usePairingState(mock.backend as never)
+
+    state.noteAsked('dev-new', 'M5')
+    await nextTick()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(1)
+    expect(wrapper!.text()).toContain(t('settings.p2p.pair.asking', { device: 'M5' }))
+    expect(wrapper!.text()).toContain(t('settings.p2p.pair.waiting-response'))
+    // Nothing to decide yet, so nothing to press.
+    expect(buttons()).toHaveLength(0)
+  })
+
+  it('says so when the request could not be sent', async () => {
+    const mock = await mountPrompt([])
+    const state = usePairingState(mock.backend as never)
+    state.noteAsked('dev-new', 'M5')
+    await nextTick()
+
+    state.noteAskFailed('dev-new', 'that device is offline')
+    await nextTick()
+
+    expect(wrapper!.find('.pp-err').text()).toBe('that device is offline')
+    expect(wrapper!.text()).not.toContain(t('settings.p2p.pair.waiting-response'))
+  })
 })

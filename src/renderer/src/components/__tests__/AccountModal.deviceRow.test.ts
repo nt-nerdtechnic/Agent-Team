@@ -20,6 +20,7 @@ import { i18n } from '@navide/plugin-ui/foundation'
 
 import AccountModal from '../AccountModal.vue'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
+import { usePairingState, _resetForTest } from '../../composables/usePairingState'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const MODAL = readFileSync(resolve(here, '../AccountModal.vue'), 'utf8')
@@ -32,6 +33,7 @@ let wrapper: VueWrapper | undefined
 const original = i18n.global.locale.value
 
 afterEach(() => {
+  _resetForTest()
   wrapper?.unmount()
   wrapper = undefined
   i18n.global.locale.value = original
@@ -405,5 +407,76 @@ describe('recovering from a locked trust store', () => {
     await flushPromises()
 
     expect(lockedCard().text()).toContain(t('settings.p2p.trust.rebuild-done'))
+  })
+})
+
+describe('pressing Pair', () => {
+  async function mountPairable() {
+    ;(window as unknown as Record<string, unknown>).agentTeam = {
+      trustConfirm: vi.fn().mockResolvedValue({ token: 't', issuedAt: 1 }),
+    }
+    const mock = createMockBackend('connected')
+    mock.setResponse('p2p.link.status', {
+      status: { state: 'connected', accountEmail: 'a@b.c', serverUrl: 'wss://x', emailVerified: true },
+    })
+    mock.setResponse('p2p.network.snapshot', {
+      state: 'connected',
+      deviceId: 'me',
+      devices: [
+        { deviceId: 'me', deviceName: 'This one', isLocal: true, online: true, paneCount: 0, panes: [] },
+        {
+          deviceId: 'd2', deviceName: NAME, isLocal: false, online: true,
+          paneCount: 0, panes: [], canTrust: true, trustState: 'pending',
+        },
+      ],
+    })
+    wrapper = mount(AccountModal, {
+      props: { open: true, backend: mock.backend as never },
+      global: { plugins: [i18n] },
+    })
+    await flushPromises()
+    return mock
+  }
+
+  const pairButton = () =>
+    wrapper!.findAll('button').find((b) => b.text() === t('settings.p2p.pair.start'))!
+
+  it('says a failed request failed, instead of going quiet', async () => {
+    // The wiring, not the store. The composable's own test proves
+    // `noteAskFailed` records an error; only this proves anything calls it —
+    // and a press that fails silently is the state this whole card replaced.
+    i18n.global.locale.value = 'en-US'
+    const mock = await mountPairable()
+    mock.setResponse('p2p.pair.start', null, {
+      ok: false,
+      error: { code: 'TARGET_OFFLINE', message: 'that device is offline' },
+    })
+
+    await pairButton().trigger('click')
+    await flushPromises()
+
+    const state = usePairingState(mock.backend as never)
+    expect(state.asked.value).toEqual([
+      { deviceId: 'd2', deviceName: NAME, error: 'that device is offline' },
+    ])
+  })
+
+  it('acknowledges the press before the request is answered', async () => {
+    i18n.global.locale.value = 'en-US'
+    const mock = await mountPairable()
+    let release!: () => void
+    ;(window as unknown as Record<string, unknown>).agentTeam = {
+      trustConfirm: vi.fn(() => new Promise((r) => { release = () => r({ token: 't' }) })),
+    }
+
+    await pairButton().trigger('click')
+    await flushPromises()
+
+    // The confirmation token is an IPC round trip of its own; the press is
+    // acknowledged before even that.
+    const state = usePairingState(mock.backend as never)
+    expect(state.asked.value.map((a) => a.deviceId)).toEqual(['d2'])
+    release()
+    await flushPromises()
   })
 })

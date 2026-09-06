@@ -6,9 +6,16 @@
 // is five sections down a window nobody has open, and a request that expires in
 // five minutes cannot wait for somebody to go looking. So it comes to them.
 //
-// Only the responder gets one. The initiator asked for this; interrupting them
-// with a prompt about their own request would be telling somebody what they
-// just did.
+// Both ends get one. It served the responder alone, back when the initiator did
+// not confirm at all — pressing "Pair with…" was its whole answer. Both confirm
+// now, because the six digits are the only part of the exchange a relay cannot
+// produce and somebody has to compare them at each end; and the reason the
+// responder needed a popup applies unchanged to the initiator, whose account
+// window may be closed or scrolled elsewhere while the one button that finishes
+// the exchange waits in it.
+//
+// It also acknowledges the press. "Pair" used to produce nothing until the far
+// machine answered, which is seconds of a button that has visibly done nothing.
 //
 // Every press has to change something on screen. The first version sent the
 // answer and waited for the list to stop containing the request — so a person
@@ -27,7 +34,10 @@ const { t } = useI18n()
 const state = usePairingState(props.backend)
 
 /** Reads the shared snapshot, never its own copy: two readers a poll apart
- *  would let this ask a question the card had already answered. */
+ *  would let this ask a question the card had already answered.
+ *
+ *  Only exchanges with digits to compare. Before that there is no question to
+ *  ask — what there is instead is the "sent" card below. */
 const prompts = computed<PairingRow[]>(() =>
   state.prompts.value.filter((row) => Boolean(row.code)),
 )
@@ -61,6 +71,9 @@ const timers: ReturnType<typeof setTimeout>[] = []
  *  card survives its own disappearance from the list. */
 const cards = computed(() => [
   ...settled.value.map((s) => ({ kind: 'settled' as const, key: s.key, settled: s })),
+  // The press, acknowledged before anything has been sent. Drops out the moment
+  // the exchange is real — the snapshot owns it from there.
+  ...state.asked.value.map((a) => ({ kind: 'asked' as const, key: `asked:${a.deviceId}`, asked: a })),
   ...prompts.value
     .filter((row) => !settled.value.some((s) => s.key === requestKey(row)))
     .map((row) => ({ kind: 'ask' as const, key: requestKey(row), row })),
@@ -139,7 +152,14 @@ function grouped(value: string | undefined): string {
        does not stop somebody finishing what they were typing. -->
   <div v-if="cards.length" class="pair-prompts" role="status" aria-live="polite">
     <div v-for="card in cards" :key="card.key" class="pair-prompt">
-      <template v-if="card.kind === 'settled'">
+      <template v-if="card.kind === 'asked'">
+        <p class="pp-title">
+          {{ t('settings.p2p.pair.asking', { device: card.asked.deviceName || card.asked.deviceId }) }}
+        </p>
+        <p v-if="card.asked.error" class="pp-err">{{ card.asked.error }}</p>
+        <p v-else class="pp-body">{{ t('settings.p2p.pair.waiting-response') }}</p>
+      </template>
+      <template v-else-if="card.kind === 'settled'">
         <p class="pp-title">
           {{
             card.settled.accepted
@@ -149,8 +169,16 @@ function grouped(value: string | undefined): string {
         </p>
       </template>
       <template v-else>
+        <!-- Whose question it is. "X wants to pair with you" is true only at
+             the end that was asked; the end that did the asking is comparing
+             digits with a machine it chose. -->
         <p class="pp-title">
-          {{ t('settings.p2p.pair.asked-by', { device: card.row.deviceName || card.row.deviceId }) }}
+          {{ t(
+            card.row.role === 'initiator'
+              ? 'settings.p2p.pair.with-device'
+              : 'settings.p2p.pair.asked-by',
+            { device: card.row.deviceName || card.row.deviceId },
+          ) }}
         </p>
         <p class="pp-label">{{ t('settings.p2p.pair.code-label') }}</p>
         <p class="pp-code">{{ card.row.code }}</p>
@@ -168,10 +196,16 @@ function grouped(value: string | undefined): string {
             :disabled="busy"
             @click="answer(card.row, true)"
           >
+            <!-- "Allow pairing" is what the end that was *asked* is doing. The
+                 end that did the asking is not granting anything — it is saying
+                 the two screens show the same digits, which is the only claim
+                 either button ever makes. -->
             {{
               pendingKey === card.key
                 ? t('settings.p2p.pair.sending')
-                : t('settings.p2p.pair.allow')
+                : t(card.row.role === 'initiator'
+                    ? 'settings.p2p.pair.match'
+                    : 'settings.p2p.pair.allow')
             }}
           </button>
           <button
