@@ -6,6 +6,17 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Added
 
+- Let `cli_get_status`, `cli_wait_idle` and `cli_send_and_wait` answer about
+  panes on another device. The status was already being synced — the roster
+  carries each remote pane's badge word and `cli_list_targets` was already
+  handing it to agents — so only the target resolver was refusing. Remote
+  answers say how much weaker they are rather than passing themselves off as
+  local: `source` is `roster_status` or `roster_offline` and never
+  `turn_complete`, a parked pane times out as `awaiting_unclassified` because
+  the roster cannot tell a permission prompt from a question, and `offline` is
+  a third answer returned at once instead of waited out. Reading a remote
+  pane's log and driving its UI stay unavailable; those need a device-to-device
+  request channel that does not exist.
 - Let an agent ask another pane to stop with the new `cli_interrupt` MCP tool.
   Until now an agent could force-kill a pane — PTY and all, with no gate and no
   say from the pane being killed — but had no way to interrupt one, so a child

@@ -105,7 +105,7 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 | `cli_inbox_summary` | — | 自分の送信のうち滞留中または失敗しているもの: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20`（上限 200） | **CLI Pane 専用。** *自分宛*に Queue され、まだ入っていないもの: `{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt, correlation_id?, in_reply_to?, hold?, held_for_s?, stale?}]}` |
 | `cli_read_incoming` | `uid=""`, `limit=5`（上限 20）, `include_delivered=false`, `peek=false` | **CLI Pane 専用。** 自分宛メッセージの全文（`cli_pending_incoming` は空白を潰した 200 文字のみ）: `{count, messages: [{uid, sender, status, kind?, content, age_seconds, consumed, correlation_id?, in_reply_to?, hold?, held_for_s?, stale?}], note?}`。**既定では読むと消費されます**——読んだメッセージはその後 Pane に入力されません。`peek: true` は消費せずに読みます。消費は予約してから解放する二段階で、解放が失われた場合メッセージは Queue に戻り二度届くことがあります。`consumed` はメッセージごとに返され、消費されなかった理由は `note` に入ります |
-| `cli_send_and_wait` | `to`, `text`, `timeout_s=60`（上限 120）, `pane_id?` | `cli_send` に加えてその Turn の完了まで待機。`cli_wait_idle` の結果に `{ok, target, msg_key}` を付けて返す |
+| `cli_send_and_wait` | `to`, `text`, `timeout_s=60`（上限 120）, `pane_id?` | `cli_send` に加えてその Turn の完了まで待機。`cli_wait_idle` の結果に `{ok, target, msg_key}` を付けて返す  **リモート Pane**: 送信と配信 gate はローカルと同じ（`rejected` は `failed` と区別されたまま）。待機の半分は名簿バッジを使い、弱点は `cli_wait_idle` と同じです。 |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path`（Pane 以外の呼び出し元では必須）, `model`, `effort` | Task 付きで新しい CLI Pane を Spawn。`{ok, name, address, pane_id}` を返し、Spawn が Advisory の閾値を越えた場合は `advisories` も返す。`model` と `effort` は任意で、その CLI が受け付けない場合は無視せず「拒否」するため、Pane が別のモデルで静かに起動することはない。多くの CLI は model を受け付けるが、独立した effort を受け付けるものは少なく、残りは effort を model id に埋め込む（`gpt-5.3-codex-high`）。model id は検証しない（リリースごとに変わるため）が、effort はその CLI の語彙と照合する |
 
 `cli_send` は、メッセージが配信のために*受理された*時点で返り、相手の Agent が
@@ -256,8 +256,8 @@ CLI Pane を保持でき、Spawn の連鎖は任意の深さで実行できま�
 | Tool | パラメータ | 動作 |
 |---|---|---|
 | `cli_read_log` | `target`, `tail_lines=200`, `since?`, `pane_id?` | Pane の会話 Log の末尾（≤512KB かつ ≤`tail_lines` 行）。`next_cursor` と `rotated` を返す |
-| `cli_get_status` | `target`, `pane_id?` | `{busy, agent_key, last_activity?, ui?}` — `ui` は所有ウィンドウが応答したときに `ui.pane.getStatus` を反映 |
-| `cli_wait_idle` | `target`, `timeout_s=60`（上限 120）, `pane_id?` | Pane が Idle になるか Timeout するまで Block。`{idle, source, waited_s, last_activity?, ui_status?}` を返し、Timeout 時は `reason` も返す |
+| `cli_get_status` | `target`, `pane_id?` | `{busy, agent_key, last_activity?, ui?}` — `ui` は所有ウィンドウが応答したときに `ui.pane.getStatus` を反映  **リモート Pane**: 名簿から回答し、`remote: true` と `source: "roster_status"` を付けます。バッジの語が 1 つだけで、`last_activity` も `ui` ブロックもなく、0.5 秒の debounce と 30 秒の sweep があるため、ライブではなく準ライブです。 |
+| `cli_wait_idle` | `target`, `timeout_s=60`（上限 120）, `pane_id?` | Pane が Idle になるか Timeout するまで Block。`{idle, source, waited_s, last_activity?, ui_status?}` を返し、Timeout 時は `reason` も返す  **リモート Pane**: 名簿のバッジを polling します。`source` は `roster_status` か `roster_offline` で、**`turn_complete` にはなりません**——リモートで得られる最も強い観測は「バッジが busy でなくなった」だけです。停止中の Pane は `reason: "awaiting_unclassified"` で timeout します。名簿は語を 1 つしか運ばず、権限プロンプト待ち（人間待ち）と質問中（実質 idle）を区別できないためです。`offline` は第三の答えとして、待たずに即座に返ります。 |
 | `cli_interrupt` | `target`, `pane_id` | このマシン上の Pane に、その CLI の割り込みキーを送ります（codex は `ESC`、それ以外は `^C`）。**これは Turn を止めることを意味しません**: CLI によって、Turn を中断することも、単に入力欄をクリアするだけのことも、二度押しで CLI 自体が終了することもあります。コマンドではなくキーストロークです。結果は `cli_get_status`／`cli_wait_idle` で確認してください。その作業を終わらせてよいなら `cli_send` でメッセージを送る方が適切です。`{ok, target, name, sent, status_before, advisories?}` を返します。`sent: false` は何も送られなかったことを意味します（session が無い、またはウィンドウが再接続中）。ローカル Pane のみ |
 
 `cli_read_log` の `since` は増分読み取りです。前回の呼び出しの `next_cursor` を

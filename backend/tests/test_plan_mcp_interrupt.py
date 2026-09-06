@@ -304,3 +304,33 @@ async def test_the_description_does_not_promise_a_stop() -> None:
     assert "keystroke" in text
     # And it must name the fact that some CLIs treat the key differently.
     assert "clear" in text
+
+
+@pytest.mark.asyncio
+async def test_a_pane_cannot_interrupt_itself() -> None:
+    """The call would destroy its own result.
+
+    cli_send refuses a self-send because it would be noise; this refuses for a
+    harder reason — the interrupt aborts the turn issuing it, so the answer
+    could never come back. A caller that got "ok" here would be reading a
+    reply from a turn that no longer exists.
+    """
+    _seed()
+
+    result = await plan_mcp.cli_interrupt("caller", _ctx())
+
+    assert result["ok"] is False
+    assert result["error_code"] == "self-interrupt"
+    assert "own pane" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_the_self_guard_does_not_block_a_namesake_elsewhere() -> None:
+    """Refusing must key on identity, not on the name matching. A pane in
+    another workspace that happens to share your name is a different pane."""
+    _seed()
+    agent_messaging.register("pother", "caller", "/ws/beta")
+
+    result = await plan_mcp.cli_interrupt("beta/caller", _ctx())
+
+    assert result.get("error_code") != "self-interrupt"
