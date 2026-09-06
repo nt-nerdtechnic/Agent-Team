@@ -22,7 +22,7 @@ import {
   resolveConfiguredMarketplace,
 } from './plugins/pluginIpc'
 import { readRegistryTrustSnapshot } from './plugins/pluginInstalledTrust'
-import { contributionIconDataUrl } from './plugins/pluginContributionIcon'
+import { contributionIcon } from './plugins/pluginContributionIcon'
 import { currentPluginHostTarget } from './plugins/pluginTarget'
 import { PluginStorageStore } from './plugins/pluginStorage'
 import { PluginCapabilityGrantStore } from './plugins/pluginCapabilityGrantStore'
@@ -799,7 +799,7 @@ const pluginTrustRefresh = registerPluginIpc(
   undefined,
   undefined,
   {
-    resolveContributionIcon: contributionIconDataUrl,
+    resolveContributionIcon: contributionIcon,
     onActivationChange: applyPluginActivationChange,
     cleanupPluginStorage: (pluginId) => pluginStorageStore.cleanupPlugin(pluginId),
     factoryPackageIds: ['navide.git'],

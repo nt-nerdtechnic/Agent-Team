@@ -371,7 +371,9 @@ describe('plugin management sender authorization', () => {
 
   it('projects sanitized manifest icons without exposing Host file paths', () => {
     const resolveContributionIcon = vi.fn((iconFile: string) =>
-      iconFile.endsWith('primary.png') ? 'data:image/png;base64,AAAA' : null
+      iconFile.endsWith('primary.png')
+        ? { url: 'data:image/png;base64,AAAA', monochrome: true }
+        : null
     )
     const manager = {
       listContributionCatalog: () => [
@@ -412,6 +414,7 @@ describe('plugin management sender authorization', () => {
         contributionKey: 'acme.tools.secondary',
         title: 'Secondary',
         icon: null,
+        iconMonochrome: false,
         kind: 'custom',
         location: 'right',
         manifestOrder: 0,
@@ -422,6 +425,7 @@ describe('plugin management sender authorization', () => {
         contributionKey: 'acme.tools.primary',
         title: 'Primary',
         icon: 'data:image/png;base64,AAAA',
+        iconMonochrome: true,
         kind: 'custom',
         location: 'left',
         manifestOrder: 1,

@@ -52,6 +52,7 @@ import {
 } from './pluginInstalledTrust'
 import { currentPluginHostTarget } from './pluginTarget'
 import type { FrontendPluginManager } from './frontendPluginManager'
+import type { ContributionIcon } from './pluginContributionIcon'
 import { PluginCapabilityGrantStore } from './pluginCapabilityGrantStore'
 
 /** Development-only endpoint. It is intentionally not the official Registry
@@ -124,7 +125,7 @@ export interface PluginTrustRefreshController {
 
 export interface PluginIpcOptions {
   /** Convert a Host-verified icon file into renderer-safe image bytes. */
-  resolveContributionIcon?: (iconFile: string) => string | null
+  resolveContributionIcon?: (iconFile: string) => ContributionIcon | null
   verifyCommittedInstall?: (
     pluginDir: string,
     pluginId: string,
@@ -229,10 +230,16 @@ export function registerPluginIpc(
 
   ipcMain.handle('plugins:listContributions', (event) => {
     assertAuthorized(event)
-    return manager.listContributionCatalog().map(({ iconFile, ...entry }) => ({
-      ...entry,
-      icon: iconFile ? options.resolveContributionIcon?.(iconFile) ?? null : null,
-    }))
+    return manager.listContributionCatalog().map(({ iconFile, ...entry }) => {
+      const icon = iconFile ? options.resolveContributionIcon?.(iconFile) ?? null : null
+      return {
+        ...entry,
+        icon: icon?.url ?? null,
+        // A silhouette is painted in the current text colour by the renderer,
+        // so it follows the theme the way the built-in SVG icons do.
+        iconMonochrome: icon?.monochrome ?? false,
+      }
+    })
   })
 
   ipcMain.handle('plugins:listFactoryPackages', (event): FactoryPackageSummary[] => {

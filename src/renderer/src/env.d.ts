@@ -325,6 +325,7 @@ declare global {
           contributionKey: string
           title: string
           icon: string | null
+          iconMonochrome: boolean
           kind: 'custom'
           location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
           manifestOrder: number

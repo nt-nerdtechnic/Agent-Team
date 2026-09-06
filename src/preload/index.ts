@@ -670,6 +670,9 @@ contextBridge.exposeInMainWorld('agentTeam', {
       contributionKey: string
       title: string
       icon: string | null
+      /** The icon is a single-colour silhouette, so it is painted in the
+       *  current text colour rather than the shade baked into the artwork. */
+      iconMonochrome: boolean
       kind: 'custom'
       location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
       manifestOrder: number
