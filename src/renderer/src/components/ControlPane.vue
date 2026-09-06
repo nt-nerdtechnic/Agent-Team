@@ -2076,6 +2076,36 @@ function onAgentLineClick(paneId: string, ev?: MouseEvent): void {
   expandedPaneId.value = expandedPaneId.value === paneId ? null : paneId
 }
 
+// The detail body says "this is the pane you are on", so it only holds while
+// this window has the OS focus. Each workspace window renders its own
+// ControlPane and nothing tells a window that another one took over, so
+// without this gate a window left in the background keeps a row expanded
+// (and `focusPaneId` falls back to the first pane, so one row is always a
+// candidate). The state itself is kept, not cleared: coming back to the
+// window restores the row the user had open.
+const windowFocused = ref(typeof document === 'undefined' || document.hasFocus())
+function onWindowFocus(): void {
+  windowFocused.value = true
+}
+function onWindowBlur(): void {
+  windowFocused.value = false
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('focus', onWindowFocus)
+  window.addEventListener('blur', onWindowBlur)
+}
+onUnmounted(() => {
+  window.removeEventListener('focus', onWindowFocus)
+  window.removeEventListener('blur', onWindowBlur)
+})
+
+/** Whether an agent row shows its detail body: the accordion row the user
+ *  clicked, or the focused pane — either way only while this window is on top. */
+function isRowExpanded(paneId: string): boolean {
+  if (!windowFocused.value) return false
+  return expandedPaneId.value === paneId || props.focusPaneId === paneId
+}
+
 // ── Active Agents list: drag-reorder (mirrors the TerminalPane header drop) ──
 // Dragging one agent-line onto another agent-item emits 'reorder-pane'; App.vue
 // splices `panes.value`, so the Grid and this list reorder together. During
@@ -2689,7 +2719,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           :key="p.id"
           class="agent-item"
           :style="depth ? { marginLeft: depth * 13 + 'px' } : undefined"
-          :class="{ 'in-group': !g.bare, 'in-group-last': !g.bare && gi === g.rows.length - 1, pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'agent-item--selected': props.selectedPaneIds?.has(p.id), 'agent-item--dragging': draggingBatchIds.includes(p.id), 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
+          :class="{ 'in-group': !g.bare, 'in-group-last': !g.bare && gi === g.rows.length - 1, pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'agent-item--selected': props.selectedPaneIds?.has(p.id), 'agent-item--dragging': draggingBatchIds.includes(p.id), 'drag-over': reorderDragOverId === p.id, expanded: isRowExpanded(p.id) }"
           @dragover="onAgentDragOver($event, p.id)"
           @dragenter="onAgentDragOver($event, p.id)"
           @dragleave="onAgentDragLeave(p.id)"
@@ -2732,7 +2762,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               :title="$t('pane.terminal.auto-named-tooltip')"
             >◦</span>
             <span v-if="p.isCommander" class="manager-inline" title="Stage manager — controls flow and decides ---STAGE-DONE---">🎯 Mgr</span>
-            <span v-if="expandedPaneId !== p.id && props.focusPaneId !== p.id" class="agent-line-sub">{{ agentTypeLabel(p.agentKey) }} · {{ p.roleLabel || 'No role' }}</span>
+            <span v-if="!isRowExpanded(p.id)" class="agent-line-sub">{{ agentTypeLabel(p.agentKey) }} · {{ p.roleLabel || 'No role' }}</span>
             <span v-if="p.isMinimized" class="minimized-tag" title="Docked in sidebar">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
               Docked
@@ -2752,7 +2782,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               <button class="icon-btn agent-minimize-btn" :title="$t('pane.terminal.minimize-tooltip')" @click.stop="emit('minimize', p.id)">⊟</button>
             </span>
           </div>
-          <template v-if="expandedPaneId === p.id || props.focusPaneId === p.id">
+          <template v-if="isRowExpanded(p.id)">
             <div class="agent-role-line">
               <span class="agent-role-main">{{ agentTypeLabel(p.agentKey) }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span></span>
               <span class="state" :data-state="p.status" :style="statusBadgeStyle(p.status)">{{ paneStatusLabelText(p.status) }}</span>

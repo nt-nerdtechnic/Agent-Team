@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
 
@@ -100,6 +100,57 @@ describe('ControlPane – compact agent rows with click-to-expand', () => {
     // ...while pane-b stays expanded: the toggle memory was not moved by the
     // modifier click (a plain click on pane-a would have collapsed pane-b).
     expect(items[1].classes()).toContain('expanded')
+  })
+
+  it('collapses the focus-driven row when this window loses the OS focus', async () => {
+    // Each workspace window renders its own ControlPane and no window is told
+    // that another one took over, so a background window used to keep a row
+    // expanded forever — `focusPaneId` never goes back to undefined (App feeds
+    // it a fallback-resolved id).
+    await wrapper.setProps({ focusPaneId: 'pane-a' })
+    expect(wrapper.findAll('.agent-item')[0].classes()).toContain('expanded')
+    window.dispatchEvent(new Event('blur'))
+    await wrapper.vm.$nextTick()
+    const items = wrapper.findAll('.agent-item')
+    expect(items[0].classes()).not.toContain('expanded')
+    expect(wrapper.find('.agent-cmd').exists()).toBe(false)
+    expect(wrapper.find('.row.tight').exists()).toBe(false)
+    // The one-line sub-label comes back for every row.
+    expect(wrapper.findAll('.agent-line-sub')).toHaveLength(2)
+  })
+
+  it('collapses a clicked row on blur and restores it when the window returns', async () => {
+    await wrapper.findAll('.agent-line')[1].trigger('click')
+    expect(wrapper.findAll('.agent-item')[1].classes()).toContain('expanded')
+    window.dispatchEvent(new Event('blur'))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('.agent-item')[1].classes()).not.toContain('expanded')
+    // The accordion memory is gated, not cleared — refocusing restores the row
+    // the user had open rather than dropping it.
+    window.dispatchEvent(new Event('focus'))
+    await wrapper.vm.$nextTick()
+    const items = wrapper.findAll('.agent-item')
+    expect(items[1].classes()).toContain('expanded')
+    expect(items[1].find('.agent-cmd').text()).toContain('codex')
+    expect(items[0].classes()).not.toContain('expanded')
+  })
+
+  it('drops its window focus listeners on unmount', async () => {
+    const removed = vi.spyOn(window, 'removeEventListener')
+    wrapper.unmount()
+    const events = removed.mock.calls.map((c) => c[0])
+    expect(events).toContain('focus')
+    expect(events).toContain('blur')
+    removed.mockRestore()
+    // Re-mount so afterEach has a live wrapper; a fresh window starts focused,
+    // so it is not born collapsed by an earlier window's blur.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapper = shallowMount(ControlPane as any, {
+      props: { ...minimalProps, focusPaneId: 'pane-a' },
+      global: { mocks: { $t: (key: string) => key } }
+    })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('.agent-item')[0].classes()).toContain('expanded')
   })
 
   it('expanding another row collapses the first (single-open accordion)', async () => {
