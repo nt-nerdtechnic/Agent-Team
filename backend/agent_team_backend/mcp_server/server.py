@@ -29,7 +29,8 @@ import json
 import re
 import secrets
 import time
-from contextlib import AsyncExitStack
+from collections.abc import Iterator
+from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape as html_escape
@@ -488,10 +489,24 @@ async def cli_whoami(ctx: Context) -> dict[str, Any]:
     still says nothing about who is related to whom, and who *you* opened is
     still yours alone to remember.
 
+    `waiting_on_me` is who is BLOCKED on you at this moment — every caller
+    currently parked in a cli_wait_idle or cli_send_and_wait aimed at your
+    pane, as [{waiting_s, pane_id?, name?, address?, caller?}], longest wait
+    first. Waiting was one-way before this: someone could sit on a two-minute
+    budget while you, deciding you had another twenty minutes of digging in
+    you, had no way to learn that finishing now was worth more than finishing
+    well. Read it before committing to a long stretch of work — a waiter at 90
+    seconds is about to time out. `caller` ("host" / "external") stands in for
+    a waiter that has no pane and therefore no name. The key is ABSENT when
+    nobody is waiting; it is never an empty list. It is also process memory: a
+    backend restart forgets every wait, so absence is "nobody is parked on me
+    that this backend knows of", not proof that nobody wants your answer.
+
     A caller with no pane identity (host / external credential) is not a pane
     and has none of these: it gets {ok, caller} only.
     Returns {ok, caller, name, address, pane_id, workspace_path, agent_key,
-    busy, offline, hold_reason?, spawned_by?} or {ok: false, error}.
+    busy, offline, hold_reason?, spawned_by?, waiting_on_me?} or
+    {ok: false, error}.
     """
     from agent_team_backend import agent_messaging
 
@@ -529,6 +544,11 @@ async def cli_whoami(ctx: Context) -> dict[str, Any]:
                 "name": parent.name,
                 "address": parent.qualified_name,
             }
+    # Absent, not empty, like every optional key here: a pane nobody is waiting
+    # on must read byte-for-byte as it did before anyone could wait visibly.
+    waiting = _waiting_on_me(me.pane_id)
+    if waiting:
+        result["waiting_on_me"] = waiting
     return result
 
 
@@ -1150,6 +1170,14 @@ _STALE_HOLD_S = 120.0
 # the cut cannot split a surrogate pair.
 _INBOX_EXCERPT_CHARS = 60
 _mcp_message_status: dict[str, dict[str, Any]] = {}
+# When this process started keeping the table above. cli_inbox_summary reports
+# how far back its answer reaches, because otherwise "nothing of yours is
+# stuck" and "I was restarted and remember nothing you sent" are the same empty
+# list — and an orchestrator that has been running longer than this backend has
+# no way to tell those apart. This does NOT make the table durable: the comment
+# above still holds and the outcomes are still lost on restart. It only stops
+# the loss from being silent.
+_status_tracking_since = time.monotonic()
 # Calls parked in cli_send(wait_for_delivery_s=…), by the key they are waiting
 # on. One event per waiting call rather than one per key: two agents may wait on
 # the same message, and neither may swallow the other's wake-up.
@@ -1163,6 +1191,22 @@ def _prune_message_status(now: float) -> None:
     # Insertion-ordered, so the front of the dict is the oldest send.
     while len(_mcp_message_status) >= _MESSAGE_STATUS_MAX:
         _mcp_message_status.pop(next(iter(_mcp_message_status)))
+
+
+def _tracking_window_s(now: float) -> float:
+    """How far back the send-status table's records reach, in seconds.
+
+    Three bounds, and the smallest wins: how long this process has been keeping
+    records at all (a restart puts it back to zero, which is the number that
+    matters), the TTL, and — once the table is full and evicting by count — the
+    age of the oldest record still in it.
+    """
+    covered = min(now - _status_tracking_since, _MESSAGE_STATUS_TTL_S)
+    if len(_mcp_message_status) >= _MESSAGE_STATUS_MAX:
+        # Insertion-ordered, so this is the oldest surviving send.
+        oldest = next(iter(_mcp_message_status.values()))
+        covered = min(covered, now - oldest["created_at"])
+    return round(max(covered, 0.0), 1)
 
 
 def _record_message_sent(msg_key: str, target: str, origin: str, text: str) -> None:
@@ -1502,12 +1546,22 @@ async def cli_inbox_summary(ctx: Context) -> dict[str, Any]:
     you sent twenty minutes ago is still sitting in a queue.
 
     Returns {ok, count, messages: [{msg_key, target, status, age_seconds,
-    stale?, reason?, hold?, held_for_s?, excerpt}]}, newest send last. `excerpt`
-    is the first 60 characters of what you sent, so a message is recognizable
-    without keeping every msg_key. The same in-memory bounds as
-    cli_check_message apply: the last hour, the last few hundred sends, gone on
-    backend restart. An empty list means nothing of yours is stuck — it never
-    means nothing was sent.
+    stale?, reason?, hold?, held_for_s?, excerpt}], tracked, tracking_since_s},
+    newest send last. `excerpt` is the first 60 characters of what you sent, so
+    a message is recognizable without keeping every msg_key. The same in-memory
+    bounds as cli_check_message apply: the last hour, the last few hundred
+    sends, gone on backend restart. An empty list means nothing of yours is
+    stuck — it never means nothing was sent.
+
+    `tracked` and `tracking_since_s` are what make that last sentence checkable
+    instead of a warning you have to remember. `tracked` is how many of YOUR
+    sends this table still holds, delivered ones included; `tracking_since_s`
+    is how far back its records reach at all. "0 of your sends, and I have only
+    been keeping records for 40 seconds" is a backend that restarted under you
+    and took every msg_key you were holding with it — every one of them now
+    answers cli_check_message with "unknown", and you cannot tell from here
+    whether those messages were delivered. "12 tracked, none stuck" is the
+    other thing entirely. Neither number counts anybody else's sends.
     """
     try:
         caller = _resolve_caller(ctx)
@@ -1516,9 +1570,11 @@ async def cli_inbox_summary(ctx: Context) -> dict[str, Any]:
     origin = (caller.pane_id if caller.kind == "pane" else "") or caller.kind
     now = time.monotonic()
     messages: list[dict[str, Any]] = []
+    tracked = 0
     for key, entry in _mcp_message_status.items():
         if entry.get("origin") != origin:
             continue
+        tracked += 1
         stale = _is_stale(entry, now)
         if not stale and entry["status"] not in ("failed", "rejected"):
             continue
@@ -1535,7 +1591,16 @@ async def cli_inbox_summary(ctx: Context) -> dict[str, Any]:
             row["reason"] = entry["reason"]
         row.update(_hold_view(entry, now))
         messages.append(row)
-    return {"ok": True, "count": len(messages), "messages": messages}
+    # Always present, unlike the optional keys elsewhere in this file: they
+    # exist to give the EMPTY answer a meaning, so omitting them when there is
+    # nothing to report would omit them exactly when they are needed.
+    return {
+        "ok": True,
+        "count": len(messages),
+        "messages": messages,
+        "tracked": tracked,
+        "tracking_since_s": _tracking_window_s(now),
+    }
 
 
 def _hold_for_correlation(correlation_id: str) -> dict[str, Any]:
@@ -2233,6 +2298,83 @@ async def cli_get_status(target: str, ctx: Context, pane_id: str = "") -> dict[s
 _WAIT_IDLE_POLL_S = 1.0
 _WAIT_IDLE_QUIET_S = 10.0
 _WAIT_IDLE_MAX_TIMEOUT_S = 120.0
+
+
+# ── Who is parked waiting on a pane (cli_whoami's `waiting_on_me`) ─────────
+# A wait used to be invisible to the pane it waited on. An agent a minute into
+# somebody's two-minute budget would keep digging, because nothing told it that
+# anyone had stopped to wait — so the waiter timed out and both ends acted on a
+# decision they would not have made had either known. Every wait registers here
+# for as long as it is parked, and cli_whoami hands the answer back.
+#
+# Keyed by the target's live pane id, then by WHO is waiting: one entry per
+# caller per target, refcounted, because cli_send_and_wait nests cli_wait_idle
+# inside its own registration and two rows for one waiting call would overstate
+# the queue. A caller with no pane identity has no name to give, so every host
+# caller shares the key "host" and every external one "external"; concurrent
+# waits from those collapse into one row dated from the earliest of them, which
+# understates how many are waiting and never how long.
+#
+# Nothing prunes this and nothing needs to: a row only exists inside a call
+# hard-capped at _WAIT_IDLE_MAX_TIMEOUT_S, and the finally below runs on
+# timeout, exception and cancellation alike (a client that disconnects cancels
+# the task), so the table is bounded by the waits actually in flight. It is
+# process memory like _mcp_message_status: a restart forgets every wait, and
+# every waiter is gone with it.
+_idle_waiters: dict[str, dict[str, dict[str, Any]]] = {}
+
+
+@contextmanager
+def _waiting_on(target_pane_id: str, caller: _Caller) -> Iterator[None]:
+    """Register *caller* as blocked on *target_pane_id* for the duration."""
+    key = caller.pane_id if caller.kind == "pane" else caller.kind
+    waiters = _idle_waiters.setdefault(target_pane_id, {})
+    entry = waiters.get(key)
+    if entry is None:
+        waiters[key] = {"kind": caller.kind, "since": time.monotonic(), "count": 1}
+    else:
+        entry["count"] += 1
+    try:
+        yield
+    finally:
+        held = _idle_waiters.get(target_pane_id, {}).get(key)
+        if held is not None:
+            held["count"] -= 1
+            if held["count"] <= 0:
+                del _idle_waiters[target_pane_id][key]
+                if not _idle_waiters[target_pane_id]:
+                    del _idle_waiters[target_pane_id]
+
+
+def _waiting_on_me(pane_id: str) -> list[dict[str, Any]]:
+    """Who is parked in a wait on *pane_id* right now, longest wait first.
+
+    Identities are resolved now rather than at registration, so a waiter whose
+    pane was rebuilt around its running CLI is reported under the identity it
+    answers to today — the same reason cli_whoami reads `spawned_by` through
+    ``current``. A waiter that is no longer registered at all is still waiting,
+    so its row keeps the id and simply has no name to show.
+    """
+    from agent_team_backend import agent_messaging
+
+    now = time.monotonic()
+    rows: list[dict[str, Any]] = []
+    for key, entry in _idle_waiters.get(pane_id, {}).items():
+        row: dict[str, Any] = {"waiting_s": round(now - entry["since"], 1)}
+        if entry["kind"] == "pane":
+            waiter = agent_messaging.current(key)
+            if waiter is None:
+                row["pane_id"] = key
+            else:
+                row["pane_id"] = waiter.pane_id
+                row["name"] = waiter.name
+                row["address"] = waiter.qualified_name
+        else:
+            row["caller"] = entry["kind"]
+        rows.append(row)
+    rows.sort(key=lambda row: row["waiting_s"], reverse=True)
+    return rows
+
 # Poll the owning window this often (in poll ticks) for its own view of the
 # pane. The registry's busy flag is reported by the frontend and can stay
 # stale, and log-reader activity only exists for the CLIs whose reader emits
@@ -2370,53 +2512,57 @@ async def cli_wait_idle(
             out["ui_status"] = ui_status
         return out
 
-    tick = 0
-    while True:
-        entry = agent_messaging.get(pane_id)
-        busy = bool(entry.busy) if entry else False
-        if not busy:
-            activity = app.pane_activity(pane_id)
-            if activity is None:
-                return done("quiet_period")
-            if activity["event_type"] == "turn_complete":
-                return done("turn_complete")
-            if time.monotonic() - activity["ts_monotonic"] >= _WAIT_IDLE_QUIET_S:
-                return done("quiet_period")
-        elif ui_reachable and tick >= next_ui_probe_tick:
-            # busy says otherwise, so ask the window that can actually see the
-            # pane.
-            ui = await _ui_request(
-                workspace_path,
-                "invoke",
-                caller=_pane_caller(pane_id),
-                action="ui.pane.getStatus",
-                args={"paneId": pane_id},
-            )
-            payload = ui.get("result") if ui.get("ok") else None
-            if not isinstance(payload, dict):
-                ui_failures += 1
-                if ui_failures >= _WAIT_IDLE_UI_MAX_FAILURES:
-                    ui_reachable = False
+    # Registered for exactly as long as this call is parked, so the pane
+    # being waited on can see the wait (cli_whoami's `waiting_on_me`) and
+    # wrap up rather than run out somebody's budget without knowing it.
+    with _waiting_on(pane_id, caller):
+        tick = 0
+        while True:
+            entry = agent_messaging.get(pane_id)
+            busy = bool(entry.busy) if entry else False
+            if not busy:
+                activity = app.pane_activity(pane_id)
+                if activity is None:
+                    return done("quiet_period")
+                if activity["event_type"] == "turn_complete":
+                    return done("turn_complete")
+                if time.monotonic() - activity["ts_monotonic"] >= _WAIT_IDLE_QUIET_S:
+                    return done("quiet_period")
+            elif ui_reachable and tick >= next_ui_probe_tick:
+                # busy says otherwise, so ask the window that can actually see the
+                # pane.
+                ui = await _ui_request(
+                    workspace_path,
+                    "invoke",
+                    caller=_pane_caller(pane_id),
+                    action="ui.pane.getStatus",
+                    args={"paneId": pane_id},
+                )
+                payload = ui.get("result") if ui.get("ok") else None
+                if not isinstance(payload, dict):
+                    ui_failures += 1
+                    if ui_failures >= _WAIT_IDLE_UI_MAX_FAILURES:
+                        ui_reachable = False
+                    else:
+                        next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY * (2**ui_failures)
                 else:
-                    next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY * (2**ui_failures)
-            else:
-                ui_failures = 0
-                next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY
-                ui_status = str(payload.get("status") or "")
-                if _ui_status_is_idle(payload):
-                    # A window reporting idle only means "not working right
-                    # now". For a pane that has never shown any activity that
-                    # means "has not started yet", not "finished" — a caller
-                    # that just handed it a task must be able to tell those
-                    # apart.
-                    if app.pane_activity(pane_id) is None:
-                        return done("never_started")
-                    return done("ui_status")
-        tick += 1
-        waited = time.monotonic() - started
-        if waited >= timeout:
-            return timed_out(waited)
-        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+                    ui_failures = 0
+                    next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY
+                    ui_status = str(payload.get("status") or "")
+                    if _ui_status_is_idle(payload):
+                        # A window reporting idle only means "not working right
+                        # now". For a pane that has never shown any activity that
+                        # means "has not started yet", not "finished" — a caller
+                        # that just handed it a task must be able to tell those
+                        # apart.
+                        if app.pane_activity(pane_id) is None:
+                            return done("never_started")
+                        return done("ui_status")
+            tick += 1
+            waited = time.monotonic() - started
+            if waited >= timeout:
+                return timed_out(waited)
+            await asyncio.sleep(_WAIT_IDLE_POLL_S)
 
 
 # How long to keep watching for the target to pick the message up before
@@ -2555,10 +2701,16 @@ async def cli_send_and_wait(
     # to be answered in what is left, and its hold reason is a far more useful
     # answer than "timeout, busy".
     delivery_budget = timeout / 2
-    sent = await cli_send(
-        to, text, ctx, wait_for_delivery_s=delivery_budget, pane_id=pane_id,
-        reply_to=reply_to,
-    )
+    # The wait starts here, not at the idle loop below: a message held behind
+    # whatever the target is mid-way through is the exact case this closes —
+    # the target is busy, the sender is already parked on it, and only
+    # `waiting_on_me` can tell the target that. The nested cli_wait_idle
+    # registers the same caller against the same pane and is refcounted away.
+    with _waiting_on(target_pane_id, caller):
+        sent = await cli_send(
+            to, text, ctx, wait_for_delivery_s=delivery_budget, pane_id=pane_id,
+            reply_to=reply_to,
+        )
     if not sent.get("ok"):
         return sent
     if delivery_budget > 0 and sent.get("status") != "delivered":
@@ -2595,10 +2747,11 @@ async def cli_send_and_wait(
     # Give the target a moment to pick the message up, so the wait below is
     # about its turn rather than about the state it was already in.
     grace_deadline = started + min(timeout, _SEND_AND_WAIT_START_GRACE_S)
-    while True:
-        if has_new_activity() or time.monotonic() >= grace_deadline:
-            break
-        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+    with _waiting_on(target_pane_id, caller):
+        while True:
+            if has_new_activity() or time.monotonic() >= grace_deadline:
+                break
+            await asyncio.sleep(_WAIT_IDLE_POLL_S)
 
     while True:
         left = remaining()
