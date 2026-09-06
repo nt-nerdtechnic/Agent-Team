@@ -1178,6 +1178,17 @@ const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributio
   `${entry.contributionKey}\u0000${entry.icon ?? ''}`
 const hasPluginIcon = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): boolean =>
   Boolean(entry.icon) && !failedPluginIcons.value.has(pluginIconFailureKey(entry))
+/** Single-colour artwork is painted with CSS rather than shown as an image:
+ *  the icon becomes a mask over `currentColor`, so it follows the tab's text
+ *  colour like the built-in SVG icons instead of keeping the shade the plugin
+ *  author baked in (one drawn for a dark theme is invisible on a light one).
+ *  Colour artwork stays an <img> — a mask would flatten it to one tone. */
+const isMonoPluginIcon = (
+  entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon' | 'iconMonochrome'>
+): boolean => hasPluginIcon(entry) && entry.iconMonochrome === true
+const pluginIconMask = (
+  entry: Pick<PluginRegionContribution, 'icon'>
+): Record<string, string> => ({ '--plugin-icon': `url("${entry.icon}")` })
 function markPluginIconFailed(entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): void {
   const failures = new Set(failedPluginIcons.value)
   failures.add(pluginIconFailureKey(entry))
@@ -2201,8 +2212,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         :title="$t('layout.expand')"
         @click="selectSidebarTab(t.id)"
       >
+        <span
+          v-if="t.id === 'git' && gitPluginTab && isMonoPluginIcon(gitPluginTab)"
+          class="plugin-tab-icon plugin-tab-icon--mono"
+          :style="pluginIconMask(gitPluginTab)"
+          aria-hidden="true"
+        ></span>
         <img
-          v-if="t.id === 'git' && gitPluginTab && hasPluginIcon(gitPluginTab)"
+          v-else-if="t.id === 'git' && gitPluginTab && hasPluginIcon(gitPluginTab)"
           class="plugin-tab-icon"
           :src="gitPluginTab.icon ?? ''"
           width="15"
@@ -2224,8 +2241,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         :title="pluginTab.title"
         @click="selectSidebarTab(pluginTab.tabId)"
       >
+        <span
+          v-if="isMonoPluginIcon(pluginTab)"
+          class="plugin-tab-icon plugin-tab-icon--mono"
+          :style="pluginIconMask(pluginTab)"
+          aria-hidden="true"
+        ></span>
         <img
-          v-if="hasPluginIcon(pluginTab)"
+          v-else-if="hasPluginIcon(pluginTab)"
           class="plugin-tab-icon"
           :src="pluginTab.icon ?? ''"
           width="15"
@@ -2254,8 +2277,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         @click="selectSidebarTab(t.id)"
       >
         <template v-if="t.id === 'git' && !legacyGitRecovery && gitPluginTab">
+          <span
+            v-if="isMonoPluginIcon(gitPluginTab)"
+            class="plugin-tab-icon plugin-tab-icon--mono"
+            :style="pluginIconMask(gitPluginTab)"
+            aria-hidden="true"
+          ></span>
           <img
-            v-if="hasPluginIcon(gitPluginTab)"
+            v-else-if="hasPluginIcon(gitPluginTab)"
             class="plugin-tab-icon"
             :src="gitPluginTab.icon ?? ''"
             width="15"
@@ -2276,8 +2305,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         :title="pluginTab.title"
         @click="selectSidebarTab(pluginTab.tabId)"
       >
+        <span
+          v-if="isMonoPluginIcon(pluginTab)"
+          class="plugin-tab-icon plugin-tab-icon--mono"
+          :style="pluginIconMask(pluginTab)"
+          aria-hidden="true"
+        ></span>
         <img
-          v-if="hasPluginIcon(pluginTab)"
+          v-else-if="hasPluginIcon(pluginTab)"
           class="plugin-tab-icon"
           :src="pluginTab.icon ?? ''"
           width="15"
@@ -3271,6 +3306,21 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   width: 15px;
   height: 15px;
   object-fit: contain;
+}
+/* Silhouette artwork: the icon is the mask and the button's own text colour is
+   the ink, so it tracks :hover and .active like the built-in SVG icons.
+   The artwork arrives as a per-plugin data URL in the --plugin-icon custom
+   property, set inline on the element. */
+.plugin-tab-icon--mono {
+  background-color: currentColor;
+  -webkit-mask-image: var(--plugin-icon);
+  mask-image: var(--plugin-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 .tab-spacer { flex: 1; }
 /* Not a .tab-btn: that class means "a sidebar tab", and both the shortcut

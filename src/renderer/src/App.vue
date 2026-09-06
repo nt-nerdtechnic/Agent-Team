@@ -641,6 +641,15 @@ const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributio
   `${entry.contributionKey} ${entry.icon ?? ''}`
 const hasPluginIcon = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): boolean =>
   Boolean(entry.icon) && !failedPluginIcons.value.has(pluginIconFailureKey(entry))
+/** Single-colour artwork is painted as a mask over `currentColor` instead of
+ *  shown as an image, so it follows the titlebar's text colour rather than the
+ *  shade the plugin author baked in. Colour artwork stays an <img>. */
+const isMonoPluginIcon = (
+  entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon' | 'iconMonochrome'>
+): boolean => hasPluginIcon(entry) && entry.iconMonochrome === true
+const pluginIconMask = (
+  entry: Pick<PluginRegionContribution, 'icon'>
+): Record<string, string> => ({ '--plugin-icon': `url("${entry.icon}")` })
 function markPluginIconFailed(entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): void {
   const failures = new Set(failedPluginIcons.value)
   failures.add(pluginIconFailureKey(entry))
@@ -14833,8 +14842,14 @@ function paneIsCommander(p: ActivePane): boolean {
           @mousedown.stop
           @click="openPluginContributionWindow(contribution)"
         >
+          <span
+            v-if="isMonoPluginIcon(contribution)"
+            class="titlebar-plugin-icon titlebar-plugin-icon--mono"
+            :style="pluginIconMask(contribution)"
+            aria-hidden="true"
+          ></span>
           <img
-            v-if="hasPluginIcon(contribution)"
+            v-else-if="hasPluginIcon(contribution)"
             class="titlebar-plugin-icon"
             :src="contribution.icon ?? ''"
             width="12"
@@ -16380,6 +16395,21 @@ function paneIsCommander(p: ActivePane): boolean {
   height: 12px;
   object-fit: contain;
   border-radius: 3px;
+}
+/* Silhouette artwork: masked over the button's own text colour so it follows
+   the theme. The artwork arrives in the inline --plugin-icon custom property
+   (a per-plugin data URL). */
+.titlebar-plugin-icon--mono {
+  background-color: currentColor;
+  border-radius: 0;
+  -webkit-mask-image: var(--plugin-icon);
+  mask-image: var(--plugin-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 .titlebar-plugin-fallback {
   font-size: 12px;
