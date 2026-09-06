@@ -3099,3 +3099,177 @@ async def test_a_stop_that_arrives_after_adoption_is_still_recovered(monkeypatch
         confirm_token._reset_for_test()
         trust_store._reset_for_test()
         await link.stop()
+
+
+# ── A device id belongs to a machine × an account, not to a machine ──────────
+
+
+def _conflict_until(taken: set[str]):
+    """A server that refuses any id in *taken*, the way a real one refuses an id
+    already registered to another member."""
+
+    def responder(conn, message):
+        if message.get("type") == "auth.hello":
+            payload = message.get("payload") or {}
+            conn.hellos.append(payload)
+            if payload.get("deviceId") in taken:
+                return {
+                    "id": message.get("id"),
+                    "ok": False,
+                    "error": {
+                        "code": "DEVICE_CONFLICT",
+                        "message": "that device belongs to another member",
+                    },
+                }
+        return default_responder(conn, message)
+
+    return responder
+
+
+async def test_a_refused_id_is_replaced_once_and_the_link_comes_up(tmp_path, monkeypatch):
+    """M3's dead end, resolved without anybody touching anything.
+
+    Registering a second account from a machine the server already knows made
+    every auth.hello answer DEVICE_CONFLICT, permanently — and the account view
+    reported "access token rejected", which sends people to retype a password
+    that was never wrong.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    legacy = device_identity.device_id()
+    server = FakeServer(responder=_conflict_until({legacy}), policy=ALLOW_ALL_POLICY)
+
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        offered = [h.get("deviceId") for h in conn.hellos]
+
+        # The one it has always presented, then a new one — and every offer
+        # after that is the new one, because it was recorded when the server
+        # took it. A machine that minted a fresh id per reconnect would look
+        # like a new machine to every peer each time.
+        assert offered[0] == legacy
+        assert offered[1] != legacy
+        assert set(offered[1:]) == {offered[1]}, offered
+        assert link._device_id == offered[1]
+        # And the accepted one is now this machine's node in that account —
+        # recorded only because the server took it.
+        assert device_identity.node_id_for("m1") == offered[1]
+    finally:
+        await link.stop()
+
+
+async def test_the_replacement_is_tried_once_and_not_in_a_loop(tmp_path, monkeypatch):
+    """A member is capped at ten devices on the server. Retrying until something
+    sticks would spend the whole allowance on one bad afternoon, and every burnt
+    id is one the user cannot get back."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    everything_conflicts = _conflict_until({"*"})
+
+    def responder(conn, message):
+        if message.get("type") == "auth.hello":
+            conn.hellos.append(message.get("payload") or {})
+            return {
+                "id": message.get("id"),
+                "ok": False,
+                "error": {"code": "DEVICE_CONFLICT", "message": "no"},
+            }
+        return default_responder(conn, message)
+
+    del everything_conflicts
+    server = FakeServer(responder=responder, policy=ALLOW_ALL_POLICY)
+    link = server_link.ServerLink(
+        connect=server.connect,
+        config_loader=lambda: server_link.ServerLinkConfig(url="ws://s/ws", token="t"),
+    )
+    task = asyncio.create_task(link._run())
+    try:
+        await _until(lambda: bool(server.opened and len(server.opened[0].hellos) >= 2))
+        await asyncio.sleep(0.05)
+
+        assert len(server.opened[0].hellos) == 2, "one retry, not a loop"
+        # And nothing was written: an id the server refused is not this
+        # machine's node in anything.
+        doc = json.loads(device_identity.device_identity_path().read_text(encoding="utf-8"))
+        assert doc.get("nodes", {}) == {}
+    finally:
+        link._stopped = True
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+
+
+async def test_a_conflict_that_survives_the_retry_says_what_it_is(tmp_path, monkeypatch):
+    """It used to surface as "access token rejected" — pointing at the
+    credential, when the credential was never the problem."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+
+    def responder(conn, message):
+        if message.get("type") == "auth.hello":
+            conn.hellos.append(message.get("payload") or {})
+            return {
+                "id": message.get("id"),
+                "ok": False,
+                "error": {"code": "DEVICE_CONFLICT", "message": "taken"},
+            }
+        return default_responder(conn, message)
+
+    server = FakeServer(responder=responder, policy=ALLOW_ALL_POLICY)
+    link = server_link.ServerLink(
+        connect=server.connect,
+        config_loader=lambda: server_link.ServerLinkConfig(url="ws://s/ws", token="t"),
+    )
+    task = asyncio.create_task(link._run())
+    try:
+        await _until(lambda: bool(link.terminated_reason))
+
+        assert "already registered to another account" in link.terminated_reason
+        # It used to read as a credential problem, which is where people looked.
+        assert "token" not in link.terminated_reason.lower()
+    finally:
+        link._stopped = True
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+
+
+async def test_an_id_the_server_refused_is_never_recorded(tmp_path, monkeypatch):
+    """Offering an id is not claiming it.
+
+    The member is known here — this credential has authenticated before — which
+    is the case the identity module alone cannot cover: it is the *link* that
+    decides when to record, and recording before the reply would spend one of
+    the ten devices a member is allowed on every refusal. A machine having a bad
+    afternoon would exhaust the account by trying.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    trust_store.load()
+    trust_store.adopt_own_member("ws://s/ws", "t", "m1")
+    assert trust_store.member_for_credential("ws://s/ws", "t") == "m1"
+
+    def refuse_everything(conn, message):
+        if message.get("type") == "auth.hello":
+            conn.hellos.append(message.get("payload") or {})
+            return {
+                "id": message.get("id"),
+                "ok": False,
+                "error": {"code": "DEVICE_CONFLICT", "message": "taken"},
+            }
+        return default_responder(conn, message)
+
+    server = FakeServer(responder=refuse_everything, policy=ALLOW_ALL_POLICY)
+    link = server_link.ServerLink(
+        connect=server.connect,
+        config_loader=lambda: server_link.ServerLinkConfig(url="ws://s/ws", token="t"),
+    )
+    task = asyncio.create_task(link._run())
+    try:
+        await _until(lambda: bool(link.terminated_reason))
+
+        doc = json.loads(device_identity.device_identity_path().read_text(encoding="utf-8"))
+        assert "m1" not in doc.get("nodes", {}), doc
+    finally:
+        link._stopped = True
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        trust_store._reset_for_test()

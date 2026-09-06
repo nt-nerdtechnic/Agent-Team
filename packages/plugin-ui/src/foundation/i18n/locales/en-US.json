@@ -78,6 +78,12 @@
     "push-badge-title-direct": "Handed straight to the CLI without ever reaching the pane's input box, so nothing you were typing could be submitted with it",
     "expand-rail": "Expand inter-CLI messages"
   },
+  "shutdown": {
+    "title": "Shutting down…",
+    "saving": "Saving window and session state",
+    "stopping": "Stopping running CLIs and the backend",
+    "closing": "Almost done"
+  },
   "confirm-close": {
     "ws-title": "Close workspace?",
     "ws-body": "Return to the welcome screen and close the current workspace?",
@@ -1156,7 +1162,9 @@
         "panes": "{count} CLI panes",
         "no-panes": "Nothing running here right now.",
         "solo": "Only this device is signed in. Sign in on another device to see it here.",
-        "link-offline": "The link is down, so this is the last thing the server said."
+        "link-offline": "The link is down, so this is the last thing the server said.",
+        "no-rules": "No rules yet on this device",
+        "no-rules-body": "Nothing from your other machines can reach this one until you write at least one rule. Open the rules and add one."
       },
       "trust": {
         "requests-hint": "Approving writes a rule for exactly this pane. Nothing else on this device is granted.",

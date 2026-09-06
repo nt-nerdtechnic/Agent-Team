@@ -235,6 +235,10 @@ interface NetworkSnapshot {
    * an attacker who deleted that state wants next.
    */
   trustLocked?: string
+  /** No rules written under this identity yet, so nothing inbound is accepted.
+   *  Reachable by recovering — a machine that heals a device conflict lands on
+   *  a new identity with an empty policy. */
+  policyEmpty?: boolean
   /** True when that stop is a read that may succeed next time — the offer to
    *  erase everything waits on this being false. */
   trustLockedTransient?: boolean
@@ -414,6 +418,12 @@ async function refresh(): Promise<void> {
 const trustNotices = computed<TrustNotice[]>(() => network.value?.trustNotices ?? [])
 const trustPending = computed<PendingDevice[]>(() => network.value?.trustPending ?? [])
 const trustLocked = computed(() => network.value?.trustLocked ?? '')
+/** Connected, and still receiving nothing. Said out loud because the state is
+ *  correct but invisible, and a recovery that ends here looks like a success
+ *  that quietly does not work. */
+const policyEmpty = computed(
+  () => network.value?.policyEmpty === true && !trustLocked.value,
+)
 /** The stop is a read that may succeed on the next try. Same card, but no offer
  *  to erase everything: a keychain locked for a moment has nothing wrong with
  *  it to erase, and that offer is the one act here nobody can undo. */
@@ -1682,6 +1692,18 @@ onUnmounted(() => {
                machine that hits this was Keychain Access, which is the same
                reset performed with less information and leaves the two halves
                disagreeing. Loud and deliberate beats undiscoverable. -->
+          <!-- Connected, no rules: inbound is refused and nothing else on this
+               screen would say why. Placed with the lock, above the device list,
+               because the list below is unreachable while it holds. -->
+          <div v-if="policyEmpty" class="card locked-card">
+            <h2 class="net-title">{{ t('settings.p2p.network.no-rules') }}</h2>
+            <p class="req-what">{{ t('settings.p2p.network.no-rules-body') }}</p>
+            <div class="locked-acts">
+              <button class="dev-review" @click="emit('open-rules')">
+                {{ t('settings.p2p.network.who-can-command') }}
+              </button>
+            </div>
+          </div>
           <div v-if="trustLocked" class="card locked-card">
             <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
             <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>

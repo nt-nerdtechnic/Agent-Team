@@ -78,6 +78,12 @@
     "push-badge-title-direct": "直接交給該 CLI，全程沒有經過 pane 的輸入框，你正在打的字不可能被一起送出",
     "expand-rail": "展開 CLI 互傳訊息"
   },
+  "shutdown": {
+    "title": "正在關閉…",
+    "saving": "儲存視窗與工作階段狀態",
+    "stopping": "結束執行中的 CLI 與後端服務",
+    "closing": "即將關閉"
+  },
   "confirm-close": {
     "ws-title": "關閉工作區？",
     "ws-body": "確定要關閉目前工作區並返回歡迎頁嗎？",
@@ -1156,7 +1162,9 @@
         "panes": "{count} 個 CLI 面板",
         "no-panes": "這台目前沒有執行中的面板。",
         "solo": "目前只有這台裝置登入。在另一台裝置登入同一個帳號，它就會出現在這裡。",
-        "link-offline": "連線已中斷，以下是伺服器最後一次回報的狀態。"
+        "link-offline": "連線已中斷，以下是伺服器最後一次回報的狀態。",
+        "no-rules": "這台裝置還沒有任何規則",
+        "no-rules-body": "在你寫下至少一條規則之前，其他機器送來的東西都到不了這台。開啟規則並新增一條。"
       },
       "trust": {
         "requests-hint": "核准只會為這一個 pane 寫一條規則，這台裝置上的其他 pane 不會被授權。",

@@ -909,8 +909,46 @@ class ServerLink:
         return reply if isinstance(reply, dict) else {}
 
     async def _authenticate(self, config: ServerLinkConfig) -> None:
-        self._device_id = await asyncio.to_thread(device_identity.device_id)
-        reply = await self._request(
+        """Say hello, and settle which id this machine presents to this account.
+
+        The id is per *account*, not per machine. It used to be one value for the
+        whole machine, which made a machine something an account could claim:
+        sign up a second account from a machine the server already knows and
+        every ``auth.hello`` answers ``DEVICE_CONFLICT``, permanently, because
+        the id belongs to the first member. The account view reported "access
+        token rejected", so people retyped a password that was never wrong.
+
+        The member is known before the reply whenever this credential has worked
+        before — the trust store pinned it — so the right id can be offered on
+        the first attempt. When it is not known, the id this machine has always
+        presented is offered, and the server's refusal is what corrects it.
+        """
+        hint = await asyncio.to_thread(
+            trust_store.member_for_credential, config.url, config.token
+        )
+        self._device_id = await asyncio.to_thread(device_identity.node_id_for, hint)
+        reply = await self._hello(config)
+        if not reply.get("ok") and self._conflict_code(reply) == "DEVICE_CONFLICT":
+            # Once, and only for this one code. The other two rejections mean
+            # the same thing however often they are asked; this one is a
+            # statement about the id we offered, and we have another to offer.
+            # Retrying without changing anything is what the comment below
+            # refuses, and this changes something first.
+            self._device_id = await asyncio.to_thread(device_identity.fresh_node_id)
+            log.warning(
+                "the server says the id this machine offered belongs to another "
+                "account; trying once more as a new device on this one"
+            )
+            reply = await self._hello(config)
+        await self._finish_authenticate(config, reply)
+
+    @staticmethod
+    def _conflict_code(reply: dict[str, Any]) -> str:
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        return str(error.get("code") or "")
+
+    async def _hello(self, config: ServerLinkConfig) -> dict[str, Any]:
+        return await self._request(
             "auth.hello",
             {
                 "credential": config.token,
@@ -929,21 +967,43 @@ class ServerLink:
                 "signPublicKey": await asyncio.to_thread(device_signing.public_key),
             },
         )
+
+    async def _finish_authenticate(
+        self, config: ServerLinkConfig, reply: dict[str, Any]
+    ) -> None:
         if not reply.get("ok"):
             error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
             code = str(error.get("code") or "AUTH_FAILED")
             detail = str(error.get("message") or "")
-            # Every auth.hello rejection is terminal. AUTH_REJECTED means the
-            # credential is invalid or disabled, BAD_REQUEST means this build
-            # sent a malformed deviceId, DEVICE_CONFLICT means the id belongs to
-            # another member — none of the three resolves by asking again, and
-            # retrying turns a fixable error into a silent one.
+            # AUTH_REJECTED means the credential is invalid or disabled and
+            # BAD_REQUEST means this build sent a malformed deviceId: neither
+            # resolves by asking again, and retrying turns a fixable error into a
+            # silent one. That still holds for both of them.
+            #
+            # DEVICE_CONFLICT used to be listed here for the same reason, and it
+            # no longer belongs: it is a statement about the id we offered rather
+            # than about the credential, and the caller has already offered a
+            # different one. Reaching here with it means even a brand-new id was
+            # refused, which is not something asking again can fix either — so it
+            # is terminal too, just for a different reason.
+            if code == "DEVICE_CONFLICT":
+                detail = (
+                    "this machine is already registered to another account on "
+                    "this server" + (f" ({detail})" if detail else "")
+                )
             raise ServerLinkTerminated(
                 f"auth.hello was rejected ({code})" + (f": {detail}" if detail else "")
             )
         payload = reply.get("payload")
         payload = payload if isinstance(payload, dict) else {}
-        await self._adopt_member(config, str(payload.get("memberId") or ""))
+        member = str(payload.get("memberId") or "")
+        # Recorded only now. The id becomes this machine's node in this account
+        # because the server accepted it, not because we chose it — writing it
+        # earlier would burn one on every refusal, and a member is capped at ten
+        # devices. Claiming the same value again on the next reconnect is a
+        # no-op, which is the ordinary case.
+        await asyncio.to_thread(device_identity.claim_node_id, member, self._device_id)
+        await self._adopt_member(config, member)
         self.display_name = str(payload.get("displayName") or "")
         self.email_verified = bool(payload.get("emailVerified"))
         # Per connection, not per process: the server this dialled may be a
@@ -1157,6 +1217,21 @@ class ServerLink:
         """
         if self._trust_locked:
             return None
+        # Keyed on the id this machine presents to *this* account, so signing in
+        # as somebody else starts a new sequence at zero.
+        #
+        # That reads like a replay hole and is not one — and the reason is three
+        # lines down, which is where the next person to notice should look
+        # before concluding otherwise. The sequence is the *second* gate. The
+        # first is the signature, and `device_signing.policy_payload` covers
+        # `{"deviceId", "seq", "policy"}` — so a document signed under the id
+        # this machine used to present fails verification here under the new
+        # one, and never reaches the comparison. A fresh identity has signed
+        # nothing, so there is no document bound to it to replay either.
+        #
+        # Carrying the old sequence forward would be the actual bug: revisions
+        # 1..N under the new identity would all be refused as stale, and the
+        # symptom is a user changing a rule and nothing happening.
         seq = trust_store.policy_seq(self._device_id)
         if not isinstance(raw, dict):
             if seq:
@@ -1709,6 +1784,15 @@ class ServerLink:
             # device list it is about.
             "pairings": self.pairing_rows(),
             "trustLocked": self._trust_locked,
+            # No rules written under this identity yet, so `is_allowed(None)`
+            # refuses everything inbound. That is the correct state — it is
+            # where a device that never wrote a policy already is — but it is
+            # invisible, and it is now reachable by *recovering*: a machine that
+            # heals a DEVICE_CONFLICT lands on a new identity with no rules, and
+            # would otherwise sit there connected, apparently fine, receiving
+            # nothing. Saying so is the difference between a recovery and a
+            # quieter failure.
+            "policyEmpty": self._policy is None,
             # Whether that stop is a read that may succeed next time. The card
             # says the same thing either way; what waits on this is the offer to
             # erase everything, which has nothing to erase when the keychain was

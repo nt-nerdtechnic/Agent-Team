@@ -483,6 +483,25 @@ def _token_fingerprint(url: str, token: str) -> str:
     return hashlib.sha256(f"{url}\x00{token}".encode("utf-8")).hexdigest()[:32]
 
 
+def member_for_credential(url: str, token: str) -> str:
+    """The member this credential was last seen to belong to, or "".
+
+    A read-only peek at what ``adopt_own_member`` pinned, for the one caller
+    that needs the answer *before* ``auth.hello`` can give it: the link has to
+    choose which node id to present, and that choice is per member. Never
+    raises — a store that cannot be read simply has no hint, and the link falls
+    back to the id it has always presented.
+    """
+    if not url or not token:
+        return ""
+    try:
+        with _lock:
+            state = _load_locked()
+            return str(state["ownMembers"].get(_token_fingerprint(url, token)) or "")
+    except Exception:  # noqa: BLE001 - a hint that cannot be read is just absent
+        return ""
+
+
 def adopt_own_member(url: str, token: str, member_id: str) -> str:
     """Pin the member id this credential belongs to, and return the pinned one.
 
