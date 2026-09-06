@@ -4405,4 +4405,33 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .s-body select {
   cursor: pointer;
 }
+
+/* Final visual pass: keep the dense settings surface calm while making every
+   interactive control reveal its state consistently. These rules only skin
+   existing controls; they do not alter their layout or behavior. */
+.s-modal {
+  border-color: var(--border-default);
+  background: var(--bg-base);
+}
+.s-sidebar {
+  background: var(--bg-inset);
+}
+.s-nav-group-title { color: var(--text-secondary); }
+.s-search-input:hover:not(:disabled) { border-color: var(--border-strong); }
+.s-search-input:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; }
+.s-search-result:active { background: var(--accent-subtle); }
+.s-close:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
+.s-body button:focus-visible,
+.s-body a:focus-visible,
+.s-body input:focus-visible,
+.s-body textarea:focus-visible,
+.s-body select:focus-visible {
+  outline: 2px solid var(--accent-fg);
+  outline-offset: 2px;
+}
+.ap-theme-card:focus-visible,
+.ap-lang-btn:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
+.ap-theme-card.active,
+.ap-lang-btn.active { background: var(--accent-subtle); }
+.settings-meta-row { color: var(--text-secondary); }
 </style>

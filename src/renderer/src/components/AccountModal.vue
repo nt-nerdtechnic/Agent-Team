@@ -2070,6 +2070,7 @@ onUnmounted(() => {
   line-height: 1;
 }
 .s-close:hover { background: var(--bg-muted); color: var(--text-bright); }
+.s-close:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
 /* Brand header. The mark is what names the feature — "Navide Cloud" is a new
    word for something the app already did, so the first screen that says it has
    to also show it. The tinted band is the only decorative surface in this
@@ -2112,27 +2113,33 @@ onUnmounted(() => {
   padding: 7px 12px; font-size: 12.5px; color: var(--text-secondary); cursor: pointer;
 }
 .tab.on { color: var(--text-bright); border-bottom-color: var(--accent-emphasis); font-weight: 500; }
+.tab:hover:not(:disabled) { color: var(--text-bright); background: var(--bg-muted); border-radius: var(--radius-control); }
+.tab:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: -2px; border-radius: var(--radius-control); }
 .tab:disabled { opacity: 0.5; cursor: default; }
 .lbl { display: block; font-size: 11.5px; color: var(--text-secondary); margin: 12px 0 5px; }
 input {
   width: 100%; box-sizing: border-box;
   background: var(--bg-inset); border: 1px solid var(--border-default);
-  border-radius: 6px; padding: 8px 10px; color: inherit; font: inherit; font-size: 12.5px;
+  border-radius: var(--radius-sm); padding: 8px 10px; color: inherit; font: inherit; font-size: 12.5px;
 }
 input:focus {
   outline: none; border-color: var(--accent-emphasis);
   box-shadow: 0 0 0 2px var(--accent-focus, rgba(31, 111, 235, 0.3));
 }
 .btn {
-  appearance: none; border-radius: 6px; padding: 9px 16px; font: inherit; font-size: 12.5px;
+  appearance: none; border-radius: var(--radius-sm); padding: 9px 16px; font: inherit; font-size: 12.5px;
   font-weight: 500; cursor: pointer;
-  background: var(--accent-emphasis); border: 1px solid var(--accent-emphasis); color: #fff;
+  background: var(--accent-emphasis); border: 1px solid var(--accent-emphasis); color: var(--text-on-emphasis);
 }
+.btn:not(:disabled) { transition: background var(--motion-fast, 120ms) var(--ease-out, ease-out), border-color var(--motion-fast, 120ms) var(--ease-out, ease-out), color var(--motion-fast, 120ms) var(--ease-out, ease-out); }
+.btn:not(:disabled):hover { box-shadow: inset 0 0 0 1px var(--text-on-emphasis); }
+.btn.ghost:not(:disabled):hover { background: var(--bg-muted); border-color: var(--border-strong); box-shadow: none; }
+.btn:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
 .btn.ghost { background: transparent; border-color: var(--border-default); color: inherit; }
 .btn.wide { display: block; width: 100%; margin-top: 18px; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .card {
-  border: 1px solid var(--border-default); border-radius: 8px; padding: 4px 14px; margin-top: 8px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 4px 14px; margin-top: 8px; background: var(--bg-subtle);
 }
 .kv {
   display: flex; justify-content: space-between; gap: 12px; font-size: 12px;
@@ -2226,9 +2233,9 @@ input:focus {
    pane wants something from you, hollow means it does not, red means it is
    broken. `awaiting` is the loud one on purpose — a pane holding a prompt open
    is the whole reason to look at another machine's list. */
-.pane-pill.st-running { background: var(--success-fg); color: #fff; }
-.pane-pill.st-awaiting { background: var(--attention-fg); color: #fff; }
-.pane-pill.st-waiting { background: var(--attention-fg); color: #fff; }
+.pane-pill.st-running { background: var(--success-fg); color: var(--text-on-emphasis); }
+.pane-pill.st-awaiting { background: var(--attention-fg); color: var(--text-on-emphasis); }
+.pane-pill.st-waiting { background: var(--attention-fg); color: var(--text-on-emphasis); }
 .pane-pill.st-idle,
 .pane-pill.st-starting,
 .pane-pill.st-disconnected { background: none; border-color: var(--border-default); }
@@ -2350,7 +2357,7 @@ input:focus {
 .fp-row { display: inline-flex; align-items: center; gap: 8px; }
 .fp-value { user-select: text; letter-spacing: 0.06em; }
 .fp-copy {
-  background: none; border: 1px solid var(--border-default); border-radius: 6px;
+  background: none; border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   padding: 1px 6px; font-size: 11px; color: var(--text-secondary); cursor: pointer;
 }
 .fp-copy:hover { color: var(--text-primary); }

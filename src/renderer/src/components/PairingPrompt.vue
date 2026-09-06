@@ -367,7 +367,7 @@ function grouped(value: string | undefined): string {
   font: inherit; font-size: 15px; line-height: 1.2; color: var(--text-secondary);
   cursor: pointer;
 }
-.pp-close:hover { color: var(--text-primary); }
+.pp-close:hover { color: var(--text-primary); background: var(--bg-muted); border-radius: var(--radius-control, 6px); }
 .pp-close:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; }
 .pp-label {
   margin: 8px 0 0; font-size: var(--font-3xs); text-transform: uppercase;
@@ -376,6 +376,7 @@ function grouped(value: string | undefined): string {
 .pp-code {
   margin: 2px 0 0; font-family: var(--font-mono, monospace);
   font-size: 24px; letter-spacing: 0.18em; user-select: text;
+  color: var(--text-primary); font-variant-numeric: tabular-nums;
 }
 .pp-body { margin: 6px 0 0; font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
 .pp-fp { margin: 2px 0 0; font-size: 12px; }
@@ -387,12 +388,16 @@ function grouped(value: string | undefined): string {
   border-radius: var(--radius-control, 6px); border: 1px solid var(--border-default);
   background: none; color: var(--text-secondary);
 }
+.pp-btn:hover:not(:disabled) { background: var(--bg-muted); border-color: var(--border-strong, var(--border-default)); color: var(--text-primary); }
+.pp-btn:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
 .pp-btn:disabled { opacity: 0.5; cursor: default; }
 .pp-primary {
   background: var(--accent-emphasis); border-color: var(--accent-emphasis);
   color: var(--text-on-emphasis);
 }
+.pp-primary:hover:not(:disabled) { background: var(--accent-emphasis); border-color: var(--accent-emphasis); color: var(--text-on-emphasis); }
 .pp-danger { color: var(--danger-fg); border-color: var(--danger-fg); }
+.pp-danger:hover:not(:disabled) { background: var(--danger-subtle, color-mix(in srgb, var(--danger-fg) 10%, transparent)); border-color: var(--danger-fg); color: var(--danger-fg); }
 .pp-quiet { border-color: transparent; }
 .pp-quiet:hover { color: var(--text-primary); }
 </style>

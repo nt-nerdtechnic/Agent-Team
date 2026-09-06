@@ -698,17 +698,17 @@ onMounted(() => {
   min-width: 0;
   background: var(--bg-base);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   overflow: hidden;
   position: relative;
 }
 .pipe-tag {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   font-weight: 700;
-  background: var(--accent-muted);
-  color: var(--accent-bright);
+  background: var(--accent-subtle);
+  color: var(--accent-fg);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   flex-shrink: 0;
 }
 .pane:focus-within {
@@ -729,6 +729,13 @@ onMounted(() => {
 .pane.pane-selected .pane-header {
   background: color-mix(in srgb, var(--accent-focus) 18%, var(--bg-elevated));
 }
+.pane.pane-focus.pane-selected {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-focus) 32%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent-focus) 30%, transparent);
+}
+.pane.pane-focus.pane-selected .pane-header {
+  background: color-mix(in srgb, var(--accent-focus) 14%, var(--bg-elevated));
+}
 .minimize-btn,
 .rebuild-btn {
   position: absolute;
@@ -739,9 +746,10 @@ onMounted(() => {
   color: var(--text-disabled);
   font-size: var(--font-md);
   cursor: pointer;
+  box-sizing: border-box;
   padding: 0 3px;
   line-height: 1;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   opacity: 1;
   transition: color 0.15s, background-color 0.15s;
 }
@@ -759,6 +767,11 @@ onMounted(() => {
 .rebuild-btn:hover:not(:disabled) {
   color: var(--text-primary);
   background: var(--bg-muted);
+}
+.minimize-btn:focus-visible,
+.rebuild-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
 }
 .rebuild-btn:disabled {
   opacity: 0.4;
@@ -793,6 +806,7 @@ onMounted(() => {
   text-overflow: ellipsis;
 }
 .title {
+  color: var(--text-bright);
   font-weight: 600;
 }
 /* Auto-name marker: quiet enough to ignore while scanning the header, present
@@ -814,13 +828,13 @@ onMounted(() => {
   color: var(--text-primary);
   background: var(--bg-default);
   border: 1px solid var(--accent-emphasis);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 1px 5px;
   min-width: 0;
   outline: none;
 }
 .commander-inline {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   color: var(--attention-fg);
   background: var(--attention-subtle);
@@ -832,12 +846,12 @@ onMounted(() => {
   flex-shrink: 0;
 }
 .loop-inline {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   color: var(--success-fg);
   background: var(--success-subtle);
   border: 1px solid var(--success-emphasis);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 1px 6px;
   letter-spacing: 0.2px;
   white-space: nowrap;
@@ -856,12 +870,12 @@ onMounted(() => {
   border-color: var(--success-fg);
 }
 .login-expired-inline {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   color: var(--attention-fg);
   background: var(--attention-subtle);
   border: 1px solid var(--attention-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 1px 6px;
   letter-spacing: 0.2px;
   white-space: nowrap;
@@ -872,11 +886,11 @@ onMounted(() => {
   border-color: var(--attention-fg);
 }
 .loop-btn {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   line-height: 1.4;
   background: transparent;
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-secondary);
   padding: 1px 6px;
   cursor: pointer;
@@ -972,7 +986,7 @@ onMounted(() => {
   z-index: 9;
   padding: 4px 9px;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
   color: var(--text-secondary);
   font-size: var(--font-2xs);
@@ -994,7 +1008,7 @@ onMounted(() => {
   box-sizing: border-box;
   padding: 4px 10px;
   border: 1px solid var(--accent-emphasis);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
   color: var(--accent-bright);
   font-family: inherit;
@@ -1019,7 +1033,7 @@ onMounted(() => {
   gap: 7px;
   padding: 5px 10px;
   border: 1px solid var(--danger-fg);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
   color: var(--text-secondary);
   font-size: 11.5px;
@@ -1068,7 +1082,7 @@ onMounted(() => {
   max-width: min(78%, 360px);
   padding: 8px 12px;
   border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
   color: var(--text-primary);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--bg-inverse) 10%, transparent);

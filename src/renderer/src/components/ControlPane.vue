@@ -4040,8 +4040,8 @@ button.icon-btn.muted:hover {
   color: var(--danger-fg);
 }
 .resume-state[data-state='completed'] {
-  background: var(--accent-muted);
-  color: var(--accent-bright);
+  background: var(--accent-subtle);
+  color: var(--accent-fg);
 }
 .resume-meta {
   font-size: var(--font-3xs);
@@ -4920,7 +4920,7 @@ button.icon-btn.muted:hover {
 }
 .agent-item.expanded.pipeline {
   border-color: var(--accent-muted);
-  background: linear-gradient(180deg, var(--accent-subtle) 0%, var(--bg-subtle) 100%);
+  background: var(--accent-subtle);
 }
 .agent-item.expanded.manager {
   border-color: var(--attention-muted);
@@ -4964,7 +4964,7 @@ button.icon-btn.muted:hover {
   overflow: hidden;
 }
 .role-line {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   color: var(--accent-bright);
   margin-bottom: 3px;
   padding-left: 2px;
@@ -5068,6 +5068,7 @@ button.icon-btn.muted:hover {
   flex-shrink: 0;
 }
 .agent-line:hover .agent-line-actions,
+.agent-line:focus-within .agent-line-actions,
 .agent-item.expanded .agent-line-actions {
   display: inline-flex;
 }
@@ -5104,7 +5105,7 @@ button.icon-btn.muted:hover {
 .agent-item.expanded > .row.tight button {
   font-size: var(--font-2xs);
   padding: 4px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .agent-item.expanded > .row.tight button.danger {
   background: transparent;
@@ -5127,6 +5128,7 @@ button.icon-btn.muted:hover {
 }
 .agent-minimize-btn,
 .agent-close-btn {
+  box-sizing: border-box;
   margin-left: 4px;
   padding: 0 4px;
   font-size: var(--font-2xs);
@@ -5140,8 +5142,15 @@ button.icon-btn.muted:hover {
   color: var(--text-primary);
   background: var(--bg-muted);
 }
+.agent-minimize-btn:focus-visible,
+.agent-close-btn:focus-visible,
+.agent-rebuild-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
 .agent-rebuild-btn {
   flex: 0 0 auto;
+  box-sizing: border-box;
   width: var(--icon-btn-sm);
   height: var(--icon-btn-sm);
   padding: 2px;
@@ -5172,10 +5181,10 @@ button.icon-btn.muted:hover {
   margin-bottom: 6px;
 }
 .pipe-tag {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   font-weight: 700;
-  background: var(--accent-muted);
-  color: var(--accent-bright);
+  background: var(--accent-subtle);
+  color: var(--accent-fg);
   padding: 1px 5px;
   border-radius: var(--radius-xs);
 }
@@ -5208,8 +5217,8 @@ button.icon-btn.muted:hover {
   color: var(--text-primary);
 }
 .badge.role {
-  background: var(--accent-muted);
-  color: var(--accent-bright);
+  background: var(--accent-subtle);
+  color: var(--accent-fg);
 }
 /* Auto-name marker — same treatment as the pane header's. */
 .auto-name-mark {
@@ -5234,7 +5243,7 @@ button.icon-btn.muted:hover {
   padding: 0;
 }
 .manager-inline {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   color: var(--attention-fg);
   background: var(--attention-subtle);
@@ -5249,7 +5258,7 @@ button.icon-btn.muted:hover {
    --status-badge-bg/-fg inline and win the var() fallback. */
 .state {
   margin-left: auto;
-  font-size: 9px;
+  font-size: var(--font-3xs);
   text-transform: uppercase;
   padding: 2px 6px;
   border-radius: 999px;
@@ -5325,7 +5334,7 @@ button.icon-btn.muted:hover {
   flex: 1;
   min-width: 0;
   background: var(--bg-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 3px 6px;
   font-size: var(--font-3xs);
   color: var(--text-secondary);

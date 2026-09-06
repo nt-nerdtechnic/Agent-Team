@@ -103,16 +103,23 @@ watch(dialog, async (d) => {
   min-width: 240px;
   max-width: 420px;
   padding: 10px 14px;
-  background: var(--bg-subtle);
+  background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   border-left: 4px solid var(--text-secondary);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--text-bright);
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
   font-size: var(--font-sm);
   line-height: 1.45;
-  box-shadow: 0 8px 24px var(--shadow-overlay);
+  box-shadow: var(--shadow-popover);
   cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.toast:hover {
+  background: var(--bg-hover, var(--bg-subtle));
+  border-top-color: var(--border-strong);
+  border-right-color: var(--border-strong);
+  border-bottom-color: var(--border-strong);
 }
 .toast.success {
   border-left-color: var(--success-fg);
@@ -141,6 +148,10 @@ watch(dialog, async (d) => {
   word-break: break-word;
   white-space: pre-wrap;
 }
+.toast:focus-visible {
+  outline: 2px solid var(--accent-focus, var(--accent-fg));
+  outline-offset: 2px;
+}
 .toast-enter-active,
 .toast-leave-active {
   transition: opacity 0.2s ease, transform 0.2s ease;
@@ -168,7 +179,7 @@ watch(dialog, async (d) => {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
   border-left: 4px solid var(--accent-fg);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   width: min(520px, 92vw);
   max-height: 80vh;
   display: flex;
@@ -176,7 +187,7 @@ watch(dialog, async (d) => {
   color: var(--text-bright);
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
   font-size: var(--font-sm);
-  box-shadow: 0 12px 48px var(--shadow-overlay);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 .card.confirm {
@@ -233,6 +244,10 @@ header strong {
   outline: none;
   border-color: var(--accent-fg);
 }
+.prompt-input:focus-visible {
+  outline: 2px solid var(--accent-focus, var(--accent-fg));
+  outline-offset: 1px;
+}
 .dialog-check {
   display: flex;
   align-items: center;
@@ -259,9 +274,13 @@ button {
   color: var(--text-bright);
   font-size: var(--font-xs);
   padding: 7px 14px;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   cursor: pointer;
   font-family: inherit;
+}
+button:focus-visible {
+  outline: 2px solid var(--accent-focus, var(--accent-fg));
+  outline-offset: 2px;
 }
 button.primary {
   background: var(--success-emphasis);
@@ -277,5 +296,12 @@ button.ghost {
 }
 button.ghost:hover {
   background: var(--bg-muted);
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast,
+  .toast-enter-active,
+  .toast-leave-active {
+    transition: none;
+  }
 }
 </style>
