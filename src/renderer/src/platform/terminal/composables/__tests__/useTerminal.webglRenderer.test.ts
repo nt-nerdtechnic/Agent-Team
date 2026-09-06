@@ -13,12 +13,23 @@ import { createMockBackend, withScope } from './mockBackend'
 const webgl = vi.hoisted(() => ({
   created: 0,
   disposed: 0,
+  blinkStopped: 0,
+  order: [] as string[],
   lossHandlers: [] as Array<() => void>,
   throwOnConstruct: false,
 }))
 
 vi.mock('@xterm/addon-webgl', () => ({
   WebglAddon: class {
+    // The renderer the addon disposes — except for its cursor-blink timer,
+    // which it leaves running. handleBlur is how that timer is stopped; the
+    // real one is reached the same way, through this private field.
+    _renderer = {
+      handleBlur(): void {
+        webgl.blinkStopped += 1
+        webgl.order.push('blink')
+      },
+    }
     constructor() {
       if (webgl.throwOnConstruct) throw new Error('no GL')
       webgl.created += 1
@@ -28,6 +39,7 @@ vi.mock('@xterm/addon-webgl', () => ({
     }
     dispose(): void {
       webgl.disposed += 1
+      webgl.order.push('dispose')
     }
   },
 }))
@@ -123,6 +135,8 @@ describe('useTerminal — WebGL renderer is probed, scoped, and observable', () 
     vi.clearAllMocks()
     webgl.created = 0
     webgl.disposed = 0
+    webgl.blinkStopped = 0
+    webgl.order = []
     webgl.lossHandlers = []
     webgl.throwOnConstruct = false
     loaded.addons = []
@@ -199,6 +213,49 @@ describe('useTerminal — WebGL renderer is probed, scoped, and observable', () 
       await nextTick()
       expect(webgl.disposed).toBe(1)
       expect(result.rendererKind.value).toBe('dom')
+    } finally {
+      restore()
+    }
+  })
+
+  it('stops the cursor-blink timer before releasing the context', async () => {
+    // The addon does not stop it on dispose, and a pane gives its context up
+    // every time it leaves the screen — so without this, each trip off screen
+    // leaves a 600 ms interval behind redrawing a renderer that is gone.
+    const restore = withGpu(true)
+    try {
+      const mock = createMockBackend()
+      const onScreen = ref(true)
+      const { result } = withScope(() =>
+        useTerminal('pane-blink', mock.backend, { onScreen: () => onScreen.value }),
+      )
+      result.mount(document.createElement('div'))
+      expect(result.rendererKind.value).toBe('webgl')
+
+      onScreen.value = false
+      await nextTick()
+
+      expect(webgl.blinkStopped).toBe(1)
+      // Before, not after: dispose is what puts the renderer out of reach.
+      expect(webgl.order).toEqual(['blink', 'dispose'])
+    } finally {
+      restore()
+    }
+  })
+
+  it('stops the cursor-blink timer when the context is lost too', async () => {
+    const restore = withGpu(true)
+    try {
+      const mock = createMockBackend()
+      const { result } = withScope(() =>
+        useTerminal('pane-blink-loss', mock.backend, { onScreen: () => true }),
+      )
+      result.mount(document.createElement('div'))
+
+      webgl.lossHandlers[0]()
+
+      expect(webgl.blinkStopped).toBe(1)
+      expect(webgl.order).toEqual(['blink', 'dispose'])
     } finally {
       restore()
     }

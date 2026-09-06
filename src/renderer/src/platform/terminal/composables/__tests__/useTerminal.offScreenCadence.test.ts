@@ -26,11 +26,19 @@ vi.mock('../useTerminalResize', () => ({
   createResizeController: () => ctrl,
 }))
 
+const xterm = vi.hoisted(() => ({
+  instances: [] as Array<{ options: Record<string, unknown> }>,
+  writes: [] as string[],
+}))
+
 vi.mock('@xterm/xterm', () => {
   class Terminal {
     cols = 80
     rows = 24
-    options: Record<string, unknown> = {}
+    options: Record<string, unknown> = { cursorBlink: true }
+    constructor() {
+      xterm.instances.push(this)
+    }
     unicode = { activeVersion: '6' }
     buffer = {
       active: { type: 'normal', viewportY: 0, baseY: 0, cursorX: 0, cursorY: 0, getLine: () => undefined },
@@ -48,7 +56,10 @@ vi.mock('@xterm/xterm', () => {
     onData(): { dispose(): void } {
       return { dispose(): void {} }
     }
-    write(): void {}
+    write(data: string, done?: () => void): void {
+      xterm.writes.push(data)
+      done?.()
+    }
     writeln(): void {}
     resize(): void {}
     focus(): void {}
@@ -93,6 +104,8 @@ function intervalDelays(run: () => void): number[] {
 describe('useTerminal — off-screen panes run their upkeep at a reduced cadence', () => {
   afterEach(() => {
     vi.clearAllMocks()
+    xterm.instances = []
+    xterm.writes = []
     localStorage.clear()
   })
 
@@ -135,6 +148,83 @@ describe('useTerminal — off-screen panes run their upkeep at a reduced cadence
     spy.mockRestore()
 
     expect(delays).toContain(TICK_ON_SCREEN_MS)
+  })
+
+  it('does not blink the cursor of a pane that is off screen', () => {
+    const mock = createMockBackend()
+    withScope(() => useTerminal('pane-blink-off', mock.backend, { onScreen: () => false }))
+    expect(xterm.instances.at(-1)?.options.cursorBlink).toBe(false)
+  })
+
+  it('blinks the cursor of a pane that is on screen', () => {
+    const mock = createMockBackend()
+    withScope(() => useTerminal('pane-blink-on', mock.backend, { onScreen: () => true }))
+    expect(xterm.instances.at(-1)?.options.cursorBlink).toBe(true)
+  })
+
+  it('turns the blink off and on as the pane leaves and returns', async () => {
+    const mock = createMockBackend()
+    const onScreen = ref(true)
+    withScope(() => useTerminal('pane-blink-toggle', mock.backend, { onScreen: () => onScreen.value }))
+    const term = xterm.instances.at(-1)!
+
+    onScreen.value = false
+    await nextTick()
+    expect(term.options.cursorBlink).toBe(false)
+
+    onScreen.value = true
+    await nextTick()
+    expect(term.options.cursorBlink).toBe(true)
+  })
+
+  /** Delays passed to setTimeout by the first chunk of output this pane sees. */
+  async function firstOutputCoalesceDelays(paneId: string, onScreen: boolean): Promise<number[]> {
+    const mock = createMockBackend()
+    const session = `sess-${paneId}`
+    mock.setResponse('terminal.create', { terminal_session_id: session, pid: 7 })
+    const { result } = withScope(() =>
+      useTerminal(paneId, mock.backend, { onScreen: () => onScreen }),
+    )
+    result.mount(document.createElement('div'))
+    await result.spawn({ command: 'bash', cwd: '/tmp' })
+
+    const spy = vi.spyOn(window, 'setTimeout')
+    try {
+      mock.emit('terminal.output', { terminal_session_id: session, data: 'x' })
+      return spy.mock.calls.map((c) => c[1] as number)
+    } finally {
+      spy.mockRestore()
+    }
+  }
+
+  it('batches output for an on-screen but unfocused pane at the original window', async () => {
+    expect(await firstOutputCoalesceDelays('pane-coalesce-on', true)).toContain(100)
+  })
+
+  it('batches output for an off-screen pane five times longer', async () => {
+    const delays = await firstOutputCoalesceDelays('pane-coalesce-off', false)
+    expect(delays).toContain(500)
+    expect(delays).not.toContain(100)
+  })
+
+  it('flushes what arrived off screen the moment the pane is shown', async () => {
+    // Otherwise the longer window would be visible as a stall on the way in.
+    const mock = createMockBackend()
+    mock.setResponse('terminal.create', { terminal_session_id: 'sess-flush', pid: 7 })
+    const onScreen = ref(false)
+    const { result } = withScope(() =>
+      useTerminal('pane-flush', mock.backend, { onScreen: () => onScreen.value }),
+    )
+    result.mount(document.createElement('div'))
+    await result.spawn({ command: 'bash', cwd: '/tmp' })
+
+    xterm.writes = []
+    mock.emit('terminal.output', { terminal_session_id: 'sess-flush', data: 'hidden output' })
+    expect(xterm.writes).toEqual([])  // still inside the off-screen window
+
+    onScreen.value = true
+    await nextTick()
+    expect(xterm.writes).toContain('hidden output')
   })
 
   it('does not read clientWidth for an off-screen pane', async () => {
