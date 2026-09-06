@@ -2443,7 +2443,26 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           :title="allWorkspacesCollapsed ? $t('action.expand-all-folders') : $t('action.collapse-all-folders')"
           :aria-label="allWorkspacesCollapsed ? $t('action.expand-all-folders') : $t('action.collapse-all-folders')"
           @click="toggleAllWorkspaces"
-        >{{ allWorkspacesCollapsed ? '⌄' : '›' }}</button>
+        >
+          <!-- The explorer's collapse-all glyph: two offset frames, dashed to
+               fold and crossed to unfold. The front frame is filled with the
+               sidebar's own background so the overlap reads as depth. -->
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="4.5" y="1.5" width="10" height="10" rx="1" />
+            <rect x="1.5" y="4.5" width="10" height="10" rx="1" fill="var(--bg-base)" />
+            <path :d="allWorkspacesCollapsed ? 'M4 9.5h5M6.5 7v5' : 'M4 9.5h5'" />
+          </svg>
+        </button>
         <button
           v-if="!detachedWindow"
           class="hdr-add-ws"
@@ -3628,6 +3647,11 @@ button.link {
 }
 .hdr-add-ws:hover,
 .hdr-fold-ws:hover { color: var(--text-bright); }
+/* Icon, not a glyph: centre it in the box the ＋ sizes by its text. */
+.hdr-fold-ws {
+  display: flex;
+  align-items: center;
+}
 button.history-btn {
   background: transparent;
   border: 1px solid var(--border-default);
