@@ -218,30 +218,67 @@ async def test_file_touched_after_process_start_is_parsed_not_seeded(
     assert seen == [f"act:{i}" for i in range(1, 6)]
 
 
-@pytest.mark.asyncio
-async def test_unchanged_reparse_does_not_rewrite_the_checkpoint(
+def test_identical_activity_cursor_does_not_mark_the_store_dirty(
     tmp_path: Path,
 ) -> None:
-    """A poll that finds nothing new must not mark the store dirty — otherwise
-    every 30-second rescan rewrites one row per transcript."""
+    """The store's own guard. _checkpoint_is_newer has no ordering to apply to
+    an activity cursor, so without a branch for it the comparison falls through
+    to `return True` and every advance rewrites the row — for activity that is
+    one write per transcript per rescan, forever."""
+    store = _store(tmp_path)
+    key = "/logs/a.jsonl"
+    store.advance_ingestion_checkpoint(key, {"kind": "activity", "keys": ["act_hw::12"]}, "@activity")
+    store._dirty_checkpoints.clear()
+
+    store.advance_ingestion_checkpoint(key, {"kind": "activity", "keys": ["act_hw::12"]}, "@activity")
+    assert (key, "@activity") not in store._dirty_checkpoints
+
+    # A cursor that actually moved must still get through.
+    store.advance_ingestion_checkpoint(key, {"kind": "activity", "keys": ["act_hw::13"]}, "@activity")
+    assert (key, "@activity") in store._dirty_checkpoints
+
+
+@pytest.mark.asyncio
+async def test_unchanged_reparse_does_not_reach_the_checkpoint_sink(
+    tmp_path: Path,
+) -> None:
+    """The watcher's own filter, in front of the store's.
+
+    Asserted on sink calls rather than on the store's dirty set, because the
+    store would reject an identical cursor anyway — that guard would mask this
+    one. What this pins is that a rescan finding nothing new does not serialize
+    a bag per transcript and hand it over just to have it thrown away.
+    """
     root = tmp_path / "logs"
     path = _transcript(root, "a.jsonl", 3)
     store = _store(tmp_path)
+    writes: list[tuple[str, str | None]] = []
+
+    def counting_sink(file_path: str, checkpoint: dict, scope: str | None) -> None:
+        writes.append((file_path, scope))
+        store.advance_ingestion_checkpoint(file_path, checkpoint, scope)
+
+    async def _tokens(_usage: object) -> None:
+        return None
 
     async def sink(_event: ActivityEvent) -> None:
         return None
 
-    watcher = _watcher(store, sink)
+    watcher = LogWatcher(
+        sink=_tokens,  # type: ignore[arg-type]
+        activity_sink=sink,
+        checkpoint_provider=store.get_ingestion_checkpoint,
+        checkpoint_sink=counting_sink,
+    )
     watcher.add_reader(_LineReader(root))
     await watcher._process_realtime_path(path)
+    assert writes == [(str(path.resolve()), "@activity")]
 
-    key = str(path.resolve())
-    store._dirty_checkpoints.clear()
-    # Same file, same content, fresh dedup bag restored from the store.
+    # Same file, same content, dedup bag restored from the store.
     watcher._activity_seen.clear()
     await watcher._process_realtime_path(path)
 
-    assert (key, "@activity") not in store._dirty_checkpoints
+    assert len(writes) == 1
 
 
 @pytest.mark.asyncio
