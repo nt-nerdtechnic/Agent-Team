@@ -83,6 +83,25 @@ export function reclaimBlockedBy(
   return null
 }
 
+/** Whether this pane is the one in front of the user.
+ *
+ *  Two ids, because neither on its own is the answer. `requested` is what was
+ *  last asked to focus; `effective` is what resolveFocusedPane actually put on
+ *  the stage, which differs whenever the request is null, names a minimized
+ *  pane, or names one in another workspace. Reading only `requested` let the
+ *  sweep reclaim the pane the user was looking at; reading only `effective`
+ *  would drop the request the moment it pointed off-stage.
+ *
+ *  It lives here, next to the guard it feeds, because App.vue cannot be
+ *  mounted in a test — a decision left inline there is one no test can run. */
+export function focusedForReclaim(
+  requested: string | null,
+  effective: string | null,
+  paneId: string,
+): boolean {
+  return requested === paneId || effective === paneId
+}
+
 /** Threshold for a reclaim the user asked for by name.
  *
  *  Every other guard still applies — the focused pane, one awaiting an answer,

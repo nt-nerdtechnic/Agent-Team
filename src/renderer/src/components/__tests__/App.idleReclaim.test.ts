@@ -61,6 +61,17 @@ describe('idle reclaim wiring', () => {
     expect(fn).toContain('if (histEntry && !alreadyRemoved) histEntry.removedAt = undefined')
   })
 
+  // What "focused" means is decided by focusedForReclaim, which idleReclaim's
+  // own suite runs against both ids. All this file can add is that App.vue
+  // hands it the two it holds — passing effectiveFocusPaneId twice, or the raw
+  // ref twice, would pass that suite and still reclaim the pane on screen.
+  it('hands the focus decision both ids it holds', () => {
+    const fn = block('function reclaimCandidate(', 'function paneReclaimable(')
+    expect(fn).toContain(
+      'focused: focusedForReclaim(focusPaneId.value, effectiveFocusPaneId.value, pane.id)'
+    )
+  })
+
   it('sweeps on a timer and clears it on unmount', () => {
     expect(appSource).toContain('window.setInterval(() => { void sweepIdlePanes() }, IDLE_RECLAIM_SWEEP_MS)')
     expect(appSource).toContain('if (_idleReclaimTimer !== null) clearInterval(_idleReclaimTimer)')

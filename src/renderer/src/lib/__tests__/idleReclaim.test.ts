@@ -3,6 +3,7 @@ import {
   IDLE_RECLAIM_DEFAULT_MINUTES,
   IDLE_RECLAIM_MIN_MINUTES,
   IDLE_RECLAIM_NEVER,
+  focusedForReclaim,
   idleReclaimDisabled,
   idleReclaimThresholdMs,
   reclaimBlockedBy,
@@ -91,6 +92,52 @@ describe('reclaimBlockedBy', () => {
     ['no-ref', { hasRef: false }],
   ] as const)('never reclaims a pane that is %s', (reason, over) => {
     expect(reclaimBlockedBy(idleForHours(over), THRESHOLD, NOW)).toBe(reason)
+  })
+})
+
+// Which pane the `focused` guard is actually about. App.vue holds two ids for
+// it and used to feed the guard only the first, which is how a pane on screen
+// could be reclaimed while the user was reading it.
+describe('focusedForReclaim', () => {
+  it('is the pane the request names', () => {
+    expect(focusedForReclaim('pane-a', 'pane-a', 'pane-a')).toBe(true)
+  })
+
+  it('is the pane on screen when nothing was requested', () => {
+    // The case that made the sweep visible: focusPaneId is null on a fresh
+    // window, and resolveFocusedPane puts the first visible pane on the stage.
+    expect(focusedForReclaim(null, 'pane-a', 'pane-a')).toBe(true)
+  })
+
+  it('is the pane on screen when the request points somewhere else', () => {
+    // A minimized or out-of-workspace request is replaced, and the substitute
+    // is what the user is looking at.
+    expect(focusedForReclaim('pane-minimized', 'pane-a', 'pane-a')).toBe(true)
+  })
+
+  it('still covers a request the resolver had to substitute for', () => {
+    // The docked pane keeps its protection: the user put it there deliberately
+    // and the reclaim would be just as much of a surprise on the way back.
+    expect(focusedForReclaim('pane-minimized', 'pane-a', 'pane-minimized')).toBe(true)
+  })
+
+  it('is no other pane', () => {
+    expect(focusedForReclaim('pane-a', 'pane-a', 'pane-b')).toBe(false)
+    expect(focusedForReclaim(null, null, 'pane-b')).toBe(false)
+  })
+
+  it('blocks the reclaim it feeds', () => {
+    // The two halves joined up: what this answers is the `focused` field, and
+    // a true there is what refuses an otherwise perfectly reclaimable pane.
+    const onScreen = idleForHours({
+      focused: focusedForReclaim(null, 'pane-a', 'pane-a'),
+    })
+    expect(reclaimBlockedBy(onScreen, THRESHOLD, NOW)).toBe('focused')
+
+    const offScreen = idleForHours({
+      focused: focusedForReclaim(null, 'pane-a', 'pane-b'),
+    })
+    expect(reclaimBlockedBy(offScreen, THRESHOLD, NOW)).toBeNull()
   })
 })
 

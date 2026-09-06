@@ -101,7 +101,7 @@ import { i18n } from '@navide/plugin-ui/foundation'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from '@navide/terminal'
-import { reclaimBlockedBy, idleReclaimDisabled, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
+import { reclaimBlockedBy, focusedForReclaim, idleReclaimDisabled, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
 import { findConsecutiveQuestionBlocks, findSentinel } from '@navide/terminal'
 import {
   buildCliPaneBufferReply,
@@ -11849,7 +11849,7 @@ function reclaimCandidate(pane: ActivePane): ReclaimCandidate {
   return {
     realized: pane.realized,
     restoring: !!pane.restoring,
-    focused: focusPaneId.value === pane.id,
+    focused: focusedForReclaim(focusPaneId.value, effectiveFocusPaneId.value, pane.id),
     resumeSessionId: paneResumeSessionId(pane),
     rebuilding: paneRebuilding(pane),
     loopActive: !!pane.loopActive,
