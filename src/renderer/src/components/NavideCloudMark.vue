@@ -50,8 +50,11 @@ withDefaults(
   stroke-width: 1.2;
   opacity: 0.55;
 }
+/* The nodes are rings punched out of whatever the mark sits on, so the fill
+   follows the container: a tinted tile sets --nv-cloud-node-fill to its own
+   background, and anything that does not falls back to the app canvas. */
 .nv-cloud-node {
   stroke-width: 1.5;
-  fill: var(--bg-base);
+  fill: var(--nv-cloud-node-fill, var(--bg-base));
 }
 </style>

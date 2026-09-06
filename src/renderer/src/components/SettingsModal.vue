@@ -3971,6 +3971,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   border: 1px solid var(--accent-muted);
   background: var(--accent-subtle);
   color: var(--accent-fg);
+  --nv-cloud-node-fill: var(--accent-subtle);
 }
 .nvc-page-mark :deep(.nv-cloud-mark) { width: 21px; height: 16px; }
 .nvc-nav-mark { width: 17px; height: 13px; }

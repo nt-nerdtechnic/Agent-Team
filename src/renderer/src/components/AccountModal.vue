@@ -2093,6 +2093,7 @@ onUnmounted(() => {
   border: 1px solid var(--accent-muted);
   background: var(--bg-subtle);
   color: var(--accent-fg);
+  --nv-cloud-node-fill: var(--bg-subtle);
 }
 .acct-mark :deep(.nv-cloud-mark) { width: 26px; height: 20px; }
 .acct-head-text { min-width: 0; }
