@@ -34,9 +34,13 @@
 //   cursor    —      No permission event. Its beforeShellExecution hook is a
 //                    synchronous gate — using it would make Navide part of the
 //                    approval decision, not an observer of it.
-//   antigravity —    Hook docs unpublished, and no permission event. It does
-//                    have an ask_question step its reader now names, but that
-//                    is QUESTION (see below), not a permission prompt.
+//   antigravity text Hook docs unpublished, and no permission event. Its
+//                    ask_question box is matched from the screen instead —
+//                    a second route to the QUESTION its reader already raises
+//                    from step_type 138, which needs marker binding first and
+//                    reports nothing while that is pending. The permission box
+//                    is still unmatched: its strings are in the binary but in
+//                    none of the PTY captures, since Navide launches past it.
 //   grok      —      Hooks exist but carry no permission event; its
 //                    Notification is for background delegations. The TUI is
 //                    compiled to bytecode, so no strings to match either.

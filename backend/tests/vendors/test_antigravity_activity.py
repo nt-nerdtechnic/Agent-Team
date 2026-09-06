@@ -215,18 +215,34 @@ def test_watermark_advances_so_steps_report_once(
     assert reader.parse_activity(db, seen) == []
 
 
-def test_tool_step_after_a_reply_reopens_the_turn(
+def test_reply_with_more_steps_behind_it_is_not_end_of_turn(
     tmp_path: Path, monkeypatch
 ) -> None:
-    # A reply that precedes a tool call ends the turn early. The gate stays
-    # shut because the tool's own step reports the pane active again.
+    # The agent narrates while it works, so a reply followed by a tool call is
+    # mid-turn — and the tool's own step, read in the same pass, proves it.
+    # This used to report turn_complete first and rely on the following
+    # agent_active to undo it, which dropped the pane to idle in between.
     reader, db = _db_with(tmp_path, monkeypatch, [
         (0, 15, 3, b"", _assistant(reply="先看一下結構：")),
         (1, 21, 3, b"", b""),
     ])
 
     events = reader.parse_activity(db, {"agy_idx::-1"})
-    assert [e.event_type for e in events] == ["turn_complete", "agent_active"]
+    assert [e.event_type for e in events] == ["agent_active", "agent_active"]
+
+
+def test_last_reply_of_the_pass_still_ends_the_turn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The narration guard must not swallow the real end of turn: the reply that
+    # nothing follows is still the closest thing this format has to one.
+    reader, db = _db_with(tmp_path, monkeypatch, [
+        (0, 21, 3, b"", b""),
+        (1, 15, 3, b"", _assistant(reply="做完了")),
+    ])
+
+    events = reader.parse_activity(db, {"agy_idx::-1"})
+    assert [e.event_type for e in events] == ["agent_active", "turn_complete"]
 
 
 def test_unreadable_db_reports_nothing(tmp_path: Path, monkeypatch) -> None:
