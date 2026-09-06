@@ -185,13 +185,44 @@ def check(cond: bool, label: str, extra: Any = None) -> bool:
 # link.start() is the one that link keeps for every reconnect.
 _current_device: contextvars.ContextVar[str] = contextvars.ContextVar("verify_device", default="")
 _real_device_id = device_identity.device_id
+_real_candidates = device_identity.candidate_node_ids
+_real_local_ids = device_identity.local_ids
 
 
 def _device_id() -> str:
     return _current_device.get() or _real_device_id()
 
 
+def _candidate_node_ids(member_id: str) -> list[str]:
+    """The link asks for candidates now, not for one id.
+
+    Patching ``device_id`` alone stopped reaching the link when ids became
+    per-account — every scenario below would have run against whatever the real
+    machine holds, and the script would have gone on reporting passes for a
+    path it was no longer driving.
+    """
+    forced = _current_device.get()
+    return [forced] if forced else _real_candidates(member_id)
+
+
+def _local_ids() -> set[str]:
+    forced = _current_device.get()
+    return {forced} if forced else _real_local_ids()
+
+
+def _claim_node_id(member_id: str, value: str, *, replacing: bool = False) -> None:
+    """A forced identity is the scenario's, not the machine's: recording it
+    would leave this script's fixtures in the real identity file."""
+    if _current_device.get():
+        return
+    _real_claim(member_id, value, replacing=replacing)
+
+
+_real_claim = device_identity.claim_node_id
 device_identity.device_id = _device_id  # type: ignore[assignment]
+device_identity.candidate_node_ids = _candidate_node_ids  # type: ignore[assignment]
+device_identity.local_ids = _local_ids  # type: ignore[assignment]
+device_identity.claim_node_id = _claim_node_id  # type: ignore[assignment]
 
 
 # ---- the signing key a receiver pins on first contact -----------------------

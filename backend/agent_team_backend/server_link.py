@@ -540,6 +540,9 @@ class ServerLink:
         self._own_member = ""
         self._tasks: set[asyncio.Task] = set()
         self._device_id = ""
+        #: Whether the id being claimed replaces one the server just refused.
+        #: Anything else overwriting a recorded id is how an identity is lost.
+        self._replacing_node_id = False
         self.member_id = ""
         # The role auth.hello granted this member: "admin", "member" or
         self.display_name = ""
@@ -926,20 +929,24 @@ class ServerLink:
         hint = await asyncio.to_thread(
             trust_store.member_for_credential, config.url, config.token
         )
-        self._device_id = await asyncio.to_thread(device_identity.node_id_for, hint)
-        reply = await self._hello(config)
-        if not reply.get("ok") and self._conflict_code(reply) == "DEVICE_CONFLICT":
-            # Once, and only for this one code. The other two rejections mean
-            # the same thing however often they are asked; this one is a
-            # statement about the id we offered, and we have another to offer.
-            # Retrying without changing anything is what the comment below
-            # refuses, and this changes something first.
-            self._device_id = await asyncio.to_thread(device_identity.fresh_node_id)
-            log.warning(
-                "the server says the id this machine offered belongs to another "
-                "account; trying once more as a new device on this one"
-            )
+        candidates = await asyncio.to_thread(device_identity.candidate_node_ids, hint)
+        reply: dict[str, Any] = {}
+        for index, candidate in enumerate(candidates):
+            self._device_id = candidate
             reply = await self._hello(config)
+            if reply.get("ok") or self._conflict_code(reply) != "DEVICE_CONFLICT":
+                break
+            # Only this one code is worth another attempt, and only because the
+            # next attempt offers something different. The other two rejections
+            # mean the same thing however often they are asked — see below.
+            if index + 1 < len(candidates):
+                log.warning(
+                    "the server says the id this machine offered belongs to "
+                    "another account; offering the next one it already holds"
+                )
+        # Replacing what is recorded is only allowed when the server refused it,
+        # which is exactly the case where more than one candidate was tried.
+        self._replacing_node_id = len(candidates) > 1 and self._device_id != candidates[0]
         await self._finish_authenticate(config, reply)
 
     @staticmethod
@@ -1002,7 +1009,12 @@ class ServerLink:
         # earlier would burn one on every refusal, and a member is capped at ten
         # devices. Claiming the same value again on the next reconnect is a
         # no-op, which is the ordinary case.
-        await asyncio.to_thread(device_identity.claim_node_id, member, self._device_id)
+        await asyncio.to_thread(
+            device_identity.claim_node_id,
+            member,
+            self._device_id,
+            replacing=self._replacing_node_id,
+        )
         await self._adopt_member(config, member)
         self.display_name = str(payload.get("displayName") or "")
         self.email_verified = bool(payload.get("emailVerified"))

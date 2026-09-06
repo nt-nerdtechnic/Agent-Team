@@ -1555,3 +1555,45 @@ async def test_with_no_link_at_all_both_paths_still_say_unknown_device(
     assert payload["ok"] is False
     assert payload["code"] == "unknown-device"
     assert tool["error_code"] == "unknown-device"
+
+
+# ── This machine, in any account ─────────────────────────────────────────────
+
+
+def test_a_fresh_install_recognises_its_own_node_id(tmp_path, monkeypatch):
+    """The order a new machine actually goes through, which nothing tested.
+
+    Every other test here calls ``device_id()`` first, and on an upgraded
+    machine that value *is* the first account's node — so comparing against it
+    looked right. A fresh install never takes that path: it authenticates, and
+    ``claim_node_id`` writes ``nodes`` and ``machine_id`` and nothing else. The
+    legacy id is minted later, lazily, by something unrelated — a different
+    uuid that is nobody's node.
+
+    A message addressed to this machine's own node id was then judged remote:
+    it went to the relay, came back, and was refused as not paired. A message
+    that never had to leave the machine left it on the way to failing.
+    """
+    from agent_team_backend import device_identity
+
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    # Fresh install order: no device_id() call anywhere before this.
+    node = device_identity.candidate_node_ids("")[0]
+    device_identity.claim_node_id("m1", node)
+
+    assert agent_messaging.is_local_device(node), "this machine, addressed by its own id"
+
+
+def test_every_account_this_machine_is_in_counts_as_this_machine(tmp_path, monkeypatch):
+    from agent_team_backend import device_identity
+
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    legacy = device_identity.device_id()
+    device_identity.claim_node_id("m-a", legacy)
+    second = device_identity.fresh_node_id()
+    device_identity.claim_node_id("m-b", second)
+
+    assert agent_messaging.is_local_device(legacy)
+    assert agent_messaging.is_local_device(second)
+    assert not agent_messaging.is_local_device(device_identity.fresh_node_id())
+    assert not agent_messaging.is_local_device("")

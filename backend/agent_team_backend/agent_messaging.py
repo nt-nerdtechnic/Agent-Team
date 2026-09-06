@@ -506,8 +506,17 @@ def _match_workspaces(ws_part: str) -> list[str]:
 
 
 def is_local_device(device: str) -> bool:
-    """Whether a device segment names this machine."""
-    return bool(device) and device == device_identity.device_id()
+    """Whether a device segment names this machine — in *any* account.
+
+    Ids became per-account, so there is more than one right answer. This
+    compared against the legacy machine-wide id alone, which is correct on an
+    upgraded machine (the first account inherits that id) and wrong on a fresh
+    install, where the legacy id is minted lazily by something else entirely and
+    is nobody's node. A message addressed to this machine's own node id was then
+    judged remote: delivery failed with "not paired", and a message that never
+    had to leave the machine went to the relay on the way to failing.
+    """
+    return bool(device) and device in device_identity.local_ids()
 
 
 def _split_device_segment(target: str) -> tuple[str, str]:

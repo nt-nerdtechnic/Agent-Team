@@ -153,16 +153,32 @@ def test_the_first_account_to_ask_inherits_the_id_this_machine_already_had(tmp_p
     assert device_identity.node_id_for("m-existing") == legacy
 
 
-def test_a_second_account_does_not_get_the_first_ones_id(tmp_path, monkeypatch):
-    """The bug itself: two accounts sharing one id is what the server refuses."""
+def test_a_second_account_ends_up_with_an_id_of_its_own(tmp_path, monkeypatch):
+    """Two accounts sharing one id is what the server refuses.
+
+    Which one a *known* member gets is exact; for a member we cannot name yet,
+    what is offered is everything this machine already holds, and only then
+    something new. The wrong ones are refused for free, and offering them is
+    what stops a machine minting an id it can never take back.
+    """
     monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
     legacy = device_identity.device_id()
     device_identity.claim_node_id("m-first", legacy)
 
-    second = device_identity.node_id_for("m-second")
+    # A member we can name: exact, and nothing else is offered.
+    assert device_identity.candidate_node_ids("m-first") == [legacy]
 
-    assert second != legacy
-    assert device_identity.node_id_for("m-first") == legacy, "the first is untouched"
+    # One we cannot: ours first, a new one last.
+    unknown = device_identity.candidate_node_ids("")
+    assert unknown[0] == legacy
+    assert unknown[-1] not in (legacy, "")
+    assert len(unknown) == 2
+
+    # Once the server has accepted the new one for a second account, the two are
+    # separate and the first is untouched.
+    device_identity.claim_node_id("m-second", unknown[-1])
+    assert device_identity.candidate_node_ids("m-second") == [unknown[-1]]
+    assert device_identity.candidate_node_ids("m-first") == [legacy]
 
 
 def test_nothing_is_recorded_until_the_server_accepts_it(tmp_path, monkeypatch):
@@ -218,3 +234,49 @@ def test_local_addressing_still_asks_about_the_machine(tmp_path, monkeypatch):
     device_identity.claim_node_id("m-second", device_identity.fresh_node_id())
 
     assert device_identity.device_id() == legacy
+
+
+def test_an_unknown_member_offers_what_this_machine_holds_before_minting(tmp_path, monkeypatch):
+    """The severe one, and it is reachable without anybody doing anything.
+
+    The member is looked up in the trust store, and one transient Keychain
+    failure — a locked keychain, a dismissed authorisation dialog — is enough to
+    arrive here with nothing. Minting a fresh id then is not a guess that costs
+    a round trip: the server *accepts* it, because it is a new device on an
+    account we are entitled to. Every peer that pinned this machine under the
+    old id is now talking to an id that no longer answers, and the desktop has
+    no way to release the one it just spent — a member is capped at ten.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    legacy = device_identity.device_id()
+    device_identity.claim_node_id("m-a", legacy)
+    other = device_identity.fresh_node_id()
+    device_identity.claim_node_id("m-b", other)
+
+    offered = device_identity.candidate_node_ids("")
+
+    # Everything this machine already holds comes first, in some order.
+    assert set(offered[:2]) == {legacy, other}
+    # And exactly one new id, at the end, only if none of ours is accepted.
+    assert len(offered) == 3
+    assert offered[-1] not in (legacy, other)
+
+
+def test_a_recorded_id_is_not_replaced_unless_the_server_refused_it(tmp_path, monkeypatch):
+    """The line where the identity was lost.
+
+    Overwriting silently is what turned a lookup that returned nothing into a
+    permanent loss: something offers an id other than the recorded one, the
+    server accepts it, and the id every peer pinned is gone with no way back.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    legacy = device_identity.device_id()
+    device_identity.claim_node_id("m-a", legacy)
+
+    device_identity.claim_node_id("m-a", device_identity.fresh_node_id())
+    assert device_identity.candidate_node_ids("m-a") == [legacy], "unchanged"
+
+    # The one legitimate replacement: the server refused what we had.
+    forced = device_identity.fresh_node_id()
+    device_identity.claim_node_id("m-a", forced, replacing=True)
+    assert device_identity.candidate_node_ids("m-a") == [forced]

@@ -148,43 +148,93 @@ def machine_id() -> str:
         return value
 
 
-def node_id_for(member_id: str) -> str:
-    """The id to present to a server when authenticating as *member_id*.
+def candidate_node_ids(member_id: str) -> list[str]:
+    """Ids to offer this server, best first. Nothing is written.
 
-    **Nothing is written here.** An id only becomes this machine's node in an
-    account once the server has accepted it — see ``claim_node_id`` — because
-    recording it first would burn one on every refused attempt, and the server
-    caps a member at ten devices.
+    An id only becomes this machine's node in an account once the server has
+    accepted it — see ``claim_node_id`` — because recording it first would burn
+    one on every refused attempt, and a member is capped at ten devices.
 
-    Three answers, in order:
+    **Why a list rather than one answer.** When the member is known the answer is
+    exact and the list has one entry. When it is *not* known the honest position
+    is "one of the ids this machine has already claimed, probably", and offering
+    them costs nothing: a hello the server refuses writes no row, sends no push
+    and logs nothing. Minting a fresh id instead — which is what this did — has
+    a permanent price, because the server accepts it (it is a new device on an
+    account we are entitled to) and the desktop has no way to release the old
+    one afterwards. Every peer that pinned us under the old id then talks to a
+    machine that no longer answers to it.
 
-    1. The id already recorded for this member. Stable across restarts, which is
-       what a peer's pin depends on.
-    2. The legacy machine-wide id, if no member has claimed it yet. This is what
-       keeps every existing pairing alive across the upgrade: peers pinned this
-       machine under that id and a pin cannot be re-keyed from here — the other
-       machine holds it. So the account that was already working keeps working.
-    3. A fresh one, because the legacy id belongs to another account now.
+    And the member is not known more often than it looks: the trust store is the
+    only place that mapping lives, so one transient Keychain failure — a locked
+    keychain, a dismissed authorisation dialog — is enough to reach here with
+    nothing. The fresh id would be spent on a machine whose only problem was
+    that somebody clicked "deny" once.
+
+    A fresh id is always last, and only ever one of them.
     """
     doc = _read_doc()
     nodes = doc.get("nodes")
     nodes = nodes if isinstance(nodes, dict) else {}
+    claimed = [v for v in (_valid(x) for x in nodes.values()) if v]
+    legacy = _valid(doc.get("device_id"))
+
     if member_id:
         existing = _valid(nodes.get(member_id))
         if existing:
-            return existing
+            return [existing]
+
+    out: list[str] = []
+    # Ours already, in some account. One of them is very likely the right one,
+    # and the wrong ones are refused for free.
+    out.extend(dict.fromkeys(claimed))
+    if legacy and legacy not in out:
+        # The id this machine has always presented. Keeping it is what keeps
+        # every existing pairing alive across the upgrade: peers pinned this
+        # machine under it and a pin cannot be re-keyed from here.
+        out.append(legacy)
+    out.append(str(uuid.uuid4()))
+    return out
+
+
+def node_id_for(member_id: str) -> str:
+    """The single best id to present. See ``candidate_node_ids``."""
+    return candidate_node_ids(member_id)[0]
+
+
+def local_ids() -> set[str]:
+    """Every id that names *this machine*, in any account.
+
+    Local addressing asks "is this segment this machine", and since ids became
+    per-account there is more than one right answer. Comparing against only the
+    legacy id was correct on an upgraded machine — the first account inherits it
+    — and wrong on a fresh install, where the legacy id is minted lazily and is
+    not any account's node. A message addressed to this machine's own node id
+    was then judged remote and sent to the relay, which is both a delivery
+    failure and a message leaving a machine it never had to leave.
+    """
+    doc = _read_doc()
+    nodes = doc.get("nodes")
+    nodes = nodes if isinstance(nodes, dict) else {}
+    out = {v for v in (_valid(x) for x in nodes.values()) if v}
     legacy = _valid(doc.get("device_id"))
-    if legacy and legacy not in nodes.values():
-        return legacy
-    return str(uuid.uuid4())
+    if legacy:
+        out.add(legacy)
+    return out
 
 
-def claim_node_id(member_id: str, value: str) -> None:
+def claim_node_id(member_id: str, value: str, *, replacing: bool = False) -> None:
     """Record *value* as this machine's node in *member_id*'s account.
 
     Called only after ``auth.hello`` has accepted it, so the file never holds an
-    id the server refused. Writing the same value twice is a no-op, which is the
-    ordinary case: every reconnect claims what it already had.
+    id the server refused.
+
+    **Replacing an existing entry needs saying so.** Overwriting silently is how
+    an identity gets lost: the caller offers something other than what is
+    recorded, the server accepts it because it is a new device on an account we
+    are entitled to, and the old id — the one every peer pinned — is gone with
+    no way to get it back. The only legitimate replacement is one the server
+    forced by refusing what we had, and that caller passes ``replacing=True``.
     """
     if not member_id or not _valid(value):
         return
@@ -192,8 +242,25 @@ def claim_node_id(member_id: str, value: str) -> None:
         doc = _read_doc()
         nodes = doc.get("nodes")
         nodes = nodes if isinstance(nodes, dict) else {}
-        if nodes.get(member_id) == value:
+        previous = _valid(nodes.get(member_id))
+        if previous == value:
             return
+        if previous and not replacing:
+            log.error(
+                "refusing to replace this machine's node id in member %s "
+                "(%s) with %s: nothing asked for a replacement",
+                member_id,
+                previous,
+                value,
+            )
+            return
+        if previous:
+            log.warning(
+                "this machine's node id in member %s moves from %s to %s",
+                member_id,
+                previous,
+                value,
+            )
         nodes[member_id] = value
         doc["nodes"] = nodes
         doc.setdefault("machine_id", _valid(doc.get("device_id")) or str(uuid.uuid4()))
