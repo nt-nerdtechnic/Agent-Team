@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import navideMark from '../assets/navide-mark.png'
+
 /**
  * The screen shown while the app is quitting.
  *
@@ -8,6 +10,10 @@ import { computed } from 'vue'
  * running one while it sweeps every PTY child — and the window stays up for
  * all of it. Without this the app looks hung at exactly the moment the user
  * can no longer do anything about it.
+ *
+ * Built to match the first-boot screen — same mark, same size, same breathing
+ * — so leaving looks like the other end of arriving rather than like a
+ * different program's dialog.
  */
 export type QuitStage = 'saving' | 'stopping' | 'closing'
 
@@ -19,6 +25,7 @@ const stageKey = computed(() => (props.stage ? `shutdown.${props.stage}` : ''))
 <template>
   <div v-if="props.stage" class="shutdown-overlay" role="status" aria-live="polite">
     <div class="shutdown-card">
+      <img class="shutdown-logo" :src="navideMark" alt="Navide" />
       <span class="shutdown-spinner" aria-hidden="true"></span>
       <p class="shutdown-title">{{ $t('shutdown.title') }}</p>
       <p class="shutdown-stage">{{ $t(stageKey) }}</p>
@@ -51,6 +58,16 @@ const stageKey = computed(() => (props.stage ? `shutdown.${props.stage}` : ''))
   padding: 0 24px;
   text-align: center;
 }
+/* The boot screen's mark at the boot screen's size and rhythm: the two screens
+   are the same moment from either side, and a smaller or stiller logo here
+   would read as a different one. */
+.shutdown-logo {
+  width: 72px;
+  height: 72px;
+  display: block;
+  margin-bottom: 12px;
+  animation: shutdown-breathe 2.6s ease-in-out infinite;
+}
 .shutdown-spinner {
   width: 26px;
   height: 26px;
@@ -76,10 +93,15 @@ const stageKey = computed(() => (props.stage ? `shutdown.${props.stage}` : ''))
 @keyframes shutdown-fade {
   from { opacity: 0; }
 }
+@keyframes shutdown-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.78; transform: scale(0.965); }
+}
 /* A spinner is decoration here — the stage line carries the meaning — so it is
    safe to hold it still for anyone who asked for less motion. */
 @media (prefers-reduced-motion: reduce) {
   .shutdown-overlay { animation: none; }
   .shutdown-spinner { animation: none; }
+  .shutdown-logo { animation: none; }
 }
 </style>

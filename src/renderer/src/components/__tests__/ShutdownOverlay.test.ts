@@ -32,6 +32,17 @@ describe('ShutdownOverlay', () => {
     wrapper.unmount()
   })
 
+  it('carries the same mark as the first-boot screen', () => {
+    // Leaving is the other end of arriving, and arriving has the logo. A bare
+    // spinner on a white field is any program's dialog.
+    const wrapper = mountOverlay('stopping')
+
+    const logo = wrapper.get('.shutdown-logo')
+    expect(logo.attributes('src')).toContain('navide-mark')
+    expect(logo.attributes('alt')).toBe('Navide')
+    wrapper.unmount()
+  })
+
   it('follows main through the stages', async () => {
     const wrapper = mountOverlay('saving')
     expect(wrapper.get('.shutdown-stage').text()).toBe('shutdown.saving')
