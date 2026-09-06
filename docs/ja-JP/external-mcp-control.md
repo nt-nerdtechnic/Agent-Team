@@ -98,7 +98,7 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 | Tool | パラメータ | 動作 |
 |---|---|---|
 | `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`pane_id`（すべての `ui.pane.*` アクションが取るキーであり、下の Pane 系 Tool では `address` の代わりにもなる）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
-| `cli_whoami` | — | **CLI Pane 専用。** 自分自身の識別情報を、名簿が他 Pane を記述するのと同じ形で返します: `{ok, you: {name, address, pane_id, workspace_path, agent_key, busy, spawned_by?}}`。`pane_id` は全ての `ui.pane.*` が受け付ける唯一のキーであり、Pane が自分自身を操作するための前提です。`spawned_by` は自分を開いた Pane（閉じた後は `{pane_id, gone: true}`）|
+| `cli_whoami` | — | **CLI Pane 専用。** 自分自身の識別情報を、名簿が他 Pane を記述するのと同じ形で返します: `{ok, caller, name, address, pane_id, workspace_path, agent_key, busy, offline, hold_reason?, spawned_by?, waiting_on_me?}`。`pane_id` は全ての `ui.pane.*` が受け付ける唯一のキーであり、Pane が自分自身を操作するための前提です。`spawned_by` は自分を開いた Pane（閉じた後は `{pane_id, gone: true}`）|
 | `cli_send` | `to`（Pane のアドレス、または Broadcast を表す `"group"`）, `text`, `wait_for_delivery_s=0`（上限 120）, `pane_id?`, `reply_to?` | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返し、待機を指定した場合はその結末も返す |
 | `cli_check_message` | `msg_key` | 一つの `cli_send` の結末: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_cancel_message` | `msg_key` | 送信済みでまだ入っていないメッセージを取り消します。判断するのは受信側 Queue を持つウィンドウです。まだ待機中なら破棄して status は `cancelled` に、配信が始まっていれば取り消しは無視され、確定した status が返ります。取り消しは失敗ではなく、通知も書き戻されません。`{ok, msg_key, status, reason?}` を返します |
