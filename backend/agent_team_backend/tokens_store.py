@@ -1026,6 +1026,13 @@ class TokensStore:
             if candidate.get("identity") != current.get("identity"):
                 return True
             return int(candidate.get("offset") or 0) > int(current.get("offset") or 0)
+        if candidate.get("kind") == "activity" and current.get("kind") == "activity":
+            # The activity cursor is the reader's whole dedup bag (a handful of
+            # sentinel keys), not a position we can order — so "newer" is
+            # "different". Without this the fallthrough below marks the row
+            # dirty on every parse, which for activity is every rescan of every
+            # transcript, whether or not anything moved.
+            return list(candidate.get("keys") or ()) != list(current.get("keys") or ())
         return True
 
     def advance_ingestion_checkpoint(

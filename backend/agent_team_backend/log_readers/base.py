@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -217,6 +218,64 @@ def set_activity_high_water(seen_keys: set[str], line_no: int) -> None:
     seen_keys.add(f"{_ACTIVITY_HW_PREFIX}{line_no}")
 
 
+#: Wall-clock time this process started, captured at import. A transcript whose
+#: last write predates it cannot hold activity the running backend has any live
+#: pane state to attach to, so on first sight it is seeded rather than replayed
+#: (see seed_pre_start_activity). Patchable in tests.
+PROCESS_START_S = time.time()
+
+
+def seed_pre_start_activity(path: Path, seen_keys: set[str]) -> bool:
+    """Mark an already-written transcript as read, without reading it.
+
+    The watcher has no durable mark for a file it is seeing for the first time
+    (fresh install, first start after upgrade), so the reader would walk it from
+    line 1 — a json.loads per line and one broadcast per entry, measured at
+    ~148,000 events in the first 60 seconds of a cold start (GitHub #28).
+    Counting lines gives the same resume point for a fraction of the cost.
+
+    Only for readers whose `activity_resumes_by_line` is set: the mark is a line
+    number, and a reader keyed on db row ids or per-session sequence numbers
+    would not consult it. Returns True when a mark was set.
+
+    Gated on mtime because the cost of guessing wrong is asymmetric. A file
+    written since this process started may belong to a live pane mid-turn, and
+    skipping it drops that turn's activity — text, MSG blocks, turn_complete —
+    with no second chance, since nothing re-reads a line once the mark is past
+    it. A file older than the process can only hold history. The gate does cost
+    the last turn written before a crash: its mtime predates the restarted
+    process, so it is seeded past. That is a deliberate trade (the pane's live
+    state is rebuilt from PTY scanning and hooks, not from replayed history).
+
+    Counts exactly what the readers count, so the mark means the same thing: a
+    blank line never advances it, and an unterminated final line is left in
+    front of it so the completed line is still delivered on the next poll
+    (GitHub #21 — advancing past a half-written turn-end record left the pane
+    "mid-turn" forever).
+    """
+    try:
+        if path.stat().st_mtime >= PROCESS_START_S:
+            return False
+    except OSError:
+        return False
+    last_line = 0
+    try:
+        # errors="replace" only guards the walk: nothing here reads the content,
+        # and a replacement char cannot move a newline.
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line_no, raw_line in enumerate(fh, 1):
+                if not raw_line.endswith("\n"):
+                    break
+                if raw_line.strip():
+                    last_line = line_no
+    except OSError:
+        return False
+    if not last_line:
+        return False
+    set_activity_high_water(seen_keys, last_line)
+    return True
+
+
 class LogReader(ABC):
     """Abstract reader for one CLI vendor's local conversation logs.
 
@@ -250,6 +309,12 @@ class LogReader(ABC):
     #: the single unbound candidate pane in the same cwd. Migrated
     #: replacement for membership in attribution's fallback tuple.
     binds_new_session_single_candidate: bool = False
+
+    #: parse_activity resumes from one dense ascending line high-water mark
+    #: (activity_high_water), so a first-sight file can be seeded to EOF by
+    #: counting lines instead of parsing them — see seed_pre_start_activity.
+    #: False for readers keyed on db row ids or per-session sequence numbers.
+    activity_resumes_by_line: bool = False
 
     def marker_scan_text(self, path: Path) -> str | None:
         """Text to scan for a kickoff marker, or None for the generic

@@ -1570,6 +1570,14 @@ async def _start_log_watcher() -> None:
         # broadcast an agent.activity per entry: measured at ~800k messages over
         # two minutes with the backend pegged at a core.
         workspace_provider=attribution.active_workspaces,
+        # Token/usage backfill keeps the wider scope. active_workspaces() is
+        # empty until the frontend connects and registers panes, and it shrinks
+        # again the moment a workspace's last pane closes (idle reclaim
+        # included) — scoping usage to it would silently strand the offline
+        # catch-up that the startup sweep is the only chance to do. These files
+        # never enter the drain queue, so the wider scope costs no activity
+        # parsing.
+        token_workspace_provider=attribution.known_workspaces,
         checkpoint_provider=tokens_store.get_ingestion_checkpoint,
         checkpoint_sink=tokens_store.advance_ingestion_checkpoint,
         progress_sink=_on_backfill_progress,
