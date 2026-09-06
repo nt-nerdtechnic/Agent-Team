@@ -498,7 +498,7 @@ function finish(): void {
 .ob-page {
   position: fixed;
   inset: 0;
-  z-index: 9500;
+  z-index: calc(var(--z-modal) + 140);
   display: flex;
   flex-direction: column;
   background: var(--bg-base);

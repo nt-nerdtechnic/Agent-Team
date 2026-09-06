@@ -43,7 +43,7 @@ watch(
 .restore-scope-modal {
   position: fixed;
   inset: 0;
-  z-index: 9100;
+  z-index: calc(var(--z-modal) + 131);
   display: grid;
   place-items: center;
   padding: 24px;

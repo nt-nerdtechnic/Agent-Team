@@ -58,6 +58,7 @@ import {
 } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
+import { sameRenderedPaneViews } from './lib/paneViews'
 import { paneStatusLabelText } from './lib/paneStatusLabel'
 import { statusBadgeStyle } from './composables/useStatusBadgePrefs'
 import { useBackend } from './composables/useBackend'
@@ -2865,7 +2866,7 @@ function pollAwaitingPanes(): void {
 }
 
 function syncViews(): void {
-  paneViews.value = panes.value.map((p) => {
+  const next: ActivePaneView[] = panes.value.map((p) => {
     const ref = paneRefs[p.id]
     return {
       id: p.id,
@@ -2895,6 +2896,10 @@ function syncViews(): void {
       rebuilding: p.realized && paneRebuilding(p)
     }
   })
+  // The tick is unconditional; the assignment must not be. Replacing the array
+  // re-renders the whole pane list, and the snapshot is unchanged on nearly
+  // every tick.
+  if (!sameRenderedPaneViews(paneViews.value, next)) paneViews.value = next
 }
 
 function onPaneFirstOutput(paneId: string): void {
@@ -16069,7 +16074,10 @@ function paneIsCommander(p: ActivePane): boolean {
 .boot-overlay {
   position: fixed;
   inset: 0;
-  z-index: 9000;
+  /* Inside the modal band. Nothing else is on screen during first boot, so the
+     number never mattered — but a literal above the notification band is the
+     bug that hid the pairing prompt, and this is the same shape of it. */
+  z-index: calc(var(--z-modal) + 130);
   display: flex;
   align-items: center;
   justify-content: center;

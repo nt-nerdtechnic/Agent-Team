@@ -457,7 +457,7 @@ function relaunch(): void {
 .ci-page {
   position: fixed;
   inset: 0;
-  z-index: 9560;
+  z-index: calc(var(--z-modal) + 142);
   display: flex;
   align-items: center;
   justify-content: center;

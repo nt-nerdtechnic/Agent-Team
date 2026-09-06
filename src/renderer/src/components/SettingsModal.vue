@@ -3354,13 +3354,13 @@ watch(activeTab, (tab) => {
   background: var(--modal-backdrop);
   backdrop-filter: blur(var(--modal-backdrop-blur));
   -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
-  z-index: 8000;
+  z-index: calc(var(--z-modal) + 120);
   display: flex;
   align-items: center;
   justify-content: center;
   -webkit-app-region: no-drag;
 }
-.s-overlay.confirm { z-index: 9000; }
+.s-overlay.confirm { z-index: calc(var(--z-modal) + 130); }
 
 .s-modal {
   background: var(--bg-base);
@@ -3497,7 +3497,7 @@ watch(activeTab, (tab) => {
   position: absolute;
   top: calc(100% + 8px);
   left: 0;
-  z-index: 9100;
+  z-index: calc(var(--z-modal) + 131);
   width: min(420px, 78vw);
   max-height: min(420px, 64vh);
   overflow-y: auto;

@@ -324,7 +324,7 @@ function ctxCopyPath(): void {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 5000;
+  z-index: calc(var(--z-modal) + 110);
 }
 /* Opened over a working window, so the app stays visible behind it — the
    startup screen's opaque inset would read as "the workspace closed". */

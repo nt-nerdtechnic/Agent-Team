@@ -1204,10 +1204,17 @@ onUnmounted(() => {
           <div class="card net-card">
             <div v-for="row in pairings" :key="row.deviceId" class="req pair-card">
               <div class="req-head">
+                <!-- "Waiting for them to answer" stops being true the moment
+                     they answer, and this heading used to say it anyway, over
+                     six digits that only exist because they did. The prompt
+                     now sits over this window rather than under it, so the two
+                     were on screen together saying different things about the
+                     same exchange — and this was the half that was wrong. -->
                 <span class="dev-name">
                   {{ row.role === 'responder'
                     ? t('settings.p2p.pair.asked-by', { device: row.deviceName || row.deviceId })
-                    : t('settings.p2p.pair.asking', { device: row.deviceName || row.deviceId }) }}
+                    : t(row.code ? 'settings.p2p.pair.with-device' : 'settings.p2p.pair.asking',
+                        { device: row.deviceName || row.deviceId }) }}
                 </span>
               </div>
               <!-- Nothing to compare yet: the other machine has not answered.
@@ -1255,10 +1262,9 @@ onUnmounted(() => {
                   <p class="req-what">{{ t('settings.p2p.pair.waiting-remote') }}</p>
                   <p class="hint">{{ t('settings.p2p.pair.auto-updates') }}</p>
                 </template>
-                <!-- Whose turn it is, said plainly. The heading above still
-                     reads "waiting for them" from before they answered, and
-                     leaving that as the only status would have somebody waiting
-                     for a machine that is waiting for them. -->
+                <!-- Whose turn it is, said plainly. The heading above says
+                     which exchange this is, not who it is waiting on, so this
+                     is the only thing on the card that answers "and now what". -->
                 <template v-else>
                 <span class="dev-tag pair-step">{{ t('settings.p2p.pair.step-your-turn') }}</span>
                 <p class="req-what">{{ t('settings.p2p.pair.your-turn') }}</p>
@@ -2018,7 +2024,13 @@ onUnmounted(() => {
   background: var(--modal-backdrop);
   backdrop-filter: blur(var(--modal-backdrop-blur));
   -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
-  z-index: 8000;
+  /* The modal band, under the toast band the pairing prompt lives in. It was
+     8000 against the prompt's 3000, so a pairing request — a question that
+     expires in five minutes — was drawn behind this window and blurred by its
+     own backdrop filter. A number picked to beat whatever was on screen at the
+     time is the bug; the offset only keeps this above the other overlays it
+     was already above. */
+  z-index: calc(var(--z-modal) + 120);
   display: flex;
   align-items: center;
   justify-content: center;

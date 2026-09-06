@@ -93,6 +93,13 @@ describe('PairingPrompt', () => {
     expect(tokens).toMatch(/--z-toast: (\d+)/)
     const level = (name: string) => Number(tokens.match(new RegExp(`--z-${name}: (\\d+)`))![1])
     expect(level('toast')).toBeGreaterThan(level('modal'))
+    // **What this cannot see**, and it was green while the prompt was buried:
+    // both things it compares are true and neither was in the fight. The
+    // account window did not use `--z-modal` — it wrote 8000, which beats the
+    // toast band without ever mentioning it. A window that hardcodes a number
+    // is not visible to a comparison between two tokens, and that is the case
+    // this misses entirely. What covers it is stackingOrder.test.ts, which
+    // reads the numbers actually written in the stylesheets.
   })
 
   it('respects a request for less motion', () => {

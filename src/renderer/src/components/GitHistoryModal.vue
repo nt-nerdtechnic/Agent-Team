@@ -458,14 +458,14 @@ watch(() => props.show, (visible) => {
 
 <style scoped>
 .tp-backdrop {
-  position: fixed; inset: 0; z-index: 9998;
+  position: fixed; inset: 0; z-index: calc(var(--z-modal) + 150);
   background: var(--modal-backdrop);
   backdrop-filter: blur(var(--modal-backdrop-blur));
   -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
 }
 
 .history-modal {
-  position: fixed; z-index: 9999; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  position: fixed; z-index: calc(var(--z-modal) + 151); top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(var(--modal-w-wide), 92vw); height: 86vh;
   background: var(--bg-base); border: 1px solid var(--border-default); border-radius: var(--radius-lg);
   box-shadow: var(--shadow-modal);
@@ -626,7 +626,7 @@ watch(() => props.show, (visible) => {
 
 /* ── commit context menu ────────────────────────────────────────────────── */
 .ctx-menu {
-  position: fixed; z-index: 10001;
+  position: fixed; z-index: calc(var(--z-modal) + 153);
   background: var(--bg-subtle); border: 1px solid var(--border-default);
   border-radius: var(--radius-sm); padding: 4px; min-width: 220px;
   box-shadow: 0 8px 24px var(--shadow-scrim);
@@ -645,7 +645,7 @@ watch(() => props.show, (visible) => {
 
 /* ── mini modals (create branch/tag, reset) ─────────────────────────────── */
 .mini-modal {
-  position: fixed; z-index: 10000; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  position: fixed; z-index: calc(var(--z-modal) + 152); top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(420px, 80vw); background: var(--bg-subtle); border: 1px solid var(--border-default);
   border-radius: var(--radius-md); padding: 16px; box-shadow: var(--shadow-modal);
   display: flex; flex-direction: column; gap: 10px;

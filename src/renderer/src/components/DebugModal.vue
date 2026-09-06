@@ -643,7 +643,7 @@ onUnmounted(() => stopTail())
   background: var(--modal-backdrop);
   backdrop-filter: blur(var(--modal-backdrop-blur));
   -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
-  z-index: 8000;
+  z-index: calc(var(--z-modal) + 120);
   display: flex;
   align-items: center;
   justify-content: center;

@@ -469,7 +469,7 @@ async function scanDisk(): Promise<void> {
 .rm-overlay {
   position: fixed;
   inset: 0;
-  z-index: 8000;
+  z-index: calc(var(--z-modal) + 120);
   display: flex;
   align-items: center;
   justify-content: center;

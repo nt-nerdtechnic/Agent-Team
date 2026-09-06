@@ -84,10 +84,12 @@ watch(dialog, async (d) => {
   position: fixed;
   top: 16px;
   right: 16px;
-  /* Above every overlay in the app (settings/pipeline-manager modals sit at
-     8000-9000): a toast or confirm hidden behind one reads as a silent failure,
-     and a hidden confirm still answers Enter. */
-  z-index: 10000;
+  /* The toast band, which is above every overlay: a toast or confirm hidden
+     behind one reads as a silent failure, and a hidden confirm still answers
+     Enter. Named by the token rather than by a number chosen to beat the
+     modals of the day — that is how the pairing prompt ended up underneath a
+     window whose z-index nobody had thought about since. */
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -157,7 +159,7 @@ watch(dialog, async (d) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10100;
+  z-index: calc(var(--z-toast) + 1);
 }
 .modal:focus {
   outline: none;

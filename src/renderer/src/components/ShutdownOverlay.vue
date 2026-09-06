@@ -32,10 +32,11 @@ const stageKey = computed(() => (props.stage ? `shutdown.${props.stage}` : ''))
 .shutdown-overlay {
   position: fixed;
   inset: 0;
-  /* Above every modal and toast in the app (the highest in use is 10100,
-     NotificationHost.vue:160): once main is tearing down, nothing may sit on
-     top of the shutdown screen. */
-  z-index: 10200;
+  /* Above the toast band, which is above every modal: once main is tearing
+     down, nothing may sit on top of the shutdown screen — including the
+     notifications and prompts that band is for, which have nothing left to
+     offer a person whose app is closing. */
+  z-index: calc(var(--z-toast) + 100);
   display: flex;
   align-items: center;
   justify-content: center;

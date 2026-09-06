@@ -305,7 +305,7 @@ async function dismiss(): Promise<void> {
 .ch-page {
   position: fixed;
   inset: 0;
-  z-index: 9550;
+  z-index: calc(var(--z-modal) + 141);
   display: flex;
   align-items: center;
   justify-content: center;
