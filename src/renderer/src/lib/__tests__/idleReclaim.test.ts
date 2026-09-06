@@ -30,6 +30,9 @@ function idleForHours(over: Partial<ReclaimCandidate> = {}): ReclaimCandidate {
     displayStatus: 'idle',
     hasDraft: false,
     lastTouchedAt: NOW - 4 * 60 * 60_000,
+    managerRouting: false,
+    stageWatched: false,
+    hasQueuedMessages: false,
     ...over,
   }
 }
@@ -92,6 +95,57 @@ describe('reclaimBlockedBy', () => {
     ['no-ref', { hasRef: false }],
   ] as const)('never reclaims a pane that is %s', (reason, over) => {
     expect(reclaimBlockedBy(idleForHours(over), THRESHOLD, NOW)).toBe(reason)
+  })
+})
+
+// Every guard above these reads the pane's own state. These three read who else
+// is holding it — the case a pane cannot know about itself, and the reason all
+// three were missing: each of these panes is genuinely, measurably idle.
+describe('reclaimBlockedBy — held by another subsystem', () => {
+  it('never reclaims a pane a stage router is reading', () => {
+    // A manager waiting on its workers is idle for exactly as long as they
+    // take. Reclaiming it deletes the ref the router scrapes, and the router
+    // reads '' from a stale cursor from then on, reporting nothing wrong.
+    const manager = idleForHours({ managerRouting: true })
+    expect(reclaimBlockedBy(manager, THRESHOLD, NOW)).toBe('manager-routing')
+  })
+
+  it('never reclaims a pane a stage watcher is polling', () => {
+    // Nothing rebuilds the watcher: realize skips role injection, which is
+    // where watchers are started. The stage would wait forever on a slot that
+    // can no longer report its own completion.
+    const watched = idleForHours({ stageWatched: true })
+    expect(reclaimBlockedBy(watched, THRESHOLD, NOW)).toBe('stage-watched')
+  })
+
+  it('never reclaims a pane with messages still queued for it', () => {
+    // The queue is failed as 'pane-closed' and every sender is told so. The
+    // pane did not close, and nothing re-queues on the way back.
+    const owed = idleForHours({ hasQueuedMessages: true })
+    expect(reclaimBlockedBy(owed, THRESHOLD, NOW)).toBe('has-queued-messages')
+  })
+
+  it('reports the holder rather than the idleness, however long it has been', () => {
+    // These are not "not idle yet" — they are "not yours to take". A caller
+    // logging the reason should name who was holding it, not the clock.
+    const ancient = idleForHours({
+      stageWatched: true,
+      lastTouchedAt: NOW - 99 * 60 * 60_000,
+    })
+    expect(reclaimBlockedBy(ancient, THRESHOLD, NOW)).toBe('stage-watched')
+  })
+
+  it('still refuses them when the user presses reclaim now', () => {
+    // Pressing the button answers the waiting question, not the ownership one.
+    for (const held of [
+      { managerRouting: true },
+      { stageWatched: true },
+      { hasQueuedMessages: true },
+    ]) {
+      expect(
+        reclaimBlockedBy(idleForHours(held), RECLAIM_NOW_THRESHOLD_MS, NOW)
+      ).not.toBeNull()
+    }
   })
 })
 

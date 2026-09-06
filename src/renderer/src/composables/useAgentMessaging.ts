@@ -1167,6 +1167,16 @@ function pump(): void {
   for (const paneId of queues.keys()) void pumpPane(paneId)
 }
 
+/** How many messages are still waiting to reach this pane.
+ *
+ *  Exposed for the idle-reclaim decision, which has to know the pane is owed
+ *  something before it ends the CLI: unregisterPane fails the whole queue as
+ *  'pane-closed' and tells each sender so, and there is no re-queue on the way
+ *  back. Counting is the only read — the queue itself stays private. */
+function queuedCountFor(paneId: string): number {
+  return queues.get(paneId)?.length ?? 0
+}
+
 async function pumpPane(paneId: string): Promise<void> {
   if (!deps || paused.value) return
   const q = queues.get(paneId)
@@ -1715,6 +1725,7 @@ export function useAgentMessaging() {
     renamePane,
     setDerivedName,
     unregisterPane,
+    queuedCountFor,
     nameOf,
     paneIdOf,
     suggestName,
