@@ -1348,3 +1348,29 @@ describe('the UX re-audit fixes', () => {
     expect(MODAL).toContain('settings.p2p.pair.log-line')
   })
 })
+
+describe('the empty-policy card that was removed', () => {
+  it('does not tell somebody their own machines cannot reach them', () => {
+    // It said: "no rules yet on this device — nothing from your other machines
+    // can reach this one until you write at least one rule." That is false, and
+    // false for exactly the audience it named.
+    //
+    // A machine this device has paired with lands in RING_SELF, and RING_SELF
+    // skips the policy check outright. One it has not paired with is refused
+    // earlier, by _authenticate_sender, as NOT_PAIRED. Neither path reaches the
+    // state the card described — the policy governs devices belonging to other
+    // people's accounts, which is not what the card was about.
+    //
+    // This is here so the next audit reads "a claim that was not true" rather
+    // than "a missing prompt". Adding it back needs different words.
+    expect(MODAL).not.toContain('settings.p2p.network.no-rules')
+    for (const locale of LOCALES) {
+      const network = (i18n.global.getLocaleMessage(locale) as Record<string, any>)
+        .settings.p2p.network as Record<string, string>
+      expect(network['no-rules']).toBeUndefined()
+      expect(network['no-rules-body']).toBeUndefined()
+    }
+    // The backend fact stays — it is true, it simply has no honest use here yet.
+    expect(MODAL).toContain('policyEmpty?: boolean')
+  })
+})

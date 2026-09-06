@@ -418,12 +418,6 @@ async function refresh(): Promise<void> {
 const trustNotices = computed<TrustNotice[]>(() => network.value?.trustNotices ?? [])
 const trustPending = computed<PendingDevice[]>(() => network.value?.trustPending ?? [])
 const trustLocked = computed(() => network.value?.trustLocked ?? '')
-/** Connected, and still receiving nothing. Said out loud because the state is
- *  correct but invisible, and a recovery that ends here looks like a success
- *  that quietly does not work. */
-const policyEmpty = computed(
-  () => network.value?.policyEmpty === true && !trustLocked.value,
-)
 /** The stop is a read that may succeed on the next try. Same card, but no offer
  *  to erase everything: a keychain locked for a moment has nothing wrong with
  *  it to erase, and that offer is the one act here nobody can undo. */
@@ -1692,18 +1686,25 @@ onUnmounted(() => {
                machine that hits this was Keychain Access, which is the same
                reset performed with less information and leaves the two halves
                disagreeing. Loud and deliberate beats undiscoverable. -->
-          <!-- Connected, no rules: inbound is refused and nothing else on this
-               screen would say why. Placed with the lock, above the device list,
-               because the list below is unreachable while it holds. -->
-          <div v-if="policyEmpty" class="card locked-card">
-            <h2 class="net-title">{{ t('settings.p2p.network.no-rules') }}</h2>
-            <p class="req-what">{{ t('settings.p2p.network.no-rules-body') }}</p>
-            <div class="locked-acts">
-              <button class="dev-review" @click="emit('open-rules')">
-                {{ t('settings.p2p.network.who-can-command') }}
-              </button>
-            </div>
-          </div>
+          <!-- There was a card here saying "no rules yet on this device —
+               nothing from your other machines can reach this one until you
+               write at least one rule". It was removed because that is not
+               true, and it named the one audience for whom it is least true.
+               Do not add it back in that form.
+
+               Your own machines never reach the policy at all: a sender this
+               device has paired with lands in RING_SELF, and RING_SELF skips
+               the policy check outright (server_link `refused = ... trust_ring
+               != RING_SELF and not pane_policy.is_allowed(...)`). A sender it
+               has *not* paired with is refused earlier still, by
+               `_authenticate_sender`, as NOT_PAIRED. Neither path reaches the
+               state the card described.
+
+               What the policy actually governs is devices belonging to *other
+               people's* accounts. A card about an empty policy would have to
+               say that, and would have to be worth interrupting somebody for.
+               The backend still reports `policyEmpty`; it is a true fact with
+               no honest use here yet. -->
           <div v-if="trustLocked" class="card locked-card">
             <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
             <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>

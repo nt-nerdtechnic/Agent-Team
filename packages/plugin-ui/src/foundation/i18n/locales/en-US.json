@@ -1162,9 +1162,7 @@
         "panes": "{count} CLI panes",
         "no-panes": "Nothing running here right now.",
         "solo": "Only this device is signed in. Sign in on another device to see it here.",
-        "link-offline": "The link is down, so this is the last thing the server said.",
-        "no-rules": "No rules yet on this device",
-        "no-rules-body": "Nothing from your other machines can reach this one until you write at least one rule. Open the rules and add one."
+        "link-offline": "The link is down, so this is the last thing the server said."
       },
       "trust": {
         "requests-hint": "Approving writes a rule for exactly this pane. Nothing else on this device is granted.",
