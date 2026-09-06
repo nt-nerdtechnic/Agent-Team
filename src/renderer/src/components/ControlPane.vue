@@ -2083,17 +2083,15 @@ function onAgentLineClick(paneId: string, ev?: MouseEvent): void {
 // (and `focusPaneId` falls back to the first pane, so one row is always a
 // candidate). The state itself is kept, not cleared: coming back to the
 // window restores the row the user had open.
-const windowFocused = ref(typeof document === 'undefined' || document.hasFocus())
+const windowFocused = ref(document.hasFocus())
 function onWindowFocus(): void {
   windowFocused.value = true
 }
 function onWindowBlur(): void {
   windowFocused.value = false
 }
-if (typeof window !== 'undefined') {
-  window.addEventListener('focus', onWindowFocus)
-  window.addEventListener('blur', onWindowBlur)
-}
+window.addEventListener('focus', onWindowFocus)
+window.addEventListener('blur', onWindowBlur)
 onUnmounted(() => {
   window.removeEventListener('focus', onWindowFocus)
   window.removeEventListener('blur', onWindowBlur)
