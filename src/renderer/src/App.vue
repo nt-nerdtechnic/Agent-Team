@@ -6,6 +6,7 @@ import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
 import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups'
 import { buildPaneLineage } from './lib/paneLineage'
 import { ancestorTrail } from './lib/paneListView'
+import { closeAdvisoriesFor } from './lib/paneCloseAdvisories'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
 import { schedulePrewarm } from './lib/prewarm'
@@ -6983,7 +6984,26 @@ const PANE_ID_HINT = 'a pane id, not a pane name: cli_list_targets reports it as
 registerCommand('ui.pane.close', async (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
   if (!paneId) throw new Error(`ui.pane.close requires ${PANE_ID_HINT}`)
+  // Gathered BEFORE the kill, because none of it is knowable afterwards.
+  // Creating a pane hands back advisories; closing one used to answer nothing
+  // at all, so an agent could end another's turn, drop the messages queued for
+  // it and orphan its children without any of that being visible anywhere.
+  // This does not refuse the close — force-quitting is a legitimate thing to
+  // want — it just stops the consequences from being silent.
+  const doomed = panes.value.find((p) => p.id === paneId)
+  const name = (doomed?.messagingName as string | undefined) ?? doomed?.customName ?? paneId
+  const advisories = doomed
+    ? closeAdvisoriesFor({
+        name,
+        status: paneDisplayStatus(doomed) || undefined,
+        queuedMessages: messaging.messages.value.filter(
+          (m) => m.to === name && (m.status === 'queued' || m.status === 'delivering'),
+        ).length,
+        childCount: panes.value.filter((p) => p.spawnedBy === paneId).length,
+      })
+    : []
   await onKill(paneId)
+  return advisories.length ? { advisories } : {}
 })
 registerCommand('ui.pane.focus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
