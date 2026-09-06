@@ -6320,19 +6320,25 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
   }
 }
 
-/** Press this pane's interrupt key. Returns whether a byte actually reached
- *  a PTY — false for a cold-restore placeholder, a pane whose session is gone,
- *  and a write that threw. The UI callers ignore it; ui.pane.interrupt reports
- *  it, because "nothing was sent" and "it was sent and the agent kept going"
- *  are different answers and an MCP caller cannot tell them apart otherwise. */
+/** Press this pane's interrupt key. Returns whether the interrupt was issued
+ *  at all — false for a cold-restore placeholder, a pane whose session is
+ *  gone, a window whose socket is down (useTerminal drops it rather than
+ *  queueing a SIGINT for whatever turn is running after the reconnect), and a
+ *  request that was refused or threw. True is not a promise that the agent
+ *  stopped, or even that the byte reached the CLI: the backend logs a failed
+ *  PTY write rather than answering with it.
+ *
+ *  The UI callers ignore this; ui.pane.interrupt reports it, because
+ *  "nothing was sent" and "it was sent and the agent kept going" are different
+ *  answers and an MCP caller cannot tell them apart otherwise. */
 async function onInterrupt(paneId: string): Promise<boolean> {
   if (!panes.value.find((p) => p.id === paneId)?.realized) return false
   const ref = paneRefs[paneId]
   if (!ref?.sessionId) return false
   try {
-    await ref.interrupt()
+    const issued = await ref.interrupt()
     persistPaneStopped(paneId, true)
-    return true
+    return issued !== false
   } catch {
     return false
   }
