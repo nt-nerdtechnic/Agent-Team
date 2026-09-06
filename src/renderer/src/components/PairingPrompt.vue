@@ -22,11 +22,11 @@
 // who pressed Allow saw a button dim and nothing else, and a backend that
 // answered with an error was indistinguishable from one that answered at all.
 // Pressing now moves through three visible states: in flight, settled, gone.
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { useBackend } from '../composables/useBackend'
-import { usePairingState, requestKey, type PairingRow } from '../composables/usePairingState'
+import { usePairingState, requestKey, POLL_MS, type PairingRow } from '../composables/usePairingState'
 
 const props = defineProps<{ backend: ReturnType<typeof useBackend> }>()
 
@@ -64,6 +64,25 @@ const errors = ref<Record<string, string>>({})
  *  read a sentence, short enough not to become another thing to dismiss. */
 const SETTLED_MS = 2600
 
+/**
+ * How long "sent, waiting for them" stays before it goes by itself.
+ *
+ * It has to outlast the machinery. The request goes to the server, the far
+ * machine sees it on its own poll, and this end learns of the answer on the
+ * next one — three polls before anything can come back, in the ordinary case
+ * where somebody is standing at the other screen. A notice that expires inside
+ * that window disappears while its own answer is still on the way, which reads
+ * as the request having failed.
+ *
+ * It must not outlast the person. Past that point what is left is somebody who
+ * has not looked at their machine yet, and they may answer in ten minutes; a
+ * notice that waits for them is still on screen when they do. Nothing is lost
+ * by letting it go — the answer arrives as a card of its own, which is the
+ * whole reason this one is allowed to leave and the card with the digits is
+ * not.
+ */
+const ASKED_MS = 3 * POLL_MS + 1000
+
 const timers: ReturnType<typeof setTimeout>[] = []
 
 /** Settled outcomes first, then the questions still open. A request being
@@ -78,6 +97,55 @@ const cards = computed(() => [
     .filter((row) => !settled.value.some((s) => s.key === requestKey(row)))
     .map((row) => ({ kind: 'ask' as const, key: requestKey(row), row })),
 ])
+
+/** Timers for the "sent" notices, one per device, so closing one by hand does
+ *  not leave a timeout to fire against a card that is already gone. */
+const askedTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/**
+ * Put the "sent" notice away. **The request keeps running.**
+ *
+ * It forgets only this window's record of the press — it does not touch
+ * `dismiss`, which is keyed by the request and is what would suppress the
+ * card that comes back. Closing a notice must not be a silent way to cancel a
+ * pairing, and when the far machine answers, the question with the digits
+ * appears exactly as it would have.
+ */
+function dismissAsked(deviceId: string): void {
+  const timer = askedTimers.get(deviceId)
+  if (timer) {
+    clearTimeout(timer)
+    askedTimers.delete(deviceId)
+  }
+  state.forgetAsked(deviceId)
+}
+
+watch(
+  () => state.asked.value.map((a) => `${a.deviceId}:${a.error ? 'err' : ''}`).join(','),
+  () => {
+    const live = new Map(state.asked.value.map((a) => [a.deviceId, a]))
+    for (const [deviceId, timer] of [...askedTimers]) {
+      // Gone, or turned into an error. An error is the only record that the
+      // request never went out, and nothing is coming to replace it — so it
+      // stays until somebody closes it.
+      if (!live.has(deviceId) || live.get(deviceId)?.error) {
+        clearTimeout(timer)
+        askedTimers.delete(deviceId)
+      }
+    }
+    for (const [deviceId, entry] of live) {
+      if (entry.error || askedTimers.has(deviceId)) continue
+      askedTimers.set(
+        deviceId,
+        setTimeout(() => {
+          askedTimers.delete(deviceId)
+          state.forgetAsked(deviceId)
+        }, ASKED_MS),
+      )
+    }
+  },
+  { immediate: true },
+)
 
 async function answer(row: PairingRow, accept: boolean): Promise<void> {
   if (busy.value) return
@@ -135,6 +203,8 @@ function later(row: PairingRow): void {
 onMounted(() => state.subscribe())
 onUnmounted(() => {
   for (const timer of timers.splice(0)) clearTimeout(timer)
+  for (const timer of askedTimers.values()) clearTimeout(timer)
+  askedTimers.clear()
   state.release()
 })
 
@@ -153,9 +223,21 @@ function grouped(value: string | undefined): string {
   <div v-if="cards.length" class="pair-prompts" role="status" aria-live="polite">
     <div v-for="card in cards" :key="card.key" class="pair-prompt">
       <template v-if="card.kind === 'asked'">
-        <p class="pp-title">
-          {{ t('settings.p2p.pair.asking', { device: card.asked.deviceName || card.asked.deviceId }) }}
-        </p>
+        <!-- This one closes, and goes by itself. It reports that a request went
+             out; it asks for nothing, so taking it away decides nothing. The
+             card below, which asks whether six digits match, has neither —
+             a question that removes itself has answered itself. -->
+        <div class="pp-head">
+          <p class="pp-title">
+            {{ t('settings.p2p.pair.asking', { device: card.asked.deviceName || card.asked.deviceId }) }}
+          </p>
+          <button
+            class="pp-close"
+            :aria-label="t('settings.p2p.pair.dismiss')"
+            :title="t('settings.p2p.pair.dismiss-title')"
+            @click="dismissAsked(card.asked.deviceId)"
+          >×</button>
+        </div>
         <p v-if="card.asked.error" class="pp-err">{{ card.asked.error }}</p>
         <p v-else class="pp-body">{{ t('settings.p2p.pair.waiting-response') }}</p>
       </template>
@@ -255,6 +337,15 @@ function grouped(value: string | undefined): string {
   to { opacity: 1; transform: none; }
 }
 .pp-title { margin: 0; font-size: 13px; font-weight: 600; }
+.pp-head { display: flex; align-items: flex-start; gap: 8px; }
+.pp-head .pp-title { flex: 1; min-width: 0; }
+.pp-close {
+  flex-shrink: 0; margin: -4px -4px 0 0; padding: 0 4px; border: 0; background: none;
+  font: inherit; font-size: 15px; line-height: 1.2; color: var(--text-secondary);
+  cursor: pointer;
+}
+.pp-close:hover { color: var(--text-primary); }
+.pp-close:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; }
 .pp-label {
   margin: 8px 0 0; font-size: var(--font-3xs); text-transform: uppercase;
   letter-spacing: 0.06em; color: var(--text-secondary);

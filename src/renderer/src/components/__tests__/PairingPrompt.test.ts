@@ -18,7 +18,7 @@ import { i18n } from '@navide/plugin-ui/foundation'
 
 import PairingPrompt from '../PairingPrompt.vue'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
-import { _resetForTest, usePairingState } from '../../composables/usePairingState'
+import { _resetForTest, POLL_MS, usePairingState } from '../../composables/usePairingState'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PROMPT = readFileSync(resolve(here, '../PairingPrompt.vue'), 'utf8')
@@ -113,6 +113,22 @@ describe('PairingPrompt', () => {
   })
 
   for (const locale of LOCALES) {
+    it(`does not send the other end looking for a window in ${locale}`, () => {
+      // It read "Open the account window on that device to answer." Both ends
+      // get a prompt now — the responder's row carries the six digits the
+      // instant the request lands (device_pairing.accept_request stores both
+      // nonces and starts in awaiting-local), and this component is mounted at
+      // the app root, so the far machine shows it over whatever is on screen.
+      // The sentence was instructions for a version that no longer exists.
+      const pair = (i18n.global.getLocaleMessage(locale) as Record<string, any>).settings.p2p.pair
+      expect(pair['waiting-response']).toBeTruthy()
+      expect(pair['waiting-response']).not.toMatch(/account window|帳號視窗/)
+      // And the close button says what it does and does not do, because "×" on
+      // a pairing card reads as cancelling the pairing.
+      expect(pair.dismiss).toBeTruthy()
+      expect(pair['dismiss-title']).toBeTruthy()
+    })
+
     it(`names its two answers in ${locale}`, () => {
       const pair = (i18n.global.getLocaleMessage(locale) as Record<string, any>).settings.p2p.pair
       expect(pair.allow).toBeTruthy()
@@ -215,6 +231,127 @@ async function mountPrompt(pairings: unknown[] = [RESPONDER]) {
 const t = (key: string, args?: Record<string, unknown>): string => i18n.global.t(key, args ?? {})
 const buttons = () => wrapper!.findAll('.pp-btn')
 const allow = () => buttons().find((b) => b.classes('pp-primary'))!
+
+/** The "sent" notice, which reports and asks nothing — the one card here that
+ *  is allowed to leave on its own. Its counterpart with the digits is not, and
+ *  the difference is the subject of half these tests. */
+async function mountAsked(pairings: unknown[] = []) {
+  const mock = await mountPrompt(pairings)
+  usePairingState(mock.backend as never).noteAsked('dev-far', 'M4')
+  await flushPromises()
+  return mock
+}
+
+const asked = () => wrapper!.find('.pp-close')
+
+describe('the notice that a request went out', () => {
+  it('can be closed by hand', async () => {
+    // Reported: it had no close button and never left. It is a notification —
+    // it reports that something was sent, and asks for nothing.
+    await mountAsked()
+    expect(wrapper!.text()).toContain(t('settings.p2p.pair.asking', { device: 'M4' }))
+
+    await asked().trigger('click')
+    await flushPromises()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+  })
+
+  it('goes by itself, having outlasted the round trip', async () => {
+    vi.useFakeTimers()
+    await mountAsked()
+
+    // Still there while the answer could plausibly still be coming: three polls
+    // is the worst ordinary case before anything can come back.
+    vi.advanceTimersByTime(3 * POLL_MS)
+    await flushPromises()
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(1)
+
+    vi.advanceTimersByTime(2000)
+    await flushPromises()
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+  })
+
+  it('closing it does not call off the pairing', async () => {
+    // The one that matters. Closing a notice must not be a silent cancel: the
+    // request keeps running, and when the far machine answers, the question
+    // with the digits has to arrive exactly as it would have.
+    const mock = await mountAsked()
+    await asked().trigger('click')
+    await flushPromises()
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+
+    // Nothing was sent anywhere when it was closed.
+    expect(mock.sent.map((s) => s.type)).not.toContain('p2p.pair.confirm')
+    expect(mock.sent.map((s) => s.type)).not.toContain('p2p.pair.cancel')
+
+    // They answered.
+    mock.setResponse('p2p.network.snapshot', {
+      pairings: [{ ...RESPONDER, deviceId: 'dev-far', role: 'initiator' }],
+    })
+    await usePairingState(mock.backend as never).refresh()
+    await flushPromises()
+
+    expect(wrapper!.find('.pp-code').text()).toBe('482 913')
+  })
+
+  it('and neither does letting it go by itself', async () => {
+    vi.useFakeTimers()
+    const mock = await mountAsked()
+    vi.advanceTimersByTime(3 * POLL_MS + 2000)
+    await flushPromises()
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+
+    mock.setResponse('p2p.network.snapshot', {
+      pairings: [{ ...RESPONDER, deviceId: 'dev-far', role: 'initiator' }],
+    })
+    await usePairingState(mock.backend as never).refresh()
+    await flushPromises()
+
+    expect(wrapper!.find('.pp-code').text()).toBe('482 913')
+  })
+
+  it('holds still when the request never went out', async () => {
+    // An error is the only record that nothing is happening, and nothing is
+    // coming to replace it. It waits to be read.
+    vi.useFakeTimers()
+    const mock = await mountAsked()
+    usePairingState(mock.backend as never).noteAskFailed('dev-far', 'ws not open')
+    await flushPromises()
+
+    vi.advanceTimersByTime(10 * (3 * POLL_MS + 1000))
+    await flushPromises()
+
+    expect(wrapper!.find('.pp-err').text()).toBe('ws not open')
+  })
+})
+
+describe('the question with the digits', () => {
+  it('never takes itself away', async () => {
+    // A question that removes itself has answered itself. Whoever pressed Pair
+    // may be walking to the other machine; the digits have to be there when
+    // they get back, and the exchange's own five-minute expiry is what ends it.
+    vi.useFakeTimers()
+    await mountPrompt()
+    expect(wrapper!.find('.pp-code').exists()).toBe(true)
+
+    vi.advanceTimersByTime(50 * (3 * POLL_MS + 1000))
+    await flushPromises()
+
+    expect(wrapper!.find('.pp-code').text()).toBe('482 913')
+    expect(allow().exists()).toBe(true)
+  })
+
+  it('has no close button — "Later" is the way out, and it is a choice', async () => {
+    // "Later" says a person decided to deal with it elsewhere; the card in the
+    // account window keeps the request. A ✕ in the corner of a security
+    // question is the same gesture as dismissing a banner.
+    await mountPrompt()
+
+    expect(wrapper!.find('.pp-close').exists()).toBe(false)
+    expect(buttons().some((b) => b.text() === t('settings.p2p.pair.later'))).toBe(true)
+  })
+})
 
 describe('PairingPrompt — answering', () => {
   it('draws the question with the digits to compare', async () => {
@@ -387,5 +524,53 @@ describe('PairingPrompt — the end that asked', () => {
 
     expect(wrapper!.find('.pp-err').text()).toBe('that device is offline')
     expect(wrapper!.text()).not.toContain(t('settings.p2p.pair.waiting-response'))
+  })
+
+  it('allows dismissing the sent notice early with the close button', async () => {
+    const mock = await mountPrompt([])
+    const state = usePairingState(mock.backend as never)
+    state.noteAsked('dev-new', 'M5')
+    await nextTick()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(1)
+    const closeBtn = wrapper!.find('.pp-close')
+    expect(closeBtn.exists()).toBe(true)
+    await closeBtn.trigger('click')
+    await nextTick()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+    expect(state.asked.value).toHaveLength(0)
+  })
+
+  it('automatically dismisses the sent notice after timeout', async () => {
+    vi.useFakeTimers()
+    const mock = await mountPrompt([])
+    const state = usePairingState(mock.backend as never)
+    state.noteAsked('dev-new', 'M5')
+    await nextTick()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(1)
+    vi.advanceTimersByTime(10_000)
+    await nextTick()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(0)
+    expect(state.asked.value).toHaveLength(0)
+  })
+
+  it('does not auto-dismiss an error notice', async () => {
+    vi.useFakeTimers()
+    const mock = await mountPrompt([])
+    const state = usePairingState(mock.backend as never)
+    state.noteAsked('dev-new', 'M5')
+    await nextTick()
+    state.noteAskFailed('dev-new', 'that device is offline')
+    await nextTick()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(1)
+    vi.advanceTimersByTime(20_000)
+    await nextTick()
+
+    expect(wrapper!.findAll('.pair-prompt')).toHaveLength(1)
+    expect(wrapper!.find('.pp-err').text()).toBe('that device is offline')
   })
 })

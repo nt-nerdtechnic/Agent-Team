@@ -1070,9 +1070,11 @@
         "step-your-turn": "等你比對",
         "title": "配對",
         "waiting-remote": "你已確認，等待對方確認。",
-        "waiting-response": "已送出。到那台裝置上打開帳號視窗回應。",
+        "waiting-response": "已送出。對方畫面上會直接跳出來，不必開任何視窗。",
         "with-device": "正在與 {device} 配對",
-        "your-turn": "兩邊螢幕上都有數字了。在你確認一致之前，不會配對。"
+        "your-turn": "兩邊螢幕上都有數字了。在你確認一致之前，不會配對。",
+        "dismiss": "關閉",
+        "dismiss-title": "只關掉這則通知。配對請求繼續進行，對方回應時會出現在這裡。"
       },
       "fingerprint-copy": "複製",
       "fingerprint-copied": "已複製",
