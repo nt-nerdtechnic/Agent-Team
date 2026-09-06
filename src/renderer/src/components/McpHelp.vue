@@ -35,6 +35,7 @@ const cliTools: ToolRow[] = [
   { name: 'cli_read_log', what: '讀取另一個 pane 對話紀錄的結尾（預設 200 行），也可帶游標只讀新增的部分' },
   { name: 'cli_get_status', what: '查另一個 pane 是否忙碌、最近一次活動' },
   { name: 'cli_wait_idle', what: '等到另一個 pane 閒置或逾時（最長 120 秒）；逾時會說明是卡在權限提示、還在做事、還是連不上' },
+  { name: 'cli_interrupt', what: '送出該 CLI 的中斷鍵給本機 pane；這不等於停止，可能只是清空輸入框，結果要自己去確認' },
 ]
 
 const uiTools: ToolRow[] = [

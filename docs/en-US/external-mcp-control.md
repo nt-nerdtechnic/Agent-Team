@@ -260,6 +260,7 @@ recorded as diagnostics, readable via `ui_diagnostics`.
 | `cli_read_log` | `target`, `tail_lines=200`, `since?`, `pane_id?` | Tail of the pane's conversation log (≤512KB and ≤`tail_lines` lines); returns `next_cursor` and `rotated` |
 | `cli_get_status` | `target`, `pane_id?` | `{busy, agent_key, last_activity?, ui?}` — `ui` mirrors `ui.pane.getStatus` when the owning window answers |
 | `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120), `pane_id?` | Blocks until the pane is idle or the timeout passes; returns `{idle, source, waited_s, last_activity?, ui_status?}`, plus `reason` on timeout |
+| `cli_interrupt` | `target`, `pane_id` | Send the CLI's interrupt key to a pane on this machine — `ESC` for codex, `^C` for the rest. **This does not stop a turn**: depending on the CLI it may abort the turn, merely clear the input box, or on a second press quit the CLI entirely. It is a keystroke, not a command. Verify with `cli_get_status`/`cli_wait_idle`; if the work can be allowed to finish, `cli_send` a message instead. Returns `{ok, target, name, sent, status_before, advisories?}` — `sent: false` means nothing was issued (no session, or the window was reconnecting). Local panes only |
 
 `cli_read_log`'s `since` reads incrementally: pass back the `next_cursor` from
 your previous call to get only what the pane has said since then, instead of

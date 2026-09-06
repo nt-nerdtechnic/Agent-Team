@@ -223,6 +223,7 @@ Diagnostics，可透過 `ui_diagnostics` 讀取。
 | `cli_read_log` | `target`、`tail_lines=200`、`since?`、`pane_id?` | Pane 對話記錄的尾端（≤512KB 且 ≤`tail_lines` 行）；回傳 `next_cursor` 與 `rotated` |
 | `cli_get_status` | `target`、`pane_id?` | `{busy, agent_key, last_activity?, ui?}` —— 當擁有該 Pane 的視窗有回應時，`ui` 鏡射 `ui.pane.getStatus` |
 | `cli_wait_idle` | `target`、`timeout_s=60`（上限 120）、`pane_id?` | 阻擋直到該 Pane 進入 Idle 或逾時；回傳 `{idle, source, waited_s, last_activity?, ui_status?}`，逾時再加上 `reason` |
+| `cli_interrupt` | `target`、`pane_id` | 送出該 CLI 的中斷鍵給本機的 pane——codex 是 `ESC`，其餘是 `^C`。**這不等於停止**：依 CLI 而異，可能中止當前回合、可能只是清空輸入框、第二次按下甚至可能直接離開 CLI。它是一個按鍵，不是一道指令。用 `cli_get_status`／`cli_wait_idle` 確認結果；若那件工作可以讓它做完，改用 `cli_send` 傳話。回傳 `{ok, target, name, sent, status_before, advisories?}`——`sent: false` 代表根本沒送出（沒有 session，或視窗正在重連）。僅限本機 pane |
 
 `cli_read_log` 的 `since` 提供增量讀取：把上一次呼叫回傳的 `next_cursor` 傳回來，
 就只會拿到該 Pane 自那之後說的內容，而不必重讀同一段尾端。這個 Cursor 是

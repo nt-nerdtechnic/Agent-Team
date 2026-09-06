@@ -6,6 +6,15 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Added
 
+- Let an agent ask another pane to stop with the new `cli_interrupt` MCP tool.
+  Until now an agent could force-kill a pane — PTY and all, with no gate and no
+  say from the pane being killed — but had no way to interrupt one, so a child
+  running a refactor that was going wrong left its parent choosing between
+  waiting for the turn to end and destroying the session. The per-vendor
+  interrupt key already existed and was already wired to the PTY; only the MCP
+  entry was missing. The tool is explicit that a keystroke is not a stop: it
+  may abort the turn, only clear the input box, or on a second press quit the
+  CLI, so the result has to be verified rather than assumed.
 - Let an agent withdraw a message it sent with the new `cli_cancel_message`
   MCP tool. A message waits in the recipient's queue until that pane is between
   turns, so a sender that changed its mind previously had to let it land and

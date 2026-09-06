@@ -258,6 +258,7 @@ CLI Pane を保持でき、Spawn の連鎖は任意の深さで実行できま�
 | `cli_read_log` | `target`, `tail_lines=200`, `since?`, `pane_id?` | Pane の会話 Log の末尾（≤512KB かつ ≤`tail_lines` 行）。`next_cursor` と `rotated` を返す |
 | `cli_get_status` | `target`, `pane_id?` | `{busy, agent_key, last_activity?, ui?}` — `ui` は所有ウィンドウが応答したときに `ui.pane.getStatus` を反映 |
 | `cli_wait_idle` | `target`, `timeout_s=60`（上限 120）, `pane_id?` | Pane が Idle になるか Timeout するまで Block。`{idle, source, waited_s, last_activity?, ui_status?}` を返し、Timeout 時は `reason` も返す |
+| `cli_interrupt` | `target`, `pane_id` | このマシン上の Pane に、その CLI の割り込みキーを送ります（codex は `ESC`、それ以外は `^C`）。**これは Turn を止めることを意味しません**: CLI によって、Turn を中断することも、単に入力欄をクリアするだけのことも、二度押しで CLI 自体が終了することもあります。コマンドではなくキーストロークです。結果は `cli_get_status`／`cli_wait_idle` で確認してください。その作業を終わらせてよいなら `cli_send` でメッセージを送る方が適切です。`{ok, target, name, sent, status_before, advisories?}` を返します。`sent: false` は何も送られなかったことを意味します（session が無い、またはウィンドウが再接続中）。ローカル Pane のみ |
 
 `cli_read_log` の `since` は増分読み取りです。前回の呼び出しの `next_cursor` を
 渡し戻すと、同じ末尾を読み直す代わりに、それ以降に Pane が述べた分だけを取得
