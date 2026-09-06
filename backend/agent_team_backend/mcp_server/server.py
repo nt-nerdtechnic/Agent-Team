@@ -2565,6 +2565,110 @@ async def cli_wait_idle(
             await asyncio.sleep(_WAIT_IDLE_POLL_S)
 
 
+# ── Interrupting another pane ────────────────────────────────────────────
+@server.tool()
+async def cli_interrupt(target: str, ctx: Context, pane_id: str = "") -> dict[str, Any]:
+    """Ask a CLI pane to stop what it is doing, without closing it.
+
+    This presses that CLI's interrupt key in its terminal — Ctrl-C for most
+    vendors, Esc for codex — exactly what the pane's own stop button does. It
+    is the middle rung: cli_send asks and waits for the current turn to finish,
+    ui_invoke "ui.pane.close" takes the pane and its PTY away, and until now
+    there was nothing in between.
+
+    WHAT THIS DOES NOT DO. It sends a keystroke; it does not stop a turn. What
+    the CLI makes of that keystroke is the CLI's business — most abort the
+    running turn, some only clear the text sitting in the input box, and one
+    already at an idle prompt may take a second press as "quit" and exit.
+    Nothing here waits for a stop or verifies that one happened, so a result
+    with `sent: true` means the bytes were written and nothing more. Check with
+    cli_get_status or cli_wait_idle if you need to know, and prefer cli_send
+    whenever the work can be allowed to finish.
+
+    Interrupting an idle pane is NOT refused — clearing whatever is in its
+    input box is a real reason to want it — but it is reported rather than
+    passed off as a stop: `status_before` is the pane's status at the instant
+    the key went in, and `advisories` says when no turn was interrupted (and
+    that a line somebody had typed but not sent may be gone with it).
+
+    `target` uses the same addressing as cli_send and `pane_id` names one exact
+    pane instead. Panes on this machine only: an interrupt is a byte written
+    into a local PTY and there is no relay for it, so a
+    `<device>/<workspace>/<pane>` address fails with "interrupt-local-only" —
+    that is a limit of this tool, not a wrong address.
+
+    Returns {ok, target, name, sent, status_before, advisories?}. `sent` is
+    false when there was no live CLI behind the pane at all (a cold-restore
+    placeholder, or one whose session is gone): nothing was written, and
+    `status_before` says which.
+    """
+    from agent_team_backend import message_routing
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    me = caller.pane_id if caller.kind == "pane" else ""
+    result, failure = _resolve_pane_target(caller, me, target, pane_id)
+    if failure is not None:
+        # A name that failed locally may still be a perfectly good address for
+        # a pane on another machine, and the local errors do not say so: an
+        # id-shaped device segment answers "unknown-device", which is worded
+        # for cli_send — the one caller that relays before it can reach that
+        # error — and blames a missing server link; a device *name* does not
+        # even get that far and comes back as "unknown workspace". Both would
+        # send the caller to re-check an address that is not the problem.
+        # message_routing.route is the same resolution cli_send uses, so
+        # "this names a remote pane" means here exactly what it means there.
+        if not (pane_id or "").strip():
+            routed = message_routing.route(me, target)
+            if routed.remote is not None:
+                return {
+                    "ok": False,
+                    "error": (
+                        f'cannot interrupt "{target}": it names a pane on another '
+                        f"device, and an interrupt is a byte written straight into a "
+                        f"local PTY — there is no relay for one at any link state. The "
+                        f"address may be perfectly good; only panes on this machine can "
+                        f"be interrupted from here. To stop a remote pane, cli_send it a "
+                        f"message asking it to stop."
+                    ),
+                    "error_code": "interrupt-local-only",
+                }
+        return failure
+    pane = result.pane
+
+    reply = await _ui_request(
+        pane.workspace_path,
+        "invoke",
+        caller=_pane_caller(pane.pane_id),
+        action="ui.pane.interrupt",
+        args={"paneId": pane.pane_id},
+    )
+    if not reply.get("ok"):
+        # Unlike cli_get_status's `ui` block there is no degraded answer to
+        # give: the window is the only thing that can write to the PTY, so a
+        # window that did not answer means nothing was sent.
+        return {
+            "ok": False,
+            "target": pane.qualified_name,
+            "error": str(reply.get("error") or "the window owning this pane did not answer"),
+            "error_code": str(reply.get("error_code") or "ui_action_failed"),
+        }
+    payload = reply.get("result") or {}
+    answer: dict[str, Any] = {
+        "ok": True,
+        "target": pane.qualified_name,
+        "name": pane.name,
+        "sent": bool(payload.get("sent")),
+        "status_before": str(payload.get("status") or ""),
+    }
+    advisories = [str(a) for a in (payload.get("advisories") or [])]
+    if advisories:
+        answer["advisories"] = advisories
+    return answer
+
+
 # How long to keep watching for the target to pick the message up before
 # falling through to the idle wait. Delivery is queued behind whatever the
 # pane is doing and the injected text only shows up as activity once its CLI

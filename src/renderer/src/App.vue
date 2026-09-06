@@ -7,6 +7,7 @@ import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups
 import { buildPaneLineage } from './lib/paneLineage'
 import { ancestorTrail } from './lib/paneListView'
 import { closeAdvisoriesFor } from './lib/paneCloseAdvisories'
+import { interruptAdvisoriesFor } from './lib/paneInterruptAdvisories'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
 import { schedulePrewarm } from './lib/prewarm'
@@ -6319,15 +6320,21 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
   }
 }
 
-async function onInterrupt(paneId: string): Promise<void> {
-  if (!panes.value.find((p) => p.id === paneId)?.realized) return
+/** Press this pane's interrupt key. Returns whether a byte actually reached
+ *  a PTY — false for a cold-restore placeholder, a pane whose session is gone,
+ *  and a write that threw. The UI callers ignore it; ui.pane.interrupt reports
+ *  it, because "nothing was sent" and "it was sent and the agent kept going"
+ *  are different answers and an MCP caller cannot tell them apart otherwise. */
+async function onInterrupt(paneId: string): Promise<boolean> {
+  if (!panes.value.find((p) => p.id === paneId)?.realized) return false
   const ref = paneRefs[paneId]
-  if (!ref?.sessionId) return
+  if (!ref?.sessionId) return false
   try {
     await ref.interrupt()
     persistPaneStopped(paneId, true)
+    return true
   } catch {
-    /* ignore */
+    return false
   }
 }
 
@@ -7018,6 +7025,31 @@ registerCommand('ui.pane.focus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
   if (!paneId) throw new Error(`ui.pane.focus requires ${PANE_ID_HINT}`)
   onFocusPane(paneId)
+})
+// The rung between "ask it to stop" (a message, which waits for the turn to
+// end) and ui.pane.close (which takes the pane and its PTY away). Like close
+// it does not refuse — pressing the interrupt key on an idle pane is a real
+// thing to want — but what the press landed on is knowable only here, so the
+// pane's state at that instant goes back with the answer rather than leaving
+// the caller to read `ok: true` as "the agent stopped".
+registerCommand('ui.pane.interrupt', async (args) => {
+  const paneId = (args as { paneId?: string } | undefined)?.paneId
+  if (!paneId) throw new Error(`ui.pane.interrupt requires ${PANE_ID_HINT}`)
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane) throw new Error(`ui.pane.interrupt: pane "${paneId}" not found`)
+  // Read BEFORE the interrupt: it changes the very status being reported, so
+  // asking afterwards answers a different question than the caller asked.
+  const ref = paneRefs[paneId]
+  const status = paneDisplayStatus(pane)
+  const awaitingKind = (ref?.awaitingKind as string | null | undefined) || undefined
+  const sent = await onInterrupt(paneId)
+  const advisories = interruptAdvisoriesFor({
+    name: (pane.messagingName as string | undefined) ?? pane.customName ?? paneId,
+    sent,
+    status: status || undefined,
+    awaitingKind,
+  })
+  return advisories.length ? { sent, status, advisories } : { sent, status }
 })
 registerCommand('ui.messaging.readIncoming', (args) => {
   const a = (args ?? {}) as {
