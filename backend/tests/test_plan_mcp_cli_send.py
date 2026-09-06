@@ -673,7 +673,7 @@ async def test_tools_are_registered_without_a_ctx_argument() -> None:
     }
     assert set((tools["cli_check_message"].inputSchema.get("properties") or {})) == {"msg_key"}
     assert set((tools["cli_send_and_wait"].inputSchema.get("properties") or {})) == {
-        "to", "text", "timeout_s", "pane_id",
+        "to", "text", "timeout_s", "pane_id", "reply_to",
     }
     # Every tool that addresses a pane takes an id as the unambiguous
     # alternative to a name; adding one without it has to fail here.
@@ -1989,3 +1989,54 @@ def test_shape_guard_agrees_with_the_renderers_copy() -> None:
         mine = model_args.ARGUMENT_SAFE.match(value) is not None
         theirs = renderer.match(value) is not None
         assert mine == theirs, f"{value!r}: backend={mine} renderer={theirs}"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_threads_a_reply(captured: list[dict[str, Any]]) -> None:
+    """Answering a question is exactly the case reply_to exists for, and this
+    is the tool an agent uses to answer and wait. Forwarding it here is what
+    stops a threaded conversation from losing its link at the one turn where
+    someone actually replied."""
+    _seed()
+    agent_messaging.register("pb", "worker", "/ws/alpha")
+
+    async def answer() -> None:
+        for _ in range(200):
+            if captured:
+                plan_mcp.record_delivery_result(
+                    captured[0]["payload"]["msg_key"], True, ""
+                )
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    await plan_mcp.cli_send_and_wait(
+        "worker", "here is the answer", _ctx(), timeout_s=0.2, reply_to="k-original"
+    )
+    await task
+
+    assert captured[0]["payload"]["reply_to"] == "k-original"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_without_a_reply_carries_no_key(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The shape every existing caller already parses stays byte-identical."""
+    _seed()
+    agent_messaging.register("pb", "worker", "/ws/alpha")
+
+    async def answer() -> None:
+        for _ in range(200):
+            if captured:
+                plan_mcp.record_delivery_result(
+                    captured[0]["payload"]["msg_key"], True, ""
+                )
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    await plan_mcp.cli_send_and_wait("worker", "hi", _ctx(), timeout_s=0.2)
+    await task
+
+    assert "reply_to" not in captured[0]["payload"]

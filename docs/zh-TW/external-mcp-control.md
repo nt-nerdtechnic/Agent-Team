@@ -89,12 +89,12 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 |---|---|---|
 | `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`pane_id`（每個 `ui.pane.*` action 都吃這個鍵，也可以在下面那幾個 Pane Tool 上取代 `address`）、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
 | `cli_whoami` | — | **僅限 CLI Pane。** 自己的身分，形狀與名冊描述別人時完全相同：`{ok, you: {name, address, pane_id, workspace_path, agent_key, busy, spawned_by?}}`。`pane_id` 是所有 `ui.pane.*` 動作唯一接受的鍵，所以這是 pane 能對自己動作的前提；`spawned_by` 是開出你的那個 pane（它關掉後回 `{pane_id, gone: true}`）|
-| `cli_send` | `to`（Pane 位址，或 `"group"` 表示廣播）、`text`、`wait_for_delivery_s=0`（上限 120）、`pane_id?` | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
+| `cli_send` | `to`（Pane 位址，或 `"group"` 表示廣播）、`text`、`wait_for_delivery_s=0`（上限 120）、`pane_id?`、`reply_to?` | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
 | `cli_check_message` | `msg_key` | 某次 `cli_send` 的結果：`{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_cancel_message` | `msg_key` | 收回一則你送出、但還沒送進去的訊息。由擁有收件佇列的視窗裁決：還在排隊就丟棄、狀態轉為 `cancelled`；已經開始投遞則忽略撤回並回報它最終的狀態。撤回不是失敗，也不會寫任何通知回給你。回傳 `{ok, msg_key, status, reason?}` |
 | `cli_inbox_summary` | — | 你自己送出、目前卡住或失敗的訊息：`{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
-| `cli_pending_incoming` | `limit=20`（上限 200） | **僅限 CLI Pane。** 目前排給*你*、還沒送進來的訊息：`{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
-| `cli_read_incoming` | `uid=""`、`limit=5`（上限 20）、`include_delivered=false`、`peek=false` | **僅限 CLI Pane。** 寄給你的訊息**全文**——`cli_pending_incoming` 只給 200 字元且壓平空白：`{count, messages: [{uid, sender, status, kind?, content, age_seconds, consumed}], note?}`。**預設讀取即消費**，讀過的訊息不會再注入你的輸入框；`peek: true` 只讀不消費。消費採「先保留、後釋放」，釋放若遺失，訊息會退回佇列並可能再送達一次；`consumed` 逐則回報，未消費的原因寫在 `note` |
+| `cli_pending_incoming` | `limit=20`（上限 200） | **僅限 CLI Pane。** 目前排給*你*、還沒送進來的訊息：`{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt, correlation_id?, in_reply_to?, hold?, held_for_s?, stale?}]}` |
+| `cli_read_incoming` | `uid=""`、`limit=5`（上限 20）、`include_delivered=false`、`peek=false` | **僅限 CLI Pane。** 寄給你的訊息**全文**——`cli_pending_incoming` 只給 200 字元且壓平空白：`{count, messages: [{uid, sender, status, kind?, content, age_seconds, consumed, correlation_id?, in_reply_to?, hold?, held_for_s?, stale?}], note?}`。**預設讀取即消費**，讀過的訊息不會再注入你的輸入框；`peek: true` 只讀不消費。消費採「先保留、後釋放」，釋放若遺失，訊息會退回佇列並可能再送達一次；`consumed` 逐則回報，未消費的原因寫在 `note` |
 | `cli_send_and_wait` | `to`、`text`、`timeout_s=60`（上限 120）、`pane_id?` | `cli_send` 再加上等待該回合結束；回傳 `cli_wait_idle` 的結果，外加 `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`、`name`、`task`、`workspace_path`（非 Pane 呼叫端必填）、`model`、`effort` | 帶著一項任務 Spawn 新的 CLI Pane；回傳 `{ok, name, address, pane_id}`，若該次 Spawn 跨過 Advisory 門檻則另附 `advisories`。`model` 與 `effort` 為選填，該 CLI 不支援時會「拒絕」而非忽略，Pane 不會悄悄用別的模型啟動。多數 CLI 接受 model；接受獨立 effort 的較少，其餘把 effort 編在 model id 裡（`gpt-5.3-codex-high`）。model id 不做驗證（每次改版都會變），effort 則會對照該 CLI 的合法值檢查 |
 

@@ -2455,7 +2455,12 @@ def _never_arrived(sent: dict[str, Any], started: float) -> dict[str, Any]:
 
 @server.tool()
 async def cli_send_and_wait(
-    to: str, text: str, ctx: Context, timeout_s: float = 60.0, pane_id: str = ""
+    to: str,
+    text: str,
+    ctx: Context,
+    timeout_s: float = 60.0,
+    pane_id: str = "",
+    reply_to: str = "",
 ) -> dict[str, Any]:
     """Send an instruction to another CLI pane and wait for it to finish it.
 
@@ -2465,8 +2470,10 @@ async def cli_send_and_wait(
     message to actually GO IN first, then remembers the target's last activity
     before sending and only accepts a turn NEWER than that as your answer.
 
-    `to`, `text`, `pane_id` and addressing are cli_send's — an id given here
-    addresses both halves, the send and the wait. `timeout_s` (capped at 120s)
+    `to`, `text`, `pane_id`, `reply_to` and addressing are cli_send's — an id
+    given here addresses both halves, the send and the wait. Answering a
+    question with this tool is the case `reply_to` exists for, so it threads
+    the same way a plain send does. `timeout_s` (capped at 120s)
     covers the whole thing, not just the wait: at most half of it is spent
     getting the message in, and whatever is left waits for the turn.
 
@@ -2549,7 +2556,8 @@ async def cli_send_and_wait(
     # answer than "timeout, busy".
     delivery_budget = timeout / 2
     sent = await cli_send(
-        to, text, ctx, wait_for_delivery_s=delivery_budget, pane_id=pane_id
+        to, text, ctx, wait_for_delivery_s=delivery_budget, pane_id=pane_id,
+        reply_to=reply_to,
     )
     if not sent.get("ok"):
         return sent
