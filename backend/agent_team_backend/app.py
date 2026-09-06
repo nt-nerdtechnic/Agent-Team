@@ -1570,14 +1570,11 @@ async def _start_log_watcher() -> None:
         # broadcast an agent.activity per entry: measured at ~800k messages over
         # two minutes with the backend pegged at a core.
         workspace_provider=attribution.active_workspaces,
-        # Token/usage backfill keeps the wider scope. active_workspaces() is
-        # empty until the frontend connects and registers panes, and it shrinks
-        # again the moment a workspace's last pane closes (idle reclaim
-        # included) — scoping usage to it would silently strand the offline
-        # catch-up that the startup sweep is the only chance to do. These files
-        # never enter the drain queue, so the wider scope costs no activity
-        # parsing.
-        token_workspace_provider=attribution.known_workspaces,
+        # Token/usage ingestion shares that scope on purpose: usage is counted
+        # for what Navide is watching and nothing else. A CLI run while Navide
+        # was closed, or in a workspace with no live pane, is not counted — a
+        # product decision, so that the ledger never depends on re-walking a
+        # multi-GB history nobody asked to be re-read.
         checkpoint_provider=tokens_store.get_ingestion_checkpoint,
         checkpoint_sink=tokens_store.advance_ingestion_checkpoint,
         progress_sink=_on_backfill_progress,
@@ -1686,6 +1683,10 @@ async def _stop_log_watcher() -> None:
         except Exception as err:  # noqa: BLE001
             log.warning("pty shutdown sweep failed: %s", err)
     if _log_watcher is not None:
+        # Settle what the drain has read but not yet counted, BEFORE stop()
+        # cancels the flush task that would have done it. See
+        # LogWatcher.drain_pending_tokens.
+        await _log_watcher.drain_pending_tokens()
         _log_watcher.stop()
     try:
         tokens_store.flush()

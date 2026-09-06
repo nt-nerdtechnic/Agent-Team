@@ -65,13 +65,28 @@ _ACTIVITY_SEEN_SWEEP_S = 600.0
 # on a literal workspace path, never on "any scope".
 _ACTIVITY_SCOPE = "@activity"
 _ACTIVITY_KIND = "activity"
-# The bag is stored whole, so it is only stored while it stays small. All 13
-# vendors keep a handful of sentinel keys (a line high-water mark, a cumulative
-# total, the last turn's text) rather than one key per line, so this holds for
-# every one of them; a reader that regressed to per-item keys silently falls
-# back to the old in-memory-only behaviour instead of writing an unbounded blob
-# into the checkpoint row of every transcript.
+# The bag is stored whole, so it is only stored while it stays small. Most
+# readers keep a handful of sentinel keys (a line high-water mark, a cumulative
+# total, the last turn's text) and stay far under this; a reader that keeps one
+# key per item falls back to the old in-memory-only behaviour rather than
+# writing an unbounded blob into the checkpoint row of every transcript.
+#
+# Two readers DO keep per-item keys and are therefore not covered: grok
+# (act:<session>:<seq> per message row, in one db holding every session ever —
+# see cli_vendors/grok.py, whose _write_map only consolidates the state/text
+# maps) and copilot (act:<line>, db_act:* per row). Neither sets
+# activity_resumes_by_line either, so they get no EOF seeding, and they replay
+# their history on every restart exactly as every vendor did before this
+# existed. That is unchanged behaviour, not a regression — but it means the
+# GitHub #28 fix does not reach them. Covering them means consolidating their
+# keys into a watermark the way cursor/antigravity/opencode already do.
+# Measured 2026-09-07 over 426 real session files: the covered readers peak at
+# 4 keys / 97 bytes, so this limit has roughly a 2x margin for them.
 _ACTIVITY_KEYS_PERSIST_LIMIT = 8
+
+# How long a quit will wait for coalesced token paths to settle before giving
+# up on them. See drain_pending_tokens: this is on the shutdown critical path.
+_SHUTDOWN_FLUSH_TIMEOUT_S = 5.0
 
 TokenSink = Callable[[TokenUsage], Awaitable[TokenSinkResult | None]]
 ActivitySink = Callable[[ActivityEvent], Awaitable[None]]
@@ -135,7 +150,6 @@ class LogWatcher:
         seen_path: Path | None = None,
         save_interval_s: float = 10.0,
         workspace_provider: Callable[[], list[str]] | None = None,
-        token_workspace_provider: Callable[[], list[str]] | None = None,
         checkpoint_provider: CheckpointProvider | None = None,
         checkpoint_sink: CheckpointSink | None = None,
         progress_sink: Callable[[str, int], None] | None = None,
@@ -151,17 +165,6 @@ class LogWatcher:
         # backfill is scoped to these so we never re-stat the entire multi-GB
         # CLI history every cycle. None → legacy full scan.
         self._workspace_provider = workspace_provider
-        # Second, wider scope for token/usage backfill only. The activity scope
-        # above is deliberately narrow (workspaces with a live pane), but token
-        # accounting has to keep covering every workspace ever opened —
-        # register_workspace promises attribution "including files that existed
-        # before registration", and the startup sweep is token's only offline
-        # catch-up window (watchdog fires on later writes, never on what grew
-        # while the backend was down). Files that fall only in this scope are
-        # queued straight for token ingestion and never enter the drain queue,
-        # so they cost zero activity parsing. None → no token-only sweep, i.e.
-        # exactly the behaviour before this parameter existed.
-        self._token_workspace_provider = token_workspace_provider
         self._activity_sink = activity_sink
         self._session_sink = session_sink
         self._rescan_interval_s = rescan_interval_s
@@ -186,10 +189,6 @@ class LogWatcher:
         self._activity_seen: dict[str, set[str]] = {}
         self._activity_seen_swept_at: float | None = None
         self._scan_mtimes: dict[str, float] = {}
-        # Enumeration state shared by the two scopes of one sweep; installed by
-        # _discover_sweep and torn down again when it returns. See _sweep_state.
-        self._sweep_seen: set[str] | None = None
-        self._sweep_memo: dict[tuple[int, str | None], list[Path]] | None = None
         self._queue: asyncio.Queue[tuple[Path | None, str]] = asyncio.Queue()
         self._pending_token_paths: dict[tuple[str, str], Path] = {}
         self._pending_token_backfills: dict[tuple[str, str], int] = {}
@@ -310,6 +309,40 @@ class LogWatcher:
                     log.info("watching %s for %s logs", d, reader.vendor)
                 except Exception as err:  # noqa: BLE001
                     log.warning("schedule watch on %s failed: %s", d, err)
+
+    async def drain_pending_tokens(self) -> None:
+        """Settle coalesced token paths before shutdown.
+
+        Token ingestion is deliberately lazy: a path seen by the drain is only
+        remembered, and the numbers land on the next _token_interval_s flush.
+        stop() then cancels that flush, so on a normal quit everything read
+        since the last one was simply dropped and had to be rediscovered by the
+        next start's sweep. Now that usage is only counted for what Navide is
+        watching, that sweep is no longer a safety net wide enough to find it
+        again — a workspace whose pane does not come back is never rescanned —
+        so the flush has to happen while we still have it.
+
+        Best-effort by design, and bounded: this now sits in the FastAPI
+        shutdown path ahead of the git watcher, server link, MCP teardown and
+        the database close, where stop() used to be a synchronous cancel. One
+        slow transcript — a network mount, a locked sqlite store, a stalled
+        sink — would otherwise hold the whole quit open indefinitely, so the
+        wait is capped. Whatever does not settle in time is still recoverable
+        from the durable checkpoints the next time that file is seen.
+        """
+        if not self._started:
+            return
+        try:
+            await asyncio.wait_for(
+                self._flush_pending_tokens(), timeout=_SHUTDOWN_FLUSH_TIMEOUT_S
+            )
+        except TimeoutError:
+            log.warning(
+                "shutdown token flush timed out after %.0fs; %d path(s) left for the "
+                "next start", _SHUTDOWN_FLUSH_TIMEOUT_S, len(self._pending_token_paths)
+            )
+        except Exception as err:  # noqa: BLE001
+            log.warning("shutdown token flush failed: %s", err)
 
     def stop(self) -> None:
         if not self._started:
@@ -481,19 +514,6 @@ class LogWatcher:
             f" (workspace={workspace_path})" if workspace_path else " (all readers)",
         )
 
-    def _sweep_state(self) -> tuple[set[str], dict[tuple[int, str | None], list[Path]]]:
-        """The `seen` set and enumeration memo for the sweep in progress.
-
-        _discover_sweep installs one pair so the activity and token-only passes
-        share them: a file claimed by the first pass is skipped by the second,
-        and a reader tree is walked once rather than once per pass. A call from
-        outside a sweep (tests, ad-hoc use) gets a throwaway pair, so each
-        method still behaves correctly on its own.
-        """
-        if self._sweep_seen is not None and self._sweep_memo is not None:
-            return self._sweep_seen, self._sweep_memo
-        return set(), {}
-
     def _reader_files(
         self,
         reader: LogReader,
@@ -531,11 +551,12 @@ class LogWatcher:
         seen: set[str],
         memo: dict[tuple[int, str | None], list[Path]],
     ) -> list[Path]:
-        """Enumerate one scope's candidate files, skipping anything already
-        claimed by an earlier pass of the same sweep."""
+        """Enumerate the scope's candidate files, once each.
+
+        `seen` dedupes a file two workspaces both claim; `memo` keeps a reader
+        tree walked once per sweep rather than once per workspace naming it."""
         files: list[Path] = []
-        # Empty workspace list = legacy unscoped full scan. It still records
-        # into `seen`, so a token-only pass behind it finds nothing left over.
+        # Empty workspace list = legacy unscoped full scan.
         sources = [None] if not workspaces else list(workspaces)
         for reader in self._readers:
             for ws in sources:
@@ -554,6 +575,13 @@ class LogWatcher:
         workspace to a subset fall back to their full list — those vendors keep
         far fewer files). No provider / nothing registered yet → full scan
         (legacy).
+
+        Activity and token ingestion share this one list: usage is counted for
+        what Navide is watching, and nothing else. A CLI run while Navide was
+        closed, or in a workspace with no live pane, is deliberately not
+        counted — a product decision, not a limitation. Token ingestion briefly
+        carried a second, wider scope of its own; the shutdown flush
+        (drain_pending_tokens) is what replaced it.
         """
         provider = self._workspace_provider
         if provider is not None:
@@ -564,25 +592,7 @@ class LogWatcher:
                 return []
         else:
             workspaces = []
-        seen, memo = self._sweep_state()
-        return self._collect_candidates(workspaces, seen, memo)
-
-    def _token_only_candidate_files(self) -> list[Path]:
-        """Candidates that belong to the token scope but not the activity one.
-
-        Only meaningful inside a sweep, where the shared `seen` set has already
-        absorbed everything the activity pass claimed; what comes back here is
-        the remainder — the workspaces with no live pane right now, whose usage
-        would otherwise never be backfilled.
-        """
-        provider = self._token_workspace_provider
-        if provider is None:
-            return []
-        workspaces = list(provider())
-        if not workspaces:
-            return []
-        seen, memo = self._sweep_state()
-        return self._collect_candidates(workspaces, seen, memo)
+        return self._collect_candidates(workspaces, set(), {})
 
     def _sweep_activity_seen(self, now: float) -> None:
         """Forget the activity dedup set of every file that no longer exists.
@@ -642,16 +652,6 @@ class LogWatcher:
         """
         return self._changed_since_last_scan(self._candidate_files())
 
-    def _token_only_files_to_scan(self) -> list[Path]:
-        """Changed candidates that only the token scope covers.
-
-        Same shape and same mtime gate as _files_to_scan, for the files the
-        activity pass did not claim. _rescan_loop hands these straight to
-        _queue_token_path, so they never reach _process_realtime_path and
-        never cost a parse_activity.
-        """
-        return self._changed_since_last_scan(self._token_only_candidate_files())
-
     def _changed_since_last_scan(self, files: list[Path]) -> list[Path]:
         """Drop files whose mtime is unchanged since we last enqueued them.
 
@@ -670,27 +670,6 @@ class LogWatcher:
             self._scan_mtimes[k] = mtime
             out.append(p)
         return out
-
-    def _discover_sweep(self) -> tuple[list[Path], list[Path]]:
-        """One enumeration pass over disk, two lists: activity, then token-only.
-
-        The order here is semantics, not style. Both passes share one `seen`
-        set, so whichever runs first claims a file that falls in both scopes —
-        and token-only files bypass the drain queue entirely. Collect token
-        first and every overlapping file loses its activity events, silently.
-
-        Runs in a worker thread (see _rescan_loop); the per-sweep state is torn
-        down before returning so a later standalone call can't inherit it.
-        """
-        self._sweep_seen = set()
-        self._sweep_memo = {}
-        try:
-            activity = self._files_to_scan()
-            token_only = self._token_only_files_to_scan()
-        finally:
-            self._sweep_seen = None
-            self._sweep_memo = None
-        return activity, token_only
 
     async def _rescan_loop(self) -> None:
         """Enqueue changed files immediately at startup, then every rescan."""
@@ -714,21 +693,8 @@ class LogWatcher:
                 # send. Only the enqueue runs back on the loop. _scan_mtimes
                 # stays safe: this coroutine is its only writer, and the
                 # sweep below runs strictly after the thread returns.
-                activity_paths, token_only_paths = await asyncio.to_thread(
-                    self._discover_sweep
-                )
-                for path in activity_paths:
+                for path in await asyncio.to_thread(self._files_to_scan):
                     self._queue.put_nowait((path, ""))
-                # Token-only paths coalesce straight into the next token pass:
-                # no drain queue, so no _process_realtime_path and no
-                # parse_activity for a workspace nobody has open. Queued after
-                # the activity batch for the same reason _discover_sweep
-                # collects in that order — see its docstring. Still ahead of
-                # the first_scan sentinel below, so startup catch-up settles in
-                # the first flush. _pending_token_paths keeps its single-writer
-                # invariant: this is the loop thread, same as _drain_loop.
-                for path in token_only_paths:
-                    self._queue_token_path(path)
                 if self._loop is not None:
                     self._sweep_activity_seen(self._loop.time())
             except Exception as err:  # noqa: BLE001

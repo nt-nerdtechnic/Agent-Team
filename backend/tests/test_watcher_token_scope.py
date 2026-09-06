@@ -1,27 +1,32 @@
-"""Token/usage backfill keeps its own, wider scope than activity scanning.
+"""Token/usage ingestion shares the activity scan's scope.
 
-One candidate set used to serve two consumers: _drain_loop ran the expensive
-activity parse and then queued the same path for the token pass. So narrowing
-the activity scope to workspaces that have a live pane (the cold-start flood
-fix) also cut token backfill down to those workspaces — and the startup sweep
-is token's only offline catch-up window, since watchdog only ever fires on a
-later write. Worse, the very first sweep runs at delay=0 during backend
-startup, before the frontend has connected and registered any pane at all, so
-the scope is necessarily empty exactly when the catch-up should happen.
+One candidate set serves both consumers: _drain_loop runs the activity parse
+and then queues the same path for the token pass. When the activity scope was
+narrowed to workspaces that have a live pane (the cold-start flood fix), token
+backfill narrowed with it. That was briefly treated as damage and given a
+second, wider provider of its own — and then reversed on a product decision:
+usage is counted for what Navide is watching, and nothing else. A CLI run
+while Navide was closed, or in a workspace with no live pane, is not counted.
 
-The fix is a second provider: one sweep, two lists. The token-only list goes
-straight to _queue_token_path, never into the drain queue, so it costs zero
-activity parsing.
+What that decision costs, and why it is affordable: the ledger itself is
+durable (tokens_store keeps per-workspace and global totals, plus a per-file
+ingestion checkpoint), so nothing already counted is ever recounted or lost.
+Only bytes written where Navide was not looking go uncounted. In exchange the
+scan never has to walk a multi-GB history nobody asked to be re-read.
 
-None of this dispatch had any coverage before these tests — a green suite is
-not evidence here, so every assertion below was mutation-checked against a
-deliberately broken watcher.
+The one thing that decision does make load-bearing is the shutdown flush: with
+no wide catch-up sweep, a coalesced token path that stop() throws away is not
+found again by a later start. See drain_pending_tokens.
+
+None of this dispatch had coverage before these tests — a green suite is not
+evidence here, so every assertion was mutation-checked against a deliberately
+broken watcher.
 """
 
 from __future__ import annotations
 
+import ast
 import asyncio
-import time
 from pathlib import Path
 
 from agent_team_backend.log_readers.base import LogReader, TokenUsage
@@ -64,19 +69,6 @@ class _ScopedReader(LogReader):
         return []
 
 
-class _UnscopedReader(_ScopedReader):
-    """A vendor that cannot narrow by workspace (Codex files by date; Grok,
-    Kilo, Muse and OpenCode keep every session in one shared store)."""
-
-    def __init__(self, root: Path) -> None:
-        super().__init__(root)
-        self.vendor = "codex"
-
-    def session_files_for_workspace(self, workspace_path: str) -> list[Path] | None:
-        self.enumerations.append(workspace_path)
-        return None
-
-
 def _seed(root: Path, workspace_path: str, name: str) -> Path:
     d = root / workspace_path.strip("/").replace("/", "_")
     d.mkdir(parents=True, exist_ok=True)
@@ -85,284 +77,184 @@ def _seed(root: Path, workspace_path: str, name: str) -> Path:
     return f
 
 
-def _watcher(
-    reader: LogReader,
-    *,
-    activity: list[str] | None,
-    token: list[str] | None,
-) -> LogWatcher:
+def _watcher(reader: LogReader, scope: list[str] | None) -> LogWatcher:
     w = LogWatcher(
         sink=_noop,
         activity_sink=_noop,
-        workspace_provider=None if activity is None else (lambda: list(activity)),
-        token_workspace_provider=None if token is None else (lambda: list(token)),
+        workspace_provider=None if scope is None else (lambda: list(scope)),
         rescan_interval_s=0.02,
     )
     w.add_reader(reader)
     return w
 
 
-# ── (a) the token-only list covers workspaces with no pane ─────────────────
+# ── the scope is one list, and usage follows it ────────────────────────────
 
-
-def test_token_scope_covers_a_workspace_with_no_pane(tmp_path: Path) -> None:
-    """Break point 1 and 2, together.
-
-    The activity scope is empty (startup: no pane has registered yet, or every
-    pane in that workspace was closed / idle-reclaimed). Token backfill must
-    still enumerate it — otherwise usage written while Navide was down is never
-    picked up, indefinitely and silently.
-    """
-    reader = _ScopedReader(tmp_path)
-    history = _seed(tmp_path, "/ws/history", "a.jsonl")
-
-    w = _watcher(reader, activity=[], token=["/ws/history"])
-
-    assert w._files_to_scan() == []  # noqa: SLF001
-    assert w._token_only_files_to_scan() == [history]  # noqa: SLF001
-
-
-def test_token_scope_still_covers_a_workspace_after_its_last_pane_closes(
-    tmp_path: Path,
-) -> None:
-    """Break point 4: unregister_pane shrinks the activity scope immediately,
-    not at the next restart. Usage must not go with it."""
+def test_a_workspace_with_no_pane_is_not_scanned_for_usage_either(tmp_path: Path) -> None:
+    # The product decision, pinned: no live pane means Navide is not watching,
+    # so that workspace's usage is not counted. A second, wider provider used
+    # to exist purely to defeat this.
     reader = _ScopedReader(tmp_path)
     live = _seed(tmp_path, "/ws/live", "a.jsonl")
-    other = _seed(tmp_path, "/ws/other", "b.jsonl")
+    _seed(tmp_path, "/ws/no-pane", "b.jsonl")
 
-    active = ["/ws/live", "/ws/other"]
-    w = _watcher(reader, activity=active, token=["/ws/live", "/ws/other"])
-    activity_paths, token_paths = w._discover_sweep()  # noqa: SLF001
-    assert sorted(activity_paths) == sorted([live, other])
-    assert token_paths == []
-
-    # The pane in /ws/other goes away; its file changes afterwards.
-    active.remove("/ws/other")
-    other.write_text('{"n": 2}\n')
-    activity_paths, token_paths = w._discover_sweep()  # noqa: SLF001
-    assert activity_paths == []
-    assert token_paths == [other]
-
-
-def test_no_token_provider_means_no_token_only_sweep(tmp_path: Path) -> None:
-    """The default stays exactly what it was before this parameter existed."""
-    reader = _ScopedReader(tmp_path)
-    _seed(tmp_path, "/ws/history", "a.jsonl")
-
-    w = _watcher(reader, activity=["/ws/live"], token=None)
-    assert w._token_only_files_to_scan() == []  # noqa: SLF001
-    assert w._discover_sweep()[1] == []  # noqa: SLF001
-
-
-def test_an_empty_token_scope_scans_nothing_rather_than_everything(
-    tmp_path: Path,
-) -> None:
-    """Same rule the activity scope follows: a configured-but-empty provider
-    must not fall back to a full-disk scan."""
-    reader = _ScopedReader(tmp_path)
-    _seed(tmp_path, "/ws/history", "a.jsonl")
-
-    w = _watcher(reader, activity=[], token=[])
-    assert w._token_only_files_to_scan() == []  # noqa: SLF001
-
-
-# ── (b) the token-only list costs no activity parsing ──────────────────────
-
-
-async def _drive_rescan(w: LogWatcher, ready) -> list[Path]:
-    """Run the rescan loop and the drain, without starting watchdog.
-
-    start() would also subscribe the observer, and macOS FSEvents reports
-    spurious modifications for a freshly created tree — that would smuggle
-    paths into the drain queue by a route these tests are not about. Returns
-    every path handed to _queue_token_path, in order.
-    """
-    queued: list[Path] = []
-    orig = w._queue_token_path  # noqa: SLF001
-
-    def spy(path: Path, replay_workspace: str = "") -> None:
-        queued.append(path)
-        orig(path, replay_workspace)
-
-    w._queue_token_path = spy  # type: ignore[method-assign]  # noqa: SLF001
-    w._loop = asyncio.get_running_loop()  # noqa: SLF001
-    drain = asyncio.create_task(w._drain_loop())  # noqa: SLF001
-    rescan = asyncio.create_task(w._rescan_loop())  # noqa: SLF001
-    try:
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and not ready(queued):
-            await asyncio.sleep(0.01)
-        await asyncio.sleep(0.05)  # let anything mis-routed catch up
-    finally:
-        for t in (rescan, drain):
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
-    return queued
-
-
-async def test_token_only_paths_never_reach_parse_activity(tmp_path: Path) -> None:
-    """The whole point of the split.
-
-    A rescan sweep with an empty activity scope and a populated token scope
-    must hand the file to the token pass without a single parse_activity call
-    and without an entry in _activity_seen. If the token-only list went onto
-    the drain queue instead, this is the test that notices.
-    """
-    reader = _ScopedReader(tmp_path)
-    history = _seed(tmp_path, "/ws/history", "a.jsonl")
-
-    w = _watcher(reader, activity=[], token=["/ws/history"])
-    queued = await _drive_rescan(w, lambda q: bool(q))
-
-    assert queued == [history], "token-only candidate never reached the token pass"
-    assert reader.activity_calls == [], (
-        "a workspace with no pane must not pay for activity parsing"
-    )
-    assert w._activity_seen == {}  # noqa: SLF001
-
-
-async def test_an_activity_scoped_path_still_reaches_parse_activity(
-    tmp_path: Path,
-) -> None:
-    """The other half of the pair: the split must not starve activity.
-
-    Without this, routing *everything* to the token-only path would leave the
-    test above green.
-    """
-    reader = _ScopedReader(tmp_path)
-    live = _seed(tmp_path, "/ws/live", "a.jsonl")
-
-    w = _watcher(reader, activity=["/ws/live"], token=["/ws/live"])
-    queued = await _drive_rescan(w, lambda q: bool(q))
-
-    assert reader.activity_calls == [live]
-    # Still reaches the token pass too — via the drain, as it always did.
-    assert queued == [live]
-
-
-# ── (c) ordering: activity is collected and queued first ───────────────────
-
-
-def test_a_file_in_both_scopes_is_claimed_by_activity_not_by_token(
-    tmp_path: Path,
-) -> None:
-    """Ordering is semantics, not style.
-
-    The two passes share one `seen` set, and token-only paths bypass the drain
-    queue. Collect the token list first and every overlapping file loses its
-    activity events — silently, because nothing else observes it.
-    """
-    reader = _ScopedReader(tmp_path)
-    live = _seed(tmp_path, "/ws/live", "a.jsonl")
-    history = _seed(tmp_path, "/ws/history", "b.jsonl")
-
-    w = _watcher(reader, activity=["/ws/live"], token=["/ws/live", "/ws/history"])
-    activity_paths, token_paths = w._discover_sweep()  # noqa: SLF001
-
-    assert activity_paths == [live]
-    assert token_paths == [history], "the overlapping file must not be token-only"
-
-
-async def test_the_overlapping_file_of_an_unscoped_vendor_keeps_its_activity(
-    tmp_path: Path,
-) -> None:
-    """The shared-store vendors are the ones this ordering actually protects.
-
-    Codex/Grok/Kilo/Muse/OpenCode return None from session_files_for_workspace,
-    so their whole file list lands in *both* scopes. Reversed, every one of
-    their files would go token-only and activity would stop entirely for those
-    vendors.
-    """
-    reader = _UnscopedReader(tmp_path)
-    shared = _seed(tmp_path, "/ws/live", "a.jsonl")
-
-    w = _watcher(reader, activity=["/ws/live"], token=["/ws/live", "/ws/history"])
-    activity_paths, token_paths = w._discover_sweep()  # noqa: SLF001
-    assert activity_paths == [shared]
-    assert token_paths == []
-
-
-# ── the sweep is cheaper, not doubled ──────────────────────────────────────
+    w = _watcher(reader, ["/ws/live"])
+    assert w._files_to_scan() == [live]  # noqa: SLF001
 
 
 def test_one_sweep_enumerates_each_reader_scope_once(tmp_path: Path) -> None:
-    """The memo is what keeps two scopes from costing two walks.
-
-    An unscoped reader falls back to its whole list for every workspace in
-    every scope; without memoisation a 114-workspace token scope would walk the
-    same tree 114 times, twice over.
-    """
-    reader = _UnscopedReader(tmp_path)
-    _seed(tmp_path, "/ws/live", "a.jsonl")
-
-    w = _watcher(reader, activity=["/ws/live"], token=["/ws/a", "/ws/b", "/ws/c"])
-    reader.enumerations.clear()
-    w._discover_sweep()  # noqa: SLF001
-
-    assert reader.enumerations.count(None) == 1, (
-        f"session_files() walked {reader.enumerations.count(None)} times in one sweep"
-    )
-
-
-def test_the_mtime_gate_applies_to_the_token_only_list(tmp_path: Path) -> None:
-    """An unchanged file must not be re-queued every 30 seconds just because
-    it now arrives through the token-only path."""
+    # The memo is what keeps a single scope affordable: a reader tree is walked
+    # once per sweep, not once per workspace that names it.
     reader = _ScopedReader(tmp_path)
-    history = _seed(tmp_path, "/ws/history", "a.jsonl")
+    _seed(tmp_path, "/ws/a", "a.jsonl")
+    _seed(tmp_path, "/ws/b", "b.jsonl")
 
-    w = _watcher(reader, activity=[], token=["/ws/history"])
-    assert w._discover_sweep()[1] == [history]  # noqa: SLF001
-    assert w._discover_sweep()[1] == []  # noqa: SLF001
+    w = _watcher(reader, ["/ws/a", "/ws/b", "/ws/a"])
+    reader.enumerations.clear()
+    w._files_to_scan()  # noqa: SLF001
+    assert sorted(x for x in reader.enumerations if x) == ["/ws/a", "/ws/b"]
 
 
-# ── the wiring itself ──────────────────────────────────────────────────────
+def test_an_empty_scope_scans_nothing_rather_than_everything(tmp_path: Path) -> None:
+    # The startup shape: the first sweep runs before any pane has registered.
+    reader = _ScopedReader(tmp_path)
+    _seed(tmp_path, "/ws/live", "a.jsonl")
+    w = _watcher(reader, [])
+    assert w._files_to_scan() == []  # noqa: SLF001
 
 
-def test_the_backend_wires_the_token_scope_to_known_workspaces() -> None:
-    """The one line that decides the token scope in production.
+def test_the_mtime_gate_still_applies(tmp_path: Path) -> None:
+    reader = _ScopedReader(tmp_path)
+    live = _seed(tmp_path, "/ws/live", "a.jsonl")
+    w = _watcher(reader, ["/ws/live"])
+    assert w._files_to_scan() == [live]  # noqa: SLF001
+    assert w._files_to_scan() == []  # unchanged mtime  # noqa: SLF001
 
-    Everything above runs against an explicit provider and stays green
-    whichever one app.py passes; the wiring is the part those tests cannot see.
-    Read structurally rather than by string match, mirroring the activity-scope
-    guard in test_watcher_workspace_scope.
+
+# ── the shutdown flush the decision makes load-bearing ─────────────────────
+
+async def test_shutdown_settles_coalesced_token_paths(tmp_path: Path) -> None:
+    # Without the wide catch-up sweep, a path stop() throws away is not
+    # rediscovered: its workspace may never have a live pane again.
+    reader = _ScopedReader(tmp_path)
+    path = _seed(tmp_path, "/ws/live", "a.jsonl")
+    w = _watcher(reader, ["/ws/live"])
+    w._started = True  # noqa: SLF001
+
+    parsed: list[Path] = []
+
+    async def _record(p: Path, replay_workspace: str = "") -> bool:
+        parsed.append(p)
+        return True
+
+    w._process_token_path = _record  # type: ignore[method-assign]  # noqa: SLF001
+    w._queue_token_path(path)  # noqa: SLF001
+
+    await w.drain_pending_tokens()
+    assert parsed == [path], "a pending token path must settle before shutdown"
+
+
+async def test_shutdown_flush_is_a_no_op_when_never_started(tmp_path: Path) -> None:
+    reader = _ScopedReader(tmp_path)
+    w = _watcher(reader, ["/ws/live"])
+    await w.drain_pending_tokens()  # must not raise
+
+
+async def test_a_slow_shutdown_flush_is_capped_rather_than_hanging(tmp_path: Path) -> None:
+    """The quit must end even if a transcript will not settle.
+
+    drain_pending_tokens sits ahead of the git watcher, server link, MCP
+    teardown and the database close. stop() used to be a synchronous cancel, so
+    before the drain existed nothing here could block; a network mount or a
+    locked sqlite store must not be able to hold a quit open.
     """
-    import ast
-    from pathlib import Path as _Path
+    import agent_team_backend.log_readers.watcher as watcher_mod
 
-    src = _Path(__file__).resolve().parents[1] / "agent_team_backend" / "app.py"
+    reader = _ScopedReader(tmp_path)
+    w = _watcher(reader, ["/ws/live"])
+    w._started = True  # noqa: SLF001
+
+    started = asyncio.Event()
+
+    async def _never() -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    w._flush_pending_tokens = _never  # type: ignore[method-assign]  # noqa: SLF001
+    original = watcher_mod._SHUTDOWN_FLUSH_TIMEOUT_S  # noqa: SLF001
+    watcher_mod._SHUTDOWN_FLUSH_TIMEOUT_S = 0.05  # noqa: SLF001
+    try:
+        await asyncio.wait_for(w.drain_pending_tokens(), timeout=5)
+    finally:
+        watcher_mod._SHUTDOWN_FLUSH_TIMEOUT_S = original  # noqa: SLF001
+    assert started.is_set(), "the flush must actually have been attempted"
+
+
+async def test_a_failing_shutdown_flush_does_not_block_shutdown(tmp_path: Path) -> None:
+    # Best-effort by design: quitting must not hang or crash on it.
+    reader = _ScopedReader(tmp_path)
+    w = _watcher(reader, ["/ws/live"])
+    w._started = True  # noqa: SLF001
+
+    async def _boom() -> None:
+        raise RuntimeError("store gone")
+
+    w._flush_pending_tokens = _boom  # type: ignore[method-assign]  # noqa: SLF001
+    await w.drain_pending_tokens()  # swallowed
+
+
+# ── wiring ─────────────────────────────────────────────────────────────────
+
+def _log_watcher_call() -> ast.Call:
+    src = Path(__file__).resolve().parents[1] / "agent_team_backend" / "app.py"
     tree = ast.parse(src.read_text())
-
     starters = [
         n for n in ast.walk(tree)
         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_start_log_watcher"
     ]
-    assert len(starters) == 1, "expected exactly one _start_log_watcher"
-
+    assert len(starters) == 1
     calls = [
         n for n in ast.walk(starters[0])
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
         and n.func.id == "LogWatcher"
     ]
-    assert len(calls) == 1, "expected exactly one LogWatcher construction"
+    assert len(calls) == 1
+    return calls[0]
 
-    providers = [
-        k.value for k in calls[0].keywords if k.arg == "token_workspace_provider"
-    ]
-    assert len(providers) == 1, (
-        "LogWatcher must be given an explicit token_workspace_provider; without "
-        "it token backfill inherits the activity scope and stops covering "
-        "workspaces with no live pane"
+
+def test_the_backend_gives_the_watcher_exactly_one_scope() -> None:
+    """No second provider. Reintroducing one is the whole reversed design."""
+    kwargs = {k.arg for k in _log_watcher_call().keywords}
+    assert "workspace_provider" in kwargs
+    assert "token_workspace_provider" not in kwargs, (
+        "usage is counted for what Navide watches; a second, wider token scope "
+        "would silently reinstate walking every workspace ever opened"
     )
-    provider = providers[0]
-    assert isinstance(provider, ast.Attribute), ast.dump(provider)
-    assert isinstance(provider.value, ast.Name) and provider.value.id == "attribution"
-    assert provider.attr == "known_workspaces", (
-        f"token scope is wired to attribution.{provider.attr}; it must be "
-        "known_workspaces (active_workspaces is empty at startup and shrinks "
-        "when the last pane closes)"
+
+
+def test_the_backend_drains_pending_tokens_before_stopping_the_watcher() -> None:
+    """Order is the whole point: stop() cancels the flush task."""
+    src = Path(__file__).resolve().parents[1] / "agent_team_backend" / "app.py"
+    tree = ast.parse(src.read_text())
+    stoppers = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_stop_log_watcher"
+    ]
+    assert len(stoppers) == 1
+    # By line number, and only calls on _log_watcher itself: ast.walk is
+    # breadth-first (it would report a nested call before an earlier top-level
+    # one), and this function also stops the git and credential watchers.
+    lines: dict[str, int] = {}
+    for node in ast.walk(stoppers[0]):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        recv = node.func.value
+        if not (isinstance(recv, ast.Name) and recv.id == "_log_watcher"):
+            continue
+        if node.func.attr in {"drain_pending_tokens", "stop"}:
+            lines.setdefault(node.func.attr, node.lineno)
+    assert "drain_pending_tokens" in lines, "shutdown must settle pending token paths"
+    assert "stop" in lines
+    assert lines["drain_pending_tokens"] < lines["stop"], (
+        "drain must run before stop(), which cancels the flush task"
     )
