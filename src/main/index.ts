@@ -23,6 +23,7 @@ import {
 } from './plugins/pluginIpc'
 import { readRegistryTrustSnapshot } from './plugins/pluginInstalledTrust'
 import { contributionIcon } from './plugins/pluginContributionIcon'
+import { broadcastQuitStage } from './quit-progress'
 import { currentPluginHostTarget } from './plugins/pluginTarget'
 import { PluginStorageStore } from './plugins/pluginStorage'
 import { PluginCapabilityGrantStore } from './plugins/pluginCapabilityGrantStore'
@@ -3400,6 +3401,9 @@ const BACKEND_SPAWN_WAIT_MS = 3000
 const BACKEND_STOP_WAIT_MS = 6000
 
 async function teardownBackendAndQuit(): Promise<void> {
+  // Put the shutdown screen up before anything below can block: the waits here
+  // run into seconds, and the windows stay on screen for all of it.
+  broadcastQuitStage('saving')
   // A user-initiated quit is a clean exit — nothing to restore next launch.
   windowRegistry.markCleanExit()
   // Drop any scheduled respawn: quitting must not race a backend back to life.
@@ -3408,6 +3412,9 @@ async function teardownBackendAndQuit(): Promise<void> {
   backendLifecycleEpoch++
   backendAutoRestart.cancel()
   backendRestartPending = null
+  // Everything from here is the slow part: waiting out a starting backend, then
+  // stopping the running one while it sweeps its PTY children.
+  broadcastQuitStage('stopping')
   // If the backend is still spawning (quit mid-startup), wait for it (capped) so
   // we can stop it rather than orphan the process.
   if (!backend && backendStarting) await withDeadline(backendStarting, BACKEND_SPAWN_WAIT_MS)
@@ -3423,6 +3430,7 @@ async function teardownBackendAndQuit(): Promise<void> {
   // takes that one down.
   abandonPendingBackends()
   if (b) await withDeadline(b.stop(), BACKEND_STOP_WAIT_MS)
+  broadcastQuitStage('closing')
   app.quit()
 }
 

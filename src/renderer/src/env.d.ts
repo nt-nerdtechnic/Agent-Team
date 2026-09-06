@@ -194,6 +194,7 @@ declare global {
         dontShowLabel: string
       }) => void
       onQuitConfirmDisabled: (cb: () => void) => () => void
+      onQuitProgress: (cb: (stage: 'saving' | 'stopping' | 'closing') => void) => () => void
       onWindowVisibility: (cb: (visible: boolean) => void) => () => void
       readHealthCheckTimeout: () => Promise<{ ok: boolean; timeoutSec?: number }>
       writeHealthCheckTimeout: (timeoutSec: number) => Promise<{ ok: boolean; error?: string }>
