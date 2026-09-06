@@ -190,6 +190,24 @@ class Attribution:
         with self._lock:
             return sorted(self._workspaces.keys())
 
+    def active_workspaces(self) -> list[str]:
+        """Workspaces that have at least one registered pane right now.
+
+        The scanning scope for ACTIVITY. known_workspaces() is the wrong list
+        for that: it is every workspace ever opened, kept forever on purpose so
+        historic usage can still be attributed (see register_workspace), and
+        nothing prunes it. Activity only ever answers "what is happening now",
+        so scoping it to panes that exist keeps a cold start from re-parsing
+        every transcript the machine has ever accumulated.
+
+        Ephemeral by nature — panes register when the frontend connects and
+        unregister when their terminal is killed — so this is empty until the
+        first pane arrives. That is the intended shape, not a gap: a workspace
+        with no pane has nothing live to report.
+        """
+        with self._lock:
+            return sorted({r.workspace_path for r in self._panes.values() if r.workspace_path})
+
     # ───────────────────────── pane lifecycle ──────────────────────────────
 
     def register_pane(
