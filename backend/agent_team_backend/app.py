@@ -1564,9 +1564,12 @@ async def _start_log_watcher() -> None:
         sink=_on_log_token_usage,
         activity_sink=_on_log_activity,
         session_sink=_on_session_file,
-        # Scope periodic/startup backfill to opened workspaces so the drain task
-        # never re-stats the entire multi-GB CLI history (which stalled the loop).
-        workspace_provider=attribution.known_workspaces,
+        # Scope periodic/startup scanning to workspaces that have a pane right
+        # now. known_workspaces() — every workspace ever opened, never pruned —
+        # meant a cold start re-parsed the whole multi-GB CLI history and
+        # broadcast an agent.activity per entry: measured at ~800k messages over
+        # two minutes with the backend pegged at a core.
+        workspace_provider=attribution.active_workspaces,
         checkpoint_provider=tokens_store.get_ingestion_checkpoint,
         checkpoint_sink=tokens_store.advance_ingestion_checkpoint,
         progress_sink=_on_backfill_progress,
