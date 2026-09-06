@@ -25,6 +25,7 @@ const planTools: ToolRow[] = [
 
 const cliTools: ToolRow[] = [
   { name: 'cli_list_targets', what: '有哪些 CLI pane 在線上、位址怎麼寫、對方是否忙碌' },
+  { name: 'cli_whoami', what: '我自己是誰：pane_id、名字、workspace、是誰開了我；pane_id 是對自己動作的前提' },
   { name: 'cli_send', what: '把任意指令送給指定的 pane（同工作區或跨工作區視窗），回傳查詢用的 msg_key；位址填 group 則廣播給自己分頁群組裡的其他 pane' },
   { name: 'cli_send_and_wait', what: '送出指令並等對方把這回合做完，順便帶回它最後說了什麼' },
   { name: 'cli_check_message', what: '用 msg_key 查一則送出的訊息後來如何：排隊中、已送達、或失敗與原因（只留最近一小時）' },
