@@ -418,11 +418,42 @@ describe('useAgentMessaging', () => {
       ])
     })
 
-    it('keeps the reply link out of the store (in-memory, like hold)', () => {
+    it('stores the reply link under the column name, never the camelCase field', () => {
+      // Unlike `hold`, the link does not stop being true when the row stops
+      // being live — a recipient reading its own mail over MCP has to see what
+      // a message answers after a reload too. It travels as `reply_to`: the
+      // store's columns are snake_case, and a stray `inReplyTo` key would be
+      // dropped on the floor by the backend's _normalize.
       const req = m.sendMessage('claude-1', 'codex-1', 'please review')
       const reply = m.sendMessage('codex-1', 'claude-1', 'done', { replyTo: req.uid })
       expect(reply.inReplyTo).toBe(req.uid)
-      for (const row of appended.flat()) expect(row).not.toHaveProperty('inReplyTo')
+      const rows = appended.flat()
+      for (const row of rows) expect(row).not.toHaveProperty('inReplyTo')
+      expect(rows.find((r) => r.uid === reply.uid)?.reply_to).toBe(req.uid)
+      expect(rows.find((r) => r.uid === req.uid)?.reply_to).toBeUndefined()
+    })
+
+    it('stores no correlation id for a message between two panes of this window', () => {
+      // Nothing routes it, so no such key is ever minted and both ends already
+      // share this row. An invented one would be quoted back in a reply that
+      // could never thread.
+      const msg = m.sendMessage('claude-1', 'codex-1', 'hello')
+      expect(appended.flat().find((r) => r.uid === msg.uid)?.correlation_id).toBeUndefined()
+    })
+
+    it('stores the routing key as the correlation id of an inbound message', () => {
+      // The whole point of gap two: the recipient's persisted row carries the
+      // very string the sender got back from cli_send, so the two can name one
+      // message.
+      m.registerPane('p3', 'claude', 'reader')
+      m.acceptRemoteMessage({
+        msgKey: 'pz:mcp:abc',
+        targetPaneId: 'p3',
+        fromDisplay: 'alpha/sender',
+        content: 'run the tests',
+      })
+      const row = appended.flat().find((r) => r.content === 'run the tests')
+      expect(row?.correlation_id).toBe('pz:mcp:abc')
     })
 
     it('updates on the delivering → delivered transition', async () => {
@@ -526,6 +557,27 @@ describe('useAgentMessaging', () => {
       m.hydrateLog(appended)
 
       expect(m.messages.value.map((x) => x.kind)).toEqual([undefined, 'notice'])
+    })
+
+    it('round-trips the thread, so a reload does not orphan a reply', () => {
+      m.hydrateLog([
+        { uid: 'oldboot:1', created_at: 10, status: 'delivered', sender: 'a', recipient: 'b', content: 'ask' },
+        {
+          uid: 'oldboot:2',
+          created_at: 20,
+          status: 'delivered',
+          sender: 'b',
+          recipient: 'a',
+          content: 'answer',
+          reply_to: 'oldboot:1',
+          correlation_id: 'pz:mcp:abc',
+        },
+      ])
+      expect(m.messages.value[1].inReplyTo).toBe('oldboot:1')
+      expect(m.messages.value[1].correlationId).toBe('pz:mcp:abc')
+      // A row that was neither a reply nor routed keeps both empty.
+      expect(m.messages.value[0].inReplyTo).toBeUndefined()
+      expect(m.messages.value[0].correlationId).toBeUndefined()
     })
 
     it('coerces restored in-flight rows to failed WITHOUT persisting the coercion', async () => {

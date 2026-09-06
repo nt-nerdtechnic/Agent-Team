@@ -1908,6 +1908,11 @@ function mirrorMessagingHandle(pane: ActivePane): void {
       // backend forgets a pane whose window stayed away too long, and with it
       // the aliases that pane owned.
       former_pane_ids: pane.formerPaneIds ?? [],
+      // Lineage is renderer state — this is the only place the backend can
+      // learn it, and cli_whoami is its only reader. Without it a child agent
+      // whose context was compacted has no way left to find out who opened it:
+      // the parent's name only ever appeared in the words of its kickoff.
+      spawned_by: pane.spawnedBy ?? '',
     })
     .catch(() => { /* local messaging is unaffected */ })
 }
@@ -7027,6 +7032,15 @@ registerCommand('ui.messaging.readIncoming', (args) => {
       kind: m.kind ?? null,
       content: m.content.slice(0, cap),
       createdAt: m.createdAt,
+      // The envelope typed into a pane carries `re: <correlationId>`, so an
+      // agent that is TOLD its mail can reply to a specific message. Without
+      // these three an agent that READS its mail could not: it saw the raw
+      // text and nothing else.
+      correlationId: m.correlationId ?? null,
+      inReplyTo: m.inReplyTo ?? null,
+      // Why this row has not been typed in yet — the same {key, n} the log
+      // panel renders. Live queue state, so it exists only on this path.
+      hold: m.hold ? { key: m.hold.key, n: m.hold.n ?? null } : null,
     })),
     reserved: reserved.map((r) => r.uid),
     // Delivery being paused is why a read can come back empty while messages

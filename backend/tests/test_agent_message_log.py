@@ -12,6 +12,7 @@ from agent_team_backend.agent_message_log import (
     MAX_ROWS,
     AgentMessageLog,
     _add_agent_keys,
+    _add_kind,
     _add_seq,
     _create_schema,
 )
@@ -311,12 +312,19 @@ def test_clear_failure_is_swallowed_and_leaves_the_rows_in_place(log, monkeypatc
 def test_a_fresh_database_migrates_straight_to_the_current_schema(tmp_path):
     db = Database(tmp_path / "navide.db")
     AgentMessageLog(db=db)
-    assert db.schema_version("agent_message_log") == 4
+    assert db.schema_version("agent_message_log") == 5
     with db.transaction() as cur:
         columns = {
             r["name"] for r in cur.execute("PRAGMA table_info(agent_message_log)").fetchall()
         }
-    assert {"seq", "sender_agent", "recipient_agent", "kind"} <= columns
+    assert {
+        "seq",
+        "sender_agent",
+        "recipient_agent",
+        "kind",
+        "reply_to",
+        "correlation_id",
+    } <= columns
 
 
 def test_an_existing_v1_database_upgrades_and_backfills_seq(tmp_path):
@@ -332,7 +340,7 @@ def test_an_existing_v1_database_upgrades_and_backfills_seq(tmp_path):
             )
 
     store = AgentMessageLog(db=db)
-    assert db.schema_version("agent_message_log") == 4
+    assert db.schema_version("agent_message_log") == 5
     with db.transaction() as cur:
         seqs = {
             r["uid"]: r["seq"]
@@ -441,7 +449,7 @@ def test_a_live_v3_database_upgrades_in_place_without_losing_anything(tmp_path):
     store = AgentMessageLog(db=db)
     rows = store.tail()
 
-    assert db.schema_version("agent_message_log") == 4
+    assert db.schema_version("agent_message_log") == 5
     assert [r["uid"] for r in rows] == ["v3:1", "v3:2"]
     assert [r["content"] for r in rows] == ["kept v3:1", "kept v3:2"]
     assert [r["sender_agent"] for r in rows] == ["claude", "claude"]
@@ -460,8 +468,112 @@ def test_reopening_an_upgraded_database_does_not_rerun_the_column_step(tmp_path)
 
     reopened = AgentMessageLog(db=db)  # must not raise
 
-    assert db.schema_version("agent_message_log") == 4
+    assert db.schema_version("agent_message_log") == 5
     assert [r["kind"] for r in reopened.tail()] == ["notice"]
+
+
+# ── v5: threading (reply_to / correlation_id) ──────────────────────────────
+
+
+def test_threading_columns_round_trip_and_default_to_null(tmp_path):
+    """A restart must not cost a message its thread.
+
+    Before v5 both values lived only in renderer memory, which is why an agent
+    reading its own mail over MCP could see neither what a message answered nor
+    the id its sender knows it by.
+    """
+    db = Database(tmp_path / "navide.db")
+    AgentMessageLog(db=db).append([
+        _row("a:1", 100) | {"correlation_id": "pa:mcp:beef"},
+        _row("a:2", 200) | {"reply_to": "a:1", "correlation_id": "pb:7"},
+        _row("a:3", 300),
+    ])
+
+    rows = {r["uid"]: r for r in AgentMessageLog(db=db).tail()}
+
+    assert rows["a:1"]["correlation_id"] == "pa:mcp:beef"
+    assert rows["a:1"]["reply_to"] is None
+    assert rows["a:2"]["reply_to"] == "a:1"
+    assert rows["a:2"]["correlation_id"] == "pb:7"
+    # A message between two panes of one window is never routed, so it is named
+    # by nothing but its own uid. Both columns must stay empty rather than be
+    # invented.
+    assert rows["a:3"]["reply_to"] is None
+    assert rows["a:3"]["correlation_id"] is None
+
+
+def test_pending_incoming_carries_the_threading_through(log):
+    """The recipient's own view is the one that had neither field."""
+    log.append([
+        _row("a:1", 100, status="queued", recipient="me") | {
+            "correlation_id": "pa:mcp:beef",
+            "reply_to": "earlier:1",
+        },
+    ])
+
+    rows = log.pending_incoming("me")
+
+    assert rows[0]["correlation_id"] == "pa:mcp:beef"
+    assert rows[0]["reply_to"] == "earlier:1"
+
+
+def test_incoming_carries_the_threading_through(log):
+    """``incoming`` selects an explicit column list, so a new column reaches it
+    only by being named there — the degraded read in cli_read_incoming is what
+    falls back to this, and it must not lose the thread."""
+    log.append([
+        _row("a:1", 100, status="queued", recipient="me") | {
+            "correlation_id": "pa:mcp:beef",
+            "reply_to": "earlier:1",
+        },
+    ])
+
+    rows = log.incoming("me")
+
+    assert rows[0]["correlation_id"] == "pa:mcp:beef"
+    assert rows[0]["reply_to"] == "earlier:1"
+
+
+def test_rows_written_before_v5_have_no_threading(tmp_path):
+    """Additive, like every column step before it. Nothing can be backfilled:
+    neither value was ever persisted, so a pre-v5 reply's link is simply gone,
+    and NULL says that instead of guessing."""
+    db = Database(tmp_path / "navide.db")
+    db.migrate("agent_message_log", 1, _create_schema)
+    db.migrate("agent_message_log", 2, _add_seq)
+    db.migrate("agent_message_log", 3, _add_agent_keys)
+    db.migrate("agent_message_log", 4, _add_kind)
+    with db.transaction() as cur:
+        cur.execute(
+            "INSERT INTO agent_message_log"
+            " (uid, created_at, status, sender, recipient, content, seq, kind)"
+            " VALUES ('v4:1', 100, 'queued', 'alpha', 'beta', 'kept', 1, 'notice')"
+        )
+
+    store = AgentMessageLog(db=db)
+    rows = store.tail()
+
+    assert db.schema_version("agent_message_log") == 5
+    assert [r["uid"] for r in rows] == ["v4:1"]
+    assert rows[0]["content"] == "kept"
+    assert rows[0]["kind"] == "notice"
+    assert rows[0]["reply_to"] is None
+    assert rows[0]["correlation_id"] is None
+
+    # The counter continues from the pre-upgrade row rather than colliding.
+    store.append([_row("v5:1", 200) | {"correlation_id": "pa:mcp:beef"}])
+    assert [r["uid"] for r in AgentMessageLog(db=db).tail()] == ["v4:1", "v5:1"]
+
+
+def test_a_non_text_threading_value_stores_as_null(log):
+    """Same rule the other optional columns follow: anything unusable degrades
+    to "not set" rather than reaching a caller as a made-up id."""
+    log.append([_row("a:1", 100) | {"reply_to": "", "correlation_id": None}])
+
+    row = log.tail()[0]
+
+    assert row["reply_to"] is None
+    assert row["correlation_id"] is None
 
 
 # ── pending_incoming: the recipient's view of the queue ─────────────────────

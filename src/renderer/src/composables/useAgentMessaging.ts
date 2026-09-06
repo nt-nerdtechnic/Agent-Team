@@ -115,9 +115,21 @@ export interface AgentMessage {
    *  no delivery left to explain. */
   route?: 'hook' | 'read' | `push:${string}`
   /** `uid` of the message this one answers, set when the sender echoed back the
-   *  correlation id carried in that message's envelope. Like `hold` it describes
-   *  an in-memory relation between two live rows, so it is never persisted. */
+   *  correlation id carried in that message's envelope. Persisted (`reply_to`):
+   *  a recipient reading its own mail over MCP has to be able to see what a
+   *  message answers, and unlike `hold` the link does not stop being true when
+   *  the row stops being live. */
   inReplyTo?: string
+  /** The routing key both ends of this message know it by — `<paneId>:<seq>` for
+   *  a window-to-window send, `<paneId>:mcp:<hex>` for one from `cli_send`. It
+   *  is the correlation id the envelope hands out, so it is also what a reply
+   *  echoes back in `re:`.
+   *
+   *  Absent for a message between two panes of THIS window: nothing routes it,
+   *  so no such key is ever minted, and both ends already share this row. Never
+   *  invent one — the whole value of the field is that the sender's `msg_key`
+   *  and the recipient's copy are the same string. */
+  correlationId?: string
   createdAt: number
   deliveredAt?: number
   /** Set when the message crossed a workspace boundary. 'outbound' entries live
@@ -147,6 +159,10 @@ export interface PersistedMessageRow {
   /** See AgentMessage.kind. Absent on rows written before the column existed,
    *  which is exactly right — every one of them is an ordinary message. */
   kind?: 'notice' | 'fallback'
+  /** See AgentMessage.inReplyTo — the `uid` of the row this one answers. */
+  reply_to?: string
+  /** See AgentMessage.correlationId. */
+  correlation_id?: string
 }
 
 /** A status patch for an already-persisted row. */
@@ -360,6 +376,8 @@ function toPersistedRow(m: AgentMessage): PersistedMessageRow {
     sender_agent: m.fromAgent,
     recipient_agent: m.toAgent,
     kind: m.kind,
+    reply_to: m.inReplyTo,
+    correlation_id: m.correlationId,
   }
 }
 
@@ -382,6 +400,8 @@ function fromPersistedRow(row: PersistedMessageRow): AgentMessage {
   if (row.sender_agent) m.fromAgent = row.sender_agent
   if (row.recipient_agent) m.toAgent = row.recipient_agent
   if (row.kind === 'notice' || row.kind === 'fallback') m.kind = row.kind
+  if (row.reply_to) m.inReplyTo = row.reply_to
+  if (row.correlation_id) m.correlationId = row.correlation_id
   return m
 }
 
@@ -867,6 +887,8 @@ function dispatchRemote(
   // row's `queued` — say so rather than leaving it looking stuck.
   msg.hold = { key: 'remote-ack' }
   const msgKey = `${fromPaneId}:${msg.id}`
+  // The one name this message has on both machines; see AgentMessage.correlationId.
+  msg.correlationId = msgKey
   remoteOutbound.set(msgKey, { id: msg.id, sentAt: now })
   // The receiving window renders its envelope with this same key, so a reply
   // that echoes it back lands on this row.
@@ -933,6 +955,7 @@ function acceptRemoteMessage(args: {
         createdAt: now,
         remote: 'inbound',
         remoteWorkspace: args.remoteWorkspace,
+        correlationId: args.msgKey,
       }
       stampAgents(rejected, args.fromAgent, agentByPane.get(args.targetPaneId))
       if (args.replyTo) linkReply(rejected, args.replyTo)
@@ -953,6 +976,10 @@ function acceptRemoteMessage(args: {
     createdAt: deps.now(),
     remote: 'inbound',
     remoteWorkspace: args.remoteWorkspace,
+    // Set before the row is logged: this is the id the SENDER already knows the
+    // message by, and it is what lets a recipient reading over MCP name the
+    // same message its sender does.
+    correlationId: args.msgKey,
   }
   stampAgents(msg, args.fromAgent, agentByPane.get(args.targetPaneId))
   if (args.replyTo) linkReply(msg, args.replyTo)
@@ -1018,6 +1045,7 @@ function noteOutboundMessage(args: {
     content: args.content,
     status: 'queued',
     createdAt: now,
+    correlationId: args.msgKey,
   }
   // `remote` means "crossed a workspace boundary" — a same-workspace MCP send
   // must not get the cross-workspace badge.

@@ -292,3 +292,132 @@ async def test_an_ordinary_empty_inbox_carries_no_note(
     result = await plan_mcp.cli_read_incoming(_pane_ctx())
 
     assert result == {"ok": True, "count": 0, "messages": []}
+
+
+# ── Threading and hold ──────────────────────────────────────────────────────
+# An envelope Navide types into a pane carries `re: <correlationId>`, so an
+# agent that is TOLD its mail can answer a specific message. An agent that READS
+# its mail got the raw text and nothing else — the same tool set contradicting
+# itself, and the reason cli_send's reply_to had nothing to quote.
+
+
+@pytest.fixture(autouse=True)
+def _clean_status() -> Any:
+    plan_mcp._mcp_message_status.clear()
+    yield
+    plan_mcp._mcp_message_status.clear()
+
+
+@pytest.mark.asyncio
+async def test_reports_the_id_to_quote_back_in_a_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed()
+    _fake_ui(monkeypatch, [
+        {"ok": True, "result": {
+            "messages": [_row(correlationId="pb:mcp:abc", inReplyTo="mine:3", hold=None)],
+            "reserved": [],
+        }},
+    ])
+
+    message = (await plan_mcp.cli_read_incoming(_pane_ctx(), peek=True))["messages"][0]
+
+    assert message["correlation_id"] == "pb:mcp:abc"
+    assert message["in_reply_to"] == "mine:3"
+
+
+@pytest.mark.asyncio
+async def test_a_message_that_was_never_routed_claims_no_shared_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two panes of one window share the log row itself, so the shared name is
+    the uid and no correlation id is ever minted. Absent, never invented."""
+    _seed()
+    _fake_ui(monkeypatch, [
+        {"ok": True, "result": {
+            "messages": [_row(correlationId=None, inReplyTo=None, hold=None)],
+            "reserved": [],
+        }},
+    ])
+
+    message = (await plan_mcp.cli_read_incoming(_pane_ctx(), peek=True))["messages"][0]
+
+    assert "correlation_id" not in message
+    assert "in_reply_to" not in message
+    assert "hold" not in message
+
+
+@pytest.mark.asyncio
+async def test_reports_why_the_message_has_not_gone_in_yet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recipient's own answer to "why is nothing reaching me?" — until now
+    only the sender could see it, through cli_check_message."""
+    _seed()
+    _fake_ui(monkeypatch, [
+        {"ok": True, "result": {
+            "messages": [_row(hold={"key": "behind", "n": 2})],
+            "reserved": [],
+        }},
+    ])
+
+    message = (await plan_mcp.cli_read_incoming(_pane_ctx(), peek=True))["messages"][0]
+
+    assert message["hold"] == {"key": "behind", "n": 2}
+
+
+@pytest.mark.asyncio
+async def test_the_owning_window_outranks_a_stale_backend_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window owns the queue. When it says nothing is holding this message,
+    a hold the backend recorded a moment earlier must not contradict it."""
+    _seed()
+    plan_mcp._record_message_sent("pb:mcp:abc", "reader", "pb", "hi")
+    plan_mcp.record_message_hold("pb:mcp:abc", {"key": "mid-turn"})
+    _fake_ui(monkeypatch, [
+        {"ok": True, "result": {
+            "messages": [_row(correlationId="pb:mcp:abc", hold=None)],
+            "reserved": [],
+        }},
+    ])
+
+    message = (await plan_mcp.cli_read_incoming(_pane_ctx(), peek=True))["messages"][0]
+
+    assert "hold" not in message
+    assert "held_for_s" not in message
+
+
+@pytest.mark.asyncio
+async def test_the_degraded_log_read_still_carries_the_threading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the window does not answer, the text comes from sqlite instead —
+    in the store's own column names. Both spellings have to be understood, or
+    the fallback silently drops the thread it was meant to preserve."""
+    _seed()
+
+    async def no_window(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "window gone"}
+
+    monkeypatch.setattr(plan_mcp, "_ui_request", no_window)
+
+    class _Log:
+        def incoming(self, *_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [{
+                "uid": "u1",
+                "sender": "writer",
+                "status": "queued",
+                "content": "hello",
+                "created_at": 0,
+                "correlation_id": "pb:mcp:abc",
+                "reply_to": "mine:3",
+            }]
+
+    monkeypatch.setattr(app, "agent_message_log", _Log())
+
+    result = await plan_mcp.cli_read_incoming(_pane_ctx())
+
+    assert result["messages"][0]["correlation_id"] == "pb:mcp:abc"
+    assert result["messages"][0]["in_reply_to"] == "mine:3"
+    assert "note" in result
