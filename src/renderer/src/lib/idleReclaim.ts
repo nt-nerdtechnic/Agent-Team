@@ -38,6 +38,13 @@ export interface ReclaimCandidate {
   hasDraft: boolean
   /** Newest of (agent output, user keystroke). 0 when neither ever happened. */
   lastTouchedAt: number
+  /** The manager pipeline is scraping this pane's buffer for its next
+   *  dispatch. It sits idle and unfocused for as long as its workers take. */
+  managerRouting: boolean
+  /** A stage watcher is polling this pane for its completion sentinel. */
+  stageWatched: boolean
+  /** Undelivered cross-pane messages are queued for it. */
+  hasQueuedMessages: boolean
 }
 
 /** Why this pane is not reclaimable, or null when it is. */
@@ -52,6 +59,9 @@ export type ReclaimBlock =
   | 'injecting'
   | 'spawn-report-pending'
   | 'no-ref'
+  | 'manager-routing'
+  | 'stage-watched'
+  | 'has-queued-messages'
   | 'not-idle'
   | 'has-draft'
   | 'never-touched'
@@ -72,6 +82,34 @@ export function reclaimBlockedBy(
   if (pane.injectionStatus === 'pending') return 'injecting'
   if (pane.spawnReportPending) return 'spawn-report-pending'
   if (!pane.hasRef) return 'no-ref'
+  // The three below are all the same shape: something OUTSIDE the pane is
+  // holding on to it. Every guard above this point reads the pane's own state,
+  // which is why these were missing — a pane can be idle by every measure it
+  // knows about itself and still be the thing another subsystem is waiting on.
+  //
+  // They sit above the idle check because none of them is about idleness: the
+  // reclaim is wrong here however long the pane has been quiet, and the reason
+  // the caller logs should name who was holding it.
+  //
+  // `resumeContinueAvailable` was a fourth here and was WRONG. It looks like the
+  // same shape — a pane parked at the prompt, waiting for the user to press
+  // Continue — but the offer is not lost by reclaiming: the realize path sets
+  // the flag again whenever it resumes, which it always does for a reclaimed
+  // pane (its saved record carries the session id). Nothing was protected, and
+  // the flag has no expiry, so every pane opened once after a restart and then
+  // left alone became permanently unreclaimable — the exact population this
+  // feature exists to reclaim. Do not add it back without an expiry.
+  //
+  // The manager reads this pane's buffer to route the next dispatch. Its ref
+  // goes with the reclaim, so the router silently reads '' forever after.
+  if (pane.managerRouting) return 'manager-routing'
+  // A stage watcher polls this pane for its completion sentinel, and nothing
+  // rebuilds one: realize skips role injection, which is where watchers start.
+  // The stage would wait on a slot that can no longer report.
+  if (pane.stageWatched) return 'stage-watched'
+  // Queued messages are failed as 'pane-closed' the moment the CLI goes, and
+  // their senders are told the pane closed — which it did not.
+  if (pane.hasQueuedMessages) return 'has-queued-messages'
   // 'awaiting' is the CLI holding a question open. That pane is idle by every
   // timing measure and is the single worst one to take away.
   if (pane.displayStatus !== 'idle') return 'not-idle'
@@ -81,6 +119,25 @@ export function reclaimBlockedBy(
   if (!pane.lastTouchedAt) return 'never-touched'
   if (now - pane.lastTouchedAt < thresholdMs) return 'too-recent'
   return null
+}
+
+/** Whether this pane is the one in front of the user.
+ *
+ *  Two ids, because neither on its own is the answer. `requested` is what was
+ *  last asked to focus; `effective` is what resolveFocusedPane actually put on
+ *  the stage, which differs whenever the request is null, names a minimized
+ *  pane, or names one in another workspace. Reading only `requested` let the
+ *  sweep reclaim the pane the user was looking at; reading only `effective`
+ *  would drop the request the moment it pointed off-stage.
+ *
+ *  It lives here, next to the guard it feeds, because App.vue cannot be
+ *  mounted in a test — a decision left inline there is one no test can run. */
+export function focusedForReclaim(
+  requested: string | null,
+  effective: string | null,
+  paneId: string,
+): boolean {
+  return requested === paneId || effective === paneId
 }
 
 /** Threshold for a reclaim the user asked for by name.

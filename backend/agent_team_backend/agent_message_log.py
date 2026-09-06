@@ -70,6 +70,8 @@ _COLUMNS = (
     "sender_agent",
     "recipient_agent",
     "kind",
+    "reply_to",
+    "correlation_id",
 )
 
 # Upsert: everything but the primary key and ``seq`` is refreshed. Keeping the
@@ -141,6 +143,30 @@ def _add_kind(cur: sqlite3.Cursor) -> None:
     cur.execute("ALTER TABLE agent_message_log ADD COLUMN kind TEXT")
 
 
+def _add_threading(cur: sqlite3.Cursor) -> None:
+    """v5: how a message names itself, and what it answers.
+
+    Both were renderer-memory-only, which made the MCP tools weaker than the
+    bare-line protocol they mirror: a reply linked to its original in the log
+    panel, but a recipient reading its own mail over MCP could not see either
+    the link or the id the sender knows the message by.
+
+    ``reply_to`` is the ``uid`` of the row this message answers, in this
+    table's own namespace. ``correlation_id`` is the routing key the sending
+    side minted (``<paneId>:<seq>`` for a window-to-window send,
+    ``<paneId>:mcp:<hex>`` for one from ``cli_send``) and is the ONE string
+    both ends hold. It is NULL for a message between two panes of a single
+    window: that message is never routed, so no such key is ever minted, and
+    both ends already share this row's ``uid``.
+
+    Rows written before this migration keep NULL for both. Nothing can be
+    backfilled — neither value was ever persisted, so the link a pre-existing
+    reply had is simply not recoverable.
+    """
+    cur.execute("ALTER TABLE agent_message_log ADD COLUMN reply_to TEXT")
+    cur.execute("ALTER TABLE agent_message_log ADD COLUMN correlation_id TEXT")
+
+
 def _clamp_content(content: str) -> str:
     if len(content) <= MAX_CONTENT_CHARS:
         return content
@@ -208,6 +234,8 @@ def _normalize(row: Any) -> dict[str, Any] | None:
         "sender_agent": _optional_text(row.get("sender_agent")),
         "recipient_agent": _optional_text(row.get("recipient_agent")),
         "kind": _coerce_kind(row.get("kind")),
+        "reply_to": _optional_text(row.get("reply_to")),
+        "correlation_id": _optional_text(row.get("correlation_id")),
     }
 
 
@@ -230,6 +258,7 @@ class AgentMessageLog:
         self._db.migrate(_COMPONENT, 2, _add_seq)
         self._db.migrate(_COMPONENT, 3, _add_agent_keys)
         self._db.migrate(_COMPONENT, 4, _add_kind)
+        self._db.migrate(_COMPONENT, 5, _add_threading)
         self._seq = self._read_max_seq()
 
     def _read_max_seq(self) -> int:
@@ -434,8 +463,11 @@ class AgentMessageLog:
         matching rows (then returns that window oldest first), matching
         ``pending_incoming`` and ``tail``.
 
-        Each row carries ``uid``, ``sender``, ``status``, ``content``, ``kind``
-        and ``created_at``. ``kind`` is what separates a peer's message (NULL)
+        Each row carries ``uid``, ``sender``, ``status``, ``content``, ``kind``,
+        ``created_at``, ``reply_to`` and ``correlation_id`` (see
+        ``_add_threading`` for the last two — both NULL for a message between
+        two panes of one window, which is never routed and so never named by
+        anything but its ``uid``). ``kind`` is what separates a peer's message (NULL)
         from something Navide wrote about the caller's own traffic
         (``notice``) or a spawned pane's unreported turn (``fallback``) — a
         caller that treats every row as peer mail will answer Navide.
@@ -455,7 +487,16 @@ class AgentMessageLog:
         statuses = ("queued", "delivering", "delivered") if include_delivered else (
             "queued", "delivering"
         )
-        columns = ("uid", "sender", "status", "content", "kind", "created_at")
+        columns = (
+            "uid",
+            "sender",
+            "status",
+            "content",
+            "kind",
+            "created_at",
+            "reply_to",
+            "correlation_id",
+        )
         with self._lock:
             try:
                 with self._db.transaction() as cur:

@@ -207,6 +207,76 @@ describe('matchAwaitingInput — claude (hook plus screen)', () => {
   })
 })
 
+describe('matchAwaitingInput — antigravity (ask_question list)', () => {
+  // Verbatim from a capture (agy 1.1.13, 2026-09-05). The separator is U+00B7
+  // and the arrows U+2191/U+2193 — the pattern matches these bytes, so a
+  // paraphrase here would prove nothing.
+  const QUESTION_BOX = [
+    'Question',
+    '─────────────────────────────────────────────',
+    'Question 1/1: 請問您希望推送到哪個分支？',
+    '> 1. (Recommended) 將目前的 test 分支推送到雲端',
+    '  2. 將目前進度同步並推送到雲端的 main 分支',
+    '  3. Write-in...',
+    '  ↑/↓ Navigate · enter Select · esc Skip',
+  ].join('\n')
+
+  it('matches the question box', () => {
+    expect(hasAwaitingPattern('antigravity')).toBe(true)
+    expect(matchAwaitingInput('antigravity', QUESTION_BOX)).toBe(true)
+  })
+
+  it('matches on the footer alone, for a screen tail that cut the header off', () => {
+    expect(
+      matchAwaitingInput('antigravity', '  ↑/↓ Navigate · enter Select · esc Skip'),
+    ).toBe(true)
+  })
+
+  it('does not match the chrome antigravity repaints on every frame', () => {
+    // These two are the whole reason the anchors are full phrases: `esc to
+    // cancel` appeared 25,640 times across the captures and `? for shortcuts`
+    // 3,628. A pattern loose enough to catch either pins every pane as waiting.
+    const busy = '─────────────\n> \n─────────────\nesc to cancel        Gemini 3.8 Flash · medium'
+    const idle = '─────────────\n> \n─────────────\n? for shortcuts      Gemini 3.8 Flash · medium'
+    expect(matchAwaitingInput('antigravity', busy)).toBe(false)
+    expect(matchAwaitingInput('antigravity', idle)).toBe(false)
+  })
+
+  it('does not match the other two footers that share "enter Select"', () => {
+    // Slash-command completion and /model are the user driving the UI, not the
+    // agent parked on them — and both keep the keystroke clock fresh anyway.
+    expect(
+      matchAwaitingInput('antigravity', '  ↑/↓ Navigate · enter Select · tab Complete'),
+    ).toBe(false)
+    expect(
+      matchAwaitingInput('antigravity', 'Keyboard: ↑/↓ Navigate  enter Select  esc Go Back'),
+    ).toBe(false)
+  })
+
+  it('does not match the tips it rotates through while working', () => {
+    // 482 captures of this one, all mid-turn. It reads like a prompt and is not.
+    expect(
+      matchAwaitingInput(
+        'antigravity',
+        '└ Tip: When rejecting an edit, press tab to amend with feedback explaining why.',
+      ),
+    ).toBe(false)
+  })
+
+  it('does not match the agent writing about prompts', () => {
+    expect(
+      matchAwaitingInput('antigravity', '這個步驟會等使用者手動輸入 y/n 才繼續。'),
+    ).toBe(false)
+    expect(
+      matchAwaitingInput('antigravity', '● Requested Permission: write_file(...) (ctrl+o to expand)'),
+    ).toBe(false)
+  })
+
+  it('clears on a miss, having no hook to defer to', () => {
+    expect(awaitingClearsOnMiss('antigravity')).toBe(true)
+  })
+})
+
 describe('matchAwaitingInput — vendors without a spec', () => {
   it('never matches for an unknown agent key', () => {
     expect(hasAwaitingPattern('not-a-real-cli')).toBe(false)

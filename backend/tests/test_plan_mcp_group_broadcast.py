@@ -267,3 +267,33 @@ async def test_send_and_wait_refuses_a_broadcast_with_a_useful_error(
     assert result["error_code"] == "broadcast-unsupported"
     assert "cli_send" in result["error"], "the refusal has to say what to use instead"
     assert delivered == []
+
+
+@pytest.mark.asyncio
+async def test_a_broadcast_reply_threads_on_every_recipient(
+    delivered: list[dict[str, Any]],
+) -> None:
+    """The broadcast shares _dispatch_delivery with the single send, so it must
+    carry the same field — and every recipient gets it, because a correlation id
+    is only ever recognised by the window that handed it out."""
+    _seed()
+    task = asyncio.create_task(
+        _answer_peers([{"pane_id": "pb", "name": "mate-1"}, {"pane_id": "pc", "name": "mate-2"}])
+    )
+    result = await plan_mcp.cli_send("group", "answering", _pane_ctx(), reply_to="pa:mcp:abc")
+    await task
+
+    assert result["ok"] is True
+    assert [e["payload"]["reply_to"] for e in delivered] == ["pa:mcp:abc", "pa:mcp:abc"]
+
+
+@pytest.mark.asyncio
+async def test_a_broadcast_that_is_not_a_reply_carries_no_such_key(
+    delivered: list[dict[str, Any]],
+) -> None:
+    _seed()
+    task = asyncio.create_task(_answer_peers([{"pane_id": "pb", "name": "mate-1"}]))
+    await plan_mcp.cli_send("group", "stand up", _pane_ctx())
+    await task
+
+    assert delivered and all("reply_to" not in e["payload"] for e in delivered)

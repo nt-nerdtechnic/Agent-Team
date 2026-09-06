@@ -337,8 +337,11 @@ class AntigravityLogReader(LogReader):
         remember(rows[-1][0])
         cwd = self.cwd_from_file(path)
         return [
-            ev for row in rows
-            for ev in self._step_event(path, session_id, cwd, row)
+            ev
+            for i, row in enumerate(rows)
+            for ev in self._step_event(
+                path, session_id, cwd, row, is_last=i == len(rows) - 1
+            )
         ]
 
     def _max_step_idx(self, path: Path) -> int | None:
@@ -392,6 +395,7 @@ class AntigravityLogReader(LogReader):
         session_id: str,
         cwd: str,
         row: tuple[int, int, int, bytes, bytes],
+        is_last: bool = True,
     ) -> list[ActivityEvent]:
         idx, step_type, status, metadata, payload = row
 
@@ -425,7 +429,16 @@ class AntigravityLogReader(LogReader):
             # a reply is the closest thing to one: the agent said something to
             # the user. Steps holding only reasoning, or only a tool call the
             # reply will follow, keep the pane marked active instead.
-            if reply and status == _STATUS_DONE:
+            #
+            # `is_last` removes the cases this pass can already rule out: a
+            # reply with more steps behind it in the same batch was mid-turn
+            # narration, and the steps that followed prove it. The agent talks
+            # while it works, so without this a long turn reports itself
+            # finished several times over, and each report drops the pane to
+            # idle. It cannot rule out the same thing across passes — a reply
+            # that is last only because the next step has not been written yet
+            # still reads as end-of-turn.
+            if reply and status == _STATUS_DONE and is_last:
                 return [make("turn_complete", "assistant", reply)]
             thinking = _pb_text(
                 payload, _F_ASSISTANT_PAYLOAD, _F_THINKING_TEXT

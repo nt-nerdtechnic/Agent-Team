@@ -25,11 +25,13 @@ const planTools: ToolRow[] = [
 
 const cliTools: ToolRow[] = [
   { name: 'cli_list_targets', what: '有哪些 CLI pane 在線上、位址怎麼寫、對方是否忙碌' },
+  { name: 'cli_whoami', what: '我自己是誰：pane_id、名字、workspace、是誰開了我；pane_id 是對自己動作的前提' },
   { name: 'cli_send', what: '把任意指令送給指定的 pane（同工作區或跨工作區視窗），回傳查詢用的 msg_key；位址填 group 則廣播給自己分頁群組裡的其他 pane' },
   { name: 'cli_send_and_wait', what: '送出指令並等對方把這回合做完，順便帶回它最後說了什麼' },
   { name: 'cli_check_message', what: '用 msg_key 查一則送出的訊息後來如何：排隊中、已送達、或失敗與原因（只留最近一小時）' },
   { name: 'cli_open_agent', what: '開一個新的 CLI pane 並指派任務，完成後它會回報；可指定 model 與 effort，該 CLI 不支援時會拒絕而非忽略' },
   { name: 'cli_read_incoming', what: '讀取寄給自己的訊息全文；預設讀了就不再注入輸入框，peek 可只讀不消費' },
+  { name: 'cli_cancel_message', what: '收回一則還沒送進去的訊息；已經開始投遞就收不回來，會告訴你它最終如何' },
   { name: 'cli_read_log', what: '讀取另一個 pane 對話紀錄的結尾（預設 200 行），也可帶游標只讀新增的部分' },
   { name: 'cli_get_status', what: '查另一個 pane 是否忙碌、最近一次活動' },
   { name: 'cli_wait_idle', what: '等到另一個 pane 閒置或逾時（最長 120 秒）；逾時會說明是卡在權限提示、還在做事、還是連不上' },

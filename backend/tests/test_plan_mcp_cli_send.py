@@ -510,7 +510,12 @@ async def test_open_agent_broadcasts_the_request_and_returns_the_verdict(
     result = await plan_mcp.cli_open_agent("codex", "reviewer2", "review the PR", _ctx())
     await task
 
-    assert result == {"ok": True, "name": "reviewer2", "address": "alpha/reviewer2"}
+    assert result == {
+        "ok": True,
+        "name": "reviewer2",
+        "address": "alpha/reviewer2",
+        "pane_id": "new-pane",
+    }
     assert len(captured) == 1
     payload = captured[0]["payload"]
     assert captured[0]["type"] == "agent_spawn.request"
@@ -554,6 +559,7 @@ async def test_open_agent_forwards_advisories_from_the_verdict(
         "ok": True,
         "name": "reviewer3",
         "address": "alpha/reviewer3",
+        "pane_id": "new-pane",
         "advisories": ["此工作區已有 8 個 CLI pane（建議值 8）"],
     }
 
@@ -659,7 +665,7 @@ async def test_tools_are_registered_without_a_ctx_argument() -> None:
     }
     # The Context parameter is injected, never asked of the agent.
     assert set((tools["cli_send"].inputSchema.get("properties") or {})) == {
-        "to", "text", "wait_for_delivery_s", "pane_id",
+        "to", "text", "wait_for_delivery_s", "pane_id", "reply_to",
     }
     assert not (tools["cli_list_targets"].inputSchema.get("properties") or {})
     assert set((tools["cli_open_agent"].inputSchema.get("properties") or {})) == {
@@ -667,7 +673,7 @@ async def test_tools_are_registered_without_a_ctx_argument() -> None:
     }
     assert set((tools["cli_check_message"].inputSchema.get("properties") or {})) == {"msg_key"}
     assert set((tools["cli_send_and_wait"].inputSchema.get("properties") or {})) == {
-        "to", "text", "timeout_s", "pane_id",
+        "to", "text", "timeout_s", "pane_id", "reply_to",
     }
     # Every tool that addresses a pane takes an id as the unambiguous
     # alternative to a name; adding one without it has to fail here.
@@ -768,7 +774,12 @@ async def test_open_agent_from_an_external_caller_sends_target_workspace_with_no
     )
     await task
 
-    assert result == {"ok": True, "name": "worker", "address": "ext/worker"}
+    assert result == {
+        "ok": True,
+        "name": "worker",
+        "address": "ext/worker",
+        "pane_id": "new-pane",
+    }
     payload = captured[0]["payload"]
     assert payload["requester_pane_id"] == ""
     assert payload["target_workspace"] == "/ws/ext"
@@ -1233,6 +1244,65 @@ async def test_an_unknown_target_still_answers_as_before_with_a_roster_loaded(
     result = await plan_mcp.cli_send("beta/nobody", "hi", _ctx())
     assert result["error_code"] == "unknown-target-in-workspace"
     assert captured == []
+
+
+# ── cli_send(reply_to=…) ────────────────────────────────────────────────────
+# The one place the MCP path was WEAKER than the bare-line protocol it mirrors:
+# an agent handed a `re:` correlation id in its envelope could answer a specific
+# message only by printing a ---MSG--- block. The tool had no way to say it.
+
+
+@pytest.mark.asyncio
+async def test_a_reply_carries_the_correlation_id_into_the_delivery(
+    captured: list[dict[str, Any]],
+) -> None:
+    """`reply_to` must reach the receiving window under the SAME payload key the
+    bare-line path uses (agent_msg.route in ws_handlers), because both arrive at
+    one acceptRemoteMessage — a second spelling would silently unthread every
+    reply sent through the tool."""
+    _seed()
+    result = await plan_mcp.cli_send("beta/reviewer", "done", _ctx(), reply_to="pb:mcp:abc")
+
+    assert result["ok"] is True
+    assert captured[0]["payload"]["reply_to"] == "pb:mcp:abc"
+
+
+@pytest.mark.asyncio
+async def test_a_send_with_no_reply_to_carries_no_such_key(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The payload a non-reply produces must stay exactly what it was: the
+    receiving window reads `ev.reply_to` and an empty string is not the same as
+    an absent field — it would take the linkReply path with an id nobody ever
+    handed out."""
+    _seed()
+    await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+
+    assert "reply_to" not in captured[0]["payload"]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_does_not_change_the_answer_shape(
+    captured: list[dict[str, Any]],
+) -> None:
+    """Threading is a property of the delivery, not of the send's outcome."""
+    _seed()
+    result = await plan_mcp.cli_send("beta/reviewer", "done", _ctx(), reply_to="pb:mcp:abc")
+
+    assert set(result) == {"ok", "target", "cross_workspace", "msg_key"}
+
+
+@pytest.mark.asyncio
+async def test_a_reply_addressed_by_pane_id_threads_too(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The id path skips address resolution entirely, so it is a second route
+    into _dispatch_delivery and has to carry the same field."""
+    _seed()
+    result = await plan_mcp.cli_send("", "done", _ctx(), pane_id="pb", reply_to="pb:mcp:abc")
+
+    assert result["ok"] is True
+    assert captured[0]["payload"]["reply_to"] == "pb:mcp:abc"
 
 
 # ── cli_send(wait_for_delivery_s=…) ─────────────────────────────────────────
@@ -1919,3 +1989,54 @@ def test_shape_guard_agrees_with_the_renderers_copy() -> None:
         mine = model_args.ARGUMENT_SAFE.match(value) is not None
         theirs = renderer.match(value) is not None
         assert mine == theirs, f"{value!r}: backend={mine} renderer={theirs}"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_threads_a_reply(captured: list[dict[str, Any]]) -> None:
+    """Answering a question is exactly the case reply_to exists for, and this
+    is the tool an agent uses to answer and wait. Forwarding it here is what
+    stops a threaded conversation from losing its link at the one turn where
+    someone actually replied."""
+    _seed()
+    agent_messaging.register("pb", "worker", "/ws/alpha")
+
+    async def answer() -> None:
+        for _ in range(200):
+            if captured:
+                plan_mcp.record_delivery_result(
+                    captured[0]["payload"]["msg_key"], True, ""
+                )
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    await plan_mcp.cli_send_and_wait(
+        "worker", "here is the answer", _ctx(), timeout_s=0.2, reply_to="k-original"
+    )
+    await task
+
+    assert captured[0]["payload"]["reply_to"] == "k-original"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_without_a_reply_carries_no_key(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The shape every existing caller already parses stays byte-identical."""
+    _seed()
+    agent_messaging.register("pb", "worker", "/ws/alpha")
+
+    async def answer() -> None:
+        for _ in range(200):
+            if captured:
+                plan_mcp.record_delivery_result(
+                    captured[0]["payload"]["msg_key"], True, ""
+                )
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    await plan_mcp.cli_send_and_wait("worker", "hi", _ctx(), timeout_s=0.2)
+    await task
+
+    assert "reply_to" not in captured[0]["payload"]

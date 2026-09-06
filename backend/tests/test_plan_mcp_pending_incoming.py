@@ -223,3 +223,96 @@ async def test_a_renamed_pane_sees_none_of_its_old_mail(msg_log: AgentMessageLog
     agent_messaging.register("pa", "reviewer-renamed", "/ws/alpha", agent_key="claude")
     result = await plan_mcp.cli_pending_incoming(_ctx("pa"))
     assert result == {"ok": True, "count": 0, "messages": []}
+
+
+# ── Threading and hold: the recipient's half of what the sender can see ─────
+# The sender had hold/held_for_s/stale from cli_check_message and a msg_key to
+# name the message by. The recipient had {uid, sender, status, age, excerpt} —
+# no shared id, and no way to see why its own queue was not moving.
+
+
+@pytest.fixture
+def tracked() -> Any:
+    """The sender-side bookkeeping cli_check_message reads, cleaned per test."""
+    plan_mcp._mcp_message_status.clear()
+    yield plan_mcp._mcp_message_status
+    plan_mcp._mcp_message_status.clear()
+
+
+@pytest.mark.asyncio
+async def test_reports_the_id_the_sender_knows_the_message_by(
+    msg_log: AgentMessageLog, tracked: Any
+) -> None:
+    """The point of the whole exercise: one string both ends hold, so a reply
+    can name the message it answers (cli_send's reply_to)."""
+    _seed()
+    msg_log.append([_row("a:1", 100) | {"correlation_id": "pb:mcp:abc"}])
+
+    result = await plan_mcp.cli_pending_incoming(_ctx())
+
+    assert result["messages"][0]["correlation_id"] == "pb:mcp:abc"
+
+
+@pytest.mark.asyncio
+async def test_reports_what_a_message_answers(
+    msg_log: AgentMessageLog, tracked: Any
+) -> None:
+    _seed()
+    msg_log.append([_row("a:1", 100) | {"reply_to": "earlier:9"}])
+
+    result = await plan_mcp.cli_pending_incoming(_ctx())
+
+    assert result["messages"][0]["in_reply_to"] == "earlier:9"
+
+
+@pytest.mark.asyncio
+async def test_a_message_between_two_panes_of_one_window_claims_no_shared_id(
+    msg_log: AgentMessageLog, tracked: Any
+) -> None:
+    """It is never routed, so no correlation id is ever minted for it. The
+    field must be ABSENT rather than filled with something invented — a reply
+    quoting a made-up id would silently fail to thread."""
+    _seed()
+    msg_log.append([_row("a:1", 100)])
+
+    message = (await plan_mcp.cli_pending_incoming(_ctx()))["messages"][0]
+
+    assert "correlation_id" not in message
+    assert "in_reply_to" not in message
+    assert "hold" not in message
+
+
+@pytest.mark.asyncio
+async def test_shows_why_the_queue_is_not_moving(
+    msg_log: AgentMessageLog, tracked: Any
+) -> None:
+    """The recipient reads the SAME hold the sender reads, by looking its own
+    row's correlation id up in the sender-side record. Without this an agent
+    could see that mail was waiting but not that it was waiting on itself."""
+    _seed()
+    msg_log.append([_row("a:1", 100) | {"correlation_id": "pb:mcp:abc"}])
+    plan_mcp._record_message_sent("pb:mcp:abc", "reviewer", "pb", "hello")
+    assert plan_mcp.record_message_hold("pb:mcp:abc", {"key": "mid-turn"}) is True
+
+    message = (await plan_mcp.cli_pending_incoming(_ctx()))["messages"][0]
+
+    assert message["hold"] == {"key": "mid-turn"}
+    assert isinstance(message["held_for_s"], float)
+
+
+@pytest.mark.asyncio
+async def test_marks_a_message_that_has_waited_too_long_as_stale(
+    msg_log: AgentMessageLog, tracked: Any
+) -> None:
+    """`stale` is read from the send's own age, not from the hold clock — a
+    message no window ever reported a hold for is exactly the case it exists
+    for, so it must appear with no `hold` beside it."""
+    _seed()
+    msg_log.append([_row("a:1", 100) | {"correlation_id": "pb:mcp:abc"}])
+    plan_mcp._record_message_sent("pb:mcp:abc", "reviewer", "pb", "hello")
+    tracked["pb:mcp:abc"]["created_at"] -= plan_mcp._STALE_HOLD_S + 1
+
+    message = (await plan_mcp.cli_pending_incoming(_ctx()))["messages"][0]
+
+    assert message["stale"] is True
+    assert "hold" not in message

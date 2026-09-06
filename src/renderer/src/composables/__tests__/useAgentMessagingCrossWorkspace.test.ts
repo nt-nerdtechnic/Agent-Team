@@ -406,6 +406,31 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     expect(routed[0].replyTo).toBe('k1')
   })
 
+  it('names an outbound message by the routing key both windows know it by', async () => {
+    // The sending window's own row has to carry it too: the log store is
+    // global, so a recipient reading its inbox by name can see this row, and
+    // the two copies must agree on what the message is called.
+    m.registerPane('p1', 'claude', 'sender')
+    const msg = m.sendMessage('sender', 'beta/reviewer', 'run the tests')
+    await flush()
+
+    expect(msg.correlationId).toBe(routed[0].msgKey)
+  })
+
+  it('gives an inbound message the id the sending side already knows it by', async () => {
+    m.registerPane('p2', 'claude', 'reviewer')
+    m.acceptRemoteMessage({
+      msgKey: 'k1',
+      targetPaneId: 'p2',
+      fromDisplay: 'alpha/sender',
+      content: 'run the tests',
+      remoteWorkspace: '/ws/alpha',
+    })
+    await flush()
+
+    expect(m.messages.value[0].correlationId).toBe('k1')
+  })
+
   it('links an inbound reply to the outbound message it answers', async () => {
     m.registerPane('p1', 'claude', 'sender')
     const outbound = m.sendMessage('sender', 'beta/reviewer', 'run the tests')

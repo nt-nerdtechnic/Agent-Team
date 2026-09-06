@@ -35,6 +35,12 @@ All notable released changes to Navide will be documented in this file. The form
   bounded recovery, typed fail-closed source results, strict user pins,
   revision-aware snapshot identities, and stale recommendations without source
   merging.
+- Let an agent withdraw a message it sent with the new `cli_cancel_message`
+  MCP tool. A message waits in the recipient's queue until that pane is between
+  turns, so a sender that changed its mind previously had to let it land and
+  then send a correction — costing the recipient a turn to work out the first
+  message no longer applied. A withdrawal is recorded as `cancelled` rather
+  than `failed`, since nothing went wrong and nothing should be resent.
 - Let a CLI agent read the full text of messages sent to it with the new
   `cli_read_incoming` MCP tool. `cli_pending_incoming` shows 200 characters
   with the whitespace flattened, so until now an agent could read another

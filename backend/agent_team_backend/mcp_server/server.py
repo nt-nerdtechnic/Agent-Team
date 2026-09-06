@@ -29,7 +29,8 @@ import json
 import re
 import secrets
 import time
-from contextlib import AsyncExitStack
+from collections.abc import Iterator
+from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape as html_escape
@@ -460,6 +461,97 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
     return result
 
 
+@server.tool()
+async def cli_whoami(ctx: Context) -> dict[str, Any]:
+    """Your own entry, in the same shape cli_list_targets gives you for others.
+
+    cli_list_targets deliberately leaves you out of its `targets` and names you
+    only as `you`, a single address string. So every field it hands you about
+    everyone else — `pane_id` above all — was the one thing you could not learn
+    about yourself. That is what this answers. Read-only.
+
+    `pane_id` is why this exists. It is the key every `ui.pane.*` action takes
+    (`ui.pane.close`, `ui.pane.focus`, `ui.pane.getStatus` via ui_invoke) and
+    those REFUSE a pane name, so without it you could close or focus any pane
+    but your own. It also disambiguates you to cli_read_log and cli_get_status
+    when another pane in your workspace shares your name — an address both of
+    them refuse as "ambiguous-target".
+
+    `spawned_by` names the pane that opened you, when one did, as
+    {pane_id, name, address}. This is the only place that fact survives: the
+    name of whoever opened you was written into the words of your kickoff task
+    and nowhere else, so a compaction of your context loses it permanently —
+    along with any idea of who your finished work should go back to. When that
+    pane has since closed, only `pane_id` comes back alongside `gone: true`;
+    the key is absent entirely when nobody opened you.
+
+    This is a fact about yourself, not the roster's lineage: cli_list_targets
+    still says nothing about who is related to whom, and who *you* opened is
+    still yours alone to remember.
+
+    `waiting_on_me` is who is BLOCKED on you at this moment — every caller
+    currently parked in a cli_wait_idle or cli_send_and_wait aimed at your
+    pane, as [{waiting_s, pane_id?, name?, address?, caller?}], longest wait
+    first. Waiting was one-way before this: someone could sit on a two-minute
+    budget while you, deciding you had another twenty minutes of digging in
+    you, had no way to learn that finishing now was worth more than finishing
+    well. Read it before committing to a long stretch of work — a waiter at 90
+    seconds is about to time out. `caller` ("host" / "external") stands in for
+    a waiter that has no pane and therefore no name. The key is ABSENT when
+    nobody is waiting; it is never an empty list. It is also process memory: a
+    backend restart forgets every wait, so absence is "nobody is parked on me
+    that this backend knows of", not proof that nobody wants your answer.
+
+    A caller with no pane identity (host / external credential) is not a pane
+    and has none of these: it gets {ok, caller} only.
+    Returns {ok, caller, name, address, pane_id, workspace_path, agent_key,
+    busy, offline, hold_reason?, spawned_by?, waiting_on_me?} or
+    {ok: false, error}.
+    """
+    from agent_team_backend import agent_messaging
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    if caller.kind != "pane":
+        return {"ok": True, "caller": caller.kind}
+    me = agent_messaging.get(caller.pane_id)
+    if me is None:
+        return {
+            "ok": False,
+            "error": "your pane is no longer registered — reopen it to re-wire it",
+        }
+    # Built through the very function cli_list_targets uses for everybody else:
+    # the asymmetry being closed here is that you saw a different shape for
+    # yourself than for a peer, and two hand-written dicts would reopen it the
+    # first time one of them gained a field.
+    result: dict[str, Any] = {"ok": True, "caller": "pane"}
+    result.update(_target_view(me, True))
+    # Not in _target_view because a peer's is on the roster elsewhere; yours is
+    # not reported anywhere at all, and it is what tells you which CLI you are.
+    result["agent_key"] = me.agent_key
+    if me.spawned_by:
+        # Through `current`, not `get`: a parent that was rebuilt around its
+        # still-running CLI answers to a new id, and the retired one is exactly
+        # what a child mirrored before the rebuild.
+        parent = agent_messaging.current(me.spawned_by)
+        if parent is None:
+            result["spawned_by"] = {"pane_id": me.spawned_by, "gone": True}
+        else:
+            result["spawned_by"] = {
+                "pane_id": parent.pane_id,
+                "name": parent.name,
+                "address": parent.qualified_name,
+            }
+    # Absent, not empty, like every optional key here: a pane nobody is waiting
+    # on must read byte-for-byte as it did before anyone could wait visibly.
+    waiting = _waiting_on_me(me.pane_id)
+    if waiting:
+        result["waiting_on_me"] = waiting
+    return result
+
+
 # Spawn verdicts come from the window that owns the requesting pane — only it
 # knows the pane counts, chain depth and name collisions the gate needs. The
 # tool waits for that verdict instead of reporting "requested", so the agent
@@ -607,7 +699,11 @@ async def cli_open_agent(
     just gets logged as a diagnostic warning and, on success, also returned
     here as `advisories` (a list of human-readable notes; the key is absent
     when there is nothing to report).
-    Returns {ok, name, address, advisories?} or {ok: false, error}.
+    `pane_id` is the new pane's internal id — the key `ui.pane.close`,
+    `ui.pane.focus` and `ui.pane.getStatus` take through ui_invoke, all of which
+    refuse a pane NAME. Keep it if you may want to close or focus what you
+    opened; `address` remains the right thing to send to.
+    Returns {ok, name, address, pane_id, advisories?} or {ok: false, error}.
     """
     from agent_team_backend import agent_messaging, app
     from agent_team_backend.ipc import make_event
@@ -676,12 +772,21 @@ async def cli_open_agent(
 
     if not verdict.get("ok"):
         return {"ok": False, "error": str(verdict.get("error") or "spawn refused")}
-    entry = agent_messaging.get(str(verdict.get("pane_id") or ""))
+    new_pane_id = str(verdict.get("pane_id") or "")
+    entry = agent_messaging.get(new_pane_id)
     result: dict[str, Any] = {
         "ok": True,
         "name": str(verdict.get("name") or pane_name),
         "address": entry.qualified_name if entry else str(verdict.get("name") or pane_name),
     }
+    # The id of the pane you just opened. Without it you could send to what you
+    # opened but never close or focus it: every ui.pane.* action takes an id and
+    # refuses a name, and the only other way to that id is finding your own
+    # pane again in cli_list_targets. Absent, not empty, when the window
+    # answered ok without naming a pane — an id that is the empty string would
+    # be handed to ui.pane.close as if it addressed something.
+    if new_pane_id:
+        result["pane_id"] = new_pane_id
     if verdict.get("advisories"):
         result["advisories"] = verdict["advisories"]
     return result
@@ -739,7 +844,9 @@ def _is_group_target(to: str) -> bool:
     return (to or "").strip().lower() == GROUP_TARGET
 
 
-async def _send_to_group(caller: "_Caller", me: str, text: str) -> dict[str, Any]:
+async def _send_to_group(
+    caller: "_Caller", me: str, text: str, reply_to: str = ""
+) -> dict[str, Any]:
     """Deliver *text* to every other pane in the sender's own tab group.
 
     Groups are UI state the backend never learns — ``agent_msg.register``
@@ -787,7 +894,7 @@ async def _send_to_group(caller: "_Caller", me: str, text: str) -> dict[str, Any
             )
             continue
         msg_key = await _dispatch_delivery(
-            entry, text, caller=caller, me=me, cross_workspace=False
+            entry, text, caller=caller, me=me, cross_workspace=False, reply_to=reply_to
         )
         recipients.append(
             {"name": entry.name, "pane_id": entry.pane_id, "msg_key": msg_key, "accepted": True}
@@ -802,13 +909,21 @@ async def _send_to_group(caller: "_Caller", me: str, text: str) -> dict[str, Any
 
 
 async def _dispatch_delivery(
-    entry: Any, text: str, *, caller: "_Caller", me: str, cross_workspace: bool
+    entry: Any, text: str, *, caller: "_Caller", me: str, cross_workspace: bool,
+    reply_to: str = "",
 ) -> str:
     """Hand one message to the windows and record it; returns its msg_key.
 
     Shared by the single-target send and the group broadcast, which differ only
     in how they pick recipients — every message is delivered, rate-limited, held
     and reported exactly alike whichever way it was addressed.
+
+    ``reply_to`` is a correlation id the caller is echoing back; it travels in
+    the delivery payload under the same key the bare-line path uses
+    (``agent_msg.route`` in ws_handlers), so the receiving window links the two
+    rows through the one ``acceptRemoteMessage`` path either way. Absent unless
+    the caller passed one, which keeps the payload a non-reply produces exactly
+    what it always was.
     """
     from agent_team_backend import agent_messaging, app
     from agent_team_backend.ipc import make_event
@@ -838,6 +953,8 @@ async def _dispatch_delivery(
                 # agents replying to each other through cli_send have no loop
                 # guard at all.
                 "rate_limit": True,
+                # Only present for a reply — see the docstring.
+                **({"reply_to": reply_to} if reply_to else {}),
             },
         )
     )
@@ -852,6 +969,7 @@ async def cli_send(
     ctx: Context,
     wait_for_delivery_s: float = 0.0,
     pane_id: str = "",
+    reply_to: str = "",
 ) -> dict[str, Any]:
     """Send an instruction to another CLI pane, in this or another workspace.
 
@@ -885,6 +1003,24 @@ async def cli_send(
     detach, but a pane restarted around a fresh CLI gets a new one — treat
     "unknown-pane-id" as "read a fresh id from cli_list_targets", not as "that
     pane is gone".
+
+    `reply_to` threads this message onto one you were sent, instead of starting
+    a new conversation. Pass back the `correlation_id` of the message you are
+    answering — cli_read_incoming reports it, and so does the `re:` field of an
+    envelope typed into your pane. The recipient's Messages panel then shows
+    this as the answer to that message rather than as an unrelated one, and its
+    own cli_read_incoming reports it under `in_reply_to`. An id the receiving
+    window never handed out is ignored, exactly as an unrecognised `re:` is:
+    the message still goes, it simply arrives unthreaded. Omit it for a message
+    that starts a thread — the send is then exactly what it always was.
+
+    One limit, and it is the bare-line protocol's too: `reply_to` does NOT
+    travel to another device. The relay frame carries to/sender/text/msg_key
+    and nothing else, so threading across machines needs a wire field both ends
+    understand — a protocol change, not a routing one (`agent_msg.route` in
+    ws_handlers says the same at the same seam). The far side still mints a
+    correlation id from the msg_key, so the thread holds over there; what is
+    lost is the link back to the row on this machine.
 
     Delivery is asynchronous: this returns once the message is accepted for
     delivery, not once the other agent has read it. Returns
@@ -957,7 +1093,7 @@ async def cli_send(
                 'address panes individually, or by pane_id',
                 "error_code": "no-group",
             }
-        return await _send_to_group(caller, me, text)
+        return await _send_to_group(caller, me, text, reply_to)
     # An id is already as qualified as an address gets, so the rule that a
     # caller with no workspace of its own must name one does not apply to it.
     if not target_id and caller.kind != "pane" and "/" not in (to or ""):
@@ -999,7 +1135,12 @@ async def cli_send(
         return {"ok": False, "error": "that is your own pane"}
 
     msg_key = await _dispatch_delivery(
-        result.pane, text, caller=caller, me=me, cross_workspace=result.cross_workspace
+        result.pane,
+        text,
+        caller=caller,
+        me=me,
+        cross_workspace=result.cross_workspace,
+        reply_to=reply_to,
     )
     return await _with_delivery_wait(
         {
@@ -1029,6 +1170,14 @@ _STALE_HOLD_S = 120.0
 # the cut cannot split a surrogate pair.
 _INBOX_EXCERPT_CHARS = 60
 _mcp_message_status: dict[str, dict[str, Any]] = {}
+# When this process started keeping the table above. cli_inbox_summary reports
+# how far back its answer reaches, because otherwise "nothing of yours is
+# stuck" and "I was restarted and remember nothing you sent" are the same empty
+# list — and an orchestrator that has been running longer than this backend has
+# no way to tell those apart. This does NOT make the table durable: the comment
+# above still holds and the outcomes are still lost on restart. It only stops
+# the loss from being silent.
+_status_tracking_since = time.monotonic()
 # Calls parked in cli_send(wait_for_delivery_s=…), by the key they are waiting
 # on. One event per waiting call rather than one per key: two agents may wait on
 # the same message, and neither may swallow the other's wake-up.
@@ -1042,6 +1191,22 @@ def _prune_message_status(now: float) -> None:
     # Insertion-ordered, so the front of the dict is the oldest send.
     while len(_mcp_message_status) >= _MESSAGE_STATUS_MAX:
         _mcp_message_status.pop(next(iter(_mcp_message_status)))
+
+
+def _tracking_window_s(now: float) -> float:
+    """How far back the send-status table's records reach, in seconds.
+
+    Three bounds, and the smallest wins: how long this process has been keeping
+    records at all (a restart puts it back to zero, which is the number that
+    matters), the TTL, and — once the table is full and evicting by count — the
+    age of the oldest record still in it.
+    """
+    covered = min(now - _status_tracking_since, _MESSAGE_STATUS_TTL_S)
+    if len(_mcp_message_status) >= _MESSAGE_STATUS_MAX:
+        # Insertion-ordered, so this is the oldest surviving send.
+        oldest = next(iter(_mcp_message_status.values()))
+        covered = min(covered, now - oldest["created_at"])
+    return round(max(covered, 0.0), 1)
 
 
 def _record_message_sent(msg_key: str, target: str, origin: str, text: str) -> None:
@@ -1178,8 +1343,16 @@ def record_delivery_result(msg_key: str, ok: bool, reason: str) -> bool:
     entry = _mcp_message_status.get(msg_key)
     if entry is None:
         return False
-    entry["status"] = "delivered" if ok else "failed"
-    entry["reason"] = _decode_reason(reason) if reason else None
+    decoded = _decode_reason(reason) if reason else None
+    # A withdrawal comes back down the delivered path with ok=False, but it is
+    # not a failure: nothing went wrong and nothing should be resent. Collapsing
+    # it into "failed" would invite exactly the resend the withdrawal was meant
+    # to prevent — the same reason "read" is reported as delivered.
+    if not ok and decoded == "cancelled":
+        entry["status"] = "cancelled"
+    else:
+        entry["status"] = "delivered" if ok else "failed"
+    entry["reason"] = decoded
     entry["delivered_at"] = time.monotonic()
     _clear_hold(entry)
     _settle_status_waiters(msg_key)
@@ -1295,12 +1468,18 @@ async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
                       pane policy refuses this sender. Re-sending refuses
                       again; this is a permission question for a human, not
                       something to retry.
+      - "cancelled" — withdrawn before it went in, by cli_cancel_message or by
+                      someone using the Messages panel. Nothing went wrong and
+                      nothing is waiting; resend only if you still mean it.
 
     `reason` values come from the receiving window: "rate-limit" (too many
     messages between the same pair too quickly), "queue-full" (the target's
     pending-message queue is at its cap), "inject-failed" (typing it into the
     pane did not take), "pane-closed" (the target went away before delivery),
-    "no-report" (the delivery attempt never reported an outcome).
+    "no-report" (the delivery attempt never reported an outcome). Two reasons
+    do NOT mean something went wrong: "read" pairs with "delivered" and means
+    the recipient took the message with cli_read_incoming instead of having it
+    typed in, and "cancelled" pairs with the status of the same name.
 
     On a "queued" message, `hold` is why it has not gone in yet — {key, n?},
     the same reason the Messages panel shows — and `held_for_s` is how long it
@@ -1367,12 +1546,22 @@ async def cli_inbox_summary(ctx: Context) -> dict[str, Any]:
     you sent twenty minutes ago is still sitting in a queue.
 
     Returns {ok, count, messages: [{msg_key, target, status, age_seconds,
-    stale?, reason?, hold?, held_for_s?, excerpt}]}, newest send last. `excerpt`
-    is the first 60 characters of what you sent, so a message is recognizable
-    without keeping every msg_key. The same in-memory bounds as
-    cli_check_message apply: the last hour, the last few hundred sends, gone on
-    backend restart. An empty list means nothing of yours is stuck — it never
-    means nothing was sent.
+    stale?, reason?, hold?, held_for_s?, excerpt}], tracked, tracking_since_s},
+    newest send last. `excerpt` is the first 60 characters of what you sent, so
+    a message is recognizable without keeping every msg_key. The same in-memory
+    bounds as cli_check_message apply: the last hour, the last few hundred
+    sends, gone on backend restart. An empty list means nothing of yours is
+    stuck — it never means nothing was sent.
+
+    `tracked` and `tracking_since_s` are what make that last sentence checkable
+    instead of a warning you have to remember. `tracked` is how many of YOUR
+    sends this table still holds, delivered ones included; `tracking_since_s`
+    is how far back its records reach at all. "0 of your sends, and I have only
+    been keeping records for 40 seconds" is a backend that restarted under you
+    and took every msg_key you were holding with it — every one of them now
+    answers cli_check_message with "unknown", and you cannot tell from here
+    whether those messages were delivered. "12 tracked, none stuck" is the
+    other thing entirely. Neither number counts anybody else's sends.
     """
     try:
         caller = _resolve_caller(ctx)
@@ -1381,9 +1570,11 @@ async def cli_inbox_summary(ctx: Context) -> dict[str, Any]:
     origin = (caller.pane_id if caller.kind == "pane" else "") or caller.kind
     now = time.monotonic()
     messages: list[dict[str, Any]] = []
+    tracked = 0
     for key, entry in _mcp_message_status.items():
         if entry.get("origin") != origin:
             continue
+        tracked += 1
         stale = _is_stale(entry, now)
         if not stale and entry["status"] not in ("failed", "rejected"):
             continue
@@ -1400,7 +1591,84 @@ async def cli_inbox_summary(ctx: Context) -> dict[str, Any]:
             row["reason"] = entry["reason"]
         row.update(_hold_view(entry, now))
         messages.append(row)
-    return {"ok": True, "count": len(messages), "messages": messages}
+    # Always present, unlike the optional keys elsewhere in this file: they
+    # exist to give the EMPTY answer a meaning, so omitting them when there is
+    # nothing to report would omit them exactly when they are needed.
+    return {
+        "ok": True,
+        "count": len(messages),
+        "messages": messages,
+        "tracked": tracked,
+        "tracking_since_s": _tracking_window_s(now),
+    }
+
+
+def _hold_for_correlation(correlation_id: str) -> dict[str, Any]:
+    """The recorded hold for a message, looked up by the id both ends share.
+
+    ``_mcp_message_status`` is the SENDER's bookkeeping: the receiving window
+    reports a hold change against the msg_key its delivery arrived with, and
+    cli_check_message reads it back. The recipient's copy of that same message
+    carries the same string as its ``correlation_id``, so the recipient can ask
+    the identical question — which is the point: sender and receiver see one
+    hold, not two accounts of it.
+
+    Empty for a message this backend never routed (two panes of one window
+    mint no key at all), for one from another device, and for one already
+    evicted from the bounded table. Absence therefore means "nothing recorded
+    here", never "nothing is holding it".
+    """
+    entry = _mcp_message_status.get(correlation_id) if correlation_id else None
+    if entry is None:
+        return {}
+    now = time.monotonic()
+    view = dict(_hold_view(entry, now))
+    if _is_stale(entry, now):
+        view["stale"] = True
+    return view
+
+
+def _incoming_hold(row: Any, correlation_id: str) -> dict[str, Any]:
+    """Why an incoming message has not been typed into your pane yet.
+
+    Two sources for one fact. The window that owns the queue knows the live
+    ``{key, n}`` and puts it on a cli_read_incoming row; the backend has only
+    what that window reported for a message IT dispatched, but it is the only
+    side holding a clock, so ``held_for_s`` and ``stale`` come from there
+    whichever side supplied the hold.
+
+    The owning window wins when it answered at all: it is the authority on its
+    own queue, and a backend record left behind by a race must not contradict
+    a window that just said nothing is holding this message.
+    """
+    view = _hold_for_correlation(correlation_id)
+    if isinstance(row, dict) and "hold" in row:
+        live = row.get("hold")
+        if isinstance(live, dict) and live.get("key"):
+            hold: dict[str, Any] = {"key": str(live["key"])}
+            n = live.get("n")
+            if isinstance(n, (int, float)) and not isinstance(n, bool):
+                hold["n"] = int(n)
+            view["hold"] = hold
+        else:
+            view.pop("hold", None)
+            view.pop("held_for_s", None)
+    return view
+
+
+def _threading_of(row: Any) -> tuple[str, str]:
+    """``(correlation_id, in_reply_to)`` from a row, whichever side wrote it.
+
+    A cli_read_incoming row comes from the renderer in camelCase; every other
+    read here comes from the sqlite log in its column names. Both spellings
+    carry the same two values, so they are read here rather than at two call
+    sites that could drift apart.
+    """
+    if not isinstance(row, dict):
+        return "", ""
+    correlation = str(row.get("correlationId") or row.get("correlation_id") or "")
+    in_reply_to = str(row.get("inReplyTo") or row.get("reply_to") or "")
+    return correlation, in_reply_to
 
 
 # How much of an incoming message cli_pending_incoming quotes back. Larger than
@@ -1433,11 +1701,32 @@ async def cli_pending_incoming(ctx: Context, limit: int = 20) -> dict[str, Any]:
     not typed in afterwards.
 
     Returns {ok, count, messages: [{uid, sender, status, age_seconds, kind?,
-    excerpt}]}, oldest first. `status` is "queued" (waiting for you to be
-    between turns) or "delivering" (going in right now). `kind` marks a message
-    Navide wrote rather than an agent: "notice" is delivery feedback about your
-    own send, "fallback" is a spawned pane's turn forwarded because it ended
-    without writing a report.
+    excerpt, correlation_id?, in_reply_to?, hold?, held_for_s?, stale?}]},
+    oldest first. `status` is "queued" (waiting for you to be between turns) or
+    "delivering" (going in right now). `kind` marks a message Navide wrote
+    rather than an agent: "notice" is delivery feedback about your own send,
+    "fallback" is a spawned pane's turn forwarded because it ended without
+    writing a report.
+
+    `correlation_id` is the one string you and the sender both know this
+    message by — the sender's `msg_key`. Pass it to cli_send's `reply_to` to
+    answer this message rather than start a new thread. `in_reply_to` is the
+    `uid` of the message THIS one answers, when it is itself a reply. Both are
+    absent for a message between two panes of a single window: that message is
+    never routed, so no such id is ever minted, and the two of you already
+    share this `uid`.
+
+    `hold` says why your queue is not moving — {key, n?}, the same reason the
+    sender reads from cli_check_message, with `held_for_s` and `stale` (waiting
+    over two minutes) beside it. "mid-turn" is you: the message goes in when
+    you finish this turn. "typing" is a human at that keyboard, "paused" is
+    delivery switched off in that window, and "behind" means `n` messages are
+    ahead of this one. It is absent unless this backend dispatched the message
+    and the owning window has reported a hold for it — so absence means
+    "nothing recorded", not "nothing is holding it". For the live queue state
+    of a message this cannot explain, read it with cli_read_incoming
+    (`peek: true` leaves delivery alone), which asks the window that owns the
+    queue instead of this log.
 
     Read from the persisted message log, so unlike cli_inbox_summary this
     survives a backend restart. Two limits are worth knowing: the log is
@@ -1484,6 +1773,12 @@ async def cli_pending_incoming(ctx: Context, limit: int = 20) -> dict[str, Any]:
         }
         if row.get("kind"):
             message["kind"] = row["kind"]
+        correlation, in_reply_to = _threading_of(row)
+        if correlation:
+            message["correlation_id"] = correlation
+        if in_reply_to:
+            message["in_reply_to"] = in_reply_to
+        message.update(_incoming_hold(row, correlation))
         messages.append(message)
     return {"ok": True, "count": len(messages), "messages": messages}
 
@@ -1532,10 +1827,29 @@ async def cli_read_incoming(
     something to recognise, not something that cannot arrive twice.
 
     Returns {ok, count, messages: [{uid, sender, status, kind?, content,
-    age_seconds, consumed}]}. `consumed` is per message and is false when the
-    read was a peek, when the message was already delivered, or when the
-    window could not be reached to release the reservation — in that last case
-    you have the text but delivery was left alone, so expect it in your pane.
+    age_seconds, consumed, correlation_id?, in_reply_to?, hold?, held_for_s?,
+    stale?}]}. `consumed` is per message and is false when the read was a peek,
+    when the message was already delivered, or when the window could not be
+    reached to release the reservation — in that last case you have the text
+    but delivery was left alone, so expect it in your pane.
+
+    `correlation_id` is the one string you and the sender both know this
+    message by. Pass it to cli_send's `reply_to` and your answer lands ON this
+    message instead of starting a new thread — the same thing an envelope typed
+    into your pane asks for with its `re:` field, which until now was the only
+    way to reply to a specific message. `in_reply_to` is the `uid` of the
+    message THIS one answers, when it is itself a reply. Both are absent for a
+    message between two panes of a single window: nothing routes it, so no such
+    id exists, and you and the sender already share this `uid`.
+
+    `hold` is why the message had not been typed in yet — {key, n?}: "mid-turn"
+    (you are working; it goes in when this turn ends), "typing" (a human at
+    that keyboard), "behind" (`n` messages ahead of it), "paused" (delivery
+    switched off in that window), "starting", "settling", "not-ready", "gone"
+    or "remote-ack". `held_for_s` and `stale` (waiting over two minutes) come
+    with it when this backend dispatched the message. Absent means nothing is
+    holding it, not that nothing is known — and note that a read of your own
+    reserves what it returns, so a hold you read here is the state BEFORE that.
 
     Only a Navide CLI pane has an inbox. Messages are matched by your current
     messaging name, so anything queued for a name you have been renamed away
@@ -1629,6 +1943,12 @@ async def cli_read_incoming(
         }
         if row.get("kind"):
             message["kind"] = row["kind"]
+        correlation, in_reply_to = _threading_of(row)
+        if correlation:
+            message["correlation_id"] = correlation
+        if in_reply_to:
+            message["in_reply_to"] = in_reply_to
+        message.update(_incoming_hold(row, correlation))
         messages.append(message)
 
     answer: dict[str, Any] = {"ok": True, "count": len(messages), "messages": messages}
@@ -1655,6 +1975,99 @@ async def cli_read_incoming(
             "could not confirm. They stay queued and will reach your pane."
         )
     return answer
+
+
+# How long to wait for the owning window to say whether a withdrawal landed.
+# Short: the answer comes from a window that already has the queue in memory,
+# so it is a round trip rather than a piece of work — and a caller that has
+# just changed its mind should not be parked for long.
+_CANCEL_VERDICT_TIMEOUT_S = 5.0
+
+
+@server.tool()
+async def cli_cancel_message(msg_key: str, ctx: Context) -> dict[str, Any]:
+    """Withdraw a message you sent, if it has not gone in yet.
+
+    A message sits in the recipient's queue until that pane is between turns,
+    which is often a long time. Until now a sender that changed its mind — the
+    wrong target, a premise that stopped being true, a task already done by
+    someone else — could only watch it go in and then send a correction, which
+    costs the recipient a whole turn to work out that the first message no
+    longer applies.
+
+    `msg_key` is what cli_send returned. Withdrawal is decided by the window
+    that owns the queue, because only it knows whether the message is still
+    waiting: if it is, the message is dropped and the status becomes
+    "cancelled"; if delivery already started, the withdrawal is ignored and the
+    delivery reports its own outcome as usual. Either way you get the settled
+    status back, so a "delivered" answer here means you were too late rather
+    than that something failed.
+
+    Withdrawing is not failing. The status is "cancelled" and no failure notice
+    is written back to you — there is nothing to explain to the pane that just
+    changed its mind. Resend with cli_send if you still mean it.
+
+    Only messages this server sent can be withdrawn, and only for about an
+    hour, which is how long their keys are tracked. An unknown key means "not
+    tracked any more", not "never sent" — the same caveat cli_check_message
+    carries.
+
+    Returns {ok, msg_key, status, reason?} or {ok: false, error}.
+    """
+    from agent_team_backend import app
+    from agent_team_backend.ipc import make_event
+
+    try:
+        _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    key = (msg_key or "").strip()
+    if not key:
+        return {"ok": False, "error": "msg_key is required — it is what cli_send returned"}
+
+    entry = _mcp_message_status.get(key)
+    if entry is None:
+        return {
+            "ok": False,
+            "error": (
+                f"unknown msg_key {key!r} — it was never sent from here, or it is older "
+                "than the hour these are tracked for. An untracked key says nothing "
+                "about whether the message arrived; ask cli_check_message."
+            ),
+        }
+    if entry["status"] != "queued":
+        # Already settled. Say what it settled as rather than refusing flatly:
+        # "delivered" is the answer to "can I still take it back", not an error.
+        answer: dict[str, Any] = {
+            "ok": False,
+            "msg_key": key,
+            "status": entry["status"],
+            "error": f"too late — this message is already {entry['status']}",
+        }
+        if entry.get("reason"):
+            answer["reason"] = entry["reason"]
+        return answer
+
+    await app.broadcast(make_event("agent_msg.cancel", {"msg_key": key}))
+    # The owning window answers over the ordinary delivered path, so waiting for
+    # a settled status is the same wait a send with wait_for_delivery_s does.
+    await _await_delivery(key, _CANCEL_VERDICT_TIMEOUT_S)
+
+    settled = _mcp_message_status.get(key)
+    status = settled["status"] if settled else "unknown"
+    result: dict[str, Any] = {"ok": status == "cancelled", "msg_key": key, "status": status}
+    if settled and settled.get("reason"):
+        result["reason"] = settled["reason"]
+    if status == "queued":
+        # No window claimed it within the timeout. The message is still on its
+        # way, so say that rather than implying the withdrawal took.
+        result["error"] = (
+            "no window answered in time; the message is still queued and may yet "
+            "be delivered. Check cli_check_message before assuming it was withdrawn."
+        )
+    elif status != "cancelled":
+        result["error"] = f"too late — the message was already {status}"
+    return result
 
 
 # ── Reading another pane (cli_read_log / cli_get_status / cli_wait_idle) ────
@@ -1885,6 +2298,83 @@ async def cli_get_status(target: str, ctx: Context, pane_id: str = "") -> dict[s
 _WAIT_IDLE_POLL_S = 1.0
 _WAIT_IDLE_QUIET_S = 10.0
 _WAIT_IDLE_MAX_TIMEOUT_S = 120.0
+
+
+# ── Who is parked waiting on a pane (cli_whoami's `waiting_on_me`) ─────────
+# A wait used to be invisible to the pane it waited on. An agent a minute into
+# somebody's two-minute budget would keep digging, because nothing told it that
+# anyone had stopped to wait — so the waiter timed out and both ends acted on a
+# decision they would not have made had either known. Every wait registers here
+# for as long as it is parked, and cli_whoami hands the answer back.
+#
+# Keyed by the target's live pane id, then by WHO is waiting: one entry per
+# caller per target, refcounted, because cli_send_and_wait nests cli_wait_idle
+# inside its own registration and two rows for one waiting call would overstate
+# the queue. A caller with no pane identity has no name to give, so every host
+# caller shares the key "host" and every external one "external"; concurrent
+# waits from those collapse into one row dated from the earliest of them, which
+# understates how many are waiting and never how long.
+#
+# Nothing prunes this and nothing needs to: a row only exists inside a call
+# hard-capped at _WAIT_IDLE_MAX_TIMEOUT_S, and the finally below runs on
+# timeout, exception and cancellation alike (a client that disconnects cancels
+# the task), so the table is bounded by the waits actually in flight. It is
+# process memory like _mcp_message_status: a restart forgets every wait, and
+# every waiter is gone with it.
+_idle_waiters: dict[str, dict[str, dict[str, Any]]] = {}
+
+
+@contextmanager
+def _waiting_on(target_pane_id: str, caller: _Caller) -> Iterator[None]:
+    """Register *caller* as blocked on *target_pane_id* for the duration."""
+    key = caller.pane_id if caller.kind == "pane" else caller.kind
+    waiters = _idle_waiters.setdefault(target_pane_id, {})
+    entry = waiters.get(key)
+    if entry is None:
+        waiters[key] = {"kind": caller.kind, "since": time.monotonic(), "count": 1}
+    else:
+        entry["count"] += 1
+    try:
+        yield
+    finally:
+        held = _idle_waiters.get(target_pane_id, {}).get(key)
+        if held is not None:
+            held["count"] -= 1
+            if held["count"] <= 0:
+                del _idle_waiters[target_pane_id][key]
+                if not _idle_waiters[target_pane_id]:
+                    del _idle_waiters[target_pane_id]
+
+
+def _waiting_on_me(pane_id: str) -> list[dict[str, Any]]:
+    """Who is parked in a wait on *pane_id* right now, longest wait first.
+
+    Identities are resolved now rather than at registration, so a waiter whose
+    pane was rebuilt around its running CLI is reported under the identity it
+    answers to today — the same reason cli_whoami reads `spawned_by` through
+    ``current``. A waiter that is no longer registered at all is still waiting,
+    so its row keeps the id and simply has no name to show.
+    """
+    from agent_team_backend import agent_messaging
+
+    now = time.monotonic()
+    rows: list[dict[str, Any]] = []
+    for key, entry in _idle_waiters.get(pane_id, {}).items():
+        row: dict[str, Any] = {"waiting_s": round(now - entry["since"], 1)}
+        if entry["kind"] == "pane":
+            waiter = agent_messaging.current(key)
+            if waiter is None:
+                row["pane_id"] = key
+            else:
+                row["pane_id"] = waiter.pane_id
+                row["name"] = waiter.name
+                row["address"] = waiter.qualified_name
+        else:
+            row["caller"] = entry["kind"]
+        rows.append(row)
+    rows.sort(key=lambda row: row["waiting_s"], reverse=True)
+    return rows
+
 # Poll the owning window this often (in poll ticks) for its own view of the
 # pane. The registry's busy flag is reported by the frontend and can stay
 # stale, and log-reader activity only exists for the CLIs whose reader emits
@@ -2022,53 +2512,57 @@ async def cli_wait_idle(
             out["ui_status"] = ui_status
         return out
 
-    tick = 0
-    while True:
-        entry = agent_messaging.get(pane_id)
-        busy = bool(entry.busy) if entry else False
-        if not busy:
-            activity = app.pane_activity(pane_id)
-            if activity is None:
-                return done("quiet_period")
-            if activity["event_type"] == "turn_complete":
-                return done("turn_complete")
-            if time.monotonic() - activity["ts_monotonic"] >= _WAIT_IDLE_QUIET_S:
-                return done("quiet_period")
-        elif ui_reachable and tick >= next_ui_probe_tick:
-            # busy says otherwise, so ask the window that can actually see the
-            # pane.
-            ui = await _ui_request(
-                workspace_path,
-                "invoke",
-                caller=_pane_caller(pane_id),
-                action="ui.pane.getStatus",
-                args={"paneId": pane_id},
-            )
-            payload = ui.get("result") if ui.get("ok") else None
-            if not isinstance(payload, dict):
-                ui_failures += 1
-                if ui_failures >= _WAIT_IDLE_UI_MAX_FAILURES:
-                    ui_reachable = False
+    # Registered for exactly as long as this call is parked, so the pane
+    # being waited on can see the wait (cli_whoami's `waiting_on_me`) and
+    # wrap up rather than run out somebody's budget without knowing it.
+    with _waiting_on(pane_id, caller):
+        tick = 0
+        while True:
+            entry = agent_messaging.get(pane_id)
+            busy = bool(entry.busy) if entry else False
+            if not busy:
+                activity = app.pane_activity(pane_id)
+                if activity is None:
+                    return done("quiet_period")
+                if activity["event_type"] == "turn_complete":
+                    return done("turn_complete")
+                if time.monotonic() - activity["ts_monotonic"] >= _WAIT_IDLE_QUIET_S:
+                    return done("quiet_period")
+            elif ui_reachable and tick >= next_ui_probe_tick:
+                # busy says otherwise, so ask the window that can actually see the
+                # pane.
+                ui = await _ui_request(
+                    workspace_path,
+                    "invoke",
+                    caller=_pane_caller(pane_id),
+                    action="ui.pane.getStatus",
+                    args={"paneId": pane_id},
+                )
+                payload = ui.get("result") if ui.get("ok") else None
+                if not isinstance(payload, dict):
+                    ui_failures += 1
+                    if ui_failures >= _WAIT_IDLE_UI_MAX_FAILURES:
+                        ui_reachable = False
+                    else:
+                        next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY * (2**ui_failures)
                 else:
-                    next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY * (2**ui_failures)
-            else:
-                ui_failures = 0
-                next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY
-                ui_status = str(payload.get("status") or "")
-                if _ui_status_is_idle(payload):
-                    # A window reporting idle only means "not working right
-                    # now". For a pane that has never shown any activity that
-                    # means "has not started yet", not "finished" — a caller
-                    # that just handed it a task must be able to tell those
-                    # apart.
-                    if app.pane_activity(pane_id) is None:
-                        return done("never_started")
-                    return done("ui_status")
-        tick += 1
-        waited = time.monotonic() - started
-        if waited >= timeout:
-            return timed_out(waited)
-        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+                    ui_failures = 0
+                    next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY
+                    ui_status = str(payload.get("status") or "")
+                    if _ui_status_is_idle(payload):
+                        # A window reporting idle only means "not working right
+                        # now". For a pane that has never shown any activity that
+                        # means "has not started yet", not "finished" — a caller
+                        # that just handed it a task must be able to tell those
+                        # apart.
+                        if app.pane_activity(pane_id) is None:
+                            return done("never_started")
+                        return done("ui_status")
+            tick += 1
+            waited = time.monotonic() - started
+            if waited >= timeout:
+                return timed_out(waited)
+            await asyncio.sleep(_WAIT_IDLE_POLL_S)
 
 
 # How long to keep watching for the target to pick the message up before
@@ -2107,7 +2601,12 @@ def _never_arrived(sent: dict[str, Any], started: float) -> dict[str, Any]:
 
 @server.tool()
 async def cli_send_and_wait(
-    to: str, text: str, ctx: Context, timeout_s: float = 60.0, pane_id: str = ""
+    to: str,
+    text: str,
+    ctx: Context,
+    timeout_s: float = 60.0,
+    pane_id: str = "",
+    reply_to: str = "",
 ) -> dict[str, Any]:
     """Send an instruction to another CLI pane and wait for it to finish it.
 
@@ -2117,8 +2616,10 @@ async def cli_send_and_wait(
     message to actually GO IN first, then remembers the target's last activity
     before sending and only accepts a turn NEWER than that as your answer.
 
-    `to`, `text`, `pane_id` and addressing are cli_send's — an id given here
-    addresses both halves, the send and the wait. `timeout_s` (capped at 120s)
+    `to`, `text`, `pane_id`, `reply_to` and addressing are cli_send's — an id
+    given here addresses both halves, the send and the wait. Answering a
+    question with this tool is the case `reply_to` exists for, so it threads
+    the same way a plain send does. `timeout_s` (capped at 120s)
     covers the whole thing, not just the wait: at most half of it is spent
     getting the message in, and whatever is left waits for the turn.
 
@@ -2200,9 +2701,16 @@ async def cli_send_and_wait(
     # to be answered in what is left, and its hold reason is a far more useful
     # answer than "timeout, busy".
     delivery_budget = timeout / 2
-    sent = await cli_send(
-        to, text, ctx, wait_for_delivery_s=delivery_budget, pane_id=pane_id
-    )
+    # The wait starts here, not at the idle loop below: a message held behind
+    # whatever the target is mid-way through is the exact case this closes —
+    # the target is busy, the sender is already parked on it, and only
+    # `waiting_on_me` can tell the target that. The nested cli_wait_idle
+    # registers the same caller against the same pane and is refcounted away.
+    with _waiting_on(target_pane_id, caller):
+        sent = await cli_send(
+            to, text, ctx, wait_for_delivery_s=delivery_budget, pane_id=pane_id,
+            reply_to=reply_to,
+        )
     if not sent.get("ok"):
         return sent
     if delivery_budget > 0 and sent.get("status") != "delivered":
@@ -2239,10 +2747,11 @@ async def cli_send_and_wait(
     # Give the target a moment to pick the message up, so the wait below is
     # about its turn rather than about the state it was already in.
     grace_deadline = started + min(timeout, _SEND_AND_WAIT_START_GRACE_S)
-    while True:
-        if has_new_activity() or time.monotonic() >= grace_deadline:
-            break
-        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+    with _waiting_on(target_pane_id, caller):
+        while True:
+            if has_new_activity() or time.monotonic() >= grace_deadline:
+                break
+            await asyncio.sleep(_WAIT_IDLE_POLL_S)
 
     while True:
         left = remaining()

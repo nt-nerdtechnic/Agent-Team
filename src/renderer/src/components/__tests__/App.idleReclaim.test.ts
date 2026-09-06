@@ -61,6 +61,65 @@ describe('idle reclaim wiring', () => {
     expect(fn).toContain('if (histEntry && !alreadyRemoved) histEntry.removedAt = undefined')
   })
 
+  // What "focused" means is decided by focusedForReclaim, which idleReclaim's
+  // own suite runs against both ids. All this file can add is that App.vue
+  // hands it the two it holds — passing effectiveFocusPaneId twice, or the raw
+  // ref twice, would pass that suite and still reclaim the pane on screen.
+  it('hands the focus decision both ids it holds', () => {
+    const fn = block('function reclaimCandidate(', 'function paneReclaimable(')
+    expect(fn).toContain(
+      'focused: focusedForReclaim(focusPaneId.value, effectiveFocusPaneId.value, pane.id)'
+    )
+  })
+
+  // The three "someone else is holding this pane" guards are decided in
+  // idleReclaim.ts and tested there. What only this file can show is that the
+  // candidate asks the live subsystems at all — a guard wired to a constant
+  // false passes that suite and protects nothing.
+  it('asks each holding subsystem whether it still wants the pane', () => {
+    const fn = block('function reclaimCandidate(', 'function paneHeldByStageRouter(')
+    expect(fn).toContain('managerRouting: paneHeldByStageRouter(pane.id)')
+    expect(fn).toContain('stageWatched: watchers.has(pane.id)')
+    expect(fn).toContain('hasQueuedMessages: messaging.queuedCountFor(pane.id) > 0')
+  })
+
+  // Both roles, because the manager is not the only pane a router scrapes —
+  // it is only the one that stays idle longest.
+  it('counts a router-held pane in either role', () => {
+    const fn = block('function paneHeldByStageRouter(', '/** The saved record')
+    expect(fn).toContain('router.managerPaneId === paneId')
+    expect(fn).toContain('workerPaneId === paneId')
+  })
+
+  // The realize path rebuilds launch flags from the saved record. Model and
+  // effort missing there is silent: the pane comes back on the vendor default.
+  it('carries the launch flags into the placeholder record', () => {
+    const fn = block('function projectPaneFromActive(', '/** Kill one idle pane')
+    expect(fn).toContain('model: pane.model')
+    expect(fn).toContain('effort: pane.effort')
+  })
+
+  // onKill speaks for a pane that is leaving and says so to several subsystems.
+  // A reclaim is not that, so each farewell is taken back — and every one of
+  // these has to be read BEFORE the kill, which is what makes them easy to lose
+  // in a later edit.
+  it('takes back the farewells onKill sends on the pane behalf', () => {
+    const fn = reclaimFn()
+    // The handle: onKill drops the persisted name, so realize would re-derive a
+    // different one and every sender that knew the old name would be writing
+    // into nothing.
+    // Live handle first: the persisted map is capped and evicts, so it can
+    // have lost the name of a pane that is still here.
+    expect(fn).toContain('pane.messagingName as string | undefined) || persistedMessagingName(paneId)')
+    expect(fn).toContain('registerPaneMessaging(stillThere, messagingName)')
+    // The handoffs: the destination is the pane, which is still there.
+    expect(fn).toContain("issueHandoffs.value.set(key, { ...current, state })")
+    // Loop state is deliberately NOT restored: the fields can be copied back
+    // but the watcher that drives them cannot, and a LOOP badge with nothing
+    // advancing it is worse than no badge.
+    expect(fn).not.toContain('stillThere.loopActive =')
+  })
+
   it('sweeps on a timer and clears it on unmount', () => {
     expect(appSource).toContain('window.setInterval(() => { void sweepIdlePanes() }, IDLE_RECLAIM_SWEEP_MS)')
     expect(appSource).toContain('if (_idleReclaimTimer !== null) clearInterval(_idleReclaimTimer)')

@@ -7128,6 +7128,10 @@ async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, pay
         # Absent means realized: every caller that has a live pane omits it, and
         # a window from before this field existed only ever mirrored live panes.
         realized=bool(payload.get("realized", True)),
+        # Pane id of whoever opened this pane. The window is the only process
+        # that knows it (lineage is renderer state), and cli_whoami is the only
+        # reader — a child asking who it owes its report to.
+        spawned_by=str(payload.get("spawned_by") or ""),
     )
     # The ids this same CLI process was known by before the window rebuilt its
     # pane around it (reload, detach, group reattach). They stay resolvable, so

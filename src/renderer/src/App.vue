@@ -6,6 +6,7 @@ import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
 import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups'
 import { buildPaneLineage } from './lib/paneLineage'
 import { ancestorTrail } from './lib/paneListView'
+import { closeAdvisoriesFor } from './lib/paneCloseAdvisories'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
 import { schedulePrewarm } from './lib/prewarm'
@@ -100,7 +101,7 @@ import { i18n } from '@navide/plugin-ui/foundation'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from '@navide/terminal'
-import { reclaimBlockedBy, idleReclaimDisabled, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
+import { reclaimBlockedBy, focusedForReclaim, idleReclaimDisabled, idleReclaimThresholdMs, RECLAIM_NOW_THRESHOLD_MS, type ReclaimCandidate } from './lib/idleReclaim'
 import { findConsecutiveQuestionBlocks, findSentinel } from '@navide/terminal'
 import {
   buildCliPaneBufferReply,
@@ -1915,6 +1916,11 @@ function mirrorMessagingHandle(pane: ActivePane): void {
       // backend forgets a pane whose window stayed away too long, and with it
       // the aliases that pane owned.
       former_pane_ids: pane.formerPaneIds ?? [],
+      // Lineage is renderer state — this is the only place the backend can
+      // learn it, and cli_whoami is its only reader. Without it a child agent
+      // whose context was compacted has no way left to find out who opened it:
+      // the parent's name only ever appeared in the words of its kickoff.
+      spawned_by: pane.spawnedBy ?? '',
     })
     .catch(() => { /* local messaging is unaffected */ })
 }
@@ -6991,7 +6997,26 @@ const PANE_ID_HINT = 'a pane id, not a pane name: cli_list_targets reports it as
 registerCommand('ui.pane.close', async (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
   if (!paneId) throw new Error(`ui.pane.close requires ${PANE_ID_HINT}`)
+  // Gathered BEFORE the kill, because none of it is knowable afterwards.
+  // Creating a pane hands back advisories; closing one used to answer nothing
+  // at all, so an agent could end another's turn, drop the messages queued for
+  // it and orphan its children without any of that being visible anywhere.
+  // This does not refuse the close — force-quitting is a legitimate thing to
+  // want — it just stops the consequences from being silent.
+  const doomed = panes.value.find((p) => p.id === paneId)
+  const name = (doomed?.messagingName as string | undefined) ?? doomed?.customName ?? paneId
+  const advisories = doomed
+    ? closeAdvisoriesFor({
+        name,
+        status: paneDisplayStatus(doomed) || undefined,
+        queuedMessages: messaging.messages.value.filter(
+          (m) => m.to === name && (m.status === 'queued' || m.status === 'delivering'),
+        ).length,
+        childCount: panes.value.filter((p) => p.spawnedBy === paneId).length,
+      })
+    : []
   await onKill(paneId)
+  return advisories.length ? { advisories } : {}
 })
 registerCommand('ui.pane.focus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
@@ -7040,6 +7065,15 @@ registerCommand('ui.messaging.readIncoming', (args) => {
       kind: m.kind ?? null,
       content: m.content.slice(0, cap),
       createdAt: m.createdAt,
+      // The envelope typed into a pane carries `re: <correlationId>`, so an
+      // agent that is TOLD its mail can reply to a specific message. Without
+      // these three an agent that READS its mail could not: it saw the raw
+      // text and nothing else.
+      correlationId: m.correlationId ?? null,
+      inReplyTo: m.inReplyTo ?? null,
+      // Why this row has not been typed in yet — the same {key, n} the log
+      // panel renders. Live queue state, so it exists only on this path.
+      hold: m.hold ? { key: m.hold.key, n: m.hold.n ?? null } : null,
     })),
     reserved: reserved.map((r) => r.uid),
     // Delivery being paused is why a read can come back empty while messages
@@ -11828,7 +11862,7 @@ function reclaimCandidate(pane: ActivePane): ReclaimCandidate {
   return {
     realized: pane.realized,
     restoring: !!pane.restoring,
-    focused: focusPaneId.value === pane.id,
+    focused: focusedForReclaim(focusPaneId.value, effectiveFocusPaneId.value, pane.id),
     resumeSessionId: paneResumeSessionId(pane),
     rebuilding: paneRebuilding(pane),
     loopActive: !!pane.loopActive,
@@ -11839,7 +11873,26 @@ function reclaimCandidate(pane: ActivePane): ReclaimCandidate {
     displayStatus: (ref?.displayStatus as unknown as string) ?? '',
     hasDraft: !!(ref?.hasDraft as unknown as boolean),
     lastTouchedAt: Math.max(activity, key),
+    managerRouting: paneHeldByStageRouter(pane.id),
+    stageWatched: watchers.has(pane.id),
+    hasQueuedMessages: messaging.queuedCountFor(pane.id) > 0,
   }
+}
+
+/** Whether a stage router is scraping this pane's buffer.
+ *
+ *  Both roles count. The manager is the one that looks idle for long stretches
+ *  — it waits on its workers — but a worker between dispatches reads the same
+ *  way, and the router keeps a scan cursor for each. Losing either leaves the
+ *  router reading an empty buffer from a stale offset, with nothing to say so. */
+function paneHeldByStageRouter(paneId: string): boolean {
+  for (const router of stageRouters.values()) {
+    if (router.managerPaneId === paneId) return true
+    for (const workerPaneId of router.workerPaneIds.values()) {
+      if (workerPaneId === paneId) return true
+    }
+  }
+  return false
 }
 
 function paneReclaimable(pane: ActivePane, now: number): boolean {
@@ -11876,6 +11929,17 @@ function projectPaneFromActive(pane: ActivePane): ProjectPane {
     auto_name_source: pane.autoNameSource,
     is_minimized: minimizedPanes.value.has(pane.id),
     output_log_file: pane.outputLogFile,
+    // The realize path rebuilds the launch flags from these two. Leaving them
+    // out is silent — the pane comes back on the vendor default, which looks
+    // like a working resume until you notice which model answered.
+    model: pane.model,
+    effort: pane.effort,
+    // Not reachable today: a stopped pane reports displayStatus 'stopped', so
+    // the not-idle guard refuses the reclaim before this record is built. It is
+    // here because this function claims to mirror the cold-restore record, and
+    // a claim that holds only by accident of another guard is one bad refactor
+    // from being false.
+    stopped: (paneRefs[pane.id]?.displayStatus as unknown as string) === 'stopped',
   }
 }
 
@@ -11890,6 +11954,23 @@ async function reclaimIdlePane(paneId: string): Promise<boolean> {
   // behaviour changes.
   const histEntry = spawnHistory.value.find((e) => e.paneId === paneId)
   const alreadyRemoved = !!histEntry?.removedAt
+  // Everything below is read BEFORE the kill for the same reason as the history
+  // entry above: onKill speaks the language of a pane that is leaving, and says
+  // so to several subsystems at once. This is not one of those — the seat, the
+  // conversation and the handle all survive — so each farewell is taken back
+  // afterwards rather than taught to onKill, whose six other callers do mean it.
+  //
+  // The messaging handle is the load-bearing one. onKill drops the persisted
+  // name, so the realize path would find nothing to reclaim and re-derive a
+  // handle from the fallback chain — a pane addressed as `claude-3` comes back
+  // as something else, and every sender that knew the old name is now writing
+  // to a target that does not exist.
+  // The live handle first: the persisted map is capped and evicts its oldest
+  // entries, so a long session can drop the name of a pane that is still here.
+  const messagingName = (pane.messagingName as string | undefined) || persistedMessagingName(paneId)
+  const handoffKeys = Array.from(issueHandoffs.value.entries())
+    .filter(([, v]) => v.paneId === paneId)
+    .map(([k, v]) => [k, v.state] as const)
   // markRemoved: false — the backend record is what the placeholder resumes
   // from; unspawning it would make this a real close on the next restart.
   // keepInList: true — the pane keeps its seat, name and group.
@@ -11907,6 +11988,37 @@ async function reclaimIdlePane(paneId: string): Promise<boolean> {
   stillThere.injectionStatus = 'pending'
   stillThere.skipRoleInjection = true
   stillThere.resumeContinueAvailable = undefined
+  // Loop state is deliberately NOT restored. onKill zeroes the six fields and
+  // also stops the watcher that drives them (stopLoopLimitWatcher), and only
+  // the fields can be put back from here — the watcher restarts nowhere. A
+  // pane showing LOOP with nothing advancing it is worse than one that shows
+  // no loop at all, so the zeroing stands. The loop-active guard is what keeps
+  // this from mattering; a future change that relaxes it has to restart the
+  // watcher, not copy the flags.
+  //
+  // The handoff is to the pane, not to the process behind it. 'pane-gone' is
+  // what the UI reads to say the destination no longer exists.
+  for (const [key, state] of handoffKeys) {
+    const current = issueHandoffs.value.get(key)
+    if (current) issueHandoffs.value.set(key, { ...current, state })
+  }
+  // Re-register on the same terms as a cold-restore placeholder (see the
+  // restore path): the pane stays addressable and stays in the @-mention menu
+  // while it waits to be clicked, so a message sent to it queues instead of
+  // bouncing as `unknown-target`.
+  //
+  // What makes listing one safe is the delivery HOLD, not injectPane's own
+  // `realized` check: messagingHoldKey answers 'not-ready' for a pane with no
+  // ref, and pumpPane parks the queue on that. Reaching injectPane at all would
+  // fail the message as 'inject-failed' rather than hold it, so anything that
+  // relaxes messagingHoldKey for placeholders turns this into dropped mail.
+  //
+  // The trade this makes: a message to a reclaimed pane used to fail at once as
+  // `unknown-target`; now it waits for the pane to be clicked, and the sender
+  // hears about it after STALE_HOLD_MS. That is the cold-restore behaviour, and
+  // a reclaimed pane is a pane that is coming back — but a caller that blocks
+  // on delivery (cli_send_and_wait) now waits instead of failing fast.
+  registerPaneMessaging(stillThere, messagingName)
   stillThere.deferredRestore = {
     saved,
     workspacePath: pane.workspacePath,

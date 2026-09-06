@@ -82,6 +82,19 @@ class RegisteredPane:
     #: not idle either — and collapsing them is what made the network view call a
     #: dead pane "waiting".
     display_status: str = ""
+    #: Pane id of the pane that opened this one (a SPAWN block or
+    #: cli_open_agent), mirrored from the owning window's `spawnedBy`. Empty for
+    #: a pane nobody opened, and for a window on a build that predates this
+    #: field.
+    #:
+    #: The registry keeps it for one reason: a child agent can otherwise learn
+    #: who opened it only from the words of its kickoff prompt, so a compaction
+    #: loses its parent for good and it no longer knows who to report to.
+    #: cli_whoami answers that from here. It is deliberately NOT reported by
+    #: cli_list_targets — the roster is who exists, not who is related to whom;
+    #: this is a fact about yourself, which is the one lineage question you are
+    #: entitled to ask.
+    spawned_by: str = ""
 
     @property
     def offline(self) -> bool:
@@ -223,6 +236,7 @@ def register(
     agent_key: str = "",
     owner: Any = None,
     realized: bool = True,
+    spawned_by: str = "",
 ) -> RegisteredPane:
     """Mirror one window's pane handle. Re-registering the same pane replaces
     its entry, which is how renames propagate."""
@@ -239,6 +253,12 @@ def register(
         # window re-mirrors its panes on reconnect, and whether a placeholder
         # has been opened since is exactly what that re-mirror is reporting.
         realized=realized,
+        # Read from the caller every time, like `realized`: the owning window
+        # holds the pane object this comes from and re-sends it on every mirror,
+        # and a re-key (restore mints a new parent pane id) arrives as exactly
+        # such a re-register — carrying the old value over would pin the pane to
+        # an id nothing answers to any more.
+        spawned_by=spawned_by,
         # A reconnecting window re-runs agent_msg.register for every pane it
         # mirrors, which is what clears the offline flag drop_owner set:
         # offline_since starts at None on the fresh entry.

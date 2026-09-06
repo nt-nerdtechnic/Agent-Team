@@ -3,6 +3,7 @@ import {
   IDLE_RECLAIM_DEFAULT_MINUTES,
   IDLE_RECLAIM_MIN_MINUTES,
   IDLE_RECLAIM_NEVER,
+  focusedForReclaim,
   idleReclaimDisabled,
   idleReclaimThresholdMs,
   reclaimBlockedBy,
@@ -29,6 +30,9 @@ function idleForHours(over: Partial<ReclaimCandidate> = {}): ReclaimCandidate {
     displayStatus: 'idle',
     hasDraft: false,
     lastTouchedAt: NOW - 4 * 60 * 60_000,
+    managerRouting: false,
+    stageWatched: false,
+    hasQueuedMessages: false,
     ...over,
   }
 }
@@ -91,6 +95,103 @@ describe('reclaimBlockedBy', () => {
     ['no-ref', { hasRef: false }],
   ] as const)('never reclaims a pane that is %s', (reason, over) => {
     expect(reclaimBlockedBy(idleForHours(over), THRESHOLD, NOW)).toBe(reason)
+  })
+})
+
+// Every guard above these reads the pane's own state. These three read who else
+// is holding it — the case a pane cannot know about itself, and the reason all
+// three were missing: each of these panes is genuinely, measurably idle.
+describe('reclaimBlockedBy — held by another subsystem', () => {
+  it('never reclaims a pane a stage router is reading', () => {
+    // A manager waiting on its workers is idle for exactly as long as they
+    // take. Reclaiming it deletes the ref the router scrapes, and the router
+    // reads '' from a stale cursor from then on, reporting nothing wrong.
+    const manager = idleForHours({ managerRouting: true })
+    expect(reclaimBlockedBy(manager, THRESHOLD, NOW)).toBe('manager-routing')
+  })
+
+  it('never reclaims a pane a stage watcher is polling', () => {
+    // Nothing rebuilds the watcher: realize skips role injection, which is
+    // where watchers are started. The stage would wait forever on a slot that
+    // can no longer report its own completion.
+    const watched = idleForHours({ stageWatched: true })
+    expect(reclaimBlockedBy(watched, THRESHOLD, NOW)).toBe('stage-watched')
+  })
+
+  it('never reclaims a pane with messages still queued for it', () => {
+    // The queue is failed as 'pane-closed' and every sender is told so. The
+    // pane did not close, and nothing re-queues on the way back.
+    const owed = idleForHours({ hasQueuedMessages: true })
+    expect(reclaimBlockedBy(owed, THRESHOLD, NOW)).toBe('has-queued-messages')
+  })
+
+  it('reports the holder rather than the idleness, however long it has been', () => {
+    // These are not "not idle yet" — they are "not yours to take". A caller
+    // logging the reason should name who was holding it, not the clock.
+    const ancient = idleForHours({
+      stageWatched: true,
+      lastTouchedAt: NOW - 99 * 60 * 60_000,
+    })
+    expect(reclaimBlockedBy(ancient, THRESHOLD, NOW)).toBe('stage-watched')
+  })
+
+  it('still refuses them when the user presses reclaim now', () => {
+    // Pressing the button answers the waiting question, not the ownership one.
+    for (const held of [
+      { managerRouting: true },
+      { stageWatched: true },
+      { hasQueuedMessages: true },
+    ]) {
+      expect(
+        reclaimBlockedBy(idleForHours(held), RECLAIM_NOW_THRESHOLD_MS, NOW)
+      ).not.toBeNull()
+    }
+  })
+})
+
+// Which pane the `focused` guard is actually about. App.vue holds two ids for
+// it and used to feed the guard only the first, which is how a pane on screen
+// could be reclaimed while the user was reading it.
+describe('focusedForReclaim', () => {
+  it('is the pane the request names', () => {
+    expect(focusedForReclaim('pane-a', 'pane-a', 'pane-a')).toBe(true)
+  })
+
+  it('is the pane on screen when nothing was requested', () => {
+    // The case that made the sweep visible: focusPaneId is null on a fresh
+    // window, and resolveFocusedPane puts the first visible pane on the stage.
+    expect(focusedForReclaim(null, 'pane-a', 'pane-a')).toBe(true)
+  })
+
+  it('is the pane on screen when the request points somewhere else', () => {
+    // A minimized or out-of-workspace request is replaced, and the substitute
+    // is what the user is looking at.
+    expect(focusedForReclaim('pane-minimized', 'pane-a', 'pane-a')).toBe(true)
+  })
+
+  it('still covers a request the resolver had to substitute for', () => {
+    // The docked pane keeps its protection: the user put it there deliberately
+    // and the reclaim would be just as much of a surprise on the way back.
+    expect(focusedForReclaim('pane-minimized', 'pane-a', 'pane-minimized')).toBe(true)
+  })
+
+  it('is no other pane', () => {
+    expect(focusedForReclaim('pane-a', 'pane-a', 'pane-b')).toBe(false)
+    expect(focusedForReclaim(null, null, 'pane-b')).toBe(false)
+  })
+
+  it('blocks the reclaim it feeds', () => {
+    // The two halves joined up: what this answers is the `focused` field, and
+    // a true there is what refuses an otherwise perfectly reclaimable pane.
+    const onScreen = idleForHours({
+      focused: focusedForReclaim(null, 'pane-a', 'pane-a'),
+    })
+    expect(reclaimBlockedBy(onScreen, THRESHOLD, NOW)).toBe('focused')
+
+    const offScreen = idleForHours({
+      focused: focusedForReclaim(null, 'pane-a', 'pane-b'),
+    })
+    expect(reclaimBlockedBy(offScreen, THRESHOLD, NOW)).toBeNull()
   })
 })
 
