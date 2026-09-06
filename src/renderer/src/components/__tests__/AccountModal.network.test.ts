@@ -656,7 +656,11 @@ describe('account modal — your network', () => {
     // Refusing would read as "you have no network"; the machines did not stop
     // existing because the socket blinked.
     expect(MODAL).toMatch(/networkStale = computed\([\s\S]{0,160}state !== 'connected'/)
-    expect(MODAL).toMatch(/v-if="networkStale"[\s\S]{0,120}settings\.p2p\.network\.link-offline/)
+    // Second in the chain: a read that failed is a different fact and gets its
+    // own sentence, because this one named the link on a screen whose
+    // connection card was green. Which sentence appears when is asserted by
+    // mounting, in AccountModal.staleness.test.ts.
+    expect(MODAL).toMatch(/v-else-if="networkStale"[\s\S]{0,120}settings\.p2p\.network\.link-offline/)
   })
 
   it('drops the network when the account signs out', () => {

@@ -74,6 +74,17 @@ const asked = ref<Map<string, { deviceName: string; error: string }>>(new Map())
  *  still answers, with the last picture the server sent, so this is not the
  *  same thing as an empty snapshot. */
 const unavailable = ref(false)
+/**
+ * The last read did not come back, so what is on screen is older than it looks.
+ *
+ * Deliberately not folded into anything about the link, because they are
+ * different facts and the account window used to report one as the other: a
+ * snapshot that failed to load left a banner reading "the link is down" on a
+ * screen whose connection card was green. A failed read says nothing about the
+ * socket — the handler can throw while the link is perfectly healthy, which is
+ * the case that produced the contradiction.
+ */
+const readFailed = ref(false)
 
 let consumers = 0
 let timer: ReturnType<typeof setInterval> | null = null
@@ -92,14 +103,23 @@ async function refresh(): Promise<void> {
     if (resp.ok && resp.payload) {
       snapshot.value = resp.payload
       unavailable.value = false
+      readFailed.value = false
       prune()
     } else if (resp.error?.code === 'P2P_NOT_CONFIGURED') {
       snapshot.value = null
       unavailable.value = true
+      readFailed.value = false
       prune()
+    } else {
+      // Any other refusal: the picture below is the previous one. It stays —
+      // an emptied list would be a claim of its own — but it stops passing for
+      // current.
+      readFailed.value = true
     }
   } catch {
-    /* the last answer stays on screen; the next poll corrects it */
+    /* the last answer stays on screen; the next poll corrects it — but it is
+       now visibly not current, rather than silently so */
+    readFailed.value = true
   }
 }
 
@@ -124,6 +144,7 @@ export function usePairingState(backend: Backend) {
   return {
     snapshot,
     unavailable,
+    readFailed,
     pairings: computed<PairingRow[]>(() => snapshot.value?.pairings ?? []),
     /**
      * What the prompt should show: every exchange waiting on a person here,
@@ -179,6 +200,7 @@ export function usePairingState(backend: Backend) {
      *  else's machines. */
     clear(): void {
       snapshot.value = null
+      readFailed.value = false
       prune()
     },
     subscribe(): void {
@@ -202,6 +224,7 @@ export function _resetForTest(): void {
   dismissed.value = new Set()
   asked.value = new Map()
   unavailable.value = false
+  readFailed.value = false
   consumers = 0
   if (timer) { clearInterval(timer); timer = null }
   client = null

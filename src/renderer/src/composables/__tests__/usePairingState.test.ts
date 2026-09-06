@@ -235,3 +235,59 @@ describe('usePairingState', () => {
     expect(state.pairings.value).toHaveLength(1)
   })
 })
+
+describe('a read that did not come back', () => {
+  // Kept apart from anything about the link on purpose: they are different
+  // facts, and the account window used to report one as the other.
+  it('keeps the last picture, and says it is not current', async () => {
+    const fake = backendReturning({ pairings: [RESPONDER] })
+    const state = usePairingState(asBackend(fake))
+    await state.refresh()
+    expect(state.readFailed.value).toBe(false)
+
+    fake.send.mockRejectedValueOnce(new Error('ws not open'))
+    await state.refresh()
+
+    expect(state.readFailed.value).toBe(true)
+    // Still there. An emptied list would assert those machines had gone.
+    expect(state.pairings.value.map((r) => r.deviceId)).toEqual(['dev-asking'])
+  })
+
+  it('counts a refusal, not only a thrown request', async () => {
+    // A handler that answers `ok: false` is the case that produced this: the
+    // read failed while the socket was fine.
+    const fake = { send: vi.fn().mockResolvedValue({ ok: false, error: { code: 'INTERNAL' } }) }
+    const state = usePairingState(asBackend(fake))
+
+    await state.refresh()
+
+    expect(state.readFailed.value).toBe(true)
+  })
+
+  it('does not count a machine with no server configured', async () => {
+    // Nothing failed there — there is nothing to read, and the window says so
+    // in its own words.
+    const fake = {
+      send: vi.fn().mockResolvedValue({ ok: false, error: { code: 'P2P_NOT_CONFIGURED' } }),
+    }
+    const state = usePairingState(asBackend(fake))
+
+    await state.refresh()
+
+    expect(state.readFailed.value).toBe(false)
+    expect(state.unavailable.value).toBe(true)
+  })
+
+  it('clears with the picture on sign-out', async () => {
+    const fake = backendReturning({ pairings: [RESPONDER] })
+    const state = usePairingState(asBackend(fake))
+    fake.send.mockRejectedValueOnce(new Error('ws not open'))
+    await state.refresh()
+    expect(state.readFailed.value).toBe(true)
+
+    state.clear()
+
+    // Nothing is on screen to be out of date.
+    expect(state.readFailed.value).toBe(false)
+  })
+})

@@ -3273,3 +3273,77 @@ async def test_an_id_the_server_refused_is_never_recorded(tmp_path, monkeypatch)
         with contextlib.suppress(BaseException):
             await task
         trust_store._reset_for_test()
+
+
+# ── The screen that reports a locked store must survive one ───────────────────
+
+
+def test_a_locked_store_still_answers_with_the_device_list() -> None:
+    """The account window is the only place a locked trust store is reported,
+    and reading the snapshot used to be what took that window down.
+
+    Every row's state comes from `pin_for`, which raises on a locked store; one
+    unpinned device was enough to kill the whole handler. So the person whose
+    machine had stopped got a device list that would not load, on the screen
+    written to tell them why it had stopped — `trustLocked` and its red card
+    were already in the payload, and nobody ever saw either.
+    """
+    trust_store.load()
+    _roster_offering("dev-mine", device_signing.public_key())
+    link = _trust_link()
+    link._device_id = "me"
+    link._own_member = "m-self"
+    link._directory = [{"deviceId": "dev-mine", "hostMemberId": "m-self"}]
+    link._online_devices = {"dev-mine"}
+    _lock_the_store()
+    link._trust_locked = trust_store.locked_reason()
+
+    snapshot = link.network_snapshot()
+
+    assert snapshot["trustLocked"], "the reason is what the card is for"
+    row = next(d for d in snapshot["devices"] if d["deviceId"] == "dev-mine")
+    # Silence, not a guess. "pending" would assert this machine is not paired,
+    # which may be false, and this is the surface where paired and unpaired look
+    # different — so no pill at all, with the reason beside it in `trustLocked`.
+    assert row["trustState"] == ""
+    # And no button offering to pair with a machine that may already be pinned.
+    assert row["canTrust"] is False
+
+
+def test_a_keychain_locked_for_a_moment_does_not_take_the_window_with_it(
+    monkeypatch,
+) -> None:
+    """The transient half, which is the one that happens to people.
+
+    A dismissed authorisation dialog or a `security` timeout raises exactly the
+    same `TrustStoreLocked` as a destroyed record, and it arrives on a machine
+    where nothing is wrong at all. Crashing the snapshot there means the account
+    window breaks for a few seconds for no reason a person could ever discover.
+    """
+    _roster_offering("dev-mine", device_signing.public_key())
+    link = _trust_link()
+    link._device_id = "me"
+    link._own_member = "m-self"
+    link._directory = [{"deviceId": "dev-mine", "hostMemberId": "m-self"}]
+    _with_flaky_vault(monkeypatch, failures=1)
+
+    snapshot = link.network_snapshot()
+
+    # Both rows, which is the whole assertion: before this the read raised out
+    # of the handler and there was no list at all.
+    assert [d["deviceId"] for d in snapshot["devices"]] == ["me", "dev-mine"]
+    assert next(d for d in snapshot["devices"] if d["deviceId"] == "me")["isLocal"]
+
+
+def test_the_token_read_answers_rather_than_raising(monkeypatch) -> None:
+    """`access_token` is called from the connect loop and from the settings
+    read. A vault that will not answer for a moment is not a logout and is not a
+    crash — it is one round of "no configuration this time", and the loop dials
+    again."""
+    class _Shut:
+        def read_app_secret(self, *_a, **_k):
+            raise RuntimeError("the keychain is locked")
+
+    monkeypatch.setattr(server_link, "_vault", lambda: _Shut())
+
+    assert server_link.access_token() == ""

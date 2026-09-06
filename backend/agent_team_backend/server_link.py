@@ -295,7 +295,21 @@ def account_email() -> str:
 
 
 def access_token() -> str:
-    return (_vault().read_app_secret(ACCESS_TOKEN_SECRET) or "").strip()
+    """The stored token, or "" when it cannot be had right now.
+
+    Reads are strict — a locked keychain and a dismissed authorisation dialog
+    must not read as "signed out", because that answer sends callers down paths
+    that erase real state. Strictness belongs at the vault; deciding what to do
+    about it belongs here, and for a configuration read the answer is "no
+    configuration this time round". The link's loop already treats a missing
+    token as "not configured yet" and dials again later, which is the right
+    behaviour for a keychain that was locked for a moment.
+    """
+    try:
+        return (_vault().read_app_secret(ACCESS_TOKEN_SECRET) or "").strip()
+    except Exception as err:  # noqa: BLE001 - a vault that will not answer is not a logout
+        log.warning("the navide-server token could not be read (%s)", err)
+        return ""
 
 
 def set_access_token(token: str | None) -> None:
@@ -1754,6 +1768,9 @@ class ServerLink:
                 # offline produces a card that waits five minutes and expires,
                 # which reads as the button being broken.
                 bool(row["online"])
+                # Never on an unknown state: offering to pair while the record
+                # that says whether we already are cannot be read is offering
+                # something this machine cannot check.
                 and row["trustState"] == "pending"
                 and bool(advertised)
                 and bool(self._own_member)
@@ -2191,7 +2208,27 @@ class ServerLink:
         """
         if is_local:
             return "self"
-        pin = trust_store.pin_for(device_id)
+        try:
+            pin = trust_store.pin_for(device_id)
+        except trust_store.TrustStoreLocked:
+            # `pin_for` is safe only for a caller that has already established
+            # the store is readable — the delivery path has, this one has not,
+            # and it cannot: a read can fail transiently under it. So it answers
+            # here instead of taking the whole snapshot down with it.
+            #
+            # What that cost, before this: the trust store locks, and the one
+            # screen that exists to report a locked trust store is the screen
+            # this crash removes. `trustLocked` was already in the payload and
+            # the red card was already written; nobody saw either, because the
+            # handler died before it could say so. The device list does not
+            # depend on a pin, so it goes out either way.
+            #
+            # Empty rather than a guess: "pending" would assert this device is
+            # not paired, which may be false, and this is the surface where an
+            # unpaired machine looks different from a paired one. Saying nothing
+            # is the only honest answer when the record cannot be read, and the
+            # reason sits beside it in `trustLocked`.
+            return ""
         member_id = str((pin or {}).get("memberId") or "") or member_id_for(device_id)
         if device_trust.is_blocked(self._policy, member_id=member_id, device_id=device_id):
             return "blocked"

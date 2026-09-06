@@ -418,6 +418,9 @@ async function refresh(): Promise<void> {
 const trustNotices = computed<TrustNotice[]>(() => network.value?.trustNotices ?? [])
 const trustPending = computed<PendingDevice[]>(() => network.value?.trustPending ?? [])
 const trustLocked = computed(() => network.value?.trustLocked ?? '')
+/** The last read did not come back. Says only that, because a failed read says
+ *  nothing about the socket — see usePairingState. */
+const readFailed = pairingState.readFailed
 /** The stop is a read that may succeed on the next try. Same card, but no offer
  *  to erase everything: a keychain locked for a moment has nothing wrong with
  *  it to erase, and that offer is the one act here nobody can undo. */
@@ -1870,7 +1873,12 @@ onUnmounted(() => {
               <li>{{ t('settings.p2p.first-pair-3') }}</li>
             </ol>
           </div>
-          <p v-if="networkStale" class="hint">{{ t('settings.p2p.network.link-offline') }}</p>
+          <!-- Two different reasons for the same picture, and naming the wrong
+               one is worse than naming none: this said "the link is down" on a
+               screen whose connection card was green, because the snapshot had
+               failed to load while the socket was fine. -->
+          <p v-if="readFailed" class="hint">{{ t('settings.p2p.network.not-current') }}</p>
+          <p v-else-if="networkStale" class="hint">{{ t('settings.p2p.network.link-offline') }}</p>
         </section>
 
         <!-- Only when something is blocked: an empty list here would read as a

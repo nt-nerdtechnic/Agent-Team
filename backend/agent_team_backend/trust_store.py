@@ -543,8 +543,22 @@ def adopt_own_member(url: str, token: str, member_id: str) -> str:
 
 
 def pin_for(device_id: str) -> dict[str, Any] | None:
-    """The pinned key and member for *device_id*, from memory. Never raises: the
-    delivery path calls this per message and has already checked the lock."""
+    """The pinned key and member for *device_id*.
+
+    **Raises ``TrustStoreLocked`` when the record cannot be read, and the
+    precondition belongs to the caller.** This said "never raises" for a while,
+    on the strength of one caller: the delivery path checks the lock before it
+    gets here, so for that path the sentence was true. It was read as a property
+    of this function, and the second caller — the device-list snapshot — was
+    written against it and took the whole handler down with it the first time a
+    machine's record went unreadable.
+
+    Kept raising rather than made total, deliberately. The delivery path's
+    precondition is real and worth keeping: "the store is locked, so stop
+    delivering" is a stronger guarantee expressed as an exception than as a
+    return value somebody can forget to check. What was wrong was the docstring
+    claiming the guarantee for everyone.
+    """
     with _lock:
         if not device_id:
             return None
