@@ -3154,10 +3154,19 @@ const TRUST_CONFIRM_ACTIONS = new Set([
   'p2p.trust.unblock',
   'p2p.pair.start',
   'p2p.pair.confirm',
+  // Writes an allow rule for a remote sender: a policy edit by another name.
+  'p2p.access_requests.approve',
+  // Destroys every pairing on this machine, so it is exactly the kind of act
+  // this list exists for: only a window can ask for it.
+  'p2p.trust.rebuild',
 ])
-ipcMain.handle('trust:confirm', async (_event, action: unknown, deviceId: unknown) => {
+ipcMain.handle('trust:confirm', async (_event, action: unknown, deviceId: unknown, subject: unknown) => {
   if (typeof action !== 'string' || !TRUST_CONFIRM_ACTIONS.has(action)) return null
-  return mintTrustConfirmation(action, typeof deviceId === 'string' ? deviceId : '')
+  return mintTrustConfirmation(
+    action,
+    typeof deviceId === 'string' ? deviceId : '',
+    typeof subject === 'string' ? subject : '',
+  )
 })
 
 // The legal pages by route name, so the renderer never assembles the URL.

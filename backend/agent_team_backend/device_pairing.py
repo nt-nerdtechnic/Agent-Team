@@ -96,13 +96,48 @@ class Pairing:
     our_nonce: str
     their_nonce: str = ""
     started_at: float = field(default_factory=time.time)
+    #: When this exchange stops being answerable. Initialised to
+    #: ``started_at + REQUEST_TTL_S`` and moved once — see ``extend_once``.
+    #:
+    #: Deliberately one field rather than a start time and a flag that
+    #: ``expired`` has to combine: the question "is this still answerable" has
+    #: one answer, and two time values compared at the point of asking is the
+    #: shape the next off-by-one comes in.
+    deadline: float = 0.0
+    #: Whether the clock has already been restarted. Once, not per frame: a
+    #: relay that keeps sending could otherwise hold an exchange open for ever.
+    extended: bool = False
     #: Set once this side's person has said the digits match.
     we_confirmed: bool = False
     #: Set when their ``pair-confirm`` arrives.
     peer_confirmed: bool = False
 
+    def __post_init__(self) -> None:
+        if not self.deadline:
+            self.deadline = self.started_at + REQUEST_TTL_S
+
     def expired(self, now: float | None = None) -> bool:
-        return (now or time.time()) - self.started_at > REQUEST_TTL_S
+        return (now or time.time()) > self.deadline
+
+    def extend_once(self, now: float) -> None:
+        """Restart the clock when the digits first become displayable here.
+
+        Five minutes from *pressing Pair* is the wrong window for the thing the
+        initiator is now asked to do. It has to press, walk to the other
+        machine, and compare — and the old clock was already running through the
+        part where there was nothing to compare yet. Restarting when the SAS
+        appears gives the comparison its own full window; a request nobody
+        answers still expires on the original one, so a mistaken or hostile
+        request does not sit on somebody's screen any longer than before.
+
+        Once. Extending per frame would let a device that keeps sending hold the
+        exchange open indefinitely, which is a denial of the expiry rather than
+        a longer one.
+        """
+        if self.extended:
+            return
+        self.extended = True
+        self.deadline = now + REQUEST_TTL_S
 
 
 _pairings: dict[str, Pairing] = {}
@@ -269,6 +304,13 @@ def accept_request(device_id: str, *, device_name: str, their_key: str, their_no
             our_nonce=new_nonce(),
             their_nonce=their_nonce,
         )
+        # Both ends restart the clock when the digits appear on *their* screen,
+        # and the person who has to walk over exists at either end. For this one
+        # the two moments coincide — the request arrives with their nonce, so
+        # the SAS is displayable the instant the exchange exists — but going
+        # through the same call is what keeps the rule in one place instead of
+        # being an argument about why one side does not need it.
+        pairing.extend_once(now)
         _pairings[device_id] = pairing
         return pairing
 
@@ -292,6 +334,10 @@ def accept_response(device_id: str, *, their_key: str, their_nonce: str) -> Pair
         pairing.their_key = pairing.their_key or their_key
         pairing.their_nonce = their_nonce
         pairing.state = STATE_AWAITING_LOCAL
+        # The moment this side has six digits to show. Not "they confirmed" —
+        # that is a different event and a later one, and by then the window this
+        # restarts is the one already running.
+        pairing.extend_once(time.time())
         return pairing
 
 
@@ -325,35 +371,41 @@ def note_peer_confirmed(device_id: str) -> Pairing | None:
 def complete(device_id: str) -> Pairing | None:
     """The finished exchange, or None while it is still waiting on somebody.
 
-    **Who still has to answer depends on which side this is**, and that is the
-    one asymmetry in the whole exchange:
+    **Both sides confirm.** Neither is written until a person at that machine
+    has said the six digits match the ones on the other screen.
 
-    *The responder* needs both. Somebody asked to come in; a person here says
-    whether the digits match, and until they do nothing is written. This is the
-    half that carries the security property — the initiator's own click could
-    never be the check, because the initiator is the party being authenticated.
+    This was asymmetric once: the initiator needed only the other side's
+    confirm, on the reasoning that comparing digits is one act performed by one
+    person looking at two screens, and that pressing "Pair with…" had already
+    said what this side wanted. The reasoning holds — *when there is another
+    machine and another person*. A relay is what breaks that premise, and it
+    breaks it completely: it can decline to forward the request at all and
+    answer with its own key, because the first frame of an exchange is verified
+    against the key it carries. The initiator would then pin the relay, approved
+    and in ``RING_SELF``, with every policy rule skipped, having compared
+    nothing with nobody.
 
-    *The initiator* needs only theirs. Comparing the digits is one act performed
-    by one person looking at two screens, and pressing "Pair with…" already
-    said what this side wants. A second button here asked the same person the
-    same question twice.
+    So the earlier trade was not wrong about its shape — "press Pair and walk
+    away and the other end finishes it" — it was wrong about the size. The other
+    end is not necessarily a machine you own.
 
-    **The cost, stated plainly because it is real**: somebody can press Pair and
-    walk away, and whoever is standing at the other machine can complete the
-    pairing without them. That is the trade the second button was buying, and it
-    was bought at the price of a step most people would learn to click through.
+    **And the check cannot be automated.** The SAS is derived from two public
+    keys and two nonces; a relay supplies half of them and receives the other
+    half, so it *knows the six digits*. Anything that asks the far side to prove
+    it saw them — signing them back, echoing them — a relay can compute and
+    sign. The whole security property comes from one person reading two screens.
+    A button is not ceremony here; it is the only place the property lives.
+
+    What this costs is the step the asymmetry was avoiding: somebody who presses
+    Pair and walks away comes back to a card still waiting. Nothing is granted
+    in the meantime — no pin, no ring, no exception — which is the point.
     """
     with _lock:
         _sweep(time.time())
         pairing = _pairings.get(device_id)
         if pairing is None:
             return None
-        needed = (
-            pairing.peer_confirmed
-            if pairing.role == ROLE_INITIATOR
-            else pairing.we_confirmed and pairing.peer_confirmed
-        )
-        if not needed:
+        if not (pairing.we_confirmed and pairing.peer_confirmed):
             return None
         _pairings.pop(device_id, None)
         return pairing

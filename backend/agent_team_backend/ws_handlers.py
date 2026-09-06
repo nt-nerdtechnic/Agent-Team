@@ -406,6 +406,28 @@ async def fs_stat_workspace_path(session: "Session", msg_id: str, msg_type: str,
     await session.send_json(make_response(msg_id, msg_type, result))
 
 
+@handler("fs.page_capability")
+async def fs_page_capability(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """The capability the renderer needs to build a /fs/page URL for one workspace.
+
+    Answered over the socket, so only a client that already holds the ws token
+    can obtain it; the capability itself is scoped to this workspace's URL
+    segment and is what goes into the path instead of the token
+    (ws_auth.page_capability explains why the token must not).
+    """
+    import base64
+
+    from . import ws_auth
+
+    ws_path = str(payload.get("workspace_path") or "")
+    if not ws_path:
+        await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", "workspace_path is required"))
+        return
+    ws_b64 = base64.urlsafe_b64encode(ws_path.encode("utf-8")).decode("ascii").rstrip("=")
+    cap = ws_auth.page_capability(ws_b64)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "ws_b64": ws_b64, "cap": cap}))
+
+
 @handler("fs.read_image")
 async def fs_read_image(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -3206,9 +3228,14 @@ async def p2p_policy_set(session: "Session", msg_id: str, msg_type: str, payload
     # No device in this one, so "" is what the confirmation is bound to. It
     # still binds the action, which is what stops a token minted to approve a
     # device being spent to replace the rules.
-    if not await _confirmed(session, msg_id, msg_type, payload):
-        return
+    # Bound to the document as sent: a confirmation minted to sign one rule set
+    # cannot be spent on another. The window canonicalises the same object it
+    # then sends, so the two spellings meet here.
     policy = payload.get("policy")
+    if not await _confirmed(
+        session, msg_id, msg_type, payload, subject=confirm_token.canonical_json(policy)
+    ):
+        return
     problem = pane_policy.validate(policy) or device_trust.validate_blocked(policy)
     if problem:
         await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", problem))
@@ -3281,8 +3308,17 @@ async def p2p_access_requests_approve(
     The grant is as narrow as the knock was — this member, this device, this
     workspace, this pane. Widening it to a wildcard is an edit the user makes
     in the editor, where they can see what they are widening.
+
+    Guarded like ``policy.set`` because it *is* a policy write: an allow rule
+    for a remote sender, minus the editor. Checked before the key is looked
+    up, so a socket without a confirmation learns nothing about which knocks
+    are waiting. Bound to the knock's key rather than a device: the key names
+    member, device, workspace and pane at once, so a confirmation minted for
+    one knock cannot approve another.
     """
     key = str(payload.get("key") or "")
+    if not await _confirmed(session, msg_id, msg_type, payload, subject=key):
+        return
     request = next((r for r in server_link.access_requests() if r["key"] == key), None)
     if request is None:
         await session.send_json(
@@ -3368,7 +3404,13 @@ async def p2p_trust_notices_dismiss(
 
 
 async def _confirmed(
-    session: "Session", msg_id: str, msg_type: str, payload: dict, *, device_id: str = ""
+    session: "Session",
+    msg_id: str,
+    msg_type: str,
+    payload: dict,
+    *,
+    device_id: str = "",
+    subject: str = "",
 ) -> bool:
     """Whether this trust-changing request carries a live confirmation.
 
@@ -3380,7 +3422,9 @@ async def _confirmed(
     spent to block another. See ``confirm_token`` for what this is for — it is
     the MCP and plugin paths, not a process running as this user.
     """
-    reason = confirm_token.check(payload.get("confirm"), action=msg_type, device_id=device_id)
+    reason = confirm_token.check(
+        payload.get("confirm"), action=msg_type, device_id=device_id, subject=subject
+    )
     if not reason:
         return True
     log.warning("refusing %s: %s", msg_type, reason)
@@ -3551,6 +3595,64 @@ async def p2p_trust_device_unpair(
     await session.send_json(make_response(msg_id, msg_type, {"removed": removed}))
 
 
+@handler("p2p.trust.rebuild")
+async def p2p_trust_rebuild(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Start the trust record over after it has failed closed.
+
+    The one way out of a lock, and deliberately the only one. Everything about
+    it is shaped by what a lock means: this machine holds a marker saying it
+    once had cross-device trust, and cannot read the record — which is either a
+    real attack (somebody removed the state so the machine would re-pin their
+    keys) or, far more often, a Keychain item this build can no longer open.
+    Nothing here can tell those apart, and neither can the person; what it can
+    do is make sure the choice is theirs.
+
+    So it needs a confirmation token, which is minted in the renderer and
+    nowhere else: an MCP tool, a plugin, or anything else holding this socket
+    cannot perform it, however convincing its argument. And it refuses when the
+    store is healthy — a rebuild costs every pairing on this machine, and a
+    caller that asks for one against a readable store has misunderstood it.
+    """
+    if not await _confirmed(session, msg_id, msg_type, payload):
+        return
+    try:
+        result = await asyncio.to_thread(trust_store.rebuild_locked_store)
+    except trust_store.TrustStoreNotLocked as err:
+        await session.send_json(make_error(msg_id, msg_type, "NOT_LOCKED", str(err)))
+        return
+    except Exception as err:  # noqa: BLE001 - a vault that will not answer is worth saying
+        await session.send_json(
+            make_error(msg_id, msg_type, "REBUILD_FAILED", str(err))
+        )
+        return
+    # Reconnect, rather than clear the stop and call it done.
+    #
+    # The store is only half of it: the link caches the store's answer in
+    # `_trust_locked`, written once during authentication and by nothing else,
+    # and four paths read that cache — message delivery, policy writes, the
+    # roster and the snapshot. A rebuild that only cleared the store left the
+    # card on screen saying the record was unreadable, and cross-device traffic
+    # genuinely still refused, until the link happened to reconnect. On the
+    # machine this was reported from it had not reconnected for hours.
+    #
+    # And clearing the cache alone would be worse than leaving it: the rebuild
+    # erases the member pin too, so `_own_member` would go on naming a pin that
+    # no longer exists — a machine that looks recovered and answers "yes, that
+    # is one of mine" from a record that was deleted. Only re-authenticating
+    # settles both, because `_adopt_member` runs on the `auth.hello` reply and
+    # cannot be invoked without one.
+    #
+    # Unconditional. Getting here means the store was locked, and the case that
+    # a condition would skip — locked *after* a successful adoption, so the
+    # cache is empty and the link is up — is exactly the case that needs it.
+    await server_link.reconfigure()
+    # The panel is showing the lock; this is what empties it.
+    await _announce_trust_notices()
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
 @handler("p2p.trust.block")
 async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Refuse a device outright, ahead of every rule.
@@ -3567,7 +3669,9 @@ async def p2p_trust_block(session: "Session", msg_id: str, msg_type: str, payloa
             make_error(msg_id, msg_type, "BAD_REQUEST", "block needs a deviceId or a memberId")
         )
         return
-    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
+    if not await _confirmed(
+        session, msg_id, msg_type, payload, device_id=device_id, subject=member_id
+    ):
         return
     entry = {
         "deviceId": device_id,
@@ -3614,7 +3718,9 @@ async def p2p_trust_unblock(session: "Session", msg_id: str, msg_type: str, payl
         )
         return
 
-    if not await _confirmed(session, msg_id, msg_type, payload, device_id=device_id):
+    if not await _confirmed(
+        session, msg_id, msg_type, payload, device_id=device_id, subject=member_id
+    ):
         return
 
     def drop_block(policy: dict) -> None:
@@ -5558,7 +5664,13 @@ async def terminal_kill(session: "Session", msg_id: str, msg_type: str, payload:
     term_session_id = payload["terminal_session_id"]
     force = bool(payload.get("force", False))
     owner = app._PTY_OWNERS.get(term_session_id)
-    if owner is not session:
+    # An ownerless PTY is killable by anyone. The owner entry is dropped when a
+    # connection goes away, so refusing every caller once it was gone left a
+    # live PTY nothing could reach: the renderer had already dropped the pane
+    # record, and the process only died with the hourly ownerless sweep. A
+    # different LIVE connection still blocks the kill, which is the
+    # cross-window guard this check exists for.
+    if owner is not None and owner is not session:
         await session.send_json(
             make_error(
                 msg_id,
@@ -6615,6 +6727,18 @@ async def pipeline_auto_answer(session: "Session", msg_id: str, msg_type: str, p
 @handler("manual_pane.spawn")
 async def manual_pane_spawn(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
+    from .model_args import refuse_unsafe_shape
+
+    # Checked before the store sees it, not only where argv is built. A stored
+    # model is replayed on every restore, far from any assembly site, so this
+    # has to hold as an invariant of what is persisted rather than a habit of
+    # everything that later reads it.
+    unsafe = refuse_unsafe_shape(
+        str(payload.get("model") or ""), str(payload.get("effort") or "")
+    )
+    if unsafe:
+        await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", unsafe))
+        return
 
     project = app.project_store.record_manual_pane_spawn(
         payload["workspace_path"],
@@ -6623,6 +6747,8 @@ async def manual_pane_spawn(session: "Session", msg_id: str, msg_type: str, payl
         agent=payload.get("agent", ""),
         role=payload.get("role", ""),
         command=payload.get("command", ""),
+        model=payload.get("model", ""),
+        effort=payload.get("effort", ""),
         session_id=payload.get("session_id", ""),
         session_home_id=payload.get("session_home_id", ""),
         profile_id=_profile_pin_for_spawn(payload.get("agent", ""), payload.get("profile_id")),
@@ -6640,9 +6766,21 @@ async def manual_pane_spawn(session: "Session", msg_id: str, msg_type: str, payl
 async def manual_pane_unspawn(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    # Unspawn is the renderer saying this pane is gone for good, so a PTY still
+    # running under it goes with it. The renderer kills through its own terminal
+    # ref first and this loop then finds nothing; it is the panes without one —
+    # a restore placeholder, or a pane whose kill was refused — that would
+    # otherwise have their record removed below while the process kept running
+    # with nothing left pointing at it.
+    pane_id = payload["pane_id"]
+    for term_session_id in session.terminals.live_session_ids_for_pane(pane_id):
+        await session.terminals.kill(term_session_id, force=True)
+        app._PTY_OWNERS.pop(term_session_id, None)
+        app.attribution.unregister_pane(pane_id)
+
     project = app.project_store.record_manual_pane_unspawn(
         payload["workspace_path"],
-        pane_id=payload["pane_id"],
+        pane_id=pane_id,
         session_id=payload.get("session_id", "") or "",
     )
     await session.send_json(
@@ -7149,7 +7287,7 @@ async def agent_msg_list(session: "Session", msg_id: str, msg_type: str, payload
 
 @handler("agent_msg.route")
 async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    from . import app
+    from . import app, message_routing
 
     from_pane_id = str(payload.get("from_pane_id") or "")
     to = str(payload.get("to") or "")
@@ -7170,8 +7308,47 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
         )
         return
 
-    result = agent_messaging.resolve(from_pane_id, to)
-    if result.pane is None:
+    # The same resolver cli_send uses, so one address cannot mean two different
+    # things depending on whether an agent printed a block or called the tool.
+    # It answered "unknown device … not available yet" here for a target the
+    # tool delivered, because cross-device addressing was only ever wired into
+    # the tool (see message_routing).
+    routed = message_routing.route(from_pane_id, to)
+    if routed.remote is not None:
+        # `reply_to` does not travel. The relay frame carries to/sender/text/
+        # msg_key and nothing else (server_link.send_message), so threading a
+        # reply across machines would need a wire field the server and the far
+        # side both understand — a protocol change, not a routing one. The
+        # receiver still mints a correlation id from this msg_key, so the thread
+        # holds on its side; what is lost is the link back to the row on this
+        # one. Said here rather than left to be discovered from a missing field.
+        relayed = await message_routing.relay(
+            routed.remote, content, from_pane_id=from_pane_id, msg_key=msg_key
+        )
+        if relayed is not None:
+            await session.send_json(
+                make_response(
+                    msg_id,
+                    msg_type,
+                    {
+                        "ok": relayed.ok,
+                        "error": relayed.error or None,
+                        "code": relayed.code or None,
+                        "params": {},
+                        # No local pane to report: the window that owns the
+                        # target is on another machine and delivers it there.
+                        "target_display": routed.remote.to_string(),
+                        "target_workspace_path": routed.remote.workspace,
+                        "target_agent_key": "",
+                        "cross_workspace": True,
+                    },
+                )
+            )
+            return
+        # No link configured on this machine: fall through to the answer this
+        # handler gave before, which `route` carried along with the address.
+
+    if routed.pane is None:
         # `code`/`params` let the sending window show the failure in the user's
         # language instead of parsing the English sentence in `error`.
         await session.send_json(
@@ -7180,13 +7357,16 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
                 msg_type,
                 {
                     "ok": False,
-                    "error": result.error or "unresolved",
-                    "code": result.code,
-                    "params": result.params or {},
+                    "error": routed.error or "unresolved",
+                    "code": routed.code or None,
+                    "params": routed.params or {},
                 },
             )
         )
         return
+    result = agent_messaging.ResolveResult(
+        pane=routed.pane, cross_workspace=routed.cross_workspace
+    )
 
     if result.pane.pane_id == from_pane_id:
         await session.send_json(

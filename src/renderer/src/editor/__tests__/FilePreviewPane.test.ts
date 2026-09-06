@@ -10,8 +10,13 @@ i18n.global.locale.value = 'en-US'
 function makeBackend() {
   return {
     httpUrl: ref('http://127.0.0.1:8123'),
+    wsUrl: ref('ws://127.0.0.1:8123/ws?t=tok'),
     status: ref('connected'),
-    send: vi.fn(async () => ({ payload: { ok: true } })),
+    send: vi.fn(async (type: string) =>
+      type === 'fs.page_capability'
+        ? { payload: { ok: true, cap: 'CAPWS', ws_b64: 'L3dz' } }
+        : { payload: { ok: true } },
+    ),
   }
 }
 
@@ -59,7 +64,7 @@ describe('FilePreviewPane – image', () => {
     const img = wrapper.find('img.fpv-img')
     expect(img.exists()).toBe(true)
     expect(img.attributes('src')).toBe(
-      'http://127.0.0.1:8123/fs/raw?workspace=%2Fws&rel=assets%2Fphoto.png',
+      'http://127.0.0.1:8123/fs/raw?workspace=%2Fws&rel=assets%2Fphoto.png&t=tok',
     )
   })
 
@@ -89,7 +94,7 @@ describe('FilePreviewPane – media', () => {
     const video = wrapper.find('video.fpv-video')
     expect(video.exists()).toBe(true)
     expect(video.attributes('controls')).toBeDefined()
-    expect(video.attributes('src')).toContain('/fs/raw?workspace=%2Fws&rel=clip.mp4')
+    expect(video.attributes('src')).toContain('/fs/raw?workspace=%2Fws&rel=clip.mp4&t=tok')
   })
 
   it('renders an <audio controls> for audio files', async () => {
@@ -127,8 +132,10 @@ describe('FilePreviewPane – html', () => {
     await flushPromises()
     const frame = wrapper.find('iframe.fpv-html-frame')
     expect(frame.exists()).toBe(true)
-    // L3dz = unpadded URL-safe base64 of '/ws'; slashes in rel survive.
-    expect(frame.attributes('src')).toBe('http://127.0.0.1:8123/fs/page/L3dz/site/index.html')
+    // The cap and ws_b64 come from fs.page_capability over the socket; the
+    // ws token itself must not appear anywhere in this URL.
+    expect(frame.attributes('src')).toBe('http://127.0.0.1:8123/fs/page/CAPWS/L3dz/site/index.html')
+    expect(frame.attributes('src')).not.toContain('tok')
     // Empty sandbox attribute = no allow-* tokens (scripts/forms blocked).
     expect(frame.attributes('sandbox')).toBe('')
   })
@@ -148,7 +155,7 @@ describe('FilePreviewPane – binary hex dump', () => {
     await flushPromises()
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8123/fs/raw?workspace=%2Fws&rel=archive.7z',
+      'http://127.0.0.1:8123/fs/raw?workspace=%2Fws&rel=archive.7z&t=tok',
       { headers: { Range: 'bytes=0-65535' } },
     )
     const hex = wrapper.find('pre.fpv-hex')

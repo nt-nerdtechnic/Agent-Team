@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
-// "Open history → arrow → Enter → you are in the pane" is the fast path the
-// go-to-pane action exists for. The handler sits on the modal root, so it must
+// ↑/↓ browse the history list. The handler sits on the modal root, so it must
 // not steal keys from the inputs nested inside it: the rename box and the
-// log-search box (which steps matches with ↑/↓) keep their own arrows, and
-// rows keep Enter meaning "select this row".
+// log-search box (which steps matches with ↑/↓) keep their own arrows. Enter
+// is left alone everywhere — rows keep their native "select this row", and in
+// the search box it must not fire an action out from under a search.
 import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import AgentHistoryModal from '../AgentHistoryModal.vue'
@@ -92,31 +92,24 @@ describe('AgentHistoryModal keyboard browsing', () => {
     expect(selectedLabel(wrapper)).toContain('bravo')
   })
 
-  it('arrows work from the search field, so type→arrow→enter flows', async () => {
+  it('arrows work from the search field, but Enter there does nothing', async () => {
     const wrapper = await mountModal([entry('alpha'), entry('bravo')])
     const search = wrapper.get('.agent-history-search-input')
 
     await search.trigger('keydown', { key: 'ArrowDown' })
     expect(selectedLabel(wrapper)).toContain('bravo')
 
+    // Enter used to run the selected row's primary action from here, which
+    // jumped to that pane and took the modal down with it — while the query
+    // was still being typed.
     await search.trigger('keydown', { key: 'Enter' })
-    expect(wrapper.emitted('focus-pane')).toHaveLength(1)
-    expect((wrapper.emitted('focus-pane')![0][0] as SpawnHistoryEntry).paneId).toBe('bravo')
-  })
-
-  it('Enter resumes a removed entry instead of jumping to a pane', async () => {
-    const wrapper = await mountModal([entry('alpha', { removedAt: '2026-08-08T11:00:00Z' })])
-
-    await wrapper.get('.agent-history-search-input').trigger('keydown', { key: 'Enter' })
-
-    expect(wrapper.emitted('resume')).toHaveLength(1)
     expect(wrapper.emitted('focus-pane')).toBeUndefined()
+    expect(wrapper.emitted('resume')).toBeUndefined()
+    expect(selectedLabel(wrapper)).toContain('bravo')
   })
 
-  it('Enter does nothing for a removed entry with no session to resume', async () => {
-    const wrapper = await mountModal([
-      entry('alpha', { removedAt: '2026-08-08T11:00:00Z', sessionId: undefined }),
-    ])
+  it('Enter while searching leaves a removed entry alone as well', async () => {
+    const wrapper = await mountModal([entry('alpha', { removedAt: '2026-08-08T11:00:00Z' })])
 
     await wrapper.get('.agent-history-search-input').trigger('keydown', { key: 'Enter' })
 

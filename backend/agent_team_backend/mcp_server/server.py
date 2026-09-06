@@ -481,9 +481,68 @@ def resolve_spawn(request_id: str, verdict: dict[str, Any]) -> bool:
     return True
 
 
+def _refuse_unsupported_model(agent_key: str, model: str, effort: str) -> str:
+    """Why this CLI cannot be asked for that model or effort, or "" if it can.
+
+    Checked here, before the request is broadcast, so an unsupported ask is
+    answered at once instead of waiting out the spawn verdict and then
+    reporting a timeout that blames the window. The capability mirrors the
+    frontend spec, which owns the flags themselves; the guard test in
+    test_cli_vendors_registry.py keeps the two from drifting.
+    """
+    # Trimmed here rather than trusting the caller, so this helper gives the
+    # same answer as the renderer's modelArgsFor for any input. cli_open_agent
+    # already strips; a future caller that forgets would otherwise get a
+    # backend/renderer disagreement instead of a refusal.
+    from agent_team_backend.model_args import refuse_unsafe_shape
+
+    # Trimmed here rather than trusting the caller, so this helper gives the
+    # same answer as the renderer's modelArgsFor for any input.
+    model = model.strip()
+    effort = effort.strip()
+    if not model and not effort:
+        return ""
+    from agent_team_backend.cli_vendors import registry
+
+    # Shape first, and regardless of what this vendor supports: a value that
+    # would split into extra arguments is malformed no matter who receives it,
+    # and saying "unsupported" here would send the caller off to try another
+    # CLI with the same injected string.
+    unsafe = refuse_unsafe_shape(model, effort)
+    if unsafe:
+        return unsafe
+    spec = registry.VENDORS.get(agent_key)
+    if spec is None:
+        return ""  # unknown agent key — the spawn gate reports that itself
+    if model and not spec.supports_model:
+        return (
+            f"{agent_key} cannot be told which model to run at launch, so this "
+            f"would have started on its default. Open it without `model`, or "
+            f"pick a CLI that takes one."
+        )
+    if effort and not spec.supports_effort:
+        if spec.supports_model:
+            return (
+                f"{agent_key} has no separate effort setting — it takes effort "
+                f"as part of the model id (like `gpt-5.3-codex-high`). Put it "
+                f"in `model` instead."
+            )
+        return f"{agent_key} cannot be told a reasoning effort at launch."
+    if effort and spec.known_efforts and effort not in spec.known_efforts:
+        accepted = ", ".join(spec.known_efforts)
+        return f"{agent_key} does not accept effort {effort!r}. It accepts: {accepted}."
+    return ""
+
+
 @server.tool()
 async def cli_open_agent(
-    agent: str, name: str, task: str, ctx: Context, workspace_path: str = ""
+    agent: str,
+    name: str,
+    task: str,
+    ctx: Context,
+    workspace_path: str = "",
+    model: str = "",
+    effort: str = "",
 ) -> dict[str, Any]:
     """Open a new CLI pane and give it a task.
 
@@ -523,6 +582,23 @@ async def cli_open_agent(
     Poll cli_get_status / cli_wait_idle whenever you need to be sure. An
     external or host caller gets no such message at all and must poll.
 
+    `model` names the model the new pane runs, and `effort` its reasoning
+    level. Both are optional, and asking a CLI that cannot take them is
+    REFUSED rather than ignored — otherwise the pane would start on the
+    default and look no different from one that got what it asked for.
+
+    That guarantee covers the vendor, not the value: a CLI that accepts
+    `--model` may still reject the id itself, and several report that only
+    briefly before continuing on their default. So a refusal here means the
+    pane did not open, while silence means it opened — not that the model was
+    recognised. Which CLIs accept them differs: most take a
+    model, only some take a separate effort — the rest encode effort in the
+    model id itself (cursor's `gpt-5.3-codex-high`), and two take neither.
+    The refusal names what that CLI accepts, so ask for what you want and
+    read the error rather than guessing first. Model ids are not checked
+    here — an unknown one is the CLI's own error to report — but effort is
+    checked against that CLI's vocabulary before the pane opens.
+
     Use the returned name, not the one you asked for: a concurrent request may
     have taken that name, in which case yours gets a suffix.
 
@@ -548,6 +624,9 @@ async def cli_open_agent(
         return {"ok": False, "error": "name is required — it doubles as the pane's address"}
     if not (task or "").strip():
         return {"ok": False, "error": "task is empty"}
+    refusal = _refuse_unsupported_model(agent_key, (model or "").strip(), (effort or "").strip())
+    if refusal:
+        return {"ok": False, "error": refusal}
     target_workspace = ""
     if caller.kind == "pane":
         me = caller.pane_id
@@ -572,6 +651,12 @@ async def cli_open_agent(
             "name": pane_name,
             "task": task,
         }
+        # Only sent when asked for: a window on an older build ignores keys it
+        # does not know, and an empty one would be indistinguishable anyway.
+        if (model or "").strip():
+            spawn_payload["model"] = model.strip()
+        if (effort or "").strip():
+            spawn_payload["effort"] = effort.strip()
         if target_workspace:
             # No parent pane owns this request — the owning window is decided
             # by workspace match instead (see App.vue's agent_spawn.request
@@ -602,91 +687,38 @@ async def cli_open_agent(
     return result
 
 
-# Server-side refusals of messages.send, in the vocabulary the local resolver
-# already uses. DEVICE_OFFLINE stays distinct from "target-offline": one is the
-# whole machine unreachable, the other one window disconnected, and only the
-# second is worth waiting out.
-_RELAY_ERROR_CODES = {
-    "DEVICE_OFFLINE": "device-offline",
-    "NOT_FOUND": "unknown-target",
-    # Minted by the link itself (server_link.LINK_OFFLINE / LINK_UNAUTHORIZED),
-    # not by the server: the message never left this machine. Spelled out rather
-    # than imported to keep this module free of a server_link import at import
-    # time; server_link defines the same two strings.
-    "LINK_OFFLINE": "link-offline",
-    "LINK_UNAUTHORIZED": "link-unauthorized",
-}
-
-# The subset of the above that describes *this machine's* link, not the target.
-# They get a different sentence because "refused" would point the agent at its
-# address when the address was never the problem.
-_LINK_STATE_CODES = frozenset({"link-offline", "link-unauthorized"})
-
-
 async def _send_to_device(
     address: Any, text: str, *, caller: Any, me: str
 ) -> dict[str, Any] | None:
     """Relay a `<device>/<workspace>/<pane>` message through the server link.
 
+    The relay itself is shared with the bare-line path (see message_routing);
+    what is MCP's own is the msg_key bookkeeping that cli_check_message reads
+    back, which exists nowhere else in the backend.
+
     Returns None when there is no link to relay over, so the caller can answer
     the way it always did for an unknown device.
     """
-    from agent_team_backend import agent_messaging, server_link
+    from agent_team_backend import message_routing
 
-    sender = agent_messaging.get(me) if me else None
-    msg_key = f"{me or caller.kind}:mcp:{secrets.token_hex(8)}"
-    reply = await server_link.send_message(
-        to={
-            "deviceId": address.device_id,
-            "workspace": address.workspace,
-            "paneName": address.pane_name,
-        },
-        sender=(
-            {
-                "workspace": sender.workspace_label,
-                "paneName": sender.name,
-                "paneId": sender.pane_id,
-            }
-            if sender
-            else None
-        ),
-        text=text,
-        msg_key=msg_key,
+    origin = me or caller.kind
+    msg_key = f"{origin}:mcp:{secrets.token_hex(8)}"
+    relayed = await message_routing.relay(
+        address, text, from_pane_id=me, msg_key=msg_key
     )
-    if reply is None:
+    if relayed is None:
         return None
-    if not reply.get("ok"):
-        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
-        code = str(error.get("code") or "SEND_FAILED")
-        detail = str(error.get("message") or "")
-        mapped = _RELAY_ERROR_CODES.get(code, code)
-        if mapped in _LINK_STATE_CODES:
-            # The link's own words plus what to do about them. "Not connected"
-            # alone sent an agent looking at the address it typed, when the
-            # address was never the problem — and worse, told it to retry in
-            # the two states where retrying cannot help.
-            state = str(error.get("state") or "")
-            what_to_do = {
-                "unauthorized": "this machine has to sign in to the server again",
-                "unreachable": "the server address is not answering from here",
-                "connecting": "the link is still starting up; this one is worth retrying",
-            }.get(state, "")
-            return {
-                "ok": False,
-                "error": f'"{address.to_string()}" could not be reached — '
-                + (detail or code)
-                + (f". {what_to_do}" if what_to_do else ""),
-                "error_code": mapped,
-                "link_state": state,
-                "last_error": str(error.get("lastError") or ""),
-            }
-        return {
+    if not relayed.ok:
+        answer: dict[str, Any] = {
             "ok": False,
-            "error": f'sending to "{address.to_string()}" was refused ({code})'
-            + (f": {detail}" if detail else ""),
-            "error_code": mapped,
+            "error": relayed.error,
+            "error_code": relayed.code,
         }
-    _record_message_sent(msg_key, address.to_string(), me or caller.kind, text)
+        if relayed.code in message_routing.LINK_STATE_CODES:
+            answer["link_state"] = relayed.link_state
+            answer["last_error"] = relayed.last_error
+        return answer
+    _record_message_sent(msg_key, address.to_string(), origin, text)
     return {
         "ok": True,
         "target": address.to_string(),
@@ -906,7 +938,7 @@ async def cli_send(
     retry shortly — which is what this used to do — is advice that works for
     one of them.
     """
-    from agent_team_backend import agent_messaging, app
+    from agent_team_backend import agent_messaging, app, message_routing
     from agent_team_backend.ipc import make_event
 
     try:
@@ -943,36 +975,26 @@ async def cli_send(
                 "error_code": result.code or "unknown-pane-id",
             }
     else:
-        address = agent_messaging.parse_target(to)
-        if address.device_id and not agent_messaging.is_local_device(address.device_id):
-            relayed = await _send_to_device(address, text, caller=caller, me=me)
+        # The resolution order lives in message_routing, shared with the
+        # bare-line path so the two cannot answer the same address differently.
+        routed = message_routing.route(me, to)
+        if routed.remote is not None:
+            relayed = await _send_to_device(routed.remote, text, caller=caller, me=me)
             # None means no server was ever configured on this machine; falling
             # through leaves the answer exactly what it was before cross-device
             # addressing existed. A configured-but-unreachable server does not come
             # back as None — it answers "link-offline" above.
             if relayed is not None:
                 return await _with_delivery_wait(relayed, wait_s)
-
-        result = agent_messaging.resolve(me, to)
-        if result.pane is None:
-            # Only now is the leading segment reconsidered as a device *name*. A
-            # target that resolves on this machine never reaches here, so naming a
-            # laptop after a folder can never redirect an address that works today
-            # (see agent_messaging.parse_remote_target). With no server configured
-            # the roster is empty and this is a no-op, leaving the answer below
-            # exactly what it always was.
-            remote = agent_messaging.parse_remote_target(to)
-            if remote.error:
-                return {"ok": False, "error": remote.error, "error_code": remote.code}
-            if remote.address is not None:
-                relayed = await _send_to_device(remote.address, text, caller=caller, me=me)
-                if relayed is not None:
-                    return await _with_delivery_wait(relayed, wait_s)
+        if routed.pane is None:
             return {
                 "ok": False,
-                "error": result.error or f'unknown target "{to}"',
-                "error_code": result.code or "unknown-target",
+                "error": routed.error or f'unknown target "{to}"',
+                "error_code": routed.code or "unknown-target",
             }
+        result = agent_messaging.ResolveResult(
+            pane=routed.pane, cross_workspace=routed.cross_workspace
+        )
     if me and result.pane.pane_id == me:
         return {"ok": False, "error": "that is your own pane"}
 
@@ -1405,6 +1427,11 @@ async def cli_pending_incoming(ctx: Context, limit: int = 20) -> dict[str, Any]:
     someone might need to interrupt. A non-empty answer is grounds to wrap up
     the turn you are in, which is what lets the message land.
 
+    `excerpt` is 200 characters with the whitespace flattened: enough to tell
+    what a message is about, not enough to act on. cli_read_incoming returns
+    what was actually written, and can take a message off the queue so it is
+    not typed in afterwards.
+
     Returns {ok, count, messages: [{uid, sender, status, age_seconds, kind?,
     excerpt}]}, oldest first. `status` is "queued" (waiting for you to be
     between turns) or "delivering" (going in right now). `kind` marks a message
@@ -1459,6 +1486,175 @@ async def cli_pending_incoming(ctx: Context, limit: int = 20) -> dict[str, Any]:
             message["kind"] = row["kind"]
         messages.append(message)
     return {"ok": True, "count": len(messages), "messages": messages}
+
+
+# The full text of one incoming message, bounded by what the log itself stores
+# (agent_message_log clamps content at 64K chars on the way in, so anything
+# longer was already truncated before this tool could see it).
+_INCOMING_FULL_MAX_CHARS = 64 * 1024
+
+# How many messages one read may take at once. Small on purpose: each one is up
+# to 64K of the caller's context, and taking more than a handful in a single
+# call is a sign of an agent draining a backlog it should be answering.
+_INCOMING_READ_MAX = 20
+
+
+@server.tool()
+async def cli_read_incoming(
+    ctx: Context,
+    uid: str = "",
+    limit: int = 5,
+    include_delivered: bool = False,
+    peek: bool = False,
+) -> dict[str, Any]:
+    """Read the full text of messages sent TO you.
+
+    cli_pending_incoming tells you a message exists and shows 200 characters
+    of it with the whitespace flattened. This returns what was actually
+    written. Until it existed you could read another pane's entire log but not
+    one message addressed to yourself.
+
+    BY DEFAULT READING CONSUMES. A message you read here is not typed into
+    your input box afterwards — you have it, so delivering it again would
+    repeat it. Pass `peek: true` to read without consuming, which leaves
+    delivery exactly as it was.
+
+    `uid` reads one message (the uid comes from cli_pending_incoming);
+    omitting it reads the oldest `limit` waiting for you. `include_delivered`
+    also returns messages already typed into your pane, for looking back at
+    what someone said — those are never consumed, because they already were.
+
+    Consuming is two steps, and the failure mode is deliberate: the message is
+    reserved, handed to you, and only then released. If the release is lost
+    the reservation expires and the message goes BACK to the queue, so it may
+    reach you a second time. That is the safe direction — a duplicate is
+    visible and a loss is not. Treat a message you have already handled as
+    something to recognise, not something that cannot arrive twice.
+
+    Returns {ok, count, messages: [{uid, sender, status, kind?, content,
+    age_seconds, consumed}]}. `consumed` is per message and is false when the
+    read was a peek, when the message was already delivered, or when the
+    window could not be reached to release the reservation — in that last case
+    you have the text but delivery was left alone, so expect it in your pane.
+
+    Only a Navide CLI pane has an inbox. Messages are matched by your current
+    messaging name, so anything queued for a name you have been renamed away
+    from is not yours to see.
+    """
+    from agent_team_backend import agent_messaging
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    if caller.kind != "pane":
+        return {
+            "ok": False,
+            "error": (
+                "only a Navide CLI pane has an inbox — a host or external caller "
+                "has no messaging name for anything to be addressed to."
+            ),
+        }
+    me = agent_messaging.get(caller.pane_id)
+    if me is None:
+        return {"ok": False, "error": "this pane is no longer registered for messaging"}
+
+    wanted = [uid.strip()] if uid.strip() else []
+    count = max(1, min(int(limit), _INCOMING_READ_MAX))
+    args: dict[str, Any] = {
+        "paneId": caller.pane_id,
+        "uids": wanted,
+        "limit": count,
+        "includeDelivered": bool(include_delivered),
+        "reserve": not peek,
+        "maxChars": _INCOMING_FULL_MAX_CHARS,
+    }
+    reply = await _ui_request(
+        me.workspace_path,
+        "invoke",
+        caller=_pane_caller(caller.pane_id),
+        action="ui.messaging.readIncoming",
+        args=args,
+    )
+    degraded = ""
+    paused = False
+    if reply.get("ok"):
+        result = reply.get("result") or {}
+        rows = result.get("messages") or []
+        reserved = [str(u) for u in (result.get("reserved") or [])]
+        paused = bool(result.get("paused"))
+    else:
+        # The window did not answer. Read from the log instead of failing: the
+        # text is what was asked for and the log has it. Nothing is reserved,
+        # so delivery is untouched and the message still reaches the pane —
+        # answering with the text and saying so beats refusing outright.
+        from agent_team_backend import app
+
+        rows = await asyncio.to_thread(
+            app.agent_message_log.incoming, me.name, bool(include_delivered), count
+        )
+        if wanted:
+            rows = [r for r in rows if str(r.get("uid") or "") in set(wanted)]
+        reserved = []
+        degraded = str(reply.get("error") or "the window owning this pane did not answer")
+
+    # Second step. Nothing is consumed until the window is told the text
+    # reached us; if this call fails the reservation expires on its own and the
+    # message returns to the queue, which is why `consumed` is reported per
+    # message rather than assumed.
+    released: set[str] = set()
+    if reserved:
+        settle = await _ui_request(
+            me.workspace_path,
+            "invoke",
+            caller=_pane_caller(caller.pane_id),
+            action="ui.messaging.settleRead",
+            args={"paneId": caller.pane_id, "uids": reserved, "ok": True},
+        )
+        if settle.get("ok"):
+            released = {str(u) for u in ((settle.get("result") or {}).get("settled") or [])}
+
+    now_ms = time.time() * 1000.0
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        row_uid = str(row.get("uid") or "")
+        created = float(row.get("createdAt") or row.get("created_at") or now_ms)
+        message: dict[str, Any] = {
+            "uid": row_uid,
+            "sender": str(row.get("sender") or ""),
+            "status": str(row.get("status") or ""),
+            "content": str(row.get("content") or "")[:_INCOMING_FULL_MAX_CHARS],
+            "age_seconds": round(max(0.0, now_ms - created) / 1000.0, 1),
+            "consumed": row_uid in released,
+        }
+        if row.get("kind"):
+            message["kind"] = row["kind"]
+        messages.append(message)
+
+    answer: dict[str, Any] = {"ok": True, "count": len(messages), "messages": messages}
+    if degraded:
+        answer["note"] = (
+            f"read from the message log because the window did not answer ({degraded}); "
+            "nothing was consumed, so these still reach your pane."
+        )
+        return answer
+    if paused and not reserved:
+        # Delivery being paused is why a read can come back with nothing while
+        # messages are in fact waiting. An empty answer would read as "you have
+        # no mail", which is the one thing this tool must never imply.
+        answer["note"] = (
+            "delivery is paused in this window, so nothing could be taken. Any "
+            "messages listed were read only; more may be waiting behind the pause."
+        )
+        return answer
+    stranded = [u for u in reserved if u not in released]
+    if stranded:
+        # Say it plainly rather than leaving the agent to compare two lists.
+        answer["note"] = (
+            f"{len(stranded)} message(s) were read but not consumed — the window "
+            "could not confirm. They stay queued and will reach your pane."
+        )
+    return answer
 
 
 # ── Reading another pane (cli_read_log / cli_get_status / cli_wait_idle) ────

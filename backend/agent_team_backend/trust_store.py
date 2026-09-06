@@ -155,6 +155,15 @@ ALL_NOTICE_KINDS = frozenset({
 })
 
 
+class TrustStoreNotLocked(RuntimeError):
+    """Raised when a rebuild is asked for and there is nothing wrong.
+
+    Refused rather than performed: a rebuild destroys every pairing, and a
+    caller that reaches for it against a healthy store has misunderstood what it
+    does. It is never the answer to "something feels off".
+    """
+
+
 class TrustStoreLocked(RuntimeError):
     """The state was initialised once and cannot be read now.
 
@@ -170,6 +179,24 @@ class TrustStoreFull(RuntimeError):
 _lock = threading.RLock()
 _state: dict[str, Any] | None = None
 _locked_reason = ""
+#: A read that failed for a reason that may not still be true — a locked
+#: keychain, a dismissed authorisation dialog, a ``security`` timeout. Reported
+#: like a lock, because nothing works while it holds, but not latched.
+_transient_reason = ""
+_transient_failures = 0
+#: How many consecutive transient failures before this is treated as settled.
+#:
+#: Not unlimited, and not one. Retrying for ever means every trust operation
+#: shells out to ``security`` again — which on a locked keychain means another
+#: authorisation dialog, so "keep trying" turns into a machine that will not
+#: stop asking. Giving up after the first means one dismissed dialog locks the
+#: process until it restarts, which is the failure this exists to remove.
+#:
+#: Three is a judgement, not a measurement: enough that a dialog dismissed by
+#: accident, or a keychain unlocked a moment later, costs nothing; few enough
+#: that a keychain which is genuinely unavailable settles quickly instead of
+#: prompting on every call.
+TRANSIENT_RETRY_LIMIT = 3
 
 
 # ---- storage -----------------------------------------------------------------
@@ -269,8 +296,22 @@ def _write(state: dict[str, Any]) -> None:
 
 
 def _load_locked() -> dict[str, Any]:
-    """Read the state, or raise. Caller holds ``_lock``."""
-    global _state, _locked_reason
+    """Read the state, or raise. Caller holds ``_lock``.
+
+    Two kinds of failure, and they are not the same kind of thing:
+
+    *The record is there and does not parse* — latched. Reading it again returns
+    the same bytes, so retrying is only a slower way to reach the same answer,
+    and the stability is the point: this is the state a person has to be told
+    about and decide on.
+
+    *The record could not be read at all* — retried, up to
+    ``TRANSIENT_RETRY_LIMIT``. None of the things that land here is a statement
+    about the record, and latching on the first meant one mis-clicked dialog
+    pinned the process until it restarted — with the only exit on that screen
+    being one that erases a record nothing was ever wrong with.
+    """
+    global _state, _locked_reason, _transient_reason, _transient_failures
     if _state is not None:
         return _state
     if _locked_reason:
@@ -282,9 +323,21 @@ def _load_locked() -> dict[str, Any]:
         raw = _vault().read_app_secret(SECRET_NAME)
     except Exception as err:  # noqa: BLE001 - a vault that will not answer is a lock
         if marker is not None:
-            _locked_reason = f"the device trust store could not be read ({err})"
-            raise TrustStoreLocked(_locked_reason) from err
+            # Not latched on the first one. A locked keychain, a dismissed
+            # authorisation dialog and a `security` timeout all land here, and
+            # none of them says anything about the record — while latching sent
+            # the person to the one screen that offers to erase it.
+            _transient_failures += 1
+            reason = f"the device trust store could not be read ({err})"
+            if _transient_failures >= TRANSIENT_RETRY_LIMIT:
+                _transient_reason = ""
+                _locked_reason = reason
+            else:
+                _transient_reason = reason
+            raise TrustStoreLocked(reason) from err
         raw = None
+    _transient_failures = 0
+    _transient_reason = ""
     parsed = _parse(raw)
 
     if marker is not None:
@@ -344,6 +397,17 @@ def load() -> dict[str, Any]:
     """The state document. Blocking (Keychain); call off the event loop."""
     with _lock:
         return dict(_load_locked())
+
+
+def transient_lock() -> bool:
+    """Whether the current refusal is a read that may succeed next time.
+
+    What it gates is the offer to start over: that erases every pairing, and on
+    a keychain that was locked for a moment there is nothing wrong to erase. The
+    surface reports the same stop either way; only the button waits.
+    """
+    with _lock:
+        return bool(_transient_reason) and not _locked_reason
 
 
 def locked_reason() -> str:
@@ -1188,13 +1252,62 @@ def dismiss_notice(key: str) -> bool:
         return False
 
 
+def rebuild_locked_store() -> dict[str, Any]:
+    """Start the trust record over, on purpose, with a person present.
+
+    The lock exists because a *silent* reset is the attack: delete the state and
+    the machine re-pins whatever keys it is next shown, with nobody the wiser.
+    Which is why there is no automatic recovery and never should be — but the
+    absence of any recovery at all was not a decision anybody made, and on a
+    machine that hits this the only way out was Keychain Access. That is not a
+    safer state; it is the same reset, performed with less information and
+    without clearing the marker, so the two halves stay disagreeing.
+
+    So: the same act, made visible and consistent. It refuses unless the store
+    is actually locked, it drops the record and the marker together so they
+    cannot disagree afterwards, and every pin goes with it — both machines have
+    to pair again, which is the point. The caller is responsible for the
+    confirmation that says a person asked for this; nothing here can tell.
+    """
+    global _state, _locked_reason, _transient_reason, _transient_failures
+    with _lock:
+        if not _locked_reason:
+            try:
+                _load_locked()
+            except TrustStoreLocked:
+                pass
+        if not _locked_reason:
+            # Not "is it locked right now" — "has it settled". A read that
+            # failed once may succeed on the next call, and erasing every
+            # pairing on the strength of a dismissed dialog is the mistake this
+            # distinction exists to prevent.
+            raise TrustStoreNotLocked(
+                "the device trust store is readable, or has not finished retrying"
+            )
+        cleared = _locked_reason
+        _transient_reason = ""
+        _transient_failures = 0
+        _vault().write_app_secret(SECRET_NAME, None)
+        # A JSON null reads back as "no marker" (kv_get's default), which is
+        # what the marker's absence means; the kv store has no delete.
+        _database().kv_set(INITIALISED_KEY, None, now=0)
+        _state = None
+        _locked_reason = ""
+        _seen_pending.clear()
+        log.warning("device trust store rebuilt after a lock: %s", cleared)
+        return {"rebuilt": True, "was": cleared}
+
+
 def _reset_for_test() -> None:
     """Forget the process cache and the marker. Tests run against a throwaway
     vault and a throwaway data dir, so this touches nothing real."""
-    global _state, _locked_reason, _seen_last_flush
+    global _state, _locked_reason, _transient_reason, _transient_failures
+    global _seen_last_flush
     with _lock:
         _state = None
         _locked_reason = ""
+        _transient_reason = ""
+        _transient_failures = 0
         # Module-level too, and just as much part of "this process has seen
         # nothing". Left behind, a batch recorded by one test is still pending
         # when the next starts and lands in its state document instead.

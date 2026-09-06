@@ -6,6 +6,13 @@ export const SPEC = {
   agentKey: 'pi',
   label: 'Pi',
   defaultCommand: 'pi',
+  // Like claude, pi warns and continues on an unknown level rather than
+  // failing, so the vocabulary is checked before launch. pi also accepts
+  // `provider/id:<thinking>` in --model; the flag is used instead so the two
+  // arguments stay independent.
+  modelArgs: (m) => `--model ${m}`,
+  effortArgs: (e) => `--thinking ${e}`,
+  knownEfforts: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
   // no skipPermissionFlag: pi has no permission system at all
   // (bash/edit tools execute directly, nothing to bypass)
   // Creates a NEW session when the id doesn't exist, resumes when it does.

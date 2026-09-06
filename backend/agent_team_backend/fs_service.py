@@ -86,10 +86,49 @@ def _resolve_safe(
     # rejects it — that route is how a caller could otherwise enumerate the
     # internal state. Nothing under the dir opens up either; every child except
     # the allowed subtrees fails the guard on its own path.
-    if allow_internal_root and target == root / PROJECT_DIR_NAME:
+    if allow_internal_root and _same_path(target, root / PROJECT_DIR_NAME):
         return target
     _reject_protected_internal_dir(target)
     return target
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    """Whether two paths name the same directory entry on disk.
+
+    ``==`` compares strings, and on a case-insensitive filesystem (APFS by
+    default) ``.Agent-Team`` and ``.agent-team`` are different strings for the
+    same directory — ``Path.resolve()`` does not fold case, so a string
+    comparison lets the internal-dir guard be walked around by capitalising
+    one letter. ``samefile`` asks the filesystem, which also covers a symlink
+    that points into the internal dir. Either path missing means "not the
+    same" — the caller still gets its 404 later, but never a false pass.
+    """
+    if a == b:
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _internal_dir_index(parts: tuple[str, ...]) -> int | None:
+    """Index of the ``.agent-team`` component in an absolute, resolved path.
+
+    Matched by identity on disk, not by name: for each prefix of the path,
+    ask whether it is the same entry as ``<parent>/.agent-team``. A name that
+    differs only in case, in Unicode normalisation, or by way of a symlink
+    still lands on the internal dir and is still caught.
+    """
+    for i, part in enumerate(parts):
+        if part == PROJECT_DIR_NAME:
+            return i
+        if i == 0:
+            continue
+        prefix = Path(*parts[: i + 1])
+        candidate = prefix.parent / PROJECT_DIR_NAME
+        if _same_path(prefix, candidate):
+            return i
+    return None
 
 
 def _resolve_mutation_safe(workspace_path: str, rel_path: str) -> Path:
@@ -128,15 +167,15 @@ def _reject_protected_internal_dir(target: Path) -> None:
     ``reports/`` subtrees are allowed through, exactly as before.
     """
     parts = target.parts
-    for i, part in enumerate(parts):
-        if part != PROJECT_DIR_NAME:
-            continue
-        # `target` is already resolve()d, so a traversal like
-        # `.agent-team/plans/../chat-threads.json` normalizes to a protected
-        # path before reaching this check.
-        nxt = parts[i + 1] if i + 1 < len(parts) else None
-        if nxt not in _ALLOWED_AGENT_TEAM_SUBDIRS:
-            raise FsError("the internal directory is protected")
+    i = _internal_dir_index(parts)
+    if i is None:
+        return
+    # `target` is already resolve()d, so a traversal like
+    # `.agent-team/plans/../chat-threads.json` normalizes to a protected
+    # path before reaching this check.
+    nxt = parts[i + 1] if i + 1 < len(parts) else None
+    if nxt not in _ALLOWED_AGENT_TEAM_SUBDIRS:
+        raise FsError("the internal directory is protected")
 
 
 def _entry(root: Path, parent: Path, name: str, is_dir: bool) -> dict[str, Any]:
@@ -202,7 +241,7 @@ def list_dir(
             internal_root = root / PROJECT_DIR_NAME
             for de in candidates:
                 name = de.name
-                if target == internal_root and name not in _ALLOWED_AGENT_TEAM_SUBDIRS:
+                if _same_path(target, internal_root) and name not in _ALLOWED_AGENT_TEAM_SUBDIRS:
                     continue
                 entries.append(_entry(root, target, name, True))
         else:
@@ -215,7 +254,7 @@ def list_dir(
             internal_root = root / PROJECT_DIR_NAME
             for de in scan:
                 name = de.name
-                if target == internal_root and name not in _ALLOWED_AGENT_TEAM_SUBDIRS:
+                if _same_path(target, internal_root) and name not in _ALLOWED_AGENT_TEAM_SUBDIRS:
                     continue  # internal state — only the user-facing subtrees show
                 if name.startswith(".") and not show_hidden:
                     continue

@@ -10,6 +10,7 @@
 // (server_link.DEFAULT_SERVER_URL). A typo'd address used to produce a link
 // that silently never dialled, and there was no correct value a user could
 // have discovered on their own.
+import { canonicalJson } from '../../../shared/canonicalJson'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { LegalRoute } from '../../../shared/legalLinks'
@@ -234,6 +235,9 @@ interface NetworkSnapshot {
    * an attacker who deleted that state wants next.
    */
   trustLocked?: string
+  /** True when that stop is a read that may succeed next time — the offer to
+   *  erase everything waits on this being false. */
+  trustLockedTransient?: boolean
 }
 
 /** The four the server defines; anything else is shown as the server spelled it. */
@@ -410,6 +414,45 @@ async function refresh(): Promise<void> {
 const trustNotices = computed<TrustNotice[]>(() => network.value?.trustNotices ?? [])
 const trustPending = computed<PendingDevice[]>(() => network.value?.trustPending ?? [])
 const trustLocked = computed(() => network.value?.trustLocked ?? '')
+/** The stop is a read that may succeed on the next try. Same card, but no offer
+ *  to erase everything: a keychain locked for a moment has nothing wrong with
+ *  it to erase, and that offer is the one act here nobody can undo. */
+const trustLockedTransient = computed(() => network.value?.trustLockedTransient === true)
+/** Two clicks, not one: the first only reveals what the second costs. A single
+ *  button beside an explanation of a lock is a button people press to make the
+ *  red text go away. */
+const rebuildArmed = ref(false)
+const rebuildDone = ref(false)
+
+/**
+ * Erase this machine's trust record and start again.
+ *
+ * Carries a confirmation token like every other trust-changing act, which is
+ * what keeps it out of reach of MCP and the plugin broker — they talk to the
+ * backend directly and cannot mint one. The backend refuses it outright unless
+ * the store is genuinely locked.
+ */
+async function rebuildTrust(): Promise<void> {
+  if (pending.value) return
+  pending.value = 'trust-rebuild'
+  try {
+    const resp = await props.backend.send(
+      'p2p.trust.rebuild',
+      await withConfirmation('p2p.trust.rebuild', '', {}),
+    )
+    if (!resp.ok) {
+      error.value = resp.error?.message ?? t('account.err-generic')
+      return
+    }
+    rebuildArmed.value = false
+    rebuildDone.value = true
+    await loadNetwork()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    pending.value = ''
+  }
+}
 const paused = computed(() => status.value?.paused === true)
 
 /** Which switch or notice is mid-flight, so a double click cannot act twice. */
@@ -529,8 +572,9 @@ async function withConfirmation(
   action: string,
   deviceId: string,
   payload: Record<string, unknown> = {},
+  subject = '',
 ): Promise<Record<string, unknown>> {
-  const confirm = await window.agentTeam?.trustConfirm(action, deviceId)
+  const confirm = await window.agentTeam?.trustConfirm(action, deviceId, subject)
   // Sent through even when null: the backend's refusal names the reason, and
   // inventing a different one here would hide it.
   return { ...payload, confirm }
@@ -736,6 +780,12 @@ function lastSeenLabel(iso: string | undefined): string {
   const at = iso ? Date.parse(iso) : Number.NaN
   if (!Number.isFinite(at)) return t('settings.p2p.network.last-seen-unknown')
   const { unit, count } = relativeTime(at, Date.now())
+  // `count` is both the placeholder and the plural choice — vue-i18n reads it
+  // as the number to select on — so this call was already right and only the
+  // message was wrong: English said "38 minute(s) ago", a form written to avoid
+  // choosing that nobody says out loud. It now carries both cases. Chinese
+  // declines nothing and supplies one, which is what gets picked when there is
+  // only one.
   return t(`time.ago-${unit}`, { count })
 }
 
@@ -775,8 +825,12 @@ async function decide(key: string, type: string, args: Record<string, unknown>):
   }
 }
 
-function approveRequest(req: AccessRequest): void {
-  void decide(req.key, 'p2p.access_requests.approve', { key: req.key })
+async function approveRequest(req: AccessRequest): Promise<void> {
+  await decide(
+    req.key,
+    'p2p.access_requests.approve',
+    await withConfirmation('p2p.access_requests.approve', '', { key: req.key }, req.key),
+  )
 }
 
 function dismissRequest(req: AccessRequest): void {
@@ -819,7 +873,7 @@ function unblock(entry: BlockedEntry): void {
       await withConfirmation('p2p.trust.unblock', entry.deviceId, {
         deviceId: entry.deviceId,
         memberId: entry.memberId,
-      }),
+      }, entry.memberId),
     ))()
 }
 
@@ -972,7 +1026,7 @@ async function signPolicyNow(): Promise<void> {
     const doc = usingDefault ? { version: 1, default: 'deny', rules: [] } : held
     const resp = await props.backend.send(
       'p2p.policy.set',
-      await withConfirmation('p2p.policy.set', '', { policy: doc }),
+      await withConfirmation('p2p.policy.set', '', { policy: doc }, canonicalJson(doc)),
     )
     if (!resp.ok) {
       policySignError.value = resp.error?.message ?? t('account.err-generic')
@@ -1124,17 +1178,6 @@ onUnmounted(() => {
           </span>
         </p>
 
-        <!-- The link has lost trust state it once had. First, above everything,
-             and with no button: "start over" is precisely what an attacker who
-             deleted that state is waiting for. -->
-        <section v-if="signedIn && trustLocked" class="net">
-          <div class="card locked-card">
-            <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
-            <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>
-            <p class="hint">{{ trustLocked }}</p>
-          </div>
-        </section>
-
         <!-- Pairings in flight, at either end. Above everything else in this
              panel: it is the only thing here that another person is currently
              standing in front of, waiting on. -->
@@ -1177,31 +1220,31 @@ onUnmounted(() => {
                 <p class="pend-facts"><code>{{ grouped(row.fingerprint) }}</code></p>
                 <!-- This side answered; the other has not. Still not paired,
                      which is why this says waiting rather than done. -->
-                <!-- The initiator has nothing to confirm. Comparing the digits
-                     is one act by one person looking at two screens, and
-                     pressing "Pair with…" already said what this side wants; a
-                     second button here asked them the same question twice.
-                     The cost is real: somebody can start this and walk away,
-                     and whoever is at the other machine finishes it. -->
-                <template v-if="row.role === 'initiator'">
-                  <p class="hint">{{ t('settings.p2p.pair.auto-updates') }}</p>
-                  <div class="req-acts">
-                    <button
-                      class="btn ghost small"
-                      :disabled="!!pending || !linkReady"
-                      :title="linkWaitReason || undefined"
-                      @click="answerPairing(row, false)"
-                    >
-                      {{ t('settings.p2p.pair.cancel-request') }}
-                    </button>
-                  </div>
-                </template>
-                <template v-else-if="row.state === 'awaiting-remote'">
+                <!-- Both roles answer, and the same way. The initiator used to
+                     have no button here — comparing digits is one act by one
+                     person at two screens, and pressing "Pair with…" had
+                     already said what this side wanted. That reasoning assumes
+                     there is another machine and another person at it. A relay
+                     is what breaks the assumption: it can answer with its own
+                     key and never forward the request, and this side would pin
+                     it having compared nothing with nobody. The digits cannot
+                     rescue it — a relay supplies half of what they are derived
+                     from and receives the other half, so it knows them. Only a
+                     person reading two screens is out of its reach.
+                     See device_pairing.complete. -->
+                <template v-if="row.state === 'awaiting-remote'">
                   <span class="dev-tag pair-step">{{ t('settings.p2p.pair.step-you-confirmed') }}</span>
                   <p class="req-what">{{ t('settings.p2p.pair.waiting-remote') }}</p>
                   <p class="hint">{{ t('settings.p2p.pair.auto-updates') }}</p>
                 </template>
-                <div v-else class="req-acts">
+                <!-- Whose turn it is, said plainly. The heading above still
+                     reads "waiting for them" from before they answered, and
+                     leaving that as the only status would have somebody waiting
+                     for a machine that is waiting for them. -->
+                <template v-else>
+                <span class="dev-tag pair-step">{{ t('settings.p2p.pair.step-your-turn') }}</span>
+                <p class="req-what">{{ t('settings.p2p.pair.your-turn') }}</p>
+                <div class="req-acts">
                   <button class="btn small" :disabled="!!pending || !linkReady" @click="answerPairing(row, true)" :title="linkWaitReason || undefined">
                     {{ t('settings.p2p.pair.match') }}
                   </button>
@@ -1214,6 +1257,7 @@ onUnmounted(() => {
                     {{ t('settings.p2p.pair.mismatch') }}
                   </button>
                 </div>
+                </template>
               </template>
             </div>
           </div>
@@ -1629,6 +1673,51 @@ onUnmounted(() => {
             </dl>
           </div>
 
+          <!-- The link has lost trust state it once had. It sits between the
+               connection and the directory because that is what it is about:
+               the list below cannot be trusted while this is unresolved. There
+               is a way out, and it is one click behind a warning: "start over"
+               is what an attacker who deleted that state is waiting for, so it
+               must never happen by itself — but the only alternative on a
+               machine that hits this was Keychain Access, which is the same
+               reset performed with less information and leaves the two halves
+               disagreeing. Loud and deliberate beats undiscoverable. -->
+          <div v-if="trustLocked" class="card locked-card">
+            <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
+            <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>
+            <p class="hint">{{ trustLocked }}</p>
+            <p v-if="trustLockedTransient" class="hint locked-warn">
+              {{ t('settings.p2p.trust.locked-retrying') }}
+            </p>
+            <p v-else-if="rebuildDone" class="hint ok-text">
+              {{ t('settings.p2p.trust.rebuild-done') }}
+            </p>
+            <template v-else-if="rebuildArmed">
+              <p class="hint locked-warn">{{ t('settings.p2p.trust.rebuild-warn') }}</p>
+              <div class="locked-acts">
+                <button
+                  class="dev-review locked-go"
+                  :disabled="!!pending"
+                  @click="rebuildTrust()"
+                >
+                  {{ t('settings.p2p.trust.rebuild-confirm') }}
+                </button>
+                <button class="dev-review" :disabled="!!pending" @click="rebuildArmed = false">
+                  {{ t('settings.p2p.trust.rebuild-cancel') }}
+                </button>
+              </div>
+            </template>
+            <div v-else class="locked-acts">
+              <button
+                class="dev-review"
+                :title="t('settings.p2p.trust.rebuild-title')"
+                @click="rebuildArmed = true"
+              >
+                {{ t('settings.p2p.trust.rebuild') }}
+              </button>
+            </div>
+          </div>
+
           <div class="card net-card">
             <p v-if="networkUnavailable" class="hint net-note">
               {{ t('settings.p2p.network.unavailable') }}
@@ -1654,6 +1743,13 @@ onUnmounted(() => {
                   <span v-if="device.isLocal" class="dev-tag">
                     {{ t('settings.p2p.network.this-device') }}
                   </span>
+                  <!-- Where the machine is, or what it is running. Beside the
+                       name rather than under it: a second line turned every row
+                       into two, which is a lot of height for the secondary
+                       half of the sentence. -->
+                  <span class="dev-meta" :title="deviceMetaTitle(device)">
+                    {{ deviceMeta(device) }}
+                  </span>
                   <!-- Without this the list said nothing about trust, so a
                        device you had never vouched for looked exactly like one
                        you had — while the card above was asking you to confirm
@@ -1676,7 +1772,7 @@ onUnmounted(() => {
                        people have compared the same six digits. -->
                   <button
                     v-if="device.canTrust"
-                    class="btn ghost small dev-trust"
+                    class="dev-review"
                     :disabled="!!pending || !linkReady"
                     :title="linkWaitReason || t('settings.p2p.pair.start-title')"
                     @click="startPairing(device)"
@@ -1712,12 +1808,6 @@ onUnmounted(() => {
                     {{ t('settings.p2p.trust.unpair') }}
                   </button>
                 </div>
-                <!-- Second line, small and grey: where the machine is, or what
-                     it is running. Two facts that were competing with the name
-                     for the same row. -->
-                <p class="hint dev-meta" :title="deviceMetaTitle(device)">
-                  {{ deviceMeta(device) }}
-                </p>
                 <ul v-if="device.panes.length" class="panes">
                   <li v-for="pane in device.panes" :key="pane.sessionId" class="pane">
                     <span class="pane-agent">{{ pane.agentKey || '—' }}</span>
@@ -2003,7 +2093,13 @@ input:focus {
 .net-card { min-height: 62px; padding: 10px 14px; }
 .net-note { margin: 0; }
 .dev + .dev { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-muted); }
-.dev-head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+/* One line, never two. `nowrap` on the container stops the items wrapping and
+   on the text stops a long label breaking mid-row; what gives instead is the
+   name, which truncates. */
+.dev-head {
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 6px;
+  font-size: 12px; white-space: nowrap;
+}
 /* The shared .dot carries a margin for the footer status line; here the flex gap does that job. */
 .dev-head .dot { margin-right: 0; flex: none; }
 /* The only element allowed to give up space, and the last one that should have
@@ -2067,7 +2163,11 @@ input:focus {
 .fp dt { color: var(--text-secondary); }
 .fp dd { margin: 0; }
 .fp code { font-size: 12px; letter-spacing: 0.04em; }
-.locked-card { border-color: var(--danger-fg); }
+/* It sits between the connection card and the directory — the position the
+   warning has to be read from — so it needs the same gap the connection card
+   carries. Restored: the rule was written when the card moved there and was
+   lost to a parallel edit before it reached any commit. */
+.locked-card { border-color: var(--danger-fg); margin-bottom: 10px; }
 .req { padding: 8px 0; border-bottom: 1px solid var(--border-muted); }
 .req:last-child { border-bottom: none; }
 .req:first-child { padding-top: 0; }
@@ -2083,9 +2183,16 @@ input:focus {
 .dev-tag.ts-trusted { color: var(--success-fg); }
 .dev-tag.ts-pending { color: var(--attention-fg); }
 .dev-tag.ts-blocked { color: var(--danger-fg); }
-/* Indented to the name above it — dot plus gap — so it reads as that row
-   saying something rather than as a new item. */
-.dev-meta { margin: 2px 0 0 14px; font-size: 11.5px; }
+/* Secondary, so it is the first thing to give way when the row runs out of
+   room — that is what the large shrink factor buys. The name has shrink 1 and
+   is therefore the last thing clipped, which is the whole point: a row reading
+   "M… · 38 minutes ago" tells you when something you cannot identify was last
+   seen. */
+.dev-meta {
+  flex: 0 999 auto; min-width: 0;
+  color: var(--text-secondary); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .solo-guide { margin-top: 4px; }
 .solo-title { margin: 10px 0 4px; font-size: 12px; color: var(--text-primary); font-weight: 500; }
 .solo-steps {
@@ -2111,11 +2218,12 @@ input:focus {
    does not look alarming for simply existing. */
 .dev-undo { color: var(--text-muted, var(--text-secondary)); }
 .dev-undo:hover { color: var(--danger-fg); border-color: var(--danger-fg); }
-/* A real button, unlike the bare text it started as: this one writes trust,
-   and a person has to be able to see that it is something you press. It no
-   longer needs an auto margin: the name absorbs the free space, so everything
-   after it is already against the right edge. */
-.dev-trust { flex: none; }
+/* The pairing button used to be `btn ghost small`, which is a slightly larger
+   shape than the other two actions on this row and read as the primary thing to
+   do on every unpaired device. It now shares .dev-review with them: same
+   padding, same size, same weight. The label went with it — "Pair with this
+   device…" took the width of the row to say what one word says, and the full
+   sentence lives in the tooltip where it costs nothing. */
 /* The question the button opens, inside the row it is about. Indented to the
    name above it so it reads as that row saying something, not as a new item. */
 /* Big, because it is read aloud across a desk or over a call — and because two
@@ -2132,6 +2240,12 @@ input:focus {
   user-select: text;
 }
 .dev-review:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; }
+/* The warning reads as one, and the button that acts on it is the only red
+   thing on the card — so the eye lands on the cost before the control. */
+.locked-warn { color: var(--danger-fg); line-height: 1.55; margin-top: 8px; }
+.locked-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.locked-go { color: var(--danger-fg); border-color: var(--danger-fg); }
+.locked-go:hover { background: var(--danger-subtle); }
 /* Same hollow treatment as disconnected: neither pane is doing anything, and
    the eye should skip both to find the ones that are. */
 .pane-pill.st-not-opened { background: none; border-color: var(--border-default); }

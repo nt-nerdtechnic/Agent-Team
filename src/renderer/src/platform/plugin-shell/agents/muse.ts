@@ -29,6 +29,11 @@ export const SPEC = {
   agentKey: 'muse',
   label: 'Muse Code',
   defaultCommand: 'muse',
+  // Values from the binary's --help, which lists one more (`max`) than the
+  // published configuration docs. Meta-hosted models reject `none`.
+  modelArgs: (m) => `--model ${m}`,
+  effortArgs: (e) => `--reasoning-effort ${e}`,
+  knownEfforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   // Two documented ways to stop the prompting: `--yolo` drops BOTH the
   // approval layer and the OS sandbox (Meta scopes it to "CI containers
   // only"), while `--disable-approval` drops only the approval prompts and

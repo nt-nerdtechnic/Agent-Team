@@ -8,13 +8,15 @@ list on their own and route through the same registry.
 from __future__ import annotations
 
 import asyncio
+import pathlib
+import re
 import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from agent_team_backend import agent_messaging, app
+from agent_team_backend import agent_messaging, model_args, app
 from agent_team_backend.mcp_server import server as plan_mcp, auth as plan_mcp_auth, wiring as plan_mcp_wiring
 
 
@@ -661,7 +663,7 @@ async def test_tools_are_registered_without_a_ctx_argument() -> None:
     }
     assert not (tools["cli_list_targets"].inputSchema.get("properties") or {})
     assert set((tools["cli_open_agent"].inputSchema.get("properties") or {})) == {
-        "agent", "name", "task", "workspace_path",
+        "agent", "name", "task", "workspace_path", "model", "effort",
     }
     assert set((tools["cli_check_message"].inputSchema.get("properties") or {})) == {"msg_key"}
     assert set((tools["cli_send_and_wait"].inputSchema.get("properties") or {})) == {
@@ -1684,3 +1686,236 @@ def test_a_send_and_wait_that_never_arrived_carries_the_stale_verdict() -> None:
     assert result["delivery_status"] == "queued"
     assert result["stale"] is True
     assert result["hold"] == {"key": "typing"}
+
+
+# ── cli_open_agent: model / effort ─────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_open_agent_carries_model_and_effort_to_the_window(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+
+    async def answer() -> None:
+        for _ in range(200):
+            keys = list(plan_mcp._pending_spawns)
+            if keys:
+                agent_messaging.register("new-pane", "worker", "/ws/alpha")
+                plan_mcp.resolve_spawn(
+                    keys[0], {"ok": True, "pane_id": "new-pane", "name": "worker"}
+                )
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    result = await plan_mcp.cli_open_agent(
+        "claude", "worker", "do the thing", _ctx(), model="opus-5", effort="high"
+    )
+    await task
+
+    assert result["ok"] is True
+    payload = captured[0]["payload"]
+    assert payload["model"] == "opus-5"
+    assert payload["effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_open_agent_omits_model_keys_when_none_was_asked_for(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The shape every existing window already parses: asking for no model
+    must leave the payload exactly as it was before these keys existed."""
+    _seed()
+
+    async def answer() -> None:
+        for _ in range(200):
+            keys = list(plan_mcp._pending_spawns)
+            if keys:
+                agent_messaging.register("new-pane", "worker", "/ws/alpha")
+                plan_mcp.resolve_spawn(
+                    keys[0], {"ok": True, "pane_id": "new-pane", "name": "worker"}
+                )
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    await plan_mcp.cli_open_agent("claude", "worker", "do the thing", _ctx())
+    await task
+
+    payload = captured[0]["payload"]
+    assert "model" not in payload
+    assert "effort" not in payload
+
+
+@pytest.mark.asyncio
+async def test_open_agent_refuses_a_model_the_cli_cannot_take(
+    captured: list[dict[str, Any]],
+) -> None:
+    """droid's interactive command takes neither flag. Refusing before the
+    broadcast is the point: the alternative is a pane that starts on the
+    default model and looks like it worked."""
+    _seed()
+    result = await plan_mcp.cli_open_agent(
+        "droid", "worker", "do the thing", _ctx(), model="claude-opus-5"
+    )
+    assert result["ok"] is False
+    assert "droid" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_open_agent_refuses_effort_for_a_cli_that_encodes_it_in_the_model(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_open_agent(
+        "cursor", "worker", "do the thing", _ctx(), effort="high"
+    )
+    assert result["ok"] is False
+    # The refusal has to say where effort actually goes, or the caller just
+    # retries the same way.
+    assert "model" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_open_agent_refuses_an_effort_value_outside_the_vocabulary(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_open_agent(
+        "antigravity", "worker", "do the thing", _ctx(), effort="xhigh"
+    )
+    assert result["ok"] is False
+    # agy takes low/medium/high only — the error must list them, since the
+    # value is plausible (other CLIs do accept xhigh).
+    assert "low, medium, high" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_open_agent_accepts_every_effort_a_cli_advertises(
+    captured: list[dict[str, Any]],
+) -> None:
+    """A vocabulary that refuses its own values would be worse than none."""
+    from agent_team_backend.cli_vendors import registry
+
+    for value in registry.VENDORS["claude"].known_efforts:
+        assert plan_mcp._refuse_unsupported_model("claude", "", value) == ""
+
+
+@pytest.mark.asyncio
+async def test_open_agent_does_not_validate_model_ids() -> None:
+    """Model ids change every vendor release; rejecting an unknown one here
+    would break the day a CLI ships a new name."""
+    assert plan_mcp._refuse_unsupported_model("claude", "a-model-from-2030", "") == ""
+
+
+@pytest.mark.asyncio
+async def test_open_agent_refuses_a_model_that_would_inject_a_flag(
+    captured: list[dict[str, Any]],
+) -> None:
+    """A model id is data placed after `--model`. Left unchecked, a value with
+    a space splits into two argv entries and hands the spawn an extra flag —
+    reachable by anyone who can call this tool, including a remote agent
+    reached through cli_send."""
+    _seed()
+    result = await plan_mcp.cli_open_agent(
+        "claude", "worker", "do the thing", _ctx(),
+        model="sonnet --dangerously-skip-permissions",
+    )
+    assert result["ok"] is False
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_open_agent_refuses_a_model_that_is_itself_a_flag(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    for attack in ("--dangerously-skip-permissions", "-r", "--model"):
+        captured.clear()
+        result = await plan_mcp.cli_open_agent(
+            "claude", "worker", "do the thing", _ctx(), model=attack
+        )
+        assert result["ok"] is False, attack
+        assert captured == [], attack
+
+
+def test_malformed_model_is_not_reported_as_unsupported() -> None:
+    """Saying "this CLI cannot take a model" would send the caller to try
+    another CLI with the same injected string."""
+    malformed = plan_mcp._refuse_unsupported_model("claude", "sonnet --flag", "")
+    unsupported = plan_mcp._refuse_unsupported_model("droid", "sonnet", "")
+    assert malformed != ""
+    assert unsupported != ""
+    assert malformed != unsupported
+    assert "droid" not in malformed
+
+
+def test_shape_guard_still_accepts_every_real_model_id() -> None:
+    """The guard checks shape, never identity — it must not reject ids that
+    vendors actually ship, now or after a rename."""
+    for model_id in (
+        "sonnet",
+        "openai/gpt-5.6-sol",
+        "gpt-5.3-codex-high",
+        "anthropic/claude:thinking",
+        "model-from-the-future-2099.1",
+    ):
+        assert plan_mcp._refuse_unsupported_model("claude", model_id, "") == "", model_id
+
+
+def test_shape_guard_rejects_shell_metacharacters() -> None:
+    for attack in ("a;b", "a|b", "a&b", "$(whoami)", "`id`", "a>b", "a b", "a\nb"):
+        assert plan_mcp._refuse_unsupported_model("claude", attack, "") != "", attack
+
+
+def test_shape_guard_answers_exactly_as_the_renderer_does() -> None:
+    """This guard's value is that both engines agree, so the two things that
+    could make them differ are pinned here: surrounding whitespace is trimmed
+    on both sides (so it is accepted, not refused), while an interior newline
+    is refused on both. The pattern is anchored \\A/\\Z rather than ^/$ because
+    Python's `$` also matches before a trailing newline and JavaScript's does
+    not — belt and braces with the trim above."""
+    assert plan_mcp._refuse_unsupported_model("claude", "  sonnet\n", "") == ""
+    assert plan_mcp._refuse_unsupported_model("claude", "", " high\n") == ""
+    assert plan_mcp._refuse_unsupported_model("claude", "a\nb", "") != ""
+    assert plan_mcp._refuse_unsupported_model("claude", "a b", "") != ""
+
+
+def test_shape_guard_agrees_with_the_renderers_copy() -> None:
+    """The pattern is deliberately duplicated: the renderer builds argv, this
+    side refuses before broadcasting. Duplication only helps while the two
+    agree, so the renderer's literal is read here and both are run over the
+    same vectors.
+
+    The anchors differ on purpose — `^/$` in JavaScript, `\\A/\\Z` in Python —
+    because Python's `$` also matches before a trailing newline. Translating
+    them is what makes the comparison meaningful rather than textual."""
+    source = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "src/renderer/src/platform/plugin-shell/lib/cliModel.ts"
+    ).read_text(encoding="utf-8")
+    literal = re.search(r"const ARGUMENT_SAFE = /(.+)/\n", source)
+    assert literal, "ARGUMENT_SAFE literal not found — did cliModel.ts move?"
+    translated = literal.group(1).replace("\\/", "/")
+    assert translated.startswith("^") and translated.endswith("$")
+    renderer = re.compile(r"\A" + translated[1:-1] + r"\Z")
+
+    for value in (
+        "sonnet",
+        "openai/gpt-5.6-sol",
+        "gpt-5.3-codex-high",
+        "anthropic/claude:thinking",
+        "-r",
+        "--some-flag",
+        "sonnet --some-flag",
+        "a b",
+        "a\nb",
+        "a;b",
+        "$(whoami)",
+        "",
+    ):
+        mine = model_args.ARGUMENT_SAFE.match(value) is not None
+        theirs = renderer.match(value) is not None
+        assert mine == theirs, f"{value!r}: backend={mine} renderer={theirs}"

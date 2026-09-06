@@ -740,6 +740,9 @@ def _session_path(workspace_path: str, session_id: str) -> Path:
 
 SPEC = VendorSpec(
     key="antigravity",
+    supports_model=True,
+    supports_effort=True,
+    known_efforts=('low', 'medium', 'high'),
     # Verified 2026-08-15: `gemini skills list` reports locations under
     # ~/.gemini/skills — not the ~/.gemini/antigravity-cli/skills that other
     # shared configs assume. Rides the HOME shim its MCP wiring builds.

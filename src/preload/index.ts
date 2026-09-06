@@ -435,8 +435,9 @@ contextBridge.exposeInMainWorld('agentTeam', {
   trustConfirm: (
     action: string,
     deviceId: string,
+    subject = '',
   ): Promise<{ nonce: string; expires: string; mac: string } | null> =>
-    ipcRenderer.invoke('trust:confirm', action, deviceId),
+    ipcRenderer.invoke('trust:confirm', action, deviceId, subject),
 
   /** Open one legal page in the default browser; the URL is main's, not the caller's. */
   openLegal: (route: LegalRoute): Promise<{ ok: boolean; error?: string }> =>

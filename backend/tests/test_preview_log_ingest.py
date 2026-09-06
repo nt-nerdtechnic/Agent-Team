@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from agent_team_backend import agent_messaging
 from agent_team_backend import app as app_module
 from agent_team_backend.app import app
+from agent_team_backend import hook_auth
 from agent_team_backend.git_watcher import _RepoHandler
 from agent_team_backend.mcp_server import server as plan_mcp, wiring as plan_mcp_wiring
 
@@ -28,7 +29,13 @@ WS_SESSION = "s-hook"
 @pytest.fixture()
 def client() -> TestClient:
     # No context manager: startup events (watchers/MCP) must not run in tests.
-    return TestClient(app)
+    # base_url pinned to loopback: the default "testserver" Host is exactly
+    # what reject_foreign_host refuses.
+    client = TestClient(app, base_url="http://127.0.0.1")
+    # What an installed hook presents (read out of the 0600 header file at
+    # fire time); without it the endpoint answers 403 to everyone.
+    client.headers[hook_auth.HEADER] = hook_auth.token()
+    return client
 
 
 @pytest.fixture()

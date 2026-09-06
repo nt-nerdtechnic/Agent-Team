@@ -143,41 +143,28 @@ watch(() => props.show, (open) => {
   }
 })
 
-/** Primary action for an entry: a live pane is jumped to, a dead one resumed.
- *  Mirrors which button the detail pane offers. */
-function runPrimaryAction(entry: SpawnHistoryEntry): void {
-  if (!entry.removedAt) { emit('focus-pane', entry); return }
-  if (entry.sessionId && !props.unavailablePaneIds.has(entry.paneId) && !props.revivingPaneId) {
-    emit('resume', entry)
-  }
-}
-
-/** Keyboard browsing: ↑/↓ walk the list, Enter runs the selected entry's
- *  primary action. Scoped so it never steals keys a control already owns — the
- *  rename box, the log-search box (which steps matches with ↑/↓) and the filter
- *  dropdowns (where ↑/↓ change the selected option) keep theirs; only the main
- *  search field opts in, because Enter and arrows do nothing there today and
- *  "type, arrow, enter" is the fast path to a pane. */
+/** Keyboard browsing: ↑/↓ walk the list. Scoped so it never steals keys a
+ *  control already owns — the rename box, the log-search box (which steps
+ *  matches with ↑/↓) and the filter dropdowns (where ↑/↓ change the selected
+ *  option) keep theirs; only the main search field opts in, because the arrows
+ *  do nothing there otherwise and "type, then arrow" is the fast path to a row.
+ *
+ *  Enter is deliberately not handled here at all. Rows are <button>s and keep
+ *  their native "select this row"; in the search field it used to run the
+ *  selected row's primary action, which jumps to or resumes a pane and takes
+ *  the modal down with it — losing the search someone was still in the middle
+ *  of typing. */
 function onBrowseKeydown(e: KeyboardEvent): void {
-  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Enter') return
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
   const target = e.target as HTMLElement | null
   const isSearchField = !!target?.classList.contains('agent-history-search-input')
   if (target && !isSearchField) {
     const tag = target.tagName
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) return
-    // Rows are <button>s: Enter must keep its native "select this row".
-    if (e.key === 'Enter') return
   }
   const entries = browseOrder.value
   if (entries.length === 0) return
   const idx = entries.findIndex((entry) => entry.paneId === selectedPaneId.value)
-  if (e.key === 'Enter') {
-    const entry = idx >= 0 ? entries[idx] : null
-    if (!entry) return
-    e.preventDefault()
-    runPrimaryAction(entry)
-    return
-  }
   e.preventDefault()
   const last = entries.length - 1
   const next = e.key === 'ArrowDown'

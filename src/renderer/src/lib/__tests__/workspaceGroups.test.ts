@@ -225,6 +225,22 @@ describe('buildWorkspaceGroups', () => {
     expect(rows.find((r) => r.path === B)?.lineage.map((l) => l.id)).toEqual(['b1'])
   })
 
+  it('counts every pane the workspace holds, including ones a fold hides', () => {
+    // The badge says what the workspace holds, not what the sidebar happens to
+    // be drawing. Collapsing a parent keeps its descendants out of the lineage
+    // entirely, so counting the rows made the number shrink on a fold while the
+    // status bar — which counts panes — did not move, and the two disagreed by
+    // however many panes were tucked away.
+    const rows = build({
+      panes: [pane('p1', A), pane('p2', A), pane('p3', A)],
+      // p1 is folded, so buildPaneLineage drops p2 and p3 before this sees them.
+      lineage: [{ ...row('p1'), hasChildren: true, collapsed: true, descendantCount: 2 }],
+    })
+    expect(rows[0].count).toBe(3)
+    // Still folded: this is a count fix, not an unfold.
+    expect(rows[0].lineage.map((l) => l.id)).toEqual(['p1'])
+  })
+
   it('keeps lineage order within a workspace', () => {
     // Filtering must not sort — the order is the rendered tree.
     const rows = build({

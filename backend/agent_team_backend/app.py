@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import secrets
 import base64
 import functools
 import logging
 import mimetypes
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -23,11 +23,11 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import ValidationError
 from uvicorn.protocols.utils import ClientDisconnected
 
 from . import __version__
 from . import agent_messaging
+from . import hook_auth
 from . import hook_drain
 from . import ws_auth
 from . import loop_watchdog
@@ -74,9 +74,6 @@ from .mcp_manager import MCPManager
 from .mcp_server import server as mcp_server
 from .mcp_server import wiring as mcp_server_wiring
 from .mcp_settings import (
-    MCPServersDocument,
-    MCPSettingsConflictError,
-    MCPSettingsError,
     MCPSettingsStore,
     redact_mcp_server_secrets,
 )
@@ -122,7 +119,58 @@ log = logging.getLogger("agent_team_backend")
 
 STARTED_AT = datetime.now(timezone.utc).isoformat()
 
-app = FastAPI(title="navide-backend", version=__version__)
+app = FastAPI(
+    title="navide-backend",
+    version=__version__,
+    # The schema and its viewers are an unauthenticated route table plus a
+    # product name, served to anything that finds the port. Nothing in the app
+    # reads them.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+#: Hostnames this loopback server answers to. A browser cannot forge Host (it
+#: is a forbidden header name), so a DNS-rebinding page that has made itself
+#: same-origin with 127.0.0.1 still arrives here as ``Host: evil.com``. The
+#: /ws handshake already refuses a web Origin (see ws_auth); this is the same
+#: defence for the HTTP routes, which non-browser clients reach without ever
+#: sending an Origin at all.
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def is_local_host_header(host_header: str) -> bool:
+    """Whether a Host header names this loopback server.
+
+    Parsed rather than compared as a string so ``[::1]:1234`` and a bare
+    ``localhost`` both resolve to a hostname; splitting on ':' by hand gets
+    IPv6 wrong. A missing Host resolves to None and is refused.
+
+    The port is deliberately not compared. Hook commands baked into a user's
+    ``~/.claude/settings.json`` resolve the port from the port file at run
+    time, and one pointing at a previous run must fail as a connection error
+    rather than be rejected here as the wrong host.
+    """
+    return urlparse(f"//{host_header or ''}").hostname in _LOCAL_HOSTS
+
+
+@app.middleware("http")
+async def reject_foreign_host(request: Request, call_next: Any) -> Response:
+    """Refuse a request whose Host is not this loopback server.
+
+    A DNS-rebinding page can make itself same-origin with 127.0.0.1 and read
+    our replies, but it cannot forge Host — it is a forbidden header name — so
+    it still arrives as ``Host: evil.com``. The /ws handshake already refuses a
+    web Origin (see ws_auth); this is the same defence for the HTTP routes,
+    which non-browser clients reach without sending an Origin at all.
+
+    Registered on the app rather than per-route because plugin routes are
+    appended straight to ``app.router`` at startup (see plugins/wiring.py) and
+    never pass through FastAPI's dependency system.
+    """
+    if not is_local_host_header(request.headers.get("host", "")):
+        return Response(status_code=403)
+    return await call_next(request)
 
 database = Database(app_data_dir() / DB_FILENAME)
 workspace_databases = WorkspaceDatabases()
@@ -1711,11 +1759,13 @@ async def _stop_log_watcher() -> None:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    # backend_log is deliberately absent: the absolute path carries the account
+    # name, and this is the one route that answers without a credential. The
+    # clients that need it read it from the ws settings.paths reply instead.
     return {
         "status": "ok",
         "version": __version__,
         "started_at": STARTED_AT,
-        "backend_log": str(backend_log_path()),
     }
 
 
@@ -1773,9 +1823,23 @@ def _serve_workspace_file(workspace: str, rel: str, *, allow_css: bool = False) 
     return FileResponse(target, media_type=media_type, headers=headers)
 
 
+def _require_ws_token(t: str) -> None:
+    """The HTTP file routes share the ws token as their credential.
+
+    Without it, /fs/raw was reachable by any local account: the backend binds
+    loopback but never asked who was calling, and ``workspace=/`` turned the
+    escape check into a no-op. The ws token file is 0600 — that permission is
+    the one boundary between this user's processes and everyone else on the
+    machine, and this route sat outside it. Same shape as /hooks/claude/rewake.
+    """
+    if not ws_auth.token_matches(t):
+        raise HTTPException(status_code=403, detail="missing or invalid token")
+
+
 @app.get("/fs/raw")
-async def fs_raw(workspace: str, rel: str) -> FileResponse:
+async def fs_raw(workspace: str, rel: str, t: str = "") -> FileResponse:
     """Serve a raw workspace file (query-addressed). See _serve_workspace_file."""
+    _require_ws_token(t)
     # The helper is pure-sync and does real syscalls (_resolve_safe → resolve(),
     # is_dir, is_file) that block for minutes on a stalled network/cloud mount.
     # An `async def` route is not handed to FastAPI's threadpool, so it would
@@ -1783,139 +1847,30 @@ async def fs_raw(workspace: str, rel: str) -> FileResponse:
     return await asyncio.to_thread(_serve_workspace_file, workspace, rel)
 
 
-@app.get("/fs/page/{ws_b64}/{rel:path}")
-async def fs_page(ws_b64: str, rel: str) -> FileResponse:
+@app.get("/fs/page/{cap}/{ws_b64}/{rel:path}")
+async def fs_page(cap: str, ws_b64: str, rel: str) -> FileResponse:
     """Serve a workspace file path-addressed so relative subresources resolve.
 
     ``ws_b64`` is the URL-safe base64 of the absolute workspace path (padding
     optional). Same policy as /fs/raw, plus text/css inline — an HTML preview
     loaded from this route can fetch its ./style.css, images, and fonts via
     relative URLs.
+
+    ``cap`` is the per-workspace capability from ``ws_auth.page_capability``
+    (the renderer asks for it over the socket, ``fs.page_capability``). It sits
+    in the path, ahead of the workspace, so the relative subresources a
+    previewed page loads carry it automatically — and it is deliberately not
+    the ws token itself; see ``page_capability`` for why a token in this path
+    would leave the machine.
     """
+    if not ws_auth.page_capability_matches(ws_b64, cap):
+        raise HTTPException(status_code=403, detail="missing or invalid capability")
     try:
         padded = ws_b64 + "=" * (-len(ws_b64) % 4)
         workspace = base64.urlsafe_b64decode(padded).decode("utf-8")
     except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="invalid workspace encoding") from exc
     return await asyncio.to_thread(_serve_workspace_file, workspace, rel, allow_css=True)
-
-
-@app.get("/mcp/servers")
-async def list_mcp_servers() -> dict[str, Any]:
-    try:
-        servers = await asyncio.to_thread(mcp_settings_store.list_servers)
-    except MCPSettingsError as err:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "MCP_SETTINGS_INVALID",
-                "message": str(err),
-                "details": {"path": str(mcp_settings_store.path)},
-            },
-        ) from err
-    return {
-        "servers": servers,
-        "path": str(mcp_settings_store.path),
-        "revision": str(mcp_settings_store.revision),
-    }
-
-
-def _mcp_expected_revision(payload: dict[str, Any]) -> int:
-    raw = payload.get("expected_revision")
-    if raw is None:
-        raise HTTPException(
-            status_code=428,
-            detail={
-                "code": "MCP_REVISION_REQUIRED",
-                "message": "expected_revision is required",
-                "details": {"field": "expected_revision"},
-            },
-        )
-    if isinstance(raw, bool) or not isinstance(raw, (str, int)):
-        revision = None
-    else:
-        try:
-            revision = int(raw)
-        except ValueError:
-            revision = None
-    if revision is None:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "MCP_VALIDATION_ERROR",
-                "message": "expected_revision must be an integer revision string",
-                "details": {"field": "expected_revision"},
-            },
-        )
-    return revision
-
-
-def _raise_mcp_http_store_error(err: MCPSettingsError) -> None:
-    if isinstance(err, MCPSettingsConflictError):
-        detail = {
-            "code": "MCP_SETTINGS_CONFLICT",
-            "message": str(err),
-            "details": {
-                "expected_revision": str(err.expected_revision),
-                "actual_revision": str(err.actual_revision),
-                "path": str(mcp_settings_store.path),
-            },
-        }
-    else:
-        detail = {
-            "code": "MCP_SETTINGS_INVALID",
-            "message": str(err),
-            "details": {"path": str(mcp_settings_store.path)},
-        }
-    raise HTTPException(status_code=409, detail=detail) from err
-
-
-@app.put("/mcp/servers")
-async def replace_mcp_servers(payload: dict[str, Any]) -> dict[str, Any]:
-    expected_revision = _mcp_expected_revision(payload)
-    try:
-        document = MCPServersDocument.model_validate(payload)
-    except ValidationError as err:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "MCP_VALIDATION_ERROR",
-                "message": "invalid MCP server settings",
-                "details": {"errors": err.errors()},
-            },
-        ) from err
-    try:
-        servers = await asyncio.to_thread(
-            mcp_settings_store.replace_servers,
-            [server.model_dump() for server in document.servers],
-            expected_revision,
-        )
-    except MCPSettingsError as err:
-        _raise_mcp_http_store_error(err)
-    await mcp_manager.reload(mcp_settings_store.path)
-    return {
-        "ok": True,
-        "servers": servers,
-        "revision": str(mcp_settings_store.revision),
-    }
-
-
-@app.post("/mcp/servers/reset")
-async def reset_mcp_servers(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    expected_revision = _mcp_expected_revision(payload or {})
-    try:
-        servers = await asyncio.to_thread(
-            mcp_settings_store.reset,
-            expected_revision,
-        )
-    except MCPSettingsError as err:
-        _raise_mcp_http_store_error(err)
-    await mcp_manager.reload(mcp_settings_store.path)
-    return {
-        "ok": True,
-        "servers": servers,
-        "revision": str(mcp_settings_store.revision),
-    }
 
 
 # Derived, not listed: a vendor that installs hooks is exactly the one allowed
@@ -2010,6 +1965,12 @@ async def cli_hook(vendor: str, request: Request) -> Any:
     """
     if vendor not in _HOOK_VENDORS:
         return {"ok": False, "reason": f"unknown hook vendor: {vendor!r}"}
+    if not hook_auth.presented(request.headers.get(hook_auth.HEADER)):
+        # Not installed by this machine's backend — another local account, or a
+        # hook written by a build before the secret existed. Empty 403 so a
+        # Stop hook reading the body still sees "no decision" rather than an
+        # error object it would show the user.
+        return Response(status_code=403)
     event_kind = request.headers.get("X-Agent-Team-Event", "").strip()
     try:
         payload = await request.json()
@@ -2197,12 +2158,11 @@ async def claude_rewake_hook(request: Request) -> Response:
     agent anywhere near it, and that is exactly what a user running `/exit`
     inside a pane they leave open produces.
     """
-    if not secrets.compare_digest(
-        request.query_params.get("t", ""), push_delivery.rewake_token()
-    ):
-        # A request from a previous backend run, or from something that never
-        # went through the installer. Empty body: a hook reading a 403 must
-        # still exit without a decision rather than showing the user an error.
+    if not hook_auth.presented(request.headers.get(hook_auth.HEADER)):
+        # Not installed by this machine's backend — another local account, or
+        # a hook written before the header file existed. Empty body: a hook
+        # reading a 403 must still exit without a decision rather than showing
+        # the user an error.
         return Response(status_code=403)
     if push_delivery.channel_for("claude") is None:
         # Answered before the attribution wait below rather than after it: a

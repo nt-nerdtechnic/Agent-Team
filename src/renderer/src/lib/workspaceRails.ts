@@ -10,11 +10,15 @@
  *  what lets the strip sit outside the existing workspace → run group → pane
  *  → lineage stack without any of those four knowing it exists.
  *
- *  Per window and not shared, the same judgement `workspaceOrder` makes: the
- *  rails live in sessionStorage, so a second window groups its own projects
- *  its own way and a restart starts clean. Moving to one shared set later is a
- *  swap of `parseRails`/`serializeRails` for a kv read/write — no other
- *  function here changes.
+ *  STORAGE-AGNOSTIC. Everything here is pure; the caller decides where the
+ *  list lives. It currently rides the shared `ui_settings` kv in the global
+ *  navide.db, so one set of groups serves every window and survives a restart
+ *  — but this file only ever sees a string going in and out of
+ *  `parseRails`/`serializeRails`, which is what let that move happen without
+ *  touching a single function below.
+ *
+ *  Which group you are LOOKING AT is not stored here and is not stored with
+ *  the groups: that is view state, and it stays per window.
  */
 
 /** The always-present first cell: every workspace, unfiltered. Its id is empty
@@ -28,7 +32,25 @@ export interface WorkspaceRail {
   name: string
   /** Workspace paths, normalised. A path appears in at most one rail. */
   members: string[]
+  /** Index into `RAIL_PALETTE`, assigned once at creation.
+   *
+   *  STORED, not derived. Deriving it from the rail's position would recolour
+   *  every group below one that gets deleted, and hashing the id would let two
+   *  groups collide on the only thing that tells them apart — on an 8px strip
+   *  the colour IS the label. */
+  color?: number
 }
+
+/** The strip's colours. Six hues far enough apart to survive an 8px slice,
+ *  each picked to hold up on both the light and the dark sidebar. */
+export const RAIL_PALETTE = [
+  '#3B82F6',
+  '#F59E0B',
+  '#10B981',
+  '#8B5CF6',
+  '#EC4899',
+  '#14B8A6',
+] as const
 
 /** One cell of the strip, ready to render. */
 export interface RailCell {
@@ -47,6 +69,9 @@ export interface RailCell {
   /** No member of this rail is open in this window. Not hidden — that cell is
    *  the way back to a group of projects you closed. */
   empty: boolean
+  /** The bar's colour. On the All cell this is empty: it is every group at
+   *  once, so any hue would claim to be one of them. */
+  color: string
 }
 
 /** Rows this module needs from a workspace heading. Structural on purpose, so
@@ -105,16 +130,57 @@ export function assignToRail(
   })
 }
 
+/** The palette slot a new rail takes: the lowest one nobody is using, so the
+ *  first six groups are always distinct. Past six it wraps by count, which is
+ *  the point at which an 8px colour strip has stopped being the way to tell
+ *  groups apart anyway. */
+export function nextRailColor(rails: readonly WorkspaceRail[]): number {
+  const taken = new Set(rails.map((r) => r.color).filter((c): c is number => c !== undefined))
+  for (let i = 0; i < RAIL_PALETTE.length; i++) if (!taken.has(i)) return i
+  return rails.length % RAIL_PALETTE.length
+}
+
+/** The colour a rail paints, tolerating a stored index from a longer palette
+ *  or a rail written before colours existed. */
+export function railColor(rail: Pick<WorkspaceRail, 'color'>, fallbackIndex = 0): string {
+  const slot = rail.color ?? fallbackIndex
+  return RAIL_PALETTE[((slot % RAIL_PALETTE.length) + RAIL_PALETTE.length) % RAIL_PALETTE.length]
+}
+
 /** Add a rail. An empty or whitespace-only name is refused — a cell whose
- *  glyph is a space is an invisible button. */
+ *  glyph is a space is an invisible button.
+ *
+ *  `color` is the slot the user picked; left out, it takes the lowest unused
+ *  one. */
 export function createRail(
   rails: readonly WorkspaceRail[],
   name: string,
-  now: number = Date.now()
+  now: number = Date.now(),
+  color?: number
 ): WorkspaceRail[] {
   const trimmed = name.trim()
   if (!trimmed) return [...rails]
-  return [...rails, { id: newRailId(now), name: trimmed, members: [] }]
+  return [
+    ...rails,
+    {
+      id: newRailId(now),
+      name: trimmed,
+      members: [],
+      color: color ?? nextRailColor(rails),
+    },
+  ]
+}
+
+/** Repaint one rail. Out-of-range slots are refused rather than wrapped: the
+ *  only caller is a picker over `RAIL_PALETTE`, so a value outside it is a bug
+ *  to notice, not a value to fold into range. */
+export function setRailColor(
+  rails: readonly WorkspaceRail[],
+  id: string,
+  color: number
+): WorkspaceRail[] {
+  if (!Number.isInteger(color) || color < 0 || color >= RAIL_PALETTE.length) return [...rails]
+  return rails.map((r) => (r.id === id ? { ...r, color } : r))
 }
 
 export function renameRail(
@@ -187,9 +253,10 @@ export function buildRailCells(input: {
     active: active === ALL_RAIL_ID,
     hasCurrent: false,
     empty: rows.length === 0,
+    color: '',
   }
 
-  const cells = rails.map((rail) => {
+  const cells = rails.map((rail, i) => {
     const held = rail.members.map(norm).filter((m) => countOf.has(m))
     return {
       id: rail.id,
@@ -199,6 +266,7 @@ export function buildRailCells(input: {
       active: active === rail.id,
       hasCurrent: !!here && rail.members.some((m) => norm(m) === here),
       empty: held.length === 0,
+      color: railColor(rail, i),
     }
   })
 
@@ -235,7 +303,18 @@ export function parseRails(raw: string | null): WorkspaceRail[] {
     // the way in too: a hand-edited or half-written blob must not make two
     // cells count the same panes.
     const mine = members.filter((m) => !out.some((r) => r.members.includes(m)))
-    out.push({ id: rail.id, name: rail.name.trim(), members: [...new Set(mine)] })
+    const entry: WorkspaceRail = {
+      id: rail.id,
+      name: rail.name.trim(),
+      members: [...new Set(mine)],
+    }
+    // Absent on rails written before colours existed; those fall back to their
+    // position when drawn rather than being renumbered here, which would make
+    // a read rewrite the store.
+    if (typeof rail.color === 'number' && Number.isInteger(rail.color) && rail.color >= 0) {
+      entry.color = rail.color
+    }
+    out.push(entry)
   }
   return out
 }

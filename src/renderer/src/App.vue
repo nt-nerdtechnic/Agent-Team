@@ -8,6 +8,7 @@ import { buildPaneLineage } from './lib/paneLineage'
 import { ancestorTrail } from './lib/paneListView'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
+import { schedulePrewarm } from './lib/prewarm'
 import { flattenSidebarOrder, resolveFocusedPane } from './lib/paneFocus'
 import { formatBytes } from './lib/formatBytes'
 import { formatCpuPercent, machineCpuShare, machineMemoryShare } from './lib/resourceSampling'
@@ -148,6 +149,8 @@ import {
   acquirePaneRebuildLock,
   cancelStalePendingCreate,
   dedupeRestorablePanes,
+  modelArgsFor,
+  type CliModelRequest,
   normalizeResumeSessionId,
   sessionHomeIdFor,
   paneBusyForRebuild,
@@ -261,8 +264,13 @@ import navideMark from './assets/navide-mark.png'
 // Modals/wizard that only render behind a v-if (settings opened, run completed,
 // first-run onboarding) — defer them off the main shell's first-paint bundle.
 const CompletionModal = defineAsyncComponent(() => import('./components/CompletionModal.vue'))
-const SettingsModal = defineAsyncComponent(() => import('./components/SettingsModal.vue'))
-const AccountModal = defineAsyncComponent(() => import('./components/AccountModal.vue'))
+// Named, because the prewarm below has to import the same module specifier:
+// two different arrow functions pointing at one file still resolve to one
+// module, but writing it twice is how they drift apart.
+const loadSettingsModal = () => import('./components/SettingsModal.vue')
+const loadAccountModal = () => import('./components/AccountModal.vue')
+const SettingsModal = defineAsyncComponent(loadSettingsModal)
+const AccountModal = defineAsyncComponent(loadAccountModal)
 // Not lazy: it has to be listening before anybody asks to pair, and a request
 // expires in five minutes — too short to wait for a chunk to be fetched because
 // somebody happened to open a window.
@@ -369,15 +377,6 @@ onMounted(() => {
     void injectPaneContextSources(paneIds?.length ? paneIds : [paneId], targetPaneId)
   })
   window.addEventListener('resize', onWindowResize)
-  // Warm the heaviest deferred panel (Settings) during idle: it stays lazy to
-  // keep off first paint, but it's commonly opened, so pre-fetching once the
-  // shell is interactive makes its first open instant at no visible cost.
-  const warmSettings = (): void => { void import('./components/SettingsModal.vue') }
-  if (typeof window.requestIdleCallback === 'function') {
-    window.requestIdleCallback(warmSettings, { timeout: 4000 })
-  } else {
-    window.setTimeout(warmSettings, 2500)
-  }
 })
 
 // ── First-run onboarding gate ────────────────────────────────────────────────
@@ -1053,7 +1052,17 @@ async function savedHistoryFile(
   return resolve(workspacePath, paneId, listPaneDir)
 }
 
-function resolveCommand(agentKey: string, override: string, paneArgCtx?: PaneArgContext): string {
+/** The model/effort a pane was asked to launch on. `{ model: '', effort: '' }`
+ *  means "not requested" and is what every caller that never heard of a model
+ *  passes, so their command comes out byte-for-byte as before. */
+const NO_MODEL_REQUEST: CliModelRequest = { model: '', effort: '' }
+
+function resolveCommand(
+  agentKey: string,
+  override: string,
+  paneArgCtx?: PaneArgContext,
+  modelRequest: CliModelRequest = NO_MODEL_REQUEST
+): string {
   const spec = agentSpecs.find((s) => s.agentKey === agentKey)
   const trimmed = override.trim()
   // If user supplied an override, trust it verbatim.
@@ -1063,6 +1072,24 @@ function resolveCommand(agentKey: string, override: string, paneArgCtx?: PaneArg
   if (paneArg) parts.push(paneArg)
   const skipFlag = skipFlagFor(agentKey, spec)
   if (skipFlag) parts.push(skipFlag)
+  // Model/effort last, the same order buildResumeCommand uses, so a resumed
+  // pane and a fresh one carry the same argv shape.
+  //
+  // This function returns a string and has no error channel, so a request the
+  // vendor cannot honour is DROPPED here, not refused. That is safe only
+  // because the authoritative refusal happens before a spawn ever reaches
+  // this point (the spawn gate for user actions, the MCP tool for agents) —
+  // reaching here with an unsupported request means one of those let it past,
+  // which the warning below makes visible instead of silent.
+  const chosen = modelArgsFor({ spec, request: modelRequest })
+  if (chosen.ok) {
+    if (chosen.args) parts.push(chosen.args)
+  } else {
+    console.warn(
+      `[resolveCommand] ${agentKey} cannot take model="${modelRequest.model}" `
+      + `effort="${modelRequest.effort}" (${chosen.refusal.kind}); launching on the vendor default`
+    )
+  }
   return commandWithSelectedBinary(agentKey, parts.join(' '))
 }
 
@@ -1124,6 +1151,14 @@ interface ActivePane {
    *  Empty string for single-agent stages or manually-spawned panes. */
   slotLabel: string
   command: string
+  /** Model id this pane was launched on; absent = the vendor's own default.
+   *  Kept because a resume passes its command to spawnPane verbatim, so every
+   *  rebuild has to re-derive the flag from here or the pane silently comes
+   *  back on the default model. */
+  model?: string
+  /** Reasoning-effort level, for vendors with a flag separate from the model
+   *  id. Absent = not requested. */
+  effort?: string
   workspacePath: string
   origin: 'manual' | 'pipeline' | 'mcp'
   /** Which pipeline run group this pane belongs to. Undefined = unassigned (manual). */
@@ -2214,7 +2249,7 @@ async function handleSpawnRequestsForTurn(
  *  here, not tens of seconds later. */
 async function createRequestedPane(
   parent: ActivePane,
-  req: { agentKey: string; name: string },
+  req: { agentKey: string; name: string; model?: string; effort?: string },
 ): Promise<string | null> {
   const paneId = await spawnPane({
     agentKey: req.agentKey,
@@ -2227,6 +2262,8 @@ async function createRequestedPane(
     runGroupId: parent.runGroupId,
     preferredMessagingName: req.name,
     spawnedBy: parent.id,
+    model: req.model,
+    effort: req.effort,
   })
   if (!paneId) return null
   // Persistence only — the pane is already usable, and both responses are
@@ -2238,6 +2275,12 @@ async function createRequestedPane(
     agent: req.agentKey,
     role: '',
     command: '',
+    // The only write of these two on the MCP spawn path: without them the pane
+    // record keeps the vendor default and the next restart reopens on the wrong
+    // model. The backend writes them only when non-empty, so '' leaves the
+    // record alone.
+    model: req.model ?? '',
+    effort: req.effort ?? '',
     session_id: panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? '',
     session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
     run_group_id: parent.runGroupId ?? '',
@@ -2287,7 +2330,7 @@ function standaloneTaskDeps(): StandaloneTaskInjectionDeps {
  *  would never actually be injected. */
 async function createStandaloneRequestedPane(
   workspacePath: string,
-  req: { agentKey: string; name: string; task: string },
+  req: { agentKey: string; name: string; task: string; model?: string; effort?: string },
 ): Promise<string | null> {
   const runGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
   const paneId = await spawnPane({
@@ -2300,6 +2343,8 @@ async function createStandaloneRequestedPane(
     origin: 'mcp',
     runGroupId: runGroupId || undefined,
     preferredMessagingName: req.name,
+    model: req.model,
+    effort: req.effort,
   })
   if (!paneId) return null
   void sendQuiet<ProjectPayload>('manual_pane.spawn', {
@@ -2308,6 +2353,10 @@ async function createStandaloneRequestedPane(
     agent: req.agentKey,
     role: '',
     command: '',
+    // Same as createRequestedPane: the only place an MCP spawn's model reaches
+    // the pane record. '' means "not requested" and does not overwrite.
+    model: req.model ?? '',
+    effort: req.effort ?? '',
     session_id: panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? '',
     session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
     run_group_id: runGroupId,
@@ -2336,6 +2385,7 @@ function standaloneSpawnGateContext() {
     parentDepth: 0,
     parentChildCount: 0,
     cliPaneCount: panes.value.filter((p) => p.agentKey !== 'terminal').length,
+    modelCapabilityFor: (agentKey: string) => agentSpecs.find((s) => s.agentKey === agentKey),
   }
 }
 
@@ -2460,6 +2510,7 @@ function spawnGateContextFor(parentPaneId: string) {
     ),
     parentChildCount: panes.value.filter((p) => p.spawnedBy === parentPaneId).length,
     cliPaneCount: panes.value.filter((p) => p.agentKey !== 'terminal').length,
+    modelCapabilityFor: (agentKey: string) => agentSpecs.find((s) => s.agentKey === agentKey),
   }
 }
 
@@ -2476,6 +2527,8 @@ async function handleMcpSpawnRequest(ev: {
   name: string
   task: string
   target_workspace?: string
+  model: string
+  effort: string
 }): Promise<void> {
   const standalone = !!ev.target_workspace
   let parent: ActivePane | undefined
@@ -2517,7 +2570,7 @@ async function handleMcpSpawnRequest(ev: {
   }
 
   const gate = evaluateSpawnRequest(
-    { agent: ev.agent_key, name: ev.name, task: ev.task },
+    { agent: ev.agent_key, name: ev.name, task: ev.task, model: ev.model, effort: ev.effort },
     parent ? spawnGateContextFor(parent.id) : standaloneSpawnGateContext(),
   )
   if (!gate.ok) {
@@ -4698,6 +4751,14 @@ interface SpawnInternal {
    *  header for downstream stages can identify which agent produced which output. */
   slotLabel?: string
   commandOverride: string
+  /** Model id to launch on ('' / absent = the vendor default). Only reaches
+   *  the command line on a FRESH spawn — resolveCommand hands a
+   *  commandOverride back untouched, so a resume path must have rebuilt the
+   *  flag into the override itself (buildResumeCommand does). Carried anyway
+   *  so the pane records what it is running and later rebuilds can reproduce it. */
+  model?: string
+  /** Reasoning-effort level, for vendors with a separate effort flag. */
+  effort?: string
   workspacePath: string
   origin: 'manual' | 'pipeline' | 'mcp'
   runGroupId?: string
@@ -4825,7 +4886,10 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   const paneArgCtx: PaneArgContext | undefined = spec.paneArg && opts.workspacePath
     ? { paneId: id, historyRoot: await paneHistoryRootFor(opts.agentKey, opts.workspacePath) }
     : undefined
-  let command = resolveCommand(opts.agentKey, opts.commandOverride, paneArgCtx)
+  let command = resolveCommand(opts.agentKey, opts.commandOverride, paneArgCtx, {
+    model: opts.model ?? '',
+    effort: opts.effort ?? '',
+  })
   const userShell = backend.shell.value || 'bash'
 
   if (opts.agentKey === 'terminal' && !command) {
@@ -4921,6 +4985,8 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     sessionHomeId: sessionHomeId || undefined,
     profileId: opts.profileId || undefined,
     sessionMarker: sessionMarker || undefined,
+    model: opts.model || undefined,
+    effort: opts.effort || undefined,
     spawnedBy: opts.spawnedBy,
     formerPaneIds: opts.formerPaneIds?.length ? [...opts.formerPaneIds] : undefined,
   }
@@ -5332,11 +5398,28 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
   const chatHistoryFile = payload.historyPaneId
     ? await savedHistoryFile(agentKey, workspacePath, payload.historyPaneId)
     : ''
+  // Model/effort come from the pane this session belongs to when it is still
+  // open (Agent History knows its id), and this path both launches on them and
+  // writes them onto the new pane record below — the resume gets a fresh pane
+  // id with no previous_pane_id, so the backend creates a NEW record and
+  // nothing else would ever fill its model in.
+  //
+  // Known limitation: resuming a session whose pane is already CLOSED (the
+  // common case from Agent History) has no in-memory source, so it reopens on
+  // the vendor default. The old pane's record on disk still carries the model,
+  // but no path reads it back here.
+  const historyPane = payload.historyPaneId
+    ? panes.value.find((p) => p.id === payload.historyPaneId)
+    : undefined
+  const modelRequest: CliModelRequest = {
+    model: historyPane?.model ?? '',
+    effort: historyPane?.effort ?? '',
+  }
   // Custom-binary override applies to resume too — the spec guarantees the
   // command starts with defaultCommand, which this replaces when overridden.
   const commandOverride = commandWithSelectedBinary(
     agentKey,
-    buildResumeCommand(agentKey, sessionId, skipFlag, chatHistoryFile)
+    buildResumeCommand(agentKey, sessionId, skipFlag, chatHistoryFile, modelRequest)
   )
   const spawnGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
   const paneId = await spawnPane({
@@ -5354,6 +5437,8 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
     skipRoleInjection: true,
     restoreMode: 'memory-resume',
     resumeSessionId: sessionId,
+    model: modelRequest.model || undefined,
+    effort: modelRequest.effort || undefined,
   })
   if (paneId) {
     await sendQuiet<ProjectPayload>('manual_pane.spawn', {
@@ -5362,6 +5447,12 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
       agent: agentKey,
       role: '',
       command: commandOverride,
+      // saved.command cannot stand in for these on the next restart: the
+      // restore path classifies a resume command with looksLikeResumeCommand
+      // and blanks it out, so the record's own model column is the only thing
+      // that survives. The backend writes them only when non-empty.
+      model: modelRequest.model,
+      effort: modelRequest.effort,
       session_id: sessionId,
       session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
       run_group_id: runGroupId || spawnGroupId || undefined,
@@ -5536,8 +5627,18 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
   if (ref?.sessionId) {
     try {
       await ref.kill({ force: force })
-    } catch {
-      /* ignore */
+    } catch (err) {
+      // The pane leaves the list either way — keeping it would strand the
+      // workspace on a pane the user already dismissed. But a swallowed failure
+      // here is exactly how a PTY outlives its own pane record, so it is
+      // recorded instead of dropped; the backend's unspawn path kills what this
+      // missed.
+      recordDiagnostic({
+        level: 'warn',
+        code: 'pane.killFailed',
+        message: `terminal kill failed while closing pane: ${String(err)}`,
+        paneId,
+      })
     }
   }
   if (markRemoved && pane?.origin === 'pipeline' && pane.slotLabel && stageIndex >= 0) {
@@ -5839,7 +5940,10 @@ async function rebuildPaneViaResume(
     const skipFlag = skipFlagFor(pane.agentKey, spec)
     const resumeCmd = commandWithSelectedBinary(
       pane.agentKey,
-      buildResumeCommand(pane.agentKey, sessionId, skipFlag)
+      buildResumeCommand(pane.agentKey, sessionId, skipFlag, '', {
+        model: pane.model ?? '',
+        effort: pane.effort ?? '',
+      })
     )
     if (!resumeCmd) {
       if (!opts?.suppressBusyToast) {
@@ -5876,6 +5980,8 @@ async function rebuildPaneViaResume(
       runGroupId: pane.runGroupId,
       sessionHomeId: pane.sessionHomeId,
       profileId: pane.profileId,
+      model: pane.model,
+      effort: pane.effort,
     }
     try { localStorage.removeItem(`terminal-scroll:${sessionId}`) } catch {}
     // Preserve layout order: keep the old pane as a dummy to avoid layout
@@ -5900,6 +6006,8 @@ async function rebuildPaneViaResume(
       sessionHomeId: snap.sessionHomeId,
       profileId: snap.profileId,
       resumeSessionId: sessionId,
+      model: snap.model,
+      effort: snap.effort,
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
@@ -6134,6 +6242,13 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
     origin: pane.origin,
     spawnedBy: pane.spawnedBy,
     runGroupId: pane.runGroupId,
+    // Same reason as the resume rebuild's snapshot: a clean rebuild is still
+    // the SAME pane, so it has to relaunch on the model it was running. Drop
+    // these and resolveCommand sees "no model requested" — a legal shape, so
+    // not even a console warning — and the pane silently restarts on the
+    // vendor default while its record on disk still says otherwise.
+    model: pane.model,
+    effort: pane.effort,
   }
   for (const key of lockKeys) rebuildingPanes.add(key)
   try {
@@ -6152,6 +6267,8 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
       spawnedBy: snap.spawnedBy,
       runGroupId: snap.runGroupId || undefined,
       isResume: false,
+      model: snap.model,
+      effort: snap.effort,
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
@@ -6344,6 +6461,45 @@ function openAccountModal(): void {
   accountModalEverOpened.value = true
   showAccount.value = true
 }
+/**
+ * The two windows the title bar opens, fetched and parsed before anybody clicks.
+ *
+ * Both are lazy chunks, so the first click used to pay for loading them before
+ * anything appeared — measured on this machine: Settings is 507 KB and parses
+ * in ~315 ms, the account window 67 KB and ~25 ms, plus their stylesheets
+ * (150 KB and 18 KB). A click that draws nothing for a third of a second reads
+ * as a click that did nothing.
+ *
+ * Settings already had a warm of exactly this shape, written inline a few
+ * hundred lines up; the account window had none. That code is gone and this is
+ * it — shared, cancellable, tested, and covering both. Same schedule as before,
+ * deliberately: idle with a deadline, not a fixed delay. A delay would only
+ * postpone the warm past the clicks that arrive in the opening seconds, which
+ * are the ones it exists for.
+ *
+ * If a click lands before the warm finishes, nothing breaks: `import()` hands
+ * back the promise already in flight rather than starting a second load.
+ */
+onMounted(() => {
+  const cancel = schedulePrewarm(
+    () => { void loadSettingsModal(); void loadAccountModal() },
+    {
+      idleTimeoutMs: 4000,
+      fallbackDelayMs: 2500,
+      clock: {
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: (id) => window.clearTimeout(id),
+        requestIdleCallback: window.requestIdleCallback
+          ? (fn, o) => window.requestIdleCallback(fn, o)
+          : undefined,
+        cancelIdleCallback: window.cancelIdleCallback
+          ? (id) => window.cancelIdleCallback(id)
+          : undefined,
+      },
+    },
+  )
+  onUnmounted(cancel)
+})
 onMounted(() => {
   void loadP2pAccount()
   const timer = window.setInterval(() => { if (document.hasFocus()) void loadP2pAccount() }, 5000)
@@ -6842,6 +6998,68 @@ registerCommand('ui.pane.focus', (args) => {
   if (!paneId) throw new Error(`ui.pane.focus requires ${PANE_ID_HINT}`)
   onFocusPane(paneId)
 })
+registerCommand('ui.messaging.readIncoming', (args) => {
+  const a = (args ?? {}) as {
+    paneId?: string
+    uids?: string[]
+    limit?: number
+    includeDelivered?: boolean
+    reserve?: boolean
+    maxChars?: number
+  }
+  const paneId = a.paneId
+  if (!paneId) throw new Error(`ui.messaging.readIncoming requires ${PANE_ID_HINT}`)
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane) throw new Error(`ui.messaging.readIncoming: pane "${paneId}" not found`)
+  const me = pane.messagingName as string | undefined
+  if (!me) throw new Error(`ui.messaging.readIncoming: pane "${paneId}" has no messaging name`)
+
+  // Mail is matched by the recipient's CURRENT name, the same rule the queue
+  // and cli_pending_incoming use — a message queued for a name this pane has
+  // since been renamed away from is not its to read.
+  const wanted = new Set((a.uids ?? []).filter(Boolean))
+  const openStatuses = new Set(['queued', 'delivering'])
+  const rows = messaging.messages.value
+    .filter((m) => m.to === me)
+    .filter((m) => (wanted.size ? wanted.has(m.uid) : true))
+    .filter((m) => (a.includeDelivered ? true : openStatuses.has(m.status)))
+    .slice(-Math.max(1, a.limit ?? 5))
+
+  // Reserve only what is still waiting. Delivered history is readable but
+  // cannot be consumed — it already was.
+  const reserved = a.reserve === false
+    ? []
+    : messaging.reserveIncoming(paneId, rows.filter((m) => m.status === 'queued').map((m) => m.uid))
+
+  const cap = Math.max(1, a.maxChars ?? 64 * 1024)
+  return {
+    messages: rows.map((m) => ({
+      uid: m.uid,
+      sender: m.from,
+      status: m.status,
+      kind: m.kind ?? null,
+      content: m.content.slice(0, cap),
+      createdAt: m.createdAt,
+    })),
+    reserved: reserved.map((r) => r.uid),
+    // Delivery being paused is why a read can come back empty while messages
+    // are in fact waiting. Saying so keeps "cannot take it right now" from
+    // reading as "you have no mail".
+    paused: messaging.paused.value,
+  }
+})
+
+registerCommand('ui.messaging.settleRead', (args) => {
+  const a = (args ?? {}) as { paneId?: string; uids?: string[]; ok?: boolean }
+  const paneId = a.paneId
+  if (!paneId) throw new Error(`ui.messaging.settleRead requires ${PANE_ID_HINT}`)
+  const uids = (a.uids ?? []).filter(Boolean)
+  // ok:false is the caller telling us the text never arrived; the reservation
+  // is released and the message goes back to its place in the queue.
+  messaging.settleIncomingRead(paneId, uids, a.ok !== false)
+  return { settled: a.ok === false ? [] : uids }
+})
+
 registerCommand('ui.groupPeers', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
   if (!paneId) throw new Error(`ui.groupPeers requires ${PANE_ID_HINT}`)
@@ -7288,6 +7506,12 @@ interface ProjectPane {
   agent: string
   role: string
   command?: string
+  /** Model / reasoning-effort the pane was launched on. Persisted so a restore
+   *  can rebuild the same launch flags instead of reopening the pane on the
+   *  vendor default. Absent for every record written before the fields
+   *  existed, which reads as "not requested". */
+  model?: string
+  effort?: string
   session_id?: string
   session_home_id?: string
   profile_id?: string
@@ -7437,6 +7661,12 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     restoreMode: opts.isResume ? 'memory-resume' : 'fresh',
     sessionHomeId: opts.sessionHomeId,
     profileId: opts.profileId,
+    // The persisted launch model. On a resume the flag is already inside
+    // commandOverride (buildResumeCommand rebuilt it); passing it here is what
+    // lets the restored pane report and later rebuild on the same model, and
+    // on a FRESH restore it is the only thing that puts the flag back.
+    model: saved.model || undefined,
+    effort: saved.effort || undefined,
     resumeSessionId: opts.resumeSessionId,
     sessionKnownOnDisk: opts.sessionKnownOnDisk,
     freshSessionId: opts.freshSessionId,
@@ -8128,7 +8358,10 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       const resumeCmd = attemptResume
         ? commandWithSelectedBinary(
             saved.agent,
-            buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile)
+            buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile, {
+              model: saved.model ?? '',
+              effort: saved.effort ?? '',
+            })
           )
         : ''
       const isResume = !!resumeCmd
@@ -8429,7 +8662,10 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     let resumeCmd = attemptResume
       ? commandWithSelectedBinary(
           saved.agent,
-          buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile)
+          buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile, {
+            model: saved.model ?? '',
+            effort: saved.effort ?? '',
+          })
         )
       : ''
     const ghostConfirmed = !forceFresh && shouldWarnMissingResume(
@@ -8451,7 +8687,10 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
       if (repointed) {
         resumeCmd = commandWithSelectedBinary(
           saved.agent,
-          buildResumeCommand(saved.agent, reconnectId, skipFlag)
+          buildResumeCommand(saved.agent, reconnectId, skipFlag, '', {
+            model: saved.model ?? '',
+            effort: saved.effort ?? '',
+          })
         )
         reconnectedCount.value++
         pipelineLog(`↩ ${saved.agent}: auto-reconnected ${saved.pane_id} → ${reconnectId}`)
@@ -10051,6 +10290,11 @@ backend.on('agent_spawn.request', (raw) => {
     name?: string
     task?: string
     target_workspace?: string
+    // Present on the event only when cli_open_agent was asked for them; a
+    // field left out of this re-shaping is dropped for good, and the pane
+    // would silently launch on the vendor default.
+    model?: string
+    effort?: string
   }
   // An external caller (no requesting pane) addresses this by target_workspace
   // instead — accept the event as long as one of the two identifies an owner.
@@ -10062,6 +10306,8 @@ backend.on('agent_spawn.request', (raw) => {
     name: ev.name ?? '',
     task: ev.task ?? '',
     target_workspace: ev.target_workspace,
+    model: ev.model ?? '',
+    effort: ev.effort ?? '',
   })
 })
 

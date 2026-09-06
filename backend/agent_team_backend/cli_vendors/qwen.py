@@ -755,6 +755,7 @@ def _install_hooks(port_file: str) -> Any:
 
 SPEC = VendorSpec(
     key="qwen",
+    supports_model=True,
     # Verified 2026-08-15: QWEN_HOME *is* the .qwen directory (its
     # resolveQwenHome falls back to ~/.qwen), so skills sit one level in.
     skills_supported=True,

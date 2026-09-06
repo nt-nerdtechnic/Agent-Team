@@ -35,6 +35,13 @@ All notable released changes to Navide will be documented in this file. The form
   bounded recovery, typed fail-closed source results, strict user pins,
   revision-aware snapshot identities, and stale recommendations without source
   merging.
+- Let a CLI agent read the full text of messages sent to it with the new
+  `cli_read_incoming` MCP tool. `cli_pending_incoming` shows 200 characters
+  with the whitespace flattened, so until now an agent could read another
+  pane's entire log but not one message addressed to itself. Reading consumes
+  by default — a message read this way is not typed into the pane afterwards —
+  and `peek` reads without consuming. Consuming reserves before it releases, so
+  a lost confirmation returns the message to the queue rather than dropping it.
 - Add the public Plugin Platform v2 contracts, SDK CLI, unified Vue UI package,
   and an external-workspace frontend package smoke workflow with fail-closed
   capability-denial coverage.

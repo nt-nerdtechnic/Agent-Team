@@ -6,6 +6,8 @@ import base64
 import stat
 from pathlib import Path
 
+import pytest
+
 from agent_team_backend import fs_service
 
 
@@ -605,6 +607,21 @@ def test_list_dir_mode_validation(tmp_path: Path) -> None:
     res = fs_service.list_dir(ws, "", mode="invalid")
     assert res["ok"] is False
     assert res["error"] == "invalid list_dir mode"
+
+
+@pytest.mark.parametrize("mode", ["display", "discovery"])
+def test_list_dir_internal_case_variant_protects_both_modes(tmp_path: Path, mode: str) -> None:
+    ws = _ws(tmp_path)
+    internal = tmp_path / ".agent-team"
+    (internal / "plans").mkdir()
+    (internal / "private-state").mkdir()
+    if not (tmp_path / ".Agent-Team").exists():
+        pytest.skip("filesystem is case-sensitive")
+
+    result = fs_service.list_dir(ws, ".Agent-Team", show_hidden=True, mode=mode)
+
+    assert result["ok"] is True
+    assert [entry["name"] for entry in result["entries"]] == ["plans"]
 
 
 def test_list_dir_discovery_mode_contract(tmp_path: Path) -> None:

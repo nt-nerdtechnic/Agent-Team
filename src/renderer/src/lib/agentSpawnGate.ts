@@ -4,10 +4,11 @@
 // requesting pane), so they follow the protocol language in data/stages.ts.
 //
 // This gate only rejects on correctness (unknown agent, bad/taken name, empty
-// task) — it never rejects on volume. Child/workspace/depth counts above the
+// task, a model/effort the vendor cannot be told) — it never rejects on volume. Child/workspace/depth counts above the
 // advisory thresholds below still succeed; the caller just gets an
 // `advisories` note back to relay or log.
 
+import { modelArgsFor, type CliModelCapability } from '@navide/plugin-shell'
 import { normalizeMessagingName, type ParsedSpawnRequest } from './agentMessaging'
 
 /** Advisory threshold for live child panes one pane has spawned — crossing it
@@ -32,11 +33,28 @@ export interface SpawnGateContext {
   parentChildCount: number
   /** Live AI CLI panes (terminal excluded) across the workspace. */
   cliPaneCount: number
+  /** The model/effort capability of one agent key, from the renderer's own
+   *  AgentSpec — the spec that actually assembles argv. The backend refuses an
+   *  unsupported model too, but its capability table is a mirror; this is the
+   *  authoritative check, so a drift between the two cannot launch a pane on
+   *  the wrong model. Undefined for an unknown key. */
+  modelCapabilityFor: (agentKey: string) => CliModelCapability | undefined
 }
 
-export type SpawnGateResult =
-  | { ok: true; agentKey: string; name: string; task: string; advisories?: string[] }
-  | { ok: false; reason: string }
+/** An accepted request. `model` / `effort` are present only when the caller
+ *  asked for them, so a request that named neither yields exactly the object
+ *  this gate returned before they existed. */
+export interface SpawnGateOk {
+  ok: true
+  agentKey: string
+  name: string
+  task: string
+  model?: string
+  effort?: string
+  advisories?: string[]
+}
+
+export type SpawnGateResult = SpawnGateOk | { ok: false; reason: string }
 
 /** The advisory notes for one spawn's volume context (chain depth, children
  *  per parent, workspace CLI panes) — never a rejection, just what would be
@@ -67,6 +85,41 @@ export function spawnAdvisoriesFor(
   return advisories
 }
 
+/** Turn a {@link modelArgsFor} refusal into user/agent-facing text. Says what
+ *  this vendor DOES accept, not just what it rejected — a caller told only
+ *  "not supported" retries with the same shape. */
+function describeModelRefusal(
+  agentKey: string,
+  refusal: Exclude<ReturnType<typeof modelArgsFor>, { ok: true }>['refusal'],
+  effort: string,
+): string {
+  if (refusal.kind === 'model-unsupported') {
+    return (
+      `「${agentKey}」無法在啟動時指定模型，這樣開會落回它的預設模型 — ` +
+      `請拿掉 model 參數，改在 CLI 裡自己切換模型`
+    )
+  }
+  if (refusal.kind === 'effort-unsupported') {
+    return (
+      `「${agentKey}」沒有獨立的 effort 參數 — 請拿掉 effort；` +
+      `若這家 CLI 是把強度寫在模型 id 裡（例如 gpt-5.3-codex-high），請改寫進 model`
+    )
+  }
+  if (refusal.kind === 'model-malformed') {
+    return (
+      `model 只能是單一的模型 id — 不可含空白，也不可用「-」開頭。` +
+      `帶空白的值會被拆成兩個參數，等於多塞了一個旗標給 CLI`
+    )
+  }
+  if (refusal.kind === 'effort-malformed') {
+    return `effort 只能是單一個字 — 不可含空白，也不可用「-」開頭`
+  }
+  return (
+    `「${agentKey}」的 effort 只接受：${refusal.accepted.join('、')}，` +
+    `收到的是「${effort}」`
+  )
+}
+
 /** Validate one spawn request against the whitelist, naming rules and
  *  correctness checks — the only things that reject. Volume (children per
  *  parent, workspace CLI panes, chain depth) never rejects; past its advisory
@@ -85,11 +138,21 @@ export function evaluateSpawnRequest(
   }
   if (!req.task) return { ok: false, reason: 'task 欄位不可為空' }
 
+  const model = (req.model ?? '').trim()
+  const effort = (req.effort ?? '').trim()
+  const chosen = modelArgsFor({
+    spec: ctx.modelCapabilityFor(req.agent),
+    request: { model, effort },
+  })
+  if (!chosen.ok) return { ok: false, reason: describeModelRefusal(req.agent, chosen.refusal, effort) }
+
   const advisories = spawnAdvisoriesFor(ctx)
 
-  return advisories.length > 0
-    ? { ok: true, agentKey: req.agent, name, task: req.task, advisories }
-    : { ok: true, agentKey: req.agent, name, task: req.task }
+  const result: SpawnGateOk = { ok: true, agentKey: req.agent, name, task: req.task }
+  if (model) result.model = model
+  if (effort) result.effort = effort
+  if (advisories.length > 0) result.advisories = advisories
+  return result
 }
 
 /** Evaluate every SPAWN block in a turn — no longer just the first. Each

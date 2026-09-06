@@ -222,6 +222,12 @@ describe('account modal — your network', () => {
     expect(MODAL.match(/:disabled="!!deciding \|\| !linkReady"/g)?.length).toBe(4)
   })
 
+  it('approving a knock carries a window-minted confirmation, like any policy write', () => {
+    expect(MODAL).toMatch(/withConfirmation\('p2p\.access_requests\.approve', '', \{ key: req\.key \}, req\.key\)/)
+    // ...and the two policy writers bind the document itself.
+    expect(MODAL).toMatch(/withConfirmation\('p2p\.policy\.set', '', \{ policy: doc \}, canonicalJson\(doc\)\)/)
+  })
+
   it('re-reads after every decision, so a row leaves only when it really did', () => {
     expect(MODAL).toMatch(/await props\.backend\.send\(type, args\)[\s\S]{0,60}await loadNetwork\(\)/)
   })
@@ -510,16 +516,84 @@ describe('account modal — your network', () => {
     }
   })
 
-  it('gives no way to clear a trust lock', () => {
-    // Starting over is precisely what deleting that state was meant to achieve.
-    // Sliced from the section's own markup, not from the first mention of
-    // `trustLocked` — that is the type declaration, and a slice starting there
-    // sweeps in every button between it and the template.
-    const start = MODAL.indexOf('settings.p2p.trust.locked-title')
+  // The card's own markup. Not sliced to `</section>` any more: the card now
+  // lives inside the network section, so that tag is the end of the whole
+  // section with the connection card and the entire device list in between.
+  function lockedMarkup(): string {
+    const start = MODAL.indexOf('class="card locked-card"')
     expect(start).toBeGreaterThan(-1)
-    const locked = MODAL.slice(start, MODAL.indexOf('</section>', start))
+    const end = MODAL.indexOf('<div class="card net-card"', start)
+    expect(end).toBeGreaterThan(start)
+    return MODAL.slice(start, end)
+  }
+
+  it('offers no way out at all while the read is still being retried', () => {
+    // The dangerous state, and the one that used to be indistinguishable from a
+    // record that is really gone: a locked keychain, a dismissed authorisation
+    // dialog and a `security` timeout all read the same from here. Offering to
+    // erase every pairing on the strength of one of those is offering to
+    // destroy something nothing is wrong with, so the buttons are not merely
+    // disabled — the whole branch is absent.
+    const locked = lockedMarkup()
+    const transient = locked.slice(
+      locked.indexOf('v-if="trustLockedTransient"'),
+      locked.indexOf('v-else-if="rebuildDone"'),
+    )
+    expect(transient).toContain('settings.p2p.trust.locked-retrying')
+    expect(transient).not.toMatch(/<button/)
+    // Written as one chain, so "not transient" is stated once rather than
+    // repeated on every branch that has to stay in step with it.
+    expect(locked).toMatch(
+      /v-if="trustLockedTransient"[\s\S]*v-else-if="rebuildDone"[\s\S]*v-else-if="rebuildArmed"[\s\S]*<div v-else class="locked-acts">/,
+    )
+  })
+
+  it('cannot clear a trust lock in one press', () => {
+    // This used to assert the card had no button at all, and that was true
+    // until "start over" shipped. The guarantee it was really holding is the
+    // one kept here: starting over is exactly what an attacker who deleted
+    // that state is waiting for, so it must never be one click away.
+    //
+    // The behavioural half of this lives in AccountModal.deviceRow.test.ts
+    // ("sends nothing until the second press"). It does not replace this one:
+    // that test clicks the FIRST button it finds, so a template that grew a
+    // second button wired straight to rebuildTrust would still leave it green.
+    // This is the structural half — what the markup is allowed to contain.
+    const locked = lockedMarkup()
     expect(locked).toContain('settings.p2p.trust.locked-body')
-    expect(locked).not.toMatch(/<button/)
+
+    // The resting state — the read has settled, so there is a decision to make.
+    // Anchored on the last branch of the chain, which is the only one reached
+    // when nothing else applies.
+    const resting = locked.slice(locked.indexOf('<div v-else class="locked-acts">'))
+    expect(resting).toMatch(/<button/)
+    expect(resting.match(/<button/g)).toHaveLength(1)
+    expect(resting).toContain('rebuildArmed = true')
+    expect(resting).not.toContain('rebuildTrust')
+
+    // And the only call that actually sends it is behind the cost.
+    expect(locked.indexOf('trust.rebuild-warn')).toBeLessThan(locked.indexOf('rebuildTrust()'))
+  })
+
+  it('keeps the gap the layout asks for', () => {
+    // The card sits between the connection card and the directory because the
+    // warning has to be read before the list it makes untrustworthy. The gap is
+    // part of that arrangement, not decoration — it was lost to a parallel edit
+    // once already, without any test noticing.
+    const css = MODAL.slice(MODAL.indexOf('.locked-card {'))
+    expect(css.slice(0, css.indexOf('}'))).toMatch(/margin-bottom:\s*10px/)
+  })
+
+  it('puts the trust lock between the connection and the directory', () => {
+    // Placement is the message: the device list below cannot be trusted while
+    // this is unresolved, so the warning has to be read before the list, not
+    // scrolled past above it.
+    const link = MODAL.indexOf('class="card link-card"')
+    const locked = MODAL.indexOf('class="card locked-card"')
+    const list = MODAL.indexOf('<div class="card net-card"', link)
+    expect(link).toBeGreaterThan(-1)
+    expect(locked).toBeGreaterThan(link)
+    expect(list).toBeGreaterThan(locked)
   })
 
   it('has every link string it shows, in both locales', () => {
@@ -670,7 +744,7 @@ describe('the unverified-rules notice', () => {
       /async function signPolicyNow\(\)[\s\S]{0,600}send<\{ policy\?: unknown \}>\('p2p\.policy\.get'/,
     )
     expect(MODAL).toMatch(
-      /p2p\.policy\.get[\s\S]{0,800}withConfirmation\('p2p\.policy\.set', '', \{ policy: doc \}\)/,
+      /p2p\.policy\.get[\s\S]{0,800}withConfirmation\('p2p\.policy\.set', '', \{ policy: doc \}, canonicalJson\(doc\)\)/,
     )
   })
 
@@ -704,7 +778,7 @@ describe('what a trust-changing click carries', () => {
     // The backend refuses all six without one, and only a window can obtain it:
     // MCP and the plugin broker hold the same socket and have no path to the
     // key. That is the whole difference the check is drawing.
-    expect(MODAL).toContain("window.agentTeam?.trustConfirm(action, deviceId)")
+    expect(MODAL).toContain("window.agentTeam?.trustConfirm(action, deviceId, subject)")
     for (const action of [
       'p2p.pair.start',
       'p2p.pair.confirm',
@@ -920,6 +994,45 @@ describe('why the link is not usable', () => {
 
   it('shows nothing extra once the link is up', () => {
     expect(MODAL).toMatch(/linkErrorDetail = computed\(\(\) => \(linkReady\.value \? ''/)
+  })
+})
+
+describe('the two title-bar windows are loaded before they are asked for', () => {
+  // Measured on this machine from the production build: SettingsModal is 507 KB
+  // of JavaScript (~315 ms to parse) plus a 150 KB stylesheet, the account
+  // window 67 KB (~25 ms) plus 18 KB. All of it used to be paid after the click
+  // and before anything was drawn.
+  it('uses one module specifier per window, shared by the prewarm and the component', () => {
+    // The failure this guards is silent: a second arrow function with the same
+    // path still works, until one of them is edited and the prewarm starts
+    // warming something nobody opens.
+    for (const name of ['SettingsModal', 'AccountModal']) {
+      const uses = APP.match(new RegExp(`import\\('\\./components/${name}\\.vue'\\)`, 'g')) ?? []
+      expect(uses).toHaveLength(1)
+    }
+    expect(APP).toContain('const SettingsModal = defineAsyncComponent(loadSettingsModal)')
+    expect(APP).toContain('const AccountModal = defineAsyncComponent(loadAccountModal)')
+    expect(APP).toMatch(/schedulePrewarm\([\s\S]{0,120}loadSettingsModal\(\)[\s\S]{0,40}loadAccountModal\(\)/)
+  })
+
+  it('warms at idle with a deadline, and cancels with the window', () => {
+    // Eager loading would move half a megabyte of parsing into the seconds the
+    // app is spawning panes; a fixed delay would postpone it past the early
+    // clicks it exists for. The scheduling itself is tested in prewarm.test.ts;
+    // what belongs here is that this caller asks for that form and disposes it.
+    expect(APP).toMatch(/schedulePrewarm\([\s\S]{0,240}idleTimeoutMs: 4000/)
+    expect(APP).toMatch(/schedulePrewarm\([\s\S]{0,280}fallbackDelayMs: 2500/)
+    expect(APP).toMatch(/const cancel = schedulePrewarm\([\s\S]{0,900}onUnmounted\(cancel\)/)
+    // And there is one mechanism, not two: the inline warm this replaced is gone.
+    expect(APP).not.toContain('const warmSettings')
+  })
+
+  it('does not make the account window wait for its first read', () => {
+    // Reported as a suspect and it is not one: the poll is started, not
+    // awaited, and the template has a "reading" state for the gap.
+    expect(MODAL).toContain('void refresh()')
+    expect(MODAL).not.toMatch(/watch\(\(\) => props\.open[\s\S]{0,200}await refresh\(\)/)
+    expect(MODAL).toMatch(/v-else-if="!network"[\s\S]{0,160}settings\.p2p\.network\.loading/)
   })
 })
 

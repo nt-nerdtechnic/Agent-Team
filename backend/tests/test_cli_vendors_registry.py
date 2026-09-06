@@ -351,3 +351,69 @@ def _assert_absolute_import_allowed(filename: str, root: str) -> None:
         f"standard library and {sorted(ALLOWED_THIRD_PARTY)}; app modules "
         "must depend on vendors, never the reverse"
     )
+
+
+def test_model_capability_matches_the_frontend_agent_spec() -> None:
+    """The frontend spec owns the flags because it builds argv; the backend
+    mirrors only whether a vendor accepts them, so the MCP tool can refuse a
+    request without waiting out the spawn verdict. A vendor wired on one side
+    only either refuses a model it would have accepted, or accepts one that
+    then reaches a CLI which ignores it — the silent miss the capability
+    exists to prevent."""
+    frontend_model: set[str] = set()
+    frontend_effort: set[str] = set()
+    frontend_efforts: dict[str, tuple[str, ...]] = {}
+    for path in FRONTEND_AGENTS_DIR.glob("*.ts"):
+        if path.stem.startswith("_") or path.stem in {"index", "types"}:
+            continue
+        source = path.read_text(encoding="utf-8")
+        keys = set(re.findall(r"agentKey: '([a-z]+)'", source))
+        assert len(keys) == 1, f"{path.name} declares agentKeys {sorted(keys)}"
+        key = keys.pop()
+        if re.search(r"^\s+modelArgs:", source, re.M):
+            frontend_model.add(key)
+        if re.search(r"^\s+effortArgs:", source, re.M):
+            frontend_effort.add(key)
+        listed = re.search(r"^\s+knownEfforts: \[([^\]]*)\]", source, re.M)
+        if listed:
+            frontend_efforts[key] = tuple(re.findall(r"'([^']+)'", listed.group(1)))
+
+    backend_model = {k for k, s in registry.VENDORS.items() if s.supports_model}
+    backend_effort = {k for k, s in registry.VENDORS.items() if s.supports_effort}
+    backend_efforts = {
+        k: s.known_efforts for k, s in registry.VENDORS.items() if s.known_efforts
+    }
+
+    assert backend_model == frontend_model, (
+        "model support drifted between cli_vendors/<key>.py and "
+        f"agents/<key>.ts: backend={sorted(backend_model)} "
+        f"frontend={sorted(frontend_model)}"
+    )
+    assert backend_effort == frontend_effort, (
+        "effort support drifted between cli_vendors/<key>.py and "
+        f"agents/<key>.ts: backend={sorted(backend_effort)} "
+        f"frontend={sorted(frontend_effort)}"
+    )
+    assert backend_efforts == frontend_efforts, (
+        "effort vocabularies drifted; the MCP tool would reject a value the "
+        f"CLI accepts: backend={backend_efforts} frontend={frontend_efforts}"
+    )
+
+
+def test_droid_is_never_given_an_effort_capability() -> None:
+    """droid's interactive command — the one Navide spawns — reads `-r` as
+    --resume; only `droid exec` reads it as --reasoning-effort. An effort flag
+    here would not set the effort, it would try to resume a session named
+    after the level. Asserted rather than left to review."""
+    droid = registry.VENDORS["droid"]
+    assert droid.supports_effort is False
+    assert droid.supports_model is False
+    assert droid.known_efforts == ()
+
+
+def test_effort_vocabulary_requires_effort_support() -> None:
+    """known_efforts is only read once supports_effort is true, so a vendor
+    carrying the list alone would validate values it then discards."""
+    for key, spec in registry.VENDORS.items():
+        if spec.known_efforts:
+            assert spec.supports_effort, f"{key} lists efforts but takes none"

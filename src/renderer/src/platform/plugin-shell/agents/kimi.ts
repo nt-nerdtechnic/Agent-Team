@@ -6,6 +6,9 @@ export const SPEC = {
   agentKey: 'kimi',
   label: 'Kimi Code',
   defaultCommand: 'kimi',
+  // Effort lives in ~/.kimi-code/config.toml ([thinking] effort) and an
+  // invalid value is silently clamped there, so it is not exposed here.
+  modelArgs: (m) => `--model ${m}`,
   skipPermissionFlag: '--yolo',
   // id is the `session_<uuid>` dir name.
   resumeArgs: (id) => `--session ${id}`,

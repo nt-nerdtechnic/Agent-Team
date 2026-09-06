@@ -102,8 +102,9 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 | `cli_check_message` | `msg_key` | 一つの `cli_send` の結末: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 自分の送信のうち滞留中または失敗しているもの: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_pending_incoming` | `limit=20`（上限 200） | **CLI Pane 専用。** *自分宛*に Queue され、まだ入っていないもの: `{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
+| `cli_read_incoming` | `uid=""`, `limit=5`（上限 20）, `include_delivered=false`, `peek=false` | **CLI Pane 専用。** 自分宛メッセージの全文（`cli_pending_incoming` は空白を潰した 200 文字のみ）: `{count, messages: [{uid, sender, status, kind?, content, age_seconds, consumed}], note?}`。**既定では読むと消費されます**——読んだメッセージはその後 Pane に入力されません。`peek: true` は消費せずに読みます。消費は予約してから解放する二段階で、解放が失われた場合メッセージは Queue に戻り二度届くことがあります。`consumed` はメッセージごとに返され、消費されなかった理由は `note` に入ります |
 | `cli_send_and_wait` | `to`, `text`, `timeout_s=60`（上限 120）, `pane_id?` | `cli_send` に加えてその Turn の完了まで待機。`cli_wait_idle` の結果に `{ok, target, msg_key}` を付けて返す |
-| `cli_open_agent` | `agent`, `name`, `task`, `workspace_path`（Pane 以外の呼び出し元では必須） | Task 付きで新しい CLI Pane を Spawn。`{ok, name, address}` を返し、Spawn が Advisory の閾値を越えた場合は `advisories` も返す |
+| `cli_open_agent` | `agent`, `name`, `task`, `workspace_path`（Pane 以外の呼び出し元では必須）, `model`, `effort` | Task 付きで新しい CLI Pane を Spawn。`{ok, name, address}` を返し、Spawn が Advisory の閾値を越えた場合は `advisories` も返す。`model` と `effort` は任意で、その CLI が受け付けない場合は無視せず「拒否」するため、Pane が別のモデルで静かに起動することはない。多くの CLI は model を受け付けるが、独立した effort を受け付けるものは少なく、残りは effort を model id に埋め込む（`gpt-5.3-codex-high`）。model id は検証しない（リリースごとに変わるため）が、effort はその CLI の語彙と照合する |
 
 `cli_send` は、メッセージが配信のために*受理された*時点で返り、相手の Agent が
 読んだ時点ではありません。`cli_check_message` がそのループを閉じます。`status`

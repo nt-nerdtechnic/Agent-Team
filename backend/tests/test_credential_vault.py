@@ -1643,63 +1643,175 @@ def test_write_slot_rejects_a_multiline_secret_without_touching_the_item(
 # ---- app secrets are per data directory, in Keychain as well as on disk ------
 
 
-def test_two_data_directories_do_not_share_one_keychain_secret(tmp_path):
-    """A dev build beside the installed app must not overwrite its token.
+def test_two_data_directories_do_not_share_one_keychain_secret(tmp_path, monkeypatch):
+    """A dev build beside the installed app must not overwrite its secrets.
 
-    The file fallback was always under the vault's own root; the Keychain name
-    was not, and on macOS Keychain wins. So the second backend to write clobbered
-    the first, and the symptom appeared somewhere else entirely — AUTH_REJECTED
-    on the next reconnect, a roster holding only this machine, and an account
-    view still naming the account whose token had just been replaced.
+    These two vaults are built the way production builds one — ``app.py`` says
+    ``CredentialVault()`` and passes no root — so the only thing separating them
+    is ``AGENT_TEAM_DATA_DIR``, which is exactly what separates a dev backend
+    from the installed app.
+
+    The previous version of this test varied the vault's ``root`` instead, and
+    it passed for a build where the isolation did not work at all: no caller
+    ever passes a root, so both processes computed the same name and the second
+    to write took the Keychain item's ACL with it. On 2026-09-05 that locked the
+    device trust store closed on this machine — the item was still there, the
+    dev backend simply could not read it any more.
     """
     sec = FakeSecurity()
+
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "installed"))
     one = CredentialVault(
-        root=tmp_path / "dir-one",
-        real_home=tmp_path / "home",
-        security_runner=sec,
-        platform="darwin",
-    )
-    two = CredentialVault(
-        root=tmp_path / "dir-two",
-        real_home=tmp_path / "home",
-        security_runner=sec,
-        platform="darwin",
+        real_home=tmp_path / "home", security_runner=sec, platform="darwin"
     )
     one.write_app_secret("navide-server-token", "tok-installed")
+
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dev"))
+    two = CredentialVault(
+        real_home=tmp_path / "home", security_runner=sec, platform="darwin"
+    )
     two.write_app_secret("navide-server-token", "tok-dev")
 
-    assert one.read_app_secret("navide-server-token") == "tok-installed"
+    # Both names are computed at call time, so each vault answers for whichever
+    # data directory is current — read them while that directory is set.
     assert two.read_app_secret("navide-server-token") == "tok-dev"
-    assert one.app_secret_service("navide-server-token") != two.app_secret_service(
+    dev_service = two.app_secret_service("navide-server-token")
+    dev_file = two.app_secret_path("navide-server-token")
+
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "installed"))
+    assert one.read_app_secret("navide-server-token") == "tok-installed"
+    assert one.app_secret_service("navide-server-token") != dev_service
+    # The file fallback too: isolating only the Keychain would leave the two
+    # sharing the file that is read whenever the Keychain has no answer.
+    assert one.app_secret_path("navide-server-token") != dev_file
+
+
+def test_the_default_data_directory_keeps_its_existing_keychain_name(tmp_path, monkeypatch):
+    """Suffixing every install would sign each one out exactly once, to fix a
+    collision only a second data directory can cause. So the shipped install
+    keeps the unsuffixed name, and the discriminator is what a *second* data
+    directory gets."""
+    from agent_team_backend.applog import default_app_data_dir
+    from agent_team_backend.credential_vault import _APP_SECRET_SERVICE_PREFIX
+
+    vault = CredentialVault(
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (1, ""),
+        platform="darwin",
+    )
+
+    monkeypatch.delenv("AGENT_TEAM_DATA_DIR", raising=False)
+    assert vault.app_secret_service("navide-server-token") == (
+        _APP_SECRET_SERVICE_PREFIX + "navide-server-token"
+    )
+    # Spelling the default path out explicitly is the same answer, so an
+    # existing install is not suffixed by having the variable set to where it
+    # already points.
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(default_app_data_dir()))
+    assert vault.app_secret_service("navide-server-token") == (
+        _APP_SECRET_SERVICE_PREFIX + "navide-server-token"
+    )
+
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "elsewhere"))
+    assert vault.app_secret_service("navide-server-token").startswith(
+        _APP_SECRET_SERVICE_PREFIX + "navide-server-token@"
+    )
+
+
+def test_the_profiles_root_is_not_what_separates_two_backends(tmp_path, monkeypatch):
+    """The mistake that made the previous fix unreachable, pinned so it cannot
+    come back: two vaults with different profile roots but one data directory
+    are one backend's storage, and must answer with one name."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "one-backend"))
+    a = CredentialVault(
+        root=tmp_path / "root-a",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (1, ""),
+        platform="darwin",
+    )
+    b = CredentialVault(
+        root=tmp_path / "root-b",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (1, ""),
+        platform="darwin",
+    )
+    assert a.app_secret_service("navide-server-token") == b.app_secret_service(
         "navide-server-token"
     )
 
 
-def test_the_default_data_directory_keeps_its_existing_keychain_name(tmp_path):
-    """Suffixing every install would sign each one out exactly once, to fix a
-    collision only a second data directory can cause. So the default root keeps
-    the unsuffixed name, and the discriminator is what a *second* root gets."""
-    from agent_team_backend.credential_vault import (
-        _APP_SECRET_SERVICE_PREFIX,
-        default_profiles_root,
-    )
+def test_a_transient_keychain_failure_is_not_read_as_signed_out(tmp_path, monkeypatch):
+    """A locked keychain, a dismissed dialog and a `security` timeout all used
+    to come back as None — the same answer as "never stored".
 
-    shipped = CredentialVault(
-        root=default_profiles_root(),
+    The two demand opposite responses and cost different amounts to get wrong:
+    reading a transient failure as "nothing" sends the caller down a path that
+    erases real state, while reading a genuine absence as a failure costs one
+    retry. So anything that is not an unambiguous "no such item" raises.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dd"))
+    calls: list[list[str]] = []
+
+    def flaky(args, input_text=None):
+        calls.append(args)
+        return (51, "User interaction is not allowed.")
+
+    vault = CredentialVault(
+        root=tmp_path / "root",
         real_home=tmp_path / "home",
-        security_runner=lambda args, input_text=None: (1, ""),
+        security_runner=flaky,
         platform="darwin",
     )
-    assert shipped.app_secret_service("navide-server-token") == (
-        _APP_SECRET_SERVICE_PREFIX + "navide-server-token"
-    )
+    with pytest.raises(CredentialVaultError):
+        vault.read_app_secret("navide-device-trust")
+    assert calls, "it did ask the keychain"
 
-    other = CredentialVault(
-        root=tmp_path / "elsewhere",
+
+def test_a_genuine_absence_is_still_just_absent(tmp_path, monkeypatch):
+    """The other direction, so the strictness cannot be "raise on everything":
+    exit code 44 is the keychain saying the item is not there, and a machine
+    that never stored one has to be able to say so."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dd"))
+    vault = CredentialVault(
+        root=tmp_path / "root",
         real_home=tmp_path / "home",
-        security_runner=lambda args, input_text=None: (1, ""),
+        security_runner=lambda args, input_text=None: (44, "could not be found"),
         platform="darwin",
     )
-    assert other.app_secret_service("navide-server-token").startswith(
-        _APP_SECRET_SERVICE_PREFIX + "navide-server-token@"
+    assert vault.read_app_secret("navide-device-trust") is None
+
+
+def test_a_planted_file_cannot_stand_in_for_the_keychain(tmp_path, monkeypatch):
+    """On macOS the file is never *written* — `write_app_secret` deletes it
+    after every keychain write, so a leftover cannot shadow the real item. A
+    file present on this platform is therefore a leftover from another one or
+    something somebody put there, and reading it was the only thing giving it
+    any authority. There is no MAC because there is nothing to authenticate:
+    the answer is not to read it.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dd"))
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (44, "could not be found"),
+        platform="darwin",
     )
+    planted = vault.app_secret_path("navide-device-trust")
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text('{"pins":{"attacker":{"approved":true}}}', encoding="utf-8")
+
+    assert vault.read_app_secret("navide-device-trust") is None
+
+
+def test_a_platform_without_a_keychain_still_uses_the_file(tmp_path, monkeypatch):
+    """The file is not dead code — it is the whole story where there is no
+    keychain to prefer over it."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path / "dd"))
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (1, ""),
+        platform="linux",
+    )
+    vault.write_app_secret("navide-server-token", "tok")
+    assert vault.read_app_secret("navide-server-token") == "tok"

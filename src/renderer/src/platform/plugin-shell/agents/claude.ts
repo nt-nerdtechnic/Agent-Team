@@ -6,6 +6,13 @@ export const SPEC = {
   agentKey: 'claude',
   label: 'Claude Code',
   defaultCommand: 'claude',
+  // `--effort` warns and falls back to the default on an unknown value
+  // (exit 0), so an unchecked typo would run at the wrong effort and look
+  // like it worked — hence knownEfforts. `ultracode` is deliberately absent:
+  // it is a Claude Code orchestration mode, not a model effort level.
+  modelArgs: (m) => `--model ${m}`,
+  effortArgs: (e) => `--effort ${e}`,
+  knownEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   skipPermissionFlag: '--dangerously-skip-permissions',
   resumeArgs: (id) => `--resume ${id}`,
   supportsRebuild: true,

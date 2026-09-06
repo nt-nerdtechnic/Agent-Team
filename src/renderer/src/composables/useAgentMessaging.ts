@@ -108,11 +108,12 @@ export interface AgentMessage {
    *  row is not queued any more and has nothing left to warn about. */
   staleNotified?: true
   /** Set on a message that reached its pane without being typed in: `hook` for
-   *  a claude Stop hook that was handed it as its next instruction, `push:<kind>`
-   *  for one of the vendor push channels. Like `hold` it is in-memory only: it
-   *  describes how a live row got out, and a restored log has no delivery left
-   *  to explain. */
-  route?: 'hook' | `push:${string}`
+   *  a claude Stop hook that was handed it as its next instruction, `read` for
+   *  a recipient that asked for it itself (the `cli_read_incoming` MCP tool),
+   *  `push:<kind>` for one of the vendor push channels. Like `hold` it is
+   *  in-memory only: it describes how a live row got out, and a restored log has
+   *  no delivery left to explain. */
+  route?: 'hook' | 'read' | `push:${string}`
   /** `uid` of the message this one answers, set when the sender echoed back the
    *  correlation id carried in that message's envelope. Like `hold` it describes
    *  an in-memory relation between two live rows, so it is never persisted. */
@@ -262,6 +263,27 @@ const CORRELATION_TTL_MS = REMOTE_ACK_TIMEOUT_MS
  *  and nothing compares them, so they need to agree on the threshold and not on
  *  the moment. */
 export const STALE_HOLD_MS = 120_000
+/**
+ * How long a reserveIncoming() reservation may stay open before the queue takes
+ * its message back.
+ *
+ * This is not a guard against losing a message — the two-phase protocol already
+ * covers that, since an unsettled row never leaves its queue. It guards against
+ * the pane going permanently DEAF: a reserved head stops pumpPane() and
+ * drainForHook() from touching that queue, so a reservation that is never
+ * settled would silently end delivery to that pane for the life of the window,
+ * with no error and nothing in the UI to show for it. Nothing else expires it —
+ * expireStaleRemotes() only covers OUTBOUND messages awaiting another window's
+ * report.
+ *
+ * Sized off the RPC that settles it: `ui.invoke` gives an ordinary action 15s
+ * (the backend's `_UI_INVOKE_TIMEOUT_S`), so double that leaves an answer that
+ * is merely slow room to arrive. The trade-off runs both ways and neither side
+ * is free — expire too late and the pane stays deaf for longer; expire too
+ * early and a settle still in flight loses its race against the next pump,
+ * which would hand the same message over twice.
+ */
+export const READ_RESERVE_TIMEOUT_MS = 30_000
 
 const RATE_LIMIT_REASON: MessageReason = {
   key: 'rate-limit',
@@ -291,6 +313,16 @@ const HYDRATE_LOST_REASON: MessageReason = { key: 'window-reloaded' }
  *  reportDelivery path as a failure, and the sending window reads the key to
  *  land its own row on `cancelled` rather than `failed`. */
 const CANCELLED_REASON: MessageReason = { key: 'cancelled' }
+/** Verdict reported back for a message the RECIPIENT took itself, by reading it
+ *  through `cli_read_incoming` instead of waiting for it to be typed in.
+ *
+ *  Deliberately paired with `ok: true`, unlike {@link CANCELLED_REASON}. The
+ *  message did arrive — an agent asked for it and got the text — so reporting a
+ *  failure would leave the sender's row on `failed` and invite it to send the
+ *  same instruction again, which is the one thing `cli_send` warns about. The
+ *  reason rides along only to say HOW it arrived; every consumer of a positive
+ *  report ignores it (see resolveRemoteDelivery). */
+export const READ_REASON: MessageReason = { key: 'read' }
 
 // ── Module-level singleton state ──────────────────────────────────────────
 let deps: MessagingDeps | null = null
@@ -376,6 +408,9 @@ const remoteInbound = new Map<number, string>()
  *  echoes one back can be linked to the message it answers. Populated wherever
  *  an envelope is rendered; pruned by expireCorrelations(). */
 const correlations = new Map<string, { id: number; sentAt: number }>()
+/** Messages a recipient has reserved but not yet consumed, by message id. See
+ *  reserveIncoming(); `reservedAt` is what expireReadReservations() reads. */
+const readReserved = new Map<number, { paneId: string; reservedAt: number }>()
 
 function configureMessaging(d: MessagingDeps): void {
   deps = d
@@ -452,6 +487,9 @@ function unregisterPane(paneId: string): void {
     // Undelivered cross-workspace messages must not leave the sending window
     // waiting for a report that will never come.
     ackInbound(id, false, { key: 'pane-closed' })
+    // Including anything reserved for a read: the queue is going away, so the
+    // reservation has nothing left to hold and no settle to wait for.
+    readReserved.delete(id)
   }
   queues.delete(paneId)
   delivering.delete(paneId)
@@ -1087,6 +1125,10 @@ function pump(): void {
   const now = deps.now()
   expireStaleRemotes(now)
   expireCorrelations(now)
+  // Before the pause check, like the other two: a paused window still has to
+  // stop a pane going deaf, and a released reservation only goes back to
+  // waiting — it delivers nothing.
+  expireReadReservations(now)
   if (paused.value) {
     for (const q of queues.values()) annotateHold(q, 'paused')
     return
@@ -1104,6 +1146,11 @@ async function pumpPane(paneId: string): Promise<void> {
   // Mid-injection: the head has no hold and the rest already carry their
   // positions from the call that let the head through.
   if (delivering.has(paneId)) return
+  // The head is reserved for a recipient reading it itself; typing it in as
+  // well would hand the same instruction over twice. FIFO means nothing behind
+  // it can go out first either, so the whole pane waits — bounded by
+  // expireReadReservations().
+  if (isReadReserved(q[0])) return
   // A push channel answers to its own gates, which the caller has already
   // applied — so a pane it accepts needs no second opinion from the typed
   // path's gate, which is exactly what makes a message reach a pane someone is
@@ -1226,6 +1273,8 @@ function drainForHook(paneId: string): string | null {
   if (delivering.has(paneId)) return null
   const q = queues.get(paneId)
   if (!q || q.length === 0) return null
+  // Already promised to a recipient that asked for it; see pumpPane().
+  if (isReadReserved(q[0])) return null
   const id = q[0]
   const msg = findMessage(id)
   const envelope = envelopes.get(id)
@@ -1276,6 +1325,159 @@ function settleHookDrain(paneId: string, ok: boolean): void {
   ackInbound(id, true, null)
 }
 
+// ── Recipient-initiated read ───────────────────────────────────────────────
+/** What reserveIncoming() hands back: the message as its recipient needs to
+ *  read it, which is the raw content and who sent it — not the envelope, which
+ *  exists to be typed into a pane. */
+export interface ReservedIncoming {
+  uid: string
+  from: string
+  to: string
+  content: string
+  createdAt: number
+  /** Set when the message crossed a workspace boundary. */
+  remoteWorkspace?: string
+}
+
+/** Find a logged message by its persistence key.
+ *
+ *  `uid` is what the backend store and the MCP tools address a message by; the
+ *  in-memory side maps are all keyed by the local `id`, so every uid-addressed
+ *  entry point starts here. A linear scan of at most LOG_CAP (500) rows, called
+ *  once per message a recipient asks for — an index would be state to keep
+ *  correct through eviction, hydration and reload for no measurable gain. */
+function findByUid(uid: string): AgentMessage | undefined {
+  return messages.value.find((m) => m.uid === uid)
+}
+
+/** Whether a queue entry is reserved for a recipient that asked for it. The
+ *  registry is the single source of truth, so a row cannot look reserved to one
+ *  caller and free to another. */
+function isReadReserved(id: number | undefined): boolean {
+  return id !== undefined && readReserved.has(id)
+}
+
+/**
+ * Reserve messages a recipient is about to read for itself, and return their
+ * contents — today that is the `cli_read_incoming` MCP tool, where the agent a
+ * message is addressed to pulls it instead of waiting for Navide to type it in.
+ *
+ * Reserved, not consumed — the same discipline as drainForHook(), for the same
+ * reason and with sharper teeth. The answer travels back over `ui.invoke`: a
+ * 15-second RPC that fails silently. If returning the text and dropping the row
+ * were one indivisible act, a lost reply would turn a message that was still
+ * going to be retried into a history row nobody will ever look at again, and
+ * NEITHER side would find out — the recipient never saw it, and the sender was
+ * already told it arrived. So each row stays exactly where it is in its queue,
+ * marked `delivering` with `route: 'read'`, until settleIncomingRead() says
+ * whether the hand-over landed.
+ *
+ * What stops it going out twice meanwhile: a reserved entry is skipped by
+ * pumpPane() and drainForHook(), so nothing types it in behind the reader's
+ * back. What stops it going out never: expireReadReservations(), because that
+ * skip is otherwise permanent.
+ *
+ * Per message, not per pane. A recipient asks for the messages it can see, and
+ * the head of its queue may be mid-injection at that moment — that one entry is
+ * refused (the write is already happening; it is going to arrive by typing) and
+ * the ones behind it are still perfectly reservable. Returns only the messages
+ * actually reserved, so a caller that asked for four and gets three has been
+ * told precisely which three it may report on.
+ */
+function reserveIncoming(paneId: string, uids: string[]): ReservedIncoming[] {
+  if (!deps || paused.value) return []
+  const now = deps.now()
+  const taken: ReservedIncoming[] = []
+  for (const uid of uids) {
+    const msg = findByUid(uid)
+    // Anything not still waiting in a queue is not the reader's to take: it is
+    // already delivered, failed, cancelled, or reserved by an earlier call.
+    if (!msg || msg.status !== 'queued') continue
+    const loc = queuedLocation(msg.id)
+    // Addressed to a different pane — a recipient reads its own mail only.
+    if (!loc || loc.paneId !== paneId) continue
+    if (heldInFlight(loc)) continue
+    readReserved.set(msg.id, { paneId, reservedAt: now })
+    msg.status = 'delivering'
+    msg.route = 'read'
+    delete msg.hold
+    deps.persistUpdate?.([{ uid: msg.uid, status: 'delivering' }])
+    taken.push({
+      uid: msg.uid,
+      from: msg.from,
+      to: msg.to,
+      content: msg.content,
+      createdAt: msg.createdAt,
+      remoteWorkspace: msg.remoteWorkspace,
+    })
+  }
+  return taken
+}
+
+/**
+ * Give a reservation back. The row returns to `queued` where it already is —
+ * nothing was removed, so there is nothing to put back and no position to
+ * restore. Costs nothing: no budget was spent reserving it, and the next pump
+ * treats it as it would any other queued message.
+ */
+function releaseReservation(msg: AgentMessage): void {
+  readReserved.delete(msg.id)
+  msg.status = 'queued'
+  delete msg.route
+  deps?.persistUpdate?.([{ uid: msg.uid, status: 'queued' }])
+}
+
+/**
+ * Close a reserveIncoming() reservation. `ok` means the contents reached the
+ * agent that asked for them; anything else — the RPC timed out, the tool call
+ * was abandoned, the socket failed — puts the messages back, because nothing
+ * was written anywhere and no agent has seen them.
+ *
+ * Only the reservations this pane actually holds are settled, so a stale or
+ * confused settle cannot consume somebody else's mail.
+ */
+function settleIncomingRead(paneId: string, uids: string[], ok: boolean): void {
+  if (!deps) return
+  for (const uid of uids) {
+    const msg = findByUid(uid)
+    if (!msg) continue
+    const rec = readReserved.get(msg.id)
+    if (!rec || rec.paneId !== paneId) continue
+    // unqueue() has the final say on removal, and it refuses a head another
+    // hand-over is holding. Either way the message goes back rather than
+    // vanishing — the only outcome this protocol will not produce.
+    if (ok && unqueue(msg.id)) {
+      readReserved.delete(msg.id)
+      markRead(msg)
+      continue
+    }
+    releaseReservation(msg)
+  }
+}
+
+/**
+ * Hand back reservations old enough that no answer is still coming.
+ *
+ * The failure this exists for is not a lost message — an unsettled row never
+ * left its queue. It is a pane that stops receiving: pumpPane() and
+ * drainForHook() both step over a reserved head, so one reservation that is
+ * never settled would end delivery to that pane silently and permanently. See
+ * {@link READ_RESERVE_TIMEOUT_MS}.
+ */
+function expireReadReservations(now: number): void {
+  for (const [id, rec] of [...readReserved]) {
+    if (now - rec.reservedAt < READ_RESERVE_TIMEOUT_MS) continue
+    const msg = findMessage(id)
+    // The row is gone (log eviction) or was resolved by another path, such as
+    // the pane closing and failing everything it had queued.
+    if (!msg || msg.status !== 'delivering' || msg.route !== 'read') {
+      readReserved.delete(id)
+      continue
+    }
+    releaseReservation(msg)
+  }
+}
+
 // ── Cancel ─────────────────────────────────────────────────────────────────
 /** The queue a message is sitting in, or null when nothing local holds it —
  *  it was already taken, or its queue lives in another window. */
@@ -1287,16 +1489,27 @@ function queuedLocation(id: number): { paneId: string; q: number[]; index: numbe
   return null
 }
 
-/** Take a message out of its local queue, if it is still there to take.
+/** Whether a queue entry is the one a hand-over in flight is holding.
  *
  *  Only the head can be mid-injection — pumpPane and drainForHook both hold
  *  `q[0]` and shift it when they are done — so that is the one entry a pane
- *  with an injection in flight must keep. Everything behind it splices out
- *  safely, and the head those two are holding stays exactly where it was. */
+ *  with an injection in flight must keep. Everything behind it is free.
+ *
+ *  Shared by unqueue() and reserveIncoming(), which need the same answer to
+ *  different questions ("may I remove this?" / "may I reserve this?") and must
+ *  not be able to disagree about it. */
+function heldInFlight(loc: { paneId: string; index: number }): boolean {
+  return loc.index === 0 && delivering.has(loc.paneId)
+}
+
+/** Take a message out of its local queue, if it is still there to take.
+ *
+ *  Everything behind an in-flight head splices out safely, and the head being
+ *  held stays exactly where it was. */
 function unqueue(id: number): boolean {
   const loc = queuedLocation(id)
   if (!loc) return false
-  if (loc.index === 0 && delivering.has(loc.paneId)) return false
+  if (heldInFlight(loc)) return false
   loc.q.splice(loc.index, 1)
   return true
 }
@@ -1310,6 +1523,38 @@ function markCancelled(m: AgentMessage): void {
   delete m.hold
   envelopes.delete(m.id)
   deps?.persistUpdate?.([{ uid: m.uid, status: 'cancelled' }])
+}
+
+/**
+ * Mark a message the recipient took for itself. Same shape as markCancelled(),
+ * opposite verdict — and the difference is the whole point.
+ *
+ * A cancelled message never reached anyone, so its sender is told `ok: false`
+ * and lands on `failed`. A read message DID reach its agent: it asked for the
+ * text and got it. Reporting that as a failure would show the sending pane a
+ * delivery that did not happen, and an agent reading `failed` does the sensible
+ * thing and sends the instruction again — which `cli_send` documents as the way
+ * to get one job done twice. So this reports `ok: true` with {@link
+ * READ_REASON}, which lands the sender's row on `delivered` exactly as an
+ * injection would.
+ *
+ * Who actually hears it: only a sender in ANOTHER window. ackInbound() speaks
+ * through `remoteInbound`, which is populated by acceptRemoteMessage() alone —
+ * a message between two panes of this window has no `msg_key` and no separate
+ * sender-side row (both sides read the one row this call updates), so there is
+ * nobody to notify and nothing to notify them about. That is a known limit of
+ * the local path, not something to fix here.
+ */
+function markRead(m: AgentMessage): void {
+  m.status = 'delivered'
+  m.deliveredAt = deps ? deps.now() : m.createdAt
+  delete m.hold
+  envelopes.delete(m.id)
+  // `route` is left as 'read' on purpose: like 'hook' it records how the row
+  // got out. No `reason` is written onto the row — that field is what the log
+  // panel renders for a FAILED message, and this one succeeded.
+  deps?.persistUpdate?.([{ uid: m.uid, status: 'delivered', delivered_at: m.deliveredAt }])
+  ackInbound(m.id, true, READ_REASON)
 }
 
 /** The routing key an outbound cross-workspace message is known by, while it is
@@ -1430,6 +1675,7 @@ export function _resetMessagingForTest(): void {
   remoteOutbound.clear()
   remoteInbound.clear()
   correlations.clear()
+  readReserved.clear()
 }
 
 export function useAgentMessaging() {
@@ -1454,6 +1700,9 @@ export function useAgentMessaging() {
     resolveRemoteDelivery,
     drainForHook,
     settleHookDrain,
+    findByUid,
+    reserveIncoming,
+    settleIncomingRead,
     pump,
     pauseMessaging,
     resumeMessaging,

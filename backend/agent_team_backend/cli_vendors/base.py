@@ -439,6 +439,19 @@ class VendorSpec:
     # official docs. False = no such feature exists to wire.
     skills_supported: bool = False
 
+    # --- model selection (mirrors the frontend AgentSpec) ---
+    # Whether a spawn may name the model / reasoning effort for this CLI.
+    # The flags themselves live in the frontend spec, which is what builds
+    # argv; these exist so the MCP tool can refuse an unsupported request
+    # before broadcasting it to a window, rather than waiting out the spawn
+    # verdict timeout and then answering with a misleading "no answer from
+    # the window that owns your pane".
+    supports_model: bool = False
+    supports_effort: bool = False
+    # Effort values this CLI accepts, mirroring the frontend's knownEfforts.
+    # Empty tuple = no closed vocabulary (or no effort support at all).
+    known_efforts: tuple[str, ...] = ()
+
     # --- push delivery ---
     # How an inter-CLI message reaches this CLI without being typed into its
     # input box. None = it has no such surface (or none is wired yet), and

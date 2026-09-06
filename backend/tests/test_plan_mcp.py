@@ -836,7 +836,7 @@ async def test_mounted_endpoint_serves_mcp(workspace: Path) -> None:
     await plan_mcp.startup()
     try:
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             resp = await client.post(
                 "/plan-mcp",
                 json={

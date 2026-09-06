@@ -13,12 +13,19 @@ from fastapi.testclient import TestClient
 
 from agent_team_backend import app as app_module
 from agent_team_backend.app import app
+from agent_team_backend import hook_auth
 
 
 @pytest.fixture()
 def client() -> TestClient:
     # No context manager: startup events (watchers/MCP) must not run in tests.
-    return TestClient(app)
+    # base_url pinned to loopback: the default "testserver" Host is exactly
+    # what reject_foreign_host refuses.
+    client = TestClient(app, base_url="http://127.0.0.1")
+    # What an installed hook presents (read out of the 0600 header file at
+    # fire time); without it the endpoint answers 403 to everyone.
+    client.headers[hook_auth.HEADER] = hook_auth.token()
+    return client
 
 
 @pytest.fixture()
@@ -430,3 +437,60 @@ def test_the_full_wait_then_resume_hook_sequence(
         ("agent_active", 0),
         ("turn_complete", 0),  # ← only here may it continue
     ]
+
+
+# ---------------------------------------------------------------- hook_auth (M7)
+#
+# Any local account can reach 127.0.0.1:<port>, and the port is in a readable
+# file. What separates a hook this backend installed from a POST forged by
+# another account is the header curl reads out of a 0600 file at fire time.
+
+
+def test_a_post_without_the_hook_secret_is_refused_and_broadcasts_nothing(
+    client: TestClient, events: list[dict]
+) -> None:
+    resp = client.post(
+        "/hooks/claude",
+        headers={"X-Agent-Team-Event": "notification", hook_auth.HEADER: ""},
+        json={"notification_type": "idle_prompt", "cwd": "/w"},
+    )
+    assert resp.status_code == 403
+    assert resp.content == b""  # a Stop hook reading the body must see "no decision"
+    assert events == []
+
+
+def test_a_wrong_hook_secret_is_refused(client: TestClient, events: list[dict]) -> None:
+    resp = client.post(
+        "/hooks/claude",
+        headers={"X-Agent-Team-Event": "stop", hook_auth.HEADER: "not-the-secret"},
+        json={"session_id": "s"},
+    )
+    assert resp.status_code == 403
+    assert events == []
+
+
+def test_the_hook_secret_lives_in_a_private_file_the_command_only_names(tmp_path) -> None:
+    """The command text goes into world-readable settings files, so the secret
+    must not be in it — only the path of a 0600 file curl reads when it fires."""
+    import os
+    from agent_team_backend.claude_hooks import _build_curl_command
+    from agent_team_backend.copilot_hooks import _build_command
+
+    path = hook_auth.header_file()
+    assert path.is_file()
+    assert os.stat(path).st_mode & 0o077 == 0
+    assert path.read_text(encoding="utf-8").startswith(f"{hook_auth.HEADER}: ")
+    secret = hook_auth.token()
+    for command in (
+        _build_curl_command(str(tmp_path / "port"), "stop"),
+        _build_command(str(tmp_path / "port")),
+    ):
+        assert f"-H @{path}" in command or f"-H @'{path}'" in command
+        assert secret not in command
+
+
+def test_the_secret_survives_a_restart_so_running_panes_keep_their_hooks() -> None:
+    assert hook_auth.token() == hook_auth.token()
+    assert hook_auth.presented(hook_auth.token())
+    assert not hook_auth.presented("")
+    assert not hook_auth.presented(None)

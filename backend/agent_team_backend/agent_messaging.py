@@ -163,11 +163,20 @@ def _resolve_error(code: str, error: str, **params: object) -> ResolveResult:
 
 def _unknown_device(device: str, to: str) -> ResolveResult:
     """Reported instead of "unknown target": the address may well be right, it
-    just names a machine this backend cannot look up yet."""
+    names a machine this one has no way to reach.
+
+    It used to say the roster was "not available yet". That was written before
+    the roster existed and never revisited after it was added — by then the
+    sentence described nothing, and an agent reading it would wait for something
+    that was already there. What actually stops the message now is having no
+    link to send it over: every caller that *can* relay does so before this
+    error is ever shown (see message_routing.route), so reaching here means this
+    machine is not signed in to a Navide-Server at all.
+    """
     return _resolve_error(
         "unknown-device",
-        f'unknown device "{device}" in target "{to}" — cross-device addressing '
-        f"needs the remote device roster, which is not available yet",
+        f'unknown device "{device}" in target "{to}" — this machine is not '
+        f"linked to a Navide-Server, so it can only address panes on itself",
         device=device,
         to=to,
     )

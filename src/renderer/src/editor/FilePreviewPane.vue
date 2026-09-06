@@ -6,9 +6,9 @@
 // kind in previewTypes.ts, create preview/<Kind>Preview.vue taking the
 // common props (workspacePath, relPath, name, backend), and add a v-else-if
 // branch in the template before the binary fallback.
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import type { useBackend } from '../composables/useBackend'
-import { buildPageUrl, buildRawUrl, fileExt, previewKind } from './previewTypes'
+import { buildPageUrl, buildRawUrl, fileExt, previewKind, wsTokenFromUrl } from './previewTypes'
 import ArchivePreview from './preview/ArchivePreview.vue'
 import CsvPreview from './preview/CsvPreview.vue'
 import FontPreview from './preview/FontPreview.vue'
@@ -28,14 +28,28 @@ const props = defineProps<{
 
 const kind = computed(() => previewKind(props.relPath) ?? 'binary')
 const ext = computed(() => (props.ext ?? fileExt(props.relPath)) || 'bin')
+const wsToken = computed(() => wsTokenFromUrl(props.backend.wsUrl?.value ?? ''))
 const rawUrl = computed(() =>
-  buildRawUrl(props.backend.httpUrl.value, props.workspacePath, props.relPath),
+  buildRawUrl(props.backend.httpUrl.value, props.workspacePath, props.relPath, wsToken.value),
 )
 // HTML preview loads through the path-addressed /fs/page route so relative
-// subresources (./style.css, images) resolve.
-const pageUrl = computed(() =>
-  buildPageUrl(props.backend.httpUrl.value, props.workspacePath, props.relPath),
-)
+// subresources (./style.css, images) resolve. The route wants a per-workspace
+// capability in the path (not the ws token — the previewed page is untrusted
+// and can leak its URL), which only the socket hands out; so the URL is
+// filled in once that answer arrives, and the frame stays blank until then.
+const pageUrl = ref('')
+async function loadPageUrl(): Promise<void> {
+  pageUrl.value = ''
+  if (kind.value !== 'html') return
+  const resp = (await props.backend.send('fs.page_capability', {
+    workspace_path: props.workspacePath,
+  })) as { payload?: { cap?: string; ws_b64?: string } } | null
+  const cap = String(resp?.payload?.cap ?? '')
+  const wsB64 = String(resp?.payload?.ws_b64 ?? '')
+  if (!cap || !wsB64) return
+  pageUrl.value = buildPageUrl(props.backend.httpUrl.value, cap, wsB64, props.relPath)
+}
+watch(() => [props.workspacePath, props.relPath, kind.value], () => void loadPageUrl(), { immediate: true })
 
 // ── File size ─────────────────────────────────────────────────────────────────
 const fileSize = ref<number | null>(props.size ?? null)

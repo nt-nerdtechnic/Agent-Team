@@ -37,6 +37,9 @@ from agent_team_backend import (
 
 from .test_server_link import (  # noqa: F401 - broadcasts is a fixture
     ALLOW_ALL_POLICY,
+    _CONFIRM_KEY,
+    _confirmation,
+    _ws_session,
     PEER,
     FakeConnection,
     FakeServer,
@@ -976,7 +979,14 @@ def test_no_public_read_answers_from_an_empty_cache():
     }
     # clear_policy_notice reads the cache too, but its cold answer is "leave the
     # warning alone" — the safe direction, and the reason it is exempt.
-    unchecked = touching_state - set(readers) - {"clear_policy_notice", "locked_reason"}
+    # rebuild_locked_store is not a reader at all: it refuses unless the store
+    # is locked, and a cold cache is the state in which it does its own load to
+    # find out. Its own tests cover both answers.
+    unchecked = touching_state - set(readers) - {
+        "clear_policy_notice",
+        "locked_reason",
+        "rebuild_locked_store",
+    }
     assert not unchecked, f"public readers with no cold-cache assertion: {unchecked}"
 
 
@@ -1982,7 +1992,13 @@ async def test_a_revoke_drops_this_side_of_the_pairing_too():
                 "payload": _pair_frame(PEER, device_pairing.PAIR_REVOKED),
             }
         )
-        await _until(lambda: trust_store.pin_for(PEER.device_id) is None)
+        await _until(
+            lambda: trust_store.pin_for(PEER.device_id) is None
+            and any(
+                n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "revoked"
+                for n in trust_store.notices()
+            )
+        )
 
         assert any(
             n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "revoked"
@@ -2131,7 +2147,13 @@ async def test_a_refusal_from_the_other_side_cancels_and_says_so():
                 "payload": _pair_frame(PEER, device_pairing.PAIR_REJECT),
             }
         )
-        await _until(lambda: device_pairing.get(PEER.device_id) is None)
+        await _until(
+            lambda: device_pairing.get(PEER.device_id) is None
+            and any(
+                n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "refused"
+                for n in trust_store.notices()
+            )
+        )
 
         assert trust_store.pin_for(PEER.device_id) is None
         assert any(
@@ -2418,48 +2440,11 @@ async def test_the_socket_error_reaches_the_status_untouched(monkeypatch):
             await task
 
 
-async def test_the_initiator_is_paired_by_the_other_side_alone():
-    """Pressing "Pair with…" already said what this side wants; the exchange
-    finishes when the other end answers.
-
-    The cost is real and deliberate: somebody can start a pairing and walk away,
-    and whoever is at the other machine completes it without them. That is what
-    the second button was buying, at the price of a step most people would learn
-    to click through.
-    """
-    device_pairing._reset_for_test()
-    server = FakeServer(policy=ALLOW_ALL_POLICY)
-    link = await _connected(server)
-    try:
-        conn = server.opened[0]
-        link._online_devices = {PEER.device_id}
-        await link.start_pairing(PEER.device_id)
-        device_pairing.accept_response(
-            PEER.device_id, their_key=PEER.sign_key, their_nonce="bm9uY2U="
-        )
-        # Their answer has not arrived: nothing is trusted.
-        assert trust_store.pin_for(PEER.device_id) is None
-
-        await conn.push(
-            {
-                "type": "messages.pending",
-                "payload": _pair_frame(PEER, device_pairing.PAIR_CONFIRM),
-            }
-        )
-        await _until(lambda: trust_store.pin_for(PEER.device_id) is not None)
-
-        assert trust_store.pin_for(PEER.device_id)["approved"] is True
-    finally:
-        device_pairing._reset_for_test()
-        await link.stop()
-
-
 def _confirms_sent(conn, since: int = 0) -> list[dict]:
     """The PAIR_CONFIRM frames this machine put on the wire, in order.
 
-    Counting them is the guard against the obvious way to fix a missing answer:
-    answer from both branches, and the two machines confirm at each other for
-    ever.
+    Counting them is how "one confirm from each side" stays true: each end sends
+    its own when its person presses, and nothing answers an answer.
     """
     out = []
     for frame in conn.sent[since:]:
@@ -2471,16 +2456,17 @@ def _confirms_sent(conn, since: int = 0) -> list[dict]:
     return out
 
 
-async def test_the_initiator_answers_the_confirm_it_was_sent():
-    """The half that was missing, and it left the two machines disagreeing.
+async def test_a_relay_cannot_pair_itself_with_the_initiator():
+    """This test used to be the proof-of-concept for a CRITICAL.
 
-    The asymmetry is that the initiator does not ask *its own person* twice —
-    pressing "Pair with…" already said what this side wants. It was built as the
-    initiator not *telling the other side*: it recorded the confirm, pinned, and
-    sent nothing. So the responder's `peer_confirmed` never became true, its
-    `complete()` kept returning None, and the machine whose human had just
-    pressed Allow stayed on "Not paired" for ever while this one showed
-    "Paired" — the exact state the revoke branch exists to prevent.
+    It asserted that the initiator pinned on the far end's confirm alone — and
+    it was green, which is to say a relay that never forwarded the request could
+    answer with its own key and be pinned, approved, in RING_SELF, with every
+    policy rule skipped. Nobody at this machine had compared anything.
+
+    What is asserted now is the refusal. The frames are exactly the ones a relay
+    can produce on its own: a response carrying a key it holds, then a confirm
+    signed with the same key.
     """
     device_pairing._reset_for_test()
     server = FakeServer(policy=ALLOW_ALL_POLICY)
@@ -2489,36 +2475,41 @@ async def test_the_initiator_answers_the_confirm_it_was_sent():
         conn = server.opened[0]
         link._online_devices = {PEER.device_id}
         await link.start_pairing(PEER.device_id)
+        # Everything below this line is within a relay's power to synthesise.
         device_pairing.accept_response(
             PEER.device_id, their_key=PEER.sign_key, their_nonce="bm9uY2U="
         )
-        sent_before = len(conn.sent)
-
         await conn.push(
             {
                 "type": "messages.pending",
                 "payload": _pair_frame(PEER, device_pairing.PAIR_CONFIRM),
             }
         )
-        await _until(lambda: trust_store.pin_for(PEER.device_id) is not None)
-        await _until(lambda: bool(_confirms_sent(conn, sent_before)), timeout=2.0)
+        await _until(lambda: device_pairing.get(PEER.device_id).peer_confirmed)
 
-        # Exactly one, addressed at them. Not answering left them waiting;
-        # answering twice would be a machine talking to itself.
-        answers = _confirms_sent(conn, sent_before)
-        assert len(answers) == 1
+        # Nothing is written, and nothing is granted: no pin means no ring and
+        # no policy exception, so that device is a stranger like any other.
+        assert trust_store.pin_for(PEER.device_id) is None
+        assert device_pairing.get(PEER.device_id).state == device_pairing.STATE_AWAITING_LOCAL
+
+        # And the person at this machine is what finishes it.
+        await link.confirm_pairing(PEER.device_id, accept=True)
+
+        pin = trust_store.pin_for(PEER.device_id)
+        assert pin is not None and pin["approved"] is True
     finally:
         device_pairing._reset_for_test()
         await link.stop()
 
 
-async def test_the_initiator_says_nothing_when_its_own_side_did_not_pair(monkeypatch):
-    """The answer means "we are paired", so it must not go out when we are not.
+async def test_a_failed_pin_is_not_reported_as_a_pairing(monkeypatch):
+    """A side that could not write its own pin must not end up claiming one.
 
-    Sending it regardless would swap which machine is wrong rather than fix it:
-    they would pin on the strength of a confirm from a machine that failed to
-    pin, and the two would disagree in the other direction — with the side that
-    knows something went wrong being the silent one.
+    This used to guard a reply the initiator sent on receiving a confirm — that
+    branch is gone, because each side now sends exactly one confirm when its own
+    person presses and nothing answers an answer. What survives is the property
+    underneath it: if the record cannot be written, this machine is not paired,
+    and nothing here may pretend otherwise.
     """
     device_pairing._reset_for_test()
 
@@ -2535,8 +2526,6 @@ async def test_the_initiator_says_nothing_when_its_own_side_did_not_pair(monkeyp
         device_pairing.accept_response(
             PEER.device_id, their_key=PEER.sign_key, their_nonce="bm9uY2U="
         )
-        sent_before = len(conn.sent)
-
         await conn.push(
             {
                 "type": "messages.pending",
@@ -2544,9 +2533,12 @@ async def test_the_initiator_says_nothing_when_its_own_side_did_not_pair(monkeyp
             }
         )
         await _until(lambda: bool(conn.acks))
+        await link.confirm_pairing(PEER.device_id, accept=True)
 
         assert trust_store.pin_for(PEER.device_id) is None
-        assert _confirms_sent(conn, sent_before) == []
+        assert not [
+            n for n in trust_store.notices() if n.get("pairing") == "paired"
+        ], "a machine that failed to pin must not announce a pairing"
     finally:
         device_pairing._reset_for_test()
         await link.stop()
@@ -2594,13 +2586,15 @@ async def test_the_responder_completes_when_that_answer_arrives():
                 ),
             }
         )
-        await _until(lambda: trust_store.pin_for("dev-answers") is not None)
+        await _until(
+            lambda: trust_store.pin_for("dev-answers") is not None
+            and any(
+                n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "paired"
+                for n in trust_store.notices()
+            )
+        )
 
         assert trust_store.pin_for("dev-answers")["approved"] is True
-        assert any(
-            n["kind"] == trust_store.NOTICE_PAIRING and n.get("pairing") == "paired"
-            for n in trust_store.notices()
-        ), "the person who pressed Allow has to be told it worked"
         # And this side does not answer the answer. Only the initiator replies,
         # so the handshake carries exactly one confirm from each machine.
         assert len(_confirms_sent(conn, sent_before)) == 1
@@ -2757,23 +2751,43 @@ async def test_the_responder_is_not_paired_by_the_other_side_alone():
         await link.stop()
 
 
-async def test_the_initiator_has_nothing_to_confirm():
-    """Answering here would ask the same person the same question twice."""
+async def test_the_initiator_confirms_too_and_sends_exactly_one(monkeypatch):
+    """Answering here used to be refused with PAIRING_STATE. It is the check.
+
+    One confirm from each side, whichever order the two people press in: each
+    end sends its own when its person presses, so nothing has to answer an
+    answer. A reply-on-receipt would be a third frame repeating what this side
+    already said.
+    """
     device_pairing._reset_for_test()
     server = FakeServer(policy=ALLOW_ALL_POLICY)
     link = await _connected(server)
     try:
+        conn = server.opened[0]
         link._online_devices = {PEER.device_id}
         await link.start_pairing(PEER.device_id)
         device_pairing.accept_response(
             PEER.device_id, their_key=PEER.sign_key, their_nonce="bm9uY2U="
         )
+        sent_before = len(conn.sent)
 
         reply = await link.confirm_pairing(PEER.device_id, accept=True)
 
-        assert reply["ok"] is False
-        assert reply["error"]["code"] == "PAIRING_STATE"
+        assert reply["ok"] is True
+        # Still nothing pinned: this side has answered, the other has not.
         assert trust_store.pin_for(PEER.device_id) is None
+        assert len(_confirms_sent(conn, sent_before)) == 1
+
+        await conn.push(
+            {
+                "type": "messages.pending",
+                "payload": _pair_frame(PEER, device_pairing.PAIR_CONFIRM, msg_key="pair-k9"),
+            }
+        )
+        await _until(lambda: trust_store.pin_for(PEER.device_id) is not None)
+
+        # Their answer completes it, and this side does not answer the answer.
+        assert len(_confirms_sent(conn, sent_before)) == 1
     finally:
         device_pairing._reset_for_test()
         await link.stop()
@@ -2800,4 +2814,288 @@ async def test_the_initiator_can_still_withdraw():
         assert [f for f in conn.sent[sent_before:] if f.get("type") == "messages.send"]
     finally:
         device_pairing._reset_for_test()
+        await link.stop()
+
+
+# ── Recovery from a fail-closed lock ─────────────────────────────────────────
+
+
+def _lock_the_store() -> None:
+    """Put the store in the state the user hit: the marker says this machine
+    once had trust state, and the record cannot be read."""
+    trust_store.load()
+    trust_store._vault().write_app_secret(trust_store.SECRET_NAME, "{ not json")
+    trust_store._state = None
+    trust_store._locked_reason = ""
+
+
+def test_a_rebuild_is_refused_while_the_store_is_readable() -> None:
+    """It costs every pairing on the machine. Against a healthy store that is
+    not a recovery, it is destruction, and a caller asking for one has
+    misunderstood what it does."""
+    trust_store.load()
+    with pytest.raises(trust_store.TrustStoreNotLocked):
+        trust_store.rebuild_locked_store()
+
+
+def test_a_rebuild_clears_the_record_and_the_marker_together() -> None:
+    """Both halves, or the lock comes straight back: the marker alone is what
+    turns an unreadable record into a refusal to run."""
+    _lock_the_store()
+    assert trust_store.locked_reason() != ""
+
+    result = trust_store.rebuild_locked_store()
+
+    assert result["rebuilt"] is True and result["was"]
+    # Checked before anything reads the store: the first read initialises a
+    # fresh record and writes the marker again, which is correct and would hide
+    # whether the rebuild cleared it.
+    assert trust_store._database().kv_get(trust_store.INITIALISED_KEY) is None
+    assert trust_store.locked_reason() == ""
+    # And the machine starts over rather than resuming: nothing it was paired
+    # with survives, which is the cost the warning names.
+    assert trust_store.load()["pins"] == {}
+
+
+def test_a_rebuild_erases_the_unreadable_record_itself() -> None:
+    """Not just the marker. Leaving the bad record behind would make the next
+    read find it again — and on macOS it is the Keychain item whose ACL is
+    usually why it could not be read, so the whole point is that it goes."""
+    _lock_the_store()
+    trust_store.rebuild_locked_store()
+
+    assert trust_store._vault().read_app_secret(trust_store.SECRET_NAME) is None
+
+
+def test_a_rebuilt_store_can_pair_again() -> None:
+    """The point of the recovery: after it, the machine works. A reset that
+    left the store unusable would only have moved the dead end."""
+    _lock_the_store()
+    trust_store.rebuild_locked_store()
+
+    key = device_signing.public_key()
+    assert trust_store.pin_paired_device(
+        "dev-after-rebuild", sign_key=key, member_id="m1", own_member_id="m1"
+    ) is True
+    assert trust_store.pin_for("dev-after-rebuild") is not None
+
+
+# ── A read that failed once is not a record that is gone ─────────────────────
+
+
+class _FlakyVault:
+    """A vault whose reads fail a fixed number of times, then work."""
+
+    def __init__(self, real, failures: int) -> None:
+        self._real = real
+        self._left = failures
+
+    def read_app_secret(self, name: str):
+        if self._left > 0:
+            self._left -= 1
+            raise RuntimeError("User interaction is not allowed")
+        return self._real.read_app_secret(name)
+
+    def __getattr__(self, item):
+        return getattr(self._real, item)
+
+
+def _with_flaky_vault(monkeypatch, failures: int) -> None:
+    trust_store.load()          # make sure a real record exists to come back to
+    trust_store._state = None
+    # One instance, not one per call: `_vault()` is called on every read, and a
+    # fresh wrapper each time would reset the failure budget and never recover —
+    # the test would then pass against code that never retried at all.
+    flaky = _FlakyVault(trust_store._vault(), failures)
+    monkeypatch.setattr(trust_store, "_vault", lambda: flaky)
+
+
+def test_one_failed_read_does_not_settle_into_a_lock(monkeypatch) -> None:
+    """The whole point. A locked keychain, a dismissed authorisation dialog and
+    a `security` timeout all arrive here identically, and none of them says
+    anything about the record — it used to latch on the first one and stay
+    locked until the process restarted."""
+    _with_flaky_vault(monkeypatch, failures=1)
+
+    assert trust_store.locked_reason() != ""
+    assert trust_store.transient_lock() is True
+
+    # The next read gets through, and the store is simply fine.
+    assert trust_store.locked_reason() == ""
+    assert trust_store.transient_lock() is False
+    assert trust_store.load()["pins"] == {}
+
+
+def test_start_over_is_refused_while_it_is_still_retrying(monkeypatch) -> None:
+    """The dangerous half: that button erases every pairing, and on a keychain
+    that was locked for a moment there is nothing wrong to erase."""
+    _with_flaky_vault(monkeypatch, failures=1)
+    assert trust_store.locked_reason() != ""
+
+    with pytest.raises(trust_store.TrustStoreNotLocked):
+        trust_store.rebuild_locked_store()
+
+
+def test_a_keychain_that_stays_shut_settles_instead_of_asking_for_ever(monkeypatch) -> None:
+    """Retrying without a limit means shelling out to `security` on every trust
+    operation — which on a locked keychain is another authorisation dialog. A
+    machine that will not stop asking is its own failure."""
+    _with_flaky_vault(monkeypatch, failures=trust_store.TRANSIENT_RETRY_LIMIT + 5)
+
+    for _ in range(trust_store.TRANSIENT_RETRY_LIMIT):
+        assert trust_store.locked_reason() != ""
+
+    assert trust_store.transient_lock() is False, "it has settled"
+    # And now the way out is offered, because now there is a decision to make.
+    assert trust_store.rebuild_locked_store()["rebuilt"] is True
+
+
+# ── One truth about whether this machine is stopped ───────────────────────────
+
+
+async def test_a_rebuild_makes_the_link_settle_who_this_machine_is_again(monkeypatch):
+    """The store and the link each held a copy, and only one of them was reset.
+
+    Reported from a real machine: Start over answered "the trust record was
+    cleared", and the red card stayed exactly as it was — because the card reads
+    `ServerLink._trust_locked`, which is written once during authentication and
+    by nothing else. The store was clean and the link still said stopped.
+
+    Not a display bug: the same field refuses outbound messages, refuses policy
+    writes and gates the roster, so what the person saw was accurate. And that
+    machine's link had not reconnected for hours, so the one thing that rewrites
+    the field was never going to run again on its own.
+
+    **What this test can and cannot see.** `reconfigure()` works on the module's
+    own link, built from real configuration; a test link is not that object and
+    there is no configuration to dial. So the end-to-end "the card goes away"
+    is not reachable from here, and asserting it would mean re-implementing the
+    mechanism inside the test. What is asserted instead is the wiring — that a
+    successful rebuild reconnects, and a refused one does not — with the other
+    half of the chain in the test below.
+    """
+    from agent_team_backend import confirm_token
+
+    # The autouse fixture that installs this lives in the module `_confirmation`
+    # comes from; importing the helper alone is not enough.
+    confirm_token._reset_for_test(_CONFIRM_KEY)
+    calls: list[int] = []
+
+    async def spy() -> None:
+        calls.append(1)
+
+    monkeypatch.setattr(server_link, "reconfigure", spy)
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    link = await _connected(server)
+    try:
+        _lock_the_store()
+        link._trust_locked = trust_store.locked_reason()
+        assert link._trust_locked, "the precondition: the link is showing a stop"
+
+        session = _ws_session()
+        await app.handle_message(session, {
+            "id": "r1",
+            "type": "p2p.trust.rebuild",
+            "payload": {"confirm": _confirmation("p2p.trust.rebuild")},
+        })
+        await _until(lambda: bool(session.websocket.sent))
+
+        assert session.websocket.sent[0].get("payload", {}).get("rebuilt") is True
+        assert trust_store.locked_reason() == ""
+        assert calls, "a rebuild that does not reconnect leaves the link saying stopped"
+    finally:
+        confirm_token._reset_for_test()
+        trust_store._reset_for_test()
+        await link.stop()
+
+
+async def test_a_refused_rebuild_does_not_reconnect(monkeypatch):
+    """Reconnecting is not free — it drops the link and re-authenticates. A
+    request that changed nothing must not cost that."""
+    from agent_team_backend import confirm_token
+
+    confirm_token._reset_for_test(_CONFIRM_KEY)
+    calls: list[int] = []
+
+    async def spy() -> None:
+        calls.append(1)
+
+    monkeypatch.setattr(server_link, "reconfigure", spy)
+    trust_store.load()  # readable, so the rebuild is refused
+    session = _ws_session()
+    try:
+        await app.handle_message(session, {
+            "id": "r2",
+            "type": "p2p.trust.rebuild",
+            "payload": {"confirm": _confirmation("p2p.trust.rebuild")},
+        })
+        await _until(lambda: bool(session.websocket.sent))
+
+        assert session.websocket.sent[0]["error"]["code"] == "NOT_LOCKED"
+        assert not calls
+    finally:
+        confirm_token._reset_for_test()
+
+
+async def test_settling_the_identity_again_is_what_clears_the_stop():
+    """The other half of the chain: reconnecting has to actually help.
+
+    A link carrying the stop, put through the same adoption the `auth.hello`
+    reply triggers, comes out with the stop gone — because adoption is the only
+    writer of that field and it reads the store, which the rebuild cleaned.
+    """
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    link = await _connected(server)
+    try:
+        link._trust_locked = "left over from before the record was rebuilt"
+        config = await link._read_config()
+
+        await link._adopt_member(config, link.member_id or "m1")
+
+        assert link._trust_locked == ""
+        assert link._own_member, "and it names this machine again, from the pin"
+    finally:
+        await link.stop()
+
+
+async def test_a_stop_that_arrives_after_adoption_is_still_recovered(monkeypatch):
+    """The case a conditional reconnect would skip, and the reason there is no
+    condition.
+
+    A store that becomes unreadable *after* a successful adoption leaves the
+    cache empty and the link up — so "only reconnect when the link looks
+    stopped" would do nothing here, and the rebuild would erase the member pin
+    while `_own_member` went on naming it. A machine that looks recovered and
+    answers "yes, that is one of mine" from a record that was deleted.
+    """
+    from agent_team_backend import confirm_token
+
+    confirm_token._reset_for_test(_CONFIRM_KEY)
+    calls: list[int] = []
+
+    async def spy() -> None:
+        calls.append(1)
+
+    monkeypatch.setattr(server_link, "reconfigure", spy)
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    link = await _connected(server)
+    try:
+        # Adopted cleanly, and only then does the record become unreadable.
+        assert link._trust_locked == ""
+        assert link._own_member
+        _lock_the_store()
+
+        session = _ws_session()
+        await app.handle_message(session, {
+            "id": "r3",
+            "type": "p2p.trust.rebuild",
+            "payload": {"confirm": _confirmation("p2p.trust.rebuild")},
+        })
+        await _until(lambda: bool(session.websocket.sent))
+
+        assert session.websocket.sent[0].get("payload", {}).get("rebuilt") is True
+        assert calls, "the link looked fine, and its member pin was just erased"
+    finally:
+        confirm_token._reset_for_test()
+        trust_store._reset_for_test()
         await link.stop()

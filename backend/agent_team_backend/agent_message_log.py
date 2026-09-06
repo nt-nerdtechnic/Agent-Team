@@ -393,6 +393,84 @@ class AgentMessageLog:
                 return []
         return [dict(row) for row in reversed(found)]
 
+    def incoming(
+        self,
+        recipient: str,
+        include_delivered: bool = False,
+        limit: int = MAX_ROWS,
+    ) -> list[dict[str, Any]]:
+        """Full-text version of ``pending_incoming``: what was actually said.
+
+        ``pending_incoming`` exists to answer "is anything waiting?", so its
+        caller flattens each body to a short one-line excerpt. That left the
+        recipient as the one party who could not read its own mail, while it
+        could read another pane's raw log wholesale. This closes that gap: the
+        ``content`` here is the stored body verbatim — never shortened, and
+        never whitespace-collapsed, so indentation, blank lines and code blocks
+        arrive as the sender wrote them.
+
+        "Verbatim" means as stored, which is not always as sent: ``append``
+        clamps a body longer than ``MAX_CONTENT_CHARS`` (64K *characters*, so a
+        CJK message costs ~3x that in UTF-8) down to that length with a
+        ``…[truncated]`` marker. Nothing here can recover what the write threw
+        away, so a body ending in that marker was cut at ingest, not by this
+        read.
+
+        ``include_delivered`` off (the default) selects the same statuses as
+        ``pending_incoming`` — ``queued`` and ``delivering``, the second being
+        an injection in flight rather than one that landed. Turning it on adds
+        ``delivered``, which is how a recipient re-reads a message it has
+        already been handed; ``failed`` and ``cancelled`` stay out either way,
+        since neither was ever put in front of this agent.
+
+        Ordered by ``created_at`` then ``seq``, oldest first — the same order
+        every other read here uses, and for the same reason: ``uid`` is minted
+        by the renderer as ``<boot-hex>:<local-seq>``, an opaque key that sorts
+        lexically (``a3f9:100`` before ``a3f9:2``) and restarts at each boot, so
+        it says nothing about when a row was written. ``created_at`` alone is
+        not enough either, because it is millisecond-resolution ``Date.now()``
+        and a fan-out queued in one tick ties on it; ``seq``, the backend's
+        insertion counter, breaks those ties. ``limit`` keeps the *newest*
+        matching rows (then returns that window oldest first), matching
+        ``pending_incoming`` and ``tail``.
+
+        Each row carries ``uid``, ``sender``, ``status``, ``content``, ``kind``
+        and ``created_at``. ``kind`` is what separates a peer's message (NULL)
+        from something Navide wrote about the caller's own traffic
+        (``notice``) or a spawned pane's unreported turn (``fallback``) — a
+        caller that treats every row as peer mail will answer Navide.
+
+        Two things a caller must not read into an empty list. A sqlite failure
+        is logged and swallowed, as everywhere else in this module, and comes
+        back as ``[]`` — indistinguishable from a genuinely empty inbox, so
+        "no rows" is never proof that nothing was sent. And the table is
+        globally capped at ``MAX_ROWS`` across *every* workspace and pane, not
+        per recipient, so a busy log can prune this recipient's older messages
+        before it ever reads them.
+        """
+        recipient = str(recipient or "")
+        if not recipient:
+            return []
+        limit = max(1, min(int(limit), MAX_ROWS))
+        statuses = ("queued", "delivering", "delivered") if include_delivered else (
+            "queued", "delivering"
+        )
+        columns = ("uid", "sender", "status", "content", "kind", "created_at")
+        with self._lock:
+            try:
+                with self._db.transaction() as cur:
+                    found = cur.execute(
+                        f"SELECT {', '.join(columns)} FROM agent_message_log"
+                        f" WHERE recipient = ? AND status IN"
+                        f" ({', '.join('?' * len(statuses))})"
+                        " ORDER BY created_at DESC, seq DESC LIMIT ?",
+                        (recipient, *statuses, limit),
+                    ).fetchall()
+            except sqlite3.Error as err:
+                log.warning("agent message log incoming read failed: %s", err)
+                return []
+        return [dict(row) for row in reversed(found)]
+
     def tail(self, limit: int = MAX_ROWS) -> list[dict[str, Any]]:
         """The most recent rows, newest last — the renderer's array order.
 

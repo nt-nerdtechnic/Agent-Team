@@ -663,6 +663,7 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="opencode",
+    supports_model=True,
     skills_supported=True,
     # skills.paths registers extra roots; opencode deep-merges this document
     # over the user's own config, so their skills keep loading.

@@ -39,18 +39,23 @@ export function handConfirmKey(proc: ChildProcess): void {
 /**
  * Mint a one-time confirmation for one trust-changing action.
  *
- * Bound to the action and to the device it names, so a token minted to approve
- * one machine cannot be spent to block another. Returns null before a backend
+ * Bound to the action, to the device it names, and to a subject where the
+ * device is not the whole story (the canonical policy text, a knock's key, a
+ * member id) — so a token minted to approve one machine cannot be spent to
+ * block another, and one minted for one rule set cannot sign a different one.
+ * The backend's confirm_token module lists what is and is not bound. Returns
+ * null before a backend
  * has been started, which is the honest answer: there is nothing to confirm to.
  */
 export function mintTrustConfirmation(
   action: string,
   deviceId: string,
+  subject = '',
 ): { nonce: string; expires: string; mac: string } | null {
   if (!confirmKey) return null
   const nonce = randomUUID()
   const expires = String((Date.now() + CONFIRM_TTL_MS) / 1000)
-  const payload = ['navide/trust-confirm/v1', nonce, expires, action, deviceId].join('\u0000')
+  const payload = ['navide/trust-confirm/v2', nonce, expires, action, deviceId, subject].join('\u0000')
   return { nonce, expires, mac: createHmac('sha256', confirmKey).update(payload).digest('hex') }
 }
 

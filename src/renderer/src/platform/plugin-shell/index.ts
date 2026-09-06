@@ -15,6 +15,14 @@ export {
 } from './lib/cliPermission'
 export type { CliPermissionMode } from './lib/cliPermission'
 
+export { modelArgsFor, supportsEffort, supportsModel } from './lib/cliModel'
+export type {
+  CliModelCapability,
+  CliModelRefusal,
+  CliModelRequest,
+  CliModelResult,
+} from './lib/cliModel'
+
 export { default as AiCliDock } from './components/AiCliDock.vue'
 export { default as AiCliTerminal } from './components/AiCliTerminal.vue'
 

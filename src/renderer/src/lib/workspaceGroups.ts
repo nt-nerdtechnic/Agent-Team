@@ -118,6 +118,8 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
   const paneGroup = new Map(panes.map((p) => [p.id, p.runGroupId ?? '']))
   const lineageFor = (path: string): LineageRow[] =>
     lineage.filter((r) => paneWorkspace.get(r.id) === norm(path))
+  const countIn = (path: string): number =>
+    panes.filter((p) => norm(p.workspacePath) === norm(path)).length
 
   /** Split one workspace's rows into its run groups.
    *
@@ -169,7 +171,12 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
       displayPath: workspaceParentPath(path, homeDir),
       isCurrent: true,
       collapsed: collapsed.has(path),
-      count: own.length,
+      // Counted off `panes`, not off `own`: a collapsed parent keeps its
+      // descendants out of the lineage, so a count taken from the rows shrank
+      // whenever a subtree was folded, while the status bar — which counts
+      // panes — did not move. Folding is a view preference, not a change to
+      // what the workspace holds.
+      count: countIn(path),
       // Grouped order, not spawn order — this is what the sidebar renders, and
       // shift-range selection walks it.
       lineage: groups.flatMap((g) => g.rows),

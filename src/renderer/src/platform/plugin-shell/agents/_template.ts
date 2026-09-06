@@ -15,6 +15,16 @@ export const SPEC = {
   defaultCommand: 'mycli',
   // skipPermissionFlag: '--yolo',      // unattended-mode flag, if the CLI has one
   // paneArg: (ctx) => '...',           // per-pane argument, if state must be split
+  // ── Model selection ──
+  // Only what the INTERACTIVE command accepts — Navide never spawns
+  // `exec`/`run`, and several CLIs expose these on the subcommand only.
+  // Omit a field and a spawn asking for it is REFUSED, which is the point:
+  // some CLIs accept an unknown flag and ignore it, and a dropped --model
+  // looks exactly like a working one. Verify by running the flag with a
+  // deliberately invalid value; `--flag --version` proves nothing.
+  // modelArgs: (m) => `--model ${m}`,
+  // effortArgs: (e) => `--effort ${e}`,   // omit if effort lives in the model id
+  // knownEfforts: ['low', 'medium', 'high'],  // required if the CLI only warns
   // ── Session resume (see types.ts for full field docs) ──
   // resumeArgs: (id) => `--resume ${id}`,  // args only; binary = defaultCommand
   // resumeCommandPattern: /^mycli\s+--resume\s+\S+/, // only if non-generic shape

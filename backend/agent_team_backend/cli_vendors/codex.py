@@ -1135,6 +1135,7 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="codex",
+    supports_model=True,
     # Verified 2026-08-15: codex resolves its skills from $CODEX_HOME/skills.
     skills_supported=True,
     skills_wiring=SkillsWiring(

@@ -8,6 +8,9 @@ import {
   filterRowsByRail,
   parseRails,
   railGlyph,
+  nextRailColor,
+  RAIL_PALETTE,
+  railColor,
   railIdOf,
   renameRail,
   resolveActiveRail,
@@ -118,6 +121,59 @@ describe('rail lifecycle', () => {
     const next = deleteRail(rails, 'wr-1')
     expect(next).toEqual([])
     expect(railIdOf(next, A)).toBe(ALL_RAIL_ID)
+  })
+})
+
+describe('colour', () => {
+  // On an 8px bar the colour IS the label, so two groups must not share one
+  // and a group must not change hue because a neighbour was deleted.
+
+  it('gives each new rail the lowest unused slot', () => {
+    let rails = createRail([], 'a', 1)
+    rails = createRail(rails, 'b', 2)
+    rails = createRail(rails, 'c', 3)
+    expect(rails.map((r) => r.color)).toEqual([0, 1, 2])
+  })
+
+  it('reuses a slot only after its rail is gone', () => {
+    let rails = createRail(createRail([], 'a', 1), 'b', 2)
+    rails = deleteRail(rails, rails[0].id)
+    expect(nextRailColor(rails)).toBe(0)
+  })
+
+  it('leaves the survivors\' colours alone when one is deleted', () => {
+    let rails = createRail(createRail(createRail([], 'a', 1), 'b', 2), 'c', 3)
+    const cBefore = rails[2].color
+    rails = deleteRail(rails, rails[1].id)
+    expect(rails.map((r) => r.name)).toEqual(['a', 'c'])
+    expect(rails[1].color).toBe(cBefore)
+  })
+
+  it('wraps once every slot is taken', () => {
+    let rails: ReturnType<typeof createRail> = []
+    for (let i = 0; i < RAIL_PALETTE.length; i++) rails = createRail(rails, `r${i}`, i + 1)
+    expect(nextRailColor(rails)).toBe(RAIL_PALETTE.length % RAIL_PALETTE.length)
+  })
+
+  it('resolves a slot to a hue, and falls back for a rail written before colours', () => {
+    expect(railColor({ color: 1 })).toBe(RAIL_PALETTE[1])
+    expect(railColor({ color: undefined }, 2)).toBe(RAIL_PALETTE[2])
+    // A stored index from a longer palette must still land on a colour.
+    expect(railColor({ color: RAIL_PALETTE.length + 1 })).toBe(RAIL_PALETTE[1])
+  })
+
+  it('carries the colour onto the cell, and leaves All without one', () => {
+    const rails = [rail('wr-1', '產品', [A])]
+    rails[0].color = 3
+    const out = cells({ rows: [row(A, 1)], rails })
+    expect(out[0].color).toBe('') // All is every group at once
+    expect(out[1].color).toBe(RAIL_PALETTE[3])
+  })
+
+  it('colours a pre-colour rail by its position rather than rewriting it', () => {
+    const out = cells({ rows: [row(A, 1), row(B, 1)], rails: [rail('wr-1', 'a', [A]), rail('wr-2', 'b', [B])] })
+    expect(out[1].color).toBe(RAIL_PALETTE[0])
+    expect(out[2].color).toBe(RAIL_PALETTE[1])
   })
 })
 
@@ -253,6 +309,16 @@ describe('persistence', () => {
       { id: 'wr-1', name: '重複', members: [B] },
     ])
     expect(parseRails(raw)).toEqual([rail('wr-1', '產品', [A])])
+  })
+
+  it('keeps a stored colour and drops a nonsensical one', () => {
+    const raw = JSON.stringify([
+      { id: 'wr-1', name: 'a', members: [], color: 3 },
+      { id: 'wr-2', name: 'b', members: [], color: -1 },
+      { id: 'wr-3', name: 'c', members: [], color: 'blue' },
+      { id: 'wr-4', name: 'd', members: [] },
+    ])
+    expect(parseRails(raw).map((r) => r.color)).toEqual([3, undefined, undefined, undefined])
   })
 
   it('normalises trailing slashes so membership compares equal', () => {

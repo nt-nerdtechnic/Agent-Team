@@ -12,6 +12,8 @@ export const SPEC = {
   agentKey: 'aider',
   label: 'Aider',
   defaultCommand: 'aider',
+  // Left unsupported deliberately. aider passes any model string straight
+  // through to litellm, so a wrong value cannot be caught before launch.
   // --yes-always auto-confirms every prompt (edits, shell commands, adds)
   skipPermissionFlag: '--yes-always',
   // Give every pane its own chat history: the default shared

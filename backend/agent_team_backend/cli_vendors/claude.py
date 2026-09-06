@@ -1087,6 +1087,9 @@ def _install_hooks(port_file: str) -> Any:
 
 SPEC = VendorSpec(
     key="claude",
+    supports_model=True,
+    supports_effort=True,
+    known_efforts=('low', 'medium', 'high', 'xhigh', 'max'),
     skills_supported=True,
     # --add-dir adds another project directory, and Claude Code discovers a
     # project's skills below .claude/skills — so the view has to carry that

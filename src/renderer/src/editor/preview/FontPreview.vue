@@ -4,7 +4,7 @@
 // family name; the face is removed from document.fonts on unmount.
 import { onMounted, onUnmounted, ref } from 'vue'
 import type { useBackend } from '../../composables/useBackend'
-import { buildRawUrl } from '../previewTypes'
+import { buildRawUrl, wsTokenFromUrl } from '../previewTypes'
 
 const props = defineProps<{
   workspacePath: string
@@ -25,7 +25,12 @@ const DIGITS = '0123456789 !@#$%&*()'
 const CJK = '敏捷的棕色狐狸跳過懶惰的狗'
 
 onMounted(async () => {
-  const url = buildRawUrl(props.backend.httpUrl.value, props.workspacePath, props.relPath)
+  const url = buildRawUrl(
+    props.backend.httpUrl.value,
+    props.workspacePath,
+    props.relPath,
+    wsTokenFromUrl(props.backend.wsUrl?.value ?? ''),
+  )
   try {
     const f = new FontFace(family, `url("${url}")`)
     await f.load()
