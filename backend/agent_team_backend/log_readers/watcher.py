@@ -728,7 +728,7 @@ class LogWatcher:
                 # the first flush. _pending_token_paths keeps its single-writer
                 # invariant: this is the loop thread, same as _drain_loop.
                 for path in token_only_paths:
-                    pass
+                    self._queue_token_path(path)
                 if self._loop is not None:
                     self._sweep_activity_seen(self._loop.time())
             except Exception as err:  # noqa: BLE001
