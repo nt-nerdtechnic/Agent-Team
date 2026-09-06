@@ -95,6 +95,7 @@ import SkillsPane from './SkillsPane.vue'
 import PromptSkillsPane from './PromptSkillsPane.vue'
 import MemoryPane from './MemoryPane.vue'
 import StatusBadgeSettingsPane from './StatusBadgeSettingsPane.vue'
+import NavideCloudMark from './NavideCloudMark.vue'
 import SettingsNavItem from './settings/SettingsNavItem.vue'
 import SettingsSection from './settings/SettingsSection.vue'
 import SettingsCard from './settings/SettingsCard.vue'
@@ -459,19 +460,19 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     id: 'general-p2p',
     tab: 'cross-device',
     section: 'general-p2p',
-    title: 'Cross-device Messaging / 跨裝置傳訊',
+    title: 'Navide Cloud / 跨裝置傳訊',
     group: 'Accounts & Agents',
-    summary: 'Link this machine to a Navide-Server so agents can message agents on your other devices.',
-    keywords: 'p2p cross device remote server url access token navide-server connect link relay 跨裝置 遠端 伺服器 網址 權杖 連線 傳訊',
+    summary: 'Join this machine to Navide Cloud so agents here can message agents on your other devices.',
+    keywords: 'navide cloud p2p cross device remote server url access token navide-server connect link relay 雲端 跨裝置 遠端 伺服器 網址 權杖 連線 傳訊',
   },
   {
     id: 'general-p2p-policy',
     tab: 'cross-device',
     section: 'general-p2p-policy',
-    title: 'Cross-device Authorization / 跨裝置授權',
+    title: 'Navide Cloud Authorization / 跨裝置授權',
     group: 'Accounts & Agents',
     summary: 'Choose which remote devices may send instructions to panes on this machine. Everything is refused until a rule allows it.',
-    keywords: 'policy permission authorization allow rule deny default pane cross device remote rejected 政策 權限 授權 允許 規則 拒絕 跨裝置 被擋',
+    keywords: 'navide cloud policy permission authorization allow rule deny default pane cross device remote rejected 雲端 政策 權限 授權 允許 規則 拒絕 跨裝置 被擋',
   },
   {
     id: 'appearance-language',
@@ -1804,7 +1805,9 @@ watch(activeTab, (tab) => {
               </SettingsNavItem>
               <SettingsNavItem :label="$t('settings.nav.crossDevice')" :active="activeTab === 'cross-device'" @select="activeTab = 'cross-device'">
                 <template #icon>
-                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.3" y="3" width="7" height="5.5" rx="1.2"/><rect x="8.7" y="7.5" width="6" height="5.5" rx="1.2"/><path d="M4.8 8.5v2a1.5 1.5 0 0 0 1.5 1.5h2.4"/></svg>
+                  <!-- The same mark as the titlebar and the page header: this
+                       row is how most people will first reach Navide Cloud. -->
+                  <NavideCloudMark variant="solid" class="nvc-nav-mark" />
                 </template>
               </SettingsNavItem>
             </div>
@@ -2769,7 +2772,10 @@ watch(activeTab, (tab) => {
              of the longest page in this window, which is where somebody
              told "open the rules" went looking and did not find them. -->
         <div v-show="activeTab === 'cross-device'" class="s-body cross-device-body">
-          <h1 class="s-page-title">{{ $t('settings.nav.crossDevice') }}</h1>
+          <h1 class="s-page-title nvc-page-title">
+            <span class="nvc-page-mark" aria-hidden="true"><NavideCloudMark /></span>
+            {{ $t('settings.nav.crossDevice') }}
+          </h1>
           <SettingsSection :label="$t('settings.p2p.title')">
             <SettingsCard>
               <div class="s-fullrow" data-settings-section="general-p2p">
@@ -3949,6 +3955,25 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
    page and a rule anybody editing that tab would reasonably assume they
    owned. */
 .cross-device-body { overflow-y: auto; padding: 18px 22px; }
+/* Navide Cloud is the one settings page that names a product rather than a
+   group of controls, so it is the one page title that carries the mark. */
+.nvc-page-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.nvc-page-mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--accent-muted);
+  background: var(--accent-subtle);
+  color: var(--accent-fg);
+}
+.nvc-page-mark :deep(.nv-cloud-mark) { width: 21px; height: 16px; }
+.nvc-nav-mark { width: 17px; height: 13px; }
 .legal-row {
   display: flex; align-items: center; gap: 6px;
   margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-muted);

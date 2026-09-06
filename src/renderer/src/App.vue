@@ -279,6 +279,7 @@ const AccountModal = defineAsyncComponent(loadAccountModal)
 // somebody happened to open a window.
 import PairingPrompt from './components/PairingPrompt.vue'
 import ShutdownOverlay, { type QuitStage } from './components/ShutdownOverlay.vue'
+import NavideCloudMark from './components/NavideCloudMark.vue'
 const OnboardingWizard = defineAsyncComponent(() => import('./components/OnboardingWizard.vue'))
 const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
@@ -14942,10 +14943,7 @@ function paneIsCommander(p: ActivePane): boolean {
         @click="openAccountModal"
         :title="p2pAccountLabel || $t('action.sign-in')"
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-          <circle cx="12" cy="7" r="4"/>
-        </svg>
+        <NavideCloudMark variant="solid" class="titlebar-account-mark" />
         <span v-if="p2pAccountLabel" class="titlebar-account-dot" :class="p2pAccountDotClass"></span>
       </button>
       <button class="titlebar-gear" @mousedown.stop @click="showSettings = true" title="Settings (⌘,)">
@@ -16428,6 +16426,17 @@ function paneIsCommander(p: ActivePane): boolean {
 .titlebar-account:hover {
   background: var(--bg-hover);
   color: var(--text-bright);
+}
+/* The cloud mark is drawn on a 32x24 viewBox, so it needs a wider box than the
+   24x24 icons beside it to end up the same visual height. */
+.titlebar-account-mark {
+  width: 18px;
+  height: 14px;
+}
+/* Connected is the one state worth colouring: it is what tells you the mark is
+   more than decoration. The rest stay muted so the cluster reads as one row. */
+.titlebar-account:has(.titlebar-account-dot.ok) {
+  color: var(--accent-fg);
 }
 .titlebar-account-dot {
   position: absolute;

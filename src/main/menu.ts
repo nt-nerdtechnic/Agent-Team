@@ -307,7 +307,7 @@ export function installApplicationMenu(
     {
       label: 'Window',
       submenu: [
-        { label: 'Navide Account', click: () => hooks.onOpenAccount?.() },
+        { label: 'Navide Cloud', click: () => hooks.onOpenAccount?.() },
         { type: 'separator' },
         { label: 'Pipeline Manager', click: () => hooks.onOpenPipelineManager?.() },
         { label: 'Resource Manager', click: () => hooks.onOpenResourceManager?.() },

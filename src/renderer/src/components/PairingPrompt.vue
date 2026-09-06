@@ -27,6 +27,7 @@ import { useI18n } from 'vue-i18n'
 
 import type { useBackend } from '../composables/useBackend'
 import { usePairingState, requestKey, POLL_MS, type PairingRow } from '../composables/usePairingState'
+import NavideCloudMark from './NavideCloudMark.vue'
 
 const props = defineProps<{ backend: ReturnType<typeof useBackend> }>()
 
@@ -221,6 +222,13 @@ function grouped(value: string | undefined): string {
        It is a notification, not a modal: it does not take the keyboard and it
        does not stop somebody finishing what they were typing. -->
   <div v-if="cards.length" class="pair-prompts" role="status" aria-live="polite">
+    <!-- One eyebrow for the stack, not one per card: it says where these
+         questions come from, and that is the same answer however many are
+         open. -->
+    <p class="pp-brand">
+      <NavideCloudMark variant="solid" class="pp-brand-mark" />
+      {{ t('settings.nav.crossDevice') }}
+    </p>
     <div v-for="card in cards" :key="card.key" class="pair-prompt">
       <template v-if="card.kind === 'asked'">
         <!-- This one closes, and goes by itself. It reports that a request went
@@ -336,6 +344,21 @@ function grouped(value: string | undefined): string {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: none; }
 }
+/* Names the sender of these cards. Muted and small: it is context, and the
+   question underneath is what has to be read first. */
+.pp-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0 2px;
+  font-size: var(--font-3xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.pp-brand-mark { width: 15px; height: 11px; color: var(--accent-fg); }
 .pp-title { margin: 0; font-size: 13px; font-weight: 600; }
 .pp-head { display: flex; align-items: flex-start; gap: 8px; }
 .pp-head .pp-title { flex: 1; min-width: 0; }

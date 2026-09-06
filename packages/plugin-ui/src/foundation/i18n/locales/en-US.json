@@ -60,7 +60,7 @@
     "reason-unknown-pane-id": "No pane with id “{pane_id}” on this machine",
     "reason-ambiguous-target": "{n} panes in “{ws}” are named “{name}” — rename one of them",
     "reason-target-offline": "“{to}” is offline — its window disconnected {seconds}s ago; the pane still exists",
-    "reason-unknown-device": "Unknown device “{device}” — this machine is not linked to a Navide-Server, so it can only address panes on itself",
+    "reason-unknown-device": "Unknown device “{device}” — this machine is not connected to Navide Cloud, so it can only address panes on itself",
     "rename-collision-title": "Messaging name in use",
     "rename-collision-body": "The name “{name}” is already used by another CLI. Choose a different messaging name:",
     "rename-collision-confirm": "Rename",
@@ -789,7 +789,7 @@
       "general": "General",
       "appearance": "Appearance",
       "layout": "Layout",
-      "crossDevice": "Cross-device",
+      "crossDevice": "Navide Cloud",
       "accounts": "Accounts",
       "cliAgents": "CLI Agents",
       "roles": "Roles",
@@ -1022,8 +1022,8 @@
       "updates": "Updates"
     },
     "p2p": {
-      "title": "Cross-device",
-      "hint": "Link this device to a Navide-Server so agents here can message agents on your other devices.",
+      "title": "Connection",
+      "hint": "Navide Cloud links your devices into one private network, so agents here can message agents anywhere you are signed in.",
       "legal-privacy": "Privacy",
       "legal-boundaries": "Boundaries",
       "token": "Access token",
@@ -1212,7 +1212,7 @@
         "policy-sign-when": "Only needed when this warning is showing.",
         "policy-open-rules": "Open rules",
         "policy-signed-default": "There were no rules to re-sign, so the default was signed: nothing is allowed yet.",
-        "locked-title": "Cross-device is stopped",
+        "locked-title": "Navide Cloud is stopped",
         "locked-body": "This device had trust state and no longer does. Nothing is sent or accepted until that is clear.",
         "plaintext-refused": "Refused an unencrypted message from {device}",
         "plaintext-refused-body": "This device has always sent encrypted messages; this one arrived in the clear, so it was refused.",
@@ -3040,8 +3040,8 @@
     "unnamed-pane": "Terminal"
   },
   "account": {
-    "title": "Navide Account",
-    "tagline": "Sign in to link this device with your other devices.",
+    "title": "Navide Cloud",
+    "tagline": "One account, every device. Sign in to join this machine to your private Navide Cloud.",
     "no-recovery": "There is no password reset yet — keep your password somewhere safe.",
     "err-unsupported": "This server does not support accounts yet. It may need updating.",
     "err-email-taken": "That email is already registered. Try signing in instead.",

@@ -16,6 +16,7 @@ import { useI18n } from 'vue-i18n'
 import type { LegalRoute } from '../../../shared/legalLinks'
 import { linkErrorKey } from '../lib/linkStatus'
 import { usePairingState } from '../composables/usePairingState'
+import NavideCloudMark from './NavideCloudMark.vue'
 import { relativeTime } from '../lib/relativeTime'
 import type { useBackend } from '../composables/useBackend'
 
@@ -1174,8 +1175,11 @@ onUnmounted(() => {
       <button class="s-close" @click="emit('close')" :title="t('settings.p2p.close')">✕</button>
 
       <header class="acct-head">
-        <h1 class="acct-title">{{ t('account.title') }}</h1>
-        <p class="tagline">{{ t('account.tagline') }}</p>
+        <span class="acct-mark" aria-hidden="true"><NavideCloudMark /></span>
+        <div class="acct-head-text">
+          <h1 class="acct-title">{{ t('account.title') }}</h1>
+          <p class="tagline">{{ t('account.tagline') }}</p>
+        </div>
       </header>
 
       <!-- Signed in: the credential belongs to the server, so this side only
@@ -2066,8 +2070,39 @@ onUnmounted(() => {
   line-height: 1;
 }
 .s-close:hover { background: var(--bg-muted); color: var(--text-bright); }
-.acct-head { padding: 22px 28px 10px; }
-.acct-title { margin: 0; font-size: 17px; font-weight: 600; color: var(--text-bright); }
+/* Brand header. The mark is what names the feature — "Navide Cloud" is a new
+   word for something the app already did, so the first screen that says it has
+   to also show it. The tinted band is the only decorative surface in this
+   dialog; everything below stays flat so the eye lands here first. */
+.acct-head {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 22px 28px 16px;
+  background:
+    radial-gradient(120% 160% at 0% 0%, var(--accent-subtle) 0%, transparent 62%);
+  border-bottom: 1px solid var(--border-muted);
+}
+.acct-mark {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--accent-muted);
+  background: var(--bg-subtle);
+  color: var(--accent-fg);
+}
+.acct-mark :deep(.nv-cloud-mark) { width: 26px; height: 20px; }
+.acct-head-text { min-width: 0; }
+.acct-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-bright);
+  letter-spacing: 0.01em;
+}
 .tagline { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); }
 .body { padding: 4px 28px 0; overflow-y: auto; }
 .tabs { display: flex; gap: 2px; margin: 0 0 12px; border-bottom: 1px solid var(--border-default); }
