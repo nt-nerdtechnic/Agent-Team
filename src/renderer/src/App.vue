@@ -277,6 +277,7 @@ const AccountModal = defineAsyncComponent(loadAccountModal)
 // expires in five minutes — too short to wait for a chunk to be fetched because
 // somebody happened to open a window.
 import PairingPrompt from './components/PairingPrompt.vue'
+import ShutdownOverlay, { type QuitStage } from './components/ShutdownOverlay.vue'
 const OnboardingWizard = defineAsyncComponent(() => import('./components/OnboardingWizard.vue'))
 const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
@@ -322,6 +323,9 @@ onMounted(() => {
   // user disabling it from the native quit dialog's "don't show again".
   pushQuitConfirmConfig()
   window.agentTeam?.onQuitConfirmDisabled?.(() => { confirmBeforeClose.value = false })
+  // Main narrates the quit sequence; the overlay stays up until the window
+  // is destroyed, so there is nothing to clear it.
+  window.agentTeam?.onQuitProgress?.((stage) => { quitStage.value = stage })
   // Clicking a system notification focuses the originating pane.
   window.agentTeam?.onFocusPane?.((paneId) => {
     void focusPaneFromNotification(paneId)
@@ -850,6 +854,10 @@ const confirmBeforeClosePane = makeStickyBool('agentTeam.confirmClosePane', true
 // conversation is one click away rather than gone.
 const idleReclaimEnabled = makeStickyBool('agentTeam.idleReclaim', true)
 const idleReclaimMinutes = makeStickyStr('agentTeam.idleReclaimMinutes', '30')
+// Non-null once main starts tearing the app down. Quitting runs into seconds
+// (a capped wait for a starting backend, then its SIGTERM grace), and the
+// window is still on screen for all of it.
+const quitStage = ref<QuitStage | null>(null)
 // Push the "confirm before quit" config to main so the native dialog stays in
 // sync with the shared setting and the current locale.
 function pushQuitConfirmConfig(): void {
@@ -16050,6 +16058,9 @@ function paneIsCommander(p: ActivePane): boolean {
       @jump="onResourceJump"
       @open-window="openResourceManager"
     />
+
+    <!-- Shutdown screen: last element so it paints over every popover above. -->
+    <ShutdownOverlay :stage="quitStage" />
   </div>
 </template>
 
