@@ -3425,12 +3425,17 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   border: 1px solid var(--bg-base);
 }
 .legacy-recovery-label {
-  padding: 5px 10px;
+  align-self: flex-start;
+  flex: none;
+  margin: 4px 0 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
   color: var(--attention-fg);
   background: var(--bg-muted);
-  border-bottom: 1px solid var(--border-muted);
-  font-size: 11px;
+  border: 1px solid var(--border-muted);
+  font-size: 10px;
   font-weight: 600;
+  line-height: 15px;
 }
 .dot {
   width: 8px;
