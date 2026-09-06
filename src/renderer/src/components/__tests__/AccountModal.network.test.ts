@@ -142,7 +142,7 @@ describe('account modal — your network', () => {
     // copies of the expression is how the sidebar came to say "running" while
     // the network view said "not opened" about the same pane.
     const uses = [...APP.matchAll(/paneDisplayStatus\(/g)].length
-    expect(uses, 'paneDisplayStatus should be declared once and called by every reader').toBe(4)
+    expect(uses, 'paneDisplayStatus should be declared once and called by every reader').toBe(5)
     expect(APP).toMatch(/reportPaneBusy\(pane\.id, [^,]+, paneDisplayStatus\(pane\)\)/)
     expect(APP).toMatch(/status: paneDisplayStatus\(p\) \|\| 'waiting'/)
     // ui.pane.close reports what closing a pane interrupted, and "was it busy"
@@ -150,6 +150,11 @@ describe('account modal — your network', () => {
     // here would let the advisory say "idle" about a pane the sidebar shows
     // as running, which is the drift this test exists to prevent.
     expect(APP).toMatch(/status: paneDisplayStatus\(doomed\)/)
+    // ui.pane.interrupt reports the state the interrupt key landed on, and it
+    // has to be the word the sidebar was showing at that instant — a second
+    // expression here would let it answer "running" about a pane everyone
+    // else could see was idle, which is the whole point of reporting it.
+    expect(APP).toMatch(/const status = paneDisplayStatus\(pane\)/)
 
     // Both facts in one message: the registry must never hold this tick's flag
     // beside the last tick's word.

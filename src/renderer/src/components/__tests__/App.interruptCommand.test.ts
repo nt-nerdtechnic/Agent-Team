@@ -32,13 +32,17 @@ describe('onInterrupt', () => {
     expect(fn).toContain('if (!ref?.sessionId) return false')
   })
 
-  it('reports whether a byte actually reached the PTY', () => {
+  it('reports whether the interrupt was issued, taking the answer from the terminal', () => {
     // "nothing was sent" and "it was sent and the agent kept going" are
     // different answers, and an MCP caller cannot tell them apart otherwise.
-    expect(fn).toContain('await ref.interrupt()')
-    expect(fn).toContain('return true')
-    // A failed write is not a send either — the old `catch { /* ignore */ }`
-    // would have reported success for a PTY that threw.
+    // The flag must come from useTerminal's own answer rather than being
+    // assumed from "the promise resolved": interrupt() also drops the request
+    // when the window's socket is down, which resolves exactly like a send.
+    expect(fn).toContain('const issued = await ref.interrupt()')
+    expect(fn).toContain('return issued !== false')
+    expect(fn).not.toMatch(/await ref\.interrupt\(\)\s*\n\s*persistPaneStopped[^]*?return true/)
+    // A refused or throwing request is not a send either — the old
+    // `catch { /* ignore */ }` would have reported success for a PTY that threw.
     expect(fn).toMatch(/catch \{\s*return false\s*\}/)
   })
 

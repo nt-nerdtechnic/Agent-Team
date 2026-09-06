@@ -4330,17 +4330,27 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     term.clearSelection()
   }
 
-  async function interrupt(): Promise<void> {
-    if (!sessionId.value) return
+  /** Returns whether the interrupt was actually issued. The two early exits
+   *  below are silent no-ops, and STOP pressed by hand does not care — but
+   *  ui.pane.interrupt reports this to an MCP caller that has no other way to
+   *  learn its interrupt went nowhere, and "the window was reconnecting" reads
+   *  exactly like "the agent ignored me" without it. True still means only
+   *  that the backend accepted the request: it writes to the PTY and answers,
+   *  and a write that fails there is logged, not reported back. */
+  async function interrupt(): Promise<boolean> {
+    if (!sessionId.value) return false
     // Guarded like every other user input, and for the sharpest case of it: a
     // frozen-looking pane is exactly when someone hits STOP, so a queued SIGINT
     // would land on whatever turn the CLI happens to be running once the socket
     // returns — possibly one started after the reconnect. The flag is set only
     // once the request is on its way, so the STOP badge cannot advertise an
     // interrupt that never left.
-    if (!inputTransportReady()) return
+    if (!inputTransportReady()) return false
     isStopped.value = true
-    await terminalPort.interrupt(sessionId.value)
+    const reply = await terminalPort.interrupt(sessionId.value)
+    // wsClient resolves an `ok: false` rather than rejecting it, so a refusal
+    // has to be read off the reply the way _sendPasteChunk reads it.
+    return !(reply && typeof reply === 'object' && (reply as { ok?: unknown }).ok === false)
   }
 
   async function kill(opts?: { force?: boolean }): Promise<void> {
