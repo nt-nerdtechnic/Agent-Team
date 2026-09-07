@@ -31,9 +31,11 @@ export interface AgentSpec {
   /** Vendor arguments that pick the model to run, WITHOUT the binary — e.g.
    *  `--model <id>`. Undefined = this CLI cannot be told which model to use
    *  at launch, and a spawn that asks for one is REFUSED rather than started
-   *  on the default: droid and opencode accept an unknown `--model` on their
-   *  interactive command and ignore it, so dropping the flag would look like
-   *  success until someone read the transcript. */
+   *  on the default: droid accepts an unknown `--model` on its interactive
+   *  command and ignores it, so dropping the flag would look like success
+   *  until someone read the transcript. opencode was recorded here for the
+   *  same reason once; that was wrong — its root command really does consume
+   *  the flag, and it declares this field. See the note in opencode.ts. */
   modelArgs?: (model: string) => string
   /** Vendor arguments that pick a reasoning-effort level. Undefined = this
    *  CLI has no separate effort flag. Some encode effort in the model id

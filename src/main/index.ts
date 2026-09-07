@@ -119,7 +119,7 @@ if (!app.isPackaged) {
 }
 
 if (process.platform === 'darwin') {
-  app.dock.setIcon(nativeImage.createFromPath(join(__dirname, '../../resources/icon.png')))
+  app.dock?.setIcon(nativeImage.createFromPath(join(__dirname, '../../resources/icon.png')))
 }
 
 let backend: BackendHandle | null = null

@@ -1736,7 +1736,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     switch (status) {
       case 'running': return 'var(--success-fg)'
       case 'awaiting': return 'var(--warning-fg)'
-      case 'idle': return 'var(--attention-fg)'
+      case 'idle': return 'var(--status-idle-fg)'
       case 'starting': return 'var(--status-starting-fg)'
       case 'error': return 'var(--danger-fg)'
       case 'exited':

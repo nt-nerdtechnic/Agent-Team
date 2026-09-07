@@ -404,8 +404,8 @@ button.icon-btn:hover {
   color: var(--status-badge-fg, var(--status-starting-fg));
 }
 .state[data-state='idle'] {
-  background: var(--status-badge-bg, var(--attention-muted));
-  color: var(--status-badge-fg, var(--attention-fg));
+  background: var(--status-badge-bg, var(--status-idle-muted));
+  color: var(--status-badge-fg, var(--status-idle-fg));
 }
 /* awaiting and stopped had no rule here, so both fell through to the neutral
  * default — the one surface where "blocked on you" and "done" looked alike. */

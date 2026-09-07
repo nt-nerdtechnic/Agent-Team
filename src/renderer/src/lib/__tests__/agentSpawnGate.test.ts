@@ -3,6 +3,7 @@ import {
   SPAWN_ADVISORY_CHILDREN_PER_PARENT,
   SPAWN_ADVISORY_CLI_PANES,
   SPAWN_ADVISORY_DEPTH,
+  assertAgentKeyAllowed,
   evaluateSpawnRequest,
   evaluateTurnSpawns,
   computeSpawnDepth,
@@ -421,5 +422,22 @@ describe('evaluateSpawnRequest — model / effort capability', () => {
     expect(results[1].ok).toBe(true)
     // The rejected request must not have consumed a child slot.
     if (results[1].ok) expect(results[1].advisories).toBeUndefined()
+  })
+})
+
+describe('assertAgentKeyAllowed', () => {
+  const validAgentKeys = ['claude', 'codex', 'cursor', 'droid']
+
+  it('rejects "terminal" — it is not in the whitelist', () => {
+    expect(() => assertAgentKeyAllowed('terminal', validAgentKeys)).toThrow()
+  })
+
+  it('returns the key when it is in the whitelist', () => {
+    expect(assertAgentKeyAllowed('claude', validAgentKeys)).toBe('claude')
+  })
+
+  it('rejects a non-string agent value', () => {
+    expect(() => assertAgentKeyAllowed(undefined, validAgentKeys)).toThrow()
+    expect(() => assertAgentKeyAllowed(123, validAgentKeys)).toThrow()
   })
 })

@@ -301,13 +301,13 @@ function rowTitle(row: ResourceSummaryRow): string {
 .rs-row[data-status='starting'] .rs-dot { background: var(--status-badge-fg, var(--status-starting-fg)); }
 .rs-row[data-status='error'] .rs-dot,
 .rs-row[data-status='exited'] .rs-dot { background: var(--status-badge-fg, var(--danger-fg)); }
-.rs-row[data-status='idle'] .rs-dot { background: var(--status-badge-fg, var(--attention-fg)); }
+.rs-row[data-status='idle'] .rs-dot { background: var(--status-badge-fg, var(--status-idle-fg)); }
 .rs-row[data-status='awaiting'] .rs-dot { background: var(--status-badge-fg, var(--warning-fg)); }
 .rs-row[data-status='stopped'] .rs-dot { background: var(--status-badge-fg, var(--text-disabled)); }
-/* Hollow ring so a dropped connection never reads as the (also amber) idle dot. */
+/* Hollow ring: a dropped connection is an absence, not a state the pane is in. */
 .rs-row[data-status='disconnected'] .rs-dot {
   background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--status-badge-fg, var(--attention-fg));
+  box-shadow: inset 0 0 0 1.5px var(--status-badge-fg, var(--text-bright));
 }
 .rs-row[data-status='waiting'] .rs-dot {
   background: transparent;

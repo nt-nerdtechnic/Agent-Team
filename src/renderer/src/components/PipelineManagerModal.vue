@@ -1024,7 +1024,7 @@ function buildAiContext(): string {
   border-radius: 50%;
 }
 .dot.status-connected { background: var(--success-fg); }
-.dot.status-starting { background: var(--attention-fg); }
+.dot.status-starting { background: var(--status-badge-fg, var(--status-starting-fg)); }
 .dot.status-disconnected { background: var(--text-secondary); }
 .dot.status-error { background: var(--danger-fg); }
 

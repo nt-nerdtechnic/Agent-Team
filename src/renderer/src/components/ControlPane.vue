@@ -4838,7 +4838,7 @@ button.icon-btn.muted:hover {
   background: var(--border-default);
 }
 .ws-grp[data-state='active'] .ws-grp-key { background: var(--success-fg); }
-.ws-grp[data-state='idle'] .ws-grp-key { background: var(--attention-emphasis); }
+.ws-grp[data-state='idle'] .ws-grp-key { background: var(--status-idle-emphasis); }
 .ws-grp-name {
   min-width: 0;
   overflow: hidden;
@@ -4997,7 +4997,7 @@ button.icon-btn.muted:hover {
   animation: agent-dot-pulse 0.9s ease-in-out infinite;
 }
 .status-dot[data-state='idle'] {
-  background: var(--status-badge-fg, var(--attention-fg));
+  background: var(--status-badge-fg, var(--status-idle-fg));
 }
 /* The CLI asked something and is parked on the answer. It pulses like running
    rather than sitting flat like idle: this is the one state where nothing at
@@ -5274,8 +5274,8 @@ button.icon-btn.muted:hover {
   color: var(--status-badge-fg, var(--status-starting-fg));
 }
 .state[data-state='idle'] {
-  background: var(--status-badge-bg, var(--attention-muted));
-  color: var(--status-badge-fg, var(--attention-fg));
+  background: var(--status-badge-bg, var(--status-idle-muted));
+  color: var(--status-badge-fg, var(--status-idle-fg));
 }
 .state[data-state='awaiting'] {
   background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent));

@@ -282,7 +282,7 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   background: var(--border-default);
 }
 .tab-dot[data-state='active'] { background: var(--success-fg); }
-.tab-dot[data-state='idle'] { background: var(--attention-emphasis); }
+.tab-dot[data-state='idle'] { background: var(--status-idle-emphasis); }
 
 .tab-close {
   display: inline-flex;
