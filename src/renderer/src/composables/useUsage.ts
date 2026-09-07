@@ -216,6 +216,32 @@ export function remainingPercent(snap: UsageSnapshot | undefined): number | null
   return Math.max(0, Math.min(100, 100 - headline.usedPercent))
 }
 
+/** A general window counts as spent at this figure. The panel reports whole
+ *  or one-decimal percentages and the backend clamps to 100, so equality IS
+ *  the exhausted case — there is no "over 100%". */
+const EXHAUSTED_USED_PCT = 100
+
+/** The general-account window that is fully spent, or undefined. Per-model
+ *  buckets are excluded for the same reason `remainingPercent` skips them: a
+ *  spent promotional bucket reports 100% used without actually blocking work,
+ *  so treating it as exhaustion would brand a healthy account as blocked.
+ *  A cached snapshot whose reset has already passed carries `expired` on the
+ *  window and is skipped too — a spent window from hours ago says nothing
+ *  about now. */
+export function exhaustedWindow(snap: UsageSnapshot | undefined): UsageWindow | undefined {
+  if (!snap || snap.status !== 'ok') return undefined
+  return snap.windows.find(
+    (w) => !w.expired && HEADLINE_KINDS.has(w.kind) && w.usedPercent >= EXHAUSTED_USED_PCT
+  )
+}
+
+/** True when this account has no general quota left at all. Deliberately NOT
+ *  the same as "remaining rounds to 0%": under 1% still runs, 100% used does
+ *  not, and before this the badge printed the same red 0% for both. */
+export function isExhausted(snap: UsageSnapshot | undefined): boolean {
+  return exhaustedWindow(snap) !== undefined
+}
+
 /** Severity by REMAINING quota: >40 ok (grey), 15–40 warn (orange), <15 crit (red). */
 export function remainingTier(remaining: number): 'ok' | 'warn' | 'crit' {
   if (remaining < 15) return 'crit'

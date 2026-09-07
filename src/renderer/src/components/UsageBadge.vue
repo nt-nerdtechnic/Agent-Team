@@ -5,6 +5,8 @@ import {
   formatRemaining,
   formatResetAbsolute,
   formatResetCountdown,
+  exhaustedWindow,
+  isExhausted,
   refreshUsage,
   remainingPercent,
   remainingTier,
@@ -31,6 +33,14 @@ const snap = computed(() => usageFor(props.agentKey))
 const remaining = computed(() => remainingPercent(snap.value))
 const tier = computed(() => (remaining.value === null ? 'ok' : remainingTier(remaining.value)))
 const expired = computed(() => snap.value?.status === 'expired')
+// No general quota left at all. Distinct from the red "<15% left" tier on
+// purpose: 0.4% still runs, this does not, and both used to print the same
+// red figure. Carries the spent window so the badge can say when it returns.
+const exhausted = computed(() => isExhausted(snap.value))
+const exhaustedReset = computed(() => {
+  const w = exhaustedWindow(snap.value)
+  return w ? formatResetCountdown(w.resetsAt) : ''
+})
 const cached = computed(() => snap.value?.stale === true)
 // The account just changed and its figure is being read right now. Reading
 // Claude's panel boots a whole CLI, so this state can last the better part of
@@ -59,7 +69,11 @@ const visible = computed(
 const canSwitch = computed(() => props.cliProfiles.hasProfiles(props.agentKey))
 const switchProfiles = computed(() => props.cliProfiles.profilesForAgent(props.agentKey))
 const activeProfileId = computed(() => props.cliProfiles.defaultProfileId(props.agentKey) ?? '')
-const critSwitch = computed(() => tier.value === 'crit')
+// Prompt the account list when the quota is low OR gone. Exhausted is the
+// stronger case: switching is the only thing that gets work moving again, and
+// nothing here does it automatically — a swap exchanges live keychain
+// credentials for every pane, which is not a background decision.
+const critSwitch = computed(() => tier.value === 'crit' || exhausted.value)
 
 const open = ref(false)
 const popStyle = ref<{ top: string; left: string }>({ top: '0px', left: '0px' })
@@ -318,27 +332,40 @@ function acctTitle(profileId: string | null): string {
     v-if="visible"
     ref="badgeRef"
     class="usage-badge"
-    :class="[tier, { cached, pending }]"
+    :class="[tier, { cached, pending, exhausted }]"
     :title="
       open
         ? ''
-        : $t(
-          pending
-            ? 'usage.reading-tooltip'
-            : expired
-              ? 'usage.expired-tooltip'
-              : cliMissing
-                ? 'usage.cli-missing-tooltip'
-                : cached
-                  ? 'usage.cached-tooltip'
-                  : 'usage.badge-tooltip'
-        )
+        : exhausted
+          ? $t(
+            exhaustedReset ? 'usage.exhausted-tooltip' : 'usage.exhausted-tooltip-no-reset',
+            { time: exhaustedReset }
+          )
+          : $t(
+            pending
+              ? 'usage.reading-tooltip'
+              : expired
+                ? 'usage.expired-tooltip'
+                : cliMissing
+                  ? 'usage.cli-missing-tooltip'
+                  : cached
+                    ? 'usage.cached-tooltip'
+                    : 'usage.badge-tooltip'
+          )
     "
     @mouseenter="onEnter"
     @mouseleave="onLeave"
     @click.stop
   >
-    <template v-if="remaining !== null">
+    <template v-if="exhausted">
+      {{ $t('usage.exhausted-short') }}
+      <!-- Same caveats as the numeric branch: mid-switch the figure belongs to
+           the PREVIOUS account, so an unqualified "spent" would pin the old
+           account's exhaustion on the new one. -->
+      <small v-if="pending">{{ $t('usage.reading-short') }}</small>
+      <small v-else-if="cached">{{ $t('usage.cached-short') }}</small>
+    </template>
+    <template v-else-if="remaining !== null">
       {{ formatRemaining(remaining) }}
       <small v-if="pending">{{ $t('usage.reading-short') }}</small>
       <small v-else-if="cached">{{ $t('usage.cached-short') }}</small>
@@ -367,6 +394,11 @@ function acctTitle(profileId: string | null): string {
       <div v-if="expired" class="usage-pop-expired">{{ $t('usage.expired-tooltip') }}</div>
       <div v-if="cliMissing" class="usage-pop-missing">{{ $t('usage.cli-missing-tooltip') }}</div>
       <div v-if="pending" class="usage-pop-pending">{{ $t('usage.reading-now') }}</div>
+      <div v-if="exhausted" class="usage-pop-exhausted">
+        {{ exhaustedReset
+          ? $t('usage.exhausted-tooltip', { time: exhaustedReset })
+          : $t('usage.exhausted-tooltip-no-reset') }}
+      </div>
       <div v-if="cached" class="usage-pop-cached">
         {{ $t('usage.cached-at', { time: formatResetAbsolute(snap.lastSuccessAt ?? snap.fetchedAt) }) }}
         · {{ $t('usage.refresh-status', { status: refreshStatusLabel(snap.refreshStatus) }) }}
@@ -496,6 +528,17 @@ function acctTitle(profileId: string | null): string {
   color: var(--danger-fg);
   background: var(--danger-deep);
   border-color: var(--danger-fg);
+}
+/* Out of quota: solid fill, so it does not read as "nearly out" at a glance. */
+.usage-badge.exhausted {
+  color: var(--text-on-emphasis);
+  background: var(--danger-emphasis);
+  border-color: var(--danger-emphasis);
+}
+.usage-pop-exhausted {
+  font-size: 10px;
+  color: var(--danger-fg);
+  margin-bottom: 6px;
 }
 .usage-badge.cached {
   border-style: dashed;

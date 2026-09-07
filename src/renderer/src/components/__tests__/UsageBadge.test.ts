@@ -855,3 +855,63 @@ describe('UsageBadge – manage accounts', () => {
     expect(wrapper.find('.usage-pop').exists()).toBe(false)
   })
 })
+
+describe('UsageBadge – quota spent', () => {
+  const spent = (): UsageSnapshot =>
+    snapshot({
+      windows: [
+        { kind: 'session', label: 'Session', usedPercent: 100, resetsAt: '2026-07-25T05:00:00Z' },
+      ],
+    })
+
+  it('reads differently from "under 1% left"', async () => {
+    // The whole point of the state: 0.4% left still runs and used to print the
+    // same red figure as a quota that is gone.
+    usage.usageFor.mockReturnValue(
+      snapshot({ windows: [{ kind: 'session', label: 'S', usedPercent: 99.6, resetsAt: null }] }),
+    )
+    wrapper = mountBadge(makeCliProfiles().fake)
+    expect(wrapper.find('.usage-badge').classes()).not.toContain('exhausted')
+    expect(wrapper.find('.usage-badge').text()).toContain('<1%')
+
+    wrapper.unmount()
+    usage.usageFor.mockReturnValue(spent())
+    wrapper = mountBadge(makeCliProfiles().fake)
+    expect(wrapper.find('.usage-badge').classes()).toContain('exhausted')
+    expect(wrapper.find('.usage-badge').text()).toContain('spent')
+  })
+
+  it('says when the quota comes back, in the badge tooltip and the popover', async () => {
+    vi.setSystemTime(Date.parse('2026-07-25T02:00:00Z'))
+    usage.usageFor.mockReturnValue(spent())
+    wrapper = mountBadge(makeCliProfiles().fake)
+    expect(wrapper.find('.usage-badge').attributes('title')).toContain('3h')
+
+    await openPopover(wrapper)
+    expect(wrapper.find('.usage-pop-exhausted').text()).toContain('3h')
+  })
+
+  it('points at the account list, the only thing that gets work moving again', async () => {
+    usage.usageFor.mockReturnValue(spent())
+    wrapper = mountBadge(
+      makeCliProfiles({ profiles: [profile('p1', 'Work')], defaultId: null }).fake,
+    )
+    await openPopover(wrapper)
+    expect(wrapper.find('.usage-pop-switch-title').classes()).toContain('crit')
+  })
+})
+
+describe('UsageBadge – quota spent, mid-switch', () => {
+  it('keeps the "reading" caveat so the old account\'s exhaustion is not pinned on the new one', () => {
+    usage.usageFor.mockReturnValue(
+      snapshot({
+        windows: [{ kind: 'session', label: 'S', usedPercent: 100, resetsAt: null }],
+        refreshPending: true,
+      }),
+    )
+    wrapper = mountBadge(makeCliProfiles().fake)
+    const badge = wrapper.find('.usage-badge')
+    expect(badge.classes()).toContain('exhausted')
+    expect(badge.find('small').text()).toBe('reading')
+  })
+})

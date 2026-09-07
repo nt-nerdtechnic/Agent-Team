@@ -70,6 +70,12 @@ interface Props {
   /** Runtime-only login-expired badge — lit when the pane's CLI reported an
    *  expired login; clicking it asks App.vue to re-send the login command. */
   loginExpired?: boolean
+  /** Runtime-only quota badge — lit while this pane's CLI has announced it is
+   *  out of quota. `usageLimitUntil` is when it comes back, or null when no
+   *  reset time could be resolved (the badge then says so instead of naming a
+   *  time it does not know). Not clickable: nothing here can grant quota. */
+  usageLimitHit?: boolean
+  usageLimitUntil?: number | null
   /** Runtime-only continue affordance — lit when this pane came back from a
    *  restore with `--resume`: the CLI reloaded its transcript but is parked at
    *  the prompt, so whatever it was doing is never picked up on its own. */
@@ -620,6 +626,15 @@ onMounted(() => {
           @click.stop="emit('fix-login')"
         >{{ $t('pane.terminal.login-expired-badge') }}</span>
         <span
+          v-if="usageLimitHit"
+          class="usage-limit-inline"
+          :title="usageLimitUntil != null
+            ? $t('pane.terminal.usage-limit-tooltip', { time: formatLoopTime(usageLimitUntil) })
+            : $t('pane.terminal.usage-limit-tooltip-unknown')"
+        >{{ usageLimitUntil != null
+          ? $t('pane.terminal.usage-limit-badge', { time: formatLoopTime(usageLimitUntil) })
+          : $t('pane.terminal.usage-limit-badge-unknown') }}</span>
+        <span
           class="status"
           :data-status="displayStatus"
           :style="statusBadgeVars"
@@ -885,6 +900,22 @@ onMounted(() => {
 .login-expired-inline:hover {
   border-color: var(--attention-fg);
 }
+/* Quota exhausted. Deliberately louder than the login badge and not a button:
+   a re-login is something the user can do here, waiting out a quota window is
+   not — the badge only says when work can start again. */
+.usage-limit-inline {
+  font-size: var(--font-3xs);
+  font-weight: 600;
+  color: var(--danger-fg);
+  background: var(--danger-deep);
+  border: 1px solid var(--danger-fg);
+  border-radius: var(--radius-xs);
+  padding: 1px 6px;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: default;
+}
 .loop-btn {
   font-size: var(--font-3xs);
   line-height: 1.4;
@@ -933,8 +964,8 @@ onMounted(() => {
   color: var(--status-badge-fg, var(--text-primary));
 }
 .status[data-status='idle'] {
-  background: var(--status-badge-bg, var(--attention-muted));
-  color: var(--status-badge-fg, var(--attention-fg));
+  background: var(--status-badge-bg, var(--status-idle-muted));
+  color: var(--status-badge-fg, var(--status-idle-fg));
 }
 .status[data-status='awaiting'] {
   background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent));
