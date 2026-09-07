@@ -3279,6 +3279,16 @@ _UI_INVOKE_TIMEOUT_S = 15.0
 # claude. Giving these actions the same budget as an unanswered request means
 # reporting failure for work that in fact succeeded, so they get their own.
 _UI_INVOKE_SLOW_TIMEOUT_S = 60.0
+#: Renderer commands whose argument names a pane's PRIVATE data — an inbox —
+#: rather than a window or a project. `ui_invoke` forwards action and args
+#: verbatim, so without this list any caller holding a valid credential could
+#: read and consume another pane's mail by naming its id. These two are
+#: refused unless the caller IS the pane named in args.paneId; the only
+#: legitimate emitter, cli_read_incoming, always names its own. Deliberately a
+#: short explicit list, not "every action with a paneId": focus, close,
+#: getStatus and interrupt are cross-pane by design.
+_PANE_PRIVATE_UI_ACTIONS = frozenset({"ui.messaging.readIncoming", "ui.messaging.settleRead"})
+
 _UI_INVOKE_SLOW_ACTIONS = frozenset({"ui.pane.create"})
 _ui_invoke_pending: PendingRegistry[dict[str, Any]] = PendingRegistry()
 
@@ -3429,6 +3439,10 @@ async def _ui_request(
         "args": args,
         "global": is_global,
         "addressed": owner is not None,
+        # Who is asking, from the credential and never from args: the renderer
+        # refuses the pane-private actions when this is not the pane named in
+        # args.paneId. Empty for host / external callers, which have no inbox.
+        "caller_pane_id": caller.pane_id if caller is not None and caller.kind == "pane" else "",
     }
     # The event is built inside each branch, after `addressed` has settled:
     # make_event stores the payload by reference today, so mutating it after
@@ -3507,6 +3521,23 @@ async def ui_invoke(
     from a window that has the project open.
     """
     caller = _resolve_caller(ctx)
+    if action in _PANE_PRIVATE_UI_ACTIONS:
+        # Refused here as well as in the window: the renderer check is the one
+        # that holds for every path a request can take, this one gives the
+        # caller the reason without a round trip. Same rule on both sides.
+        own = caller.pane_id if caller.kind == "pane" else ""
+        named = str((args or {}).get("paneId") or "")
+        if not own or named != own:
+            return {
+                "ok": False,
+                "result": None,
+                "error": (
+                    f"{action} reads a pane's own inbox; it can only be invoked by that "
+                    "pane for itself (use cli_read_incoming), not for another pane "
+                    "and not by a host or external caller"
+                ),
+                "error_code": "ui_pane_private",
+            }
     return await _ui_request(
         workspace_path,
         "invoke",

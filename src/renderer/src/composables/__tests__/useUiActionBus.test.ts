@@ -393,3 +393,73 @@ describe('handleUiInvokeRequest — warnings from uiDiagnostics', () => {
     expect('warnings' in sent[0].payload).toBe(false)
   })
 })
+
+
+describe('useUiActionBus — pane-private actions (inbox)', () => {
+  // ui.messaging.readIncoming / settleRead take the pane whose inbox to touch
+  // from args.paneId. The backend puts the caller's own pane, from the
+  // credential, in caller_pane_id; the two must agree or the action does not
+  // run. Registered here as spies so the test sees whether the command ran.
+  function setup(): { ran: ReturnType<typeof vi.fn>; sent: ReturnType<typeof createMockBackend>['sent']; emit: ReturnType<typeof createMockBackend>['emit'] } {
+    const { backend, emit, sent } = createMockBackend()
+    const ran = vi.fn(() => 'read')
+    registerCommand('ui.messaging.readIncoming', ran)
+    registerCommand('ui.messaging.settleRead', ran)
+    useUiActionBus({ backend, currentWorkspace: ref('/ws'), buildSnapshot: () => ({}) })
+    return { ran, sent, emit }
+  }
+
+  it('runs when the caller is the pane it names', async () => {
+    const { ran, sent, emit } = setup()
+    emit('ui.invoke.request', baseRequest({
+      action: 'ui.messaging.readIncoming', args: { paneId: 'pa', limit: 5 }, caller_pane_id: 'pa', addressed: true,
+    }))
+    await flush()
+    expect(ran).toHaveBeenCalledTimes(1)
+    const reply = sent.find((s) => s.type === 'ui.invoke.result')
+    expect(reply?.payload).toMatchObject({ request_id: 'req-1', ok: true, result: 'read' })
+  })
+
+  it('refuses, with the reason, when the caller names another pane', async () => {
+    const { ran, sent, emit } = setup()
+    for (const action of ['ui.messaging.readIncoming', 'ui.messaging.settleRead']) {
+      emit('ui.invoke.request', baseRequest({
+        request_id: `req-${action}`, action, args: { paneId: 'pb' }, caller_pane_id: 'pa', addressed: true,
+      }))
+    }
+    await flush()
+    expect(ran).not.toHaveBeenCalled()
+    const replies = sent.filter((s) => s.type === 'ui.invoke.result')
+    expect(replies).toHaveLength(2)
+    for (const reply of replies) {
+      expect(reply.payload).toMatchObject({ ok: false })
+      expect(String((reply.payload as { error: string }).error)).toMatch(/own inbox/)
+    }
+  })
+
+  it('refuses when the request carries no caller pane at all', async () => {
+    // A host / external credential, or a backend build that does not send the
+    // field: either way there is no pane to match, so nothing is read.
+    const { ran, sent, emit } = setup()
+    emit('ui.invoke.request', baseRequest({ action: 'ui.messaging.readIncoming', args: { paneId: 'pa' } }))
+    emit('ui.invoke.request', baseRequest({
+      request_id: 'req-2', action: 'ui.messaging.settleRead', args: { paneId: 'pa' }, caller_pane_id: '',
+    }))
+    await flush()
+    expect(ran).not.toHaveBeenCalled()
+    expect(sent.filter((s) => s.type === 'ui.invoke.result').every((s) => (s.payload as { ok: boolean }).ok === false)).toBe(true)
+  })
+
+  it('leaves every other paneId-taking action cross-pane, as before', async () => {
+    // The list is explicit on purpose: focus / close / getStatus / interrupt
+    // are meant to be driven from another pane.
+    const { backend, emit, sent } = createMockBackend()
+    const focus = vi.fn(() => 'focused')
+    registerCommand('ui.pane.focus', focus)
+    useUiActionBus({ backend, currentWorkspace: ref('/ws'), buildSnapshot: () => ({}) })
+    emit('ui.invoke.request', baseRequest({ action: 'ui.pane.focus', args: { paneId: 'pb' }, caller_pane_id: 'pa' }))
+    await flush()
+    expect(focus).toHaveBeenCalledTimes(1)
+    expect(sent.find((s) => s.type === 'ui.invoke.result')?.payload).toMatchObject({ ok: true, result: 'focused' })
+  })
+})

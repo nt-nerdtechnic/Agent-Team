@@ -5,7 +5,7 @@ import { currentDiagnosticSeq, takeDiagnosticsSince } from '../lib/uiDiagnostics
  * Bridges an external MCP client's `ui.invoke.request` broadcasts into this
  * window's command registry and replies with `ui.invoke.result`. Backend
  * contract (do not change without updating the backend side):
- *   request:  { request_id, workspace_path, op, action, args, global, addressed }
+ *   request:  { request_id, workspace_path, op, action, args, global, addressed, caller_pane_id }
  *   response: backend.send('ui.invoke.result', { request_id, ok, result, error, warnings? })
  * `warnings` is a string array and is only present when uiDiagnostics recorded
  * something during the action (e.g. injectText resending content) — it lets
@@ -27,6 +27,10 @@ export interface UiInvokeRequest {
    *  one named (see WORKSPACE_SCOPED_ACTIONS), since being the right WINDOW
    *  does not make this the right PROJECT. */
   addressed?: boolean
+  /** The pane the credential behind this request belongs to — taken from the
+   *  credential by the backend, never from args. Empty for host / external
+   *  callers. Read only for PANE_PRIVATE_ACTIONS. */
+  caller_pane_id?: string
 }
 
 export interface UiActionBusBackend {
@@ -63,6 +67,21 @@ function errorMessage(err: unknown): string {
  *  ui.diagnostics.read — they describe the window as it is), window-scoped
  *  (settings), or keyed by pane id, and stays on the wider rule. */
 const WORKSPACE_SCOPED_ACTIONS = new Set(['ui.pane.create', 'ui.window.openGit', 'ui.preview.show'])
+
+/** Actions whose args.paneId names a pane's PRIVATE data — its inbox — rather
+ *  than a window or a project. They run only when the caller IS that pane:
+ *  `caller_pane_id` (from the credential) must be present and equal to
+ *  args.paneId. Without this, any holder of a valid credential could read and
+ *  consume another pane's mail by naming its id. The check lives here, not in
+ *  the commands, so the registry's args-only handler signature stays as is.
+ *  Deliberately a short explicit list — focus, close, getStatus and interrupt
+ *  are cross-pane by design and must keep working across panes. */
+const PANE_PRIVATE_ACTIONS = new Set(['ui.messaging.readIncoming', 'ui.messaging.settleRead'])
+
+const namedPaneId = (args: Record<string, unknown> | null | undefined): string => {
+  const v = args?.paneId
+  return typeof v === 'string' ? v : ''
+}
 
 const normWs = (p: string): string => p.replace(/\/+$/, '')
 
@@ -101,6 +120,15 @@ export async function handleUiInvokeRequest(
     normWs(req.workspace_path) !== normWs(opts.currentWorkspace.value)
   if (wrongProject && !req.addressed) return
 
+  // A pane-private action asked for a pane other than the caller's own (or by
+  // a caller with no pane at all). Answered, not ignored: the request reached
+  // the right window, and the reason is what the caller needs.
+  const notOwnPane =
+    req.op === 'invoke' &&
+    !!req.action &&
+    PANE_PRIVATE_ACTIONS.has(req.action) &&
+    (!req.caller_pane_id || req.caller_pane_id !== namedPaneId(req.args))
+
   const diagnosticSeq = currentDiagnosticSeq()
   let ok = true
   let result: unknown
@@ -112,6 +140,12 @@ export async function handleUiInvokeRequest(
         `${req.action} acts on the project this window is showing, which is ` +
         `"${opts.currentWorkspace.value}", not "${req.workspace_path}". Switch that ` +
         `window to the project first, or call from a pane in a window that has it open.`
+    } else if (notOwnPane) {
+      ok = false
+      error =
+        `${req.action} reads a pane's own inbox and can only be invoked by that pane ` +
+        `for itself; the caller ${req.caller_pane_id ? `"${req.caller_pane_id}"` : 'has no pane'} ` +
+        `and asked for "${namedPaneId(req.args)}".`
     } else if (req.op === 'invoke') {
       if (!req.action) {
         ok = false
