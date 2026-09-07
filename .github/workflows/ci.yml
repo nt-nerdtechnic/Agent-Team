@@ -15,14 +15,13 @@ concurrency:
 
 jobs:
   dependency-audit:
-    # Known-vulnerability scan of the locked dependency trees (SCA). Advisory
-    # for now: the first run found a backlog (see .agent-team/plans/
-    # navide-security-program_*.html, A1), and a red gate nobody can clear is
-    # a gate people learn to ignore. Flip continue-on-error off once the
-    # backlog is cleared.
-    name: Dependency audit (advisory)
+    # Known-vulnerability scan of the locked dependency trees (SCA). This gate
+    # blocks: the backlog it was provisionally exempted for is cleared (see
+    # .agent-team/plans/dependency-audit-backlog_f203f7.html), so a new
+    # advisory at high or above now fails the run instead of adding another
+    # red cross nobody reads.
+    name: Dependency audit
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -165,7 +164,7 @@ jobs:
     # Preserve the existing required-check name for branch protection.
     name: Lint and test
     if: ${{ always() }}
-    needs: [frontend, backend, registry]
+    needs: [frontend, backend, registry, dependency-audit]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -174,7 +173,9 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           BACKEND_RESULT: ${{ needs.backend.result }}
           REGISTRY_RESULT: ${{ needs.registry.result }}
+          AUDIT_RESULT: ${{ needs['dependency-audit'].result }}
         run: |
           test "$FRONTEND_RESULT" = success
           test "$BACKEND_RESULT" = success
           test "$REGISTRY_RESULT" = success
+          test "$AUDIT_RESULT" = success
