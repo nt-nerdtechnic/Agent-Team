@@ -242,6 +242,22 @@ export function settingsRemove(key: string): void {
   scheduleFlush()
 }
 
+/** Send the queued writes now instead of on the debounce timer.
+ *
+ *  Exit paths cannot await: `beforeunload` gets no async turn, and the quit
+ *  sequence stops the backend before the window unloads. Firing the batch is
+ *  still what gets it onto the socket in order — only the ack is given up,
+ *  which is the same trade the message log's exit flush makes. Without this,
+ *  anything written within `SETTINGS_FLUSH_DEBOUNCE_MS` of exiting is lost
+ *  while still sitting in `pending`. */
+export function flushSettingsOnExit(): void {
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+  void flushPending()
+}
+
 /** Hook the module to a composed settings port (call once from each window's
  *  composition root). Subscribes to settings-change broadcasts and, on every
  *  (re)connect, reconciles the cache and flushes writes queued while offline. */

@@ -3455,11 +3455,22 @@ app.on('window-all-closed', () => {
 // still-starting backend is killed outright rather than stopped cleanly.
 const BACKEND_SPAWN_WAIT_MS = 3000
 const BACKEND_STOP_WAIT_MS = 6000
+// What the renderers get to put their queued settings writes on the socket
+// after the 'saving' broadcast. Sized for an IPC hop plus a WebSocket send, not
+// a round trip: nobody awaits the ack. Without it the broadcast has not even
+// been delivered by the time the backend that receives those writes is stopped,
+// so any preference changed within the renderer's 500ms write debounce of
+// quitting is lost.
+const SETTINGS_FLUSH_GRACE_MS = 250
 
 async function teardownBackendAndQuit(): Promise<void> {
   // Put the shutdown screen up before anything below can block: the waits here
   // run into seconds, and the windows stay on screen for all of it.
   broadcastQuitStage('saving')
+  // The renderers flush their queued settings writes when they see 'saving'.
+  // That flush travels renderer → backend over the WebSocket, so it has to land
+  // while the backend below is still up.
+  await new Promise<void>((resolve) => setTimeout(resolve, SETTINGS_FLUSH_GRACE_MS))
   // A user-initiated quit is a clean exit — nothing to restore next launch.
   windowRegistry.markCleanExit()
   // Drop any scheduled respawn: quitting must not race a backend back to life.

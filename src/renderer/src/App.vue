@@ -216,7 +216,7 @@ import {
   type RestoreSessionTrigger,
   type WorkspaceRestoreSession,
 } from './lib/resumeBehavior'
-import { initSettingsBackend, settingsGet, settingsSet } from '@navide/plugin-ui/shared'
+import { flushSettingsOnExit, initSettingsBackend, settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { cliPermissionKey, parseCliPermissionMode, skipPermissionFlagFor } from '@navide/plugin-shell'
 import { useLayoutStore } from './layout/useLayoutStore'
 import { RAIL_SIZE } from './layout/slots'
@@ -328,7 +328,15 @@ onMounted(() => {
   window.agentTeam?.onQuitConfirmDisabled?.(() => { confirmBeforeClose.value = false })
   // Main narrates the quit sequence; the overlay stays up until the window
   // is destroyed, so there is nothing to clear it.
-  window.agentTeam?.onQuitProgress?.((stage) => { quitStage.value = stage })
+  window.agentTeam?.onQuitProgress?.((stage) => {
+    quitStage.value = stage
+    // 'saving' is the last point in the quit sequence where the backend that
+    // receives settings writes is still up — main stops it before `app.quit()`
+    // lets the window unload, so `beforeunload` below is too late for a quit.
+    // The setting the dialog itself just changed ("don't show again") is the
+    // one this most often saves.
+    if (stage === 'saving') flushSettingsOnExit()
+  })
   // Clicking a system notification focuses the originating pane.
   window.agentTeam?.onFocusPane?.((paneId) => {
     void focusPaneFromNotification(paneId)
@@ -2818,13 +2826,19 @@ onMounted(() => {
   // cannot await, so it only stores what xterm has already parsed — the
   // periodic save is what makes the snapshot faithful.
   window.addEventListener('beforeunload', saveAllScrollSnapshots)
+  // Covers the teardowns that are not an app quit — ⌘R's reload and closing a
+  // window — where the backend outlives the renderer. A quit is handled from
+  // the 'saving' stage above, before the backend is stopped.
+  window.addEventListener('beforeunload', flushSettingsOnExit)
 })
 onUnmounted(() => {
   window.clearInterval(_msgPumpTimer)
   window.clearInterval(_remoteTargetsTimer)
   window.removeEventListener('beforeunload', msgLog.flushOnExit)
   window.removeEventListener('beforeunload', saveAllScrollSnapshots)
+  window.removeEventListener('beforeunload', flushSettingsOnExit)
   void msgLog.flush()
+  flushSettingsOnExit()
 })
 
 // ── AWAITING watcher (vendors with no notification hook) ────────────────────
