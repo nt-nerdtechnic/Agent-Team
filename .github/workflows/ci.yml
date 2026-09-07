@@ -35,14 +35,31 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      # Both scans always run: a finding in one must not hide the other half of
+      # the tree. Each records its outcome and the gate below re-raises it, so
+      # the job still turns red when either scan finds something.
       - name: npm audit (high and above)
+        id: npm-audit
+        continue-on-error: true
         run: pnpm audit --audit-level=high
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
       - name: pip-audit (backend lock)
+        id: pip-audit
+        continue-on-error: true
         run: |
           uv --project backend export --format requirements-txt --no-hashes --no-emit-project > /tmp/backend-requirements.txt
           uv --project backend run --with pip-audit pip-audit -r /tmp/backend-requirements.txt
+      - name: Audit gate
+        env:
+          NPM_AUDIT: ${{ steps.npm-audit.outcome }}
+          PIP_AUDIT: ${{ steps.pip-audit.outcome }}
+        run: |
+          echo "npm audit:  $NPM_AUDIT"
+          echo "pip-audit:  $PIP_AUDIT"
+          if [ "$NPM_AUDIT" != success ] || [ "$PIP_AUDIT" != success ]; then
+            exit 1
+          fi
 
   frontend:
     name: Frontend checks and build
