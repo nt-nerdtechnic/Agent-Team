@@ -14,6 +14,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-audit:
+    # Known-vulnerability scan of the locked dependency trees (SCA). Advisory
+    # for now: the first run found a backlog (see .agent-team/plans/
+    # navide-security-program_*.html, A1), and a red gate nobody can clear is
+    # a gate people learn to ignore. Flip continue-on-error off once the
+    # backlog is cleared.
+    name: Dependency audit (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: npm audit (high and above)
+        run: pnpm audit --audit-level=high
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+      - name: pip-audit (backend lock)
+        run: |
+          uv --project backend export --format requirements-txt --no-hashes --no-emit-project > /tmp/backend-requirements.txt
+          uv --project backend run --with pip-audit pip-audit -r /tmp/backend-requirements.txt
+
   frontend:
     name: Frontend checks and build
     # Keep the desktop checks on the release platform.
