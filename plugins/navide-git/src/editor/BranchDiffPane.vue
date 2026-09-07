@@ -3,7 +3,7 @@ import { ref, watch, computed } from 'vue'
 import { parseHunks, toSideBySide, type Hunk, type SideRow } from '../lib/git-diff'
 import type { GitTransport } from '#git-feature'
 import type { GitBranchDiffPort } from '../ports/gitSurface'
-import { useGit } from '../composables/useGit'
+import type { GitBranch, GitStatus } from '../composables/useGit'
 
 const props = defineProps<{
   workspacePath: string
@@ -11,6 +11,12 @@ const props = defineProps<{
   compare: string
   gitTransport: GitTransport
   branchDiff: GitBranchDiffPort
+  // Injected by the parent surface rather than read from a second useGit()
+  // instance: every instance subscribes to git.changed and fans out seven
+  // loaders, so owning one here doubled the refresh cost of the whole window
+  // just to hand two values to the review slot.
+  gitStatus: GitStatus
+  gitBranches: GitBranch[]
 }>()
 
 const emit = defineEmits<{
@@ -55,10 +61,6 @@ function startReviewDrag(e: MouseEvent) {
   window.addEventListener('mousemove', onMove)
   window.addEventListener('mouseup', onUp)
 }
-const { gitStatus, gitBranches } = useGit(
-  () => props.workspacePath,
-  props.gitTransport,
-)
 
 interface FileDiff {
   filename: string
