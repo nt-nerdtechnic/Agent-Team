@@ -130,7 +130,7 @@
     "vite-plugin-monaco-editor": "^1.1.0",
     "vitest": "^3.2.7",
     "vue": "^3.5.13",
-    "vue-tsc": "^2.1.10"
+    "vue-tsc": "^3.3.11"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
