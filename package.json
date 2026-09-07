@@ -162,7 +162,7 @@
     "electron-updater": "^6.8.9",
     "koffi": "^3.1.0",
     "mermaid": "^11.17.2",
-    "monaco-editor": "^0.55.1",
+    "monaco-editor": "^0.56.0",
     "vue-i18n": "11",
     "ws": "^8.21.1",
     "yaml": "^2.9.0"
