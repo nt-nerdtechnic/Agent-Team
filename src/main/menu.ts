@@ -18,10 +18,13 @@ import { getTerminalSelection } from './terminal-selection-cache'
  * accelerators fire before the renderer's key handlers:
  *
  *   - The View submenu's `resetZoom` / `zoomIn` / `zoomOut` roles. Those roles
- *     bind ⌘0 / ⌘+ / ⌘- to `webContents` zoom, which scales the ENTIRE window
- *     — chrome, layout, every pane. Zoom in this app is per-pane content zoom
- *     only (xterm font size in useTerminal.ts, Monaco font size in
- *     EditorViewMonaco.vue), so the built-in roles must not exist.
+ *     bind ⌘0 / ⌘+ / ⌘- to `webContents` zoom, and this app already gives
+ *     those three chords to per-pane content zoom (xterm font size in
+ *     useTerminal.ts, Monaco font size in EditorViewMonaco.vue). Interface
+ *     zoom does exist — Settings -> Appearance, or the Shift variants of these
+ *     chords through the renderer's keybinding registry, applied by
+ *     src/main/ui-zoom-store.ts — but it must not come from these roles, whose
+ *     native accelerators would take ⌘0 / ⌘+ / ⌘- away from the panes.
  *   - The View submenu's `forceReload` role, which owns ⇧⌘R.
  *   - The View submenu's `reload` role, which owns ⌘R. Between them those two
  *     held both halves of the reload/rebuild pair, and had them backwards: ⌘R

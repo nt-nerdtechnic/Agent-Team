@@ -16,6 +16,7 @@ import { useTheme } from '@navide/plugin-ui/foundation'
 import { useNotify } from '@navide/plugin-ui/foundation'
 import { resolvePlanStore, type PlanCtx, type WriteResult } from './composables/planStore'
 import { sanitizePlanSectionHtml } from './editor/planRuntime'
+import { resetUiScale, stepUiScaleBy } from './lib/uiScale'
 import PlansPane from './editor/PlansPane.vue'
 import { lastOpenedStorageKey, loadStoredValue, saveStoredChoice } from './editor/plansPaneModel'
 import { initKeybindingsPort, useKeybindings, setContext } from '@navide/plugin-ui/shared'
@@ -326,6 +327,12 @@ registerCommand('workbench.action.closeWindow', () => { window.close() })
 // ⇧⌘R. Same reasoning: plans live on disk, so a reload costs nothing but an
 // in-progress section edit, which ESC discards anyway.
 registerCommand('workbench.action.reloadWindow', () => { location.reload() })
+
+// ⇧⌘=/⇧⌘-/⇧⌘0. Interface zoom is app-wide: main applies the new factor to
+// every window, so scaling from here moves the main shell too.
+registerCommand('workbench.action.zoomUiIn',    () => { stepUiScaleBy(1) })
+registerCommand('workbench.action.zoomUiOut',   () => { stepUiScaleBy(-1) })
+registerCommand('workbench.action.zoomUiReset', () => { resetUiScale() })
 
 // ESC, bound centrally as closeModal on `planWindow` (keybindings/defaults.ts).
 //

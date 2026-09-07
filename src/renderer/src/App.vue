@@ -144,6 +144,7 @@ import {
   SUBMIT_CONFIRM_MS, SUBMIT_SCREEN_LINES, TAIL_MATCH_LEN
 } from './lib/injectEcho'
 import { recordDiagnostic, readDiagnostics, currentDiagnosticSeq } from './lib/uiDiagnostics'
+import { resetUiScale, stepUiScaleBy } from './lib/uiScale'
 import { injectStandaloneTask, type StandaloneTaskInjectionDeps } from './lib/standalonePaneTask'
 import { quickClassify } from './lib/quick-classify'
 import type { DirLister } from '@navide/plugin-shell'
@@ -6936,6 +6937,12 @@ registerCommand('workbench.action.rebuildFocusedPane', async () => {
 // so a reload here reconnects and restores the panes rather than losing them.
 // The Mini IDE, whose unsaved buffers only exist in the renderer, guards its own.
 registerCommand('workbench.action.reloadWindow', () => { location.reload() })
+// ⌘⇧= / ⌘⇧- / ⌘⇧0. Interface zoom is app-wide: the main process applies the
+// stored factor to every WebContents, so registering it here reaches the
+// plugin windows too.
+registerCommand('workbench.action.zoomUiIn', () => { stepUiScaleBy(1) })
+registerCommand('workbench.action.zoomUiOut', () => { stepUiScaleBy(-1) })
+registerCommand('workbench.action.zoomUiReset', () => { resetUiScale() })
 // Ctrl+Tab / Ctrl+Shift+Tab — see cycleFocusedPane near the grid pagination
 // state. 'paneStage' marks this as the window that owns the CLI pane grid; the
 // keybinding rules gate on it so plugin windows keep their editor-tab behavior.

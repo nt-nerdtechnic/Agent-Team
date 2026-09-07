@@ -102,6 +102,7 @@ import SettingsCard from './settings/SettingsCard.vue'
 import SettingRow from './settings/SettingRow.vue'
 import ToggleSwitch from './settings/ToggleSwitch.vue'
 import { formatBytes } from '../lib/formatBytes'
+import { UI_SCALE_STEPS, formatUiScale, getUiScale, setUiScale } from '../lib/uiScale'
 import {
   RevisionedMcpSaveQueue,
   shouldReloadMcpAfterBundleImport,
@@ -484,6 +485,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     keywords: 'language locale 語言 繁體中文 english en-us zh-tw',
   },
   {
+    id: 'appearance-ui-scale',
+    tab: 'appearance',
+    section: 'appearance-ui-scale',
+    title: 'Interface Scale / 介面縮放',
+    group: 'Appearance',
+    summary: 'Scale the whole interface — text, icons, and spacing — in every window.',
+    keywords: 'ui scale zoom interface magnify enlarge shrink bigger smaller font size percent dpi 介面 縮放 放大 縮小 字級 字體 大小 百分比 老花',
+  },
+  {
     id: 'appearance-runtime',
     tab: 'appearance',
     section: 'appearance-runtime',
@@ -701,6 +711,13 @@ async function loadAutoRestore(): Promise<void> {
 }
 async function onAutoRestoreChange(): Promise<void> {
   try { await window.agentTeam?.restore?.setAutoRestore?.(autoRestoreWindows.value) } catch { /* ignore */ }
+}
+
+// Interface scale (Electron page zoom, applied by the main process to every
+// window). setUiScale returns the clamped value that was actually stored.
+const uiScaleModel = ref(getUiScale())
+function onUiScaleChange(value: string): void {
+  uiScaleModel.value = setUiScale(value)
 }
 
 const SUPPORTED_LANGUAGES = [
@@ -3248,6 +3265,18 @@ watch(activeTab, (tab) => {
 
           <SettingsSection :label="$t('settings.section.other')">
             <SettingsCard>
+              <SettingRow
+                data-settings-section="appearance-ui-scale"
+                :title="$t('settings.appearance.ui-scale')"
+                :description="$t('settings.appearance.ui-scale-hint')"
+              >
+                <template #control>
+                  <select :value="uiScaleModel" @change="onUiScaleChange(($event.target as HTMLSelectElement).value)">
+                    <option v-for="step in UI_SCALE_STEPS" :key="step" :value="step">{{ formatUiScale(step) }}</option>
+                  </select>
+                </template>
+              </SettingRow>
+
               <SettingRow
                 data-settings-section="appearance-runtime"
                 :title="$t('settings.appearance.restore-windows')"

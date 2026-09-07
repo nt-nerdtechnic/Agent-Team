@@ -257,6 +257,8 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.invoke('window:updateGitLeft', args),
   closeGitLeftView: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('window:closeGitLeft'),
   getZoomFactor: (): Promise<number> => ipcRenderer.invoke('window:getZoomFactor'),
+  // Interface scale: main applies it to every window's WebContents at once.
+  setUiScale: (scale: number): Promise<number> => ipcRenderer.invoke('window:setUiScale', scale),
   onZoomChanged: (cb: () => void): (() => void) => {
     const listener = (): void => cb()
     ipcRenderer.on('window:zoom-changed', listener)

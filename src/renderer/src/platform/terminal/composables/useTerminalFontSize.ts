@@ -20,9 +20,12 @@ function loadPersisted(): number {
  * app-wide setting, so all CLI panes stay the same size and newly-spawned panes
  * pick up the current size. Each terminal watches this ref (see useTerminal).
  *
- * Only terminal CONTENT scales. The app chrome and layout must never scale —
- * which is why the built-in Electron menu's zoomIn/zoomOut/resetZoom roles are
- * omitted in src/main/menu.ts; those roles zoom the whole webContents.
+ * This ref scales terminal CONTENT only. Scaling the app chrome and layout is a
+ * separate setting (Settings -> Appearance, src/shared/uiScale.ts) applied by
+ * the main process as Electron page zoom, and the two multiply the way a
+ * browser's page zoom multiplies with a site's own font size. The built-in
+ * Electron menu's zoomIn/zoomOut/resetZoom roles are still omitted in
+ * src/main/menu.ts — their native accelerators would fire ahead of both.
  */
 export const terminalFontSize = ref(loadPersisted())
 
@@ -39,7 +42,14 @@ export function zoomReset(): void { setFontSize(DEFAULT_FONT_SIZE) }
 let installed = false
 
 /**
- * Bind ⌘= / ⌘+ / ⌘- / ⌘0 at the window level.
+ * Bind ⌘= / ⌘- / ⌘0 at the window level.
+ *
+ * Shift-bearing variants are deliberately excluded: ⇧⌘= / ⇧⌘- / ⇧⌘0 belong to
+ * interface zoom (src/shared/uiScale.ts), which is dispatched by the keybinding
+ * registry through another capture-phase listener on this same window. Without
+ * an explicit guard here, which one won would depend on listener registration
+ * order — the registry mounts with the app root, this installs with the first
+ * pane — and nothing enforces that order.
  *
  * This must NOT live on xterm's `attachCustomKeyEventHandler`: that only fires
  * while a terminal's hidden helper textarea holds focus, so the shortcut would
@@ -66,9 +76,10 @@ export function installTerminalZoomShortcuts(): void {
 
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if (!e.metaKey || e.altKey || e.ctrlKey) return
-    // `+` shares the Equal key and requires Shift on macOS. Accept both forms,
-    // and match `code` so keyboard-layout differences cannot break zoom-in.
-    if (e.code === 'Equal' || e.key === '=' || e.key === '+') zoomIn()
+    // Match `code` so keyboard-layout differences cannot break zoom-in. `+`
+    // still reaches here unshifted from a numeric keypad (NumpadAdd); the
+    // shifted ⇧⌘= form is interface zoom's, not this one's.
+    if (!e.shiftKey && (e.code === 'Equal' || e.key === '=' || e.key === '+')) zoomIn()
     else if (!e.shiftKey && (e.code === 'Minus' || e.key === '-')) zoomOut()
     else if (!e.shiftKey && (e.code === 'Digit0' || e.key === '0')) zoomReset()
     else return

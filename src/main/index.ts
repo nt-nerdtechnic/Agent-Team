@@ -43,6 +43,8 @@ import {
 } from './plugins/pluginBackendActivationCatalog'
 import { registerStorageIpc } from './storage-ipc'
 import { lockPageZoom } from './web-contents-zoom'
+import { createUiZoomStore, type UiZoomStore } from './ui-zoom-store'
+import { clampUiScale, UI_SCALE_SETTING_KEY } from '../shared/uiScale'
 import { installContextMenu, registerTerminalContextMenu } from './context-menu'
 import { initUpdater } from './updater'
 import { withDeadline } from './deadline'
@@ -1203,6 +1205,19 @@ function currentUiTheme(): string {
   return typeof theme === 'string' ? theme : ''
 }
 
+// Interface scale. Created lazily because readUiSettings() needs app paths,
+// which are only valid after 'ready' — the first WebContents (and therefore the
+// first read) always happens later than that.
+let uiZoomStoreRef: UiZoomStore | null = null
+function uiZoomStore(): UiZoomStore {
+  if (!uiZoomStoreRef) {
+    uiZoomStoreRef = createUiZoomStore(
+      clampUiScale(uiSetting<number>(readUiSettings(), UI_SCALE_SETTING_KEY))
+    )
+  }
+  return uiZoomStoreRef
+}
+
 /** Read-only Host values bootstrapped into each Git v2 view's entry query.
  *  They are deliberately encoded in the same shapes the settings facade uses:
  *  yolo/analyzer are plain strings, while theme customizations remain JSON. */
@@ -2091,6 +2106,18 @@ ipcMain.handle('window:getZoomFactor', (event) => {
   if (!hostWindow) return 1
   const factor = hostWindow.webContents.getZoomFactor()
   return Number.isFinite(factor) && factor > 0 ? factor : 1
+})
+
+// Interface scale, applied to every window at once. Accepted only from a
+// top-level app frame: plugin content runs in a child frame or a
+// WebContentsView whose preload does not expose this bridge at all, so it can
+// never resize the host's chrome.
+ipcMain.handle('window:setUiScale', (event, next: unknown) => {
+  const hostWindow = BrowserWindow.fromWebContents(event.sender)
+  if (!hostWindow || !event.senderFrame || event.senderFrame.parent) {
+    return uiZoomStore().get()
+  }
+  return uiZoomStore().set(next)
 })
 
 function openBranchDiffWindow(host: BrowserWindow | null, params: Record<string, string>): void {
@@ -3144,11 +3171,27 @@ function isAppNavigation(url: string): boolean {
   return false
 }
 app.on('web-contents-created', (_e, contents) => {
-  // Pane zoom changes terminal/editor font size only. Never let a retained
-  // Chromium/Electron page zoom scale the entire Navide interface.
-  lockPageZoom(contents, () => {
-    if (!contents.isDestroyed()) contents.send('window:zoom-changed')
-  })
+  // Page zoom is owned by the app's interface-scale setting, not by Chromium's
+  // retained per-origin zoom or a pinch gesture. Tracking every WebContents
+  // here is what lets one Settings change scale all windows at once — including
+  // the plugin bundles, which have their own documents and no host preload.
+  //
+  // A <webview> guest is laid out inside an already-scaled host document and
+  // shares its embedder's zoom, so scaling it again would compound. A native
+  // WebContentsView composites outside the DOM and does need its own factor.
+  const zoom = uiZoomStore()
+  const scalable = contents.getType() !== 'webview'
+  if (scalable) {
+    zoom.track(contents)
+    contents.once('destroyed', () => zoom.untrack(contents))
+  }
+  lockPageZoom(
+    contents,
+    () => {
+      if (!contents.isDestroyed()) contents.send('window:zoom-changed')
+    },
+    () => (scalable ? zoom.get() : 1)
+  )
   // Electron has no default right-click menu; without this one, right-click is
   // inert everywhere and there is no fallback path for copy/paste.
   installContextMenu(contents)

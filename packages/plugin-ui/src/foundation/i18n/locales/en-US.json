@@ -716,6 +716,8 @@
       "language-zh-TW": "繁體中文",
       "language-en-US": "English",
       "language-hint": "Language is a user-level preference applied across all workspaces.",
+      "ui-scale": "Interface Scale",
+      "ui-scale-hint": "Scale the whole interface — text, icons, and spacing — in every window. Separate from the terminal and editor font sizes, which keep their own ⌘= / ⌘- shortcuts.",
       "restore-windows": "Restore Windows",
       "restore-windows-hint": "Reopen the workspace windows you had open when you last quit.",
       "restore-windows-label": "Reopen windows on next launch",
@@ -808,8 +810,13 @@
     },
     "help": {
       "topic": {
+        "workspace": "Workspace & Panes",
+        "cliAgents": "CLI Agents & Accounts",
         "messaging": "Inter-CLI Messaging",
-        "mcp": "MCP"
+        "mcp": "MCP",
+        "codeWorkflow": "Code Workflow",
+        "settingsSystem": "Settings & System",
+        "icons": "Icon Reference"
       }
     },
     "mcp": {
@@ -1612,7 +1619,10 @@
         "workbench_action_splitEditor": "Split Editor",
         "workbench_action_toggleAIChat": "Toggle AI Chat",
         "workbench_action_toggleSidebar": "Toggle Sidebar",
-        "workbench_action_toggleZenMode": "Toggle Zen Mode"
+        "workbench_action_toggleZenMode": "Toggle Zen Mode",
+        "workbench_action_zoomUiIn": "Interface Zoom In",
+        "workbench_action_zoomUiOut": "Interface Zoom Out",
+        "workbench_action_zoomUiReset": "Interface Zoom Reset"
       },
       "col": {
         "command": "Command",

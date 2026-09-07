@@ -124,6 +124,7 @@ declare global {
       }) => Promise<{ ok: boolean; fallback?: 'legacy' }>
       closeGitLeftView: () => Promise<{ ok: boolean }>
       getZoomFactor?: () => Promise<number>
+      setUiScale?: (scale: number) => Promise<number>
       onZoomChanged?: (cb: () => void) => () => void
       onPlanOpenDoc: (handler: (relPath: string) => void) => () => void
       openDiffWindow: (args: {
