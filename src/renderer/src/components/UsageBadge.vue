@@ -93,19 +93,33 @@ function onEnter(): void {
   }, 150)
 }
 
-// The popover's height only exists once it has rendered, so the drop-down
-// placement above is provisional: a badge low in the window would push the
-// panel past the bottom edge, where it covers whatever sits there and can no
-// longer be scrolled to. Flip it above the badge in that case.
+// The popover's real box only exists once it has rendered, so the placement
+// above is provisional in both axes.
+//
+// Height: a badge low in the window would push the panel past the bottom edge,
+// where it covers whatever sits there and can no longer be scrolled to. Flip it
+// above the badge in that case.
+//
+// Width: POP_WIDTH is only the CSS `width`, and the renderer has no global
+// border-box reset, so padding and border make the panel wider than that. A
+// badge near the right edge therefore lands a panel that spills past the window
+// and gets clipped by it. Re-clamp against the measured width.
 function flipIfOffscreen(): void {
   const rect = badgeRef.value?.getBoundingClientRect()
   const height = popRef.value?.offsetHeight ?? 0
+  const width = popRef.value?.offsetWidth ?? 0
   if (!rect || height === 0) return
-  if (rect.bottom + POP_GAP + height <= window.innerHeight - VIEWPORT_MARGIN) return
-  popStyle.value = {
-    ...popStyle.value,
-    top: `${Math.max(VIEWPORT_MARGIN, rect.top - POP_GAP - height)}px`
+  const next = { ...popStyle.value }
+  if (width > 0) {
+    next.left = `${Math.max(
+      VIEWPORT_MARGIN,
+      Math.min(rect.left, window.innerWidth - width - VIEWPORT_MARGIN)
+    )}px`
   }
+  if (rect.bottom + POP_GAP + height > window.innerHeight - VIEWPORT_MARGIN) {
+    next.top = `${Math.max(VIEWPORT_MARGIN, rect.top - POP_GAP - height)}px`
+  }
+  popStyle.value = next
 }
 
 function onLeave(): void {

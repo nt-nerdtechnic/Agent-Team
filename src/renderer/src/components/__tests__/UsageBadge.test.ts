@@ -720,6 +720,37 @@ describe('UsageBadge – popover placement', () => {
     heightSpy.mockRestore()
     rectSpy.mockRestore()
   })
+
+  // The provisional clamp uses the CSS `width` alone; padding and border make
+  // the rendered panel wider than that, so a badge near the right edge used to
+  // land a panel that spilled past the window and got clipped by it.
+  it('re-clamps against the rendered width, not the CSS width', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const heightSpy = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(200)
+    const widthSpy = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(286)
+    const rectSpy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+      top: 40,
+      bottom: 60,
+      left: 900,
+      right: 940,
+      width: 40,
+      height: 20,
+      x: 900,
+      y: 40,
+      toJSON: () => ({}),
+    } as DOMRect)
+
+    wrapper = mountBadge(makeCliProfiles().fake)
+    await openPopover(wrapper)
+    await nextTick()
+
+    // 1024 - 286 - 8, so the right edge lands on the 8px margin rather than
+    // 26px past the window edge.
+    expect(wrapper.find('.usage-pop').attributes('style')).toContain('left: 730px')
+    heightSpy.mockRestore()
+    widthSpy.mockRestore()
+    rectSpy.mockRestore()
+  })
 })
 
 describe('UsageBadge – popover dismissal', () => {
