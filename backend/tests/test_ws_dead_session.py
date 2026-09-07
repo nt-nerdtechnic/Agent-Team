@@ -211,3 +211,83 @@ async def test_disconnect_cancels_inflight_handler_tasks(monkeypatch) -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert task.cancelled()
+
+
+# ── Long-running analyzer work must be tracked like every other handler ───────
+#
+# analyzer.benchmark and analyzer.pull hand their work to a background task and
+# answer immediately. Those two used to call create_task without keeping the
+# result, so they were neither cancelled on disconnect nor reachable from
+# anywhere — a benchmark could hold Ollama for up to 25s per task per installed
+# model after its window was gone, broadcasting progress into an empty set.
+
+
+class _TaskRecordingSession:
+    """Just enough Session for a handler: the task set and send_json."""
+
+    def __init__(self) -> None:
+        self._handler_tasks: set[asyncio.Task] = set()
+        self.sent: list[dict] = []
+
+    async def send_json(self, data: dict) -> None:
+        self.sent.append(data)
+
+
+@pytest.mark.asyncio
+async def test_benchmark_task_is_tracked_for_cancellation(monkeypatch) -> None:
+    from agent_team_backend import ws_handlers
+
+    running = asyncio.Event()
+
+    async def slow_benchmark(progress_cb=None):  # noqa: ANN001, ANN202
+        running.set()
+        await asyncio.sleep(30)
+        return []
+
+    monkeypatch.setattr(app_module, "analyzer_benchmark", slow_benchmark)
+
+    session = _TaskRecordingSession()
+    await ws_handlers.analyzer_benchmark_h(session, "m1", "analyzer.benchmark", {})
+
+    # The handler answers immediately; the work continues in the background.
+    assert session.sent and session.sent[0]["payload"]["started"] is True
+    await asyncio.wait_for(running.wait(), timeout=2)
+
+    assert len(session._handler_tasks) == 1, "the background task must be tracked"
+    task = next(iter(session._handler_tasks))
+
+    # This is what ws()'s finally does on disconnect.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert session._handler_tasks == set(), "done_callback must discard the finished task"
+
+
+@pytest.mark.asyncio
+async def test_pull_task_is_tracked_for_cancellation(monkeypatch) -> None:
+    from agent_team_backend import ws_handlers
+
+    running = asyncio.Event()
+
+    async def slow_pull(name, base_url):  # noqa: ANN001, ANN202
+        running.set()
+        await asyncio.sleep(30)
+        yield {}  # pragma: no cover - never reached
+
+    monkeypatch.setattr(app_module, "_az_is_ollama", lambda: True)
+    monkeypatch.setattr(app_module, "_az_base_url", lambda: "http://localhost:11434")
+    monkeypatch.setattr(app_module, "_ollama_pull_model", slow_pull)
+
+    session = _TaskRecordingSession()
+    await ws_handlers.analyzer_pull(session, "m2", "analyzer.pull", {"name": "qwen2.5-coder"})
+
+    assert session.sent and session.sent[0]["payload"]["started"] is True
+    await asyncio.wait_for(running.wait(), timeout=2)
+
+    assert len(session._handler_tasks) == 1, "the background task must be tracked"
+    task = next(iter(session._handler_tasks))
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert session._handler_tasks == set(), "done_callback must discard the finished task"
