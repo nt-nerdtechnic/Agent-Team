@@ -15,10 +15,19 @@ A short debounce coalesces bursts (e.g. a build writing many files, or `git
 checkout` touching thousands) into a single `on_change(ws_path, paths)`
 call, `paths` being the workspace-relative files the window touched.
 
-Noise is filtered in the handler: build/dependency dirs (node_modules, .venv,
-dist, …) and git-internal churn (.git/objects, .git/logs, *.lock) never
-trigger a refresh — matching VS Code's behaviour, which ignores `index.lock`
-and only reacts to the first level of `.git`.
+Noise is filtered in the handler in two layers: a fixed list of build and
+dependency dirs (node_modules, .venv, dist, …) plus git-internal churn
+(.git/objects, .git/logs, *.lock), and then the workspace's own `.gitignore`
+rules — matching VS Code's behaviour, which ignores `index.lock` and only
+reacts to the first level of `.git`.
+
+The fixed list stays underneath the .gitignore layer rather than being replaced
+by it. It has to: a path git ignores is certainly uninteresting, but the
+converse does not hold. Plenty of real projects never ignore `build/` or
+`.venv/` (this repo is one — `build/` sits untracked and unignored), and a
+workspace need not be a git repo at all. So the list is the floor and
+.gitignore only ever adds to it; nothing that is filtered today stops being
+filtered.
 """
 
 from __future__ import annotations
@@ -30,6 +39,8 @@ from pathlib import Path
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
+
+from .gitignore import GitIgnore
 
 log = logging.getLogger("agent_team_backend.git_watcher")
 
@@ -45,10 +56,10 @@ _IGNORE_SEGMENTS = frozenset({
     "target", ".next", ".nuxt", ".turbo", ".cache", ".mypy_cache",
     ".pytest_cache", ".ruff_cache", ".idea", ".gradle",
     # Our own run artifacts: pipeline panes stream agent output into
-    # .agent-team/runs/.../*.log continuously. git ignores this dir (it ships a
-    # `.gitignore` of `*`), but watchdog doesn't read .gitignore — so without
-    # this, every log write fires git.changed → a 7-request git fan-out in the
-    # frontend, flooding the shared WebSocket and stalling pipeline messages.
+    # .agent-team/runs/.../*.log continuously. Kept here rather than left to
+    # the .gitignore layer because the plans channel depends on this filter
+    # dropping .agent-team wholesale (see `on_any_event`), and because a
+    # workspace may not be a git repo at all.
     ".agent-team",
 })
 
@@ -87,12 +98,14 @@ class _RepoHandler(FileSystemEventHandler):
         ws_path: str,
         on_dirty: Callable[[str, list[tuple[str, str]]], None],
         on_plans_dirty: Callable[[str], None] | None = None,
+        ignores: GitIgnore | None = None,
     ) -> None:
         super().__init__()
         self._root = root
         self._ws_path = ws_path
         self._on_dirty = on_dirty
         self._on_plans_dirty = on_plans_dirty
+        self._ignores = ignores
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         # `closed`/`opened` events carry no state change; only react to actual
@@ -101,14 +114,26 @@ class _RepoHandler(FileSystemEventHandler):
             return
         src = str(event.src_path)
         dest = str(event.dest_path) if getattr(event, "dest_path", "") else ""
+        # Editing an ignore file changes the answer for every path beneath it,
+        # so its cached rules go before this event is judged — otherwise the
+        # first write after someone ignores a directory is still let through,
+        # and so is every write until something else evicted the entry.
+        # Resolved once and passed down: `Path.resolve()` walks the path on
+        # disk, and both the ignore-rule check and the relevance check need it.
+        # Calling it in each doubled the syscalls this handler makes per event.
+        src_parts = self._parts(src)
+        dest_parts = self._parts(dest) if dest else ()
+        self._refresh_ignore_rules(src_parts)
+        if dest_parts:
+            self._refresh_ignore_rules(dest_parts)
         # Plan documents live under .agent-team/, which the git filter ignores
         # wholesale — check them on a separate channel before that filter.
         if self._on_plans_dirty is not None and (
             self._is_plan_doc(src) or (dest and self._is_plan_doc(dest))
         ):
             self._on_plans_dirty(self._ws_path)
-        src_ok = self._is_relevant(src)
-        dest_ok = bool(dest) and self._is_relevant(dest)
+        src_ok = self._is_relevant(src_parts, event.is_directory)
+        dest_ok = bool(dest) and self._is_relevant(dest_parts, event.is_directory)
         if src_ok or dest_ok:
             self._on_dirty(
                 self._ws_path, self._changed_paths(event, src, dest, src_ok, dest_ok)
@@ -183,12 +208,31 @@ class _RepoHandler(FileSystemEventHandler):
         name = parts[-1]
         return name.endswith((".html", ".plan.md", ".md")) and not name.startswith(("_", "."))
 
-    def _is_relevant(self, src: str) -> bool:
+    def _refresh_ignore_rules(self, parts: tuple[str, ...]) -> None:
+        """Drop the cached rules for a directory whose ignore file just changed."""
+        if self._ignores is None or not parts:
+            return
+        if parts[-1] == "exclude":
+            # Only this repo's own `.git/info/exclude` — matched exactly, so a
+            # submodule's copy (which is never read, since only the root's is)
+            # does not evict the root's rules for nothing.
+            if parts == (".git", "info", "exclude"):
+                self._ignores.invalidate(())
+            return
+        if parts[-1] == ".gitignore":
+            self._ignores.invalidate(parts[:-1])
+
+    def _parts(self, src: str) -> tuple[str, ...]:
+        """`src` relative to the repo root, as parts, or () if it is outside."""
         try:
-            rel = Path(src).resolve().relative_to(self._root)
+            return Path(src).resolve().relative_to(self._root).parts
         except (ValueError, OSError):
-            return False
-        parts = rel.parts
+            return ()
+
+    def _is_relevant(self, src: str | tuple[str, ...], is_dir: bool = False) -> bool:
+        # Accepts an already-resolved `parts` tuple from `on_any_event`, or a
+        # raw path (tests, and any future caller that has only the string).
+        parts = src if isinstance(src, tuple) else self._parts(src)
         if not parts:
             return False
         name = parts[-1]
@@ -205,8 +249,16 @@ class _RepoHandler(FileSystemEventHandler):
             sub = parts[si + 1:]
             if sub and sub[0] in _IGNORE_STORAGE_SUBDIRS:
                 return False
-        # Working tree: drop anything under a known build/dependency dir.
-        return not any(seg in _IGNORE_SEGMENTS for seg in parts)
+        # Working tree: drop anything under a known build/dependency dir …
+        if any(seg in _IGNORE_SEGMENTS for seg in parts):
+            return False
+        # … then anything the workspace itself ignores. This is what catches
+        # the dirs the fixed list misses because it compares whole segments:
+        # `dist-release`, `dist-local`, `dist-plugins` are not `dist`, so a
+        # packaging run used to fire a refresh per file written.
+        if self._ignores is not None and self._ignores.ignored(parts, is_dir):
+            return False
+        return True
 
 
 class GitWatcher:
@@ -278,6 +330,7 @@ class GitWatcher:
             ws_path,
             self._mark_dirty_threadsafe,
             self._mark_plans_dirty_threadsafe if self._on_plans_change else None,
+            GitIgnore(root),
         )
         try:
             self._observer.schedule(handler, str(root), recursive=True)
