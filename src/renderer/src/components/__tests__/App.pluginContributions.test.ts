@@ -22,9 +22,35 @@ describe('titlebar button order', () => {
   it('renders plugin buttons before the built-in titlebar controls', () => {
     const plugins = at('class="titlebar-plugin-actions"')
     expect(plugins).toBeLessThan(at('class="titlebar-gear"'))
-    // Both ws buttons too — reattach and the workspace switcher.
+    expect(plugins).toBeLessThan(at('class="titlebar-account"'))
+    // Reattach too. The workspace switcher is deliberately absent from this
+    // list: it left the cluster for the centred identity block, where it reads
+    // as Back — see the titlebar-id test below.
     expect(plugins).toBeLessThan(at('@click="reattachThisWindow"'))
-    expect(plugins).toBeLessThan(at('@click="onSwitchWorkspace"'))
+  })
+
+  it('keeps the workspace switcher out of the right-hand cluster', () => {
+    // It leads .titlebar-id, ahead of the workspace name it takes you out of.
+    const id = at('class="titlebar-id"')
+    const name = at('class="titlebar-name titlebar-name--ws"')
+    const back = at('@click="onSwitchWorkspace"')
+    expect(back).toBeGreaterThan(id)
+    expect(back).toBeLessThan(name)
+    expect(back).toBeLessThan(at('class="titlebar-plugin-actions"'))
+  })
+
+  it('reveals the workspace switcher only while the identity block is hovered', () => {
+    // Same rule .titlebar-reveal follows. It is what keeps the button
+    // clickable: the hover that shows it also swaps the name for the longer
+    // path, so a permanently visible button would slide as the row re-centres.
+    expect(appSource).toContain('class="titlebar-ws-btn titlebar-back"')
+    expect(appSource).toMatch(/\.titlebar-back \{ display: none; \}/)
+    expect(appSource).toMatch(/\.titlebar-id:hover \.titlebar-back \{ display: flex; \}/)
+    // display:none has to land after .titlebar-ws-btn's display:flex — equal
+    // specificity, so the later rule is the only reason it wins.
+    expect(appSource.indexOf('.titlebar-back { display: none; }')).toBeGreaterThan(
+      appSource.indexOf('.titlebar-ws-btn {')
+    )
   })
 
   it('keeps the spacer that pins the cluster right', () => {
