@@ -32,7 +32,11 @@ def _clean() -> Any:
 
 
 def _ctx() -> Any:
-    params = {"pane": "pa", "t": plan_mcp_wiring.caller_token()}
+    return _ctx_for("pa")
+
+
+def _ctx_for(pane_id: str) -> Any:
+    params = {"pane": pane_id, "t": plan_mcp_wiring.caller_token()}
     return SimpleNamespace(
         request_context=SimpleNamespace(request=SimpleNamespace(query_params=params))
     )
@@ -132,6 +136,24 @@ async def test_a_silent_window_does_not_look_like_a_withdrawal(
     assert result["status"] == "queued"
     assert "still queued" in result["error"]
     assert len(broadcasts) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_different_pane_cannot_withdraw_someone_elses_message(
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    """A msg_key is not a capability: only the pane that sent it may withdraw
+    it. Anyone else holding the key must be refused, with the message left
+    exactly as it was and no cancel broadcast to the recipient."""
+    _sent()  # sent by "pa"
+    agent_messaging.register("pb", "other", "/ws/beta")
+
+    result = await plan_mcp.cli_cancel_message("k1", _ctx_for("pb"))
+
+    assert result["ok"] is False
+    assert "not sent from here" in result["error"] or "your own" in result["error"]
+    assert plan_mcp._mcp_message_status["k1"]["status"] == "queued"
+    assert broadcasts == []
 
 
 @pytest.mark.asyncio

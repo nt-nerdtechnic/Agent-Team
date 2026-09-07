@@ -71,15 +71,13 @@ _ACTIVITY_KIND = "activity"
 # key per item falls back to the old in-memory-only behaviour rather than
 # writing an unbounded blob into the checkpoint row of every transcript.
 #
-# Two readers DO keep per-item keys and are therefore not covered: grok
-# (act:<session>:<seq> per message row, in one db holding every session ever —
-# see cli_vendors/grok.py, whose _write_map only consolidates the state/text
-# maps) and copilot (act:<line>, db_act:* per row). Neither sets
-# activity_resumes_by_line either, so they get no EOF seeding, and they replay
-# their history on every restart exactly as every vendor did before this
-# existed. That is unchanged behaviour, not a regression — but it means the
-# GitHub #28 fix does not reach them. Covering them means consolidating their
-# keys into a watermark the way cursor/antigravity/opencode already do.
+# grok and copilot used to keep per-item keys (act:<session>:<seq> per message
+# row; act:<line>, db_act:* per row) and were the two readers this limit shut
+# out, so they replayed their history on every start while every other vendor
+# stopped. Both now consolidate into a watermark instead (grok on a global
+# messages.rowid, copilot on a line high-water mark), so they are covered.
+# copilot still leaves activity_resumes_by_line False on purpose — that flag is
+# per-READER and this one also serves session-store.db, keyed on db row ids.
 # Measured 2026-09-07 over 426 real session files: the covered readers peak at
 # 4 keys / 97 bytes, so this limit has roughly a 2x margin for them.
 _ACTIVITY_KEYS_PERSIST_LIMIT = 8

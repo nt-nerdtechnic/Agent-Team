@@ -2018,7 +2018,7 @@ async def cli_cancel_message(msg_key: str, ctx: Context) -> dict[str, Any]:
     from agent_team_backend.ipc import make_event
 
     try:
-        _resolve_caller(ctx)
+        caller = _resolve_caller(ctx)
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     key = (msg_key or "").strip()
@@ -2034,6 +2034,12 @@ async def cli_cancel_message(msg_key: str, ctx: Context) -> dict[str, Any]:
                 "than the hour these are tracked for. An untracked key says nothing "
                 "about whether the message arrived; ask cli_check_message."
             ),
+        }
+    origin = (caller.pane_id if caller.kind == "pane" else "") or caller.kind
+    if entry.get("origin") != origin:
+        return {
+            "ok": False,
+            "error": f"msg_key {key!r} was not sent from here — you can only withdraw your own messages",
         }
     if entry["status"] != "queued":
         # Already settled. Say what it settled as rather than refusing flatly:
@@ -3281,12 +3287,22 @@ _UI_INVOKE_TIMEOUT_S = 15.0
 _UI_INVOKE_SLOW_TIMEOUT_S = 60.0
 #: Renderer commands whose argument names a pane's PRIVATE data — an inbox —
 #: rather than a window or a project. `ui_invoke` forwards action and args
-#: verbatim, so without this list any caller holding a valid credential could
-#: read and consume another pane's mail by naming its id. These two are
-#: refused unless the caller IS the pane named in args.paneId; the only
-#: legitimate emitter, cli_read_incoming, always names its own. Deliberately a
-#: short explicit list, not "every action with a paneId": focus, close,
-#: getStatus and interrupt are cross-pane by design.
+#: verbatim, so without this list a caller could name another pane's id and
+#: read and consume its mail. These two are refused unless args.paneId is the
+#: caller's own pane; the only legitimate emitter, cli_read_incoming, always
+#: names its own.
+#:
+#: This is NOT a boundary around the inbox, and reading it as one would be a
+#: mistake. A pane caller's identity is the `pane=<id>` query param it was
+#: wired with, checked against a token shared by every pane on the machine
+#: (wiring.caller_token — a freshness check, readable via `ps` by anything
+#: running as the same user). So a local caller can present itself AS the
+#: victim pane and satisfy the check below. What this list buys is that a
+#: caller acting under its own identity cannot reach across to someone else's
+#: inbox; closing the impersonation case needs a per-pane token.
+#:
+#: Deliberately a short explicit list, not "every action with a paneId": focus,
+#: close, getStatus and interrupt are cross-pane by design.
 _PANE_PRIVATE_UI_ACTIONS = frozenset({"ui.messaging.readIncoming", "ui.messaging.settleRead"})
 
 _UI_INVOKE_SLOW_ACTIONS = frozenset({"ui.pane.create"})

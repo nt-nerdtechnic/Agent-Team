@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shlex
 import shutil
@@ -12,6 +13,7 @@ from agent_team_backend.host_shell import (
     parse_allowlisted_command,
     parse_public_allowlisted_command,
     run_public_allowlisted_text,
+    run_allowlisted_capped,
     run_allowlisted_text,
     validate_argv,
 )
@@ -930,3 +932,114 @@ async def test_run_broker_returns_validation_failure_instead_of_raising() -> Non
     assert rc == 126
     assert stdout == ""
     assert "not allowlisted" in stderr
+
+
+# ── run_allowlisted_capped ────────────────────────────────────────────────────
+# The capped runner exists so a caller that only shows the head of a command's
+# output does not first buffer all of it. These pin the two halves that make it
+# worth having: it really stops at the cap, and an uncapped-size run still
+# behaves exactly like run_allowlisted.
+
+
+def _repo_with_large_diff(path, line_count: int) -> None:
+    """A repo whose HEAD diff is far larger than any cap used in these tests."""
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=path, check=True, capture_output=True)
+    (path / "seed.txt").write_text("seed\n")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
+    (path / "big.txt").write_text("".join(f"line {i} {'x' * 60}\n" for i in range(line_count)))
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+
+
+@pytest.mark.asyncio
+async def test_capped_run_stops_at_the_cap_and_reports_truncation(tmp_path) -> None:
+    _repo_with_large_diff(tmp_path, 4000)
+    rc, stdout, stderr, truncated = await run_allowlisted_capped(
+        ["git", "diff", "HEAD"], str(tmp_path), max_stdout_bytes=30_000
+    )
+    assert truncated is True
+    assert len(stdout) == 30_000
+    assert stdout.startswith(b"diff --git")
+    # rc is the kill signal, not a command failure - callers check truncated first.
+    assert rc != 0
+    assert stderr == b""
+
+
+@pytest.mark.asyncio
+async def test_capped_run_returns_whole_output_below_the_cap(tmp_path) -> None:
+    _repo_with_large_diff(tmp_path, 2)
+    rc, stdout, stderr, truncated = await run_allowlisted_capped(
+        ["git", "diff", "HEAD"], str(tmp_path), max_stdout_bytes=30_000
+    )
+    assert (rc, truncated, stderr) == (0, False, b"")
+    assert b"line 1" in stdout
+    assert len(stdout) < 30_000
+
+
+@pytest.mark.asyncio
+async def test_capped_run_reports_command_failure_with_stderr() -> None:
+    rc, stdout, stderr, truncated = await run_allowlisted_capped(
+        ["git", "rev-parse", "--verify", "no-such-ref-for-tests"],
+        max_stdout_bytes=30_000,
+    )
+    assert truncated is False
+    assert rc != 0
+    assert stdout == b""
+
+
+@pytest.mark.asyncio
+async def test_capped_run_returns_validation_failure_instead_of_raising() -> None:
+    rc, stdout, stderr, truncated = await run_allowlisted_capped(
+        ["rm", "-rf", "."], max_stdout_bytes=30_000
+    )
+    assert (rc, stdout, truncated) == (126, b"", False)
+    assert "not allowlisted" in stderr.decode()
+
+
+@pytest.mark.asyncio
+async def test_capped_read_drains_stderr_while_stdout_is_still_coming() -> None:
+    """stderr must not wait for stdout to end.
+
+    A child that fills its stderr pipe blocks, and a reader that only turns to
+    stderr after stdout has ended would then wait on a process that can no
+    longer write - a stall the cap itself cannot break. Driven through fake
+    pipes because the allowlist (git/gh/glab) offers no command that floods
+    stderr while stdout is still open.
+    """
+    order: list[str] = []
+
+    class _Stdout:
+        def __init__(self) -> None:
+            self.remaining = 3
+
+        async def read(self, _n: int) -> bytes:
+            order.append("stdout")
+            await asyncio.sleep(0)
+            if self.remaining == 0:
+                return b""
+            self.remaining -= 1
+            return b"x" * 10
+
+    class _Stderr:
+        async def read(self) -> bytes:
+            order.append("stderr")
+            await asyncio.sleep(0)
+            return b"warning"
+
+    class _Process:
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdout = _Stdout()
+            self.stderr = _Stderr()
+
+        async def wait(self) -> int:
+            return 0
+
+    rc, stdout, stderr, truncated = await host_shell._read_stdout_capped(_Process(), 30_000)
+
+    assert (rc, stdout, stderr, truncated) == (0, b"x" * 30, b"warning", False)
+    assert "stderr" in order
+    assert order.index("stderr") < len(order) - 1

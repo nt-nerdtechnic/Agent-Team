@@ -2431,16 +2431,49 @@ class TestDiffBranches:
         assert result["diff"] == ""
 
     @pytest.mark.asyncio
-    async def test_diff_truncated_at_30000_chars(self, tmp_path, monkeypatch):
+    async def test_small_diff_is_not_reported_truncated(self, tmp_path):
         _make_branch_repo(tmp_path)
-        # Monkeypatch _run to return a very long diff
-        big_diff = "+" + "x" * 40_000
-        async def _fake_run(cmd, cwd, **_):
-            return 0, big_diff, ""
-        monkeypatch.setattr(git_service, "_run", _fake_run)
         result = await git_service.diff_branches(str(tmp_path), "main", "feature")
         assert result["ok"] is True
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_diff_truncated_at_30000_bytes(self, tmp_path):
+        """A real oversized diff, not a stubbed _run.
+
+        The cap is enforced by stopping the read (and the git process) rather
+        than by slicing a fully buffered string, so a stub that returns the
+        whole diff would no longer be testing the mechanism that bounds memory.
+        """
+        _make_branch_repo(tmp_path)
+        big = "".join(f"line {i} {'x' * 60}\n" for i in range(4000))
+        (tmp_path / "big.txt").write_text(big)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "big"], cwd=tmp_path, check=True, capture_output=True)
+
+        result = await git_service.diff_branches(str(tmp_path), "main", "feature")
+        assert result["ok"] is True
+        assert result["truncated"] is True
         assert len(result["diff"]) == 30_000
+        assert result["diff"].startswith("diff --git")
+
+    @pytest.mark.asyncio
+    async def test_diff_does_not_go_through_the_buffering_runner(self, tmp_path, monkeypatch):
+        """Slicing a fully buffered diff looks identical from the outside.
+
+        Truncating the result is not the point of the change -- not holding the
+        whole diff in memory is -- and only the runner it picks shows that, so
+        the buffering one is made to fail loudly here.
+        """
+        _make_branch_repo(tmp_path)
+
+        async def _fail(*_args, **_kwargs):
+            raise AssertionError("diff_branches must use the capped runner")
+
+        monkeypatch.setattr(git_service, "_run", _fail)
+        result = await git_service.diff_branches(str(tmp_path), "main", "feature")
+        assert result["ok"] is True
+        assert "+feature content" in result["diff"]
 
 
 # ── discover_repositories ───────────────────────────────────────────────────────
@@ -3079,3 +3112,91 @@ class TestGitProcLimit:
         release.set()
         await asyncio.gather(t1, t2)
         assert peak == 1
+
+
+# ── generate_commit_message: the Anthropic client must be released ────────────
+#
+# AsyncAnthropic owns an httpx connection pool and an SSL context. Auto-commit
+# calls this path once a minute, so a client that is never closed accumulates
+# roughly sixty of them an hour, waiting on a garbage collector that cannot
+# close an async transport reliably.
+
+
+def _fake_anthropic(closed: list[str], *, raises: Exception | None = None) -> Any:
+    """An `anthropic` module whose client records how it was left."""
+    import types
+
+    class FakeMessages:
+        async def create(self, **_kw: Any) -> Any:
+            if raises is not None:
+                raise raises
+            block = type("Block", (), {"type": "text", "text": "fix: tidy the widget"})()
+            return type("Resp", (), {"content": [block]})()
+
+    class FakeAsyncAnthropic:
+        def __init__(self, **_kw: Any) -> None:
+            self.messages = FakeMessages()
+
+        async def __aenter__(self) -> "FakeAsyncAnthropic":
+            closed.append("entered")
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> bool:
+            closed.append("closed")
+            return False
+
+    module = types.ModuleType("anthropic")
+    module.AsyncAnthropic = FakeAsyncAnthropic  # type: ignore[attr-defined]
+    return module
+
+
+def _dirty_repo(path: Path) -> None:
+    init_repo(path)
+    (path / "widget.py").write_text("def widget():\n    return 1\n")
+
+
+ANTHROPIC_SETTINGS = {
+    "provider": "anthropic",
+    "anthropic_api_key": "sk-test-not-a-real-key",
+    "anthropic_model": "claude-sonnet-5",
+}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_is_closed_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    closed: list[str] = []
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(closed))
+    _dirty_repo(tmp_path)
+
+    result = await git_service.generate_commit_message(
+        str(tmp_path), "http://unused", settings=ANTHROPIC_SETTINGS
+    )
+
+    assert result["ok"] is True
+    assert closed == ["entered", "closed"], "the client must be released on the happy path"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_is_closed_when_the_api_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The path that used to leak hardest: an exception skipped every cleanup."""
+    import sys
+
+    closed: list[str] = []
+    monkeypatch.setitem(
+        sys.modules, "anthropic", _fake_anthropic(closed, raises=RuntimeError("429 overloaded"))
+    )
+    _dirty_repo(tmp_path)
+
+    result = await git_service.generate_commit_message(
+        str(tmp_path), "http://unused", settings=ANTHROPIC_SETTINGS
+    )
+
+    assert result["ok"] is False
+    assert "429 overloaded" in result["error"]
+    assert closed == ["entered", "closed"], "an API error must still release the client"

@@ -235,6 +235,9 @@ _PUBLIC_GLAB_AUTH_KEYS = frozenset(
 )
 _PUBLIC_SECRET_REPLACEMENT = "[redacted]"
 _MAX_PROVIDER_CONFIG_BYTES = 1024 * 1024
+# Read granularity for run_allowlisted_capped: large enough that a capped
+# read finishes in a few awaits, small enough not to overshoot the cap much.
+_CAPPED_READ_CHUNK = 64 * 1024
 
 
 def validate_argv(args: Sequence[str]) -> list[str]:
@@ -812,6 +815,85 @@ async def run_allowlisted(
             process.kill()
             await process.wait()
         return 128, b"", str(exc).encode()
+
+
+async def _read_stdout_capped(
+    process: asyncio.subprocess.Process, max_stdout_bytes: int
+) -> tuple[int, bytes, bytes, bool]:
+    """Read *process* stdout until EOF or *max_stdout_bytes*, killing it if capped."""
+    assert process.stdout is not None and process.stderr is not None
+    # stderr is drained concurrently: a command that fails while writing a large
+    # diagnostic would otherwise fill its pipe and block before stdout ends.
+    stderr_task = asyncio.ensure_future(process.stderr.read())
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
+    try:
+        while True:
+            chunk = await process.stdout.read(_CAPPED_READ_CHUNK)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_stdout_bytes:
+                truncated = True
+                break
+        if truncated and process.returncode is None:
+            process.kill()
+        stderr = await stderr_task
+    except BaseException:
+        stderr_task.cancel()
+        raise
+    rc = await process.wait()
+    return rc, b"".join(chunks)[:max_stdout_bytes], stderr, truncated
+
+
+async def run_allowlisted_capped(
+    args: Sequence[str],
+    cwd: str | None = None,
+    *,
+    timeout: float = 15.0,
+    max_stdout_bytes: int,
+    env: Mapping[str, str] | None = None,
+) -> tuple[int, bytes, bytes, bool]:
+    """Run one allowlisted executable, stopping once stdout passes the cap.
+
+    ``run_allowlisted`` buffers the whole of stdout before a caller can truncate
+    it, so a command whose output the caller only wants the head of still peaks
+    in memory at its full length. This variant stops reading and kills the child
+    at the cap, and reports whether it did as the fourth element -- callers must
+    check that flag before the return code, which is the kill signal, not a
+    failure of the command.
+    """
+    try:
+        argv = validate_argv(args)
+    except ValueError as exc:
+        return 126, b"", str(exc).encode("utf-8"), False
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            env=dict(env) if env is not None else None,
+            stdin=None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        return await asyncio.wait_for(
+            _read_stdout_capped(process, max_stdout_bytes), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+        return 128, b"", f"{argv[0]} timed out".encode(), False
+    except FileNotFoundError:
+        return 127, b"", f"{argv[0]} not found".encode(), False
+    except Exception as exc:  # noqa: BLE001 - preserve service-level error envelope
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+        return 128, b"", str(exc).encode(), False
 
 
 async def run_allowlisted_text(

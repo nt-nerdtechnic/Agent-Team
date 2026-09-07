@@ -4284,7 +4284,14 @@ async def analyzer_benchmark_h(session: "Session", msg_id: str, msg_type: str, p
             app.log.warning("benchmark error: %s", _bench_err)
             await app.broadcast(make_event("analyzer.benchmark_done", {"results": [], "error": str(_bench_err)}))
 
-    asyncio.create_task(_benchmark_bg())
+    # Tracked like every other handler task (see Session._handler_tasks): the
+    # progress it reports goes to this connection's UI, so outliving the
+    # connection means holding Ollama — up to 25s per task per installed model —
+    # to broadcast into an empty set. Keeping the reference also satisfies
+    # CPython's requirement that a create_task result stay reachable.
+    task = asyncio.create_task(_benchmark_bg())
+    session._handler_tasks.add(task)
+    task.add_done_callback(session._handler_tasks.discard)
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "started": True}))
 
 
@@ -4311,7 +4318,12 @@ async def analyzer_pull(session: "Session", msg_id: str, msg_type: str, payload:
             except Exception as _pull_err:
                 await app.broadcast(make_event("analyzer.pull_done", {"name": name, "ok": False, "error": str(_pull_err)}))
 
-        asyncio.create_task(_pull_bg())
+        # Tracked for the same reason as the benchmark above. A cancelled pull
+        # is recoverable: Ollama keeps the blobs it already wrote, so pressing
+        # download again resumes rather than restarts.
+        task = asyncio.create_task(_pull_bg())
+        session._handler_tasks.add(task)
+        task.add_done_callback(session._handler_tasks.discard)
         await session.send_json(make_response(msg_id, msg_type, {"ok": True, "started": True}))
 
 
@@ -6513,15 +6525,48 @@ async def pipeline_slot_session(session: "Session", msg_id: str, msg_type: str, 
     )
 
 
+async def _sweep_pane_ptys(session: "Session", pane_id: str) -> None:
+    """Take down any PTY still running under a pane whose record is going away.
+
+    The renderer kills through its own terminal ref first and this then finds
+    nothing; it is the panes without one — a restore placeholder, or a pane
+    whose kill was refused — that would otherwise have their record removed
+    while the process kept running with nothing left pointing at it.
+    """
+    from . import app
+
+    if not pane_id:
+        # A slot with no pane record resolves to a blank id; sweeping on that
+        # would match whatever the lookup returns for "no pane".
+        return
+    for term_session_id in session.terminals.live_session_ids_for_pane(pane_id):
+        await session.terminals.kill(term_session_id, force=True)
+        app._PTY_OWNERS.pop(term_session_id, None)
+        app.attribution.unregister_pane(pane_id)
+
+
 @handler("pipeline.slot_unspawn")
 async def pipeline_slot_unspawn(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    stage_index = int(payload["stage_index"])
+    slot_label = payload["slot_label"]
     project = app.project_store.record_slot_unspawn(
         payload["workspace_path"],
-        stage_index=int(payload["stage_index"]),
-        slot_label=payload["slot_label"],
+        stage_index=stage_index,
+        slot_label=slot_label,
     )
+    # A pipeline slot is closed through the same paths as a manual pane, so it
+    # needs the same sweep: the record is now 'removed' and nothing will point
+    # at the process again.
+    pane_id = next(
+        (p.pane_id for p in project.panes
+         if p.origin == "pipeline"
+         and p.stage_index == stage_index
+         and p.slot_label == slot_label),
+        "",
+    )
+    await _sweep_pane_ptys(session, pane_id)
     await session.send_json(
         make_response(msg_id, msg_type, app._project_payload(project))
     )
@@ -6658,16 +6703,9 @@ async def manual_pane_unspawn(session: "Session", msg_id: str, msg_type: str, pa
     from . import app
 
     # Unspawn is the renderer saying this pane is gone for good, so a PTY still
-    # running under it goes with it. The renderer kills through its own terminal
-    # ref first and this loop then finds nothing; it is the panes without one —
-    # a restore placeholder, or a pane whose kill was refused — that would
-    # otherwise have their record removed below while the process kept running
-    # with nothing left pointing at it.
+    # running under it goes with it.
     pane_id = payload["pane_id"]
-    for term_session_id in session.terminals.live_session_ids_for_pane(pane_id):
-        await session.terminals.kill(term_session_id, force=True)
-        app._PTY_OWNERS.pop(term_session_id, None)
-        app.attribution.unregister_pane(pane_id)
+    await _sweep_pane_ptys(session, pane_id)
 
     project = app.project_store.record_manual_pane_unspawn(
         payload["workspace_path"],
