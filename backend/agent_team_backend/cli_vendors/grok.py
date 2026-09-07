@@ -75,13 +75,16 @@ ORDER BY m.created_at, m.seq
 """
 
 _ACTIVITY_SQL = """
-SELECT m.session_id, m.seq, m.role, m.message_json, m.created_at,
+SELECT m.rowid, m.session_id, m.seq, m.role, m.message_json, m.created_at,
        COALESCE(w.scope_key, '')
 FROM messages m
 JOIN sessions s ON s.id = m.session_id
 LEFT JOIN workspaces w ON w.id = s.workspace_id
-ORDER BY m.session_id, m.seq
+WHERE m.rowid > ?
+ORDER BY m.rowid
 """
+
+_MAX_ROWID_SQL = "SELECT COALESCE(MAX(rowid), 0) FROM messages"
 
 # Grok writes no end-of-turn record, so a turn is closed either by the next
 # user message or — for the latest turn — once that session has been quiet for
@@ -91,6 +94,21 @@ ORDER BY m.session_id, m.seq
 _TURN_IDLE_SECONDS = 8.0
 _STATE_PREFIX = "grok_turn::"
 _TEXT_PREFIX = "grok_text::"
+# One integer marking how far `messages` has been walked, replacing the
+# `act:<session>:<seq>` key this reader used to leave in seen_keys per message
+# row. Those keys grew without bound in a db that holds EVERY session ever run,
+# which pushed the bag past the watcher's persistence limit
+# (_ACTIVITY_KEYS_PERSIST_LIMIT) — so the bag was never written to the durable
+# "@activity" checkpoint and grok replayed its whole history on every backend
+# start (GitHub #28).
+#
+# The mark is GLOBAL, on messages.rowid, not per-session. `seq` is per-session
+# and restarts at 0 for each new session, so a single max over seq would
+# swallow every row of a younger session; rowid is one insertion counter across
+# the whole store, which is the same shape opencode uses for its shared db.
+# The per-session turn state below stays per-session — one db, many concurrent
+# sessions, and a turn boundary belongs to exactly one of them.
+_ROW_PREFIX = "grok_row::"
 _TEXT_MAX_CHARS = 4_000
 
 
@@ -146,6 +164,26 @@ def _write_map(seen_keys: set[str], prefix: str, value: dict) -> None:
         seen_keys.add(f"{prefix}{json.dumps(value, sort_keys=True)}")
 
 
+def _read_mark(seen_keys: set[str], prefix: str) -> int | None:
+    """The integer sentinel stored under `prefix`, or None when never set.
+
+    None and 0 are NOT the same: 0 is a store that has been walked and held
+    nothing, None is a store no pass has looked at yet.
+    """
+    for k in seen_keys:
+        if k.startswith(prefix):
+            try:
+                return int(k[len(prefix):])
+            except ValueError:
+                return None
+    return None
+
+
+def _write_mark(seen_keys: set[str], prefix: str, value: int) -> None:
+    seen_keys.difference_update({k for k in seen_keys if k.startswith(prefix)})
+    seen_keys.add(f"{prefix}{int(value)}")
+
+
 def _int(v) -> int:  # noqa: ANN001
     try:
         return max(0, int(v))
@@ -178,14 +216,16 @@ class GrokLogReader(LogReader):
     def session_files(self) -> list[Path]:
         return [db for db in self._db_paths() if db.is_file()]
 
-    def _query(self, path: Path, sql: str) -> list[tuple] | None:
+    def _query(
+        self, path: Path, sql: str, params: tuple = ()
+    ) -> list[tuple] | None:
         """Short-lived read-only query. None = db unreadable this cycle
         (missing / busy / locked / mid-write) — callers treat it as no data."""
         try:
             con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             try:
                 con.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-                return con.execute(sql).fetchall()
+                return con.execute(sql, params).fetchall()
             finally:
                 con.close()
         except (sqlite3.Error, OSError) as err:
@@ -241,18 +281,41 @@ class GrokLogReader(LogReader):
         State is keyed by session because one database holds every session;
         the same reason the idle test uses each session's own last message
         rather than the file's mtime.
+
+        Only rows past the `_ROW_PREFIX` watermark are read, so a restart
+        resumes instead of replaying (GitHub #28). Everything the flush pass
+        needs about a session that has NO new rows this pass — its cwd and when
+        it was last written to — therefore has to live in the per-session state
+        rather than be recomputed from a full table scan, which is what the
+        `cwd` and `seen` fields are for.
         """
         if path.name != _DB_NAME:
             return []
-        rows = self._query(path, _ACTIVITY_SQL)
+        mark = _read_mark(seen_keys, _ROW_PREFIX)
+        watermark = 0 if mark is None else max(0, mark)
+        rows = self._query(path, _ACTIVITY_SQL, (watermark,))
         if rows is None:
             return []
+        if not rows and watermark:
+            # No new rows: check the store did not shrink under the mark
+            # (session deleted, db replaced). rowids are handed out as
+            # max(rowid)+1, so they repeat after the newest rows go, and a mark
+            # left standing above the new max would swallow every row written
+            # after it. Re-anchor to 0 rather than to the new max: under
+            # repeating rowids nothing below the mark has been delivered under
+            # the ids it will now be handed. The two errors are not symmetric —
+            # a duplicate is absorbed downstream, because dedup_key is
+            # <session>:<seq> and does not move, while a skipped row has no
+            # second chance.
+            top = self._query(path, _MAX_ROWID_SQL)
+            if top is not None and int(top[0][0] or 0) < watermark:
+                _write_mark(seen_keys, _ROW_PREFIX, 0)
+                return []
 
         out: list[ActivityEvent] = []
         states = _read_map(seen_keys, _STATE_PREFIX)
         texts = _read_map(seen_keys, _TEXT_PREFIX)
-        last_seen_at: dict[str, float] = {}
-        cwds: dict[str, str] = {}
+        next_row = watermark
 
         def _complete(sid: str, state: dict, detail: str) -> ActivityEvent:
             # The turn's own last message supplies the timestamp. It must be a
@@ -261,24 +324,33 @@ class GrokLogReader(LogReader):
             # turn delivered twice and replay history after a backend restart.
             return ActivityEvent(
                 vendor="grok", event_type="turn_complete",
-                cwd=cwds.get(sid, ""), session_id=sid, file_path=str(path),
+                cwd=str(state.get("cwd") or ""), session_id=sid,
+                file_path=str(path),
                 dedup_key=f"turn:{sid}:{int(state['idx'])}",
                 timestamp=str(state.get("ts") or ""), detail=detail,
                 text=str(texts.get(sid) or ""),
             )
 
-        for session_id, seq, role, message_json, created_at, ws_root in rows:
+        def _touch(state: dict, cwd: str, stamp: float) -> None:
+            """Carry forward what the flush pass can no longer rescan for."""
+            state["cwd"] = cwd
+            if stamp > float(state.get("seen") or 0.0):
+                state["seen"] = stamp
+
+        for row_id, session_id, seq, role, message_json, created_at, ws_root in rows:
             sid = str(session_id or "")
             key = f"act:{sid}:{seq}"
-            cwds[sid] = str(ws_root or "")
-            last_seen_at[sid] = max(last_seen_at.get(sid, 0.0), _epoch(created_at))
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
+            next_row = max(next_row, int(row_id))
+            cwd = str(ws_root or "")
+            stamp = _epoch(created_at)
+            state = states.get(sid)
             role_name = str(role or "")
             if role_name not in ("user", "assistant"):
+                # Still evidence the session is being written to, which is what
+                # the idle test measures — the row just carries no event.
+                if state is not None:
+                    _touch(state, cwd, stamp)
                 continue
-            state = states.get(sid)
             created = str(created_at or "")
             text = ""
             if role_name == "user":
@@ -296,9 +368,10 @@ class GrokLogReader(LogReader):
                 reply = _message_text(message_json).strip()
                 if reply:
                     texts[sid] = _cap_text(reply)
+            _touch(states[sid], cwd, stamp)
             out.append(ActivityEvent(
                 vendor="grok", event_type="agent_active",
-                cwd=cwds[sid], session_id=sid, file_path=str(path),
+                cwd=cwd, session_id=sid, file_path=str(path),
                 dedup_key=key, timestamp=str(created_at or ""),
                 detail=role_name, text=text,
             ))
@@ -308,7 +381,7 @@ class GrokLogReader(LogReader):
         for sid, state in list(states.items()):
             if state.get("flushed"):
                 continue
-            seen_at = last_seen_at.get(sid, 0.0)
+            seen_at = float(state.get("seen") or 0.0)
             if seen_at <= 0.0 or now - seen_at < _TURN_IDLE_SECONDS:
                 continue
             out.append(_complete(sid, state, "idle"))
@@ -317,6 +390,7 @@ class GrokLogReader(LogReader):
 
         _write_map(seen_keys, _STATE_PREFIX, states)
         _write_map(seen_keys, _TEXT_PREFIX, texts)
+        _write_mark(seen_keys, _ROW_PREFIX, next_row)
         return out
 
     def parse_incremental(

@@ -174,7 +174,9 @@ async def test_first_sight_pre_start_file_is_seeded_without_parsing(
     the mark is pushed to EOF by counting lines — no events, no parse."""
     root = tmp_path / "logs"
     path = _transcript(root, "a.jsonl", 40)
-    monkeypatch.setattr(base, "PROCESS_START_S", path.stat().st_mtime + 60)
+    monkeypatch.setattr(
+        base, "PROCESS_START_S", path.stat().st_mtime + base.SEED_TAIL_GRACE_S + 60
+    )
 
     seen: list[str] = []
 
@@ -288,7 +290,9 @@ async def test_appended_lines_after_a_seed_still_fire(
     """Seeding is a starting point, not a mute: the next append is delivered."""
     root = tmp_path / "logs"
     path = _transcript(root, "a.jsonl", 6)
-    monkeypatch.setattr(base, "PROCESS_START_S", path.stat().st_mtime + 60)
+    monkeypatch.setattr(
+        base, "PROCESS_START_S", path.stat().st_mtime + base.SEED_TAIL_GRACE_S + 60
+    )
 
     seen: list[str] = []
 
@@ -318,7 +322,9 @@ async def test_partial_final_line_is_not_seeded_past(
     path = _transcript(root, "a.jsonl", 3)
     with path.open("a", encoding="utf-8") as fh:
         fh.write('{"type": "assist')
-    monkeypatch.setattr(base, "PROCESS_START_S", path.stat().st_mtime + 60)
+    monkeypatch.setattr(
+        base, "PROCESS_START_S", path.stat().st_mtime + base.SEED_TAIL_GRACE_S + 60
+    )
 
     seen: list[str] = []
 
@@ -375,3 +381,114 @@ def test_line_high_water_vendors_declare_the_seeding_hook() -> None:
 
     assert {k for k, v in flags.items() if v} == _LINE_HIGH_WATER_VENDORS & set(flags)
     assert _LINE_HIGH_WATER_VENDORS <= set(flags)
+
+
+def _big_transcript(root: Path, name: str, lines: int, pad: int = 4096) -> Path:
+    """A transcript whose lines are wide enough that SEED_TAIL_BYTES lands
+    mid-file, so the tail boundary is exercised rather than swallowing it."""
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / name
+    path.write_text(
+        "".join(
+            json.dumps({"type": "assistant", "timestamp": f"t{i}", "pad": "x" * pad})
+            + "\n"
+            for i in range(1, lines + 1)
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.asyncio
+async def test_a_recently_written_file_replays_only_its_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 2D. A busy transcript used to be refused a mark entirely — the
+    mtime gate protected its unread turns by leaving the reader to walk it from
+    line 1, so the largest, busiest files were the ones that still replayed in
+    full. Now the mark stops SEED_TAIL_BYTES from the end: recent turns are
+    still delivered, everything older is skipped, and the work is bounded.
+    """
+    root = tmp_path / "logs"
+    path = _big_transcript(root, "busy.jsonl", 200)
+    # Written a moment before the process started: inside the grace window.
+    monkeypatch.setattr(base, "PROCESS_START_S", path.stat().st_mtime + 5)
+
+    seen: list[str] = []
+
+    async def sink(event: ActivityEvent) -> None:
+        seen.append(event.dedup_key)
+
+    store = _store(tmp_path)
+    watcher = _watcher(store, sink)
+    watcher.add_reader(_LineReader(root))
+    await watcher._process_realtime_path(path)
+
+    assert seen, "the tail must still be delivered"
+    assert len(seen) < 200, "the whole file replayed — the tail bound did nothing"
+    # The tail is expressed in bytes, so the line count it covers is
+    # SEED_TAIL_BYTES / average line width, give or take the boundary line.
+    avg_line = path.stat().st_size / 200
+    expected = base.SEED_TAIL_BYTES / avg_line
+    assert len(seen) <= expected + 2, (
+        f"{len(seen)} lines parsed; the {base.SEED_TAIL_BYTES}-byte tail covers "
+        f"about {expected:.0f}"
+    )
+    # Every delivered line is from the END of the file, not the start.
+    assert seen[-1] == "act:200"
+    assert "act:1" not in seen
+
+
+@pytest.mark.asyncio
+async def test_a_file_older_than_the_grace_window_replays_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other side of the same branch: history stays free. Without this the
+    tail rule would broadcast the last turns of every transcript on the disk."""
+    root = tmp_path / "logs"
+    path = _big_transcript(root, "history.jsonl", 200)
+    monkeypatch.setattr(
+        base, "PROCESS_START_S", path.stat().st_mtime + base.SEED_TAIL_GRACE_S + 60
+    )
+
+    seen: list[str] = []
+
+    async def sink(event: ActivityEvent) -> None:
+        seen.append(event.dedup_key)
+
+    store = _store(tmp_path)
+    watcher = _watcher(store, sink)
+    watcher.add_reader(_LineReader(root))
+    await watcher._process_realtime_path(path)
+
+    assert seen == [], "an out-of-grace transcript delivered its tail"
+    assert activity_high_water(watcher._activity_seen[str(path.resolve())]) == 200
+
+
+@pytest.mark.asyncio
+async def test_the_turn_written_just_before_a_crash_is_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trade the old gate accepted, now closed.
+
+    A turn lands in the transcript, the backend dies before its cursor is
+    persisted, and the restart sees a file whose mtime predates the new
+    process. Under the old rule that file was marked to EOF and the turn — with
+    its MSG block — was gone for good. Inside the grace window its tail is read.
+    """
+    root = tmp_path / "logs"
+    path = _transcript(root, "crashed.jsonl", 3)
+    # Died seconds ago; restarted now.
+    monkeypatch.setattr(base, "PROCESS_START_S", path.stat().st_mtime + 10)
+
+    seen: list[str] = []
+
+    async def sink(event: ActivityEvent) -> None:
+        seen.append(event.dedup_key)
+
+    store = _store(tmp_path)
+    watcher = _watcher(store, sink)
+    watcher.add_reader(_LineReader(root))
+    await watcher._process_realtime_path(path)
+
+    assert seen == ["act:1", "act:2", "act:3"], "the pre-crash turn was skipped"
