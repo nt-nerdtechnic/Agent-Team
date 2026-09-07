@@ -17,6 +17,23 @@ export type WhatsNewText = {
   'en-US': string
 }
 
+/**
+ * A headline feature given its own panel above the bullet list.
+ *
+ * Reserved for a release that introduces something a person did not have
+ * before — not a better version of a thing they already used. A spotlight on
+ * every release is a spotlight on nothing, so this stays empty unless the
+ * release is also marked `major`.
+ */
+export interface WhatsNewSpotlight {
+  /** Product name, shown as-is in both locales (e.g. 'Navide Cloud'). */
+  name: string
+  /** One line saying what it is, not what changed. */
+  tagline: WhatsNewText
+  /** What it lets somebody do. Three or four, each a capability. */
+  points: WhatsNewText[]
+}
+
 export interface WhatsNewEntry {
   /** App version this announcement belongs to, e.g. '0.1.65'. */
   version: string
@@ -25,6 +42,15 @@ export interface WhatsNewEntry {
   highlights: WhatsNewText[]
   /** Optional footer note, e.g. an action the user should take. */
   note?: WhatsNewText
+  /**
+   * Marks a release worth stopping for: the modal takes on celebratory chrome
+   * and says so in words. Every release matters to whoever shipped it, so the
+   * bar here is the user's, not ours — a new surface, or something that
+   * changes how the app is used.
+   */
+  major?: boolean
+  /** The one feature this release is remembered for. Requires `major`. */
+  spotlight?: WhatsNewSpotlight
 }
 
 // Chrome labels (header + dismiss button), kept here so the whole announcement
@@ -32,9 +58,124 @@ export interface WhatsNewEntry {
 export const WHATS_NEW_CHROME = {
   header: { 'zh-TW': '新版更新', 'en-US': 'What’s New' } as WhatsNewText,
   dismiss: { 'zh-TW': '知道了', 'en-US': 'Got it' } as WhatsNewText,
+  /** Replaces `header` on a release marked `major`. */
+  majorHeader: { 'zh-TW': '重大更新', 'en-US': 'Major Update' } as WhatsNewText,
+  /** Heading over the bullet list once a spotlight sits above it. */
+  alsoIn: { 'zh-TW': '這一版還有', 'en-US': 'Also in this release' } as WhatsNewText,
+  /** Label above the spotlight panel. */
+  introducing: { 'zh-TW': '隆重介紹', 'en-US': 'Introducing' } as WhatsNewText,
 }
 
 export const WHATS_NEW: WhatsNewEntry[] = [
+  {
+    version: '0.2.0',
+    major: true,
+    title: {
+      'zh-TW': 'Navide Cloud 上線：你的裝置，連成一個 agent 網路',
+      'en-US': 'Navide Cloud is here: your devices, joined into one agent network',
+    },
+    spotlight: {
+      name: 'Navide Cloud',
+      tagline: {
+        'zh-TW': '一個帳號，把你所有裝置上的 agent 串成一個私有網路。',
+        'en-US': 'One account joins the agents on every device you own into one private network.',
+      },
+      points: [
+        {
+          'zh-TW':
+            '看得到你的裝置：登入同一個帳號，就能看到哪些機器在線、各自開了哪些 agent、在忙什麼。',
+          'en-US':
+            'See your machines: sign in on each one and you can tell which are online, which agents they are running, and what those agents are doing.',
+        },
+        {
+          'zh-TW':
+            '跨裝置派工：這台的 agent 可以直接對另一台的 agent 下指令、等它回話，就像它們在同一台機器上。',
+          'en-US':
+            'Hand work across devices: an agent here can instruct an agent there and wait for its answer, as if they shared a machine.',
+        },
+        {
+          'zh-TW':
+            '六位數確認才算數：配對時兩台機器各自算出同一組六位數，兩邊都按「一致」才建立信任——中間人做不出這組數字。',
+          'en-US':
+            'Six digits, confirmed at both ends: pairing shows the same six digits on both machines and trusts neither until both people say they match — a relay cannot produce them.',
+        },
+        {
+          'zh-TW':
+            '內容只有你們讀得到：跨裝置訊息端對端加密後才離開本機，伺服器只搬密文；私鑰、絕對路徑與終端機畫面從不上傳。',
+          'en-US':
+            'Only the two ends can read it: cross-device messages are encrypted before they leave your machine and the server only relays ciphertext. Private keys, absolute paths and terminal output never leave.',
+        },
+        {
+          'zh-TW':
+            '預設誰都不准：外來訊息一律拒收，除非你寫下規則放行；封鎖優先於一切規則，連你自己的裝置也擋。',
+          'en-US':
+            'Nothing is allowed by default: messages from other devices are refused until a rule of yours allows them, and a block outranks every rule — including one for your own machines.',
+        },
+      ],
+    },
+    highlights: [
+      {
+        'zh-TW':
+          'MCP 新增四個工具：cli_interrupt（中止對方正在跑的回合）、cli_whoami（問自己是誰）、cli_read_incoming（讀收件匣）、cli_cancel_message（收回還沒送達的訊息）。cli_open_agent 現在也能指定模型與推理強度。',
+        'en-US':
+          'Four new MCP tools: cli_interrupt (stop a turn in progress), cli_whoami, cli_read_incoming, and cli_cancel_message (take back a message that has not landed). cli_open_agent can now pick the model and reasoning effort.',
+      },
+      {
+        'zh-TW':
+          '側欄血緣導軌：面板依「誰開出誰」畫出連續的分支軌，滑過會整條亮起；執行群組列改為黏頂區段標題，附自己的 ＋ 按鈕。',
+        'en-US':
+          'Sidebar lineage rails: panes are drawn on continuous branch rails showing which opened which, with the whole trunk highlighting on hover. Run-group rows became sticky section headers with their own ＋.',
+      },
+      {
+        'zh-TW':
+          '關閉面板前先提醒：還在跑的回合、排隊中的訊息、以及會一起消失的子面板，會在你按下關閉前列出來。',
+        'en-US':
+          'Advice before you close a pane: an active turn, queued messages, and child panes that would go with it are listed before the pane closes.',
+      },
+      {
+        'zh-TW':
+          '終端機拿回控制終端：PTY 子行程現在有自己的 controlling terminal，sudo 密碼提示、Ctrl+C 與視窗縮放通知都恢復正常。',
+        'en-US':
+          'Panes get a controlling terminal: PTY children now own one, which restores sudo password prompts, Ctrl+C, and resize notifications.',
+      },
+      {
+        'zh-TW':
+          '狀態徽章可自訂：Settings 新增徽章分頁，色盤與文字都能改；分頁狀態圓點改為方形，與側欄群組記號一致。',
+        'en-US':
+          'Customizable status badges: a new settings pane for badge palettes and labels, and the tab status dot is now square to match the sidebar group key.',
+      },
+      {
+        'zh-TW':
+          '關閉 App 有畫面了：退出流程會顯示進度覆蓋層，讓你看到它正在收尾而不是卡住。',
+        'en-US':
+          'Quitting shows its work: a shutdown overlay reports the teardown sequence instead of leaving the window looking frozen.',
+      },
+      {
+        'zh-TW':
+          '本機攻擊面收斂：CLI hook 端點、HTTP 檔案路由與 MCP 伺服器清單全部改為需要驗證，並封掉兩條路徑穿越與非 loopback 的 Host 標頭。',
+        'en-US':
+          'A smaller local attack surface: CLI hook endpoints, HTTP file routes and the MCP server list all require authentication now, and two path-traversal bypasses plus non-loopback Host headers are refused.',
+      },
+      {
+        'zh-TW':
+          '啟動與重繪更省：活動掃描只看有面板在跑的工作區、面板檢視不再重複重繪、WebGL 游標閃爍計時器不再洩漏，較重的對話框改為閒置時預先載入。',
+        'en-US':
+          'Lighter startup and redraw: activity scanning is scoped to workspaces with live panes, unchanged pane views skip re-render, the WebGL cursor-blink timer no longer leaks, and heavy modals prewarm while idle.',
+      },
+      {
+        'zh-TW':
+          '計畫文件可封存：新增 plan_archive 工具、封存區段與批次封存，完成的計畫不再擠在清單裡。',
+        'en-US':
+          'Plans can be archived: a plan_archive tool, an archived section, and batch archiving keep finished plans out of the list.',
+      },
+    ],
+    note: {
+      'zh-TW':
+        '要開始使用 Navide Cloud：點標題列右上角的雲朵圖示登入，在另一台裝置登入同一個帳號，然後在兩邊按「配對」並核對那六位數。沒有登入的話，這一版的其他功能完全不受影響。',
+      'en-US':
+        'To start using Navide Cloud: click the cloud mark in the titlebar and sign in, sign in to the same account on another device, then press Pair on both and check the six digits match. Everything else in this release works exactly the same if you never sign in.',
+    },
+  },
   {
     version: '0.1.93',
     title: {
