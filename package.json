@@ -129,7 +129,7 @@
     "typescript": "^5.7.2",
     "vite": "^6.4.3",
     "vite-plugin-monaco-editor": "^1.1.0",
-    "vitest": "^3.2.7",
+    "vitest": "^5.0.0",
     "vue": "^3.5.13",
     "vue-tsc": "^2.1.10"
   },
