@@ -528,6 +528,33 @@ def test_parse_activity_reparse_does_not_reemit(fake_pi_root: Path) -> None:
     assert reader.parse_activity(f, seen) == []
 
 
+def test_parse_activity_leaves_a_half_written_last_line_for_next_poll(
+    fake_pi_root: Path,
+) -> None:
+    """A poll that catches Pi mid-append must not advance past the
+    unterminated last line: doing so drops it for good once it completes,
+    which strands the pane mid-turn forever when the lost line was the
+    assistant's closing entry (GitHub #21)."""
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    _write_jsonl(f, [_header(), _user("aa000001", content="go")])
+    seen: set[str] = set()
+    reader.parse_activity(f, seen)
+    assert activity_high_water(seen) == 2
+
+    full_line = json.dumps(_assistant_saying("aa000002", "working", "aa000001"))
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(full_line[:20])  # Pi is still writing this line
+    assert reader.parse_activity(f, seen) == []
+    assert activity_high_water(seen) == 2, "must not advance past the half-written line"
+
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(full_line[20:] + "\n")
+    events = reader.parse_activity(f, seen)
+    assert [(e.event_type, e.detail) for e in events] == [("agent_active", "assistant")]
+    assert activity_high_water(seen) == 3
+
+
 # ── activity: the seen_keys bag stays O(1) ───────────────────────────────────
 # seen_keys lives as long as the session file, so a walk of a long log must
 # leave one high-water mark in it, not a key per line (GitHub #23).

@@ -521,10 +521,17 @@ class AiderLogReader(LogReader):
         last_line = high_water
 
         with fh:
-            for line_no, raw in enumerate(fh, 1):
-                line = raw.rstrip("\r\n")
-                key = f"act:{line_no}"
+            for line_no, raw_line in enumerate(fh, 1):
+                line = raw_line.rstrip("\r\n")
                 is_new = line_no > high_water
+                if is_new and not raw_line.endswith("\n"):
+                    # An unterminated final line is still being written.
+                    # Leave the mark behind it so the completed line is read
+                    # on the next poll: advancing past it would drop the
+                    # `> Tokens:` line for good if it landed here, which is
+                    # the only turn_complete signal aider gives (GitHub #21).
+                    break
+                key = f"act:{line_no}"
                 last_line = line_no
                 m = _SECTION_RE.match(line)
                 if m:
