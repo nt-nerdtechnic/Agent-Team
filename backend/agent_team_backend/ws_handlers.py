@@ -4466,7 +4466,7 @@ async def shell_run(session: "Session", msg_id: str, msg_type: str, payload: dic
             await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "workspace path is required"}))
             return
         resolved_cwd = app.Path(ws_path).resolve()
-        known_roots = [app.Path(w).resolve() for w in app.attribution.known_workspaces()]
+        known_roots = app.attribution.existing_workspace_roots()
         registered_root = next((root for root in known_roots if (
             resolved_cwd == root or resolved_cwd.is_relative_to(root)
         )), None)
@@ -4505,7 +4505,7 @@ async def shell_run(session: "Session", msg_id: str, msg_type: str, payload: dic
     else:
         resolved_cwd = app.Path(ws_path).resolve() if ws_path else None
         # Validate that cwd is a known registered workspace (or its subdirectory)
-        known_roots = [app.Path(w).resolve() for w in app.attribution.known_workspaces()]
+        known_roots = app.attribution.existing_workspace_roots()
         cwd_allowed = resolved_cwd is None or any(
             resolved_cwd == r or resolved_cwd.is_relative_to(r)
             for r in known_roots
