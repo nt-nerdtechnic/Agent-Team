@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { canonicalJson } from '../../../shared/canonicalJson'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { disabledReasonKey } from '../lib/linkStatus'
 import type { LegalRoute } from '../../../shared/legalLinks'
@@ -87,6 +87,11 @@ import type { useCliProfiles } from '../composables/useCliProfiles'
 import KeyboardShortcutsEditor from './KeyboardShortcutsEditor.vue'
 import CliMessagingHelp from './CliMessagingHelp.vue'
 import McpHelp from './McpHelp.vue'
+import WorkspacePanesHelp from './WorkspacePanesHelp.vue'
+import CliAgentsHelp from './CliAgentsHelp.vue'
+import CodeWorkflowHelp from './CodeWorkflowHelp.vue'
+import SettingsSystemHelp from './SettingsSystemHelp.vue'
+import IconReferenceHelp from './IconReferenceHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
 import StorageUsagePane from './StorageUsagePane.vue'
 import LayoutSettingsPane from '../layout/LayoutSettingsPane.vue'
@@ -187,8 +192,35 @@ const reclaimNowSize = computed(() => formatBytes(props.reclaimableNowBytes ?? 0
 type Tab = 'mcp' | 'skills' | 'prompts' | 'memory' | 'analyzer' | 'cliAgents' | 'general' | 'cross-device' | 'updates' | 'appearance' | 'statusBadges' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
-type HelpTopic = 'messaging' | 'mcp'
-const helpTopic = ref<HelpTopic>('messaging')
+type HelpTopic =
+  | 'workspace'
+  | 'cliAgents'
+  | 'messaging'
+  | 'mcp'
+  | 'codeWorkflow'
+  | 'settingsSystem'
+  | 'icons'
+const helpTopic = ref<HelpTopic>('workspace')
+// Topic order is the reading order: what the main window is made of, then the
+// agents in it, then how they talk, then the code surfaces, then settings.
+const helpTopicComponents: Record<HelpTopic, Component> = {
+  workspace: WorkspacePanesHelp,
+  cliAgents: CliAgentsHelp,
+  messaging: CliMessagingHelp,
+  mcp: McpHelp,
+  codeWorkflow: CodeWorkflowHelp,
+  settingsSystem: SettingsSystemHelp,
+  icons: IconReferenceHelp,
+}
+const helpTopicOrder: HelpTopic[] = [
+  'workspace',
+  'cliAgents',
+  'messaging',
+  'mcp',
+  'codeWorkflow',
+  'settingsSystem',
+  'icons',
+]
 const activeTab = ref<Tab>(props.initialTab ?? 'general')
 // initialTab is only read once at mount by the ref initializer above; when the
 // modal is already open and a new tab is requested (e.g. the ui.settings.open
@@ -629,6 +661,56 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     group: 'Help',
     summary: 'How one CLI agent sends an instruction to another — addressing, delivery timing, guard rails, and troubleshooting.',
     keywords: 'help guide messaging message send cli agent pane cross workspace address broadcast queue rate limit troubleshooting 說明 教學 訊息 傳訊 互傳 傳送 指令 位址 跨工作區 廣播 佇列 頻率 疑難排解 怎麼用',
+  },
+  {
+    id: 'help-workspace',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'workspace',
+    title: '工作區與面板 / Workspace & Panes',
+    group: 'Help',
+    summary: 'What a workspace, pane and run group are, plus stage layouts, the sidebar tree and the status bar.',
+    keywords: 'help guide workspace pane run group sidebar layout grid spotlight fullscreen slot status bar placeholder idle reclaim lineage 說明 教學 工作區 專案 面板 群組 側欄 版面 排列 佔位卡 閒置 回收 血緣 狀態列 多選 拖曳 快捷鍵',
+  },
+  {
+    id: 'help-cli-agents',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'cliAgents',
+    title: 'CLI Agent 與帳號 / CLI Agents & Accounts',
+    group: 'Help',
+    summary: 'Which CLIs are supported, how they are detected and installed, roles, account switching and usage badges.',
+    keywords: 'help guide cli agent vendor install detect role account switch login usage quota badge permission skip 說明 教學 安裝 偵測 角色 帳號 切換 登入 額度 用量 徽章 權限 多帳號 疑難排解',
+  },
+  {
+    id: 'help-code-workflow',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'codeWorkflow',
+    title: '程式碼工作流 / Code Workflow',
+    group: 'Help',
+    summary: 'Git staging and branches, plan documents and their review tools, the editor window and file preview.',
+    keywords: 'help guide git stage commit branch remote conflict diff stash plan review approve todo editor monaco preview record track 說明 教學 暫存 提交 分支 遠端 衝突 差異 草稿 計畫 審閱 核准 編輯器 預覽 變更記錄',
+  },
+  {
+    id: 'help-settings-system',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'settingsSystem',
+    title: '設定與系統 / Settings & System',
+    group: 'Help',
+    summary: 'A map of all settings pages, plus Navide Cloud, the window menus, scheduled tasks and resource upkeep.',
+    keywords: 'help guide settings overview skills prompts memory storage shortcuts updates analyzer extensions navide cloud pairing device schedule resource 說明 教學 設定 總覽 技能 提示 記憶 儲存 快捷鍵 更新 跨裝置 配對 裝置 排程 資源',
+  },
+  {
+    id: 'help-icons',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'icons',
+    title: '介面圖示 / Icon Reference',
+    group: 'Help',
+    summary: 'Every button icon in the interface — what it is called, where it lives and what pressing it does.',
+    keywords: 'help guide icon button symbol glyph legend reference sidebar pane stage status bar git plan rail 說明 教學 圖示 按鈕 符號 對照 對照表 圖例 這是什麼 狀態色 色點',
   },
 ])
 
@@ -3321,22 +3403,16 @@ watch(activeTab, (tab) => {
           <h1 class="s-page-title">{{ $t('settings.nav.help') }}</h1>
           <div class="help-topics" role="tablist">
             <button
+              v-for="topic in helpTopicOrder"
+              :key="topic"
               class="help-topic"
-              :class="{ active: helpTopic === 'messaging' }"
+              :class="{ active: helpTopic === topic }"
               role="tab"
-              :aria-selected="helpTopic === 'messaging'"
-              @click="helpTopic = 'messaging'"
-            >{{ $t('settings.help.topic.messaging') }}</button>
-            <button
-              class="help-topic"
-              :class="{ active: helpTopic === 'mcp' }"
-              role="tab"
-              :aria-selected="helpTopic === 'mcp'"
-              @click="helpTopic = 'mcp'"
-            >{{ $t('settings.help.topic.mcp') }}</button>
+              :aria-selected="helpTopic === topic"
+              @click="helpTopic = topic"
+            >{{ $t(`settings.help.topic.${topic}`) }}</button>
           </div>
-          <CliMessagingHelp v-if="activeTab === 'help' && helpTopic === 'messaging'" />
-          <McpHelp v-else-if="activeTab === 'help'" />
+          <component :is="helpTopicComponents[helpTopic]" v-if="activeTab === 'help'" />
         </div>
 
         <!-- ── EXTENSIONS TAB (flag-gated) ───────────────────────────────── -->
@@ -4055,6 +4131,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .help-body { overflow-y: auto; padding: 18px 22px; }
 .help-topics {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   margin-bottom: 18px;
   padding: 3px;

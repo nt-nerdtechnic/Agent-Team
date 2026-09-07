@@ -60,6 +60,27 @@ describe('status colour palette', () => {
     expect(DEFAULT_STATUS_COLORS.idle).not.toBe(DEFAULT_STATUS_COLORS.awaiting)
   })
 
+  it('ships the agreed default hue for the three statuses that were recoloured', () => {
+    // These three moved together and only make sense together: 'starting' took
+    // over the attention hue, 'idle' took the accent hue it left behind, and
+    // 'disconnected' stopped sharing a colour with either. Pinning the literals
+    // is the point — the per-surface CSS has to say the same thing, and nothing
+    // else in this file would notice if one of the three drifted back.
+    expect(DEFAULT_STATUS_COLORS.starting).toBe('yellow')
+    expect(DEFAULT_STATUS_COLORS.idle).toBe('blue')
+    expect(DEFAULT_STATUS_COLORS.disconnected).toBe('ink')
+  })
+
+  it('paints the "blue" swatch with the role token that carries blue', () => {
+    // 'blue' used to borrow --status-starting-*, which was the blue role token
+    // at the time. That token is the attention hue now, so a swatch left
+    // pointing at it would render yellow in the picker and on every idle badge.
+    expect(STATUS_COLOR_PALETTE.blue.bg).toContain('--status-idle-')
+    expect(STATUS_COLOR_PALETTE.blue.fg).toContain('--status-idle-')
+    expect(STATUS_COLOR_PALETTE.blue.bg).not.toContain('--status-starting-')
+    expect(STATUS_COLOR_PALETTE.blue.fg).not.toContain('--status-starting-')
+  })
+
   it('rejects colours and statuses it does not know', () => {
     // Guards a settings blob written by a newer build: an unknown value must
     // fall back to the default, not emit var(--undefined) and paint nothing.

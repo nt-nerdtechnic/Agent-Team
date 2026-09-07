@@ -140,10 +140,6 @@
   --accent-emphasis: var(--blue-5);   /* #1f6feb — primary button */
   --accent-muted: var(--blue-6);      /* #1f3a5f — borders */
   --accent-subtle: var(--blue-7);     /* #0d2845 — tinted backgrounds */
-  --status-starting-subtle: var(--accent-subtle);
-  --status-starting-muted: var(--accent-muted);
-  --status-starting-fg: var(--accent-fg);
-  --status-starting-emphasis: var(--accent-emphasis);
 
   /* ── Success (green) ──────────────────────────────────────── */
   --success-fg: var(--green-2);       /* #3fb950 */
@@ -169,6 +165,21 @@
   --attention-subtle: var(--yellow-7);/* #2d2100 */
   --warning-fg: var(--yellow-4);      /* #f0883e — orange warnings */
   --manager-fg: var(--yellow-2);      /* #d8b46d — manager / admin designation */
+
+  /* ── Status role tokens ───────────────────────────────────────
+   * Which family a pane status borrows its hue from, one indirection away
+   * from the family itself. A theme whose family colour would collide with
+   * another status (dark-forest's green accent against green 'running')
+   * overrides these rather than the family. */
+  --status-starting-subtle: var(--attention-subtle);
+  --status-starting-muted: var(--attention-muted);
+  --status-starting-fg: var(--attention-fg);
+  --status-starting-emphasis: var(--attention-emphasis);
+  --status-idle-subtle: var(--accent-subtle);
+  --status-idle-muted: var(--accent-muted);
+  --status-idle-fg: var(--accent-fg);
+  --status-idle-bright: var(--accent-bright);
+  --status-idle-emphasis: var(--accent-emphasis);
 
   /* ── Done (purple) ────────────────────────────────────────── */
   --done-fg: var(--purple-0);         /* #bc8cff */

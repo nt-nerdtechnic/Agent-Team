@@ -30,17 +30,20 @@
   --border-muted: #1d2a1e;
   --border-strong: #45583f;
 
-  /* Accent — keep blue but slightly cooled */
+  /* Accent — green, in keeping with the foliage palette */
   --accent-fg: #6fc28a;
   --accent-bright: #8fd8a5;
   --accent-focus: #4cae6a;
   --accent-emphasis: #2ea043;
   --accent-muted: #1f5e34;
   --accent-subtle: #0d2818;
-  --status-starting-subtle: #0d1d3d;
-  --status-starting-muted: #1e3a6b;
-  --status-starting-fg: #6cb0ff;
-  --status-starting-emphasis: #2563eb;
+  /* This theme's accent is green, which is also 'running'. The status that
+   * borrows accent keeps a blue of its own here so the two never collide. */
+  --status-idle-subtle: #0d1d3d;
+  --status-idle-muted: #1e3a6b;
+  --status-idle-fg: #6cb0ff;
+  --status-idle-bright: #8fc8ff;
+  --status-idle-emphasis: #2563eb;
 
   /* Success */
   --success-fg: #56d364;

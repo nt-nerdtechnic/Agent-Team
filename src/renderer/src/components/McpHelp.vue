@@ -176,10 +176,21 @@ const comparison: CompareRow[] = [
 
       <h3 class="mh-h3">哪些 CLI 接得到</h3>
       <p class="mh-p">
-        目前只有 <strong>Claude Code</strong> 與 <strong>Codex</strong>。
-        這兩家的 CLI 支援在啟動時用參數指定 MCP server，Navide 就是這樣接上的——
-        不會去改你自己的 MCP 設定檔。其他 CLI 要嘛不支援這種接法，要嘛只能改設定檔，
-        目前沒有接。
+        十四家裡目前有 <strong>十家</strong>：Claude Code、Codex、Copilot CLI、Qwen Code、
+        OpenCode、Kilo Code、Kimi Code、Grok CLI、Antigravity CLI、Cursor CLI。
+        接法看那家 CLI 自己提供什麼介面——啟動參數（Claude Code、Codex、Copilot、Qwen）、
+        一個帶著整份設定的環境變數（OpenCode、Kilo），或一份只給這個 pane 用的設定目錄鏡像
+        （Kimi、Grok、Antigravity）。這三種都<strong>不會動到你自己的 MCP 設定檔</strong>。
+      </p>
+      <p class="mh-note">
+        <strong>Cursor 是唯一的例外</strong>：它只讀工作區裡的 <code>.cursor/mcp.json</code>，
+        所以 Navide 會合併寫入那個檔，並把它加進 <code>.git/info/exclude</code>，不會弄髒
+        你的 git 狀態。
+      </p>
+      <p class="mh-note">
+        還沒接上的是 <strong>Aider、Muse Code、Pi</strong>（這三家的 CLI 沒有 MCP 介面）
+        與 <strong>Droid</strong>（Navide 尚未接）。這些 pane 仍然可以用裸行輸出協定跟其他
+        pane 傳訊，只是沒有 MCP 工具可以呼叫。
       </p>
       <p class="mh-note">
         接線是 <strong>pane 啟動當下</strong>做的。所以功能更新後，已經開著的 pane
@@ -286,8 +297,8 @@ const comparison: CompareRow[] = [
           <tbody>
             <tr>
               <td>agent 說它沒有計畫或傳訊的工具</td>
-              <td>那個 pane 開啟時還沒接上（功能更新前開的），或用的 CLI 不是 Claude Code／Codex。
-                  前者關掉重開即可。</td>
+              <td>那個 pane 開啟時還沒接上（功能更新前開的），或用的 CLI 屬於尚未接上 MCP 的四家
+                  （Aider／Droid／Muse Code／Pi）。前者關掉重開即可；後者請改用裸行輸出協定傳訊。</td>
             </tr>
             <tr>
               <td>設定 → MCP 加了 server，但 agent 用不到</td>
