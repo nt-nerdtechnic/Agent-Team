@@ -89,9 +89,17 @@ describe('closing a family in place', () => {
 })
 
 describe('what a card shows', () => {
-  it('spells out ancestry instead of indenting it', () => {
-    expect(appSource).toContain('class="pane-list-src"')
-    expect(appSource).toContain('↳ {{ paneListTrail(p.ancestors) }}')
+  it('marks a nested card and keeps the trail on hover', () => {
+    expect(appSource).toContain('class="pane-list-src-mark"')
+    expect(appSource).toContain(':title="paneListTrail(p.ancestors)"')
+  })
+
+  it('indents a nested card by a small, capped amount', () => {
+    // These lists are narrow: past three levels the indent would cost more
+    // width than the ancestry is worth showing.
+    const body = bodyOf('function paneListIndent(depth: number): string {')
+    expect(body).toContain('Math.min(depth, 3) * 8')
+    expect(appSource).toContain(':style="{ marginLeft: paneListIndent(p.ancestors.length) }"')
   })
 
   it('gives the open/close control its own click target', () => {

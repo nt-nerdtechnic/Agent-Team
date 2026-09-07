@@ -8,7 +8,10 @@ dependencies = [
     "chardet>=7.4.3",
     "fastapi>=0.115",
     "mammoth>=1.12.0",
-    "mcp>=1.27.1",
+    # Pinned below 2.0: 1.28.1 carries the PYSEC-2026-3481/3482/3483 fixes,
+    # while 2.x is a breaking FastMCP rewrite that mcp_server/server.py has not
+    # been migrated to.
+    "mcp>=1.28.1,<2",
     "openpyxl>=3.1.5",
     "pyyaml>=6.0",
     "send2trash>=2.1.0",

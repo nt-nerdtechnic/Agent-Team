@@ -1,4 +1,5 @@
 export {
+  flushSettingsOnExit,
   initSettingsBackend,
   migrateLegacyLocalStorage,
   onSettingsChanged,

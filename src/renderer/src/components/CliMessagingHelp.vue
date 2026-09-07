@@ -24,30 +24,40 @@ interface TroubleRow {
 interface CoverageRow {
   cli: string
   send: string
-  sendKind: 'both' | 'protocol' | 'mcp' | 'none'
 }
 
-// Sending needs one of the two routes. The MCP tools are wired for the CLIs
-// that take MCP config from a spawn-time flag or an environment variable; the
-// output protocol needs Navide to read the agent's turn text, which needs the
-// vendor's log to expose the reply in the first place. Antigravity and Cursor
-// keep theirs in undocumented protobuf blobs and offer no way to point them at
-// an MCP server without editing the user's own config file, so neither route
-// is open. Receiving is unaffected throughout — that is text injected into the
+// Sending needs one of the two routes, and every vendor has at least one.
+//
+// The output protocol needs Navide to read the agent's turn text: all 14
+// readers now put the reply on `turn_complete` as `text=`, and the parser
+// (agentMessaging.ts) is vendor-agnostic — App.vue hands it `ev.text` with no
+// vendor check — so the protocol route is open everywhere.
+//
+// The MCP tools are wired at spawn for the 10 vendors whose CLI offers a way
+// in: a launch flag (Claude Code, Codex, Copilot, Qwen), one env var carrying
+// the whole config document (OpenCode, Kilo), or a per-pane mirror of the
+// config directory (Kimi, Grok, Antigravity). Cursor is the exception that
+// only reads a workspace file, so its wiring writes `.cursor/mcp.json` (and
+// excludes it from git). Aider, Muse and Pi have no MCP surface at all
+// (base.py says so outright); Droid is simply not wired yet.
+//
+// Receiving is unaffected throughout — that is text injected into the
 // terminal, and it works for every CLI.
 const coverage: CoverageRow[] = [
-  { cli: 'Claude Code', send: 'MCP 工具 ＋ 輸出協定', sendKind: 'both' },
-  { cli: 'Codex', send: 'MCP 工具 ＋ 輸出協定', sendKind: 'both' },
-  { cli: 'Copilot CLI', send: 'MCP 工具 ＋ 輸出協定', sendKind: 'both' },
-  { cli: 'OpenCode', send: '僅 MCP 工具', sendKind: 'mcp' },
-  { cli: 'Kilo Code', send: '僅 MCP 工具', sendKind: 'mcp' },
-  { cli: 'Aider', send: '僅輸出協定', sendKind: 'protocol' },
-  { cli: 'Kimi Code', send: '僅輸出協定', sendKind: 'protocol' },
-  { cli: 'Qwen Code', send: '僅輸出協定', sendKind: 'protocol' },
-  { cli: 'Grok CLI', send: '僅輸出協定', sendKind: 'protocol' },
-  { cli: 'Pi', send: '僅輸出協定', sendKind: 'protocol' },
-  { cli: 'Antigravity CLI', send: '目前不支援', sendKind: 'none' },
-  { cli: 'Cursor CLI', send: '目前不支援', sendKind: 'none' },
+  { cli: 'Claude Code', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'Codex', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'Copilot CLI', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'Qwen Code', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'OpenCode', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'Kilo Code', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'Kimi Code', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'Grok CLI', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'Antigravity CLI', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'Cursor CLI', send: 'MCP 工具 ＋ 輸出協定' },
+  { cli: 'Aider', send: '僅輸出協定' },
+  { cli: 'Droid', send: '僅輸出協定' },
+  { cli: 'Muse Code', send: '僅輸出協定' },
+  { cli: 'Pi', send: '僅輸出協定' },
 ]
 
 const addressing: AddressRow[] = [
@@ -99,8 +109,8 @@ const guards: GuardRow[] = [
 const troubleshooting: TroubleRow[] = [
   {
     symptom: 'agent 說它沒有傳訊的工具',
-    cause: '那個 pane 是在功能上線前開的（MCP 工具是 pane 啟動當下接上去的），或那個 CLI 本來就不支援',
-    fix: '先對照下方「哪些 CLI 送得出訊息」；若該 CLI 支援，關掉那個 pane 重開',
+    cause: '那個 pane 是在功能上線前開的（MCP 工具是 pane 啟動當下接上去的），或那家 CLI 不在接上 MCP 的十家之列',
+    fix: '關掉那個 pane 重開；若那家 CLI 本來就沒接 MCP（Aider／Droid／Muse Code／Pi），改請它用 ---MSG--- 輸出協定',
   },
   {
     symptom: '提示 pane id 已失效（stale）',
@@ -194,7 +204,8 @@ const troubleshooting: TroubleRow[] = [
           </li>
         </ul>
         <p class="cmh-note">
-          目前只有 <strong>Claude Code</strong> 與 <strong>Codex</strong> 接上了這組工具。
+          十四家裡有 <strong>十家</strong>接上了這組工具（見下一節的表）。沒接上的是
+          Aider、Droid、Muse Code、Pi，它們改走下面的輸出協定。
         </p>
       </div>
 
@@ -208,8 +219,9 @@ const troubleshooting: TroubleRow[] = [
 幫我跑一下 pnpm test:run，把失敗清單回報給我
 ---MSG-END---</pre>
         <p class="cmh-note">
-          to: 必須與 ---MSG-START--- 寫在同一行——換到下一行整個區塊就會失效，而且不會有任何錯誤提示。
-          三行都要頂格、不可縮排，也不可以放在 markdown 的程式碼區塊裡，否則不會被辨識。
+          to: 可以跟 ---MSG-START--- 寫在同一行，也可以單獨寫在它<strong>正下方那一行</strong>；
+          再往下的 to: 就會被當成內容。---MSG-START--- 與 ---MSG-END--- 這兩行必須頂格、不可縮排，
+          也不可以放在 markdown 的程式碼區塊裡，否則不會被辨識，而且不會有任何錯誤提示。
           流程的 slot 在開場時就會被告知這個協定；手動開的 pane 不會，
           但你可以把上面這段直接貼給它——前提是那個 CLI 在下表裡支援輸出協定。
         </p>
@@ -221,7 +233,7 @@ const troubleshooting: TroubleRow[] = [
       <h2 class="cmh-h2">哪些 CLI 送得出訊息</h2>
       <p class="cmh-p">
         <strong>所有 CLI pane 都收得到訊息</strong>——那是 Navide 直接把文字打進終端機，跟 CLI 種類無關。
-        受限的是<strong>主動送出</strong>：
+        <strong>主動送出也是十四家都可以</strong>，差別只在它手上有哪條路：
       </p>
       <div class="cmh-tablewrap">
         <table class="cmh-table">
@@ -231,17 +243,21 @@ const troubleshooting: TroubleRow[] = [
           <tbody>
             <tr v-for="row in coverage" :key="row.cli">
               <td>{{ row.cli }}</td>
-              <td :class="row.sendKind === 'none' ? 'cmh-unsupported' : 'cmh-supported'">
-                {{ row.send }}
-              </td>
+              <td class="cmh-supported">{{ row.send }}</td>
             </tr>
           </tbody>
         </table>
       </div>
       <p class="cmh-note">
-        為什麼有些不支援：輸出協定需要 Navide 讀得到那個 agent「講完一段話」以及它講了什麼。
-        這些資訊來自各家 CLI 自己的對話紀錄，而有幾家的紀錄是二進位格式讀不出文字、
-        或根本沒有「回合結束」這個訊號。這不是設定問題，目前無解。
+        <strong>十四家都送得出訊息</strong>，差別只在走哪條路。輸出協定每家都通——Navide
+        讀得到各家 agent「講完一段話」以及它講了什麼。MCP 工具則要那家 CLI 提供接入點
+        （啟動參數、一個帶整份設定的環境變數，或一份只給這個 pane 用的設定目錄鏡像），
+        Aider、Droid、Muse Code、Pi 目前沒有，所以它們只走輸出協定。
+      </p>
+      <p class="cmh-note">
+        兩個實務上的但書：<strong>Antigravity</strong> 在「agent 反問你」的那個回合送不出訊息
+        （那個回合不帶回覆文字），一般回答的回合正常；<strong>Qwen、Pi、Grok、Kimi</strong>
+        沒有明確的「回合結束」訊號，Navide 靠靜默推斷，所以送出時機會晚一些。
       </p>
     </section>
 
@@ -322,12 +338,15 @@ const troubleshooting: TroubleRow[] = [
       <ul class="cmh-list">
         <li>新 pane 的名稱就是它的位址，取角色名最好用。</li>
         <li>任務完成後，新 pane 會<strong>主動用訊息回報</strong>給開它的那個 agent。</li>
-        <li>被拒絕時會說明原因（名稱重複、CLI 名稱錯誤、或撞到下面的上限）。</li>
+        <li>
+          被拒絕的原因<strong>只跟寫錯有關</strong>：CLI 名稱不存在、名稱重複或不合法、
+          任務空白、指定了那家 CLI 無法接受的模型或思考強度。
+        </li>
       </ul>
       <div class="cmh-tablewrap">
         <table class="cmh-table">
           <thead>
-            <tr><th>上限</th><th>數值</th></tr>
+            <tr><th>建議值</th><th>數值</th></tr>
           </thead>
           <tbody>
             <tr><td>一個 pane 最多開幾個子 pane</td><td class="cmh-nowrap">3</td></tr>
@@ -337,8 +356,9 @@ const troubleshooting: TroubleRow[] = [
         </table>
       </div>
       <p class="cmh-note">
-        這些上限是為了避免 agent 遞迴開下去把機器塞爆。流程（pipeline）的 pane 也可以用
-        <code>---SPAWN---</code> 區塊做同一件事，走的是同一套上限。
+        這些是<strong>建議值，不是上限</strong>——超過不會擋下來，只會在回覆裡附一則提醒，
+        讓 agent 轉達或記錄，用意是提醒它別遞迴開下去把機器塞爆。流程（pipeline）的 pane
+        也可以用 <code>---SPAWN---</code> 區塊做同一件事，走的是同一套建議值。
       </p>
     </section>
 
@@ -549,7 +569,6 @@ const troubleshooting: TroubleRow[] = [
 .cmh-table tr:last-child td { border-bottom: none; }
 .cmh-nowrap { white-space: nowrap; }
 .cmh-supported { color: var(--text-primary); }
-.cmh-unsupported { color: var(--text-secondary); }
 
 .cmh code {
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;

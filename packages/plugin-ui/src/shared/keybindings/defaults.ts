@@ -113,6 +113,19 @@ export const defaults: KeybindingRule[] = [
   { key: 'cmd+=',       command: 'editor.action.fontZoomIn',    when: 'editorOpen' },
   { key: 'cmd+-',       command: 'editor.action.fontZoomOut',   when: 'editorOpen' },
   { key: 'cmd+0',       command: 'editor.action.fontZoomReset', when: 'editorOpen' },
+  // Interface zoom — the whole app chrome, not one font. It shares the zoom
+  // chords above with Shift added, which is free: the matcher compares Shift
+  // exactly, so ⌘= (editor font) and ⌘⇧= never resolve to each other.
+  // macOS US reports ⌘⇧= as '+' and ⌘⇧- as '_', and only '/', digits and
+  // alt+letter have physical-key fallbacks, so these two specs name the
+  // character the keyboard actually emits — same reason as cmd+shift+| above.
+  // No `when`: the main, editor and plans windows all register the handlers
+  // (one factor scales them together), and the Git plugin view deliberately
+  // does not — its preload has no bridge to main, so an unregistered binding
+  // there is simply not consumed and falls through untouched.
+  { key: 'cmd+shift++', command: 'workbench.action.zoomUiIn' },
+  { key: 'cmd+shift+_', command: 'workbench.action.zoomUiOut' },
+  { key: 'cmd+shift+0', command: 'workbench.action.zoomUiReset' },
   { key: 'f3',          command: 'editor.action.nextMatch',          when: 'findOpen' },
   { key: 'shift+f3',    command: 'editor.action.prevMatch',          when: 'findOpen' },
 

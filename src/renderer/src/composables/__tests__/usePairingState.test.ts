@@ -34,14 +34,63 @@ afterEach(() => {
 })
 
 describe('usePairingState', () => {
-  it('prompts only for the side that has something to decide', async () => {
-    // Interrupting the initiator with a prompt about their own request would be
-    // telling somebody what they just did.
+  it('prompts both ends, because both of them have something to decide', async () => {
+    // It served the responder alone, back when the initiator did not confirm at
+    // all. Both confirm now — the six digits are the only part of the exchange
+    // a relay cannot produce, so somebody compares them at each end — and the
+    // reason the responder needed a popup applies unchanged to the initiator:
+    // the account window may be closed while the one button that finishes the
+    // exchange waits inside it.
     const state = usePairingState(asBackend(backendReturning({ pairings: [RESPONDER, INITIATOR] })))
     await state.refresh()
 
     expect(state.pairings.value.map((r) => r.deviceId)).toEqual(['dev-asking', 'dev-asked'])
-    expect(state.prompts.value.map((r) => r.deviceId)).toEqual(['dev-asking'])
+    expect(state.prompts.value.map((r) => r.deviceId)).toEqual(['dev-asking', 'dev-asked'])
+  })
+
+  it('acknowledges a press before anything has been sent', async () => {
+    // "Pair" produced nothing until the far machine answered — seconds of a
+    // button that has visibly done nothing. The snapshot is polled, so even the
+    // local record of "we asked" is up to a poll away.
+    const state = usePairingState(asBackend(backendReturning({ pairings: [] })))
+
+    state.noteAsked('dev-new', 'M5')
+
+    expect(state.asked.value).toEqual([{ deviceId: 'dev-new', deviceName: 'M5', error: '' }])
+  })
+
+  it('hands the request over to the snapshot the moment it is real', async () => {
+    // Two cards for one exchange would be the snapshot and the optimistic note
+    // disagreeing about the same thing.
+    const state = usePairingState(
+      asBackend(backendReturning({ pairings: [{ ...RESPONDER, deviceId: 'dev-new' }] })),
+    )
+    state.noteAsked('dev-new', 'M5')
+    await state.refresh()
+
+    expect(state.asked.value).toEqual([])
+    expect(state.prompts.value.map((r) => r.deviceId)).toEqual(['dev-new'])
+  })
+
+  it('says a failed send failed, rather than going quiet', async () => {
+    const state = usePairingState(asBackend(backendReturning({ pairings: [] })))
+    state.noteAsked('dev-new', 'M5')
+
+    state.noteAskFailed('dev-new', 'that device is offline')
+
+    expect(state.asked.value[0].error).toBe('that device is offline')
+    // And it stays on screen: clearing it would return to the silence this
+    // replaced, with the failure only in a panel nobody has open.
+    expect(state.asked.value).toHaveLength(1)
+  })
+
+  it('forgets a press that was given up on', async () => {
+    const state = usePairingState(asBackend(backendReturning({ pairings: [] })))
+    state.noteAsked('dev-new', 'M5')
+
+    state.forgetAsked('dev-new')
+
+    expect(state.asked.value).toEqual([])
   })
 
   it('keeps a dismissed request out of the prompt and in the list', async () => {
@@ -184,5 +233,61 @@ describe('usePairingState', () => {
     await same.refresh()
 
     expect(state.pairings.value).toHaveLength(1)
+  })
+})
+
+describe('a read that did not come back', () => {
+  // Kept apart from anything about the link on purpose: they are different
+  // facts, and the account window used to report one as the other.
+  it('keeps the last picture, and says it is not current', async () => {
+    const fake = backendReturning({ pairings: [RESPONDER] })
+    const state = usePairingState(asBackend(fake))
+    await state.refresh()
+    expect(state.readFailed.value).toBe(false)
+
+    fake.send.mockRejectedValueOnce(new Error('ws not open'))
+    await state.refresh()
+
+    expect(state.readFailed.value).toBe(true)
+    // Still there. An emptied list would assert those machines had gone.
+    expect(state.pairings.value.map((r) => r.deviceId)).toEqual(['dev-asking'])
+  })
+
+  it('counts a refusal, not only a thrown request', async () => {
+    // A handler that answers `ok: false` is the case that produced this: the
+    // read failed while the socket was fine.
+    const fake = { send: vi.fn().mockResolvedValue({ ok: false, error: { code: 'INTERNAL' } }) }
+    const state = usePairingState(asBackend(fake))
+
+    await state.refresh()
+
+    expect(state.readFailed.value).toBe(true)
+  })
+
+  it('does not count a machine with no server configured', async () => {
+    // Nothing failed there — there is nothing to read, and the window says so
+    // in its own words.
+    const fake = {
+      send: vi.fn().mockResolvedValue({ ok: false, error: { code: 'P2P_NOT_CONFIGURED' } }),
+    }
+    const state = usePairingState(asBackend(fake))
+
+    await state.refresh()
+
+    expect(state.readFailed.value).toBe(false)
+    expect(state.unavailable.value).toBe(true)
+  })
+
+  it('clears with the picture on sign-out', async () => {
+    const fake = backendReturning({ pairings: [RESPONDER] })
+    const state = usePairingState(asBackend(fake))
+    fake.send.mockRejectedValueOnce(new Error('ws not open'))
+    await state.refresh()
+    expect(state.readFailed.value).toBe(true)
+
+    state.clear()
+
+    // Nothing is on screen to be out of date.
+    expect(state.readFailed.value).toBe(false)
   })
 })

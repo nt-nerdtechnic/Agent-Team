@@ -1200,6 +1200,17 @@ const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributio
   `${entry.contributionKey}\u0000${entry.icon ?? ''}`
 const hasPluginIcon = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): boolean =>
   Boolean(entry.icon) && !failedPluginIcons.value.has(pluginIconFailureKey(entry))
+/** Single-colour artwork is painted with CSS rather than shown as an image:
+ *  the icon becomes a mask over `currentColor`, so it follows the tab's text
+ *  colour like the built-in SVG icons instead of keeping the shade the plugin
+ *  author baked in (one drawn for a dark theme is invisible on a light one).
+ *  Colour artwork stays an <img> — a mask would flatten it to one tone. */
+const isMonoPluginIcon = (
+  entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon' | 'iconMonochrome'>
+): boolean => hasPluginIcon(entry) && entry.iconMonochrome === true
+const pluginIconMask = (
+  entry: Pick<PluginRegionContribution, 'icon'>
+): Record<string, string> => ({ '--plugin-icon': `url("${entry.icon}")` })
 function markPluginIconFailed(entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): void {
   const failures = new Set(failedPluginIcons.value)
   failures.add(pluginIconFailureKey(entry))
@@ -2223,8 +2234,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         :title="$t('layout.expand')"
         @click="selectSidebarTab(t.id)"
       >
+        <span
+          v-if="t.id === 'git' && gitPluginTab && isMonoPluginIcon(gitPluginTab)"
+          class="plugin-tab-icon plugin-tab-icon--mono"
+          :style="pluginIconMask(gitPluginTab)"
+          aria-hidden="true"
+        ></span>
         <img
-          v-if="t.id === 'git' && gitPluginTab && hasPluginIcon(gitPluginTab)"
+          v-else-if="t.id === 'git' && gitPluginTab && hasPluginIcon(gitPluginTab)"
           class="plugin-tab-icon"
           :src="gitPluginTab.icon ?? ''"
           width="15"
@@ -2246,8 +2263,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         :title="pluginTab.title"
         @click="selectSidebarTab(pluginTab.tabId)"
       >
+        <span
+          v-if="isMonoPluginIcon(pluginTab)"
+          class="plugin-tab-icon plugin-tab-icon--mono"
+          :style="pluginIconMask(pluginTab)"
+          aria-hidden="true"
+        ></span>
         <img
-          v-if="hasPluginIcon(pluginTab)"
+          v-else-if="hasPluginIcon(pluginTab)"
           class="plugin-tab-icon"
           :src="pluginTab.icon ?? ''"
           width="15"
@@ -2276,8 +2299,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         @click="selectSidebarTab(t.id)"
       >
         <template v-if="t.id === 'git' && !legacyGitRecovery && gitPluginTab">
+          <span
+            v-if="isMonoPluginIcon(gitPluginTab)"
+            class="plugin-tab-icon plugin-tab-icon--mono"
+            :style="pluginIconMask(gitPluginTab)"
+            aria-hidden="true"
+          ></span>
           <img
-            v-if="hasPluginIcon(gitPluginTab)"
+            v-else-if="hasPluginIcon(gitPluginTab)"
             class="plugin-tab-icon"
             :src="gitPluginTab.icon ?? ''"
             width="15"
@@ -2298,8 +2327,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         :title="pluginTab.title"
         @click="selectSidebarTab(pluginTab.tabId)"
       >
+        <span
+          v-if="isMonoPluginIcon(pluginTab)"
+          class="plugin-tab-icon plugin-tab-icon--mono"
+          :style="pluginIconMask(pluginTab)"
+          aria-hidden="true"
+        ></span>
         <img
-          v-if="hasPluginIcon(pluginTab)"
+          v-else-if="hasPluginIcon(pluginTab)"
           class="plugin-tab-icon"
           :src="pluginTab.icon ?? ''"
           width="15"
@@ -3313,6 +3348,21 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   height: 15px;
   object-fit: contain;
 }
+/* Silhouette artwork: the icon is the mask and the button's own text colour is
+   the ink, so it tracks :hover and .active like the built-in SVG icons.
+   The artwork arrives as a per-plugin data URL in the --plugin-icon custom
+   property, set inline on the element. */
+.plugin-tab-icon--mono {
+  background-color: currentColor;
+  -webkit-mask-image: var(--plugin-icon);
+  mask-image: var(--plugin-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
 .tab-spacer { flex: 1; }
 /* Not a .tab-btn: that class means "a sidebar tab", and both the shortcut
    handling and its tests index the strip by position. */
@@ -3416,12 +3466,17 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   border: 1px solid var(--bg-base);
 }
 .legacy-recovery-label {
-  padding: 5px 10px;
+  align-self: flex-start;
+  flex: none;
+  margin: 4px 0 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
   color: var(--attention-fg);
   background: var(--bg-muted);
-  border-bottom: 1px solid var(--border-muted);
-  font-size: 11px;
+  border: 1px solid var(--border-muted);
+  font-size: 10px;
   font-weight: 600;
+  line-height: 15px;
 }
 .dot {
   width: 8px;
@@ -4026,8 +4081,8 @@ button.icon-btn.muted:hover {
   color: var(--danger-fg);
 }
 .resume-state[data-state='completed'] {
-  background: var(--accent-muted);
-  color: var(--accent-bright);
+  background: var(--accent-subtle);
+  color: var(--accent-fg);
 }
 .resume-meta {
   font-size: var(--font-3xs);
@@ -4824,7 +4879,7 @@ button.icon-btn.muted:hover {
   background: var(--border-default);
 }
 .ws-grp[data-state='active'] .ws-grp-key { background: var(--success-fg); }
-.ws-grp[data-state='idle'] .ws-grp-key { background: var(--attention-emphasis); }
+.ws-grp[data-state='idle'] .ws-grp-key { background: var(--status-idle-emphasis); }
 .ws-grp-name {
   min-width: 0;
   overflow: hidden;
@@ -4906,7 +4961,7 @@ button.icon-btn.muted:hover {
 }
 .agent-item.expanded.pipeline {
   border-color: var(--accent-muted);
-  background: linear-gradient(180deg, var(--accent-subtle) 0%, var(--bg-subtle) 100%);
+  background: var(--accent-subtle);
 }
 .agent-item.expanded.manager {
   border-color: var(--attention-muted);
@@ -4950,7 +5005,7 @@ button.icon-btn.muted:hover {
   overflow: hidden;
 }
 .role-line {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   color: var(--accent-bright);
   margin-bottom: 3px;
   padding-left: 2px;
@@ -4983,7 +5038,7 @@ button.icon-btn.muted:hover {
   animation: agent-dot-pulse 0.9s ease-in-out infinite;
 }
 .status-dot[data-state='idle'] {
-  background: var(--status-badge-fg, var(--attention-fg));
+  background: var(--status-badge-fg, var(--status-idle-fg));
 }
 /* The CLI asked something and is parked on the answer. It pulses like running
    rather than sitting flat like idle: this is the one state where nothing at
@@ -5054,6 +5109,7 @@ button.icon-btn.muted:hover {
   flex-shrink: 0;
 }
 .agent-line:hover .agent-line-actions,
+.agent-line:focus-within .agent-line-actions,
 .agent-item.expanded .agent-line-actions {
   display: inline-flex;
 }
@@ -5090,7 +5146,7 @@ button.icon-btn.muted:hover {
 .agent-item.expanded > .row.tight button {
   font-size: var(--font-2xs);
   padding: 4px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .agent-item.expanded > .row.tight button.danger {
   background: transparent;
@@ -5113,6 +5169,7 @@ button.icon-btn.muted:hover {
 }
 .agent-minimize-btn,
 .agent-close-btn {
+  box-sizing: border-box;
   margin-left: 4px;
   padding: 0 4px;
   font-size: var(--font-2xs);
@@ -5126,8 +5183,15 @@ button.icon-btn.muted:hover {
   color: var(--text-primary);
   background: var(--bg-muted);
 }
+.agent-minimize-btn:focus-visible,
+.agent-close-btn:focus-visible,
+.agent-rebuild-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
 .agent-rebuild-btn {
   flex: 0 0 auto;
+  box-sizing: border-box;
   width: var(--icon-btn-sm);
   height: var(--icon-btn-sm);
   padding: 2px;
@@ -5158,10 +5222,10 @@ button.icon-btn.muted:hover {
   margin-bottom: 6px;
 }
 .pipe-tag {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   font-weight: 700;
-  background: var(--accent-muted);
-  color: var(--accent-bright);
+  background: var(--accent-subtle);
+  color: var(--accent-fg);
   padding: 1px 5px;
   border-radius: var(--radius-xs);
 }
@@ -5194,8 +5258,8 @@ button.icon-btn.muted:hover {
   color: var(--text-primary);
 }
 .badge.role {
-  background: var(--accent-muted);
-  color: var(--accent-bright);
+  background: var(--accent-subtle);
+  color: var(--accent-fg);
 }
 /* Auto-name marker — same treatment as the pane header's. */
 .auto-name-mark {
@@ -5220,7 +5284,7 @@ button.icon-btn.muted:hover {
   padding: 0;
 }
 .manager-inline {
-  font-size: 9px;
+  font-size: var(--font-3xs);
   font-weight: 600;
   color: var(--attention-fg);
   background: var(--attention-subtle);
@@ -5235,7 +5299,7 @@ button.icon-btn.muted:hover {
    --status-badge-bg/-fg inline and win the var() fallback. */
 .state {
   margin-left: auto;
-  font-size: 9px;
+  font-size: var(--font-3xs);
   text-transform: uppercase;
   padding: 2px 6px;
   border-radius: 999px;
@@ -5251,8 +5315,8 @@ button.icon-btn.muted:hover {
   color: var(--status-badge-fg, var(--status-starting-fg));
 }
 .state[data-state='idle'] {
-  background: var(--status-badge-bg, var(--attention-muted));
-  color: var(--status-badge-fg, var(--attention-fg));
+  background: var(--status-badge-bg, var(--status-idle-muted));
+  color: var(--status-badge-fg, var(--status-idle-fg));
 }
 .state[data-state='awaiting'] {
   background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent));
@@ -5311,7 +5375,7 @@ button.icon-btn.muted:hover {
   flex: 1;
   min-width: 0;
   background: var(--bg-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 3px 6px;
   font-size: var(--font-3xs);
   color: var(--text-secondary);

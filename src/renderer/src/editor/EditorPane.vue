@@ -1373,24 +1373,25 @@ defineExpose({
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   font-size: var(--font-xs);
   background: var(--bg-base);
   border: 1px solid var(--border-muted);
 }
-.ep-tab.active { border-color: var(--accent-emphasis); }
+.ep-tab.active { border-color: var(--accent-emphasis); color: var(--text-bright); background: var(--bg-elevated); }
 .ep-dirty { color: var(--attention-fg); font-size: var(--font-3xs); }
 .ep-spacer { flex: 1; }
 .ep-act {
   font-size: 11.5px;
   padding: 4px 10px;
   border: 1px solid var(--border-default);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
 }
 .ep-act:hover:not(:disabled) { background: var(--bg-muted); color: var(--text-bright); }
+.ep-act:focus-visible, .ep-retry:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 1px; }
 .ep-act:disabled { opacity: 0.5; cursor: default; }
 .ep-act.primary { background: var(--accent-emphasis); border-color: var(--accent-emphasis); color: var(--text-on-emphasis); }
 .ep-act.success { background: var(--success-emphasis); border-color: var(--success-strong); color: var(--text-on-emphasis); }
@@ -1402,7 +1403,7 @@ defineExpose({
   font-size: 11.5px;
   padding: 4px 10px;
   border: 1px solid var(--border-default);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -1412,7 +1413,7 @@ defineExpose({
 /* Binary / image file preview */
 .ep-binary { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; background: var(--bg-subtle); }
 .ep-binary-img-wrap { max-width: 100%; max-height: 100%; padding: 24px; }
-.ep-binary-img { max-width: 100%; max-height: 70vh; object-fit: contain; border-radius: 4px; box-shadow: 0 2px 16px rgba(0,0,0,.3); }
+.ep-binary-img { max-width: 100%; max-height: 70vh; object-fit: contain; border-radius: var(--radius-xs); box-shadow: 0 2px 16px rgba(0,0,0,.3); }
 .ep-binary-placeholder { text-align: center; padding: 48px 24px; color: var(--text-muted); }
 .ep-binary-icon { font-size: 40px; display: block; opacity: 0.3; margin-bottom: 12px; }
 .ep-binary-name { font-size: 15px; font-weight: 600; color: var(--text-secondary); margin: 0 0 6px; }
@@ -1438,7 +1439,7 @@ defineExpose({
   font-size: 12.5px;
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   outline: none;
 }
@@ -1517,7 +1518,7 @@ defineExpose({
   font-size: 12.5px;
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-primary);
   outline: none;
 }
@@ -1527,7 +1528,7 @@ defineExpose({
   font-size: var(--font-2xs);
   font-family: inherit;
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -1538,7 +1539,7 @@ defineExpose({
   padding: 3px 8px;
   font-size: var(--font-sm);
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -1584,7 +1585,7 @@ defineExpose({
   font-size: var(--font-sm);
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-primary);
   outline: none;
   text-align: center;
@@ -1600,7 +1601,7 @@ defineExpose({
   position: absolute;
   background: var(--bg-overlay);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   box-shadow: 0 4px 16px rgba(0,0,0,.28);
   padding: 4px 0;
   min-width: 160px;
@@ -1646,7 +1647,7 @@ defineExpose({
 .ep-indent-picker {
   position: absolute; bottom: calc(100% + 4px); right: 8px;
   background: var(--bg-overlay); border: 1px solid var(--border-default);
-  border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.28);
+  border-radius: var(--radius-sm); box-shadow: 0 4px 16px rgba(0,0,0,.28);
   padding: 4px 0; min-width: 140px; z-index: 300;
 }
 .ep-indent-header { padding: 4px 12px 2px; font-size: var(--font-3xs); opacity: 0.5; text-transform: uppercase; letter-spacing: .04em; }
@@ -1660,7 +1661,7 @@ defineExpose({
   display: flex; align-items: center; gap: 5px;
   padding: 4px 10px; font-size: var(--font-2xs); font-weight: 600;
   background: var(--accent-emphasis); color: var(--text-on-emphasis);
-  border: none; border-radius: 5px; cursor: pointer;
+  border: none; border-radius: var(--radius-sm); cursor: pointer;
   box-shadow: 0 2px 8px rgba(0,0,0,0.35);
   transform: translateX(-50%);
   pointer-events: all;

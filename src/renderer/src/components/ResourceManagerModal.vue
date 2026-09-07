@@ -469,7 +469,7 @@ async function scanDisk(): Promise<void> {
 .rm-overlay {
   position: fixed;
   inset: 0;
-  z-index: 8000;
+  z-index: calc(var(--z-modal) + 120);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -631,7 +631,7 @@ async function scanDisk(): Promise<void> {
 .rm-row[data-status='running'] .rm-dot { background: var(--success-fg); }
 .rm-row[data-status='disconnected'] .rm-dot {
   background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--attention-fg);
+  box-shadow: inset 0 0 0 1.5px var(--text-bright);
 }
 .rm-name {
   min-width: 0;

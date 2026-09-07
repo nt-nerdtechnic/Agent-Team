@@ -126,7 +126,9 @@ from ..log_readers.base import (
     IncrementalParseResult,
     LogReader,
     TokenUsage,
+    activity_high_water,
     read_jsonl_tail,
+    set_activity_high_water,
     user_prompt_text,
 )
 
@@ -138,6 +140,21 @@ log = logging.getLogger("agent_team_backend.log_readers.copilot")
 # in different poll batches still delivers the text on turn_complete.
 _CUM_PREFIX = "__cum__:"
 _TEXT_PREFIX = "__lasttext__:"
+
+# Store-activity watermarks, one per source table, replacing the
+# `db_act:usage:<id>` / `db_act:turn:<id>` key this reader used to leave in
+# seen_keys per row. Those grew without bound in a store that holds EVERY
+# session, pushing the bag past the watcher's _ACTIVITY_KEYS_PERSIST_LIMIT — so
+# it was never written to the durable "@activity" checkpoint and Copilot
+# replayed its whole history on every backend start (GitHub #28).
+#
+# One mark per table is enough, and it is GLOBAL rather than per-session:
+# `turns.id` and `assistant_usage_events.id` are both INTEGER PRIMARY KEY
+# AUTOINCREMENT, so they ascend across every session in the store and are never
+# reused after a delete. (`turn_index` is the per-session counter, and a single
+# mark over THAT would swallow every row of a younger session.)
+_DB_USAGE_HW_PREFIX = "db_act_hw::usage:"
+_DB_TURN_HW_PREFIX = "db_act_hw::turn:"
 
 #: 1.0.78+ central session store, directly under the root.
 _DB_NAME = "session-store.db"
@@ -253,6 +270,26 @@ def _write_last_text(seen_keys: set[str], text: str) -> None:
     for k in [k for k in seen_keys if k.startswith(_TEXT_PREFIX)]:
         seen_keys.discard(k)
     seen_keys.add(f"{_TEXT_PREFIX}{text}")
+
+
+def _read_mark(seen_keys: set[str], prefix: str) -> int | None:
+    """The integer sentinel stored under `prefix`, or None when never set.
+
+    None and 0 are NOT the same: 0 is a table that has been walked and held
+    nothing, None is a table no pass has looked at yet.
+    """
+    for k in seen_keys:
+        if k.startswith(prefix):
+            try:
+                return int(k[len(prefix):])
+            except ValueError:
+                return None
+    return None
+
+
+def _write_mark(seen_keys: set[str], prefix: str, value: int) -> None:
+    seen_keys.difference_update({k for k in seen_keys if k.startswith(prefix)})
+    seen_keys.add(f"{prefix}{int(value)}")
 
 
 def _metrics_totals(data: dict) -> tuple[int, int] | None:
@@ -505,28 +542,47 @@ class CopilotLogReader(LogReader):
         Consequence of the store's design: user text and turn boundaries are
         one turn late compared with the 1.0.75 events.jsonl path, which saw
         user.message the moment it was typed.
+
+        Both tables are read from a watermark rather than scanned whole, so a
+        restart resumes instead of replaying — see _DB_USAGE_HW_PREFIX.
         """
         out: list[ActivityEvent] = []
 
-        usage_rows = self._query(path, _USAGE_SQL)
+        usage_mark = self._db_watermark(
+            path, seen_keys, _DB_USAGE_HW_PREFIX,
+            "SELECT COALESCE(MAX(id), 0) FROM assistant_usage_events",
+        )
+        usage_rows = self._query(
+            path,
+            _USAGE_SQL.replace("ORDER BY a.id", "WHERE a.id > ? ORDER BY a.id"),
+            (usage_mark,),
+        )
+        next_usage = usage_mark
         for row in usage_rows or []:
             key = f"db_act:usage:{row[0]}"
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
+            next_usage = max(next_usage, int(row[0]))
             out.append(ActivityEvent(
                 vendor="copilot", event_type="agent_active",
                 cwd=str(row[6] or ""), session_id=str(row[1] or ""),
                 file_path=str(path), dedup_key=key,
                 timestamp=str(row[5] or ""), detail="assistant",
             ))
+        if usage_rows is not None:
+            _write_mark(seen_keys, _DB_USAGE_HW_PREFIX, next_usage)
 
-        turn_rows = self._query(path, _TURNS_SQL)
+        turn_mark = self._db_watermark(
+            path, seen_keys, _DB_TURN_HW_PREFIX,
+            "SELECT COALESCE(MAX(id), 0) FROM turns",
+        )
+        turn_rows = self._query(
+            path,
+            _TURNS_SQL.replace("ORDER BY t.id", "WHERE t.id > ? ORDER BY t.id"),
+            (turn_mark,),
+        )
+        next_turn = turn_mark
         for row_id, session_id, user_message, assistant_response, ts, cwd in turn_rows or []:
             key = f"db_act:turn:{row_id}"
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
+            next_turn = max(next_turn, int(row_id))
             sid = str(session_id or "")
             cwd = str(cwd or "")
             ts = str(ts or "")
@@ -542,7 +598,40 @@ class CopilotLogReader(LogReader):
                 dedup_key=f"db_turn:{row_id}", timestamp=ts, detail="turn_row",
                 text=str(assistant_response or ""),
             ))
+        if turn_rows is not None:
+            _write_mark(seen_keys, _DB_TURN_HW_PREFIX, next_turn)
         return out
+
+    def _db_watermark(
+        self, path: Path, seen_keys: set[str], prefix: str, max_sql: str
+    ) -> int:
+        """The id this table has been read up to, re-anchored if it shrank.
+
+        AUTOINCREMENT ids are never reused, so a delete cannot make the mark
+        skip a row — but the store being REPLACED restarts them at 1, and the
+        bag is keyed by path, so the replacement lands on the same bag with the
+        old mark still standing above every id the new store will hand out.
+
+        A shrink therefore re-anchors to 0, not to the new max: under restarted
+        ids nothing in the store has been delivered yet, and re-anchoring to
+        the max would skip whatever is already in it. The two errors are not
+        symmetric — a duplicate is absorbed downstream, because dedup_key is a
+        stable function of the row id, while a skipped row has no second
+        chance.
+        """
+        mark = _read_mark(seen_keys, prefix)
+        if mark is None:
+            return 0
+        mark = max(0, mark)
+        if not mark:
+            return 0
+        top = self._query(path, max_sql)
+        if top is None:
+            return mark
+        if int(top[0][0] or 0) < mark:
+            _write_mark(seen_keys, prefix, 0)
+            return 0
+        return mark
 
     def find_sessions_by_marker(
         self, markers: Iterable[str]
@@ -761,6 +850,18 @@ class CopilotLogReader(LogReader):
         """Emit `agent_active` for user/assistant messages and tool execution
         records, and `turn_complete` on assistant.turn_end — Copilot's
         explicit end-of-turn record — carrying the turn's last assistant text.
+
+        The walk is a dense ascending scan from line 1, so its progress is one
+        high-water mark rather than an `act:<line>` key per line: the per-line
+        keys pushed the bag past the watcher's _ACTIVITY_KEYS_PERSIST_LIMIT,
+        which meant it was never written to the durable "@activity" checkpoint
+        and this file replayed in full on every backend start (GitHub #28).
+
+        `activity_resumes_by_line` stays False all the same, so the watcher
+        does not seed a first-sight file to EOF for this reader. The flag is
+        per-READER and this one also serves session-store.db, whose bag is
+        keyed on db row ids; flipping it would have the watcher count newlines
+        in a SQLite file and drop a line number into a bag nothing consults.
         """
         if path.name == _DB_NAME:
             return self._parse_db_activity(path, seen_keys)
@@ -776,64 +877,76 @@ class CopilotLogReader(LogReader):
         except OSError:
             return out
 
-        with fh:
-            for line_no, raw in enumerate(fh, 1):
-                raw = raw.strip()
-                if not raw:
-                    continue
-                key = f"act:{line_no}"
-                if key in seen_keys:
-                    continue
-                try:
-                    rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    # Text iteration yields the partial trailing line of a
-                    # file mid-write; leave it unseen so the completed line is
-                    # parsed on a later poll (a permanently malformed line is
-                    # just re-attempted each poll — cheap).
-                    continue
-                seen_keys.add(key)
+        high_water = activity_high_water(seen_keys)
+        last_line = high_water
+        try:
+            with fh:
+                for line_no, raw_line in enumerate(fh, 1):
+                    raw = raw_line.strip()
+                    if not raw:
+                        continue
+                    if line_no <= high_water:
+                        continue
+                    key = f"act:{line_no}"
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        # An unterminated final line is still being written: leave
+                        # the mark behind it so the completed line is parsed on a
+                        # later poll. Advancing past it drops that line's events
+                        # for good, and when the lost line is assistant.turn_end
+                        # the pane stays "mid-turn" forever (GitHub #21).
+                        if not raw_line.endswith("\n"):
+                            break
+                        # A terminated line that will not parse never will. Step
+                        # over it rather than holding the mark behind it and
+                        # re-emitting the whole rest of the file on every poll.
+                        last_line = line_no
+                        continue
+                    last_line = line_no
 
-                rtype = str(rec.get("type") or "")
-                data = rec.get("data")
-                data = data if isinstance(data, dict) else {}
-                ts = str(rec.get("timestamp") or "")
-                if rtype == "user.message":
-                    # data.content holds the prompt verbatim; the frontend
-                    # names the pane from the first user text.
-                    out.append(ActivityEvent(
-                        vendor="copilot", event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail="user",
-                        text=user_prompt_text(str(data.get("content") or "")),
-                    ))
-                elif rtype == "assistant.message":
-                    text = str(data.get("content") or "")
-                    if text:
-                        last_text = text
+                    rtype = str(rec.get("type") or "")
+                    data = rec.get("data")
+                    data = data if isinstance(data, dict) else {}
+                    ts = str(rec.get("timestamp") or "")
+                    if rtype == "user.message":
+                        # data.content holds the prompt verbatim; the frontend
+                        # names the pane from the first user text.
+                        out.append(ActivityEvent(
+                            vendor="copilot", event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=key, timestamp=ts, detail="user",
+                            text=user_prompt_text(str(data.get("content") or "")),
+                        ))
+                    elif rtype == "assistant.message":
+                        text = str(data.get("content") or "")
+                        if text:
+                            last_text = text
+                            text_changed = True
+                        out.append(ActivityEvent(
+                            vendor="copilot", event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=key, timestamp=ts, detail="assistant",
+                        ))
+                    elif rtype.startswith("tool."):
+                        out.append(ActivityEvent(
+                            vendor="copilot", event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=key, timestamp=ts, detail=rtype,
+                        ))
+                    elif rtype == "assistant.turn_end":
+                        out.append(ActivityEvent(
+                            vendor="copilot", event_type="turn_complete",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=f"turn:{line_no}", timestamp=ts,
+                            detail="turn_end", text=last_text,
+                        ))
+                        # The turn consumed the text; reset so the next turn's
+                        # empty-text boundary can't reuse it.
+                        last_text = ""
                         text_changed = True
-                    out.append(ActivityEvent(
-                        vendor="copilot", event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail="assistant",
-                    ))
-                elif rtype.startswith("tool."):
-                    out.append(ActivityEvent(
-                        vendor="copilot", event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail=rtype,
-                    ))
-                elif rtype == "assistant.turn_end":
-                    out.append(ActivityEvent(
-                        vendor="copilot", event_type="turn_complete",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=f"turn:{line_no}", timestamp=ts,
-                        detail="turn_end", text=last_text,
-                    ))
-                    # The turn consumed the text; reset so the next turn's
-                    # empty-text boundary can't reuse it.
-                    last_text = ""
-                    text_changed = True
+        finally:
+            set_activity_high_water(seen_keys, last_line)
 
         if text_changed:
             _write_last_text(seen_keys, last_text)

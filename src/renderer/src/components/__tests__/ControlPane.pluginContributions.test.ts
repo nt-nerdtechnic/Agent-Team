@@ -115,6 +115,42 @@ describe('ControlPane manifest-driven plugin placement', () => {
     wrapper.unmount()
   })
 
+  it('paints single-colour artwork with the tab colour instead of showing it', () => {
+    // The shipped navide.git icon is one flat shade drawn for a dark theme; as
+    // an <img> it kept that shade and all but vanished on a light background.
+    // Masking it over currentColor makes it track the theme like the SVGs.
+    const wrapper = mountPane([
+      contribution({ icon: 'data:image/png;base64,mono-data', iconMonochrome: true }),
+    ])
+
+    const icon = wrapper.get('.plugin-tab-icon')
+    expect(icon.element.tagName).toBe('SPAN')
+    expect(icon.classes()).toContain('plugin-tab-icon--mono')
+    expect(icon.attributes('style')).toContain('data:image/png;base64,mono-data')
+    expect(wrapper.find('img.plugin-tab-icon').exists()).toBe(false)
+    expect(wrapper.find('.plugin-tab-fallback').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('still shows colour artwork as an image, which a mask would flatten', () => {
+    const wrapper = mountPane([
+      contribution({ icon: 'data:image/png;base64,colour-data', iconMonochrome: false }),
+    ])
+
+    const icon = wrapper.get('.plugin-tab-icon')
+    expect(icon.element.tagName).toBe('IMG')
+    expect(icon.classes()).not.toContain('plugin-tab-icon--mono')
+    wrapper.unmount()
+  })
+
+  it('falls back to the generic mark when a contribution is monochrome but iconless', () => {
+    const wrapper = mountPane([contribution({ icon: null, iconMonochrome: true })])
+
+    expect(wrapper.get('.plugin-tab-fallback').text()).toBe('◇')
+    expect(wrapper.find('.plugin-tab-icon').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('uses the generic fallback when a contribution has no icon', () => {
     const wrapper = mountPane([contribution()])
 

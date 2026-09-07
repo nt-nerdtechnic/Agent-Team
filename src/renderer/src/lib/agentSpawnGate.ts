@@ -8,7 +8,7 @@
 // advisory thresholds below still succeed; the caller just gets an
 // `advisories` note back to relay or log.
 
-import { modelArgsFor, type CliModelCapability } from '@navide/plugin-shell'
+import { modelArgsFor, type AgentKey, type CliModelCapability } from '@navide/plugin-shell'
 import { normalizeMessagingName, type ParsedSpawnRequest } from './agentMessaging'
 
 /** Advisory threshold for live child panes one pane has spawned — crossing it
@@ -118,6 +118,19 @@ function describeModelRefusal(
     `「${agentKey}」的 effort 只接受：${refusal.accepted.join('、')}，` +
     `收到的是「${effort}」`
   )
+}
+
+/** The same agent-key whitelist check evaluateSpawnRequest does, pulled out
+ *  so a caller that bypasses the rest of the gate (ui.pane.create) can still
+ *  refuse a key with no runtime representation — "terminal" included — before
+ *  it reaches spawnPane, instead of relying on a `as AgentKey` cast that does
+ *  nothing at runtime. Throws instead of returning a result because the only
+ *  caller already throws for its other validation failures. */
+export function assertAgentKeyAllowed(agent: unknown, validAgentKeys: readonly string[]): AgentKey {
+  if (typeof agent !== 'string' || !validAgentKeys.includes(agent)) {
+    throw new Error(`agent 欄位缺少或不合法：「${String(agent)}」不是可用的 agent key`)
+  }
+  return agent as AgentKey
 }
 
 /** Validate one spawn request against the whitelist, naming rules and

@@ -937,7 +937,7 @@ function buildAiContext(): string {
   background: var(--modal-backdrop);
   backdrop-filter: blur(var(--modal-backdrop-blur));
   -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
-  z-index: 8000;
+  z-index: calc(var(--z-modal) + 120);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1024,7 +1024,7 @@ function buildAiContext(): string {
   border-radius: 50%;
 }
 .dot.status-connected { background: var(--success-fg); }
-.dot.status-starting { background: var(--attention-fg); }
+.dot.status-starting { background: var(--status-badge-fg, var(--status-starting-fg)); }
 .dot.status-disconnected { background: var(--text-secondary); }
 .dot.status-error { background: var(--danger-fg); }
 
@@ -1468,7 +1468,7 @@ button.small {
 }
 
 /* ── Modals ───────────────────────────────────────────────────────────────── */
-/* Nested inside .pm-overlay (z-index 8000): must sit above the modal shell that
+/* Nested inside .pm-overlay: must sit above the modal shell that
    hosts them, hence a z-index past the shell's own stacking level. */
 .modal {
   position: fixed;
@@ -1477,7 +1477,7 @@ button.small {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 8100;
+  z-index: calc(var(--z-modal) + 121);
 }
 .modal-card {
   background: var(--bg-base);

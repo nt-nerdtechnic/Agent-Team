@@ -135,7 +135,7 @@ async function onSubmit(): Promise<void> {
 .tp-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 9998;
+  z-index: calc(var(--z-modal) + 150);
   background: var(--modal-backdrop);
   backdrop-filter: blur(var(--modal-backdrop-blur));
   -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
@@ -144,7 +144,7 @@ async function onSubmit(): Promise<void> {
    the window, not a centered modal box. */
 .cred-quick-input {
   position: fixed;
-  z-index: 9999;
+  z-index: calc(var(--z-modal) + 151);
   top: 18vh;
   left: 50%;
   transform: translateX(-50%);

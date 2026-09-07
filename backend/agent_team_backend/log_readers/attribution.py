@@ -190,6 +190,62 @@ class Attribution:
         with self._lock:
             return sorted(self._workspaces.keys())
 
+    def existing_workspace_roots(self) -> list[Path]:
+        """Registered workspace roots that still exist, resolved once.
+
+        The path-allowlist checks (plugin terminal.run, shell.run) rebuild this
+        list on every call to ask "is this cwd inside a registered workspace".
+        The registry is never pruned — 44 of 115 entries on one real install
+        point at folders that are gone — so most of that resolve() work is
+        spent on roots nothing can ever be inside of.
+
+        Dropping them changes no answer. Every caller already rejects a cwd
+        that is not an existing directory, and a directory cannot exist inside
+        one that does not; a root that is only temporarily away (unmounted
+        volume) takes its subtree with it, so requests under it fail either
+        way. What does change is WHICH rejection: such a cwd is now "not
+        registered" rather than "invalid path". Both refuse.
+
+        The property that matters for a security check: filtering can only
+        make the allowlist SMALLER, so it can reject more but never permit
+        more. Pruning the registry itself would not be equivalent — it is also
+        the record historic usage is attributed against.
+        """
+        roots: list[Path] = []
+        for w in self.known_workspaces():
+            # isdir on the raw string FIRST, and that order is the whole point:
+            # it is one stat, while resolve() walks and readlinks every
+            # component. Resolving all 115 and then testing each is measurably
+            # SLOWER than the unfiltered list it replaced (1.31 ms vs 0.90 ms
+            # on a real registry); this way round is 0.72 ms.
+            if not os.path.isdir(w):
+                continue
+            try:
+                roots.append(Path(w).resolve())
+            except OSError:
+                # A root on a wedged mount answers neither yes nor no; treat it
+                # as absent rather than letting one bad path break every check.
+                continue
+        return roots
+
+    def active_workspaces(self) -> list[str]:
+        """Workspaces that have at least one registered pane right now.
+
+        The scanning scope for ACTIVITY. known_workspaces() is the wrong list
+        for that: it is every workspace ever opened, kept forever on purpose so
+        historic usage can still be attributed (see register_workspace), and
+        nothing prunes it. Activity only ever answers "what is happening now",
+        so scoping it to panes that exist keeps a cold start from re-parsing
+        every transcript the machine has ever accumulated.
+
+        Ephemeral by nature — panes register when the frontend connects and
+        unregister when their terminal is killed — so this is empty until the
+        first pane arrives. That is the intended shape, not a gap: a workspace
+        with no pane has nothing live to report.
+        """
+        with self._lock:
+            return sorted({r.workspace_path for r in self._panes.values() if r.workspace_path})
+
     # ───────────────────────── pane lifecycle ──────────────────────────────
 
     def register_pane(

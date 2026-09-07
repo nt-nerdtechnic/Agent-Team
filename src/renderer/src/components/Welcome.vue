@@ -324,11 +324,11 @@ function ctxCopyPath(): void {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 5000;
+  z-index: calc(var(--z-modal) + 110);
 }
 /* Opened over a working window, so the app stays visible behind it — the
    startup screen's opaque inset would read as "the workspace closed". */
-.welcome-overlay--modal { background: rgb(0 0 0 / 45%); }
+.welcome-overlay--modal { background: rgb(0 0 0 / 52%); }
 .w-head { position: relative; }
 .w-close {
   position: absolute;
@@ -341,23 +341,34 @@ function ctxCopyPath(): void {
   font-size: var(--font-sm);
   line-height: 1;
   color: var(--text-muted);
+  border-radius: var(--radius-sm);
 }
-.w-close:hover { color: var(--text-bright); }
+.w-close:hover { color: var(--text-bright); background: var(--bg-muted); }
+.w-close:focus-visible,
+button.primary:focus-visible,
+button.ghost:focus-visible,
+button.link:focus-visible,
+.pin:focus-visible,
+.r-delete:focus-visible {
+  outline: 2px solid var(--accent-emphasis);
+  outline-offset: 2px;
+}
 .welcome-card {
   width: 560px;
   max-height: 86vh;
   overflow-y: auto;
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 28px 32px;
   color: var(--text-bright);
-  box-shadow: 0 16px 48px var(--shadow-overlay);
+  box-shadow: var(--shadow-modal);
 }
 .w-head h1 {
   margin: 0;
   font-size: 26px;
   letter-spacing: 0.5px;
+  line-height: 1.2;
 }
 .tagline {
   margin: 4px 0 0;
@@ -384,7 +395,7 @@ button.primary {
   border: 1px solid var(--success-strong);
   color: var(--text-on-emphasis);
   padding: 8px 16px;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   cursor: pointer;
   font-size: var(--font-sm);
 }
@@ -396,7 +407,7 @@ button.ghost {
   border: 1px solid var(--border-default);
   color: var(--text-primary);
   padding: 8px 16px;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   cursor: pointer;
   font-size: var(--font-sm);
 }
@@ -421,12 +432,16 @@ button:disabled {
   gap: 8px;
   padding: 8px 10px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   cursor: pointer;
 }
 .recent-item:hover {
   background: var(--bg-subtle);
   border-color: var(--border-default);
+}
+.recent-item:focus-visible {
+  outline: 2px solid var(--accent-emphasis);
+  outline-offset: -1px;
 }
 .recent-item.stale {
   opacity: 0.55;
@@ -454,6 +469,7 @@ button:disabled {
   flex-wrap: wrap;
 }
 .r-name {
+  color: var(--text-bright);
   font-weight: 600;
   font-size: var(--font-sm);
 }
@@ -512,7 +528,7 @@ button:disabled {
   cursor: pointer;
   font-size: var(--font-xs);
   padding: 2px 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   flex-shrink: 0;
   align-self: center;
 }
@@ -559,7 +575,7 @@ button.link:hover {
   min-width: 180px;
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: 0 8px 24px var(--shadow-overlay);
   padding: 4px;
 }
@@ -569,7 +585,7 @@ button.link:hover {
   width: 100%;
   padding: 5px 10px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-primary);
   font-family: inherit;
@@ -604,7 +620,7 @@ button.link:hover {
   min-width: 180px;
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 4px;
   box-shadow: 0 8px 24px var(--shadow-overlay);
 }

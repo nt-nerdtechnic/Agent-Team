@@ -81,6 +81,17 @@ def _clean_for_log(raw: str) -> str:
             lines_out.append(stripped)
     return "\n".join(lines_out)
 
+
+_ARGV_TOKEN_RE = re.compile(r"([?&]t=)[^&\s]+")
+
+
+def _redact_argv(argv: list[str]) -> list[str]:
+    """Mask the `t=` (caller token) query parameter in argv before it reaches
+    backend.log. backend.log is 0644, and MCP URLs carry a live caller token
+    in that parameter — logging it verbatim hands out a working credential to
+    anyone who can read the log file."""
+    return [_ARGV_TOKEN_RE.sub(r"\1<redacted>", a) for a in argv]
+
 from .ipc import make_event
 
 log = logging.getLogger("agent_team_backend.terminals")
@@ -624,7 +635,7 @@ class TerminalService:
             session.id,
             pane_id,
             proc.pid,
-            argv,
+            _redact_argv(argv),
         )
         return session
 

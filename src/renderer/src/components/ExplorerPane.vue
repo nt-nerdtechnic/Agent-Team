@@ -819,6 +819,7 @@ defineExpose({ revealFile, focusTree })
   justify-content: space-between;
   gap: 8px;
   padding: 8px 10px;
+  background: var(--bg-subtle);
   border-bottom: 1px solid var(--border-muted);
   flex-shrink: 0;
 }
@@ -840,12 +841,16 @@ defineExpose({ revealFile, focusTree })
   width: var(--icon-btn-md);
   height: var(--icon-btn-md);
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
 }
 .exp-icon-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
+.exp-icon-btn:focus-visible {
+  outline: 2px solid var(--accent-emphasis);
+  outline-offset: 1px;
+}
 .exp-icon-btn.on { color: var(--accent-fg); }
 
 .exp-tree { flex: 1; overflow-y: auto; min-height: 0; padding: 4px 0; }
@@ -860,7 +865,7 @@ defineExpose({ revealFile, focusTree })
   font-size: 12.5px;
   white-space: nowrap;
 }
-.exp-row:hover { background: var(--bg-hover); }
+.exp-row:hover { background: var(--bg-hover); box-shadow: inset 2px 0 var(--border-default); }
 .exp-row.noise .exp-name { color: var(--text-muted); }
 .exp-row.hidden .exp-name,
 .exp-row.hidden .exp-glyph { opacity: 0.55; }
@@ -930,7 +935,7 @@ defineExpose({ revealFile, focusTree })
 .exp-prompt {
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 14px;
   width: 84%;
   max-width: 280px;
@@ -969,7 +974,7 @@ defineExpose({ revealFile, focusTree })
   min-width: 160px;
   background: var(--bg-overlay);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 4px;
   box-shadow: 0 8px 28px var(--shadow-overlay);
 }
@@ -980,7 +985,7 @@ defineExpose({ revealFile, focusTree })
   padding: 6px 10px;
   font-size: var(--font-xs);
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
@@ -1006,7 +1011,7 @@ defineExpose({ revealFile, focusTree })
   min-width: 160px;
   background: var(--bg-overlay);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 4px;
   box-shadow: 0 8px 28px var(--shadow-overlay);
 }
@@ -1014,6 +1019,7 @@ defineExpose({ revealFile, focusTree })
 
 /* Multi-select */
 .exp-row.row-selected { background: color-mix(in srgb, var(--accent-fg) 12%, transparent); }
+.exp-row.row-selected { box-shadow: inset 2px 0 var(--accent-fg); }
 .exp-row.row-selected:hover { background: color-mix(in srgb, var(--accent-fg) 18%, transparent); }
 .exp-row.row-focused { outline: 1px solid var(--accent-emphasis); outline-offset: -1px; }
 .exp-tree:focus { outline: none; }
@@ -1047,7 +1053,7 @@ defineExpose({ revealFile, focusTree })
 .sel-btn {
   font-size: var(--font-2xs);
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   border: 1px solid var(--border-default);
   background: var(--bg-muted);
   color: var(--text-primary);

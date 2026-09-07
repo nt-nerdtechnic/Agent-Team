@@ -21,6 +21,7 @@ import {
   type MentionCandidate,
 } from '../lib/cliContext'
 import { extractClipboardImage } from '../lib/clipboardImage'
+import { stopWebglCursorBlink } from '../lib/webglCursorBlink'
 import { createThrottledDiag, diagLog } from '../lib/diagLog'
 import { TERMINAL_CREATE_TIMEOUT_MS, formatTerminalExit, isTerminalCrashLoopOpen, recordTerminalExit, terminalCrashKey } from '../lib/terminalLifecycle'
 import { settingsGet, settingsSet, setContext } from '@navide/plugin-ui/shared'
@@ -1427,11 +1428,21 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     // A pane coming back on screen must not show a status up to
     // TICK_OFF_SCREEN_MS stale, so settle it immediately.
     if (onScreen) nowTick.value = Date.now()
+    // Output that arrived under the off-screen window must not wait on it now
+    // that someone is looking. Before the renderer is re-attached, so the
+    // catch-up write lands in one redraw rather than two.
+    if (onScreen) _flushPendingOutput(true)
+    // Nothing drawn means nothing scheduled: a blinking cursor on a pane that
+    // is not on screen is a 600 ms timer (WebGL) or a forever CSS animation
+    // (DOM) that no one can see. xterm pauses its renderer on its own, but not
+    // this.
+    setCursorBlink(onScreen)
     // Hand the WebGL context back while off screen so on-screen panes stay
     // within Chromium's live-context budget (see attachWebgl).
     if (onScreen) attachWebgl()
     else detachWebgl()
   })
+  setCursorBlink(isOnScreen())
 
   // Starts when spawn() enters the raw STARTING state, before any reattach,
   // layout, or resume-semaphore wait. App uses this to unlock recovery at the
@@ -1725,7 +1736,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     switch (status) {
       case 'running': return 'var(--success-fg)'
       case 'awaiting': return 'var(--warning-fg)'
-      case 'idle': return 'var(--attention-fg)'
+      case 'idle': return 'var(--status-idle-fg)'
       case 'starting': return 'var(--status-starting-fg)'
       case 'error': return 'var(--danger-fg)'
       case 'exited':
@@ -2093,6 +2104,16 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
   // not rAF: rAF is paused in packaged Electron when the window is occluded,
   // which would leave output stuck in _pendingOutput.)
   const _BACKGROUND_COALESCE_MS = 100
+  // A pane that is off screen is not drawn at all — xterm pauses its renderer
+  // once the terminal stops intersecting the viewport — so the reason to hand
+  // it output promptly is gone. What still reads from it is the badge path,
+  // whose hysteresis is measured in seconds, and pollAwaitingPanes, which looks
+  // once a second; batching at half a second costs them nothing and saves a
+  // parse, a write-buffer wake-up and a clean pass per chunk. Coming back on
+  // screen flushes immediately, so nothing arrives late on the way in.
+  const _OFF_SCREEN_COALESCE_MS = 500
+  const _coalesceMs = (): number =>
+    isOnScreen() ? _BACKGROUND_COALESCE_MS : _OFF_SCREEN_COALESCE_MS
   // The text side path (decode → stripAnsi/dropTuiNoise → cleanBuffer → badge
   // burst) is NOT needed per chunk: its consumers are the RUNNING/IDLE
   // hysteresis (BURST_GAP_MS / IDLE_CONFIRM_MS, seconds) and App.vue
@@ -2477,7 +2498,18 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     webglAddon = null
     rendererKind.value = 'dom'
     if (!addon) return
+    // Before dispose: the addon does not stop its own cursor-blink timer, and
+    // this runs on every trip off screen. See stopWebglCursorBlink.
+    stopWebglCursorBlink(addon)
     try { addon.dispose() } catch { /* xterm may have disposed it already */ }
+  }
+
+  /** Blink the cursor only while the pane is on screen. Constructed with
+   *  cursorBlink: true, so this is what turns it off — including for a pane
+   *  that is created behind a hidden tab and never shown. */
+  function setCursorBlink(on: boolean): void {
+    if (term.options.cursorBlink === on) return
+    term.options.cursorBlink = on
   }
 
   function mount(el: HTMLElement): void {
@@ -3597,7 +3629,7 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
         // The user is typing in this pane — render the echo now.
         _flushPendingOutput()
       } else if (!_outputTimer) {
-        _outputTimer = setTimeout(() => _flushPendingOutput(true), _BACKGROUND_COALESCE_MS)
+        _outputTimer = setTimeout(() => _flushPendingOutput(true), _coalesceMs())
       }
     })
 
@@ -4330,17 +4362,27 @@ export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts
     term.clearSelection()
   }
 
-  async function interrupt(): Promise<void> {
-    if (!sessionId.value) return
+  /** Returns whether the interrupt was actually issued. The two early exits
+   *  below are silent no-ops, and STOP pressed by hand does not care — but
+   *  ui.pane.interrupt reports this to an MCP caller that has no other way to
+   *  learn its interrupt went nowhere, and "the window was reconnecting" reads
+   *  exactly like "the agent ignored me" without it. True still means only
+   *  that the backend accepted the request: it writes to the PTY and answers,
+   *  and a write that fails there is logged, not reported back. */
+  async function interrupt(): Promise<boolean> {
+    if (!sessionId.value) return false
     // Guarded like every other user input, and for the sharpest case of it: a
     // frozen-looking pane is exactly when someone hits STOP, so a queued SIGINT
     // would land on whatever turn the CLI happens to be running once the socket
     // returns — possibly one started after the reconnect. The flag is set only
     // once the request is on its way, so the STOP badge cannot advertise an
     // interrupt that never left.
-    if (!inputTransportReady()) return
+    if (!inputTransportReady()) return false
     isStopped.value = true
-    await terminalPort.interrupt(sessionId.value)
+    const reply = await terminalPort.interrupt(sessionId.value)
+    // wsClient resolves an `ok: false` rather than rejecting it, so a refusal
+    // has to be read off the reply the way _sendPasteChunk reads it.
+    return !(reply && typeof reply === 'object' && (reply as { ok?: unknown }).ok === false)
   }
 
   async function kill(opts?: { force?: boolean }): Promise<void> {

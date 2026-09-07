@@ -4,6 +4,7 @@ import { useBackend } from './composables/useBackend'
 import { createHostGitTransport } from './composables/hostGitTransport'
 import { createHostGitSettingsPort, createHostGitSurfacePorts, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
 import { revealPath } from './composables/hostShell'
+import { resetUiScale, stepUiScaleBy } from './lib/uiScale'
 import ExplorerPane from './components/ExplorerPane.vue'
 import SearchPane from './components/SearchPane.vue'
 import GitPane from './components/GitPane.vue'
@@ -1521,6 +1522,13 @@ registerCommand('editor.action.blockComment',      () => activeEditor()?.toggleB
 registerCommand('editor.action.fontZoomIn',    () => activeEditor()?.zoomIn())
 registerCommand('editor.action.fontZoomOut',   () => activeEditor()?.zoomOut())
 registerCommand('editor.action.fontZoomReset', () => activeEditor()?.zoomReset())
+
+// ── Interface zoom (⇧⌘=/⇧⌘-/⇧⌘0) ─────────────────────────────────────────────
+// Scales this whole window's chrome, not just the editor's font. Main applies
+// it to every window at once, so zooming here also moves the main shell.
+registerCommand('workbench.action.zoomUiIn',    () => { stepUiScaleBy(1) })
+registerCommand('workbench.action.zoomUiOut',   () => { stepUiScaleBy(-1) })
+registerCommand('workbench.action.zoomUiReset', () => { resetUiScale() })
 registerCommand('editor.action.toggleLineNumbers', () => activeEditor()?.toggleLineNumbers())
 registerCommand('editor.action.toggleWordWrap',    () => activeEditor()?.toggleWordWrap())
 

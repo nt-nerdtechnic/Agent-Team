@@ -55,7 +55,7 @@ export const STATUS_COLOR_PALETTE: Record<StatusColorKey, StatusColorSpec> = {
     fg: 'var(--warning-fg)',
   },
   red: { bg: 'var(--danger-deep)', fg: 'var(--danger-fg)' },
-  blue: { bg: 'var(--status-starting-muted)', fg: 'var(--status-starting-fg)' },
+  blue: { bg: 'var(--status-idle-muted)', fg: 'var(--status-idle-fg)' },
   purple: {
     bg: 'color-mix(in srgb, var(--done-fg) 22%, transparent)',
     fg: 'var(--done-fg)',
@@ -107,21 +107,31 @@ export const PANE_STATUS_ORDER: readonly PaneStatusValue[] = [
  *  a fresh install looks like, and what "Reset" restores. Nothing else needs
  *  to change with it.
  *
- *  The shipped values reproduce the CSS that was written by hand per surface,
- *  with one deliberate exception: 'stopped' was a literal `#000000` on white
- *  text, which read as a hole punched in the light theme. It is `ink` now —
- *  the same near-black in dark themes, a pale inset in light ones.
+ *  The shipped values and the per-surface CSS say the same thing, and have to
+ *  be changed together: this table is what the picker shows as "current" and
+ *  what "Reset" clears back to, while the CSS is what actually paints.
+ *
+ *  'starting' and 'idle' paint through a role token (`--status-starting-*`,
+ *  `--status-idle-*`) rather than a colour family directly, so a theme whose
+ *  family colour would collide with another status can move that one status
+ *  alone. That is also why the picker's `blue` swatch above resolves through
+ *  `--status-idle-*`: it is the entry that has to stay blue in dark-forest,
+ *  where `--accent-*` is green.
+ *
+ *  'stopped' and 'disconnected' are `ink` — near-black in dark themes, a pale
+ *  inset in light ones. That replaced a literal `#000000` on white text, which
+ *  read as a hole punched in the light theme.
  */
 export const DEFAULT_STATUS_COLORS: Record<PaneStatusValue, StatusColorKey> = {
-  starting: 'blue',
+  starting: 'yellow',
   running: 'green',
-  idle: 'yellow',
+  idle: 'blue',
   awaiting: 'orange',
   stopped: 'ink',
   exited: 'gray',
   error: 'red',
   waiting: 'gray',
-  disconnected: 'yellow',
+  disconnected: 'ink',
 }
 
 /** True when `value` is a colour this build knows. Guards settings written by

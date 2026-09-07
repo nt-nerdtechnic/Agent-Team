@@ -16,6 +16,7 @@ import { useI18n } from 'vue-i18n'
 import type { LegalRoute } from '../../../shared/legalLinks'
 import { linkErrorKey } from '../lib/linkStatus'
 import { usePairingState } from '../composables/usePairingState'
+import NavideCloudMark from './NavideCloudMark.vue'
 import { relativeTime } from '../lib/relativeTime'
 import type { useBackend } from '../composables/useBackend'
 
@@ -235,6 +236,10 @@ interface NetworkSnapshot {
    * an attacker who deleted that state wants next.
    */
   trustLocked?: string
+  /** No rules written under this identity yet, so nothing inbound is accepted.
+   *  Reachable by recovering — a machine that heals a device conflict lands on
+   *  a new identity with an empty policy. */
+  policyEmpty?: boolean
   /** True when that stop is a read that may succeed next time — the offer to
    *  erase everything waits on this being false. */
   trustLockedTransient?: boolean
@@ -414,6 +419,9 @@ async function refresh(): Promise<void> {
 const trustNotices = computed<TrustNotice[]>(() => network.value?.trustNotices ?? [])
 const trustPending = computed<PendingDevice[]>(() => network.value?.trustPending ?? [])
 const trustLocked = computed(() => network.value?.trustLocked ?? '')
+/** The last read did not come back. Says only that, because a failed read says
+ *  nothing about the socket — see usePairingState. */
+const readFailed = pairingState.readFailed
 /** The stop is a read that may succeed on the next try. Same card, but no offer
  *  to erase everything: a keychain locked for a moment has nothing wrong with
  *  it to erase, and that offer is the one act here nobody can undo. */
@@ -611,18 +619,29 @@ async function startPairing(device: NetworkDevice): Promise<void> {
   if (pending.value) return
   pending.value = device.deviceId
   error.value = ''
+  // Before the token is minted and before anything is sent. The confirmation is
+  // an IPC round trip of its own, so acknowledging after it would still leave a
+  // gap — and the gap is the whole complaint: the press produced nothing until
+  // the far machine answered.
+  pairingState.noteAsked(device.deviceId, deviceLabel(device))
   try {
     const resp = await props.backend.send(
       'p2p.pair.start',
       await withConfirmation('p2p.pair.start', device.deviceId, { deviceId: device.deviceId }),
     )
     if (!resp.ok) {
-      error.value = resp.error?.message ?? t('account.err-generic')
+      const message = resp.error?.message ?? t('account.err-generic')
+      error.value = message
+      // Said on the card too. Clearing it instead would return the screen to
+      // the silence this replaced, with the failure only in the panel below.
+      pairingState.noteAskFailed(device.deviceId, message)
       return
     }
     await refresh()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err)
+    const message = err instanceof Error ? err.message : String(err)
+    error.value = message
+    pairingState.noteAskFailed(device.deviceId, message)
   } finally {
     pending.value = ''
   }
@@ -1156,8 +1175,11 @@ onUnmounted(() => {
       <button class="s-close" @click="emit('close')" :title="t('settings.p2p.close')">✕</button>
 
       <header class="acct-head">
-        <h1 class="acct-title">{{ t('account.title') }}</h1>
-        <p class="tagline">{{ t('account.tagline') }}</p>
+        <span class="acct-mark" aria-hidden="true"><NavideCloudMark /></span>
+        <div class="acct-head-text">
+          <h1 class="acct-title">{{ t('account.title') }}</h1>
+          <p class="tagline">{{ t('account.tagline') }}</p>
+        </div>
       </header>
 
       <!-- Signed in: the credential belongs to the server, so this side only
@@ -1186,10 +1208,17 @@ onUnmounted(() => {
           <div class="card net-card">
             <div v-for="row in pairings" :key="row.deviceId" class="req pair-card">
               <div class="req-head">
+                <!-- "Waiting for them to answer" stops being true the moment
+                     they answer, and this heading used to say it anyway, over
+                     six digits that only exist because they did. The prompt
+                     now sits over this window rather than under it, so the two
+                     were on screen together saying different things about the
+                     same exchange — and this was the half that was wrong. -->
                 <span class="dev-name">
                   {{ row.role === 'responder'
                     ? t('settings.p2p.pair.asked-by', { device: row.deviceName || row.deviceId })
-                    : t('settings.p2p.pair.asking', { device: row.deviceName || row.deviceId }) }}
+                    : t(row.code ? 'settings.p2p.pair.with-device' : 'settings.p2p.pair.asking',
+                        { device: row.deviceName || row.deviceId }) }}
                 </span>
               </div>
               <!-- Nothing to compare yet: the other machine has not answered.
@@ -1237,10 +1266,9 @@ onUnmounted(() => {
                   <p class="req-what">{{ t('settings.p2p.pair.waiting-remote') }}</p>
                   <p class="hint">{{ t('settings.p2p.pair.auto-updates') }}</p>
                 </template>
-                <!-- Whose turn it is, said plainly. The heading above still
-                     reads "waiting for them" from before they answered, and
-                     leaving that as the only status would have somebody waiting
-                     for a machine that is waiting for them. -->
+                <!-- Whose turn it is, said plainly. The heading above says
+                     which exchange this is, not who it is waiting on, so this
+                     is the only thing on the card that answers "and now what". -->
                 <template v-else>
                 <span class="dev-tag pair-step">{{ t('settings.p2p.pair.step-your-turn') }}</span>
                 <p class="req-what">{{ t('settings.p2p.pair.your-turn') }}</p>
@@ -1682,6 +1710,25 @@ onUnmounted(() => {
                machine that hits this was Keychain Access, which is the same
                reset performed with less information and leaves the two halves
                disagreeing. Loud and deliberate beats undiscoverable. -->
+          <!-- There was a card here saying "no rules yet on this device —
+               nothing from your other machines can reach this one until you
+               write at least one rule". It was removed because that is not
+               true, and it named the one audience for whom it is least true.
+               Do not add it back in that form.
+
+               Your own machines never reach the policy at all: a sender this
+               device has paired with lands in RING_SELF, and RING_SELF skips
+               the policy check outright (server_link `refused = ... trust_ring
+               != RING_SELF and not pane_policy.is_allowed(...)`). A sender it
+               has *not* paired with is refused earlier still, by
+               `_authenticate_sender`, as NOT_PAIRED. Neither path reaches the
+               state the card described.
+
+               What the policy actually governs is devices belonging to *other
+               people's* accounts. A card about an empty policy would have to
+               say that, and would have to be worth interrupting somebody for.
+               The backend still reports `policyEmpty`; it is a true fact with
+               no honest use here yet. -->
           <div v-if="trustLocked" class="card locked-card">
             <h2 class="net-title">{{ t('settings.p2p.trust.locked-title') }}</h2>
             <p class="req-what">{{ t('settings.p2p.trust.locked-body') }}</p>
@@ -1836,7 +1883,12 @@ onUnmounted(() => {
               <li>{{ t('settings.p2p.first-pair-3') }}</li>
             </ol>
           </div>
-          <p v-if="networkStale" class="hint">{{ t('settings.p2p.network.link-offline') }}</p>
+          <!-- Two different reasons for the same picture, and naming the wrong
+               one is worse than naming none: this said "the link is down" on a
+               screen whose connection card was green, because the snapshot had
+               failed to load while the socket was fine. -->
+          <p v-if="readFailed" class="hint">{{ t('settings.p2p.network.not-current') }}</p>
+          <p v-else-if="networkStale" class="hint">{{ t('settings.p2p.network.link-offline') }}</p>
         </section>
 
         <!-- Only when something is blocked: an empty list here would read as a
@@ -1976,7 +2028,13 @@ onUnmounted(() => {
   background: var(--modal-backdrop);
   backdrop-filter: blur(var(--modal-backdrop-blur));
   -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
-  z-index: 8000;
+  /* The modal band, under the toast band the pairing prompt lives in. It was
+     8000 against the prompt's 3000, so a pairing request — a question that
+     expires in five minutes — was drawn behind this window and blurred by its
+     own backdrop filter. A number picked to beat whatever was on screen at the
+     time is the bug; the offset only keeps this above the other overlays it
+     was already above. */
+  z-index: calc(var(--z-modal) + 120);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2012,8 +2070,41 @@ onUnmounted(() => {
   line-height: 1;
 }
 .s-close:hover { background: var(--bg-muted); color: var(--text-bright); }
-.acct-head { padding: 22px 28px 10px; }
-.acct-title { margin: 0; font-size: 17px; font-weight: 600; color: var(--text-bright); }
+.s-close:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
+/* Brand header. The mark is what names the feature — "Navide Cloud" is a new
+   word for something the app already did, so the first screen that says it has
+   to also show it. The tinted band is the only decorative surface in this
+   dialog; everything below stays flat so the eye lands here first. */
+.acct-head {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 22px 28px 16px;
+  background:
+    radial-gradient(120% 160% at 0% 0%, var(--accent-subtle) 0%, transparent 62%);
+  border-bottom: 1px solid var(--border-muted);
+}
+.acct-mark {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--accent-muted);
+  background: var(--bg-subtle);
+  color: var(--accent-fg);
+  --nv-cloud-node-fill: var(--bg-subtle);
+}
+.acct-mark :deep(.nv-cloud-mark) { width: 26px; height: 20px; }
+.acct-head-text { min-width: 0; }
+.acct-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-bright);
+  letter-spacing: 0.01em;
+}
 .tagline { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); }
 .body { padding: 4px 28px 0; overflow-y: auto; }
 .tabs { display: flex; gap: 2px; margin: 0 0 12px; border-bottom: 1px solid var(--border-default); }
@@ -2022,27 +2113,33 @@ onUnmounted(() => {
   padding: 7px 12px; font-size: 12.5px; color: var(--text-secondary); cursor: pointer;
 }
 .tab.on { color: var(--text-bright); border-bottom-color: var(--accent-emphasis); font-weight: 500; }
+.tab:hover:not(:disabled) { color: var(--text-bright); background: var(--bg-muted); border-radius: var(--radius-control); }
+.tab:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: -2px; border-radius: var(--radius-control); }
 .tab:disabled { opacity: 0.5; cursor: default; }
 .lbl { display: block; font-size: 11.5px; color: var(--text-secondary); margin: 12px 0 5px; }
 input {
   width: 100%; box-sizing: border-box;
   background: var(--bg-inset); border: 1px solid var(--border-default);
-  border-radius: 6px; padding: 8px 10px; color: inherit; font: inherit; font-size: 12.5px;
+  border-radius: var(--radius-sm); padding: 8px 10px; color: inherit; font: inherit; font-size: 12.5px;
 }
 input:focus {
   outline: none; border-color: var(--accent-emphasis);
   box-shadow: 0 0 0 2px var(--accent-focus, rgba(31, 111, 235, 0.3));
 }
 .btn {
-  appearance: none; border-radius: 6px; padding: 9px 16px; font: inherit; font-size: 12.5px;
+  appearance: none; border-radius: var(--radius-sm); padding: 9px 16px; font: inherit; font-size: 12.5px;
   font-weight: 500; cursor: pointer;
-  background: var(--accent-emphasis); border: 1px solid var(--accent-emphasis); color: #fff;
+  background: var(--accent-emphasis); border: 1px solid var(--accent-emphasis); color: var(--text-on-emphasis);
 }
+.btn:not(:disabled) { transition: background var(--motion-fast, 120ms) var(--ease-out, ease-out), border-color var(--motion-fast, 120ms) var(--ease-out, ease-out), color var(--motion-fast, 120ms) var(--ease-out, ease-out); }
+.btn:not(:disabled):hover { box-shadow: inset 0 0 0 1px var(--text-on-emphasis); }
+.btn.ghost:not(:disabled):hover { background: var(--bg-muted); border-color: var(--border-strong); box-shadow: none; }
+.btn:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
 .btn.ghost { background: transparent; border-color: var(--border-default); color: inherit; }
 .btn.wide { display: block; width: 100%; margin-top: 18px; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .card {
-  border: 1px solid var(--border-default); border-radius: 8px; padding: 4px 14px; margin-top: 8px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 4px 14px; margin-top: 8px; background: var(--bg-subtle);
 }
 .kv {
   display: flex; justify-content: space-between; gap: 12px; font-size: 12px;
@@ -2136,9 +2233,9 @@ input:focus {
    pane wants something from you, hollow means it does not, red means it is
    broken. `awaiting` is the loud one on purpose — a pane holding a prompt open
    is the whole reason to look at another machine's list. */
-.pane-pill.st-running { background: var(--success-fg); color: #fff; }
-.pane-pill.st-awaiting { background: var(--attention-fg); color: #fff; }
-.pane-pill.st-waiting { background: var(--attention-fg); color: #fff; }
+.pane-pill.st-running { background: var(--success-fg); color: var(--text-on-emphasis); }
+.pane-pill.st-awaiting { background: var(--attention-fg); color: var(--text-on-emphasis); }
+.pane-pill.st-waiting { background: var(--attention-fg); color: var(--text-on-emphasis); }
 .pane-pill.st-idle,
 .pane-pill.st-starting,
 .pane-pill.st-disconnected { background: none; border-color: var(--border-default); }
@@ -2260,7 +2357,7 @@ input:focus {
 .fp-row { display: inline-flex; align-items: center; gap: 8px; }
 .fp-value { user-select: text; letter-spacing: 0.06em; }
 .fp-copy {
-  background: none; border: 1px solid var(--border-default); border-radius: 6px;
+  background: none; border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   padding: 1px 6px; font-size: 11px; color: var(--text-secondary); cursor: pointer;
 }
 .fp-copy:hover { color: var(--text-primary); }

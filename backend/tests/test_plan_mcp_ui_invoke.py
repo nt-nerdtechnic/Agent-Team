@@ -609,3 +609,84 @@ async def test_an_addressed_timeout_blames_the_window_not_the_path(
     assert "your own Navide window" in result["error"]
     assert "workspace_path is not involved" in result["error"]
     assert plan_mcp._ui_invoke_pending.pending == {}
+
+
+# ---------------------------------------------------------------- pane-private actions
+#
+# ui_invoke forwards action and args verbatim, and the two ui.messaging.*
+# commands take the pane whose inbox to read from args.paneId. So the caller's
+# identity has to travel with the request and be matched against that id —
+# here, and again in the window. These pin both halves.
+
+
+def _no_window_reached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make a refusal test fail closed: a request that should have been refused
+    must go red the moment it reaches a window, not after the 15 s reply
+    timeout. Both send paths raise, so nothing waits on a reply that never comes."""
+
+    async def reached(*_args: Any, **_kwargs: Any) -> bool:
+        raise AssertionError("the refusal is missing: the request reached a window")
+
+    monkeypatch.setattr(app, "unicast_to", reached)
+    monkeypatch.setattr(app, "broadcast", reached)
+    monkeypatch.setattr(app, "unicast_any", reached)
+
+
+
+@pytest.mark.asyncio
+async def test_a_pane_cannot_read_another_panes_inbox_through_ui_invoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_window_reached(monkeypatch)
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=_Window())
+    agent_messaging.register("pb", "victim", "/ws/alpha", agent_key="claude", owner=_Window())
+
+    for action in ("ui.messaging.readIncoming", "ui.messaging.settleRead"):
+        result = await plan_mcp.ui_invoke("/ws/alpha", action, _pane_ctx("pa"), {"paneId": "pb"})
+        assert result["ok"] is False, action
+        assert result["error_code"] == "ui_pane_private", action
+
+
+@pytest.mark.asyncio
+async def test_a_host_caller_has_no_inbox_to_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same rule as cli_read_incoming: only a Navide CLI pane has an inbox."""
+    _no_window_reached(monkeypatch)
+    agent_messaging.register("pb", "victim", "/ws/alpha", agent_key="claude", owner=_Window())
+    for action in ("ui.messaging.readIncoming", "ui.messaging.settleRead"):
+        result = await plan_mcp.ui_invoke("/ws/alpha", action, _ctx(), {"paneId": "pb"})
+        assert result["ok"] is False, action
+        assert result["error_code"] == "ui_pane_private", action
+
+
+@pytest.mark.asyncio
+async def test_a_pane_reading_its_own_inbox_passes_and_carries_its_identity(
+    addressed: list[tuple[Any, dict[str, Any]]], broadcasts: list[dict[str, Any]]
+) -> None:
+    """The one legitimate shape — what cli_read_incoming emits — still goes
+    through, and the request names the caller from the credential so the
+    window can make the same check."""
+    window = _Window()
+    agent_messaging.register("pa", "worker", "/ws/alpha", agent_key="claude", owner=window)
+
+    task = asyncio.create_task(_answer("own"))
+    result = await plan_mcp.ui_invoke(
+        "/ws/alpha", "ui.messaging.readIncoming", _pane_ctx("pa"), {"paneId": "pa", "limit": 5}
+    )
+    await task
+
+    assert result["ok"] is True
+    assert broadcasts == []
+    _session, event = addressed[0]
+    assert event["payload"]["caller_pane_id"] == "pa"
+    assert event["payload"]["args"] == {"paneId": "pa", "limit": 5}
+
+
+@pytest.mark.asyncio
+async def test_a_host_request_carries_an_empty_caller_pane_id(
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    task = asyncio.create_task(_answer("host"))
+    result = await plan_mcp.ui_invoke("/ws/alpha", "editor.save", _ctx(), None)
+    await task
+    assert result["ok"] is True
+    assert broadcasts[0]["payload"]["caller_pane_id"] == ""

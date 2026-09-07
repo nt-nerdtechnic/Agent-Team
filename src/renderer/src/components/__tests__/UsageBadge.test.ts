@@ -720,6 +720,37 @@ describe('UsageBadge – popover placement', () => {
     heightSpy.mockRestore()
     rectSpy.mockRestore()
   })
+
+  // The provisional clamp uses the CSS `width` alone; padding and border make
+  // the rendered panel wider than that, so a badge near the right edge used to
+  // land a panel that spilled past the window and got clipped by it.
+  it('re-clamps against the rendered width, not the CSS width', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const heightSpy = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(200)
+    const widthSpy = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(286)
+    const rectSpy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+      top: 40,
+      bottom: 60,
+      left: 900,
+      right: 940,
+      width: 40,
+      height: 20,
+      x: 900,
+      y: 40,
+      toJSON: () => ({}),
+    } as DOMRect)
+
+    wrapper = mountBadge(makeCliProfiles().fake)
+    await openPopover(wrapper)
+    await nextTick()
+
+    // 1024 - 286 - 8, so the right edge lands on the 8px margin rather than
+    // 26px past the window edge.
+    expect(wrapper.find('.usage-pop').attributes('style')).toContain('left: 730px')
+    heightSpy.mockRestore()
+    widthSpy.mockRestore()
+    rectSpy.mockRestore()
+  })
 })
 
 describe('UsageBadge – popover dismissal', () => {
@@ -822,5 +853,65 @@ describe('UsageBadge – manage accounts', () => {
     expect(executeCommand).toHaveBeenCalledWith('workbench.action.openSettingsAccounts')
     // Popover closes so the settings modal opens on top unobstructed.
     expect(wrapper.find('.usage-pop').exists()).toBe(false)
+  })
+})
+
+describe('UsageBadge – quota spent', () => {
+  const spent = (): UsageSnapshot =>
+    snapshot({
+      windows: [
+        { kind: 'session', label: 'Session', usedPercent: 100, resetsAt: '2026-07-25T05:00:00Z' },
+      ],
+    })
+
+  it('reads differently from "under 1% left"', async () => {
+    // The whole point of the state: 0.4% left still runs and used to print the
+    // same red figure as a quota that is gone.
+    usage.usageFor.mockReturnValue(
+      snapshot({ windows: [{ kind: 'session', label: 'S', usedPercent: 99.6, resetsAt: null }] }),
+    )
+    wrapper = mountBadge(makeCliProfiles().fake)
+    expect(wrapper.find('.usage-badge').classes()).not.toContain('exhausted')
+    expect(wrapper.find('.usage-badge').text()).toContain('<1%')
+
+    wrapper.unmount()
+    usage.usageFor.mockReturnValue(spent())
+    wrapper = mountBadge(makeCliProfiles().fake)
+    expect(wrapper.find('.usage-badge').classes()).toContain('exhausted')
+    expect(wrapper.find('.usage-badge').text()).toContain('spent')
+  })
+
+  it('says when the quota comes back, in the badge tooltip and the popover', async () => {
+    vi.setSystemTime(Date.parse('2026-07-25T02:00:00Z'))
+    usage.usageFor.mockReturnValue(spent())
+    wrapper = mountBadge(makeCliProfiles().fake)
+    expect(wrapper.find('.usage-badge').attributes('title')).toContain('3h')
+
+    await openPopover(wrapper)
+    expect(wrapper.find('.usage-pop-exhausted').text()).toContain('3h')
+  })
+
+  it('points at the account list, the only thing that gets work moving again', async () => {
+    usage.usageFor.mockReturnValue(spent())
+    wrapper = mountBadge(
+      makeCliProfiles({ profiles: [profile('p1', 'Work')], defaultId: null }).fake,
+    )
+    await openPopover(wrapper)
+    expect(wrapper.find('.usage-pop-switch-title').classes()).toContain('crit')
+  })
+})
+
+describe('UsageBadge – quota spent, mid-switch', () => {
+  it('keeps the "reading" caveat so the old account\'s exhaustion is not pinned on the new one', () => {
+    usage.usageFor.mockReturnValue(
+      snapshot({
+        windows: [{ kind: 'session', label: 'S', usedPercent: 100, resetsAt: null }],
+        refreshPending: true,
+      }),
+    )
+    wrapper = mountBadge(makeCliProfiles().fake)
+    const badge = wrapper.find('.usage-badge')
+    expect(badge.classes()).toContain('exhausted')
+    expect(badge.find('small').text()).toBe('reading')
   })
 })

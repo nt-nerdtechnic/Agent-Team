@@ -327,6 +327,11 @@ def _main_usage(event: dict) -> tuple[str, int, int] | None:
 class MuseLogReader(LogReader):
     vendor: str = "muse"
 
+    #: parse_activity walks a dense ascending line counter and resumes from
+    #: one high-water mark, so an old file can be seeded to EOF by counting
+    #: lines rather than replaying it (log_readers.base).
+    activity_resumes_by_line: bool = True
+
     def project_dirs(self) -> list[Path]:
         root = muse_sessions_root()
         return [root] if root.is_dir() else []

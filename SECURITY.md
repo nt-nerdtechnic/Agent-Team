@@ -23,9 +23,17 @@ Include a description, reproduction steps, potential impact, affected versions o
 
 The project aims to acknowledge reports within 48 hours and provide a status update within 7 days. These are response targets, not a guarantee of resolution within that period.
 
+## Scope and safe harbour
+
+In scope: this repository, the Navide desktop application, and the Navide Cloud relay at `server.navide.dev`. Out of scope: the external coding CLIs Navide launches (report those upstream), findings that require physical access to an unlocked machine, and findings that only apply with `contextIsolation`, `sandbox`, or code signing deliberately disabled.
+
+Good-faith research that stays within that scope, avoids privacy violations and service disruption, and allows reasonable time for a fix before disclosure will not be met with legal action. Do not test against other people's accounts or devices on the production relay; the server can be run locally (see `Navide-Server/server/deploy/`).
+
 ## Security model
 
 Navide's Electron application, Python backend, PTYs, orchestration state, and workspace data run on the user's machine. The backend listens on loopback and is not designed to be exposed as a remote service.
+
+The attacker positions every security review is checked against, and the controls that answer each, are written down in [Security threat model](docs/en-US/security-threat-model.md).
 
 Navide is local-first, not universally offline. External coding CLIs, cloud AI providers, Context7, search, Git hosts, MCP servers, and update checks can communicate with third parties when used. See [Privacy and Data Flows](docs/en-US/privacy.md).
 

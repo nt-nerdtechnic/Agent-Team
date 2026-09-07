@@ -2018,7 +2018,7 @@ async def cli_cancel_message(msg_key: str, ctx: Context) -> dict[str, Any]:
     from agent_team_backend.ipc import make_event
 
     try:
-        _resolve_caller(ctx)
+        caller = _resolve_caller(ctx)
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     key = (msg_key or "").strip()
@@ -2034,6 +2034,12 @@ async def cli_cancel_message(msg_key: str, ctx: Context) -> dict[str, Any]:
                 "than the hour these are tracked for. An untracked key says nothing "
                 "about whether the message arrived; ask cli_check_message."
             ),
+        }
+    origin = (caller.pane_id if caller.kind == "pane" else "") or caller.kind
+    if entry.get("origin") != origin:
+        return {
+            "ok": False,
+            "error": f"msg_key {key!r} was not sent from here — you can only withdraw your own messages",
         }
     if entry["status"] != "queued":
         # Already settled. Say what it settled as rather than refusing flatly:
@@ -2113,15 +2119,139 @@ def _read_log_window(path: Path, since: int | None, tail_lines: int) -> tuple[st
     return "\n".join(lines), byte_truncated or line_truncated, rotated, size
 
 
+# ── Reading a pane on ANOTHER machine ──────────────────────────────────────
+# The observing tools answer for a remote pane out of `remote_roster`, which is
+# Navide-Server's session directory as this machine last received it. Nothing
+# new is uploaded for them: cli_list_targets already hands `busy` / `offline` /
+# `host_online` / `status` back for every remote pane.
+#
+# It is a genuinely weaker source than the local path, and every tool below
+# says so in its own docstring. The three ways it is weaker, once:
+#
+#   1. ONE WORD PER PANE. The roster carries the sending window's own sidebar
+#      badge (server_link._pane_status) and nothing else — no turn_complete, no
+#      last_activity, no log. "The turn ended" is never observed remotely; the
+#      most that can be seen is that the pane stopped being busy.
+#   2. NO `awaitingKind`. The local path splits "awaiting" into a permission
+#      prompt (parked on a HUMAN) and an open question (which counts as idle,
+#      see _ui_status_is_idle). The far side sends one word for both, so that
+#      split cannot be made here at all.
+#   3. IT ARRIVES LATE. The owning window debounces its uploads
+#      (server_link.ROSTER_DEBOUNCE_S, 0.5s) and re-sweeps every
+#      ROSTER_SWEEP_S (30s), so a status read here is near-live, not live.
+
+#: Roster words that end a wait as "this pane is not working". "idle" is the
+#: badge of a pane sitting at its prompt; the other three are terminal — the
+#: session is over — and the local path settles on those too
+#: (_UI_IDLE_STATUSES), so a remote pane that died ends a wait rather than
+#: running it out.
+_ROSTER_IDLE_STATUSES = frozenset({"idle", "exited", "stopped", "error"})
+
+#: Roster words that mean the pane is doing something. Deliberately a closed
+#: list rather than "anything that is not idle": "waiting" is what a machine too
+#: old to send a badge word reports for every pane whatever it is doing, and a
+#: word this build has never heard of says nothing at all. Neither may be read
+#: as "your message started a turn", so both stay outside this set and leave the
+#: wait running. "awaiting" is inside it — the pane is parked, which is
+#: something it started doing — but it is not in _ROSTER_IDLE_STATUSES, so it
+#: never ends a wait either (see weakness 2 above).
+_ROSTER_WORKING_STATUSES = frozenset({"running", "starting", "awaiting"})
+
+
+@dataclass
+class _RemoteResolution:
+    """A resolved target that lives on another machine.
+
+    `pane` is always None, and named the same as ResolveResult's on purpose: a
+    tool that did not ask for remote targets keeps meeting the local registry
+    entry it always did, and only the ones passing `allow_remote=True` ever see
+    one of these.
+    """
+
+    address: Any
+    entry: Any
+    pane: None = None
+
+
+def _remote_pane_for(address: Any) -> Any:
+    """The roster row `address` names, or None when the roster has none.
+
+    Matched on the three parts an address is made of. The roster is rebuilt
+    wholesale on every push (remote_roster.replace), so a row is replaced rather
+    than mutated — a poll has to look it up again each time instead of holding
+    on to one.
+    """
+    from agent_team_backend import remote_roster
+
+    for pane in remote_roster.list_panes():
+        if (
+            pane.device_id == address.device_id
+            and pane.workspace == address.workspace
+            and pane.pane_name == address.pane_name
+        ):
+            return pane
+    return None
+
+
+def _resolve_local_or_remote(me: str, target: str) -> tuple[Any, dict[str, Any] | None]:
+    """`_resolve_pane_target`'s answer for a tool that can also read a remote pane.
+
+    Local addressing wins exactly as it does in cli_send, because this is the
+    same message_routing.route call: a target that resolves on this machine
+    never reaches the roster, so the local answer is the one it always was.
+    """
+    from agent_team_backend import agent_messaging, message_routing
+
+    routed = message_routing.route(me, target)
+    if routed.pane is not None:
+        return (
+            agent_messaging.ResolveResult(
+                pane=routed.pane, cross_workspace=routed.cross_workspace
+            ),
+            None,
+        )
+    if routed.remote is not None:
+        entry = _remote_pane_for(routed.remote)
+        if entry is not None:
+            return _RemoteResolution(address=routed.remote, entry=entry), None
+        # The address names another machine, but this machine's copy of the
+        # session directory has no such pane in it — either no server is
+        # configured at all, in which case `routed.error` already says that, or
+        # the far pane is gone. Either way there is nothing here to read.
+        return None, {
+            "ok": False,
+            "error": routed.error
+            or (
+                f'"{routed.remote.to_string()}" names a pane on another device, and '
+                f"this machine's copy of the server's session directory does not "
+                f"list it — read cli_list_targets' remote_targets for the ones it "
+                f"does know about"
+            ),
+            "error_code": routed.code or "unknown-remote-pane",
+        }
+    return None, {
+        "ok": False,
+        "error": routed.error or f'unknown target "{target}"',
+        "error_code": routed.code or "unknown-target",
+    }
+
+
 # ── Resolving a pane for the read-only cli_* tools ─────────────────────────
 def _resolve_pane_target(
-    caller: "_Caller", me: str, target: str, pane_id: str
+    caller: "_Caller", me: str, target: str, pane_id: str, allow_remote: bool = False
 ) -> tuple[Any, dict[str, Any] | None]:
     """Resolve `pane_id` when one was given, `target` otherwise.
 
     Shared by the tools that only read a pane, so an id means the same thing in
     all of them as it does in cli_send. Returns (result, failure): `failure` is
     the error dict to hand straight back, or None when `result.pane` is set.
+
+    `allow_remote` opts a tool into `<device>/<workspace>/<pane>` targets. It is
+    off by default because most of these tools cannot serve one — cli_read_log
+    and cli_interrupt need something on this machine — and with it off the
+    resolution is the local one, unchanged. With it on, a target that resolves
+    locally still resolves locally; only one that does not can come back as a
+    `_RemoteResolution`, whose `pane` is None and whose `entry` is a roster row.
     """
     from agent_team_backend import agent_messaging
 
@@ -2137,6 +2267,8 @@ def _resolve_pane_target(
         return result, None
     if caller.kind != "pane" and "/" not in (target or ""):
         return None, {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
+    if allow_remote:
+        return _resolve_local_or_remote(me, target)
     result = agent_messaging.resolve(me, target)
     if result.pane is None:
         return result, {
@@ -2261,6 +2393,20 @@ async def cli_get_status(target: str, ctx: Context, pane_id: str = "") -> dict[s
       - "pending" — still running.
 
     Absent when the pane was not spawned with a task.
+
+    A `<device>/<workspace>/<pane>` target is answered from Navide-Server's
+    session directory instead, and comes back in cli_list_targets'
+    `remote_targets` shape — {ok, remote: true, source: "roster_status", name,
+    address, device, workspace, workspace_path, agent_key, busy, offline,
+    host_online, status} — with `source` naming where the answer came from.
+    That answer is WEAKER in three ways and none of them are hidden: there is
+    no `last_activity` and no `ui` block (neither the local activity log nor
+    the owning window is reachable from here), `status` is one word with no
+    `awaitingKind` behind it, so an "awaiting" pane may be parked on a human or
+    merely asking a question, and the word itself is what the far window last
+    uploaded — near-live, not live. `offline` is its own answer, not a kind of
+    busy: it means the far machine or its window is away, and the row you are
+    reading is the last thing the server said about a pane nobody can reach.
     """
 
     try:
@@ -2268,9 +2414,18 @@ async def cli_get_status(target: str, ctx: Context, pane_id: str = "") -> dict[s
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     me = caller.pane_id if caller.kind == "pane" else ""
-    result, failure = _resolve_pane_target(caller, me, target, pane_id)
+    result, failure = _resolve_pane_target(caller, me, target, pane_id, allow_remote=True)
     if failure is not None:
         return failure
+    if result.pane is None:
+        # A pane on another machine: the roster row is the whole answer, and
+        # `source` says as much rather than letting it pass for a local read.
+        return {
+            "ok": True,
+            "remote": True,
+            "source": "roster_status",
+            **result.entry.to_dict(),
+        }
     pane = result.pane
 
     status: dict[str, Any] = {
@@ -2406,6 +2561,75 @@ _UI_IDLE_STATUSES = frozenset({"idle", "exited", "stopped", "error"})
 _UI_IDLE_AWAITING_KINDS = frozenset({"question"})
 
 
+async def _wait_idle_remote(address: Any, timeout_s: float) -> dict[str, Any]:
+    """cli_wait_idle for a pane on another machine.
+
+    Polls the roster, because none of the three local signals exist here: there
+    is no activity log for a pane this machine does not own, no turn_complete
+    ever crosses the link, and the window that could be probed belongs to
+    somebody else. One word per poll is the whole input.
+
+    Settles on four answers instead of the local five:
+
+      - `source: "roster_status"`, idle true — the far window's badge says the
+        pane is not working (idle) or that its session is over (exited /
+        stopped / error, which the local path settles on too).
+      - `source: "roster_offline"`, idle false, `reason: "offline"` — the far
+        machine is away or its window disconnected. Deliberately its own
+        answer: it is neither busy nor idle, and the roster keeps the pane
+        listed while it is gone, so "no answer" and "not working" would
+        otherwise look the same. Returned as soon as it is seen rather than
+        waited out — a window that is not there cannot report a turn ending.
+      - `source: "timeout"` with `reason` — see below.
+      - `{ok: false}` — the pane dropped out of the roster entirely during the
+        wait, so there is nothing left to watch.
+
+    `reason` on timeout is "busy" for a pane that stayed at work, and
+    "awaiting_unclassified" for one parked on "awaiting". That second one is
+    the honest name for what cannot be known from here: locally `awaitingKind`
+    separates a permission prompt (waiting on a HUMAN) from an open question
+    (which counts as idle), and the roster carries no such field, so an
+    "awaiting" pane is left running the wait out and the reason says why the
+    two were never told apart.
+    """
+    timeout = min(max(float(timeout_s), 0.0), _WAIT_IDLE_MAX_TIMEOUT_S)
+    started = time.monotonic()
+    while True:
+        # Looked up again every poll: a roster push replaces the row object
+        # rather than mutating it, so a held reference would never change.
+        entry = _remote_pane_for(address)
+        if entry is None:
+            return {
+                "ok": False,
+                "error": f'"{address.to_string()}" is no longer listed in the session '
+                f"directory this machine has from the server, so there is nothing "
+                f"left to wait on",
+                "error_code": "unknown-remote-pane",
+            }
+        waited = time.monotonic() - started
+        answer: dict[str, Any] = {
+            "waited_s": round(waited, 1),
+            "remote": True,
+            "address": entry.address,
+            "status": entry.status,
+            "host_online": entry.host_online,
+        }
+        if not entry.host_online or entry.status == "disconnected":
+            return {**answer, "idle": False, "source": "roster_offline", "reason": "offline"}
+        if entry.status in _ROSTER_IDLE_STATUSES:
+            return {**answer, "idle": True, "source": "roster_status"}
+        if waited >= timeout:
+            return {
+                **answer,
+                "idle": False,
+                "source": "timeout",
+                "reason": (
+                    "awaiting_unclassified" if entry.status == "awaiting" else "busy"
+                ),
+            }
+        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+
+
 def _ui_status_is_idle(payload: dict[str, Any]) -> bool:
     """Whether a `ui.pane.getStatus` reply means the pane can take work."""
     status = str(payload.get("status") or "")
@@ -2454,6 +2678,20 @@ async def cli_wait_idle(
     and is waiting on a HUMAN, not on work — answer it in the UI), "busy" (it
     really is still working; wait longer), and "unreachable" (the window that
     owns the pane stopped answering, so nothing here is current).
+
+    A `<device>/<workspace>/<pane>` target is waited on through Navide-Server's
+    session directory, and that wait is WEAKER than this one — read `source`,
+    which never says "turn_complete" for a remote pane because no end-of-turn
+    signal crosses the link. It settles as "roster_status" (the far window's
+    badge stopped saying the pane was working), "roster_offline" (that machine
+    or its window went away — a third answer, neither busy nor idle), or
+    "timeout" with `reason` "busy" or "awaiting_unclassified" — the latter
+    meaning the pane is parked and the roster does not carry the
+    `awaitingKind` that would say whether it is stuck on a human or merely
+    asking a question. There is no `last_activity` and no `ui_status`; the
+    badge word is reported as `status`, and it is what the far window last
+    uploaded (it debounces by 0.5s and re-sweeps every 30s), so it is near-live
+    rather than live.
     """
     from agent_team_backend import agent_messaging, app
 
@@ -2462,9 +2700,15 @@ async def cli_wait_idle(
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     me = caller.pane_id if caller.kind == "pane" else ""
-    result, failure = _resolve_pane_target(caller, me, target, pane_id)
+    result, failure = _resolve_pane_target(caller, me, target, pane_id, allow_remote=True)
     if failure is not None:
         return failure
+    if result.pane is None:
+        # No _waiting_on registration for a remote target: that table is keyed
+        # by a local pane id and is read back by cli_whoami on this machine, so
+        # a row for a pane on another one could never be seen by the pane it
+        # was about.
+        return await _wait_idle_remote(result.address, timeout_s)
     pane_id = result.pane.pane_id
 
     workspace_path = result.pane.workspace_path
@@ -2565,6 +2809,129 @@ async def cli_wait_idle(
             await asyncio.sleep(_WAIT_IDLE_POLL_S)
 
 
+# ── Interrupting another pane ────────────────────────────────────────────
+@server.tool()
+async def cli_interrupt(target: str, ctx: Context, pane_id: str = "") -> dict[str, Any]:
+    """Ask a CLI pane to stop what it is doing, without closing it.
+
+    This presses that CLI's interrupt key in its terminal — Ctrl-C for most
+    vendors, Esc for codex — exactly what the pane's own stop button does. It
+    is the middle rung: cli_send asks and waits for the current turn to finish,
+    ui_invoke "ui.pane.close" takes the pane and its PTY away, and until now
+    there was nothing in between.
+
+    WHAT THIS DOES NOT DO. It sends a keystroke; it does not stop a turn. What
+    the CLI makes of that keystroke is the CLI's business — most abort the
+    running turn, some only clear the text sitting in the input box, and one
+    already at an idle prompt may take a second press as "quit" and exit.
+    Nothing here waits for a stop or verifies that one happened, so a result
+    with `sent: true` means the bytes were written and nothing more. Check with
+    cli_get_status or cli_wait_idle if you need to know, and prefer cli_send
+    whenever the work can be allowed to finish.
+
+    Interrupting an idle pane is NOT refused — clearing whatever is in its
+    input box is a real reason to want it — but it is reported rather than
+    passed off as a stop: `status_before` is the pane's status at the instant
+    the key went in, and `advisories` says when no turn was interrupted (and
+    that a line somebody had typed but not sent may be gone with it).
+
+    `target` uses the same addressing as cli_send and `pane_id` names one exact
+    pane instead. Panes on this machine only: an interrupt is a byte written
+    into a local PTY and there is no relay for it, so a
+    `<device>/<workspace>/<pane>` address fails with "interrupt-local-only" —
+    that is a limit of this tool, not a wrong address.
+
+    Returns {ok, target, name, sent, status_before, advisories?}. `sent` false
+    means the interrupt was never issued — no live CLI behind the pane (a
+    cold-restore placeholder, or one whose session is gone), or the owning
+    window's own socket was down, in which case it drops the request rather
+    than queueing a stop for whatever turn is running after it reconnects.
+    `sent` true means the keystroke was issued and accepted; it is not a
+    receipt from the CLI, and a PTY write that fails on the far side is logged
+    there rather than reported here.
+    """
+    from agent_team_backend import message_routing
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    me = caller.pane_id if caller.kind == "pane" else ""
+    result, failure = _resolve_pane_target(caller, me, target, pane_id)
+    if failure is not None:
+        # A name that failed locally may still be a perfectly good address for
+        # a pane on another machine, and the local errors do not say so: an
+        # id-shaped device segment answers "unknown-device", which is worded
+        # for cli_send — the one caller that relays before it can reach that
+        # error — and blames a missing server link; a device *name* does not
+        # even get that far and comes back as "unknown workspace". Both would
+        # send the caller to re-check an address that is not the problem.
+        # message_routing.route is the same resolution cli_send uses, so
+        # "this names a remote pane" means here exactly what it means there.
+        if not (pane_id or "").strip():
+            routed = message_routing.route(me, target)
+            if routed.remote is not None:
+                return {
+                    "ok": False,
+                    "error": (
+                        f'cannot interrupt "{target}": it names a pane on another '
+                        f"device, and an interrupt is a byte written straight into a "
+                        f"local PTY — there is no relay for one at any link state. The "
+                        f"address may be perfectly good; only panes on this machine can "
+                        f"be interrupted from here. To stop a remote pane, cli_send it a "
+                        f"message asking it to stop."
+                    ),
+                    "error_code": "interrupt-local-only",
+                }
+        return failure
+    pane = result.pane
+    if caller.kind == "pane" and pane.pane_id == caller.pane_id:
+        # Interrupting yourself aborts the very turn making this call, so the
+        # answer would never reach the caller that asked for it. cli_send
+        # refuses a self-send for a milder reason (it would just be noise);
+        # here the call destroys its own result.
+        return {
+            "ok": False,
+            "target": pane.qualified_name,
+            "error": (
+                "that is your own pane — interrupting it would abort the turn "
+                "making this call, so you would never see the answer. Stop by "
+                "ending your turn instead."
+            ),
+            "error_code": "self-interrupt",
+        }
+
+    reply = await _ui_request(
+        pane.workspace_path,
+        "invoke",
+        caller=_pane_caller(pane.pane_id),
+        action="ui.pane.interrupt",
+        args={"paneId": pane.pane_id},
+    )
+    if not reply.get("ok"):
+        # Unlike cli_get_status's `ui` block there is no degraded answer to
+        # give: the window is the only thing that can write to the PTY, so a
+        # window that did not answer means nothing was sent.
+        return {
+            "ok": False,
+            "target": pane.qualified_name,
+            "error": str(reply.get("error") or "the window owning this pane did not answer"),
+            "error_code": str(reply.get("error_code") or "ui_action_failed"),
+        }
+    payload = reply.get("result") or {}
+    answer: dict[str, Any] = {
+        "ok": True,
+        "target": pane.qualified_name,
+        "name": pane.name,
+        "sent": bool(payload.get("sent")),
+        "status_before": str(payload.get("status") or ""),
+    }
+    advisories = [str(a) for a in (payload.get("advisories") or [])]
+    if advisories:
+        answer["advisories"] = advisories
+    return answer
+
+
 # How long to keep watching for the target to pick the message up before
 # falling through to the idle wait. Delivery is queued behind whatever the
 # pane is doing and the injected text only shows up as activity once its CLI
@@ -2597,6 +2964,106 @@ def _never_arrived(sent: dict[str, Any], started: float) -> dict[str, Any]:
         if key in sent:
             result[key] = sent[key]
     return result
+
+
+async def _send_and_wait_remote(
+    target: _RemoteResolution,
+    to: str,
+    text: str,
+    ctx: Context,
+    *,
+    timeout_s: float,
+    pane_id: str,
+    reply_to: str,
+) -> dict[str, Any]:
+    """cli_send_and_wait for a pane on another machine.
+
+    The same three steps as the local path — buy the delivery with half the
+    budget, give the target a moment to pick the message up, then wait for it
+    to go quiet — with the one signal that does not exist across the link
+    swapped out. Locally "did my message start a turn" is answered from the
+    pane's activity log; here the only observable is the roster badge, so it is
+    answered by having SEEN the pane working since the send
+    (_ROSTER_WORKING_STATUSES). A pane that never visibly started still ends as
+    reason "never_started", so an idle roster row can no more pass for a
+    finished turn than a stale activity record can locally.
+
+    The delivery gate itself is the same one and needs nothing special: a
+    relayed message settles through record_remote_ack, whose three states
+    (delivered / failed / rejected) land in the very table
+    `wait_for_delivery_s` parks on.
+    """
+    started = time.monotonic()
+    timeout = min(max(float(timeout_s), 0.0), _WAIT_IDLE_MAX_TIMEOUT_S)
+    delivery_budget = timeout / 2
+    sent = await cli_send(
+        to, text, ctx, wait_for_delivery_s=delivery_budget, pane_id=pane_id,
+        reply_to=reply_to,
+    )
+    if not sent.get("ok"):
+        return sent
+    if delivery_budget > 0 and sent.get("status") != "delivered":
+        return _never_arrived(sent, started)
+
+    def wrap(result: dict[str, Any]) -> dict[str, Any]:
+        return {**result, "ok": True, "target": sent["target"], "msg_key": sent["msg_key"]}
+
+    started_working = False
+
+    def poll_started() -> bool:
+        """Latch: has the roster shown this pane working since we sent?
+
+        Latched rather than sampled because the badge is debounced on its way
+        here — a turn that begins and ends between two uploads is a transition
+        this side never sees, and a sample taken after it would say "idle" for
+        a pane that did the work.
+        """
+        nonlocal started_working
+        entry = _remote_pane_for(target.address)
+        if entry is not None and entry.status in _ROSTER_WORKING_STATUSES:
+            started_working = True
+        return started_working
+
+    # Same grace as the local path, waiting on the same question: give the
+    # target a moment to pick the message up, so what follows is about its turn
+    # rather than about the state it was already in.
+    grace_deadline = started + min(timeout, _SEND_AND_WAIT_START_GRACE_S)
+    while True:
+        if poll_started() or time.monotonic() >= grace_deadline:
+            break
+        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+
+    while True:
+        left = timeout - (time.monotonic() - started)
+        if left <= 0:
+            break
+        waited = await cli_wait_idle(to, ctx, timeout_s=left, pane_id=pane_id)
+        if waited.get("ok") is False:
+            # Same reading as the local target_lost: the send happened and
+            # msg_key is real, so this is "delivered, but I can no longer
+            # confirm it was finished" and must not invite a resend.
+            return wrap(
+                {
+                    "idle": False,
+                    "source": "target_lost",
+                    "error": waited.get("error") or "the target is no longer addressable",
+                    "waited_s": round(time.monotonic() - started, 1),
+                }
+            )
+        if not waited.get("idle") or poll_started():
+            return wrap(waited)
+        if timeout - (time.monotonic() - started) <= 0:
+            break
+        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+
+    return wrap(
+        {
+            "idle": False,
+            "source": "timeout",
+            "reason": "never_started",
+            "waited_s": round(time.monotonic() - started, 1),
+        }
+    )
 
 
 @server.tool()
@@ -2656,6 +3123,21 @@ async def cli_send_and_wait(
     of having read the message. `reason` is only meaningful for "timeout" and
     is absent from every other source. A send that is refused outright returns
     cli_send's {ok: false, error} unchanged.
+
+    A `<device>/<workspace>/<pane>` target works end to end, and `source` is
+    where you see what it cost. It is NEVER "turn_complete" for a remote pane
+    — no end-of-turn signal crosses the link — and instead settles as
+    "roster_status" (Navide-Server's session directory stopped reporting the
+    pane as working, which is the strongest thing observable from here),
+    "roster_offline" (the far machine or its window went away mid-wait: a
+    third answer, neither busy nor idle), or "timeout" with `reason` "busy",
+    "never_started", or "awaiting_unclassified" — that last one meaning the
+    pane is parked and the roster carries no `awaitingKind`, so whether it is
+    stuck on a human or merely asking a question could not be told apart. Nor
+    is there a `last_activity`: what the other agent said cannot be read back
+    from here, only that it appears to have stopped. "not_delivered" reaches
+    remote targets too, and there `reason` is the far device's own ack —
+    "rejected" meaning its pane policy refused, which resending will not fix.
     """
     from agent_team_backend import app
 
@@ -2678,9 +3160,14 @@ async def cli_send_and_wait(
         }
     # Same gate as cli_send, applied before the resolve below so an unqualified
     # address gets the same answer here as it would there.
-    resolved, failure = _resolve_pane_target(caller, me, to, pane_id)
+    resolved, failure = _resolve_pane_target(caller, me, to, pane_id, allow_remote=True)
     if failure is not None:
         return failure
+    if resolved.pane is None:
+        return await _send_and_wait_remote(
+            resolved, to, text, ctx,
+            timeout_s=timeout_s, pane_id=pane_id, reply_to=reply_to,
+        )
     target_pane_id = resolved.pane.pane_id
 
     baseline = app.pane_activity(target_pane_id)
@@ -2931,6 +3418,26 @@ _UI_INVOKE_TIMEOUT_S = 15.0
 # claude. Giving these actions the same budget as an unanswered request means
 # reporting failure for work that in fact succeeded, so they get their own.
 _UI_INVOKE_SLOW_TIMEOUT_S = 60.0
+#: Renderer commands whose argument names a pane's PRIVATE data — an inbox —
+#: rather than a window or a project. `ui_invoke` forwards action and args
+#: verbatim, so without this list a caller could name another pane's id and
+#: read and consume its mail. These two are refused unless args.paneId is the
+#: caller's own pane; the only legitimate emitter, cli_read_incoming, always
+#: names its own.
+#:
+#: This is NOT a boundary around the inbox, and reading it as one would be a
+#: mistake. A pane caller's identity is the `pane=<id>` query param it was
+#: wired with, checked against a token shared by every pane on the machine
+#: (wiring.caller_token — a freshness check, readable via `ps` by anything
+#: running as the same user). So a local caller can present itself AS the
+#: victim pane and satisfy the check below. What this list buys is that a
+#: caller acting under its own identity cannot reach across to someone else's
+#: inbox; closing the impersonation case needs a per-pane token.
+#:
+#: Deliberately a short explicit list, not "every action with a paneId": focus,
+#: close, getStatus and interrupt are cross-pane by design.
+_PANE_PRIVATE_UI_ACTIONS = frozenset({"ui.messaging.readIncoming", "ui.messaging.settleRead"})
+
 _UI_INVOKE_SLOW_ACTIONS = frozenset({"ui.pane.create"})
 _ui_invoke_pending: PendingRegistry[dict[str, Any]] = PendingRegistry()
 
@@ -3081,6 +3588,10 @@ async def _ui_request(
         "args": args,
         "global": is_global,
         "addressed": owner is not None,
+        # Who is asking, from the credential and never from args: the renderer
+        # refuses the pane-private actions when this is not the pane named in
+        # args.paneId. Empty for host / external callers, which have no inbox.
+        "caller_pane_id": caller.pane_id if caller is not None and caller.kind == "pane" else "",
     }
     # The event is built inside each branch, after `addressed` has settled:
     # make_event stores the payload by reference today, so mutating it after
@@ -3159,6 +3670,23 @@ async def ui_invoke(
     from a window that has the project open.
     """
     caller = _resolve_caller(ctx)
+    if action in _PANE_PRIVATE_UI_ACTIONS:
+        # Refused here as well as in the window: the renderer check is the one
+        # that holds for every path a request can take, this one gives the
+        # caller the reason without a round trip. Same rule on both sides.
+        own = caller.pane_id if caller.kind == "pane" else ""
+        named = str((args or {}).get("paneId") or "")
+        if not own or named != own:
+            return {
+                "ok": False,
+                "result": None,
+                "error": (
+                    f"{action} reads a pane's own inbox; it can only be invoked by that "
+                    "pane for itself (use cli_read_incoming), not for another pane "
+                    "and not by a host or external caller"
+                ),
+                "error_code": "ui_pane_private",
+            }
     return await _ui_request(
         workspace_path,
         "invoke",

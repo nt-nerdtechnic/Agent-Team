@@ -126,6 +126,11 @@ def _usage_tokens(usage: dict) -> tuple[int, int]:
 class KimiLogReader(LogReader):
     vendor: str = "kimi"
 
+    #: parse_activity walks a dense ascending line counter and resumes from
+    #: one high-water mark, so an old file can be seeded to EOF by counting
+    #: lines rather than replaying it (log_readers.base).
+    activity_resumes_by_line: bool = True
+
     def _sessions_root(self) -> Path:
         return _kimi_home() / "sessions"
 

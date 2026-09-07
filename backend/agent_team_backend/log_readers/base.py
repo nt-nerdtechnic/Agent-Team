@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -217,6 +218,98 @@ def set_activity_high_water(seen_keys: set[str], line_no: int) -> None:
     seen_keys.add(f"{_ACTIVITY_HW_PREFIX}{line_no}")
 
 
+#: Wall-clock time this process started, captured at import. A transcript whose
+#: last write predates it cannot hold activity the running backend has any live
+#: pane state to attach to, so on first sight it is seeded rather than replayed
+#: (see seed_pre_start_activity). Patchable in tests.
+PROCESS_START_S = time.time()
+
+#: A file untouched for longer than this before the process started can only
+#: hold history: the MSG delivery path already refuses anything whose own
+#: timestamp is more than 60s old (App.vue's TURN_TEXT_REPLAY_TOLERANCE_MS), so
+#: nothing still deliverable can be hiding in it. Anything more recent might —
+#: a live pane mid-turn, or a turn written just before a crash — so its tail is
+#: read rather than skipped. Generous against that 60s on purpose: the cost of
+#: being wrong is one-directional (a dropped turn has no second chance).
+SEED_TAIL_GRACE_S = 300.0
+
+#: How much of a recent file's tail is left for the reader to parse. Bounded on
+#: purpose: the whole point is that startup cost stops scaling with transcript
+#: size. Large enough to hold several turns of any vendor, including Claude's
+#: tool-output lines, which are the longest by a wide margin.
+SEED_TAIL_BYTES = 256 * 1024
+
+
+def seed_pre_start_activity(path: Path, seen_keys: set[str]) -> bool:
+    """Mark a transcript as read up to a point, without reading its content.
+
+    The watcher has no durable mark for a file it is seeing for the first time
+    (fresh install, first start after upgrade), so the reader would walk it from
+    line 1 — a json.loads per line and one broadcast per entry, measured at
+    ~148,000 events in the first 60 seconds of a cold start (GitHub #28).
+    Counting newlines reaches the same resume point for a fraction of the cost.
+
+    Only for readers whose `activity_resumes_by_line` is set: the mark is a line
+    number, and a reader keyed on db row ids or per-session sequence numbers
+    would not consult it. Returns True when a mark was set.
+
+    How far the mark goes depends on how recently the file was written, because
+    the cost of guessing wrong is one-directional — a turn skipped here has no
+    second chance, since nothing re-reads a line once the mark is past it:
+
+    * Untouched for more than SEED_TAIL_GRACE_S before this process started:
+      history only. Marked to the end; nothing is parsed, nothing is broadcast.
+    * More recent than that: it may belong to a live pane mid-turn, or hold the
+      last turn written before a crash. Marked only up to SEED_TAIL_BYTES from
+      the end, so the reader parses that tail and delivers what is in it.
+
+    The tail is what makes the second case affordable. Refusing to mark such a
+    file at all — the earlier shape of this function — left the reader walking
+    it from line 1, so the busiest, largest transcripts were exactly the ones
+    that still replayed in full.
+
+    Counts what the readers count, so the mark means the same thing to them: a
+    blank line never advances it, and an unterminated final line is left in
+    front of it so the completed line is still delivered on the next poll
+    (GitHub #21 — advancing past a half-written turn-end record left the pane
+    "mid-turn" forever).
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    # None = mark the whole file; otherwise the byte offset marking stops at.
+    stop_at: int | None = None
+    if st.st_mtime >= PROCESS_START_S - SEED_TAIL_GRACE_S:
+        stop_at = st.st_size - SEED_TAIL_BYTES
+        if stop_at <= 0:
+            # The file is all tail. Nothing to skip, so leave it unmarked and
+            # let the reader do its ordinary walk.
+            return False
+    last_line = 0
+    try:
+        # Binary: only newlines matter here, nothing decodes the content, and
+        # byte offsets are what the tail boundary is expressed in. Line
+        # numbering matches the readers' text-mode walk — both split on "\n",
+        # and a "\r\n" line still ends with one.
+        with path.open("rb") as fh:
+            offset = 0
+            for line_no, raw_line in enumerate(fh, 1):
+                if not raw_line.endswith(b"\n"):
+                    break
+                if stop_at is not None and offset >= stop_at:
+                    break
+                offset += len(raw_line)
+                if raw_line.strip():
+                    last_line = line_no
+    except OSError:
+        return False
+    if not last_line:
+        return False
+    set_activity_high_water(seen_keys, last_line)
+    return True
+
+
 class LogReader(ABC):
     """Abstract reader for one CLI vendor's local conversation logs.
 
@@ -250,6 +343,12 @@ class LogReader(ABC):
     #: the single unbound candidate pane in the same cwd. Migrated
     #: replacement for membership in attribution's fallback tuple.
     binds_new_session_single_candidate: bool = False
+
+    #: parse_activity resumes from one dense ascending line high-water mark
+    #: (activity_high_water), so a first-sight file can be seeded to EOF by
+    #: counting lines instead of parsing them — see seed_pre_start_activity.
+    #: False for readers keyed on db row ids or per-session sequence numbers.
+    activity_resumes_by_line: bool = False
 
     def marker_scan_text(self, path: Path) -> str | None:
         """Text to scan for a kickoff marker, or None for the generic

@@ -388,6 +388,33 @@ def test_parse_activity_reparse_does_not_reemit(fake_qwen_root: Path) -> None:
     assert reader.parse_activity(f, seen) == []
 
 
+def test_parse_activity_leaves_a_half_written_last_line_for_next_poll(
+    fake_qwen_root: Path,
+) -> None:
+    """A poll that catches Qwen mid-append must not advance past the
+    unterminated last line: doing so drops it for good once it completes,
+    which strands the pane mid-turn forever when the lost line was the
+    assistant's closing record (GitHub #21)."""
+    reader = QwenLogReader()
+    f = _chat_file(fake_qwen_root)
+    _write_jsonl(f, [_user("u1", "go")])
+    seen: set[str] = set()
+    reader.parse_activity(f, seen)
+    assert activity_high_water(seen) == 1
+
+    full_line = json.dumps(_assistant_saying("a1", "working"))
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(full_line[:20])  # Qwen is still writing this line
+    assert reader.parse_activity(f, seen) == []
+    assert activity_high_water(seen) == 1, "must not advance past the half-written line"
+
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(full_line[20:] + "\n")
+    events = reader.parse_activity(f, seen)
+    assert [(e.event_type, e.detail) for e in events] == [("agent_active", "assistant")]
+    assert activity_high_water(seen) == 2
+
+
 # ── activity: the seen_keys bag stays O(1) ───────────────────────────────────
 # seen_keys lives as long as the chat file, so a walk of a long log must leave
 # one high-water mark in it, not a key per line (GitHub #23).

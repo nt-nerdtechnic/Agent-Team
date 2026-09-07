@@ -3099,3 +3099,251 @@ async def test_a_stop_that_arrives_after_adoption_is_still_recovered(monkeypatch
         confirm_token._reset_for_test()
         trust_store._reset_for_test()
         await link.stop()
+
+
+# ── A device id belongs to a machine × an account, not to a machine ──────────
+
+
+def _conflict_until(taken: set[str]):
+    """A server that refuses any id in *taken*, the way a real one refuses an id
+    already registered to another member."""
+
+    def responder(conn, message):
+        if message.get("type") == "auth.hello":
+            payload = message.get("payload") or {}
+            conn.hellos.append(payload)
+            if payload.get("deviceId") in taken:
+                return {
+                    "id": message.get("id"),
+                    "ok": False,
+                    "error": {
+                        "code": "DEVICE_CONFLICT",
+                        "message": "that device belongs to another member",
+                    },
+                }
+        return default_responder(conn, message)
+
+    return responder
+
+
+async def test_a_refused_id_is_replaced_once_and_the_link_comes_up(tmp_path, monkeypatch):
+    """M3's dead end, resolved without anybody touching anything.
+
+    Registering a second account from a machine the server already knows made
+    every auth.hello answer DEVICE_CONFLICT, permanently — and the account view
+    reported "access token rejected", which sends people to retype a password
+    that was never wrong.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    legacy = device_identity.device_id()
+    server = FakeServer(responder=_conflict_until({legacy}), policy=ALLOW_ALL_POLICY)
+
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        offered = [h.get("deviceId") for h in conn.hellos]
+
+        # The one it has always presented, then a new one — and every offer
+        # after that is the new one, because it was recorded when the server
+        # took it. A machine that minted a fresh id per reconnect would look
+        # like a new machine to every peer each time.
+        assert offered[0] == legacy
+        assert offered[1] != legacy
+        assert set(offered[1:]) == {offered[1]}, offered
+        assert link._device_id == offered[1]
+        # And the accepted one is now this machine's node in that account —
+        # recorded only because the server took it.
+        assert device_identity.node_id_for("m1") == offered[1]
+    finally:
+        await link.stop()
+
+
+async def test_the_replacement_is_tried_once_and_not_in_a_loop(tmp_path, monkeypatch):
+    """A member is capped at ten devices on the server. Retrying until something
+    sticks would spend the whole allowance on one bad afternoon, and every burnt
+    id is one the user cannot get back."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    everything_conflicts = _conflict_until({"*"})
+
+    def responder(conn, message):
+        if message.get("type") == "auth.hello":
+            conn.hellos.append(message.get("payload") or {})
+            return {
+                "id": message.get("id"),
+                "ok": False,
+                "error": {"code": "DEVICE_CONFLICT", "message": "no"},
+            }
+        return default_responder(conn, message)
+
+    del everything_conflicts
+    server = FakeServer(responder=responder, policy=ALLOW_ALL_POLICY)
+    link = server_link.ServerLink(
+        connect=server.connect,
+        config_loader=lambda: server_link.ServerLinkConfig(url="ws://s/ws", token="t"),
+    )
+    task = asyncio.create_task(link._run())
+    try:
+        await _until(lambda: bool(server.opened and len(server.opened[0].hellos) >= 2))
+        await asyncio.sleep(0.05)
+
+        assert len(server.opened[0].hellos) == 2, "one retry, not a loop"
+        # And nothing was written: an id the server refused is not this
+        # machine's node in anything.
+        doc = json.loads(device_identity.device_identity_path().read_text(encoding="utf-8"))
+        assert doc.get("nodes", {}) == {}
+    finally:
+        link._stopped = True
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+
+
+async def test_a_conflict_that_survives_the_retry_says_what_it_is(tmp_path, monkeypatch):
+    """It used to surface as "access token rejected" — pointing at the
+    credential, when the credential was never the problem."""
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+
+    def responder(conn, message):
+        if message.get("type") == "auth.hello":
+            conn.hellos.append(message.get("payload") or {})
+            return {
+                "id": message.get("id"),
+                "ok": False,
+                "error": {"code": "DEVICE_CONFLICT", "message": "taken"},
+            }
+        return default_responder(conn, message)
+
+    server = FakeServer(responder=responder, policy=ALLOW_ALL_POLICY)
+    link = server_link.ServerLink(
+        connect=server.connect,
+        config_loader=lambda: server_link.ServerLinkConfig(url="ws://s/ws", token="t"),
+    )
+    task = asyncio.create_task(link._run())
+    try:
+        await _until(lambda: bool(link.terminated_reason))
+
+        assert "already registered to another account" in link.terminated_reason
+        # It used to read as a credential problem, which is where people looked.
+        assert "token" not in link.terminated_reason.lower()
+    finally:
+        link._stopped = True
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+
+
+async def test_an_id_the_server_refused_is_never_recorded(tmp_path, monkeypatch):
+    """Offering an id is not claiming it.
+
+    The member is known here — this credential has authenticated before — which
+    is the case the identity module alone cannot cover: it is the *link* that
+    decides when to record, and recording before the reply would spend one of
+    the ten devices a member is allowed on every refusal. A machine having a bad
+    afternoon would exhaust the account by trying.
+    """
+    monkeypatch.setenv("AGENT_TEAM_DATA_DIR", str(tmp_path))
+    trust_store.load()
+    trust_store.adopt_own_member("ws://s/ws", "t", "m1")
+    assert trust_store.member_for_credential("ws://s/ws", "t") == "m1"
+
+    def refuse_everything(conn, message):
+        if message.get("type") == "auth.hello":
+            conn.hellos.append(message.get("payload") or {})
+            return {
+                "id": message.get("id"),
+                "ok": False,
+                "error": {"code": "DEVICE_CONFLICT", "message": "taken"},
+            }
+        return default_responder(conn, message)
+
+    server = FakeServer(responder=refuse_everything, policy=ALLOW_ALL_POLICY)
+    link = server_link.ServerLink(
+        connect=server.connect,
+        config_loader=lambda: server_link.ServerLinkConfig(url="ws://s/ws", token="t"),
+    )
+    task = asyncio.create_task(link._run())
+    try:
+        await _until(lambda: bool(link.terminated_reason))
+
+        doc = json.loads(device_identity.device_identity_path().read_text(encoding="utf-8"))
+        assert "m1" not in doc.get("nodes", {}), doc
+    finally:
+        link._stopped = True
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        trust_store._reset_for_test()
+
+
+# ── The screen that reports a locked store must survive one ───────────────────
+
+
+def test_a_locked_store_still_answers_with_the_device_list() -> None:
+    """The account window is the only place a locked trust store is reported,
+    and reading the snapshot used to be what took that window down.
+
+    Every row's state comes from `pin_for`, which raises on a locked store; one
+    unpinned device was enough to kill the whole handler. So the person whose
+    machine had stopped got a device list that would not load, on the screen
+    written to tell them why it had stopped — `trustLocked` and its red card
+    were already in the payload, and nobody ever saw either.
+    """
+    trust_store.load()
+    _roster_offering("dev-mine", device_signing.public_key())
+    link = _trust_link()
+    link._device_id = "me"
+    link._own_member = "m-self"
+    link._directory = [{"deviceId": "dev-mine", "hostMemberId": "m-self"}]
+    link._online_devices = {"dev-mine"}
+    _lock_the_store()
+    link._trust_locked = trust_store.locked_reason()
+
+    snapshot = link.network_snapshot()
+
+    assert snapshot["trustLocked"], "the reason is what the card is for"
+    row = next(d for d in snapshot["devices"] if d["deviceId"] == "dev-mine")
+    # Silence, not a guess. "pending" would assert this machine is not paired,
+    # which may be false, and this is the surface where paired and unpaired look
+    # different — so no pill at all, with the reason beside it in `trustLocked`.
+    assert row["trustState"] == ""
+    # And no button offering to pair with a machine that may already be pinned.
+    assert row["canTrust"] is False
+
+
+def test_a_keychain_locked_for_a_moment_does_not_take_the_window_with_it(
+    monkeypatch,
+) -> None:
+    """The transient half, which is the one that happens to people.
+
+    A dismissed authorisation dialog or a `security` timeout raises exactly the
+    same `TrustStoreLocked` as a destroyed record, and it arrives on a machine
+    where nothing is wrong at all. Crashing the snapshot there means the account
+    window breaks for a few seconds for no reason a person could ever discover.
+    """
+    _roster_offering("dev-mine", device_signing.public_key())
+    link = _trust_link()
+    link._device_id = "me"
+    link._own_member = "m-self"
+    link._directory = [{"deviceId": "dev-mine", "hostMemberId": "m-self"}]
+    _with_flaky_vault(monkeypatch, failures=1)
+
+    snapshot = link.network_snapshot()
+
+    # Both rows, which is the whole assertion: before this the read raised out
+    # of the handler and there was no list at all.
+    assert [d["deviceId"] for d in snapshot["devices"]] == ["me", "dev-mine"]
+    assert next(d for d in snapshot["devices"] if d["deviceId"] == "me")["isLocal"]
+
+
+def test_the_token_read_answers_rather_than_raising(monkeypatch) -> None:
+    """`access_token` is called from the connect loop and from the settings
+    read. A vault that will not answer for a moment is not a logout and is not a
+    crash — it is one round of "no configuration this time", and the loop dials
+    again."""
+    class _Shut:
+        def read_app_secret(self, *_a, **_k):
+            raise RuntimeError("the keychain is locked")
+
+    monkeypatch.setattr(server_link, "_vault", lambda: _Shut())
+
+    assert server_link.access_token() == ""

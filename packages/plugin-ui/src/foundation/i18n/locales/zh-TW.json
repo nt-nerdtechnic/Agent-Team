@@ -60,7 +60,7 @@
     "reason-unknown-pane-id": "本機找不到 id 為「{pane_id}」的 pane",
     "reason-ambiguous-target": "工作區「{ws}」中有 {n} 個 pane 都叫「{name}」 — 請重新命名其中一個",
     "reason-target-offline": "「{to}」目前離線 — 所屬視窗已斷線 {seconds} 秒，該 pane 仍然存在",
-    "reason-unknown-device": "找不到裝置「{device}」 — 這台機器沒有連上 Navide-Server，只能定址自己機器上的面板",
+    "reason-unknown-device": "找不到裝置「{device}」 — 這台機器沒有連上 Navide Cloud，只能定址自己機器上的面板",
     "rename-collision-title": "訊息名稱重複",
     "rename-collision-body": "名稱「{name}」已被其他 CLI 使用。請設定另一個訊息名稱：",
     "rename-collision-confirm": "確認",
@@ -77,6 +77,12 @@
     "push-badge-title-box": "經由該 CLI 自己的本機介面送入，不是逐字打進去 — 但文字仍然進了 pane 的輸入框，所以還是等你停止打字才送",
     "push-badge-title-direct": "直接交給該 CLI，全程沒有經過 pane 的輸入框，你正在打的字不可能被一起送出",
     "expand-rail": "展開 CLI 互傳訊息"
+  },
+  "shutdown": {
+    "title": "正在關閉…",
+    "saving": "儲存視窗與工作階段狀態",
+    "stopping": "結束執行中的 CLI 與後端服務",
+    "closing": "即將關閉"
   },
   "confirm-close": {
     "ws-title": "關閉工作區？",
@@ -399,6 +405,13 @@
       "loop-capped-notify-title": "Loop 已停止 — 達續跑次數上限",
       "loop-capped-notify-body": "Loop 已送出上限次數的續跑提示，Agent 仍未回報任務完成 — 若工作方向正確請手動重新啟動",
       "login-expired-badge": "⚠ 登入過期",
+      "usage-limit-badge": "⛔ {time} 恢復",
+      "usage-limit-badge-unknown": "⛔ 額度用完",
+      "usage-limit-tooltip": "此 CLI 的額度已用完 — 預計 {time} 恢復",
+      "usage-limit-tooltip-unknown": "此 CLI 的額度已用完 — 恢復時間無法判讀",
+      "usage-limit-notify-title": "CLI 額度已用完",
+      "usage-limit-notify-body": "CLI 回報額度已用完 — 預計 {time} 恢復",
+      "usage-limit-notify-body-unknown": "CLI 回報額度已用完 — 恢復時間無法判讀",
       "login-expired-tooltip": "CLI 登入已過期 — 點擊送出其登入指令重新登入",
       "login-expired-notify-title": "CLI 登入已過期",
       "login-expired-notify-body": "CLI 回報登入已過期 — 點擊該 pane 的標籤重新登入",
@@ -918,6 +931,8 @@
       "language-zh-TW": "繁體中文",
       "language-en-US": "English",
       "language-hint": "語言是使用者層級的偏好設定，對所有工作區生效。",
+      "ui-scale": "介面縮放",
+      "ui-scale-hint": "整體放大或縮小介面——文字、圖示與間距——並套用到所有視窗。與終端機、編輯器的字級無關，那兩者仍各自使用 ⌘= / ⌘- 快捷鍵。",
       "restore-windows": "還原視窗",
       "restore-windows-hint": "下次啟動時，自動開回你上次結束前開著的工作區視窗。",
       "restore-windows-label": "下次啟動時重新開啟視窗",
@@ -993,7 +1008,7 @@
       "general": "一般",
       "appearance": "外觀",
       "layout": "版面",
-      "crossDevice": "跨裝置",
+      "crossDevice": "Navide Cloud",
       "accounts": "帳號",
       "cliAgents": "CLI Agents",
       "roles": "角色",
@@ -1013,8 +1028,13 @@
     },
     "help": {
       "topic": {
+        "workspace": "工作區與面板",
+        "cliAgents": "CLI Agent 與帳號",
         "messaging": "CLI 互傳訊息",
-        "mcp": "MCP"
+        "mcp": "MCP",
+        "codeWorkflow": "程式碼工作流",
+        "settingsSystem": "設定與系統",
+        "icons": "介面圖示"
       }
     },
     "mcp": {
@@ -1227,8 +1247,8 @@
       "updates": "更新"
     },
     "p2p": {
-      "title": "跨裝置",
-      "hint": "連上 Navide-Server，這裡的 agent 就能傳訊給其他裝置。",
+      "title": "連線",
+      "hint": "Navide Cloud 把你的裝置串成一個私有網路，這裡的 agent 就能傳訊給任何登入同一帳號的裝置。",
       "legal-privacy": "隱私權",
       "legal-boundaries": "使用界線",
       "token": "存取權杖",
@@ -1275,8 +1295,11 @@
         "step-your-turn": "等你比對",
         "title": "配對",
         "waiting-remote": "你已確認，等待對方確認。",
-        "waiting-response": "已送出。到那台裝置上打開帳號視窗回應。",
-        "your-turn": "兩邊螢幕上都有數字了。在你確認一致之前，不會配對。"
+        "waiting-response": "已送出。對方畫面上會直接跳出來，不必開任何視窗。",
+        "with-device": "正在與 {device} 配對",
+        "your-turn": "兩邊螢幕上都有數字了。在你確認一致之前，不會配對。",
+        "dismiss": "關閉",
+        "dismiss-title": "只關掉這則通知。配對請求繼續進行，對方回應時會出現在這裡。"
       },
       "fingerprint-copy": "複製",
       "fingerprint-copied": "已複製",
@@ -1367,7 +1390,8 @@
         "panes": "{count} 個 CLI 面板",
         "no-panes": "這台目前沒有執行中的面板。",
         "solo": "目前只有這台裝置登入。在另一台裝置登入同一個帳號，它就會出現在這裡。",
-        "link-offline": "連線已中斷，以下是伺服器最後一次回報的狀態。"
+        "link-offline": "連線已中斷，以下是伺服器最後一次回報的狀態。",
+        "not-current": "這份資料可能不是最新的——最後一次讀取沒有回來。"
       },
       "trust": {
         "requests-hint": "核准只會為這一個 pane 寫一條規則，這台裝置上的其他 pane 不會被授權。",
@@ -1413,7 +1437,7 @@
         "policy-sign-when": "只有看到這個警告時才需要按。",
         "policy-open-rules": "開啟規則",
         "policy-signed-default": "沒有規則可重新簽署，所以簽的是預設值：目前不允許任何裝置。",
-        "locked-title": "跨裝置已停止",
+        "locked-title": "Navide Cloud 已停止",
         "locked-body": "這台裝置原本有信任狀態，現在沒有了。在弄清楚之前不送也不收。",
         "plaintext-refused": "已拒收來自 {device} 的未加密訊息",
         "plaintext-refused-body": "這台裝置一向送加密訊息，這一則是明文，因此被拒收。",
@@ -1813,7 +1837,10 @@
         "workbench_action_splitEditor": "分割編輯器",
         "workbench_action_toggleAIChat": "開關 AI 終端面板",
         "workbench_action_toggleSidebar": "開關側邊欄",
-        "workbench_action_toggleZenMode": "切換專注模式"
+        "workbench_action_toggleZenMode": "切換專注模式",
+        "workbench_action_zoomUiIn": "介面放大",
+        "workbench_action_zoomUiOut": "介面縮小",
+        "workbench_action_zoomUiReset": "介面縮放重設"
       },
       "col": {
         "command": "命令",
@@ -3018,6 +3045,9 @@
     "switch-title": "切換帳號",
     "switch-default": "Default（內建）",
     "switch-low": "額度不足，可切換帳號",
+    "exhausted-short": "已用完",
+    "exhausted-tooltip": "額度已用完 — {time} 後恢復。這與「剩下不到 1%」不同：現在送出的工作會被擋下",
+    "exhausted-tooltip-no-reset": "額度已用完 — 恢復時間未知",
     "switch-manage": "新增／管理帳號…",
     "settings-title": "CLI 額度徽章",
     "settings-enabled": "在 CLI pane 標題列顯示剩餘額度",
@@ -3241,8 +3271,8 @@
     "unnamed-pane": "終端機"
   },
   "account": {
-    "title": "Navide 帳號",
-    "tagline": "登入後即可將這台裝置與你的其他裝置連起來。",
+    "title": "Navide Cloud",
+    "tagline": "一個帳號，串起所有裝置。登入即可把這台機器加入你的 Navide Cloud。",
     "no-recovery": "目前還沒有密碼重設功能——請妥善保存你的密碼。",
     "err-unsupported": "這台伺服器尚未支援帳號功能，可能需要更新。",
     "err-email-taken": "這個 email 已經註冊過了，請改用登入。",

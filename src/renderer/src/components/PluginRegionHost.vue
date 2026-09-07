@@ -21,6 +21,9 @@ export interface PluginRegionContribution {
   contributionKey: string
   title: string
   icon: string | null
+  /** Single-colour artwork: the renderer paints it in the current text colour
+   *  so it follows the theme like the built-in SVG icons. */
+  iconMonochrome?: boolean
   kind: 'custom'
   location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
   manifestOrder: number

@@ -141,6 +141,7 @@ declare global {
       }) => Promise<{ ok: boolean; fallback?: 'legacy' }>
       closeGitLeftView: () => Promise<{ ok: boolean }>
       getZoomFactor?: () => Promise<number>
+      setUiScale?: (scale: number) => Promise<number>
       onZoomChanged?: (cb: () => void) => () => void
       onPlanOpenDoc: (handler: (relPath: string) => void) => () => void
       openDiffWindow: (args: {
@@ -211,6 +212,7 @@ declare global {
         dontShowLabel: string
       }) => void
       onQuitConfirmDisabled: (cb: () => void) => () => void
+      onQuitProgress: (cb: (stage: 'saving' | 'stopping' | 'closing') => void) => () => void
       onWindowVisibility: (cb: (visible: boolean) => void) => () => void
       readHealthCheckTimeout: () => Promise<{ ok: boolean; timeoutSec?: number }>
       writeHealthCheckTimeout: (timeoutSec: number) => Promise<{ ok: boolean; error?: string }>
@@ -343,6 +345,7 @@ declare global {
           contributionKey: string
           title: string
           icon: string | null
+          iconMonochrome: boolean
           kind: 'custom'
           location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
           manifestOrder: number

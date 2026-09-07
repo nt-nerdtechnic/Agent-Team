@@ -74,6 +74,17 @@ rules the editor writes.
 | `⌘-` | Zoom out |
 | `⌘0` | Reset zoom |
 
+### Interface Zoom
+
+Scales the whole app chrome (Electron page zoom), not just a font. The shifted
+forms of the font-zoom chords above.
+
+| Shortcut | Action |
+|----------|--------|
+| `⌘⇧=` | Interface zoom in |
+| `⌘⇧-` | Interface zoom out |
+| `⌘⇧0` | Interface zoom reset |
+
 ---
 
 ## Editor Tabs

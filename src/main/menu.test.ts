@@ -198,10 +198,10 @@ describe('installApplicationMenu', () => {
     expect(hooks.calls).toEqual(['resource-manager'])
   })
 
-  it('Window has Navide Account wired to its hook', () => {
+  it('Window has Navide Cloud wired to its hook', () => {
     // Signing in must be reachable without finding Settings first — it is the
     // first thing a new user does.
-    fire(itemIn(submenuOf('Window'), 'Navide Account'))
+    fire(itemIn(submenuOf('Window'), 'Navide Cloud'))
     expect(hooks.calls).toEqual(['account'])
   })
 

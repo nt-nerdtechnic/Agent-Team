@@ -7,6 +7,7 @@ import { buildWorkspaceGroups, workspaceParentPath } from './lib/workspaceGroups
 import { buildPaneLineage } from './lib/paneLineage'
 import { ancestorTrail } from './lib/paneListView'
 import { closeAdvisoriesFor } from './lib/paneCloseAdvisories'
+import { interruptAdvisoriesFor } from './lib/paneInterruptAdvisories'
 import { panesOfActiveTab, panesOfViewedWorkspace } from './lib/paneVisibility'
 import { buildStageTabs } from './lib/stageTabs'
 import { schedulePrewarm } from './lib/prewarm'
@@ -52,11 +53,13 @@ import { VENDORS_WITHOUT_TURN_END, hasUnparsedMessageAttempt, isInjectedMessageT
 import {
   evaluateTurnSpawns,
   evaluateSpawnRequest,
+  assertAgentKeyAllowed,
   computeSpawnDepth,
   spawnAdvisoriesFor,
 } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
+import { sameRenderedPaneViews } from './lib/paneViews'
 import { paneStatusLabelText } from './lib/paneStatusLabel'
 import { statusBadgeStyle } from './composables/useStatusBadgePrefs'
 import { useBackend } from './composables/useBackend'
@@ -142,6 +145,7 @@ import {
   SUBMIT_CONFIRM_MS, SUBMIT_SCREEN_LINES, TAIL_MATCH_LEN
 } from './lib/injectEcho'
 import { recordDiagnostic, readDiagnostics, currentDiagnosticSeq } from './lib/uiDiagnostics'
+import { resetUiScale, stepUiScaleBy } from './lib/uiScale'
 import { injectStandaloneTask, type StandaloneTaskInjectionDeps } from './lib/standalonePaneTask'
 import { quickClassify } from './lib/quick-classify'
 import type { DirLister } from '@navide/plugin-shell'
@@ -213,7 +217,7 @@ import {
   type RestoreSessionTrigger,
   type WorkspaceRestoreSession,
 } from './lib/resumeBehavior'
-import { initSettingsBackend, settingsGet, settingsSet } from '@navide/plugin-ui/shared'
+import { flushSettingsOnExit, initSettingsBackend, settingsGet, settingsSet } from '@navide/plugin-ui/shared'
 import { cliPermissionKey, parseCliPermissionMode, skipPermissionFlagFor } from '@navide/plugin-shell'
 import { useLayoutStore } from './layout/useLayoutStore'
 import { RAIL_SIZE } from './layout/slots'
@@ -228,7 +232,7 @@ const SlotHistory = defineAsyncComponent(() => import('./components/HistoryPanel
 const SlotTasker = defineAsyncComponent(() => import('./components/TaskerPanel.vue'))
 const SlotMessages = defineAsyncComponent(() => import('./components/AgentMessagesPanel.vue'))
 import { pickWhatsNew, type WhatsNewEntry } from './lib/whatsNew'
-import { initUsage } from './composables/useUsage'
+import { initUsage, refreshUsage } from './composables/useUsage'
 import {
   LOOP_PROMPT_SETTING_KEY,
   DEFAULT_LOOP_PROMPT,
@@ -238,14 +242,13 @@ import {
   LOOP_DONE_MARKER,
   LOOP_WAIT_MARKER,
   withLoopDoneInstruction,
-  parseLimitReset,
-  matchSessionLimit,
   unseenTail,
   formatLoopTime,
 } from './lib/loopPrompt'
 import { resolvePromptSkill } from './lib/promptSkills'
 import { usePromptSkills } from './composables/usePromptSkills'
 import { loginCommandFor, matchLoginExpired } from './lib/cliLoginExpired'
+import { detectUsageLimit, usageLimitDue } from './lib/cliUsageLimit'
 import {
   awaitingClearsOnMiss,
   hasAwaitingPattern,
@@ -276,6 +279,8 @@ const AccountModal = defineAsyncComponent(loadAccountModal)
 // expires in five minutes — too short to wait for a chunk to be fetched because
 // somebody happened to open a window.
 import PairingPrompt from './components/PairingPrompt.vue'
+import ShutdownOverlay, { type QuitStage } from './components/ShutdownOverlay.vue'
+import NavideCloudMark from './components/NavideCloudMark.vue'
 const OnboardingWizard = defineAsyncComponent(() => import('./components/OnboardingWizard.vue'))
 const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
@@ -321,6 +326,17 @@ onMounted(() => {
   // user disabling it from the native quit dialog's "don't show again".
   pushQuitConfirmConfig()
   window.agentTeam?.onQuitConfirmDisabled?.(() => { confirmBeforeClose.value = false })
+  // Main narrates the quit sequence; the overlay stays up until the window
+  // is destroyed, so there is nothing to clear it.
+  window.agentTeam?.onQuitProgress?.((stage) => {
+    quitStage.value = stage
+    // 'saving' is the last point in the quit sequence where the backend that
+    // receives settings writes is still up — main stops it before `app.quit()`
+    // lets the window unload, so `beforeunload` below is too late for a quit.
+    // The setting the dialog itself just changed ("don't show again") is the
+    // one this most often saves.
+    if (stage === 'saving') flushSettingsOnExit()
+  })
   // Clicking a system notification focuses the originating pane.
   window.agentTeam?.onFocusPane?.((paneId) => {
     void focusPaneFromNotification(paneId)
@@ -648,6 +664,15 @@ const pluginIconFailureKey = (entry: Pick<PluginRegionContribution, 'contributio
   `${entry.contributionKey} ${entry.icon ?? ''}`
 const hasPluginIcon = (entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): boolean =>
   Boolean(entry.icon) && !failedPluginIcons.value.has(pluginIconFailureKey(entry))
+/** Single-colour artwork is painted as a mask over `currentColor` instead of
+ *  shown as an image, so it follows the titlebar's text colour rather than the
+ *  shade the plugin author baked in. Colour artwork stays an <img>. */
+const isMonoPluginIcon = (
+  entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon' | 'iconMonochrome'>
+): boolean => hasPluginIcon(entry) && entry.iconMonochrome === true
+const pluginIconMask = (
+  entry: Pick<PluginRegionContribution, 'icon'>
+): Record<string, string> => ({ '--plugin-icon': `url("${entry.icon}")` })
 function markPluginIconFailed(entry: Pick<PluginRegionContribution, 'contributionKey' | 'icon'>): void {
   const failures = new Set(failedPluginIcons.value)
   failures.add(pluginIconFailureKey(entry))
@@ -847,6 +872,10 @@ const confirmBeforeClosePane = makeStickyBool('agentTeam.confirmClosePane', true
 // conversation is one click away rather than gone.
 const idleReclaimEnabled = makeStickyBool('agentTeam.idleReclaim', true)
 const idleReclaimMinutes = makeStickyStr('agentTeam.idleReclaimMinutes', '30')
+// Non-null once main starts tearing the app down. Quitting runs into seconds
+// (a capped wait for a starting backend, then its SIGTERM grace), and the
+// window is still on screen for all of it.
+const quitStage = ref<QuitStage | null>(null)
 // Push the "confirm before quit" config to main so the native dialog stays in
 // sync with the shared setting and the current locale.
 function pushQuitConfirmConfig(): void {
@@ -1233,6 +1262,14 @@ interface ActivePane {
    *  expired-login message (see lib/cliLoginExpired); cleared once the login
    *  command is re-sent via the badge click. Not persisted to PaneRecord. */
   loginExpired?: boolean
+  /** Runtime-only quota-exhausted state, set when the pane's CLI printed its
+   *  "hit your limit" message (see lib/cliUsageLimit). `usageLimitAt` is when
+   *  it was seen — the loop reads it as an edge, so it must change on every
+   *  fresh hit; `usageLimitUntil` is when the quota is expected back, or null
+   *  when no reset time could be resolved from either source. Not persisted: a
+   *  restart re-detects from live output. */
+  usageLimitAt?: number | null
+  usageLimitUntil?: number | null
   /** Runtime-only continue affordance — lit when this pane was brought back with
    *  `--resume`. The CLI reloads its transcript but parks at the prompt, so an
    *  interrupted task is never picked up on its own and nothing in the restore
@@ -2804,13 +2841,19 @@ onMounted(() => {
   // cannot await, so it only stores what xterm has already parsed — the
   // periodic save is what makes the snapshot faithful.
   window.addEventListener('beforeunload', saveAllScrollSnapshots)
+  // Covers the teardowns that are not an app quit — ⌘R's reload and closing a
+  // window — where the backend outlives the renderer. A quit is handled from
+  // the 'saving' stage above, before the backend is stopped.
+  window.addEventListener('beforeunload', flushSettingsOnExit)
 })
 onUnmounted(() => {
   window.clearInterval(_msgPumpTimer)
   window.clearInterval(_remoteTargetsTimer)
   window.removeEventListener('beforeunload', msgLog.flushOnExit)
   window.removeEventListener('beforeunload', saveAllScrollSnapshots)
+  window.removeEventListener('beforeunload', flushSettingsOnExit)
   void msgLog.flush()
+  flushSettingsOnExit()
 })
 
 // ── AWAITING watcher (vendors with no notification hook) ────────────────────
@@ -2854,7 +2897,7 @@ function pollAwaitingPanes(): void {
 }
 
 function syncViews(): void {
-  paneViews.value = panes.value.map((p) => {
+  const next: ActivePaneView[] = panes.value.map((p) => {
     const ref = paneRefs[p.id]
     return {
       id: p.id,
@@ -2884,6 +2927,10 @@ function syncViews(): void {
       rebuilding: p.realized && paneRebuilding(p)
     }
   })
+  // The tick is unconditional; the assignment must not be. Replacing the array
+  // re-renders the whole pane list, and the snapshot is unchanged on nearly
+  // every tick.
+  if (!sameRenderedPaneViews(paneViews.value, next)) paneViews.value = next
 }
 
 function onPaneFirstOutput(paneId: string): void {
@@ -3772,9 +3819,10 @@ interface LoopLimitWatcher {
    *  watchers' scanFrom overflow problem), at worst over-scanning slightly
    *  after a recleanBuffer() shrink. */
   baseline: number
-  /** Last unparseable matched message — dedupes the warn/notify when TUI
-   *  repaints re-surface the same text. */
-  lastUnparseable: string | null
+  /** `pane.usageLimitAt` of the last quota hit this loop already acted on.
+   *  The pane health watcher keeps that flag lit for the whole window, so
+   *  without this edge the loop would re-schedule and re-notify every poll. */
+  limitSeenAt: number
   /** Wall-clock ms when the current turn was armed (loop-start / after each
    *  resume/continue). Only a turn_complete AFTER this counts for auto-continue
    *  — mirrors the pipeline's paneArmedAt. MAX_SAFE_INTEGER until the first
@@ -3813,9 +3861,6 @@ interface LoopLimitWatcher {
 }
 const loopLimitWatchers = new Map<string, LoopLimitWatcher>()
 const LOOP_LIMIT_POLL_MS = 5000
-// Tail-only matching: repainted TUI frames keep the limit message near the
-// buffer tail, and slicing avoids rescanning the capped 128KB cleanBuffer.
-const LOOP_LIMIT_TAIL_CHARS = 2000
 
 function stopLoopLimitWatcher(paneId: string): void {
   const watcher = loopLimitWatchers.get(paneId)
@@ -3835,7 +3880,7 @@ function startLoopLimitWatcher(paneId: string): void {
   const watcher: LoopLimitWatcher = {
     timer: 0,
     baseline: paneCleanBytes(paneId),
-    lastUnparseable: null,
+    limitSeenAt: 0,
     armedAt: Number.MAX_SAFE_INTEGER,
     continuing: false,
     continues: 0,
@@ -3875,40 +3920,35 @@ function startLoopLimitWatcher(paneId: string): void {
       return
     }
     const buf = ((ref.cleanBuffer as unknown as string) ?? '')
-    const tail = unseenTail(buf, paneCleanBytes(paneId), watcher.baseline, LOOP_LIMIT_TAIL_CHARS)
-    const matched = matchSessionLimit(tail)
     // Session limit takes priority over auto-continue: when the CLI hit the
     // quota its turn also "ends" (turn_complete), but resending now would just
-    // burn against the still-exhausted quota — schedule the timed resume instead.
-    if (matched != null) {
-      // Consume the matched region either way so the same text can't re-match
-      // on a later poll (a stale re-match would roll the wait a full day out).
-      watcher.baseline = paneCleanBytes(paneId)
-      const resumeAt = parseLimitReset(matched)
-      if (resumeAt == null) {
+    // burn against the still-exhausted quota — schedule the timed resume
+    // instead. Matching the message is the pane health watcher's job (it runs
+    // whether or not a loop does, so the badge lights either way); this reads
+    // its verdict as an edge, which is what keeps a still-lit flag from
+    // re-scheduling on every poll.
+    if (pane.usageLimitAt != null && pane.usageLimitAt !== watcher.limitSeenAt) {
+      watcher.limitSeenAt = pane.usageLimitAt
+      if (pane.usageLimitUntil == null) {
         // Fail open: badge stays lit, no auto-resume — but KEEP watching so a
-        // future parseable limit message still schedules. Warn/notify once per
-        // distinct unparseable message.
-        if (matched !== watcher.lastUnparseable) {
-          watcher.lastUnparseable = matched
-          console.warn(`[loop] pane ${paneId}: session-limit message matched but reset time was unparseable; auto-resume not scheduled`)
-          sysNotify.notifyPaneState(
-            paneId,
-            'attention',
-            i18n.global.t('pane.terminal.loop-unparseable-notify-title'),
-            i18n.global.t('pane.terminal.loop-unparseable-notify-body')
-          )
-        }
+        // later hit that does resolve a reset still schedules.
+        console.warn(`[loop] pane ${paneId}: quota limit hit but its reset time was unresolvable; auto-resume not scheduled`)
+        sysNotify.notifyPaneState(
+          paneId,
+          'attention',
+          i18n.global.t('pane.terminal.loop-unparseable-notify-title'),
+          i18n.global.t('pane.terminal.loop-unparseable-notify-body')
+        )
         return
       }
-      pane.loopWaitUntil = resumeAt
+      pane.loopWaitUntil = pane.usageLimitUntil
       // Make the pause visible even when the pane is unfocused — same
       // background-gated native notification path as done/attention.
       sysNotify.notifyPaneState(
         paneId,
         'attention',
         i18n.global.t('pane.terminal.loop-paused-notify-title'),
-        i18n.global.t('pane.terminal.loop-paused-notify-body', { time: formatLoopTime(resumeAt) })
+        i18n.global.t('pane.terminal.loop-paused-notify-body', { time: formatLoopTime(pane.loopWaitUntil) })
       )
       return
     }
@@ -3974,70 +4014,145 @@ function startLoopLimitWatcher(paneId: string): void {
 // lights the pane's re-login badge on match. Same consumed-position baseline
 // discipline as the loop-limit watcher, so TUI repaints can't re-match. The
 // interval self-cleans when the pane is gone or its terminal exited.
-interface LoginExpiredWatcher {
+interface PaneHealthWatcher {
   timer: number
   /** Consumed-position baseline in monotonic cleanBytesSeen units — only text
-   *  appended after it is matched (see LoopLimitWatcher.baseline). */
+   *  appended after it is matched (see LoopLimitWatcher.baseline). Belongs to
+   *  the login half. */
   baseline: number
+  /** The quota half's own baseline. The two matchers cannot share one:
+   *  whichever consumed it first would hide the same text from the other. */
+  limitBaseline: number
   /** False until the initial output (spawn banner / reattach scrollback replay)
    *  has settled; matching is suppressed while false so stale historical text
-   *  can't spuriously light the badge. */
+   *  can't spuriously light a badge. */
   warmedUp: boolean
 }
-const loginExpiredWatchers = new Map<string, LoginExpiredWatcher>()
+const paneHealthWatchers = new Map<string, PaneHealthWatcher>()
 // Panes with an in-flight fix-login injection, so a second badge click can't
 // start a concurrent second "/login" injection during the multi-second await.
 const loginFixInFlight = new Set<string>()
-const LOGIN_EXPIRED_POLL_MS = 5000
-const LOGIN_EXPIRED_TAIL_CHARS = 2000
+const PANE_HEALTH_POLL_MS = 5000
+const PANE_HEALTH_TAIL_CHARS = 2000
 
-function stopLoginExpiredWatcher(paneId: string): void {
-  const watcher = loginExpiredWatchers.get(paneId)
+function stopPaneHealthWatcher(paneId: string): void {
+  const watcher = paneHealthWatchers.get(paneId)
   if (watcher !== undefined) {
     clearInterval(watcher.timer)
-    loginExpiredWatchers.delete(paneId)
+    paneHealthWatchers.delete(paneId)
   }
 }
 
-function startLoginExpiredWatcher(paneId: string): void {
-  stopLoginExpiredWatcher(paneId)
-  const watcher: LoginExpiredWatcher = {
+/** The quota half of the pane health watch: light `usageLimitAt/Until` on a
+ *  fresh limit message, and drop them once the quota is due back. */
+function checkPaneUsageLimit(
+  pane: ActivePane,
+  buf: string,
+  bytes: number,
+  watcher: PaneHealthWatcher
+): void {
+  const now = Date.now()
+  if (pane.usageLimitAt != null) {
+    // Already flagged: keep consuming so a TUI repaint of the same message
+    // cannot re-flag it (which would also make the loop re-schedule), and let
+    // the flag go once the window is due.
+    watcher.limitBaseline = bytes
+    if (usageLimitDue(pane.usageLimitAt, pane.usageLimitUntil ?? null, now)) {
+      pane.usageLimitAt = null
+      pane.usageLimitUntil = null
+    }
+    return
+  }
+  const tail = unseenTail(buf, bytes, watcher.limitBaseline, PANE_HEALTH_TAIL_CHARS)
+  const hit = detectUsageLimit(pane.agentKey, tail, now)
+  if (hit === null) return
+  // Consume the matched region so a later poll can't re-match the same text.
+  watcher.limitBaseline = bytes
+  pane.usageLimitAt = now
+  pane.usageLimitUntil = hit.resumeAt
+  // The badge's figure is up to CLAUDE_CLI_READ_INTERVAL old, so it would go on
+  // advertising quota that is gone. One refresh per hit, never per poll: the
+  // read boots a whole Claude Code.
+  //
+  // The slot has to be named. refreshUsage() substitutes '__default__' for an
+  // absent one, which clears the built-in account's cooldown — so on a named
+  // profile the refresh would land on the wrong slot and the badge would keep
+  // its stale figure until the next natural read, a quarter of an hour later.
+  refreshUsage(pane.agentKey, cliProfilesApi.defaultProfileId(pane.agentKey))
+  // Leave the announcement to the loop when one is running. notifyPaneState
+  // dedupes consecutive same-kind notifications per pane, and both of these
+  // are 'attention' — notifying here would SWALLOW the loop's own "paused,
+  // resuming at HH:MM", which says strictly more (that work restarts by
+  // itself). A pane with no loop has no other voice, so it gets this one.
+  if (pane.loopActive) return
+  sysNotify.notifyPaneState(
+    pane.id,
+    'attention',
+    i18n.global.t('pane.terminal.usage-limit-notify-title'),
+    hit.resumeAt == null
+      ? i18n.global.t('pane.terminal.usage-limit-notify-body-unknown')
+      : i18n.global.t('pane.terminal.usage-limit-notify-body', {
+        time: formatLoopTime(hit.resumeAt)
+      })
+  )
+}
+
+/** Always-on per-pane output watch: the CLI's expired-login message (for the
+ *  vendors that declare one) and its quota-limit message (any vendor).
+ *
+ *  Both ride ONE interval on purpose — they read the same buffer tail on the
+ *  same cadence, so a second timer per pane would double that cost for
+ *  nothing. The quota half is deliberately not gated on the loop: a pane
+ *  nobody is looping hits the limit just the same, and until this existed it
+ *  did so invisibly. */
+function startPaneHealthWatcher(paneId: string): void {
+  stopPaneHealthWatcher(paneId)
+  const watcher: PaneHealthWatcher = {
     timer: 0,
     baseline: paneCleanBytes(paneId),
+    limitBaseline: paneCleanBytes(paneId),
     warmedUp: false,
   }
   watcher.timer = window.setInterval(() => {
     const pane = panes.value.find((p) => p.id === paneId)
     if (!pane) {
-      stopLoginExpiredWatcher(paneId)
+      stopPaneHealthWatcher(paneId)
       return
     }
     const ref = paneRefs[paneId]
     if (!ref) return
     const status = ref.displayStatus as string | undefined
     if (status === 'exited' || status === 'error') {
-      // Dead pane: clear the flag so a lit badge whose click does nothing
+      // Dead pane: clear the flags so a lit badge whose click does nothing
       // doesn't linger, then stop the watcher.
       pane.loginExpired = false
-      stopLoginExpiredWatcher(paneId)
+      pane.usageLimitAt = null
+      pane.usageLimitUntil = null
+      stopPaneHealthWatcher(paneId)
       return
     }
     const bytes = paneCleanBytes(paneId)
     if (!watcher.warmedUp) {
       // Consume spawn banner / reattach scrollback replay without matching so
-      // stale historical "login expired" text can't spuriously light the badge;
-      // start matching once output settles for one interval.
-      if (bytes > watcher.baseline) { watcher.baseline = bytes; return }
+      // stale historical "login expired" / limit text can't spuriously light a
+      // badge; start matching once output settles for one interval.
+      if (bytes > watcher.baseline) {
+        watcher.baseline = bytes
+        watcher.limitBaseline = bytes
+        return
+      }
       watcher.warmedUp = true
     }
+    const buf = ((ref.cleanBuffer as unknown as string) ?? '')
+    checkPaneUsageLimit(pane, buf, bytes, watcher)
+    if (loginCommandFor(pane.agentKey) == null) return
     if (pane.loginExpired) {
       // Badge already lit: keep consuming output so the same (repainted) error
       // text can't instantly re-light the badge after a fix-login clears it.
       watcher.baseline = bytes
       return
     }
-    const buf = ((ref.cleanBuffer as unknown as string) ?? '')
-    const tail = unseenTail(buf, bytes, watcher.baseline, LOGIN_EXPIRED_TAIL_CHARS)
+    const tail = unseenTail(buf, bytes, watcher.baseline, PANE_HEALTH_TAIL_CHARS)
     if (!matchLoginExpired(pane.agentKey, tail)) return
     // Consume the matched region so a later poll can't re-match the same text.
     watcher.baseline = bytes
@@ -4048,8 +4163,8 @@ function startLoginExpiredWatcher(paneId: string): void {
       i18n.global.t('pane.terminal.login-expired-notify-title'),
       i18n.global.t('pane.terminal.login-expired-notify-body')
     )
-  }, LOGIN_EXPIRED_POLL_MS)
-  loginExpiredWatchers.set(paneId, watcher)
+  }, PANE_HEALTH_POLL_MS)
+  paneHealthWatchers.set(paneId, watcher)
 }
 
 /** Login-expired badge clicked: send the CLI's login command into the pane.
@@ -4071,7 +4186,7 @@ async function fixPaneLogin(paneId: string): Promise<void> {
       // Advance the watcher's consumed baseline so error text repainted between
       // the last lit-tick and this clear can't re-match on the next poll and
       // re-light the badge. Failure keeps the badge lit for retry.
-      const w = loginExpiredWatchers.get(paneId)
+      const w = paneHealthWatchers.get(paneId)
       if (w) w.baseline = paneCleanBytes(paneId)
       pane.loginExpired = false
     }
@@ -5137,9 +5252,10 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     const historyEntry = spawnHistory.value.find((e) => e.paneId === id)
     if (historyEntry) historyEntry.outputLogFile = effectiveLogFile
 
-    // Arm the always-on login-expired watcher for CLIs with a detection spec
-    // (the interval self-cleans once the pane is gone or its terminal exited).
-    if (loginCommandFor(opts.agentKey) != null) startLoginExpiredWatcher(id)
+    // Arm the always-on pane health watcher (expired login for the vendors
+    // that declare one, quota limit for all of them). The interval self-cleans
+    // once the pane is gone or its terminal exited.
+    startPaneHealthWatcher(id)
 
     if ((ref.status as unknown as string) === 'running') {
       if (pane.origin !== 'pipeline' && !pane.roleKey && !pane.kickoffPrompt) {
@@ -5682,12 +5798,16 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
   delete paneRefs[paneId]
   unregisterPaneMessaging(paneId)
   paneMsgProcessedAt.delete(paneId)
+  // The auto-name guard is per pane id and pane ids are never reused, so a
+  // stale entry cannot misfire — it just never leaves. Dropped here with the
+  // rest of the per-pane state.
+  llmNameRequested.delete(paneId)
   // A pane closed mid-preparation never reaches ready/failed, which is where
   // setPrepStatus would otherwise have dropped its timing entry.
   prepStageEnteredAt.delete(paneId)
   clearDoneNotifyTimer(paneId)
   stopLoopLimitWatcher(paneId)
-  stopLoginExpiredWatcher(paneId)
+  stopPaneHealthWatcher(paneId)
   if (pane) {
     pane.loopActive = false
     pane.loopWaitUntil = null
@@ -6323,15 +6443,27 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
   }
 }
 
-async function onInterrupt(paneId: string): Promise<void> {
-  if (!panes.value.find((p) => p.id === paneId)?.realized) return
+/** Press this pane's interrupt key. Returns whether the interrupt was issued
+ *  at all — false for a cold-restore placeholder, a pane whose session is
+ *  gone, a window whose socket is down (useTerminal drops it rather than
+ *  queueing a SIGINT for whatever turn is running after the reconnect), and a
+ *  request that was refused or threw. True is not a promise that the agent
+ *  stopped, or even that the byte reached the CLI: the backend logs a failed
+ *  PTY write rather than answering with it.
+ *
+ *  The UI callers ignore this; ui.pane.interrupt reports it, because
+ *  "nothing was sent" and "it was sent and the agent kept going" are different
+ *  answers and an MCP caller cannot tell them apart otherwise. */
+async function onInterrupt(paneId: string): Promise<boolean> {
+  if (!panes.value.find((p) => p.id === paneId)?.realized) return false
   const ref = paneRefs[paneId]
-  if (!ref?.sessionId) return
+  if (!ref?.sessionId) return false
   try {
-    await ref.interrupt()
+    const issued = await ref.interrupt()
     persistPaneStopped(paneId, true)
+    return issued !== false
   } catch {
-    /* ignore */
+    return false
   }
 }
 
@@ -6798,40 +6930,84 @@ async function refreshStatusBarGit(): Promise<void> {
       behind: resp.behind ?? 0,
       dirty: (resp.staged?.length ?? 0) + (resp.unstaged?.length ?? 0) > 0
     }
+    return
+  }
+  // A cold-start git.status can time out even once the socket reports
+  // connected, and sendQuiet does not retry. The old 5s poll papered over that
+  // by simply asking again; with nothing scheduled the bar would sit blank
+  // until the workspace changed or something on disk did. One bounded retry —
+  // only while the bar has nothing to show, so a transient failure during
+  // normal use never turns into a second poll.
+  if (_gitRetryTimer === null && !statusBarGit.value.branch) {
+    _gitRetryTimer = window.setTimeout(() => {
+      _gitRetryTimer = null
+      void refreshStatusBarGit()
+    }, 3000)
   }
 }
 
-let _gitPollTimer: number | null = null
-// Skip the poll while the window is hidden (minimized / other desktop) — each
-// tick spawns git subprocesses in the backend, and hidden windows kept polling
-// forever. Catch up once when the window becomes visible again.
-// Main reports this over IPC rather than the Page Visibility API: terminal panes
-// need backgroundThrottling disabled, which pins document.hidden to false.
+// Event-driven, not polled. A 5s interval here spawned three git subprocesses
+// per tick per window (rev-parse, status --porcelain, rev-parse --git-dir) and
+// ran whether or not anything had changed — measured at ~107 git processes a
+// minute across three idle windows. The backend already broadcasts git.changed
+// for every git write, every fs write, and every watched worktree/.git change,
+// so the bar can just listen. Coalesced because one user action (a commit, a
+// checkout) fans out into several file events.
 let _windowVisible = true
+let _gitStale = false
+let _gitRefreshTimer: number | null = null
+let _gitRetryTimer: number | null = null
+function scheduleStatusBarGit(): void {
+  // Hidden windows do no git work; they mark themselves stale and catch up on
+  // the way back in. Main reports visibility over IPC rather than the Page
+  // Visibility API: terminal panes need backgroundThrottling disabled, which
+  // pins document.hidden to false.
+  if (!_windowVisible) { _gitStale = true; return }
+  if (_gitRefreshTimer !== null) return
+  _gitRefreshTimer = window.setTimeout(() => {
+    _gitRefreshTimer = null
+    // Re-checked: the window can go away during the 300ms wait, and firing
+    // then is the one case the visibility guard above would still let through.
+    if (!_windowVisible) { _gitStale = true; return }
+    void refreshStatusBarGit()
+  }, 300)
+}
 const _offWindowVisibility = window.agentTeam?.onWindowVisibility?.((visible: boolean) => {
   _windowVisible = visible
-  if (visible && _gitPollTimer !== null) void refreshStatusBarGit()
+  if (visible && _gitStale) { _gitStale = false; void refreshStatusBarGit() }
 })
-onUnmounted(() => _offWindowVisibility?.())
+const _offGitChanged = backend.on('git.changed', (raw) => {
+  const ws = (raw as { workspace_path?: string } | null)?.workspace_path
+  if (!ws || ws !== currentWorkspace.value) return
+  scheduleStatusBarGit()
+})
+onUnmounted(() => {
+  _offWindowVisibility?.()
+  _offGitChanged?.()
+  if (_gitRefreshTimer !== null) { clearTimeout(_gitRefreshTimer); _gitRefreshTimer = null }
+  if (_gitRetryTimer !== null) { clearTimeout(_gitRetryTimer); _gitRetryTimer = null }
+})
+// git.changed broadcasts sent while this window was disconnected are gone for
+// good, and without a poll nothing would ever fetch them. Resync on reconnect.
+watch(() => backend.status.value, (s) => {
+  if (s === 'connected' && workspaceSelected.value) void refreshStatusBarGit()
+})
 watch(workspaceSelected, (v) => {
-  if (v) {
-    void refreshStatusBarGit()
-    _gitPollTimer = window.setInterval(() => {
-      if (_windowVisible) void refreshStatusBarGit()
-    }, 5000)
-  } else {
-    if (_gitPollTimer !== null) { clearInterval(_gitPollTimer); _gitPollTimer = null }
-    statusBarGit.value = { branch: '', ahead: 0, behind: 0, dirty: false }
-  }
+  if (v) void refreshStatusBarGit()
+  else statusBarGit.value = { branch: '', ahead: 0, behind: 0, dirty: false }
 }, { immediate: true })
 
 // Switching between two workspaces this window holds never flips
 // workspaceSelected, so the watch above does not fire and the bar kept showing
-// the branch of the workspace being left until the 5s poll caught up. Wrong is
-// worse than absent here: a branch name next to a project you just switched to
-// reads as that project's branch. Cleared first, then refetched.
+// the branch of the workspace being left. Wrong is worse than absent here: a
+// branch name next to a project you just switched to reads as that project's
+// branch. Cleared first, then refetched.
 watch(currentWorkspace, () => {
   statusBarGit.value = { branch: '', ahead: 0, behind: 0, dirty: false }
+  // The staleness belonged to the workspace being left; this refetch settles
+  // the new one, so carrying the flag over only buys a duplicate request when
+  // the window next comes to the front.
+  _gitStale = false
   void refreshStatusBarGit()
 })
 // ── Keybinding system ─────────────────────────────────────────────────────────
@@ -6913,6 +7089,12 @@ registerCommand('workbench.action.rebuildFocusedPane', async () => {
 // so a reload here reconnects and restores the panes rather than losing them.
 // The Mini IDE, whose unsaved buffers only exist in the renderer, guards its own.
 registerCommand('workbench.action.reloadWindow', () => { location.reload() })
+// ⌘⇧= / ⌘⇧- / ⌘⇧0. Interface zoom is app-wide: the main process applies the
+// stored factor to every WebContents, so registering it here reaches the
+// plugin windows too.
+registerCommand('workbench.action.zoomUiIn', () => { stepUiScaleBy(1) })
+registerCommand('workbench.action.zoomUiOut', () => { stepUiScaleBy(-1) })
+registerCommand('workbench.action.zoomUiReset', () => { resetUiScale() })
 // Ctrl+Tab / Ctrl+Shift+Tab — see cycleFocusedPane near the grid pagination
 // state. 'paneStage' marks this as the window that owns the CLI pane grid; the
 // keybinding rules gate on it so plugin windows keep their editor-tab behavior.
@@ -6938,11 +7120,19 @@ registerCommand('ui.pane.create', async (args) => {
   if (!a.agent || !currentWorkspace.value) {
     throw new Error('ui.pane.create requires an agent and an open workspace')
   }
-  // Held to the same gate as the SPAWN-block and cli_open_agent paths: a
-  // taken name is rejected rather than silently suffixed, and volume
-  // advisories are recorded so they reach the caller via ui.invoke.result's
-  // warnings channel (see useUiActionBus).
+  // Only THREE pieces of the spawn gate, not the gate itself: the agent-key
+  // whitelist, the name-collision check and the volume advisories.
+  // evaluateSpawnRequest is never called on this path, so the spawn depth /
+  // child-count limits and the workspace CLI-pane cap do NOT apply here,
+  // which the SPAWN-block and cli_open_agent paths do enforce. The agent key
+  // is checked via assertAgentKeyAllowed against gateCtx.validAgentKeys
+  // before spawnPane runs, so "terminal" (a user-shell pane, not an agent)
+  // and any other unlisted key are refused rather than silently cast. A
+  // taken name is still rejected rather than silently suffixed, and the
+  // advisories reach the caller via ui.invoke.result's warnings channel (see
+  // useUiActionBus).
   const gateCtx = standaloneSpawnGateContext()
+  const agentKey = assertAgentKeyAllowed(a.agent, gateCtx.validAgentKeys)
   if (a.name) {
     const name = normalizeMessagingName(a.name)
     if (name && gateCtx.isNameTaken(name)) {
@@ -6951,7 +7141,7 @@ registerCommand('ui.pane.create', async (args) => {
   }
   const runGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
   const paneId = await spawnPane({
-    agentKey: a.agent as AgentKey,
+    agentKey,
     roleKey: '' as RoleKey,
     stageId: '' as StageId,
     customName: a.name,
@@ -7022,6 +7212,31 @@ registerCommand('ui.pane.focus', (args) => {
   const paneId = (args as { paneId?: string } | undefined)?.paneId
   if (!paneId) throw new Error(`ui.pane.focus requires ${PANE_ID_HINT}`)
   onFocusPane(paneId)
+})
+// The rung between "ask it to stop" (a message, which waits for the turn to
+// end) and ui.pane.close (which takes the pane and its PTY away). Like close
+// it does not refuse — pressing the interrupt key on an idle pane is a real
+// thing to want — but what the press landed on is knowable only here, so the
+// pane's state at that instant goes back with the answer rather than leaving
+// the caller to read `ok: true` as "the agent stopped".
+registerCommand('ui.pane.interrupt', async (args) => {
+  const paneId = (args as { paneId?: string } | undefined)?.paneId
+  if (!paneId) throw new Error(`ui.pane.interrupt requires ${PANE_ID_HINT}`)
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane) throw new Error(`ui.pane.interrupt: pane "${paneId}" not found`)
+  // Read BEFORE the interrupt: it changes the very status being reported, so
+  // asking afterwards answers a different question than the caller asked.
+  const ref = paneRefs[paneId]
+  const status = paneDisplayStatus(pane)
+  const awaitingKind = (ref?.awaitingKind as string | null | undefined) || undefined
+  const sent = await onInterrupt(paneId)
+  const advisories = interruptAdvisoriesFor({
+    name: (pane.messagingName as string | undefined) ?? pane.customName ?? paneId,
+    sent,
+    status: status || undefined,
+    awaitingKind,
+  })
+  return advisories.length ? { sent, status, advisories } : { sent, status }
 })
 registerCommand('ui.messaging.readIncoming', (args) => {
   const a = (args ?? {}) as {
@@ -14454,9 +14669,16 @@ const auxiliaryListOrderedIds = computed<string[]>(() => auxiliaryListPanes.valu
 
 const paneNameById = computed(() => new Map(paneViews.value.map((v) => [v.id, v.agentLabel])))
 
-/** The source line under a nested card: who opened this pane. */
+/** The trail behind a nested card's ↳ mark: who opened this pane. */
 function paneListTrail(ancestors: readonly string[]): string {
   return ancestorTrail(ancestors, (id) => paneNameById.value.get(id) ?? '')
+}
+
+/** How far a nested card sits in from its parent's edge. Deliberately small,
+ *  and capped: these lists are narrow, and past three levels the indent would
+ *  cost more width than the ancestry is worth showing. */
+function paneListIndent(depth: number): string {
+  return `${Math.min(depth, 3) * 8}px`
 }
 
 /** How many status dots a card shows before it starts counting instead. */
@@ -14846,8 +15068,14 @@ function paneIsCommander(p: ActivePane): boolean {
           @mousedown.stop
           @click="openPluginContributionWindow(contribution)"
         >
+          <span
+            v-if="isMonoPluginIcon(contribution)"
+            class="titlebar-plugin-icon titlebar-plugin-icon--mono"
+            :style="pluginIconMask(contribution)"
+            aria-hidden="true"
+          ></span>
           <img
-            v-if="hasPluginIcon(contribution)"
+            v-else-if="hasPluginIcon(contribution)"
             class="titlebar-plugin-icon"
             :src="contribution.icon ?? ''"
             width="12"
@@ -14889,10 +15117,7 @@ function paneIsCommander(p: ActivePane): boolean {
         @click="openAccountModal"
         :title="p2pAccountLabel || $t('action.sign-in')"
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-          <circle cx="12" cy="7" r="4"/>
-        </svg>
+        <NavideCloudMark variant="solid" class="titlebar-account-mark" />
         <span v-if="p2pAccountLabel" class="titlebar-account-dot" :class="p2pAccountDotClass"></span>
       </button>
       <button class="titlebar-gear" @mousedown.stop @click="showSettings = true" title="Settings (⌘,)">
@@ -15334,6 +15559,8 @@ function paneIsCommander(p: ActivePane): boolean {
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
           :login-expired="p.loginExpired"
+          :usage-limit-until="p.usageLimitUntil"
+          :usage-limit-hit="p.usageLimitAt != null"
           :continue-available="p.resumeContinueAvailable"
           :restoring="p.restoring"
           @set-focus="(ev) => onSetFocus(p.id, ev, stageSurfaceOrderedIds)"
@@ -15377,6 +15604,7 @@ function paneIsCommander(p: ActivePane): boolean {
             :key="p.id"
             class="meeting-item"
             :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
+            :style="{ marginLeft: paneListIndent(p.ancestors.length) }"
             draggable="true"
             title="Drag to reorder or click to focus"
             @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -15389,10 +15617,14 @@ function paneIsCommander(p: ActivePane): boolean {
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">
-              <!-- Who opened this pane. These lists have no indentation to
-                   spend on ancestry, so they spend a line of text instead. -->
-              <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
+                <!-- A nested pane is marked, not spelled out: the card is
+                     already indented, and the trail sits on the mark's title. -->
+                <span
+                  v-if="p.ancestors.length && paneListTrail(p.ancestors)"
+                  class="pane-list-src-mark"
+                  :title="paneListTrail(p.ancestors)"
+                >↳</span>
                 <!-- Opens the family in place, ahead of the name so the card
                      stays the same height whether or not it has children. Its
                      own click target — the card itself still focuses the pane —
@@ -15471,6 +15703,13 @@ function paneIsCommander(p: ActivePane): boolean {
         >
           <div class="spotlight-thumb-info">
             <div class="spotlight-thumb-name-row">
+              <!-- Same nesting mark as the other two lists; the thumb has no
+                   room for the trail, so it lives on the mark's title. -->
+              <span
+                v-if="p.ancestors.length && paneListTrail(p.ancestors)"
+                class="pane-list-src-mark"
+                :title="paneListTrail(p.ancestors)"
+              >↳</span>
               <span v-if="p.origin === 'pipeline' && p.stageId" class="spotlight-thumb-pipe-tag">P{{ p.stageId }}</span>
               <input
                 v-if="inlineRenamingId === p.id"
@@ -15497,10 +15736,6 @@ function paneIsCommander(p: ActivePane): boolean {
             <span class="spotlight-thumb-role">
               {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
             </span>
-            <!-- Same source line as the other two lists; the thumb is narrow,
-                 so it truncates sooner, but the nearest parent survives —
-                 the trail is cut from the left for exactly this reason. -->
-            <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
           </div>
           <div class="spotlight-thumb-badges">
             <span
@@ -15559,6 +15794,7 @@ function paneIsCommander(p: ActivePane): boolean {
             :key="p.id"
             class="meeting-item"
             :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
+            :style="{ marginLeft: paneListIndent(p.ancestors.length) }"
             draggable="true"
             title="Drag to reorder or click to focus"
             @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -15571,10 +15807,14 @@ function paneIsCommander(p: ActivePane): boolean {
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">
-              <!-- Who opened this pane. These lists have no indentation to
-                   spend on ancestry, so they spend a line of text instead. -->
-              <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
+                <!-- A nested pane is marked, not spelled out: the card is
+                     already indented, and the trail sits on the mark's title. -->
+                <span
+                  v-if="p.ancestors.length && paneListTrail(p.ancestors)"
+                  class="pane-list-src-mark"
+                  :title="paneListTrail(p.ancestors)"
+                >↳</span>
                 <!-- Opens the family in place, ahead of the name so the card
                      stays the same height whether or not it has children. Its
                      own click target — the card itself still focuses the pane —
@@ -16011,6 +16251,9 @@ function paneIsCommander(p: ActivePane): boolean {
       @jump="onResourceJump"
       @open-window="openResourceManager"
     />
+
+    <!-- Shutdown screen: last element so it paints over every popover above. -->
+    <ShutdownOverlay :stage="quitStage" />
   </div>
 </template>
 
@@ -16019,7 +16262,10 @@ function paneIsCommander(p: ActivePane): boolean {
 .boot-overlay {
   position: fixed;
   inset: 0;
-  z-index: 9000;
+  /* Inside the modal band. Nothing else is on screen during first boot, so the
+     number never mattered — but a literal above the notification band is the
+     bug that hid the pairing prompt, and this is the same shape of it. */
+  z-index: calc(var(--z-modal) + 130);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -16371,6 +16617,17 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-hover);
   color: var(--text-bright);
 }
+/* The cloud mark is drawn on a 32x24 viewBox, so it needs a wider box than the
+   24x24 icons beside it to end up the same visual height. */
+.titlebar-account-mark {
+  width: 18px;
+  height: 14px;
+}
+/* Connected is the one state worth colouring: it is what tells you the mark is
+   more than decoration. The rest stay muted so the cluster reads as one row. */
+.titlebar-account:has(.titlebar-account-dot.ok) {
+  color: var(--accent-fg);
+}
 .titlebar-account-dot {
   position: absolute;
   right: 4px;
@@ -16394,6 +16651,21 @@ function paneIsCommander(p: ActivePane): boolean {
   height: 12px;
   object-fit: contain;
   border-radius: 3px;
+}
+/* Silhouette artwork: masked over the button's own text colour so it follows
+   the theme. The artwork arrives in the inline --plugin-icon custom property
+   (a per-plugin data URL). */
+.titlebar-plugin-icon--mono {
+  background-color: currentColor;
+  border-radius: 0;
+  -webkit-mask-image: var(--plugin-icon);
+  mask-image: var(--plugin-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 .titlebar-plugin-fallback {
   font-size: 12px;
@@ -16896,7 +17168,7 @@ function paneIsCommander(p: ActivePane): boolean {
   border-radius: 3px;
 }
 .spotlight-thumb-badge[data-status="running"]  { background: var(--status-badge-bg, var(--success-subtle)); color: var(--status-badge-fg, var(--success-fg)); border: 1px solid var(--status-badge-fg, var(--success-emphasis)); }
-.spotlight-thumb-badge[data-status="idle"]     { background: var(--status-badge-bg, var(--attention-subtle)); color: var(--status-badge-fg, var(--attention-bright)); border: 1px solid var(--status-badge-fg, var(--attention-emphasis)); }
+.spotlight-thumb-badge[data-status="idle"]     { background: var(--status-badge-bg, var(--status-idle-subtle)); color: var(--status-badge-fg, var(--status-idle-bright)); border: 1px solid var(--status-badge-fg, var(--status-idle-emphasis)); }
 .spotlight-thumb-badge[data-status="starting"] { background: var(--status-badge-bg, var(--status-starting-subtle)); color: var(--status-badge-fg, var(--status-starting-fg)); border: 1px solid var(--status-badge-fg, var(--status-starting-emphasis)); }
 .spotlight-thumb-badge[data-status="error"]    { background: var(--status-badge-bg, var(--danger-subtle)); color: var(--status-badge-fg, var(--danger-fg)); border: 1px solid var(--status-badge-fg, var(--danger-emphasis)); }
 .spotlight-thumb-badge[data-status="stopped"]  { background: var(--status-badge-bg, var(--bg-inset)); color: var(--status-badge-fg, var(--text-bright)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
@@ -17032,15 +17304,14 @@ function paneIsCommander(p: ActivePane): boolean {
    they spend a line of text, and show one family at a time instead of the
    whole forest. */
 
-/* Who opened this pane. Above the name, not beside it: the name row is the
-   scarcest space on the card. */
-.pane-list-src {
+/* Marks a pane as opened by another. Beside the name rather than above it:
+   the indent already places the card, so this only has to say why. */
+.pane-list-src-mark {
+  flex: none;
   font-size: var(--font-3xs);
   color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.3;
+  line-height: 1;
+  cursor: default;
 }
 
 /* Opens and closes the family a card is standing for. It rides the name row,
@@ -17103,7 +17374,7 @@ function paneIsCommander(p: ActivePane): boolean {
   font-variant-numeric: tabular-nums;
 }
 .meeting-badge[data-status="running"]  { background: var(--status-badge-bg, var(--success-subtle)); color: var(--status-badge-fg, var(--success-fg)); border: 1px solid var(--status-badge-fg, var(--success-emphasis)); }
-.meeting-badge[data-status="idle"]     { background: var(--status-badge-bg, var(--attention-subtle)); color: var(--status-badge-fg, var(--attention-bright)); border: 1px solid var(--status-badge-fg, var(--attention-emphasis)); }
+.meeting-badge[data-status="idle"]     { background: var(--status-badge-bg, var(--status-idle-subtle)); color: var(--status-badge-fg, var(--status-idle-bright)); border: 1px solid var(--status-badge-fg, var(--status-idle-emphasis)); }
 .meeting-badge[data-status="stopped"]  { background: var(--status-badge-bg, var(--bg-inset)); color: var(--status-badge-fg, var(--text-bright)); border: 1px solid var(--status-badge-fg, var(--border-default)); }
 .meeting-badge[data-status="starting"] { background: var(--status-badge-bg, var(--status-starting-subtle)); color: var(--status-badge-fg, var(--status-starting-fg)); border: 1px solid var(--status-badge-fg, var(--status-starting-emphasis)); }
 .meeting-badge[data-status="error"]    { background: var(--status-badge-bg, var(--danger-subtle)); color: var(--status-badge-fg, var(--danger-bright)); border: 1px solid var(--status-badge-fg, var(--danger-emphasis)); }

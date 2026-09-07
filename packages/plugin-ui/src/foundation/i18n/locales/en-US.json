@@ -60,7 +60,7 @@
     "reason-unknown-pane-id": "No pane with id “{pane_id}” on this machine",
     "reason-ambiguous-target": "{n} panes in “{ws}” are named “{name}” — rename one of them",
     "reason-target-offline": "“{to}” is offline — its window disconnected {seconds}s ago; the pane still exists",
-    "reason-unknown-device": "Unknown device “{device}” — this machine is not linked to a Navide-Server, so it can only address panes on itself",
+    "reason-unknown-device": "Unknown device “{device}” — this machine is not connected to Navide Cloud, so it can only address panes on itself",
     "rename-collision-title": "Messaging name in use",
     "rename-collision-body": "The name “{name}” is already used by another CLI. Choose a different messaging name:",
     "rename-collision-confirm": "Rename",
@@ -77,6 +77,12 @@
     "push-badge-title-box": "Handed to the CLI over its own local interface rather than typed key by key — it still went into the pane's input box, so it waited for you to stop typing",
     "push-badge-title-direct": "Handed straight to the CLI without ever reaching the pane's input box, so nothing you were typing could be submitted with it",
     "expand-rail": "Expand inter-CLI messages"
+  },
+  "shutdown": {
+    "title": "Shutting down…",
+    "saving": "Saving window and session state",
+    "stopping": "Stopping running CLIs and the backend",
+    "closing": "Almost done"
   },
   "confirm-close": {
     "ws-title": "Close workspace?",
@@ -399,6 +405,13 @@
       "loop-capped-notify-title": "Loop stopped — continue limit reached",
       "loop-capped-notify-body": "The loop sent its maximum number of continue prompts without the agent reporting the task done — restart it if the work is still on track",
       "login-expired-badge": "⚠ Login expired",
+      "usage-limit-badge": "⛔ back {time}",
+      "usage-limit-badge-unknown": "⛔ out of quota",
+      "usage-limit-tooltip": "This CLI is out of quota — expected back at {time}",
+      "usage-limit-tooltip-unknown": "This CLI is out of quota — its reset time could not be read",
+      "usage-limit-notify-title": "CLI is out of quota",
+      "usage-limit-notify-body": "The CLI reported it is out of quota — expected back at {time}",
+      "usage-limit-notify-body-unknown": "The CLI reported it is out of quota — its reset time could not be read",
       "login-expired-tooltip": "The CLI's login has expired — click to send its login command",
       "login-expired-notify-title": "CLI login expired",
       "login-expired-notify-body": "The CLI reported an expired login — click the pane's badge to re-login",
@@ -918,6 +931,8 @@
       "language-zh-TW": "繁體中文",
       "language-en-US": "English",
       "language-hint": "Language is a user-level preference applied across all workspaces.",
+      "ui-scale": "Interface Scale",
+      "ui-scale-hint": "Scale the whole interface — text, icons, and spacing — in every window. Separate from the terminal and editor font sizes, which keep their own ⌘= / ⌘- shortcuts.",
       "restore-windows": "Restore Windows",
       "restore-windows-hint": "Reopen the workspace windows you had open when you last quit.",
       "restore-windows-label": "Reopen windows on next launch",
@@ -993,7 +1008,7 @@
       "general": "General",
       "appearance": "Appearance",
       "layout": "Layout",
-      "crossDevice": "Cross-device",
+      "crossDevice": "Navide Cloud",
       "accounts": "Accounts",
       "cliAgents": "CLI Agents",
       "roles": "Roles",
@@ -1013,8 +1028,13 @@
     },
     "help": {
       "topic": {
+        "workspace": "Workspace & Panes",
+        "cliAgents": "CLI Agents & Accounts",
         "messaging": "Inter-CLI Messaging",
-        "mcp": "MCP"
+        "mcp": "MCP",
+        "codeWorkflow": "Code Workflow",
+        "settingsSystem": "Settings & System",
+        "icons": "Icon Reference"
       }
     },
     "mcp": {
@@ -1227,8 +1247,8 @@
       "updates": "Updates"
     },
     "p2p": {
-      "title": "Cross-device",
-      "hint": "Link this device to a Navide-Server so agents here can message agents on your other devices.",
+      "title": "Connection",
+      "hint": "Navide Cloud links your devices into one private network, so agents here can message agents anywhere you are signed in.",
       "legal-privacy": "Privacy",
       "legal-boundaries": "Boundaries",
       "token": "Access token",
@@ -1275,8 +1295,11 @@
         "step-your-turn": "Waiting for you",
         "title": "Pairing",
         "waiting-remote": "You confirmed. Waiting for the other device.",
-        "waiting-response": "Sent. Open the account window on that device to answer.",
-        "your-turn": "The digits are on both screens. Nothing is paired until you say they match."
+        "waiting-response": "Sent. It comes up on that device’s screen — there is nothing to open there.",
+        "with-device": "Pairing with {device}",
+        "your-turn": "The digits are on both screens. Nothing is paired until you say they match.",
+        "dismiss": "Dismiss",
+        "dismiss-title": "Hides this notice. The request keeps running, and the answer will appear here."
       },
       "fingerprint-copy": "Copy",
       "fingerprint-copied": "Copied",
@@ -1367,7 +1390,8 @@
         "panes": "{count} CLI panes",
         "no-panes": "Nothing running here right now.",
         "solo": "Only this device is signed in. Sign in on another device to see it here.",
-        "link-offline": "The link is down, so this is the last thing the server said."
+        "link-offline": "The link is down, so this is the last thing the server said.",
+        "not-current": "This may not be current — the last read did not come back."
       },
       "trust": {
         "requests-hint": "Approving writes a rule for exactly this pane. Nothing else on this device is granted.",
@@ -1413,7 +1437,7 @@
         "policy-sign-when": "Only needed when this warning is showing.",
         "policy-open-rules": "Open rules",
         "policy-signed-default": "There were no rules to re-sign, so the default was signed: nothing is allowed yet.",
-        "locked-title": "Cross-device is stopped",
+        "locked-title": "Navide Cloud is stopped",
         "locked-body": "This device had trust state and no longer does. Nothing is sent or accepted until that is clear.",
         "plaintext-refused": "Refused an unencrypted message from {device}",
         "plaintext-refused-body": "This device has always sent encrypted messages; this one arrived in the clear, so it was refused.",
@@ -1813,7 +1837,10 @@
         "workbench_action_splitEditor": "Split Editor",
         "workbench_action_toggleAIChat": "Toggle AI Chat",
         "workbench_action_toggleSidebar": "Toggle Sidebar",
-        "workbench_action_toggleZenMode": "Toggle Zen Mode"
+        "workbench_action_toggleZenMode": "Toggle Zen Mode",
+        "workbench_action_zoomUiIn": "Interface Zoom In",
+        "workbench_action_zoomUiOut": "Interface Zoom Out",
+        "workbench_action_zoomUiReset": "Interface Zoom Reset"
       },
       "col": {
         "command": "Command",
@@ -3018,6 +3045,9 @@
     "switch-title": "Switch account",
     "switch-default": "Default (built-in)",
     "switch-low": "Quota low — switch account",
+    "exhausted-short": "spent",
+    "exhausted-tooltip": "Out of quota — back in {time}. Not the same as \u201cunder 1% left\u201d: work sent now is refused",
+    "exhausted-tooltip-no-reset": "Out of quota — reset time unknown",
     "switch-manage": "Add / manage accounts…",
     "settings-title": "CLI quota badge",
     "settings-enabled": "Show remaining quota in CLI pane headers",
@@ -3241,8 +3271,8 @@
     "unnamed-pane": "Terminal"
   },
   "account": {
-    "title": "Navide Account",
-    "tagline": "Sign in to link this device with your other devices.",
+    "title": "Navide Cloud",
+    "tagline": "One account, every device. Sign in to join this machine to your private Navide Cloud.",
     "no-recovery": "There is no password reset yet — keep your password somewhere safe.",
     "err-unsupported": "This server does not support accounts yet. It may need updating.",
     "err-email-taken": "That email is already registered. Try signing in instead.",

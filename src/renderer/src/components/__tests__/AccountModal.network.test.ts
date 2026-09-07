@@ -142,7 +142,7 @@ describe('account modal — your network', () => {
     // copies of the expression is how the sidebar came to say "running" while
     // the network view said "not opened" about the same pane.
     const uses = [...APP.matchAll(/paneDisplayStatus\(/g)].length
-    expect(uses, 'paneDisplayStatus should be declared once and called by every reader').toBe(4)
+    expect(uses, 'paneDisplayStatus should be declared once and called by every reader').toBe(5)
     expect(APP).toMatch(/reportPaneBusy\(pane\.id, [^,]+, paneDisplayStatus\(pane\)\)/)
     expect(APP).toMatch(/status: paneDisplayStatus\(p\) \|\| 'waiting'/)
     // ui.pane.close reports what closing a pane interrupted, and "was it busy"
@@ -150,6 +150,11 @@ describe('account modal — your network', () => {
     // here would let the advisory say "idle" about a pane the sidebar shows
     // as running, which is the drift this test exists to prevent.
     expect(APP).toMatch(/status: paneDisplayStatus\(doomed\)/)
+    // ui.pane.interrupt reports the state the interrupt key landed on, and it
+    // has to be the word the sidebar was showing at that instant — a second
+    // expression here would let it answer "running" about a pane everyone
+    // else could see was idle, which is the whole point of reporting it.
+    expect(APP).toMatch(/const status = paneDisplayStatus\(pane\)/)
 
     // Both facts in one message: the registry must never hold this tick's flag
     // beside the last tick's word.
@@ -651,7 +656,11 @@ describe('account modal — your network', () => {
     // Refusing would read as "you have no network"; the machines did not stop
     // existing because the socket blinked.
     expect(MODAL).toMatch(/networkStale = computed\([\s\S]{0,160}state !== 'connected'/)
-    expect(MODAL).toMatch(/v-if="networkStale"[\s\S]{0,120}settings\.p2p\.network\.link-offline/)
+    // Second in the chain: a read that failed is a different fact and gets its
+    // own sentence, because this one named the link on a screen whose
+    // connection card was green. Which sentence appears when is asserted by
+    // mounting, in AccountModal.staleness.test.ts.
+    expect(MODAL).toMatch(/v-else-if="networkStale"[\s\S]{0,120}settings\.p2p\.network\.link-offline/)
   })
 
   it('drops the network when the account signs out', () => {
@@ -1341,5 +1350,31 @@ describe('the UX re-audit fixes', () => {
     expect(MODAL).toMatch(/LOG_KINDS = \['remote-command', 'device-pairing', 'device-first-seen'\]/)
     expect(MODAL).toContain('const logByDevice = computed')
     expect(MODAL).toContain('settings.p2p.pair.log-line')
+  })
+})
+
+describe('the empty-policy card that was removed', () => {
+  it('does not tell somebody their own machines cannot reach them', () => {
+    // It said: "no rules yet on this device — nothing from your other machines
+    // can reach this one until you write at least one rule." That is false, and
+    // false for exactly the audience it named.
+    //
+    // A machine this device has paired with lands in RING_SELF, and RING_SELF
+    // skips the policy check outright. One it has not paired with is refused
+    // earlier, by _authenticate_sender, as NOT_PAIRED. Neither path reaches the
+    // state the card described — the policy governs devices belonging to other
+    // people's accounts, which is not what the card was about.
+    //
+    // This is here so the next audit reads "a claim that was not true" rather
+    // than "a missing prompt". Adding it back needs different words.
+    expect(MODAL).not.toContain('settings.p2p.network.no-rules')
+    for (const locale of LOCALES) {
+      const network = (i18n.global.getLocaleMessage(locale) as Record<string, any>)
+        .settings.p2p.network as Record<string, string>
+      expect(network['no-rules']).toBeUndefined()
+      expect(network['no-rules-body']).toBeUndefined()
+    }
+    // The backend fact stays — it is true, it simply has no honest use here yet.
+    expect(MODAL).toContain('policyEmpty?: boolean')
   })
 })

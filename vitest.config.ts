@@ -46,6 +46,16 @@ export default defineConfig({
     ],
     // Playwright E2E lives in e2e/ and is run by `test:e2e`, not Vitest.
     exclude: ['e2e/**', 'node_modules/**'],
-    globals: false
+    globals: false,
+    server: {
+      deps: {
+        // pluginExternalWorkspace.test.ts imports the *built* plugin bundle out
+        // of a mkdtemp directory to prove the packaged artifact loads as a real
+        // ES module. Vite 6 pulls such a path through its transform pipeline and
+        // rejects it for sitting outside the project root; externalizing hands
+        // the file to Node's own loader, which is what the assertion is about.
+        external: [/navide-plugin-external-/]
+      }
+    }
   }
 })

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { canonicalJson } from '../../../shared/canonicalJson'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { disabledReasonKey } from '../lib/linkStatus'
 import type { LegalRoute } from '../../../shared/legalLinks'
@@ -87,6 +87,11 @@ import type { useCliProfiles } from '../composables/useCliProfiles'
 import KeyboardShortcutsEditor from './KeyboardShortcutsEditor.vue'
 import CliMessagingHelp from './CliMessagingHelp.vue'
 import McpHelp from './McpHelp.vue'
+import WorkspacePanesHelp from './WorkspacePanesHelp.vue'
+import CliAgentsHelp from './CliAgentsHelp.vue'
+import CodeWorkflowHelp from './CodeWorkflowHelp.vue'
+import SettingsSystemHelp from './SettingsSystemHelp.vue'
+import IconReferenceHelp from './IconReferenceHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
 import ExecutionPolicyPane from './ExecutionPolicyPane.vue'
 import StorageUsagePane from './StorageUsagePane.vue'
@@ -96,12 +101,14 @@ import SkillsPane from './SkillsPane.vue'
 import PromptSkillsPane from './PromptSkillsPane.vue'
 import MemoryPane from './MemoryPane.vue'
 import StatusBadgeSettingsPane from './StatusBadgeSettingsPane.vue'
+import NavideCloudMark from './NavideCloudMark.vue'
 import SettingsNavItem from './settings/SettingsNavItem.vue'
 import SettingsSection from './settings/SettingsSection.vue'
 import SettingsCard from './settings/SettingsCard.vue'
 import SettingRow from './settings/SettingRow.vue'
 import ToggleSwitch from './settings/ToggleSwitch.vue'
 import { formatBytes } from '../lib/formatBytes'
+import { UI_SCALE_STEPS, formatUiScale, getUiScale, setUiScale } from '../lib/uiScale'
 import {
   RevisionedMcpSaveQueue,
   shouldReloadMcpAfterBundleImport,
@@ -186,8 +193,35 @@ const reclaimNowSize = computed(() => formatBytes(props.reclaimableNowBytes ?? 0
 type Tab = 'mcp' | 'skills' | 'prompts' | 'memory' | 'analyzer' | 'cliAgents' | 'general' | 'cross-device' | 'updates' | 'appearance' | 'statusBadges' | 'layout' | 'accounts' | 'extensions' | 'executionPolicy' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
-type HelpTopic = 'messaging' | 'mcp'
-const helpTopic = ref<HelpTopic>('messaging')
+type HelpTopic =
+  | 'workspace'
+  | 'cliAgents'
+  | 'messaging'
+  | 'mcp'
+  | 'codeWorkflow'
+  | 'settingsSystem'
+  | 'icons'
+const helpTopic = ref<HelpTopic>('workspace')
+// Topic order is the reading order: what the main window is made of, then the
+// agents in it, then how they talk, then the code surfaces, then settings.
+const helpTopicComponents: Record<HelpTopic, Component> = {
+  workspace: WorkspacePanesHelp,
+  cliAgents: CliAgentsHelp,
+  messaging: CliMessagingHelp,
+  mcp: McpHelp,
+  codeWorkflow: CodeWorkflowHelp,
+  settingsSystem: SettingsSystemHelp,
+  icons: IconReferenceHelp,
+}
+const helpTopicOrder: HelpTopic[] = [
+  'workspace',
+  'cliAgents',
+  'messaging',
+  'mcp',
+  'codeWorkflow',
+  'settingsSystem',
+  'icons',
+]
 const activeTab = ref<Tab>(props.initialTab ?? 'general')
 // initialTab is only read once at mount by the ref initializer above; when the
 // modal is already open and a new tab is requested (e.g. the ui.settings.open
@@ -460,19 +494,19 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     id: 'general-p2p',
     tab: 'cross-device',
     section: 'general-p2p',
-    title: 'Cross-device Messaging / 跨裝置傳訊',
+    title: 'Navide Cloud / 跨裝置傳訊',
     group: 'Accounts & Agents',
-    summary: 'Link this machine to a Navide-Server so agents can message agents on your other devices.',
-    keywords: 'p2p cross device remote server url access token navide-server connect link relay 跨裝置 遠端 伺服器 網址 權杖 連線 傳訊',
+    summary: 'Join this machine to Navide Cloud so agents here can message agents on your other devices.',
+    keywords: 'navide cloud p2p cross device remote server url access token navide-server connect link relay 雲端 跨裝置 遠端 伺服器 網址 權杖 連線 傳訊',
   },
   {
     id: 'general-p2p-policy',
     tab: 'cross-device',
     section: 'general-p2p-policy',
-    title: 'Cross-device Authorization / 跨裝置授權',
+    title: 'Navide Cloud Authorization / 跨裝置授權',
     group: 'Accounts & Agents',
     summary: 'Choose which remote devices may send instructions to panes on this machine. Everything is refused until a rule allows it.',
-    keywords: 'policy permission authorization allow rule deny default pane cross device remote rejected 政策 權限 授權 允許 規則 拒絕 跨裝置 被擋',
+    keywords: 'navide cloud policy permission authorization allow rule deny default pane cross device remote rejected 雲端 政策 權限 授權 允許 規則 拒絕 跨裝置 被擋',
   },
   {
     id: 'appearance-language',
@@ -482,6 +516,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     group: 'Appearance',
     summary: 'Switch between Traditional Chinese and English.',
     keywords: 'language locale 語言 繁體中文 english en-us zh-tw',
+  },
+  {
+    id: 'appearance-ui-scale',
+    tab: 'appearance',
+    section: 'appearance-ui-scale',
+    title: 'Interface Scale / 介面縮放',
+    group: 'Appearance',
+    summary: 'Scale the whole interface — text, icons, and spacing — in every window.',
+    keywords: 'ui scale zoom interface magnify enlarge shrink bigger smaller font size percent dpi 介面 縮放 放大 縮小 字級 字體 大小 百分比 老花',
   },
   {
     id: 'appearance-runtime',
@@ -629,6 +672,56 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     summary: 'How one CLI agent sends an instruction to another — addressing, delivery timing, guard rails, and troubleshooting.',
     keywords: 'help guide messaging message send cli agent pane cross workspace address broadcast queue rate limit troubleshooting 說明 教學 訊息 傳訊 互傳 傳送 指令 位址 跨工作區 廣播 佇列 頻率 疑難排解 怎麼用',
   },
+  {
+    id: 'help-workspace',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'workspace',
+    title: '工作區與面板 / Workspace & Panes',
+    group: 'Help',
+    summary: 'What a workspace, pane and run group are, plus stage layouts, the sidebar tree and the status bar.',
+    keywords: 'help guide workspace pane run group sidebar layout grid spotlight fullscreen slot status bar placeholder idle reclaim lineage 說明 教學 工作區 專案 面板 群組 側欄 版面 排列 佔位卡 閒置 回收 血緣 狀態列 多選 拖曳 快捷鍵',
+  },
+  {
+    id: 'help-cli-agents',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'cliAgents',
+    title: 'CLI Agent 與帳號 / CLI Agents & Accounts',
+    group: 'Help',
+    summary: 'Which CLIs are supported, how they are detected and installed, roles, account switching and usage badges.',
+    keywords: 'help guide cli agent vendor install detect role account switch login usage quota badge permission skip 說明 教學 安裝 偵測 角色 帳號 切換 登入 額度 用量 徽章 權限 多帳號 疑難排解',
+  },
+  {
+    id: 'help-code-workflow',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'codeWorkflow',
+    title: '程式碼工作流 / Code Workflow',
+    group: 'Help',
+    summary: 'Git staging and branches, plan documents and their review tools, the editor window and file preview.',
+    keywords: 'help guide git stage commit branch remote conflict diff stash plan review approve todo editor monaco preview record track 說明 教學 暫存 提交 分支 遠端 衝突 差異 草稿 計畫 審閱 核准 編輯器 預覽 變更記錄',
+  },
+  {
+    id: 'help-settings-system',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'settingsSystem',
+    title: '設定與系統 / Settings & System',
+    group: 'Help',
+    summary: 'A map of all settings pages, plus Navide Cloud, the window menus, scheduled tasks and resource upkeep.',
+    keywords: 'help guide settings overview skills prompts memory storage shortcuts updates analyzer extensions navide cloud pairing device schedule resource 說明 教學 設定 總覽 技能 提示 記憶 儲存 快捷鍵 更新 跨裝置 配對 裝置 排程 資源',
+  },
+  {
+    id: 'help-icons',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'icons',
+    title: '介面圖示 / Icon Reference',
+    group: 'Help',
+    summary: 'Every button icon in the interface — what it is called, where it lives and what pressing it does.',
+    keywords: 'help guide icon button symbol glyph legend reference sidebar pane stage status bar git plan rail 說明 教學 圖示 按鈕 符號 對照 對照表 圖例 這是什麼 狀態色 色點',
+  },
 ])
 
 const settingsSearchResults = computed(() => {
@@ -710,6 +803,13 @@ async function loadAutoRestore(): Promise<void> {
 }
 async function onAutoRestoreChange(): Promise<void> {
   try { await window.agentTeam?.restore?.setAutoRestore?.(autoRestoreWindows.value) } catch { /* ignore */ }
+}
+
+// Interface scale (Electron page zoom, applied by the main process to every
+// window). setUiScale returns the clamped value that was actually stored.
+const uiScaleModel = ref(getUiScale())
+function onUiScaleChange(value: string): void {
+  uiScaleModel.value = setUiScale(value)
 }
 
 const SUPPORTED_LANGUAGES = [
@@ -1815,7 +1915,9 @@ watch(activeTab, (tab) => {
               </SettingsNavItem>
               <SettingsNavItem :label="$t('settings.nav.crossDevice')" :active="activeTab === 'cross-device'" @select="activeTab = 'cross-device'">
                 <template #icon>
-                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.3" y="3" width="7" height="5.5" rx="1.2"/><rect x="8.7" y="7.5" width="6" height="5.5" rx="1.2"/><path d="M4.8 8.5v2a1.5 1.5 0 0 0 1.5 1.5h2.4"/></svg>
+                  <!-- The same mark as the titlebar and the page header: this
+                       row is how most people will first reach Navide Cloud. -->
+                  <NavideCloudMark variant="solid" class="nvc-nav-mark" />
                 </template>
               </SettingsNavItem>
             </div>
@@ -2789,7 +2891,10 @@ watch(activeTab, (tab) => {
              of the longest page in this window, which is where somebody
              told "open the rules" went looking and did not find them. -->
         <div v-show="activeTab === 'cross-device'" class="s-body cross-device-body">
-          <h1 class="s-page-title">{{ $t('settings.nav.crossDevice') }}</h1>
+          <h1 class="s-page-title nvc-page-title">
+            <span class="nvc-page-mark" aria-hidden="true"><NavideCloudMark /></span>
+            {{ $t('settings.nav.crossDevice') }}
+          </h1>
           <SettingsSection :label="$t('settings.p2p.title')">
             <SettingsCard>
               <div class="s-fullrow" data-settings-section="general-p2p">
@@ -3263,6 +3368,18 @@ watch(activeTab, (tab) => {
           <SettingsSection :label="$t('settings.section.other')">
             <SettingsCard>
               <SettingRow
+                data-settings-section="appearance-ui-scale"
+                :title="$t('settings.appearance.ui-scale')"
+                :description="$t('settings.appearance.ui-scale-hint')"
+              >
+                <template #control>
+                  <select :value="uiScaleModel" @change="onUiScaleChange(($event.target as HTMLSelectElement).value)">
+                    <option v-for="step in UI_SCALE_STEPS" :key="step" :value="step">{{ formatUiScale(step) }}</option>
+                  </select>
+                </template>
+              </SettingRow>
+
+              <SettingRow
                 data-settings-section="appearance-runtime"
                 :title="$t('settings.appearance.restore-windows')"
                 :description="$t('settings.appearance.restore-windows-hint')"
@@ -3316,22 +3433,16 @@ watch(activeTab, (tab) => {
           <h1 class="s-page-title">{{ $t('settings.nav.help') }}</h1>
           <div class="help-topics" role="tablist">
             <button
+              v-for="topic in helpTopicOrder"
+              :key="topic"
               class="help-topic"
-              :class="{ active: helpTopic === 'messaging' }"
+              :class="{ active: helpTopic === topic }"
               role="tab"
-              :aria-selected="helpTopic === 'messaging'"
-              @click="helpTopic = 'messaging'"
-            >{{ $t('settings.help.topic.messaging') }}</button>
-            <button
-              class="help-topic"
-              :class="{ active: helpTopic === 'mcp' }"
-              role="tab"
-              :aria-selected="helpTopic === 'mcp'"
-              @click="helpTopic = 'mcp'"
-            >{{ $t('settings.help.topic.mcp') }}</button>
+              :aria-selected="helpTopic === topic"
+              @click="helpTopic = topic"
+            >{{ $t(`settings.help.topic.${topic}`) }}</button>
           </div>
-          <CliMessagingHelp v-if="activeTab === 'help' && helpTopic === 'messaging'" />
-          <McpHelp v-else-if="activeTab === 'help'" />
+          <component :is="helpTopicComponents[helpTopic]" v-if="activeTab === 'help'" />
         </div>
 
         <!-- ── EXTENSIONS TAB (flag-gated) ───────────────────────────────── -->
@@ -3384,13 +3495,13 @@ watch(activeTab, (tab) => {
   background: var(--modal-backdrop);
   backdrop-filter: blur(var(--modal-backdrop-blur));
   -webkit-backdrop-filter: blur(var(--modal-backdrop-blur));
-  z-index: 8000;
+  z-index: calc(var(--z-modal) + 120);
   display: flex;
   align-items: center;
   justify-content: center;
   -webkit-app-region: no-drag;
 }
-.s-overlay.confirm { z-index: 9000; }
+.s-overlay.confirm { z-index: calc(var(--z-modal) + 130); }
 
 .s-modal {
   background: var(--bg-base);
@@ -3527,7 +3638,7 @@ watch(activeTab, (tab) => {
   position: absolute;
   top: calc(100% + 8px);
   left: 0;
-  z-index: 9100;
+  z-index: calc(var(--z-modal) + 131);
   width: min(420px, 78vw);
   max-height: min(420px, 64vh);
   overflow-y: auto;
@@ -3979,6 +4090,26 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
    page and a rule anybody editing that tab would reasonably assume they
    owned. */
 .cross-device-body { overflow-y: auto; padding: 18px 22px; }
+/* Navide Cloud is the one settings page that names a product rather than a
+   group of controls, so it is the one page title that carries the mark. */
+.nvc-page-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.nvc-page-mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--accent-muted);
+  background: var(--accent-subtle);
+  color: var(--accent-fg);
+  --nv-cloud-node-fill: var(--accent-subtle);
+}
+.nvc-page-mark :deep(.nv-cloud-mark) { width: 21px; height: 16px; }
+.nvc-nav-mark { width: 17px; height: 13px; }
 .legal-row {
   display: flex; align-items: center; gap: 6px;
   margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-muted);
@@ -4030,6 +4161,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .help-body { overflow-y: auto; padding: 18px 22px; }
 .help-topics {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   margin-bottom: 18px;
   padding: 3px;
@@ -4409,4 +4541,33 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .s-body select {
   cursor: pointer;
 }
+
+/* Final visual pass: keep the dense settings surface calm while making every
+   interactive control reveal its state consistently. These rules only skin
+   existing controls; they do not alter their layout or behavior. */
+.s-modal {
+  border-color: var(--border-default);
+  background: var(--bg-base);
+}
+.s-sidebar {
+  background: var(--bg-inset);
+}
+.s-nav-group-title { color: var(--text-secondary); }
+.s-search-input:hover:not(:disabled) { border-color: var(--border-strong); }
+.s-search-input:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; }
+.s-search-result:active { background: var(--accent-subtle); }
+.s-close:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
+.s-body button:focus-visible,
+.s-body a:focus-visible,
+.s-body input:focus-visible,
+.s-body textarea:focus-visible,
+.s-body select:focus-visible {
+  outline: 2px solid var(--accent-fg);
+  outline-offset: 2px;
+}
+.ap-theme-card:focus-visible,
+.ap-lang-btn:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
+.ap-theme-card.active,
+.ap-lang-btn.active { background: var(--accent-subtle); }
+.settings-meta-row { color: var(--text-secondary); }
 </style>

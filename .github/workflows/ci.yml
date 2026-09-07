@@ -14,6 +14,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-audit:
+    # Known-vulnerability scan of the locked dependency trees (SCA). Advisory
+    # for now: the first run found a backlog (see .agent-team/plans/
+    # navide-security-program_*.html, A1), and a red gate nobody can clear is
+    # a gate people learn to ignore. Flip continue-on-error off once the
+    # backlog is cleared.
+    name: Dependency audit (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      # Both scans always run: a finding in one must not hide the other half of
+      # the tree. Each records its outcome and the gate below re-raises it, so
+      # the job still turns red when either scan finds something.
+      - name: npm audit (high and above)
+        id: npm-audit
+        continue-on-error: true
+        run: pnpm audit --audit-level=high
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+      - name: pip-audit (backend lock)
+        id: pip-audit
+        continue-on-error: true
+        run: |
+          uv --project backend export --format requirements-txt --no-hashes --no-emit-project > /tmp/backend-requirements.txt
+          uv --project backend run --with pip-audit pip-audit -r /tmp/backend-requirements.txt
+      - name: Audit gate
+        env:
+          NPM_AUDIT: ${{ steps.npm-audit.outcome }}
+          PIP_AUDIT: ${{ steps.pip-audit.outcome }}
+        run: |
+          echo "npm audit:  $NPM_AUDIT"
+          echo "pip-audit:  $PIP_AUDIT"
+          if [ "$NPM_AUDIT" != success ] || [ "$PIP_AUDIT" != success ]; then
+            exit 1
+          fi
+
   frontend:
     name: Frontend checks and build
     # Keep the desktop checks on the release platform.

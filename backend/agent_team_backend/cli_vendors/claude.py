@@ -169,6 +169,11 @@ def claude_projects_root() -> Path | None:
 class ClaudeLogReader(LogReader):
     vendor: str = "claude"
 
+    #: parse_activity walks a dense ascending line counter and resumes from
+    #: one high-water mark, so an old file can be seeded to EOF by counting
+    #: lines rather than replaying it (log_readers.base).
+    activity_resumes_by_line: bool = True
+
     def _default_root(self) -> Path | None:
         return claude_projects_root()
 

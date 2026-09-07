@@ -1825,6 +1825,8 @@ registerCommand('git.focusAgent', () => {
               :compare="diffCompare"
               :git-transport="gitTransport"
               :branch-diff="branchDiff"
+              :git-status="gitStatus"
+              :git-branches="gitBranches"
             />
             <div v-else class="empty-hint">{{ $t('hint.pick-two-branches') }}</div>
           </div>

@@ -426,8 +426,11 @@ class VendorSpec:
     interrupt_key: bytes | None = None
 
     # --- MCP wiring ---
-    # How a spawn points this CLI at an MCP server. None = the CLI has no MCP
-    # surface at all (aider, muse, pi).
+    # How a spawn points this CLI at an MCP server. None covers two different
+    # situations, and the distinction matters when someone asks "can this be
+    # added?": aider, muse and pi have no MCP surface at all, so there is
+    # nothing to point anywhere; droid is simply not wired yet — whether its
+    # CLI exposes a way in has not been established either way.
     mcp_wiring: McpWiring | None = None
 
     # --- skills wiring ---

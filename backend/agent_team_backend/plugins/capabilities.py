@@ -227,8 +227,8 @@ def _validate_workspace_cwd(ws_path: str | None) -> "Path | None":
 
     ``None``/empty passes through as None (inherit the backend's cwd).
     Otherwise the resolved path must be a registered workspace root (per
-    ``app.attribution.known_workspaces()``) or a subdirectory of one, and an
-    existing directory. Mirrors the shell.run WS handler's validation;
+    ``app.attribution.existing_workspace_roots()``) or a subdirectory of one,
+    and an existing directory. Mirrors the shell.run WS handler's validation;
     TODO(Phase 2): share one code path via an extracted ShellService.
     """
     if not ws_path:
@@ -238,7 +238,7 @@ def _validate_workspace_cwd(ws_path: str | None) -> "Path | None":
     from .. import app
 
     resolved = Path(ws_path).resolve()
-    known_roots = [Path(w).resolve() for w in app.attribution.known_workspaces()]
+    known_roots = app.attribution.existing_workspace_roots()
     if not any(
         resolved == root or resolved.is_relative_to(root) for root in known_roots
     ):

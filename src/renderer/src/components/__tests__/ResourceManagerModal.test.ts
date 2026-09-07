@@ -161,7 +161,10 @@ describe('ResourceManagerModal layout', () => {
     const overlay = source.slice(source.indexOf('.rm-overlay {'), source.indexOf('.rm-modal {'))
     expect(overlay).toContain('position: fixed')
     expect(overlay).toContain('inset: 0')
-    expect(overlay).toMatch(/z-index:\s*\d/)
+    // A stacking level of its own, said however — a literal number is exactly
+    // what buried the pairing prompt behind another modal, so this must not be
+    // the thing that requires one. See stackingOrder.test.ts.
+    expect(overlay).toMatch(/z-index:\s*\S/)
     expect(overlay).toContain('display: flex')
   })
 

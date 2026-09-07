@@ -330,6 +330,34 @@ def _long_history(tmp_path: Path, turns: int) -> Path:
     )
 
 
+def test_activity_leaves_a_half_written_last_line_for_next_poll(tmp_path: Path) -> None:
+    """A poll that catches aider mid-write on the trailing usage line must
+    not mark it seen: that line is aider's only turn_complete signal, and
+    losing it strands the pane mid-turn forever (GitHub #21)."""
+    reader = AiderLogReader()
+    p = _history(
+        tmp_path / "ws",
+        "# aider chat started at 2026-07-28 21:30:45\n\n#### go\n\nHalf an answer.\n",
+    )
+    seen: set[str] = set()
+    first = reader.parse_activity(p, seen)
+    assert [e.event_type for e in first] == ["agent_active", "agent_active"]
+    line_count = len(p.read_text(encoding="utf-8").splitlines())
+
+    full_line = "> Tokens: 100 sent, 50 received. Cost: $0.01 message.\n"
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(full_line[:20])  # aider is still writing this line
+    assert reader.parse_activity(p, seen) == []
+    assert activity_high_water(seen) == line_count, \
+        "must not advance past the half-written line"
+
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(full_line[20:])
+    events = reader.parse_activity(p, seen)
+    assert [e.event_type for e in events] == ["turn_complete"]
+    assert "Half an answer." in events[0].text
+
+
 def test_activity_seen_keys_stay_constant_size(tmp_path: Path) -> None:
     """seen_keys lives as long as the watched file, so a walk of a long
     history must leave ONE high-water mark in it, not a key per line

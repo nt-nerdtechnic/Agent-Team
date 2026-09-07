@@ -35,6 +35,26 @@ All notable released changes to Navide will be documented in this file. The form
   bounded recovery, typed fail-closed source results, strict user pins,
   revision-aware snapshot identities, and stale recommendations without source
   merging.
+- Let `cli_get_status`, `cli_wait_idle` and `cli_send_and_wait` answer about
+  panes on another device. The status was already being synced — the roster
+  carries each remote pane's badge word and `cli_list_targets` was already
+  handing it to agents — so only the target resolver was refusing. Remote
+  answers say how much weaker they are rather than passing themselves off as
+  local: `source` is `roster_status` or `roster_offline` and never
+  `turn_complete`, a parked pane times out as `awaiting_unclassified` because
+  the roster cannot tell a permission prompt from a question, and `offline` is
+  a third answer returned at once instead of waited out. Reading a remote
+  pane's log and driving its UI stay unavailable; those need a device-to-device
+  request channel that does not exist.
+- Let an agent ask another pane to stop with the new `cli_interrupt` MCP tool.
+  Until now an agent could force-kill a pane — PTY and all, with no gate and no
+  say from the pane being killed — but had no way to interrupt one, so a child
+  running a refactor that was going wrong left its parent choosing between
+  waiting for the turn to end and destroying the session. The per-vendor
+  interrupt key already existed and was already wired to the PTY; only the MCP
+  entry was missing. The tool is explicit that a keystroke is not a stop: it
+  may abort the turn, only clear the input box, or on a second press quit the
+  CLI, so the result has to be verified rather than assumed.
 - Let an agent withdraw a message it sent with the new `cli_cancel_message`
   MCP tool. A message waits in the recipient's queue until that pane is between
   turns, so a sender that changed its mind previously had to let it land and
@@ -135,6 +155,12 @@ All notable released changes to Navide will be documented in this file. The form
 - Report a message block Navide could not read. A turn that prints `---MSG-START---` and produces no block was the one failure nothing could describe — no message existed, so there was no queue entry, no log row and no notice. The pane that wrote it is now told, which is the only party that knows what it meant to send.
 - Show at a glance whether a tab's agents are working: each run-group tab in the tab bar now carries a small dot — green while any CLI in that tab is running or starting, amber once every one of them has stopped, grey for a tab with no panes. A pane waiting on you counts as stopped: the dot answers one question only, and the pane badge still says which kind of stop it is. It reuses the colours the pane badges already use, says the same thing on hover and to a screen reader, and never animates.
 
+- Add a per-device trust policy (allow, ask, or block) and network pairing controls to the account UI, the first step toward pairing with another machine over Navide's cross-device link.
+- Add device pairing: confirmation tokens, a six-digit SAS comparison, live link status, and a pairing prompt UI, so trusting another machine requires an exchange a person checks rather than a bare address.
+- Encrypt cross-device messages end to end: an ephemeral X25519 keypair per message, ECDH against the recipient's long-term public key, HKDF-SHA256, and AES-256-GCM, so the relay server can no longer read message text in transit — it previously stored it as plaintext.
+- Support unpairing and revoking a pairing from the account modal, closing device trust in the other direction.
+- Require a trust-confirmation key, handed to the backend over stdin's first line by the process that spawned it, before any of the six trust-changing actions (device pairing, revocation, policy changes) may run. A file or an environment variable would be readable by anything else on the machine, so a backend started without one on stdin — the tests, a developer running it by hand — refuses those actions instead of silently skipping the check. Ships alongside CLI accounts management and per-account usage tracking, and gives the credential vault's Keychain entries for app-owned secrets a name scoped to each backend data directory, so a second install (a dev build running alongside the packaged app) can no longer overwrite the other's stored server credential.
+
 ### Changed
 
 - Explicitly declare and document the supported Node.js runtime as Node.js 22.12+ within the 22.x release line (with pnpm 10).
@@ -191,6 +217,98 @@ All notable released changes to Navide will be documented in this file. The form
 - Keep repository discovery responsive on slow filesystems by moving scans off the
   backend event loop and returning partial results after a bounded scan period.
 - Keep a CLI agent's Navide tools working after its pane is rebuilt around it. Reloading a window, detaching a run group or taking one back gives the pane a new id while the CLI keeps quoting the one it was launched with, which used to fail every MCP tool for that pane — plan documents included — with "this pane's id is stale". The old id now resolves to the pane the process is actually attached to, and so do the pane's Claude Stop-hook delivery and what `cli_get_status` reports. Its push channel follows a window reload and a run group returning from a detached window, but not a detach itself — the window handing the pane over releases the channel before the receiving window claims the pane, so a detached pane is typed into until its CLI is restarted (a Claude pane re-arms its own hook at the next turn end and is unaffected). An id that names no pane at all is still refused.
+
+- Authenticate the HTTP file routes and close two path bypasses: `/fs/raw`
+  now requires the ws token instead of trusting any local process that could
+  reach loopback, and `workspace=/` can no longer turn the escape check into
+  a no-op; `/fs/page` instead serves previewed content under an HMAC
+  capability scoped to one workspace, because that route hands untrusted
+  HTML to a sandboxed iframe that could otherwise leak the ws token itself
+  through an unsafe-url referrer or a remote image; and the internal
+  workspace-directory guard now compares paths with `samefile` instead of
+  string equality, closing the APFS case-insensitivity bypass where
+  `.Agent-Team` walked around a check written for `.agent-team`.
+- Refuse HTTP requests whose Host header does not name this loopback server,
+  closing a DNS-rebinding path that could make a page same-origin with
+  `127.0.0.1` and read the unauthenticated file routes' replies — including
+  the 0600 ws token on disk. Also stop serving the FastAPI schema routes
+  (`/docs`, `/redoc`, `/openapi.json`) and `/health`'s absolute backend-log
+  path without authentication.
+- Remove the unauthenticated `/mcp/servers` HTTP routes: guarded only by the
+  loopback Host check, they let any local process PUT an arbitrary stdio MCP
+  server and have it spawned immediately by `mcp_manager.reload()` — local
+  unauthenticated remote code execution, bypassing the confirm-token trust
+  mechanism entirely. The same functionality is already served by the
+  ws_auth-gated `mcp.save_servers` websocket handler.
+- Authenticate the loopback CLI hook endpoints (Claude, Copilot) with a
+  per-backend session token instead of relying on the Host-header loopback
+  check alone.
+- Give the credential vault's Keychain fallback key its own name per app
+  data directory, keyed off the actual data directory rather than an
+  always-identical CLI-profiles root that had made the per-directory branch
+  unreachable — a packaged and a dev backend had been silently sharing one
+  `navide-device-trust` Keychain entry, and once each wrote it under a
+  different code signature the Keychain ACL followed the last writer, so the
+  other backend's trust store failed closed with every pairing gone. Add a
+  person-confirmed `p2p.trust.rebuild` recovery path for that failure, gated
+  through the same `trust:confirm` IPC allowlist as pairing and unblocking —
+  the only way out before was deleting the Keychain item by hand, an
+  unrecorded silent reset that is exactly what the store's lock exists to
+  prevent.
+- Validate that sensitive Electron IPC handlers (shell, fs, keybindings,
+  trust confirmation) are called from the top frame of a real BrowserWindow,
+  refusing webviews and subframes with `UNTRUSTED_SENDER` instead of
+  trusting any IPC sender.
+- Enforce pane ownership on the private-inbox `ui_invoke` actions
+  (`ui.messaging.readIncoming`, `settleRead`): the caller's pane id now has
+  to match the pane the action names, closing a path where one pane could
+  read or settle another pane's incoming messages through MCP.
+- Sanitize PTY injections: strip bracketed-paste guard sequences and unsafe
+  C0 control bytes from a message body before it is written into a pane, so
+  a message that happens to contain the paste end-guard can no longer drop
+  the CLI out of paste mode partway through and have the rest of the text
+  land as keystrokes — Enter, Ctrl+C, Ctrl+D — on someone else's machine.
+- Make argument-safety an invariant of stored CLI model/effort arguments
+  rather than a property of today's call graph: `manual_pane.spawn` now
+  rejects an unsafe shape before persisting it, sharing one check
+  (`model_args.py`) with the MCP entry point, so a value replayed from
+  storage on restore cannot reintroduce an unsafe flag. Pinned with a test
+  that enumerates every externally reachable spawn path and asserts a
+  remote MCP or websocket caller can never supply a raw `commandOverride`.
+- Fix two findings from a security review of the desktop-to-server link:
+  trust-store reads answered from a cold in-process cache instead of
+  loading the persisted state, which could report an already-pinned device
+  as never seen and made the policy-sequence replay check vacuous; and the
+  receive side now refuses plaintext from a peer this machine has already
+  exchanged encrypted messages with, matching a rule the send side already
+  enforced, instead of letting a relay downgrade the conversation by simply
+  asking the receiver for it.
+- Fix a message-deduplication race introduced while fixing the trust-store
+  read bug above: take the dedup claim synchronously before any `await`, so
+  two copies of the same message pushed at once can no longer both pass the
+  membership check while the first is still writing its claim to the
+  Keychain on a background thread.
+- Require a person to confirm a device pairing at both ends instead of
+  finishing it on the responder's confirmation alone — a relay that
+  declines to forward the real request and answers with its own key could
+  otherwise derive and echo back the same six-digit SAS the initiator was
+  meant to compare against nobody.
+- Reinforce device pairing: harden confirmation-token validation, tighten
+  trust-store file permissions, and close gaps found while that pairing
+  hardening was under review.
+- Re-authenticate the desktop-to-server link when the trust record is
+  rebuilt, so a machine that just discarded every pairing does not keep
+  treating its existing connection as trusted.
+- Stop a locked trust store from taking the whole account window down: a
+  device row whose trust state cannot currently be read now shows nothing
+  rather than crashing the device-list snapshot, and pairing is refused for
+  that device rather than offered while its trust state is unknown.
+
+### Documentation
+
+- Add SECURITY.md private-reporting guidelines, scope, and safe-harbour language, a STRIDE threat model across four attacker positions, Chinese and Japanese security-policy translations, a weekly Dependabot config for npm/uv/GitHub Actions, and an advisory dependency-audit CI job (npm audit, pip-audit).
+- Expand SECURITY.md and the threat model with further detail.
+- Align the Chinese and Japanese security docs with the expanded root SECURITY.md and link them to the English threat model.
 
 ## [0.1.62] — 2026-07-26 — signed release
 

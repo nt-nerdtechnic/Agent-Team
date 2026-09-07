@@ -3529,11 +3529,11 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 .tp-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 9998;
+  z-index: calc(var(--z-modal) + 150);
 }
 .tp-dropdown {
   position: fixed;
-  z-index: 9999;
+  z-index: calc(var(--z-modal) + 151);
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
@@ -3581,7 +3581,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 /* ── File context menu ─────────────────────────────────────────────────────── */
 .ctx-menu {
   position: fixed;
-  z-index: 9999;
+  z-index: calc(var(--z-modal) + 151);
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
@@ -3628,7 +3628,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
 
 /* "Why is this ignored?" verdict modal */
 .ignore-modal {
-  position: fixed; z-index: 10000; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  position: fixed; z-index: calc(var(--z-modal) + 152); top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(420px, 80vw); background: var(--bg-subtle); border: 1px solid var(--border-default);
   border-radius: var(--radius-md); padding: 16px; box-shadow: 0 12px 32px rgba(1, 4, 9, 0.9);
   display: flex; flex-direction: column; gap: 10px;

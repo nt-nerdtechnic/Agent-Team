@@ -133,6 +133,11 @@ def _has_block(content, block_type: str) -> bool:
 class DroidLogReader(LogReader):
     vendor: str = "droid"
 
+    #: parse_activity walks a dense ascending line counter and resumes from
+    #: one high-water mark, so an old file can be seeded to EOF by counting
+    #: lines rather than replaying it (log_readers.base).
+    activity_resumes_by_line: bool = True
+
     def _default_root(self) -> Path | None:
         return droid_sessions_root()
 

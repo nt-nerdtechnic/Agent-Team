@@ -22,7 +22,8 @@ import {
   resolveConfiguredMarketplace,
 } from './plugins/pluginIpc'
 import { readRegistryTrustSnapshot } from './plugins/pluginInstalledTrust'
-import { contributionIconDataUrl } from './plugins/pluginContributionIcon'
+import { contributionIcon } from './plugins/pluginContributionIcon'
+import { broadcastQuitStage } from './quit-progress'
 import { currentPluginHostTarget } from './plugins/pluginTarget'
 import { PluginStorageStore } from './plugins/pluginStorage'
 import { PluginCapabilityGrantStore } from './plugins/pluginCapabilityGrantStore'
@@ -62,6 +63,8 @@ import {
 } from './plugins/pluginBackendActivationCatalog'
 import { registerStorageIpc } from './storage-ipc'
 import { lockPageZoom } from './web-contents-zoom'
+import { createUiZoomStore, type UiZoomStore } from './ui-zoom-store'
+import { clampUiScale, UI_SCALE_SETTING_KEY } from '../shared/uiScale'
 import { installContextMenu, registerTerminalContextMenu } from './context-menu'
 import { initUpdater } from './updater'
 import { withDeadline } from './deadline'
@@ -117,6 +120,7 @@ import {
 import { resolveBackendDataDir, readUiSettingsText, UI_SETTINGS_FILE } from './ui-settings-bootstrap'
 import { PlanWindowRegistry } from './plan-windows'
 import { warnMain } from './main-log'
+import { isAppWindowSender, UNTRUSTED_SENDER } from './ipcSender'
 import {
   GitAccountsStore,
   type GitAccountCrypto,
@@ -155,7 +159,7 @@ if (
 }
 
 if (process.platform === 'darwin') {
-  app.dock.setIcon(nativeImage.createFromPath(join(__dirname, '../../resources/icon.png')))
+  app.dock?.setIcon(nativeImage.createFromPath(join(__dirname, '../../resources/icon.png')))
 }
 
 let backend: BackendHandle | null = null
@@ -903,7 +907,7 @@ const pluginTrustRefresh = registerPluginIpc(
   undefined,
   undefined,
   {
-    resolveContributionIcon: contributionIconDataUrl,
+    resolveContributionIcon: contributionIcon,
     onActivationChange: applyPluginActivationChange,
     cleanupPluginStorage: (pluginId) => pluginStorageStore.cleanupPlugin(pluginId),
     factoryPackageIds: ['navide.git'],
@@ -1396,6 +1400,19 @@ function currentUiTheme(): string {
 
 function currentUiLocale(): string {
   return hostLocaleManager.getLocale()
+}
+
+// Interface scale. Created lazily because readUiSettings() needs app paths,
+// which are only valid after 'ready' — the first WebContents (and therefore the
+// first read) always happens later than that.
+let uiZoomStoreRef: UiZoomStore | null = null
+function uiZoomStore(): UiZoomStore {
+  if (!uiZoomStoreRef) {
+    uiZoomStoreRef = createUiZoomStore(
+      clampUiScale(uiSetting<number>(readUiSettings(), UI_SCALE_SETTING_KEY))
+    )
+  }
+  return uiZoomStoreRef
 }
 
 /** Read-only Host values bootstrapped into each Git v2 view's entry query.
@@ -2440,6 +2457,18 @@ ipcMain.handle('window:getZoomFactor', (event) => {
   return Number.isFinite(factor) && factor > 0 ? factor : 1
 })
 
+// Interface scale, applied to every window at once. Accepted only from a
+// top-level app frame: plugin content runs in a child frame or a
+// WebContentsView whose preload does not expose this bridge at all, so it can
+// never resize the host's chrome.
+ipcMain.handle('window:setUiScale', (event, next: unknown) => {
+  const hostWindow = BrowserWindow.fromWebContents(event.sender)
+  if (!hostWindow || !event.senderFrame || event.senderFrame.parent) {
+    return uiZoomStore().get()
+  }
+  return uiZoomStore().set(next)
+})
+
 function openBranchDiffWindow(host: BrowserWindow | null, params: Record<string, string>): void {
   // EditorWindowApp reads branch_diff_base/branch_diff_compare from the entry
   // query on startup (or after the query-change reload) and opens the tab.
@@ -3077,7 +3106,8 @@ ipcMain.handle(
 // not wait on it, and a failed prune only costs disk.
 app.whenReady().then(() => void pruneDroppedFiles(droppedFilesDir()))
 
-ipcMain.handle('shell:openTerminal', async (_event, command: string) => {
+ipcMain.handle('shell:openTerminal', async (event, command: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (!command || typeof command !== 'string') return { ok: false, error: 'invalid command' }
   // Open Terminal.app and run the install command interactively (sudo / OAuth
   // prompts need a real TTY). The command is AppleScript-escaped.
@@ -3126,9 +3156,13 @@ async function openShellPath(target: string): Promise<{ ok: boolean; error?: str
   return { ok: true }
 }
 
-ipcMain.handle('shell:openPath', (_event, target: string) => openShellPath(target))
+ipcMain.handle('shell:openPath', async (event, target: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
+  return openShellPath(target)
+})
 
-ipcMain.handle('shell:revealPath', async (_event, target: string) => {
+ipcMain.handle('shell:revealPath', async (event, target: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (!target || typeof target !== 'string') return { ok: false, error: 'invalid path' }
   try {
     shell.showItemInFolder(target)
@@ -3160,7 +3194,10 @@ const TRUST_CONFIRM_ACTIONS = new Set([
   // this list exists for: only a window can ask for it.
   'p2p.trust.rebuild',
 ])
-ipcMain.handle('trust:confirm', async (_event, action: unknown, deviceId: unknown, subject: unknown) => {
+ipcMain.handle('trust:confirm', async (event, action: unknown, deviceId: unknown, subject: unknown) => {
+  // Minting is the one thing this list exists to keep away from anything
+  // that is not a person's window — a webview guest or an iframe gets null.
+  if (!isAppWindowSender(event)) return null
   if (typeof action !== 'string' || !TRUST_CONFIRM_ACTIONS.has(action)) return null
   return mintTrustConfirmation(
     action,
@@ -3181,7 +3218,8 @@ ipcMain.handle('legal:open', async (_event, route: unknown) => {
   }
 })
 
-ipcMain.handle('shell:openExternal', async (_event, url: string) => {
+ipcMain.handle('shell:openExternal', async (event, url: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (!url || typeof url !== 'string') return { ok: false, error: 'invalid url' }
   if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'only http/https allowed' }
   try {
@@ -3194,7 +3232,8 @@ ipcMain.handle('shell:openExternal', async (_event, url: string) => {
 
 // Write read-only content (e.g. a file's HEAD version) to a temp file and open
 // it with the OS default app — the equivalent of Cursor's "Open File (HEAD)".
-ipcMain.handle('shell:openTempFile', async (_event, filename: string, content: string) => {
+ipcMain.handle('shell:openTempFile', async (event, filename: string, content: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (!filename || typeof filename !== 'string') return { ok: false, error: 'invalid filename' }
   try {
     const artifact = await writeTempTextArtifact(tmpdir(), filename, content ?? '')
@@ -3225,6 +3264,7 @@ ipcMain.handle('keybindings:read', async () => {
 })
 
 ipcMain.handle('keybindings:write', async (event, content: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (typeof content !== 'string') return { ok: false, error: 'invalid content' }
   const filePath = join(app.getPath('userData'), 'keybindings.json')
   try {
@@ -3244,7 +3284,8 @@ ipcMain.handle('keybindings:write', async (event, content: string) => {
   }
 })
 
-ipcMain.handle('fs:readFrom', async (_event, filePath: string, fromByte: number) => {
+ipcMain.handle('fs:readFrom', async (event, filePath: string, fromByte: number) => {
+  if (!isAppWindowSender(event)) return { ok: false, content: '' }
   if (!filePath || typeof filePath !== 'string') return { ok: false, content: '' }
   try {
     const fs = await import('node:fs/promises')
@@ -3338,7 +3379,8 @@ ipcMain.handle('settings:health-timeout-read', () => {
   return { ok: true, timeoutSec: readHealthCheckTimeoutSec(healthTimeoutPath()) }
 })
 
-ipcMain.handle('settings:health-timeout-write', (_event, timeoutSec: number) => {
+ipcMain.handle('settings:health-timeout-write', (event, timeoutSec: number) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   try {
     writeHealthCheckTimeoutSec(healthTimeoutPath(), timeoutSec)
     return { ok: true }
@@ -3354,7 +3396,8 @@ ipcMain.handle('settings:cdp-debug-read', () => {
   return { ok: true, config: readCdpDebugConfig(cdpDebugPath()) }
 })
 
-ipcMain.handle('settings:cdp-debug-write', (_event, config: CdpDebugConfig) => {
+ipcMain.handle('settings:cdp-debug-write', (event, config: CdpDebugConfig) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   try {
     writeCdpDebugConfig(cdpDebugPath(), config)
     return { ok: true }
@@ -3599,11 +3642,27 @@ function isAppNavigation(url: string): boolean {
   return false
 }
 app.on('web-contents-created', (_e, contents) => {
-  // Pane zoom changes terminal/editor font size only. Never let a retained
-  // Chromium/Electron page zoom scale the entire Navide interface.
-  lockPageZoom(contents, () => {
-    if (!contents.isDestroyed()) contents.send('window:zoom-changed')
-  })
+  // Page zoom is owned by the app's interface-scale setting, not by Chromium's
+  // retained per-origin zoom or a pinch gesture. Tracking every WebContents
+  // here is what lets one Settings change scale all windows at once — including
+  // the plugin bundles, which have their own documents and no host preload.
+  //
+  // A <webview> guest is laid out inside an already-scaled host document and
+  // shares its embedder's zoom, so scaling it again would compound. A native
+  // WebContentsView composites outside the DOM and does need its own factor.
+  const zoom = uiZoomStore()
+  const scalable = contents.getType() !== 'webview'
+  if (scalable) {
+    zoom.track(contents)
+    contents.once('destroyed', () => zoom.untrack(contents))
+  }
+  lockPageZoom(
+    contents,
+    () => {
+      if (!contents.isDestroyed()) contents.send('window:zoom-changed')
+    },
+    () => (scalable ? zoom.get() : 1)
+  )
   // Electron has no default right-click menu; without this one, right-click is
   // inert everywhere and there is no fallback path for copy/paste.
   installContextMenu(contents)
@@ -3897,8 +3956,22 @@ app.on('window-all-closed', () => {
 const BACKEND_SPAWN_WAIT_MS = 3000
 const BACKEND_STOP_WAIT_MS = 6000
 const PLUGIN_BACKEND_STOP_WAIT_MS = 6000
+// What the renderers get to put their queued settings writes on the socket
+// after the 'saving' broadcast. Sized for an IPC hop plus a WebSocket send, not
+// a round trip: nobody awaits the ack. Without it the broadcast has not even
+// been delivered by the time the backend that receives those writes is stopped,
+// so any preference changed within the renderer's 500ms write debounce of
+// quitting is lost.
+const SETTINGS_FLUSH_GRACE_MS = 250
 
 async function teardownBackendAndQuit(): Promise<void> {
+  // Put the shutdown screen up before anything below can block: the waits here
+  // run into seconds, and the windows stay on screen for all of it.
+  broadcastQuitStage('saving')
+  // The renderers flush their queued settings writes when they see 'saving'.
+  // That flush travels renderer → backend over the WebSocket, so it has to land
+  // while the backend below is still up.
+  await new Promise<void>((resolve) => setTimeout(resolve, SETTINGS_FLUSH_GRACE_MS))
   // A user-initiated quit is a clean exit — nothing to restore next launch.
   windowRegistry.markCleanExit()
   // Drop any scheduled respawn: quitting must not race a backend back to life.
@@ -3907,6 +3980,9 @@ async function teardownBackendAndQuit(): Promise<void> {
   backendLifecycleEpoch++
   backendAutoRestart.cancel()
   backendRestartPending = null
+  // Everything from here is the slow part: waiting out a starting backend, then
+  // stopping the running one while it sweeps its PTY children.
+  broadcastQuitStage('stopping')
   // If the backend is still spawning (quit mid-startup), wait for it (capped) so
   // we can stop it rather than orphan the process.
   if (!backend && backendStarting) await withDeadline(backendStarting, BACKEND_SPAWN_WAIT_MS)
@@ -3926,6 +4002,7 @@ async function teardownBackendAndQuit(): Promise<void> {
     frontendPluginManager.closeBackendPlugins(),
     PLUGIN_BACKEND_STOP_WAIT_MS,
   )
+  broadcastQuitStage('closing')
   app.quit()
 }
 

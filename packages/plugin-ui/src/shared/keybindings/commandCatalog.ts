@@ -314,4 +314,7 @@ export const COMMAND_IDS: readonly string[] = [
   'workbench.action.toggleAIChat',
   'workbench.action.toggleSidebar',
   'workbench.action.toggleZenMode',
+  'workbench.action.zoomUiIn',
+  'workbench.action.zoomUiOut',
+  'workbench.action.zoomUiReset',
 ]

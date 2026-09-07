@@ -2678,10 +2678,10 @@ registerCommand('git.focusAgent', () => {
 .commitbtn:disabled { opacity: 0.45; cursor: default; }
 
 /* ── ⋯ popover menu ── */
-.menu-backdrop { position: fixed; inset: 0; z-index: 9998; }
+.menu-backdrop { position: fixed; inset: 0; z-index: calc(var(--z-modal) + 150); }
 .menu {
   position: fixed;
-  z-index: 9999;
+  z-index: calc(var(--z-modal) + 151);
   min-width: 188px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);

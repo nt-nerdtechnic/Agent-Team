@@ -1646,7 +1646,7 @@ async function copyLogText(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10000;
+  z-index: calc(var(--z-modal) + 152);
 }
 .log-preview-modal {
   background: var(--bg-base);

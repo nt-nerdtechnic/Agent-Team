@@ -6,7 +6,9 @@ import {
   accountUsageFor,
   formatRemaining,
   formatResetCountdown,
+  exhaustedWindow,
   initUsage,
+  isExhausted,
   refreshUsage,
   remainingPercent,
   remainingTier,
@@ -198,6 +200,45 @@ describe('useUsage store', () => {
     expect(formatRemaining(58.4)).toBe('58%')
     expect(formatRemaining(0.5)).toBe('<1%')
     expect(formatRemaining(0)).toBe('0%')
+  })
+
+  it('isExhausted separates a spent quota from "under 1% left"', () => {
+    // The distinction the badge exists to draw: 0.4% still runs, 100% does not.
+    expect(isExhausted(snap({
+      windows: [{ kind: 'session', label: 'S', usedPercent: 99.6, resetsAt: null }]
+    }))).toBe(false)
+    expect(isExhausted(snap({
+      windows: [{ kind: 'session', label: 'S', usedPercent: 100, resetsAt: null }]
+    }))).toBe(true)
+  })
+
+  it('isExhausted ignores per-model buckets and expired cached windows', () => {
+    // A spent promotional bucket reports 100% used without blocking anything —
+    // the same exclusion remainingPercent makes.
+    expect(isExhausted(snap({
+      windows: [{ kind: 'weekly-model', label: 'Weekly (Fable)', usedPercent: 100, resetsAt: null }]
+    }))).toBe(false)
+    // A cached window whose reset already passed says nothing about now.
+    expect(isExhausted(snap({
+      windows: [{ kind: 'session', label: 'S', usedPercent: 100, resetsAt: null, expired: true }]
+    }))).toBe(false)
+    // A snapshot that is not a reading at all carries no verdict.
+    expect(isExhausted(snap({
+      status: 'not-measured',
+      windows: [{ kind: 'session', label: 'S', usedPercent: 100, resetsAt: null }]
+    }))).toBe(false)
+    expect(isExhausted(undefined)).toBe(false)
+  })
+
+  it('exhaustedWindow returns the spent window so the badge can name its reset', () => {
+    const w = exhaustedWindow(snap({
+      windows: [
+        { kind: 'session', label: 'Session (5h)', usedPercent: 12, resetsAt: null },
+        { kind: 'weekly', label: 'Weekly (all models)', usedPercent: 100, resetsAt: '2026-07-26T02:00:00Z' }
+      ]
+    }))
+    expect(w?.label).toBe('Weekly (all models)')
+    expect(w?.resetsAt).toBe('2026-07-26T02:00:00Z')
   })
 
   it('formatResetCountdown renders d/h/m tiers and empty for the past', () => {

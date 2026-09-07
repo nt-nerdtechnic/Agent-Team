@@ -310,6 +310,8 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.invoke('window:updateGitLeft', args),
   closeGitLeftView: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('window:closeGitLeft'),
   getZoomFactor: (): Promise<number> => ipcRenderer.invoke('window:getZoomFactor'),
+  // Interface scale: main applies it to every window's WebContents at once.
+  setUiScale: (scale: number): Promise<number> => ipcRenderer.invoke('window:setUiScale', scale),
   onZoomChanged: (cb: () => void): (() => void) => {
     const listener = (): void => cb()
     ipcRenderer.on('window:zoom-changed', listener)
@@ -478,6 +480,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
     const listener = (): void => cb()
     ipcRenderer.on('app:quitConfirmDisabled', listener)
     return () => ipcRenderer.removeListener('app:quitConfirmDisabled', listener)
+  },
+  /** Stages of the quit sequence, so the window can show a shutdown screen
+   *  instead of sitting there looking hung while the backend is stopped. */
+  onQuitProgress: (cb: (stage: 'saving' | 'stopping' | 'closing') => void): (() => void) => {
+    const listener = (_event: unknown, stage: 'saving' | 'stopping' | 'closing'): void => cb(stage)
+    ipcRenderer.on('app:quitProgress', listener)
+    return () => ipcRenderer.removeListener('app:quitProgress', listener)
   },
   // Real window visibility, reported by main. The Page Visibility API cannot be
   // used for this: terminal panes need backgroundThrottling disabled, which also
@@ -748,6 +757,9 @@ contextBridge.exposeInMainWorld('agentTeam', {
       contributionKey: string
       title: string
       icon: string | null
+      /** The icon is a single-colour silhouette, so it is painted in the
+       *  current text colour rather than the shade baked into the artwork. */
+      iconMonochrome: boolean
       kind: 'custom'
       location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
       manifestOrder: number

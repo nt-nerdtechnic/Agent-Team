@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 
 // Health-check timeout (seconds): how long startBackend() waits for /health
 // before giving up. User-configurable (Settings UI), persisted in a small
@@ -25,17 +25,36 @@ export function parseHealthCheckTimeoutDoc(text: string | null): number {
   try {
     const data = JSON.parse(text)
     return clampHealthCheckTimeoutSec(Number(data?.timeoutSec))
-  } catch {
+  } catch (err) {
+    // Content exists but is unreadable — the configured value is gone and the
+    // user gets the default with no way to tell it apart from never having set
+    // one. Say so: silently reverting a preference is the failure to avoid.
+    console.warn('[health-timeout] corrupt document; falling back to the default', err)
     return DEFAULT_HEALTH_CHECK_TIMEOUT_SEC
   }
 }
 
 export function readHealthCheckTimeoutSec(filePath: string): number {
   let text: string | null = null
-  try { text = readFileSync(filePath, 'utf-8') } catch { /* missing file → default */ }
+  try {
+    text = readFileSync(filePath, 'utf-8')
+  } catch (err) {
+    // No file is the ordinary first-run case. Anything else — a permissions
+    // problem, an I/O error — also silently became the default before, which
+    // reads to the user as "my setting reverted itself".
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      console.warn('[health-timeout] read failed; falling back to the default', err)
+    }
+  }
   return parseHealthCheckTimeoutDoc(text)
 }
 
 export function writeHealthCheckTimeoutSec(filePath: string, sec: number): void {
-  writeFileSync(filePath, JSON.stringify({ timeoutSec: clampHealthCheckTimeoutSec(sec) }), 'utf-8')
+  // Temp + rename, like the other main-owned stores: a bare writeFileSync
+  // truncates first, so a crash mid-write leaves a partial file that parses to
+  // the default — losing the value this call was saving.
+  const doc = JSON.stringify({ timeoutSec: clampHealthCheckTimeoutSec(sec) })
+  const tmp = `${filePath}.tmp`
+  writeFileSync(tmp, doc, 'utf-8')
+  renameSync(tmp, filePath)
 }

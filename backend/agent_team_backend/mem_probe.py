@@ -12,6 +12,15 @@ cheap periodic sample that stays quiet until the water rises, which is what
 turns "4 GB after 19 h" into "these events did it". With NAVIDE_MEM_TRACE=1 a
 jump also dumps the top allocators, answering *what* and not just *when*.
 
+Peak RSS alone is not enough to drive that detector on macOS. A page that goes
+cold is compressed out of the resident set while still counting toward the
+process footprint, so growth that has already cooled moves the footprint but
+not the RSS. Measured in the field: a backend held 2195 arenas (2.14 GB, of
+which 2.09 GB was compressed) and grew 585 of them over 42 hours without ever
+tripping the 32 MB peak-RSS threshold — the probe was silent for the entire
+window it existed to describe. The detector therefore watches several signals
+and reports whichever one rises, so no single blind spot can silence it.
+
 Stdlib only — no new dependency to carry through PyInstaller.
 """
 
@@ -27,6 +36,8 @@ import threading
 import tracemalloc
 from dataclasses import dataclass
 
+from . import proc_rusage
+
 log = logging.getLogger("agent_team_backend.mem_probe")
 
 #: pymalloc's arena size, fixed at 1 MB since CPython 3.10.
@@ -39,7 +50,8 @@ SAMPLE_INTERVAL_S = 60.0
 #: Growth since the last reported level that counts as a step worth naming.
 #: Large enough that ordinary churn stays silent, small enough that the ~500 MB
 #: an idle-to-busy session accumulates gets attributed to several distinct
-#: events rather than one shrug.
+#: events rather than one shrug. Applies to every signal, which is why the
+#: arena count is carried in bytes rather than in arenas.
 JUMP_BYTES = 32 * 1024 * 1024
 
 #: Opt-in deep diagnosis. tracemalloc roughly doubles allocation cost, so it is
@@ -147,6 +159,36 @@ def peak_rss_bytes() -> int:
     return peak if sys.platform == "darwin" else peak * 1024
 
 
+def phys_footprint_bytes() -> int | None:
+    """This process's phys_footprint, or None where the syscall is unavailable.
+
+    The counter Activity Monitor shows, and the one that keeps counting after
+    macOS compresses a cold page out of the resident set. Off Darwin there is
+    no equivalent and this returns None, leaving peak RSS as the only signal —
+    which is what the probe had everywhere before.
+    """
+    pid = os.getpid()
+    measured = proc_rusage.sample([pid])
+    entry = measured.get(pid)
+    return entry[0] if entry is not None else None
+
+
+def _signals(peak: int, stats: ArenaStats | None) -> dict[str, int]:
+    """Everything worth watching this sample, keyed by name, all in bytes.
+
+    A signal that cannot be read is absent rather than zero: a missing key
+    means "no reading", while a zero would look like a collapse and re-baseline
+    the detector down to nothing.
+    """
+    out = {"peak_rss": peak}
+    footprint = phys_footprint_bytes()
+    if footprint is not None:
+        out["footprint"] = footprint
+    if stats is not None:
+        out["arenas"] = stats.arena_bytes
+    return out
+
+
 def _mb(value: int) -> float:
     return round(value / 1024 / 1024, 1)
 
@@ -184,10 +226,12 @@ def _trace_top(previous: tracemalloc.Snapshot | None) -> tracemalloc.Snapshot | 
 async def probe_loop() -> None:
     """Sample the footprint forever, staying quiet until the water rises.
 
-    Driven by peak RSS rather than the arena count, because peak RSS survives
-    both of the configurations where arenas disappear (PYTHONMALLOC=malloc and
-    tracemalloc) — and losing observability exactly when someone turns on the
-    deeper tool would defeat the purpose.
+    Watches every signal it can read and reports whichever one rises, because
+    each has a blind spot the others cover: peak RSS misses growth that macOS
+    has already compressed away, the footprint is Darwin-only, and the arena
+    count disappears under both PYTHONMALLOC=malloc and tracemalloc — the two
+    configurations someone reaches for when investigating memory, which is
+    exactly when the probe must not go dark.
     """
     if os.environ.get(TRACE_ENV):
         tracemalloc.start(1)
@@ -195,26 +239,45 @@ async def probe_loop() -> None:
             "memory probe: tracemalloc enabled by %s — arena counts unavailable "
             "while it runs", TRACE_ENV,
         )
-    baseline: int | None = None
+    baselines: dict[str, int] = {}
     traced: tracemalloc.Snapshot | None = None
     while True:
         await asyncio.sleep(SAMPLE_INTERVAL_S)
         peak = peak_rss_bytes()
         stats = await asyncio.to_thread(read_arena_stats)
+        current = _signals(peak, stats)
         log.debug("memory probe: %s", _describe(peak, stats))
-        if baseline is None:
-            baseline = peak
+        if not baselines:
+            baselines = current
             traced = await asyncio.to_thread(_trace_top, None)
             continue
-        if peak - baseline >= JUMP_BYTES:
-            log.info(
-                "memory probe: peak_rss +%sMB (%sMB -> %sMB) — %s",
-                _mb(peak - baseline), _mb(baseline), _mb(peak),
-                _describe(peak, stats),
-            )
+        rose = False
+        for name, value in current.items():
+            previous = baselines.get(name)
+            if previous is None:
+                # A signal that has just become readable — take a level, do not
+                # report the whole of it as a jump.
+                baselines[name] = value
+                continue
+            if value - previous >= JUMP_BYTES:
+                log.info(
+                    "memory probe: %s +%sMB (%sMB -> %sMB) — %s",
+                    name, _mb(value - previous), _mb(previous), _mb(value),
+                    _describe(peak, stats),
+                )
+                baselines[name] = value
+                rose = True
+            elif value < previous:
+                # ru_maxrss is monotonic in practice, but the footprint and the
+                # arena count genuinely fall. Track them down so a stale high
+                # baseline cannot hide the next climb.
+                baselines[name] = value
+        # A signal that stops reading keeps its level. Dropping it would look
+        # tidier, but tracemalloc takes the arenas away for as long as it runs,
+        # and re-baselining on its return would silently swallow everything
+        # that grew while it was gone — the deep tool would create a blind spot
+        # rather than remove one.
+        if rose:
+            # One dump per sample however many signals moved — they are all
+            # describing the same growth.
             traced = await asyncio.to_thread(_trace_top, traced)
-            baseline = peak
-        elif peak < baseline:
-            # ru_maxrss is monotonic in practice, but never let a stale high
-            # baseline hide a later climb if the platform ever reports lower.
-            baseline = peak

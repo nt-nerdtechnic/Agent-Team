@@ -483,6 +483,25 @@ def _token_fingerprint(url: str, token: str) -> str:
     return hashlib.sha256(f"{url}\x00{token}".encode("utf-8")).hexdigest()[:32]
 
 
+def member_for_credential(url: str, token: str) -> str:
+    """The member this credential was last seen to belong to, or "".
+
+    A read-only peek at what ``adopt_own_member`` pinned, for the one caller
+    that needs the answer *before* ``auth.hello`` can give it: the link has to
+    choose which node id to present, and that choice is per member. Never
+    raises — a store that cannot be read simply has no hint, and the link falls
+    back to the id it has always presented.
+    """
+    if not url or not token:
+        return ""
+    try:
+        with _lock:
+            state = _load_locked()
+            return str(state["ownMembers"].get(_token_fingerprint(url, token)) or "")
+    except Exception:  # noqa: BLE001 - a hint that cannot be read is just absent
+        return ""
+
+
 def adopt_own_member(url: str, token: str, member_id: str) -> str:
     """Pin the member id this credential belongs to, and return the pinned one.
 
@@ -524,8 +543,22 @@ def adopt_own_member(url: str, token: str, member_id: str) -> str:
 
 
 def pin_for(device_id: str) -> dict[str, Any] | None:
-    """The pinned key and member for *device_id*, from memory. Never raises: the
-    delivery path calls this per message and has already checked the lock."""
+    """The pinned key and member for *device_id*.
+
+    **Raises ``TrustStoreLocked`` when the record cannot be read, and the
+    precondition belongs to the caller.** This said "never raises" for a while,
+    on the strength of one caller: the delivery path checks the lock before it
+    gets here, so for that path the sentence was true. It was read as a property
+    of this function, and the second caller — the device-list snapshot — was
+    written against it and took the whole handler down with it the first time a
+    machine's record went unreadable.
+
+    Kept raising rather than made total, deliberately. The delivery path's
+    precondition is real and worth keeping: "the store is locked, so stop
+    delivering" is a stronger guarantee expressed as an exception than as a
+    return value somebody can forget to check. What was wrong was the docstring
+    claiming the guarantee for everyone.
+    """
     with _lock:
         if not device_id:
             return None

@@ -32,7 +32,11 @@ import httpx
 from agent_team_backend.applog import app_data_dir
 from agent_team_backend import commit_message_prompt
 from agent_team_backend.git_security import is_remote_helper_form
-from agent_team_backend.host_shell import run_allowlisted, run_allowlisted_text
+from agent_team_backend.host_shell import (
+    run_allowlisted,
+    run_allowlisted_capped,
+    run_allowlisted_text,
+)
 from agent_team_backend.pending_registry import TIMEOUT, PendingRegistry
 
 log = logging.getLogger("agent_team_backend.git_service")
@@ -212,6 +216,29 @@ async def _run_with_input(args: list[str], cwd: str, stdin_text: str) -> tuple[i
             args, cwd, timeout=15.0, input_text=stdin_text
         )
     return rc, stdout, stderr
+
+
+async def _run_capped(
+    args: list[str], cwd: str, max_stdout_bytes: int
+) -> tuple[int, str, str, bool]:
+    """Run a git command, stopping at *max_stdout_bytes*; return (rc, out, err, truncated).
+
+    For commands whose output the caller only shows the head of. Reading the
+    whole of a large ``git diff`` before truncating makes the memory peak scale
+    with the full diff; this stops the read -- and the git process -- at the cap.
+    Callers must check *truncated* before *rc*, which is the kill signal when
+    the cap was hit.
+    """
+    async with _git_proc_semaphore():
+        rc, stdout, stderr, truncated = await run_allowlisted_capped(
+            args, cwd, timeout=15.0, max_stdout_bytes=max_stdout_bytes
+        )
+    return (
+        rc,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+        truncated,
+    )
 
 
 async def _run_bytes(args: list[str], cwd: str) -> tuple[int, bytes, str]:
@@ -1239,6 +1266,11 @@ async def compare_branches(workspace_path: str, base: str, compare: str) -> dict
     return {"ok": True, "stat": summary, "files": files}
 
 
+# Head of a branch diff kept for the UI. A byte cap rather than a character one
+# so the read can stop before the whole diff is decoded.
+_DIFF_MAX_BYTES = 30_000
+
+
 async def diff_branches(workspace_path: str, base: str, compare: str) -> dict[str, Any]:
     """Return a unified diff.
 
@@ -1248,7 +1280,7 @@ async def diff_branches(workspace_path: str, base: str, compare: str) -> dict[st
     When *compare* is provided, uses three-dot diff (merge-base) so only
     committed changes unique to *compare* relative to *base* are shown.
 
-    Truncated to 30,000 chars.
+    Truncated to 30,000 bytes; ``truncated`` says whether it was.
     """
     if not compare.strip():
         # Show all uncommitted changes (staged + unstaged) vs last commit
@@ -1259,10 +1291,11 @@ async def diff_branches(workspace_path: str, base: str, compare: str) -> dict[st
         if err := _validate_ref_name(compare, "compare branch"):
             return {"ok": False, "diff": "", "error": err}
         cmd = ["git", "-c", "core.quotePath=false", "diff", f"{base.strip()}...{compare.strip()}"]
-    rc, out, stderr = await _run(cmd, workspace_path)
-    if rc != 0:
+    rc, out, stderr, truncated = await _run_capped(cmd, workspace_path, _DIFF_MAX_BYTES)
+    # truncated is checked first: capping kills git, so rc is then a signal.
+    if not truncated and rc != 0:
         return {"ok": False, "diff": "", "error": stderr.strip()}
-    return {"ok": True, "diff": out[:30_000], "truncated": len(out) > 30_000}
+    return {"ok": True, "diff": out, "truncated": truncated}
 
 
 async def _rebase_in_progress(workspace_path: str) -> bool:
@@ -2945,23 +2978,28 @@ async def generate_commit_message(
         api_key = (settings or {}).get("anthropic_api_key", "").strip()
         anthropic_model = (settings or {}).get("anthropic_model", model)
         try:
-            client = _anthropic.AsyncAnthropic(api_key=api_key or None)
-            response = await client.messages.create(
-                model=anthropic_model,
-                max_tokens=256,
-                system=system,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                timeout=remaining,
-            )
-            raw = ""
-            for block in response.content:
-                if getattr(block, "type", None) == "text":
-                    raw += block.text
-            message = commit_message_prompt.parse_commit_message(raw)
-            if not message:
-                return {"ok": False, "error": "empty response from Anthropic", "message": ""}
-            return {"ok": True, "message": message}
+            # Held in async with, like the Ollama client below: AsyncAnthropic
+            # owns an httpx connection pool and an SSL context, and auto-commit
+            # calls this once a minute. Without the context manager each call
+            # left one behind for the garbage collector, which cannot close an
+            # async transport reliably.
+            async with _anthropic.AsyncAnthropic(api_key=api_key or None) as client:
+                response = await client.messages.create(
+                    model=anthropic_model,
+                    max_tokens=256,
+                    system=system,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    timeout=remaining,
+                )
+                raw = ""
+                for block in response.content:
+                    if getattr(block, "type", None) == "text":
+                        raw += block.text
+                message = commit_message_prompt.parse_commit_message(raw)
+                if not message:
+                    return {"ok": False, "error": "empty response from Anthropic", "message": ""}
+                return {"ok": True, "message": message}
         except Exception as exc:
             log.warning("generate_commit_message (anthropic) failed: %s", exc)
             return {"ok": False, "error": str(exc), "message": ""}

@@ -3,7 +3,9 @@
 Uses `watchdog` for change notifications, with a periodic full-rescan
 fallback (default 30s) to recover from missed events (network mounts,
 edge-case file ops). Token readers resume from compact per-file checkpoints
-owned by TokensStore; the watcher itself persists no token dedup state.
+owned by TokensStore; the watcher persists its activity dedup marks into the
+same store, under the reserved "@activity" scope, so a restart resumes where
+the last one stopped instead of replaying every transcript from line 1.
 
 Architecture:
 
@@ -29,7 +31,13 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .base import ActivityEvent, LogReader, TokenSinkResult, TokenUsage
+from .base import (
+    ActivityEvent,
+    LogReader,
+    TokenSinkResult,
+    TokenUsage,
+    seed_pre_start_activity,
+)
 
 log = logging.getLogger("agent_team_backend.log_readers.watcher")
 
@@ -45,8 +53,38 @@ log = logging.getLogger("agent_team_backend.log_readers.watcher")
 # A file that still exists keeps its set however old it looks: resuming an old
 # session is a first-class flow here, and a resumed transcript with no dedup
 # state replays every historical turn — text, turn_complete and all — at a pane
-# that is already registered and attributed.
+# that is already registered and attributed. (The durable "@activity"
+# checkpoint below would rebuild the mark on the next read, but only after the
+# file has already been re-enqueued and re-walked; the in-memory bag is what
+# makes the common case free.)
 _ACTIVITY_SEEN_SWEEP_S = 600.0
+
+# Reserved checkpoint scope for the activity dedup bag. Real scopes are either
+# "" (Global) or an absolute workspace path, so a leading "@" cannot collide —
+# and the tokens_store paths that iterate workspace scopes (reset, prune) match
+# on a literal workspace path, never on "any scope".
+_ACTIVITY_SCOPE = "@activity"
+_ACTIVITY_KIND = "activity"
+# The bag is stored whole, so it is only stored while it stays small. Most
+# readers keep a handful of sentinel keys (a line high-water mark, a cumulative
+# total, the last turn's text) and stay far under this; a reader that keeps one
+# key per item falls back to the old in-memory-only behaviour rather than
+# writing an unbounded blob into the checkpoint row of every transcript.
+#
+# grok and copilot used to keep per-item keys (act:<session>:<seq> per message
+# row; act:<line>, db_act:* per row) and were the two readers this limit shut
+# out, so they replayed their history on every start while every other vendor
+# stopped. Both now consolidate into a watermark instead (grok on a global
+# messages.rowid, copilot on a line high-water mark), so they are covered.
+# copilot still leaves activity_resumes_by_line False on purpose — that flag is
+# per-READER and this one also serves session-store.db, keyed on db row ids.
+# Measured 2026-09-07 over 426 real session files: the covered readers peak at
+# 4 keys / 97 bytes, so this limit has roughly a 2x margin for them.
+_ACTIVITY_KEYS_PERSIST_LIMIT = 8
+
+# How long a quit will wait for coalesced token paths to settle before giving
+# up on them. See drain_pending_tokens: this is on the shutdown critical path.
+_SHUTDOWN_FLUSH_TIMEOUT_S = 5.0
 
 TokenSink = Callable[[TokenUsage], Awaitable[TokenSinkResult | None]]
 ActivitySink = Callable[[ActivityEvent], Awaitable[None]]
@@ -137,12 +175,15 @@ class LogWatcher:
         self._checkpoint_provider = checkpoint_provider or self._local_checkpoint
         self._checkpoint_sink = checkpoint_sink or self._advance_local_checkpoint
         self._readers: list[LogReader] = []
-        # Activity dedup is in-memory only. On restart, we only emit *new*
-        # activity since the last seen line, but we don't try to "replay"
-        # history — old events have no semantic value to a newly-started
-        # watcher anyway. Per-file sets are dropped once the file goes cold
-        # (_sweep_activity_seen); it used to be lifetime-bound, which is how
-        # it became the backend's largest retained structure.
+        # Per-file activity dedup bags, restored from the durable "@activity"
+        # checkpoint on first sight and written back as they advance
+        # (_restore_activity_seen / _persist_activity_seen). This dict is the
+        # hot cache, not the record: a restart with an empty one used to mean
+        # every reader walked its transcript from line 1 and broadcast an
+        # agent.activity per historical entry — ~148,000 in the first 60s of a
+        # cold start (GitHub #28). Bags are dropped once the file is deleted
+        # (_sweep_activity_seen); they used to be lifetime-bound, which is how
+        # this became the backend's largest retained structure.
         self._activity_seen: dict[str, set[str]] = {}
         self._activity_seen_swept_at: float | None = None
         self._scan_mtimes: dict[str, float] = {}
@@ -266,6 +307,40 @@ class LogWatcher:
                     log.info("watching %s for %s logs", d, reader.vendor)
                 except Exception as err:  # noqa: BLE001
                     log.warning("schedule watch on %s failed: %s", d, err)
+
+    async def drain_pending_tokens(self) -> None:
+        """Settle coalesced token paths before shutdown.
+
+        Token ingestion is deliberately lazy: a path seen by the drain is only
+        remembered, and the numbers land on the next _token_interval_s flush.
+        stop() then cancels that flush, so on a normal quit everything read
+        since the last one was simply dropped and had to be rediscovered by the
+        next start's sweep. Now that usage is only counted for what Navide is
+        watching, that sweep is no longer a safety net wide enough to find it
+        again — a workspace whose pane does not come back is never rescanned —
+        so the flush has to happen while we still have it.
+
+        Best-effort by design, and bounded: this now sits in the FastAPI
+        shutdown path ahead of the git watcher, server link, MCP teardown and
+        the database close, where stop() used to be a synchronous cancel. One
+        slow transcript — a network mount, a locked sqlite store, a stalled
+        sink — would otherwise hold the whole quit open indefinitely, so the
+        wait is capped. Whatever does not settle in time is still recoverable
+        from the durable checkpoints the next time that file is seen.
+        """
+        if not self._started:
+            return
+        try:
+            await asyncio.wait_for(
+                self._flush_pending_tokens(), timeout=_SHUTDOWN_FLUSH_TIMEOUT_S
+            )
+        except TimeoutError:
+            log.warning(
+                "shutdown token flush timed out after %.0fs; %d path(s) left for the "
+                "next start", _SHUTDOWN_FLUSH_TIMEOUT_S, len(self._pending_token_paths)
+            )
+        except Exception as err:  # noqa: BLE001
+            log.warning("shutdown token flush failed: %s", err)
 
     def stop(self) -> None:
         if not self._started:
@@ -437,6 +512,59 @@ class LogWatcher:
             f" (workspace={workspace_path})" if workspace_path else " (all readers)",
         )
 
+    def _reader_files(
+        self,
+        reader: LogReader,
+        workspace: str | None,
+        memo: dict[tuple[int, str | None], list[Path]],
+    ) -> list[Path]:
+        """One enumeration per (reader, workspace) per sweep.
+
+        Readers that cannot narrow by workspace (Codex files itself by date;
+        Grok/Kilo/Muse/OpenCode keep every session in one shared store) return
+        None from session_files_for_workspace and fall back to their whole
+        list — for every workspace, in every scope. Without this memo the two
+        scopes would walk those trees N_workspaces × 2 times per sweep instead
+        of once.
+        """
+        key = (id(reader), workspace)
+        cached = memo.get(key)
+        if cached is not None:
+            return cached
+        if workspace is None:
+            files = list(reader.session_files())
+        else:
+            scoped = reader.session_files_for_workspace(workspace)
+            files = (
+                list(scoped)
+                if scoped is not None
+                else self._reader_files(reader, None, memo)
+            )
+        memo[key] = files
+        return files
+
+    def _collect_candidates(
+        self,
+        workspaces: list[str],
+        seen: set[str],
+        memo: dict[tuple[int, str | None], list[Path]],
+    ) -> list[Path]:
+        """Enumerate the scope's candidate files, once each.
+
+        `seen` dedupes a file two workspaces both claim; `memo` keeps a reader
+        tree walked once per sweep rather than once per workspace naming it."""
+        files: list[Path] = []
+        # Empty workspace list = legacy unscoped full scan.
+        sources = [None] if not workspaces else list(workspaces)
+        for reader in self._readers:
+            for ws in sources:
+                for p in self._reader_files(reader, ws, memo):
+                    k = str(p)
+                    if k not in seen:
+                        seen.add(k)
+                        files.append(p)
+        return files
+
     def _candidate_files(self) -> list[Path]:
         """Backfill candidates scoped to opened workspaces (no mtime filter).
 
@@ -445,6 +573,13 @@ class LogWatcher:
         workspace to a subset fall back to their full list — those vendors keep
         far fewer files). No provider / nothing registered yet → full scan
         (legacy).
+
+        Activity and token ingestion share this one list: usage is counted for
+        what Navide is watching, and nothing else. A CLI run while Navide was
+        closed, or in a workspace with no live pane, is deliberately not
+        counted — a product decision, not a limitation. Token ingestion briefly
+        carried a second, wider scope of its own; the shutdown flush
+        (drain_pending_tokens) is what replaced it.
         """
         provider = self._workspace_provider
         if provider is not None:
@@ -455,23 +590,7 @@ class LogWatcher:
                 return []
         else:
             workspaces = []
-        if not workspaces:
-            files: list[Path] = []
-            for reader in self._readers:
-                files.extend(reader.session_files())
-            return files
-        files = []
-        seen: set[str] = set()
-        for reader in self._readers:
-            for ws in workspaces:
-                scoped = reader.session_files_for_workspace(ws)
-                cand = scoped if scoped is not None else reader.session_files()
-                for p in cand:
-                    k = str(p)
-                    if k not in seen:
-                        seen.add(k)
-                        files.append(p)
-        return files
+        return self._collect_candidates(workspaces, set(), {})
 
     def _sweep_activity_seen(self, now: float) -> None:
         """Forget the activity dedup set of every file that no longer exists.
@@ -484,10 +603,17 @@ class LogWatcher:
         session, it arms one. The next append re-enqueues the file, the reader
         starts from line 1 with an empty set, and every historical
         `agent_active` / `turn_complete` — carrying turn text and MSG blocks —
-        is broadcast again, this time to a live, attributed pane. A restart
-        replays too, but a restart also resets the frontend; this does not.
-        The per-file sets are bounded by the readers' high-water marks (see
+        is broadcast again, this time to a live, attributed pane. The durable
+        "@activity" checkpoint now backs the bag up, so the replay is bounded
+        by what the store still holds rather than by the file — but it is one
+        provider call and a re-walk of the file either way, and the per-file
+        sets are bounded by the readers' high-water marks (see
         log_readers.base), so retaining them is cheap.
+
+        The checkpoint row of a deleted file is deliberately left alone here:
+        tokens_store prunes an unreadable path after DEAD_ENTRY_DAYS, which
+        tolerates a file that is only temporarily missing (an unmounted volume,
+        a rename in flight) where an eager delete here would not.
         """
         if (
             self._activity_seen_swept_at is not None
@@ -517,9 +643,21 @@ class LogWatcher:
         this mtime gate stops us from re-enqueueing unchanged files. Without
         it every 30-second cycle re-reads every workspace session file —
         including 100 MB+ Claude histories — saturating the drain task.
+
+        Takes no arguments and returns a list: test_watcher_offloop_discovery
+        replaces this method wholesale with a zero-arg spy to prove discovery
+        stays off the event loop.
+        """
+        return self._changed_since_last_scan(self._candidate_files())
+
+    def _changed_since_last_scan(self, files: list[Path]) -> list[Path]:
+        """Drop files whose mtime is unchanged since we last enqueued them.
+
+        _scan_mtimes is shared by both scopes on purpose: a file is worth
+        re-reading once per change, whichever scope surfaced it.
         """
         out: list[Path] = []
-        for p in self._candidate_files():
+        for p in files:
             try:
                 mtime = p.stat().st_mtime
             except OSError:
@@ -591,7 +729,12 @@ class LogWatcher:
         # Activity parsing stays realtime even though token accounting is
         # intentionally delayed.
         if self._activity_sink is not None:
-            act_seen = self._activity_seen.setdefault(key, set())
+            act_seen = self._activity_seen.get(key)
+            seeded = False
+            if act_seen is None:
+                act_seen, seeded = await self._restore_activity_seen(key, path, reader)
+                self._activity_seen[key] = act_seen
+            before = frozenset(act_seen)
             try:
                 activity_events = await asyncio.to_thread(
                     reader.parse_activity, path, act_seen
@@ -606,7 +749,61 @@ class LogWatcher:
                     await self._activity_sink(aev)
                 except Exception as err:  # noqa: BLE001
                     log.warning("activity sink raised: %s", err)
+            # After delivery, so the durable mark can never run ahead of what
+            # was actually broadcast. `seeded` is its own signal because a seed
+            # leaves the bag unchanged across the parse that follows it — the
+            # reader finds nothing new and rewrites the same mark.
+            if seeded or frozenset(act_seen) != before:
+                self._persist_activity_seen(key, act_seen)
         return True
+
+    async def _restore_activity_seen(
+        self, key: str, path: Path, reader: LogReader
+    ) -> tuple[set[str], bool]:
+        """The dedup bag for a file not in the hot cache: (bag, was_seeded).
+
+        Restored from the durable checkpoint when one exists. When none does,
+        this is the first time any process has looked at the file, and a
+        line-resuming reader gets it seeded to EOF instead of replayed — see
+        seed_pre_start_activity for the mtime gate that keeps a live pane's
+        fresh transcript out of that path.
+        """
+        try:
+            stored = self._checkpoint_provider(key, _ACTIVITY_SCOPE) or {}
+        except Exception as err:  # noqa: BLE001
+            log.warning("activity checkpoint provider raised for %s: %s", path, err)
+            stored = {}
+        if stored.get("kind") == _ACTIVITY_KIND:
+            keys = stored.get("keys")
+            if isinstance(keys, list):
+                return {str(k) for k in keys}, False
+            return set(), False
+        seen: set[str] = set()
+        if not reader.activity_resumes_by_line:
+            return seen, False
+        # stat + line walk are disk-bound; the drain runs on the loop.
+        seeded = await asyncio.to_thread(seed_pre_start_activity, path, seen)
+        return seen, seeded
+
+    def _persist_activity_seen(self, key: str, act_seen: set[str]) -> None:
+        """Write a file's dedup bag back to the durable checkpoint store.
+
+        Sorted so the serialized row is stable and _checkpoint_is_newer's
+        difference test does not fire on set-iteration order alone. An
+        over-limit bag is left unwritten rather than truncated: a partial bag
+        would read back as a real resume point and silently swallow the lines
+        it dropped.
+        """
+        if len(act_seen) > _ACTIVITY_KEYS_PERSIST_LIMIT:
+            return
+        try:
+            self._checkpoint_sink(
+                key,
+                {"kind": _ACTIVITY_KIND, "keys": sorted(act_seen)},
+                _ACTIVITY_SCOPE,
+            )
+        except Exception as err:  # noqa: BLE001
+            log.warning("activity checkpoint sink raised for %s: %s", key, err)
 
     async def _process_token_path(
         self, path: Path, replay_workspace: str = ""

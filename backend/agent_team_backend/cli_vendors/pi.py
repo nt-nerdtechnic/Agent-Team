@@ -154,6 +154,11 @@ def _model_of(rec: dict) -> str:
 class PiLogReader(LogReader):
     vendor: str = "pi"
 
+    #: parse_activity walks a dense ascending line counter and resumes from
+    #: one high-water mark, so an old file can be seeded to EOF by counting
+    #: lines rather than replaying it (log_readers.base).
+    activity_resumes_by_line: bool = True
+
     def project_dirs(self) -> list[Path]:
         """The single sessions root (empty list when it doesn't exist)."""
         default = pi_sessions_root()
@@ -466,18 +471,25 @@ class PiLogReader(LogReader):
 
         try:
             with fh:
-                for line_no, raw in enumerate(fh, 1):
-                    raw = raw.strip()
+                for line_no, raw_line in enumerate(fh, 1):
+                    raw = raw_line.strip()
                     if not raw:
                         continue
                     if line_no <= high_water:
                         continue
-                    last_line = line_no
                     key = f"act:{line_no}"
                     try:
                         rec = json.loads(raw)
                     except json.JSONDecodeError:
+                        # An unterminated final line is still being written.
+                        # Leave the mark behind it so the completed line is
+                        # read on the next poll: advancing past it would
+                        # drop that line's events for good (GitHub #21).
+                        if not raw_line.endswith("\n"):
+                            break
+                        last_line = line_no
                         continue
+                    last_line = line_no
                     if not isinstance(rec, dict) or rec.get("type") != "message":
                         continue
                     msg = rec.get("message")
