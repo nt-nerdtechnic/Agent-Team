@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useTheme, DEFAULT_THEME } from '../useTheme'
-import { settingsGet, settingsSet } from '../../../shared'
+import { settingsGet, settingsReadiness, settingsSet } from '../../../shared'
 import { __resetSettingsForTest } from '../../../shared/testing'
 
 const THEME_KEY = 'agent-team:theme'
@@ -64,6 +64,24 @@ describe('useTheme', () => {
     const { loadTheme, theme } = useTheme()
     loadTheme({ theme: 'light' })
     expect(theme.value).toBe('high-contrast')
+  })
+
+  it('does not promote the backend fallback before the store is authoritative', () => {
+    // An empty cache here means "the snapshot has not landed", not "unset" —
+    // the user's real theme is still on its way. Applying the workspace's
+    // dormant backup to the screen is fine; writing it back is not, because a
+    // pending key beats the server value in reconcile and is never corrected.
+    settingsReadiness.status = 'pending'
+    try {
+      const { loadTheme, theme } = useTheme()
+      const res = loadTheme({ theme: 'light', theme_custom: { '--accent-fg': '#abcdef' } })
+      expect(res.fromLocal).toBe(false)
+      expect(theme.value).toBe('light')
+      expect(storedJson(THEME_KEY)).toBeNull()
+      expect(storedJson(CUSTOM_KEY)).toBeNull()
+    } finally {
+      settingsReadiness.status = 'ready'
+    }
   })
 
   it('falls back to default for an unknown stored theme', () => {

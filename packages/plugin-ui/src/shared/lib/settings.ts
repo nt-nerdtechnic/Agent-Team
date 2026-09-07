@@ -397,9 +397,18 @@ async function flushPending(): Promise<void> {
   const b = backend
   // Not connected: keep the queue; the status watch flushes on reconnect.
   if (!b || b.status.value !== 'connected') return
-  // An owned v2 store may only receive writes after its authoritative snapshot
-  // succeeded. This prevents fallback defaults from overwriting preferences.
-  if (b.ownedKeys && settingsReadiness.status !== 'ready') return
+  // A store may only receive writes after its authoritative snapshot succeeded.
+  // This prevents fallback defaults from overwriting preferences: before the
+  // snapshot lands the cache reads empty, so a consumer that treats "missing"
+  // as "unset" writes its own default over the stored value — and because a
+  // pending key beats the server value in reconcile(), that write is never
+  // corrected. The queue is kept, not dropped: these writes go out once the
+  // snapshot arrives (or on the next reconnect).
+  //
+  // This used to be gated on `b.ownedKeys`, which no host port declares — so
+  // the main window, the one with the fallback-writing consumers, was the only
+  // surface the protection never covered.
+  if (settingsReadiness.status !== 'ready') return
   const updates: Record<string, unknown> = {}
   for (const [key, value] of pending) updates[key] = value
   pending.clear()

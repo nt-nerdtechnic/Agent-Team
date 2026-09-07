@@ -1,6 +1,10 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSettings } from '../useSettings'
+import { settingsGet, settingsReadiness } from '@navide/plugin-ui/shared'
+import { __resetSettingsForTest } from '@navide/plugin-ui/shared/testing'
+
+const LANGUAGE_KEY = 'agent-team:language'
 
 describe('useSettings — health-check timeout', () => {
   beforeEach(() => {
@@ -64,5 +68,48 @@ describe('useSettings — health-check timeout', () => {
     setHealthCheckTimeoutSec(60.4)
     expect(healthCheckTimeoutSec.value).toBe(60)
     expect(write).toHaveBeenCalledWith(60)
+  })
+})
+
+describe('useSettings — language fallback promotion', () => {
+  beforeEach(() => {
+    __resetSettingsForTest()
+  })
+
+  it('promotes the workspace fallback once the store is authoritative', () => {
+    const { loadLanguage, language } = useSettings()
+    loadLanguage({ language: 'en-US' })
+    expect(language.value).toBe('en-US')
+    expect(settingsGet(LANGUAGE_KEY, null)).toBe('en-US')
+  })
+
+  it('does not promote the workspace fallback before the snapshot lands', () => {
+    // An empty cache here means the snapshot is still in flight, not that the
+    // user has no language. Writing the workspace's dormant backup now buries
+    // the real preference permanently: a pending key beats the server value in
+    // reconcile, so nothing later corrects it.
+    settingsReadiness.status = 'pending'
+    try {
+      const { loadLanguage, language } = useSettings()
+      loadLanguage({ language: 'en-US' })
+      // Applied to the UI, but not written back.
+      expect(language.value).toBe('en-US')
+      expect(settingsGet(LANGUAGE_KEY, null)).toBeNull()
+    } finally {
+      settingsReadiness.status = 'ready'
+    }
+  })
+
+  it('leaves an explicit change writable while the snapshot is in flight', () => {
+    // setLanguage is the user acting, not a fallback being guessed — it must
+    // still be recorded (the settings module holds the write until ready).
+    settingsReadiness.status = 'pending'
+    try {
+      const { setLanguage } = useSettings()
+      setLanguage('en-US')
+      expect(settingsGet(LANGUAGE_KEY, null)).toBe('en-US')
+    } finally {
+      settingsReadiness.status = 'ready'
+    }
   })
 })

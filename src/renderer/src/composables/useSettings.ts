@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { i18n } from '@navide/plugin-ui/foundation'
-import { settingsGet, settingsSet } from '@navide/plugin-ui/shared'
+import { settingsGet, settingsReadiness, settingsSet } from '@navide/plugin-ui/shared'
 
 const LANGUAGE_KEY = 'agent-team:language'
 const SUPPORTED = new Set(['zh-TW', 'en-US'])
@@ -36,7 +36,11 @@ function loadLanguage(backendFallback?: { language?: string }): void {
   const next = backend ?? normalizeLocale(navigator.language)
   language.value = next
   i18n.global.locale.value = next as 'zh-TW' | 'en-US'
-  if (backend) writeLocal(next)
+  // Promote the workspace's dormant backup only once the settings store is
+  // authoritative. Before the snapshot lands, readLocal() returns null for a
+  // preference the user does have, and this write would bury it — permanently,
+  // since a pending key also wins the reconcile that would otherwise fix it.
+  if (backend && settingsReadiness.status === 'ready') writeLocal(next)
 }
 
 function setLanguage(locale: string): void {

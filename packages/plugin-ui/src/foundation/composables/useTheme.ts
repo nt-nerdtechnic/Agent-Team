@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { settingsGet, settingsSet } from '../../shared'
+import { settingsGet, settingsReadiness, settingsSet } from '../../shared'
 
 /**
  * useTheme — theme selection + custom color overrides.
@@ -115,7 +115,14 @@ export function useTheme() {
 
     // If we adopted the backend value (no local copy), promote it to the source
     // of truth so subsequent loads are stable.
-    if (!fromLocal && (backendFallback?.theme || backendFallback?.theme_custom)) {
+    //
+    // Only once the store is authoritative: "no local copy" and "the snapshot
+    // has not arrived yet" are indistinguishable from here, and promoting in
+    // the second case writes THIS workspace's dormant backup over the user's
+    // real preference. That write also wins the reconcile that follows (a
+    // pending key beats the server value), so it would not be corrected.
+    const storeIsAuthoritative = settingsReadiness.status === 'ready'
+    if (!fromLocal && storeIsAuthoritative && (backendFallback?.theme || backendFallback?.theme_custom)) {
       writeLocal(THEME_KEY, next)
       writeLocal(CUSTOM_KEY, customOverrides.value)
     }
