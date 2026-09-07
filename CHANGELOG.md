@@ -4,6 +4,8 @@ All notable released changes to Navide will be documented in this file. The form
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-07 — signed release
+
 ### Added
 
 - Let `cli_get_status`, `cli_wait_idle` and `cli_send_and_wait` answer about
