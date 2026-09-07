@@ -98,6 +98,7 @@ import {
 import { resolveBackendDataDir, readUiSettingsText, UI_SETTINGS_FILE } from './ui-settings-bootstrap'
 import { PlanWindowRegistry } from './plan-windows'
 import { warnMain } from './main-log'
+import { isAppWindowSender, UNTRUSTED_SENDER } from './ipcSender'
 import {
   GitAccountsStore,
   type GitAccountCrypto,
@@ -2619,7 +2620,8 @@ ipcMain.handle(
 // not wait on it, and a failed prune only costs disk.
 app.whenReady().then(() => void pruneDroppedFiles(droppedFilesDir()))
 
-ipcMain.handle('shell:openTerminal', async (_event, command: string) => {
+ipcMain.handle('shell:openTerminal', async (event, command: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (!command || typeof command !== 'string') return { ok: false, error: 'invalid command' }
   // Open Terminal.app and run the install command interactively (sudo / OAuth
   // prompts need a real TTY). The command is AppleScript-escaped.
@@ -2651,7 +2653,8 @@ ipcMain.handle('permissions:open-settings', async (_event, key: PermissionKey) =
   }
 })
 
-ipcMain.handle('shell:openPath', async (_event, target: string) => {
+ipcMain.handle('shell:openPath', async (event, target: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (!target || typeof target !== 'string') return { ok: false, error: 'invalid path' }
   // shell.openPath returns an empty string on success, or an error message.
   const err = await shell.openPath(target)
@@ -2668,7 +2671,8 @@ ipcMain.handle('shell:openPath', async (_event, target: string) => {
   return { ok: true }
 })
 
-ipcMain.handle('shell:revealPath', async (_event, target: string) => {
+ipcMain.handle('shell:revealPath', async (event, target: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (!target || typeof target !== 'string') return { ok: false, error: 'invalid path' }
   try {
     shell.showItemInFolder(target)
@@ -2700,7 +2704,10 @@ const TRUST_CONFIRM_ACTIONS = new Set([
   // this list exists for: only a window can ask for it.
   'p2p.trust.rebuild',
 ])
-ipcMain.handle('trust:confirm', async (_event, action: unknown, deviceId: unknown, subject: unknown) => {
+ipcMain.handle('trust:confirm', async (event, action: unknown, deviceId: unknown, subject: unknown) => {
+  // Minting is the one thing this list exists to keep away from anything
+  // that is not a person's window — a webview guest or an iframe gets null.
+  if (!isAppWindowSender(event)) return null
   if (typeof action !== 'string' || !TRUST_CONFIRM_ACTIONS.has(action)) return null
   return mintTrustConfirmation(
     action,
@@ -2721,7 +2728,8 @@ ipcMain.handle('legal:open', async (_event, route: unknown) => {
   }
 })
 
-ipcMain.handle('shell:openExternal', async (_event, url: string) => {
+ipcMain.handle('shell:openExternal', async (event, url: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (!url || typeof url !== 'string') return { ok: false, error: 'invalid url' }
   if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'only http/https allowed' }
   try {
@@ -2734,7 +2742,8 @@ ipcMain.handle('shell:openExternal', async (_event, url: string) => {
 
 // Write read-only content (e.g. a file's HEAD version) to a temp file and open
 // it with the OS default app — the equivalent of Cursor's "Open File (HEAD)".
-ipcMain.handle('shell:openTempFile', async (_event, filename: string, content: string) => {
+ipcMain.handle('shell:openTempFile', async (event, filename: string, content: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (!filename || typeof filename !== 'string') return { ok: false, error: 'invalid filename' }
   try {
     const artifact = await writeTempTextArtifact(tmpdir(), filename, content ?? '')
@@ -2765,6 +2774,7 @@ ipcMain.handle('keybindings:read', async () => {
 })
 
 ipcMain.handle('keybindings:write', async (event, content: string) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   if (typeof content !== 'string') return { ok: false, error: 'invalid content' }
   const filePath = join(app.getPath('userData'), 'keybindings.json')
   try {
@@ -2784,7 +2794,8 @@ ipcMain.handle('keybindings:write', async (event, content: string) => {
   }
 })
 
-ipcMain.handle('fs:readFrom', async (_event, filePath: string, fromByte: number) => {
+ipcMain.handle('fs:readFrom', async (event, filePath: string, fromByte: number) => {
+  if (!isAppWindowSender(event)) return { ok: false, content: '' }
   if (!filePath || typeof filePath !== 'string') return { ok: false, content: '' }
   try {
     const fs = await import('node:fs/promises')
@@ -2870,7 +2881,8 @@ ipcMain.handle('settings:health-timeout-read', () => {
   return { ok: true, timeoutSec: readHealthCheckTimeoutSec(healthTimeoutPath()) }
 })
 
-ipcMain.handle('settings:health-timeout-write', (_event, timeoutSec: number) => {
+ipcMain.handle('settings:health-timeout-write', (event, timeoutSec: number) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   try {
     writeHealthCheckTimeoutSec(healthTimeoutPath(), timeoutSec)
     return { ok: true }
@@ -2886,7 +2898,8 @@ ipcMain.handle('settings:cdp-debug-read', () => {
   return { ok: true, config: readCdpDebugConfig(cdpDebugPath()) }
 })
 
-ipcMain.handle('settings:cdp-debug-write', (_event, config: CdpDebugConfig) => {
+ipcMain.handle('settings:cdp-debug-write', (event, config: CdpDebugConfig) => {
+  if (!isAppWindowSender(event)) return UNTRUSTED_SENDER
   try {
     writeCdpDebugConfig(cdpDebugPath(), config)
     return { ok: true }
