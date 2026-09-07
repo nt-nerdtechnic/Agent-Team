@@ -14502,9 +14502,16 @@ const auxiliaryListOrderedIds = computed<string[]>(() => auxiliaryListPanes.valu
 
 const paneNameById = computed(() => new Map(paneViews.value.map((v) => [v.id, v.agentLabel])))
 
-/** The source line under a nested card: who opened this pane. */
+/** The trail behind a nested card's ↳ mark: who opened this pane. */
 function paneListTrail(ancestors: readonly string[]): string {
   return ancestorTrail(ancestors, (id) => paneNameById.value.get(id) ?? '')
+}
+
+/** How far a nested card sits in from its parent's edge. Deliberately small,
+ *  and capped: these lists are narrow, and past three levels the indent would
+ *  cost more width than the ancestry is worth showing. */
+function paneListIndent(depth: number): string {
+  return `${Math.min(depth, 3) * 8}px`
 }
 
 /** How many status dots a card shows before it starts counting instead. */
@@ -15427,6 +15434,7 @@ function paneIsCommander(p: ActivePane): boolean {
             :key="p.id"
             class="meeting-item"
             :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
+            :style="{ marginLeft: paneListIndent(p.ancestors.length) }"
             draggable="true"
             title="Drag to reorder or click to focus"
             @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -15439,10 +15447,14 @@ function paneIsCommander(p: ActivePane): boolean {
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">
-              <!-- Who opened this pane. These lists have no indentation to
-                   spend on ancestry, so they spend a line of text instead. -->
-              <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
+                <!-- A nested pane is marked, not spelled out: the card is
+                     already indented, and the trail sits on the mark's title. -->
+                <span
+                  v-if="p.ancestors.length && paneListTrail(p.ancestors)"
+                  class="pane-list-src-mark"
+                  :title="paneListTrail(p.ancestors)"
+                >↳</span>
                 <!-- Opens the family in place, ahead of the name so the card
                      stays the same height whether or not it has children. Its
                      own click target — the card itself still focuses the pane —
@@ -15521,6 +15533,13 @@ function paneIsCommander(p: ActivePane): boolean {
         >
           <div class="spotlight-thumb-info">
             <div class="spotlight-thumb-name-row">
+              <!-- Same nesting mark as the other two lists; the thumb has no
+                   room for the trail, so it lives on the mark's title. -->
+              <span
+                v-if="p.ancestors.length && paneListTrail(p.ancestors)"
+                class="pane-list-src-mark"
+                :title="paneListTrail(p.ancestors)"
+              >↳</span>
               <span v-if="p.origin === 'pipeline' && p.stageId" class="spotlight-thumb-pipe-tag">P{{ p.stageId }}</span>
               <input
                 v-if="inlineRenamingId === p.id"
@@ -15547,10 +15566,6 @@ function paneIsCommander(p: ActivePane): boolean {
             <span class="spotlight-thumb-role">
               {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
             </span>
-            <!-- Same source line as the other two lists; the thumb is narrow,
-                 so it truncates sooner, but the nearest parent survives —
-                 the trail is cut from the left for exactly this reason. -->
-            <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
           </div>
           <div class="spotlight-thumb-badges">
             <span
@@ -15609,6 +15624,7 @@ function paneIsCommander(p: ActivePane): boolean {
             :key="p.id"
             class="meeting-item"
             :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
+            :style="{ marginLeft: paneListIndent(p.ancestors.length) }"
             draggable="true"
             title="Drag to reorder or click to focus"
             @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -15621,10 +15637,14 @@ function paneIsCommander(p: ActivePane): boolean {
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">
-              <!-- Who opened this pane. These lists have no indentation to
-                   spend on ancestry, so they spend a line of text instead. -->
-              <div v-if="p.ancestors.length && paneListTrail(p.ancestors)" class="pane-list-src">↳ {{ paneListTrail(p.ancestors) }}</div>
               <div class="meeting-name-row">
+                <!-- A nested pane is marked, not spelled out: the card is
+                     already indented, and the trail sits on the mark's title. -->
+                <span
+                  v-if="p.ancestors.length && paneListTrail(p.ancestors)"
+                  class="pane-list-src-mark"
+                  :title="paneListTrail(p.ancestors)"
+                >↳</span>
                 <!-- Opens the family in place, ahead of the name so the card
                      stays the same height whether or not it has children. Its
                      own click target — the card itself still focuses the pane —
@@ -17114,15 +17134,14 @@ function paneIsCommander(p: ActivePane): boolean {
    they spend a line of text, and show one family at a time instead of the
    whole forest. */
 
-/* Who opened this pane. Above the name, not beside it: the name row is the
-   scarcest space on the card. */
-.pane-list-src {
+/* Marks a pane as opened by another. Beside the name rather than above it:
+   the indent already places the card, so this only has to say why. */
+.pane-list-src-mark {
+  flex: none;
   font-size: var(--font-3xs);
   color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.3;
+  line-height: 1;
+  cursor: default;
 }
 
 /* Opens and closes the family a card is standing for. It rides the name row,

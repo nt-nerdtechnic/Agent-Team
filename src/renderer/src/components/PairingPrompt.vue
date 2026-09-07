@@ -359,7 +359,7 @@ function grouped(value: string | undefined): string {
   color: var(--text-secondary);
 }
 .pp-brand-mark { width: 15px; height: 11px; color: var(--accent-fg); }
-.pp-title { margin: 0; font-size: 13px; font-weight: 600; }
+.pp-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-bright); }
 .pp-head { display: flex; align-items: flex-start; gap: 8px; }
 .pp-head .pp-title { flex: 1; min-width: 0; }
 .pp-close {
@@ -376,7 +376,7 @@ function grouped(value: string | undefined): string {
 .pp-code {
   margin: 2px 0 0; font-family: var(--font-mono, monospace);
   font-size: 24px; letter-spacing: 0.18em; user-select: text;
-  color: var(--text-primary); font-variant-numeric: tabular-nums;
+  color: var(--text-bright); font-variant-numeric: tabular-nums;
 }
 .pp-body { margin: 6px 0 0; font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
 .pp-fp { margin: 2px 0 0; font-size: 12px; }

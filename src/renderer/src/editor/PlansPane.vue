@@ -1529,13 +1529,15 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .plans-search-input {
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   box-sizing: border-box;
   color: var(--text-primary);
   font-size: var(--font-xs);
   padding: 4px 24px 4px 8px;
   width: 100%;
 }
+
+.plans-search-input:focus-visible, .plans-select:focus-visible, .plans-toggle-btn:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 1px; }
 
 .plans-search-input:focus {
   border-color: var(--accent-focus);
@@ -1546,7 +1548,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   align-items: center;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
@@ -1573,7 +1575,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .plans-select {
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   flex: 1;
   font-size: var(--font-2xs);
@@ -1586,7 +1588,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .plans-toggle-btn {
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   cursor: pointer;
   flex: 0 0 auto;
@@ -1601,14 +1603,15 @@ async function ctxUpgradeToPlan(): Promise<void> {
 
 .plans-toggle-btn--on {
   border-color: var(--accent-focus);
-  color: var(--text-primary);
+  background: var(--accent-subtle);
+  color: var(--text-bright);
 }
 
 .plans-icon-btn,
 .plans-link-btn {
   background: transparent;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: var(--font-xs);
@@ -1678,7 +1681,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .plan-row {
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   box-sizing: border-box;
   color: inherit;
   cursor: pointer;
@@ -1705,7 +1708,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   align-items: center;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
@@ -1757,7 +1760,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   align-items: center;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   display: flex;
   font-size: var(--font-2xs);
@@ -1842,7 +1845,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 
 .plan-chip {
   background: var(--attention-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--attention-bright);
   font-size: var(--font-3xs);
   font-weight: 700;
@@ -1903,7 +1906,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 
 .plan-progress-bar {
   background: var(--bg-muted);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   flex-shrink: 0;
   height: 4px;
   overflow: hidden;
@@ -1912,7 +1915,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 
 .plan-progress-fill {
   background: var(--text-secondary);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   display: block;
   height: 100%;
 }
@@ -1957,7 +1960,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .ctx-menu {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
   min-width: 180px;
   padding: 4px;
@@ -1968,7 +1971,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .ctx-menu .menu-item {
   background: transparent;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   cursor: pointer;
   display: block;
@@ -1995,7 +1998,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .rename-dialog {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
   left: 50%;
   padding: 14px;
@@ -2010,7 +2013,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .quick-open {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
   left: 50%;
   padding: 10px;
@@ -2023,7 +2026,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 
 .quick-open-row {
   align-items: center;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   display: flex;
   gap: 8px;
@@ -2055,7 +2058,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .rename-input {
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: var(--font-xs);
   padding: 5px 8px;
@@ -2083,7 +2086,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
 .rename-btn {
   background: var(--bg-muted);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   cursor: pointer;
   font-size: var(--font-2xs);

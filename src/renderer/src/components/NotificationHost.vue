@@ -116,7 +116,7 @@ watch(dialog, async (d) => {
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 .toast:hover {
-  background: var(--bg-hover, var(--bg-subtle));
+  background: var(--bg-elevated);
   border-top-color: var(--border-strong);
   border-right-color: var(--border-strong);
   border-bottom-color: var(--border-strong);

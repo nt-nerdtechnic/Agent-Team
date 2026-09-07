@@ -743,7 +743,7 @@ onMounted(() => {
   z-index: 10;
   background: none;
   border: none;
-  color: var(--text-disabled);
+  color: var(--text-secondary);
   font-size: var(--font-md);
   cursor: pointer;
   box-sizing: border-box;
