@@ -76,6 +76,20 @@ describe('Plans storage migration admission', () => {
     expect(fixture.onReady).not.toHaveBeenCalled()
   })
 
+  it('repairs a corrupt lifecycle record without uninstalling Plans', async () => {
+    const fixture = await setup()
+    writeFileSync(fixture.lifecyclePath, '{broken')
+    expect(await fixture.ensure(packageVersion)).toEqual({ status: 'unavailable' })
+
+    expect(fixture.lifecycle.resetUnreadableRecord()).toBe(true)
+    expect(await fixture.ensure(packageVersion)).toEqual({ status: 'ready' })
+    expect(fixture.onReady).toHaveBeenCalledWith(packageVersion, null)
+    // The repair resets the record only; Plans storage stays installed.
+    await expect(fixture.store.assertSnapshotReadable({
+      pluginId, packageVersion: previousVersion, tier: 'active',
+    })).resolves.toBeUndefined()
+  })
+
   it('rejects a corrupt selected snapshot instead of presenting empty legacy recovery', async () => {
     const fixture = await setup()
     const hash = (value: string) => createHash('sha256').update(value).digest('hex')

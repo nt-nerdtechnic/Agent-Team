@@ -3,7 +3,10 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { PlansStorageLifecycleFileOps } from './plansStorageLifecycle'
-import { PlansStorageLifecycleSelector } from './plansStorageLifecycle'
+import {
+  PlansStorageLifecycleSelector,
+  UnreadablePlansLifecycleRecordError,
+} from './plansStorageLifecycle'
 
 const roots: string[] = []
 
@@ -19,6 +22,24 @@ describe('Plans storage lifecycle selector', () => {
     } })
     const selector = new PlansStorageLifecycleSelector('/unused/lifecycle.json', operations)
     expect(() => selector.sourceFor('0.1.94')).toThrow()
+  })
+
+  it('resets an unreadable record without reaching a readable one', () => {
+    const root = fs.mkdtempSync(join(tmpdir(), 'navide-plans-lifecycle-'))
+    roots.push(root)
+    const recordPath = join(root, 'lifecycle.json')
+    const selector = new PlansStorageLifecycleSelector(recordPath)
+    expect(selector.rememberActive('0.1.93')).toBe(true)
+    // A readable record still holds a trusted recovery pointer: the repair
+    // must refuse it, so no upgrade path can drop the pointer this way.
+    expect(selector.resetUnreadableRecord()).toBe(false)
+    expect(selector.sourceFor('0.1.94')?.packageVersion).toBe('0.1.93')
+
+    fs.writeFileSync(recordPath, '{broken')
+    expect(() => selector.sourceFor('0.1.94')).toThrow(UnreadablePlansLifecycleRecordError)
+    expect(selector.resetUnreadableRecord()).toBe(true)
+    expect(selector.sourceFor('0.1.94')).toBeNull()
+    expect(selector.rememberActive('0.1.94')).toBe(true)
   })
 
   it('clears the selector when plugin storage is removed', () => {

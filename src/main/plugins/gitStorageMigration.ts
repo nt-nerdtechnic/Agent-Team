@@ -6,6 +6,7 @@ import type {
   PluginStorageStore,
   StorageExecution,
 } from './pluginStorage'
+import { StorageSnapshotExistsError } from './pluginStorage'
 
 export const GIT_STORAGE_KEYS = HOST_GIT_USER_PREFERENCE_KEYS
 
@@ -56,7 +57,7 @@ export async function prepareGitStorageSnapshot(
       { pluginId: GIT_PLUGIN_ID, packageVersion, tier: 'candidate' },
     )
   } catch (error) {
-    if (!(error instanceof Error && /already exists/i.test(error.message))) throw error
+    if (!(error instanceof StorageSnapshotExistsError)) throw error
   }
   return { sourcePackageVersion: sourceSnapshot.packageVersion }
 }
@@ -169,7 +170,7 @@ async function migrateBundledGitPreferencesUnlocked(
         // A pre-existing active snapshot is authoritative for keys it already
         // owns. Missing keys still need to be filled from the prepared
         // candidate before the completion marker is written.
-        if (!(error instanceof Error && /already exists/i.test(error.message))) throw error
+        if (!(error instanceof StorageSnapshotExistsError)) throw error
       }
       if (!promotedCandidate) {
         for (const key of GIT_STORAGE_KEYS) {

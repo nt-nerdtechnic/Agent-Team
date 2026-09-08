@@ -48,6 +48,21 @@ const defaultFileOps: PlansStorageLifecycleFileOps = {
 let temporaryFileSequence = 0
 
 /**
+ * A record that exists but cannot be read or validated. This is deliberately
+ * distinct from an absent record: only an absent record may be treated as a
+ * first install, so `sourceFor` fails closed on this one instead of silently
+ * dropping the recovery source. Resetting it is an explicit operator repair.
+ */
+export class UnreadablePlansLifecycleRecordError extends Error {
+  constructor(readonly reason: unknown) {
+    super(
+      'Plans storage lifecycle record is unreadable; reset the record to recover without reinstalling Plans',
+    )
+    this.name = 'UnreadablePlansLifecycleRecordError'
+  }
+}
+
+/**
  * Records the exact active Plans package identity. Upgrade recovery consumes
  * this record only; it never guesses a previous version by scanning storage
  * directories or comparing semver values.
@@ -58,10 +73,19 @@ export class PlansStorageLifecycleSelector {
     private readonly fileOps: PlansStorageLifecycleFileOps = defaultFileOps,
   ) {}
 
-  sourceFor(packageVersion: string): HostStorageSnapshotIdentity | null {
-    if (!packageVersion) return null
+  /** Read the durable record. `null` means the record is absent; an existing
+   * record that cannot be read or validated raises the typed fault so it can
+   * never be confused with a first install. */
+  private readRecord(): LifecycleRecord | null {
+    let raw: string
     try {
-      const record = JSON.parse(this.fileOps.readFileSync(this.recordPath, 'utf8')) as Partial<LifecycleRecord>
+      raw = this.fileOps.readFileSync(this.recordPath, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw new UnreadablePlansLifecycleRecordError(error)
+    }
+    try {
+      const record = JSON.parse(raw) as Partial<LifecycleRecord>
       if (
         record.pluginId !== PLANS_PLUGIN_ID ||
         record.tier !== 'active' ||
@@ -71,19 +95,41 @@ export class PlansStorageLifecycleSelector {
           typeof record.previousPackageVersion !== 'string' || !record.previousPackageVersion
         ))
       ) throw new Error('invalid Plans storage lifecycle record')
-      const sourcePackageVersion = record.packageVersion === packageVersion
-        ? record.previousPackageVersion
-        : record.packageVersion
-      if (
-        typeof sourcePackageVersion !== 'string' ||
-        !sourcePackageVersion ||
-        sourcePackageVersion === packageVersion
-      ) return null
-      return { pluginId: PLANS_PLUGIN_ID, packageVersion: sourcePackageVersion, tier: 'active' }
+      return record as LifecycleRecord
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
-      throw error
+      throw new UnreadablePlansLifecycleRecordError(error)
     }
+  }
+
+  sourceFor(packageVersion: string): HostStorageSnapshotIdentity | null {
+    if (!packageVersion) return null
+    const record = this.readRecord()
+    if (!record) return null
+    const sourcePackageVersion = record.packageVersion === packageVersion
+      ? record.previousPackageVersion
+      : record.packageVersion
+    if (
+      typeof sourcePackageVersion !== 'string' ||
+      !sourcePackageVersion ||
+      sourcePackageVersion === packageVersion
+    ) return null
+    return { pluginId: PLANS_PLUGIN_ID, packageVersion: sourcePackageVersion, tier: 'active' }
+  }
+
+  /** Explicit operator repair for a record this selector refuses to read.
+   * Discarding it gives up the recovery pointer, so it is never automatic:
+   * `sourceFor` still fails closed, and a readable record is left untouched
+   * (returns false), which keeps a valid recovery pointer out of reach of this
+   * operation. Unlike plugin removal it leaves Plans and its storage in place. */
+  resetUnreadableRecord(): boolean {
+    try {
+      this.readRecord()
+      return false
+    } catch (error) {
+      if (!(error instanceof UnreadablePlansLifecycleRecordError)) throw error
+    }
+    this.clear()
+    return true
   }
 
   clear(): void {

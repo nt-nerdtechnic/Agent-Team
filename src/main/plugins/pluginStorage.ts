@@ -52,6 +52,15 @@ export class MissingStorageSnapshotError extends PluginStorageError {
   }
 }
 
+/** Host lifecycle signal for the idempotent rerun: the target snapshot this
+ * clone would create is already there. Callers must branch on this type, never
+ * on the message text. */
+export class StorageSnapshotExistsError extends PluginStorageError {
+  constructor() {
+    super('INVALID_ARGUMENT', 'storage clone target snapshot already exists')
+  }
+}
+
 export interface HostStorageSnapshotIdentity {
   pluginId: string
   packageVersion: string
@@ -607,7 +616,7 @@ export class PluginStorageStore {
           if (!sourceStat) throw new MissingStorageSnapshotError()
           if (sourceStat.kind !== 'directory') internal('storage clone source snapshot is not a directory')
           if (await this.fs.stat(targetDirectory)) {
-            invalid('storage clone target snapshot already exists')
+            throw new StorageSnapshotExistsError()
           }
           const files = await this.partitionFiles(source)
           let usage = 0

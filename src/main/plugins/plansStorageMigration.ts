@@ -3,7 +3,7 @@ import type {
   PluginStorageStore,
   StorageExecution,
 } from './pluginStorage'
-import { MissingStorageSnapshotError } from './pluginStorage'
+import { MissingStorageSnapshotError, StorageSnapshotExistsError } from './pluginStorage'
 import type { StoragePartition, StorageSnapshotRef } from './pluginCapabilityBroker'
 import { PLANS_PLUGIN_ID, PlansStorageLifecycleSelector } from './plansStorageLifecycle'
 import { STORAGE_LIMITS } from './pluginCapabilityCatalog'
@@ -109,7 +109,7 @@ export async function preparePlansStorageSnapshot(
     )
   } catch (error) {
     if (error instanceof MissingStorageSnapshotError) return { sourcePackageVersion: null }
-    if (!(error instanceof Error && /already exists/i.test(error.message))) throw error
+    if (!(error instanceof StorageSnapshotExistsError)) throw error
   }
   return { sourcePackageVersion: sourceSnapshot.packageVersion }
 }
@@ -153,7 +153,7 @@ export async function migratePlansStorage(
           )
           promoted = true
         } catch (error) {
-          if (!(error instanceof Error && /already exists/i.test(error.message))) throw error
+          if (!(error instanceof StorageSnapshotExistsError)) throw error
         }
         if (!(await marker(store, options.packageVersion, 'active'))) {
           await writeMarker(store, options.packageVersion, 'active')

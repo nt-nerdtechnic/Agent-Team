@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { StorageExecution } from './pluginStorage'
-import { PluginStorageStore } from './pluginStorage'
+import { PluginStorageStore, StorageSnapshotExistsError } from './pluginStorage'
 import { PlansStorageLifecycleSelector } from './plansStorageLifecycle'
 import {
   migratePlansStorage,
@@ -85,6 +85,24 @@ describe('Plans storage migration', () => {
       packageVersion: currentVersion,
       sourceSnapshot: null,
     })).resolves.toMatchObject({ completed: true, migrated: false })
+  })
+
+  it('completes an idempotent rerun when the clone target already exists, whatever the message says', async () => {
+    // Every normal relaunch takes this path. It must branch on the typed Host
+    // signal, so renaming the message can never turn a benign rerun into a
+    // failed migration and permanent recovery mode.
+    class RenamedTargetExistsError extends StorageSnapshotExistsError {
+      override message = 'storage clone target snapshot is present'
+    }
+    const root = mkdtempSync(join(tmpdir(), 'navide-plans-storage-'))
+    roots.push(root)
+    const store = new PluginStorageStore(root)
+    vi.spyOn(store, 'cloneSnapshot').mockRejectedValue(new RenamedTargetExistsError())
+
+    await expect(migratePlansStorage(store, {
+      packageVersion: currentVersion,
+      sourceSnapshot: { pluginId, packageVersion: previousVersion, tier: 'active' },
+    })).resolves.toEqual({ migrated: true, completed: true, sourcePackageVersion: previousVersion })
   })
 
   it('projects only the legacy preference allowlist and preserves current values', async () => {
