@@ -234,6 +234,20 @@ export function parseExecutionPolicy(raw: unknown): ExecutionPolicy {
   }
 }
 
+/** True when a policy grants unrestricted authority, whichever mode expresses
+ * it. `full` says so directly; a `denylist` that denies nothing on an axis is
+ * privilege-identical to `full` on that axis. The two axes are judged
+ * independently because the enforcement point evaluates them independently:
+ * an empty `shell` denylist permits every executable even when `system` is
+ * constrained, and an empty `system` denylist grants every namespace even when
+ * `shell` is constrained. An `allowlist` is never unrestricted — it can only
+ * name what it permits. */
+export function isHighRiskExecutionPolicy(policy: ExecutionPolicy): boolean {
+  if (policy.mode === 'full') return true
+  if (policy.mode !== 'denylist') return false
+  return policy.system.length === 0 || policy.shell.length === 0
+}
+
 function safePath(value: unknown, label: string): string {
   const path = stringValue(value, label, 1)
   if (canonicalPackagePath(path) === null) {

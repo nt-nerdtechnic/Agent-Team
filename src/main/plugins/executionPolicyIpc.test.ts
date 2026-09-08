@@ -30,6 +30,30 @@ const FULL_POLICY: ExecutionPolicy = {
   shell: [],
 }
 
+/** A denylist that denies nothing is privilege-identical to full mode. */
+const UNRESTRICTED_DENYLIST_POLICY: ExecutionPolicy = {
+  schemaVersion: 1,
+  mode: 'denylist',
+  system: [],
+  shell: [],
+}
+
+/** Only the shell axis is unrestricted: every executable is permitted. */
+const UNRESTRICTED_SHELL_DENYLIST_POLICY: ExecutionPolicy = {
+  schemaVersion: 1,
+  mode: 'denylist',
+  system: ['fs', 'ui', 'aiCli'],
+  shell: [],
+}
+
+/** Only the system axis is unrestricted: every namespace is permitted. */
+const UNRESTRICTED_SYSTEM_DENYLIST_POLICY: ExecutionPolicy = {
+  schemaVersion: 1,
+  mode: 'denylist',
+  system: [],
+  shell: ['sudo'],
+}
+
 function temporaryUserData(): string {
   return mkdtempSync(join(tmpdir(), 'navide-execution-policy-ipc-'))
 }
@@ -119,6 +143,126 @@ describe('execution policy IPC', () => {
         { policy: FULL_POLICY, highRiskConfirmed: true, expectedRevision: 0 },
       )
       expect(accepted).toMatchObject({ ok: true, snapshot: { global: { state: 'user' } } })
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+
+  it('requires high-risk confirmation before selecting an unrestricted denylist recommendation', async () => {
+    const userData = temporaryUserData()
+    try {
+      const workspacePath = join(userData, 'workspace')
+      mkdirSync(join(workspacePath, '.navide'), { recursive: true })
+      const policyPath = join(workspacePath, '.navide/execution-policy.json')
+      writeFileSync(policyPath, JSON.stringify(UNRESTRICTED_DENYLIST_POLICY))
+      const store = new ExecutionPolicySourceStore(userData)
+      const changed = vi.fn()
+      handlers.clear()
+      registerPolicyIpc(store, workspacePath, changed)
+      const before = store.getEffectivePolicy(workspacePath)
+      const request = { source: 'repository', expectedFingerprint: before.recommendation.fingerprint }
+
+      const denied = await call('execution-policy:select-source', { workspacePath, request })
+      expect(denied).toMatchObject({ ok: false, error: { code: 'high-risk-confirmation-required' } })
+      expect(store.getEffectivePolicy(workspacePath)).toEqual(before)
+      expect(changed).not.toHaveBeenCalled()
+
+      const accepted = await call('execution-policy:select-source', {
+        workspacePath,
+        request,
+        highRiskConfirmed: true,
+      })
+      expect(accepted).toMatchObject({ ok: true, changed: true })
+      expect(store.getEffectivePolicy(workspacePath).policy).toMatchObject({
+        mode: 'denylist',
+        system: [],
+        shell: [],
+      })
+      expect(changed).toHaveBeenCalledTimes(1)
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+
+  it('requires high-risk confirmation for a denylist recommendation that is unrestricted on one axis only', async () => {
+    for (const policy of [UNRESTRICTED_SHELL_DENYLIST_POLICY, UNRESTRICTED_SYSTEM_DENYLIST_POLICY]) {
+      const userData = temporaryUserData()
+      try {
+        const workspacePath = join(userData, 'workspace')
+        mkdirSync(join(workspacePath, '.navide'), { recursive: true })
+        writeFileSync(join(workspacePath, '.navide/execution-policy.json'), JSON.stringify(policy))
+        const store = new ExecutionPolicySourceStore(userData)
+        handlers.clear()
+        registerPolicyIpc(store, workspacePath)
+        const before = store.getEffectivePolicy(workspacePath)
+        const request = { source: 'repository', expectedFingerprint: before.recommendation.fingerprint }
+
+        const denied = await call('execution-policy:select-source', { workspacePath, request })
+        expect(denied).toMatchObject({ ok: false, error: { code: 'high-risk-confirmation-required' } })
+        expect(store.getEffectivePolicy(workspacePath)).toEqual(before)
+      } finally {
+        rmSync(userData, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('still selects a constrained denylist recommendation without confirmation', async () => {
+    const userData = temporaryUserData()
+    try {
+      const workspacePath = join(userData, 'workspace')
+      mkdirSync(join(workspacePath, '.navide'), { recursive: true })
+      writeFileSync(
+        join(workspacePath, '.navide/execution-policy.json'),
+        JSON.stringify({ schemaVersion: 1, mode: 'denylist', system: ['aiCli'], shell: ['sudo'] }),
+      )
+      const store = new ExecutionPolicySourceStore(userData)
+      handlers.clear()
+      registerPolicyIpc(store, workspacePath)
+      const before = store.getEffectivePolicy(workspacePath)
+
+      const accepted = await call('execution-policy:select-source', {
+        workspacePath,
+        request: { source: 'repository', expectedFingerprint: before.recommendation.fingerprint },
+      })
+      expect(accepted).toMatchObject({ ok: true, changed: true })
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+
+  it('requires explicit high-risk confirmation before persisting an unrestricted denylist', async () => {
+    const userData = temporaryUserData()
+    try {
+      handlers.clear()
+      const store = new ExecutionPolicySourceStore(userData)
+      registerPolicyIpc(store)
+
+      for (const policy of [
+        UNRESTRICTED_DENYLIST_POLICY,
+        UNRESTRICTED_SHELL_DENYLIST_POLICY,
+        UNRESTRICTED_SYSTEM_DENYLIST_POLICY,
+      ]) {
+        const denied = await call<{ ok: boolean; error?: { code: string } }>(
+          'execution-policy:set-user',
+          { policy, expectedRevision: 0 },
+        )
+        expect(denied).toMatchObject({
+          ok: false,
+          error: { code: 'high-risk-confirmation-required' },
+        })
+        expect(store.getGlobalEffectivePolicy().state).toBe('default')
+      }
+
+      const accepted = await call<{ ok: boolean; snapshot: { global: { state: string } } }>(
+        'execution-policy:set-user',
+        { policy: UNRESTRICTED_DENYLIST_POLICY, highRiskConfirmed: true, expectedRevision: 0 },
+      )
+      expect(accepted).toMatchObject({ ok: true, snapshot: { global: { state: 'user' } } })
+      expect(store.getGlobalEffectivePolicy().policy).toMatchObject({
+        mode: 'denylist',
+        system: [],
+        shell: [],
+      })
     } finally {
       rmSync(userData, { recursive: true, force: true })
     }

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   EXECUTION_POLICY_MODES,
+  isHighRiskExecutionPolicy,
   V2_SYSTEM_NAMESPACES,
   type ExecutionPolicy,
   type ExecutionPolicyMode,
@@ -128,7 +129,11 @@ async function load(options: { replaceDraft?: boolean } = {}): Promise<void> {
 
 const workspaceSnapshot = computed(() => snapshot.value?.workspace ?? null)
 const recommendation = computed(() => workspaceSnapshot.value?.recommendation ?? null)
-const repositoryNeedsConfirmation = computed(() => recommendation.value?.policy?.mode === 'full' && !repositoryFullConfirmed.value)
+const recommendationIsHighRisk = computed(() => {
+  const policy = recommendation.value?.policy
+  return !!policy && isHighRiskExecutionPolicy(policy)
+})
+const repositoryNeedsConfirmation = computed(() => recommendationIsHighRisk.value && !repositoryFullConfirmed.value)
 watch([() => props.workspacePath, () => recommendation.value?.fingerprint], () => {
   repositoryFullConfirmed.value = false
 }, { flush: 'sync' })
@@ -144,9 +149,10 @@ const policyMutationAvailable = computed(() => {
   const state = snapshot.value?.recovery.state
   return state === 'missing' || state === 'healthy'
 })
+const draftIsHighRisk = computed(() => !!draft.value && isHighRiskExecutionPolicy(draft.value))
 const canSave = computed(() => {
   if (!draft.value || busy.value || !policyMutationAvailable.value) return false
-  return draft.value.mode !== 'full' || fullConfirmed.value
+  return !draftIsHighRisk.value || fullConfirmed.value
 })
 const hasUserPolicy = computed(() => snapshot.value?.userPolicy !== null && snapshot.value?.userPolicy !== undefined)
 
@@ -173,10 +179,10 @@ function listOrNone(values: readonly string[]): string {
 function setMode(mode: ExecutionPolicyMode): void {
   if (!draft.value) return
   draft.value.mode = mode
+  fullConfirmed.value = false
   if (mode === 'full') {
     draft.value.system = []
     draft.value.shell = []
-    fullConfirmed.value = false
   }
 }
 
@@ -247,7 +253,7 @@ async function save(): Promise<void> {
     const result = await api.setUser({
       policy: clonePolicy(draft.value),
       expectedRevision,
-      ...(draft.value.mode === 'full' ? { highRiskConfirmed: fullConfirmed.value } : {}),
+      ...(draftIsHighRisk.value ? { highRiskConfirmed: fullConfirmed.value } : {}),
       ...(currentWorkspacePath() ? { workspacePath: currentWorkspacePath() } : {}),
     })
     applyOperationResult(result, 'save')
@@ -302,7 +308,7 @@ async function selectSource(source: ExecutionPolicySource): Promise<void> {
     const result = await api.selectSource({
       workspacePath,
       request,
-      ...(source === 'repository' && recommendation.value?.policy?.mode === 'full'
+      ...(source === 'repository' && recommendationIsHighRisk.value
         ? { highRiskConfirmed: repositoryFullConfirmed.value }
         : {}),
     })
@@ -456,7 +462,7 @@ watch(() => props.workspacePath, () => { void load({ replaceDraft: !draftDirty.v
         </label>
       </div>
 
-      <div v-if="draft.mode === 'full'" class="ep-full-warning" role="alert">
+      <div v-if="draftIsHighRisk" class="ep-full-warning" role="alert">
         {{ $t('settings.executionPolicy.fullWarning') }}
         <label class="ep-confirm-label">
           <input v-model="fullConfirmed" type="checkbox" class="ep-full-confirmation" />
@@ -464,7 +470,7 @@ watch(() => props.workspacePath, () => { void load({ replaceDraft: !draftDirty.v
         </label>
       </div>
 
-      <template v-else>
+      <template v-if="draft.mode !== 'full'">
         <div class="ep-editor-block">
           <h3>{{ $t(`settings.executionPolicy.${draft.mode === 'denylist' ? 'systemDenylistLabel' : 'systemAllowlistLabel'}`) }}</h3>
           <p class="ep-hint">{{ $t(`settings.executionPolicy.${draft.mode === 'denylist' ? 'systemDenylistHint' : 'systemAllowlistHint'}`) }}</p>
@@ -572,7 +578,7 @@ watch(() => props.workspacePath, () => { void load({ replaceDraft: !draftDirty.v
         <div><strong>{{ $t('settings.executionPolicy.systemLabel') }}</strong>: {{ listOrNone(recommendation.policy.system) }}</div>
         <div><strong>{{ $t('settings.executionPolicy.shellLabel') }}</strong>: {{ listOrNone(recommendation.policy.shell) }}</div>
       </div>
-      <div v-if="recommendation.state === 'valid' && recommendation.policy?.mode === 'full'" class="ep-warning">
+      <div v-if="recommendation.state === 'valid' && recommendationIsHighRisk" class="ep-warning">
         <p>{{ $t('settings.executionPolicy.fullWarning') }}</p>
         <label>
           <input v-model="repositoryFullConfirmed" type="checkbox" class="ep-repository-full-confirmation" />

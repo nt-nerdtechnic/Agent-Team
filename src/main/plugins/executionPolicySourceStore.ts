@@ -9,6 +9,7 @@ import {
 } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import {
+  isHighRiskExecutionPolicy,
   parseExecutionPolicyJson,
   type ExecutionPolicy,
 } from '../../../packages/plugin-contracts/src/index'
@@ -708,7 +709,12 @@ export class ExecutionPolicySourceStore {
       if (expectedFingerprint !== fingerprint) {
         return this.failedSelection('recommendation-stale', currentSnapshot)
       }
-      if (recommendation.policy?.mode === 'full' && options.highRiskConfirmed !== true) {
+      const recommendedPolicy = recommendation.policy
+      if (
+        recommendedPolicy &&
+        isHighRiskExecutionPolicy(recommendedPolicy) &&
+        options.highRiskConfirmed !== true
+      ) {
         return this.failedSelection('high-risk-confirmation-required', currentSnapshot)
       }
     }

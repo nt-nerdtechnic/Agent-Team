@@ -157,6 +157,60 @@ describe('ExecutionPolicyPane', () => {
     expect(wrapper.get('.ep-accept-recommendation').attributes('disabled')).toBeDefined()
   })
 
+  it('treats an unrestricted denylist recommendation as high risk', async () => {
+    const initial = snapshot()
+    initial.workspace!.recommendation.policy = { schemaVersion: 1, mode: 'denylist', system: [], shell: [] }
+    const api = mockExecutionPolicy(initial)
+    wrapper = mount(ExecutionPolicyPane, {
+      props: { workspacePath: '/workspace' },
+      global: { plugins: [i18n] },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.ep-accept-recommendation').attributes('disabled')).toBeDefined()
+    await wrapper.get('.ep-repository-full-confirmation').setValue(true)
+    await wrapper.get('.ep-accept-recommendation').trigger('click')
+    await flushPromises()
+    expect(api.selectSource).toHaveBeenCalledWith({
+      workspacePath: '/workspace',
+      request: { source: 'repository', expectedFingerprint: 'a'.repeat(64) },
+      highRiskConfirmed: true,
+    })
+  })
+
+  it('requires the high-risk acknowledgement before saving an unrestricted denylist', async () => {
+    const api = mockExecutionPolicy()
+    wrapper = mount(ExecutionPolicyPane, {
+      props: { workspacePath: '/workspace' },
+      global: { plugins: [i18n] },
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-mode="denylist"] input').setValue()
+    for (const namespace of ['fs', 'ui', 'aiCli']) {
+      const checkbox = wrapper.get(`input[data-system="${namespace}"]`)
+      if ((checkbox.element as HTMLInputElement).checked) await checkbox.trigger('change')
+    }
+    while (wrapper.findAll('.ep-chip button').length > 0) {
+      await wrapper.findAll('.ep-chip button')[0]!.trigger('click')
+    }
+    await flushPromises()
+
+    expect(wrapper.get('.ep-full-warning').text()).toContain('arbitrary executables')
+    expect(wrapper.get('.ep-save').attributes('disabled')).toBeDefined()
+    await wrapper.get('.ep-full-confirmation').setValue(true)
+    expect(wrapper.get('.ep-save').attributes('disabled')).toBeUndefined()
+    await wrapper.get('.ep-save').trigger('click')
+    await flushPromises()
+
+    expect(api.setUser).toHaveBeenCalledWith({
+      policy: { schemaVersion: 1, mode: 'denylist', system: [], shell: [] },
+      expectedRevision: 0,
+      highRiskConfirmed: true,
+      workspacePath: '/workspace',
+    })
+  })
+
   it('offers rebuild for corruption and manual guidance for an unsafe directory', async () => {
     const corrupted = snapshot({
       recovery: { state: 'corrupt', canRebuild: true, unsafePaths: [] },

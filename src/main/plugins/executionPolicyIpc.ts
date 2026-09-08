@@ -1,5 +1,6 @@
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import {
+  isHighRiskExecutionPolicy,
   parseExecutionPolicy,
   PluginContractError,
   type ExecutionPolicy,
@@ -125,10 +126,6 @@ function failure(
   }
 }
 
-function isFullPolicy(policy: ExecutionPolicy): boolean {
-  return policy.mode === 'full'
-}
-
 function sourceRequest(value: unknown): SourceRequest | null {
   if (!isRecord(value)) return null
   if (value.source === 'default' || value.source === 'user') {
@@ -194,7 +191,7 @@ export function registerExecutionPolicyIpc(
       } catch (error) {
         return failure(store, workspacePath, errorCodeFor(error))
       }
-      if (isFullPolicy(policy) && input.highRiskConfirmed !== true) {
+      if (isHighRiskExecutionPolicy(policy) && input.highRiskConfirmed !== true) {
         return failure(store, workspacePath, 'high-risk-confirmation-required')
       }
       const expectedRevision = requiredRevision(input.expectedRevision)
