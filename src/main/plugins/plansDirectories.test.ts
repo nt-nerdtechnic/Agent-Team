@@ -6,6 +6,7 @@ import {
   DOC_SUFFIXES,
   isAllowedPlanDocumentPath,
   isPlanDocName,
+  MAX_NESTED_CANDIDATES,
   PLAN_DOC_DIRS,
 } from './plansDirectories'
 
@@ -47,6 +48,58 @@ describe('plansDirectories', () => {
     const probes = vi.mocked(statSync).mock.calls.filter(([path]) => String(path).endsWith('/.git'))
     expect(probes.length).toBeGreaterThan(50)
     expect(probes.length).toBeLessThanOrEqual(2000)
+  })
+
+  it('bounds candidate-collection probes in a directory full of symlinks', () => {
+    // The collection phase resolves every symlink entry (an lstat/realpath walk
+    // plus a stat) before the entry cap is applied, so an unbounded entry list
+    // used to cost O(entries) main-process syscalls no matter how small the
+    // traversal budget was.
+    const target = join(tempWorkspace, 'target')
+    mkdirSync(target)
+    for (let i = 0; i < 3000; i++) {
+      symlinkSync(target, join(tempWorkspace, `link-${i.toString().padStart(4, '0')}`), 'dir')
+    }
+
+    vi.mocked(statSync).mockClear()
+    expect(
+      isAllowedPlanDocumentPath('link-0000/.agent-team/plans/p.html', tempWorkspace),
+    ).toBe(false)
+    expect(vi.mocked(statSync).mock.calls.length).toBeLessThanOrEqual(MAX_NESTED_CANDIDATES)
+  })
+
+  it('reuses the discovered allowset instead of re-running the traversal', () => {
+    for (let i = 0; i < 300; i++) {
+      mkdirSync(join(tempWorkspace, `plain-${i.toString().padStart(4, '0')}`))
+    }
+    const nestedRepo = join(tempWorkspace, 'repo')
+    mkdirSync(join(nestedRepo, '.git'), { recursive: true })
+    mkdirSync(join(nestedRepo, '.agent-team/plans'), { recursive: true })
+    writeFileSync(join(nestedRepo, '.agent-team/plans/p.html'), '<html></html>')
+    const relPath = 'repo/.agent-team/plans/p.html'
+
+    vi.mocked(statSync).mockClear()
+    expect(isAllowedPlanDocumentPath(relPath, tempWorkspace)).toBe(true)
+    const firstCallProbes = vi.mocked(statSync).mock.calls.length
+    expect(firstCallProbes).toBeGreaterThan(100)
+
+    vi.mocked(statSync).mockClear()
+    expect(isAllowedPlanDocumentPath(relPath, tempWorkspace)).toBe(true)
+    // A reused answer costs one live re-verification of the requested root.
+    expect(vi.mocked(statSync).mock.calls.length).toBeLessThanOrEqual(2)
+  })
+
+  it('denies a reused allowset entry whose repository no longer exists', () => {
+    const nestedRepo = join(tempWorkspace, 'repo')
+    mkdirSync(join(nestedRepo, '.git'), { recursive: true })
+    mkdirSync(join(nestedRepo, '.agent-team/plans'), { recursive: true })
+    writeFileSync(join(nestedRepo, '.agent-team/plans/p.html'), '<html></html>')
+    const relPath = 'repo/.agent-team/plans/p.html'
+
+    expect(isAllowedPlanDocumentPath(relPath, tempWorkspace)).toBe(true)
+    rmSync(join(nestedRepo, '.git'), { recursive: true, force: true })
+    // The allowset is still warm; the live re-check must still deny it.
+    expect(isAllowedPlanDocumentPath(relPath, tempWorkspace)).toBe(false)
   })
 
   describe('isPlanDocName', () => {

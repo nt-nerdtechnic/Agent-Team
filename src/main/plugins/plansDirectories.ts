@@ -17,8 +17,23 @@ export const DOC_SUFFIXES = ['.html', '.plan.md', '.md'] as const
 export const MAX_NESTED_ROOT_DEPTH = 2
 export const MAX_NESTED_ROOTS = 50
 export const MAX_DIRECTORY_ENTRIES = 2000
+/**
+ * Global budget for every filesystem probe the traversal performs — the `.git`
+ * probes of the descent phase and the symlink resolutions of the collection
+ * phase alike. It is deliberately global rather than per-directory: a
+ * per-directory cap multiplies by the number of directories reached and so
+ * bounds nothing that matters on the main process.
+ */
 export const MAX_NESTED_CANDIDATES = 2000
 export const TRAVERSAL_SORT_ORDER = 'utf8_bytes_ascending' as const
+/**
+ * How long a discovered allowset may be reused before the bounded traversal
+ * runs again. Reuse never widens the answer: every hit re-verifies the
+ * requested root against the live filesystem (see `isLiveNestedRoot`), so this
+ * only bounds how long a newly created nested repository stays undiscovered.
+ */
+export const NESTED_ROOTS_CACHE_TTL_MS = 5_000
+const NESTED_ROOTS_CACHE_MAX_WORKSPACES = 8
 
 export const NOISE_SEGMENTS = [
   '.cache',
@@ -52,11 +67,17 @@ export function isPlanDocName(name: string): boolean {
  * Traverses the workspace breadth-first to find nested git repositories,
  * bounded by depth, found roots, per-directory entries, and total candidates.
  *
- * Deterministic 4-step sequence per level:
- * 1. Directory candidates only (real directories or valid symlinked directories)
+ * Deterministic 5-step sequence per level:
+ * 1. Directory candidates only (real directories or symlink entries)
  * 2. Filter hidden entries and noise segments
  * 3. Sort in UTF-8 bytes ascending order
  * 4. Cap at MAX_DIRECTORY_ENTRIES (2000)
+ * 5. Only then resolve symlink entries, under the global probe budget
+ *
+ * Steps 1-4 read only the `Dirent` records `readdirSync` already returned, so
+ * they cost no syscalls. Symlink resolution — an `lstat`/`realpath` walk plus a
+ * `stat` per entry — is deferred to step 5 so that a directory holding N
+ * symlinks costs O(budget) probes rather than O(N).
  *
  * A genuine `.git` directory marks a repository leaf (no further descent).
  * A candidate directory with a `.git` file is not a root, but descent continues.
@@ -80,33 +101,42 @@ function findNestedPlanRoots(workspaceRoot: string): string[] {
       continue
     }
 
-    // 1. Directory candidates only & 2. Filter hidden and noise segments
-    const dirCandidates: string[] = []
+    // 1. Directory candidates only & 2. Filter hidden and noise segments.
+    // A Dirent already carries its own type, so classification costs no syscalls.
+    const named: Array<{ name: string; symlink: boolean }> = []
     for (const entry of entries) {
       const name = entry.name
       if (name.startsWith('.') || (NOISE_SEGMENTS as readonly string[]).includes(name)) {
         continue
       }
       if (entry.isDirectory()) {
-        dirCandidates.push(name)
+        named.push({ name, symlink: false })
       } else if (entry.isSymbolicLink()) {
-        const childRel = currentRel ? `${currentRel}/${name}` : name
-        const childAbs = resolveWorkspaceRelativePath(workspaceRoot, childRel, false)
-        if (childAbs) {
-          try {
-            if (statSync(childAbs).isDirectory()) {
-              dirCandidates.push(name)
-            }
-          } catch {}
-        }
+        named.push({ name, symlink: true })
       }
     }
 
     // 3. Sort in UTF-8 bytes ascending
-    dirCandidates.sort((a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')))
+    named.sort((a, b) => Buffer.compare(Buffer.from(a.name, 'utf8'), Buffer.from(b.name, 'utf8')))
 
-    // 4. Apply entry cap
-    const candidates = dirCandidates.slice(0, MAX_DIRECTORY_ENTRIES)
+    // 4. Apply entry cap, then 5. resolve symlinked directories under the same
+    // global budget the descent probes spend. Ordering and the entry cap are
+    // applied first so the deterministic selection is unchanged.
+    const candidates: string[] = []
+    for (const item of named.slice(0, MAX_DIRECTORY_ENTRIES)) {
+      if (!item.symlink) {
+        candidates.push(item.name)
+        continue
+      }
+      if (visited >= MAX_NESTED_CANDIDATES) break
+      visited++
+      const linkRel = currentRel ? `${currentRel}/${item.name}` : item.name
+      const linkAbs = resolveWorkspaceRelativePath(workspaceRoot, linkRel, false)
+      if (!linkAbs) continue
+      try {
+        if (statSync(linkAbs).isDirectory()) candidates.push(item.name)
+      } catch {}
+    }
 
     for (const name of candidates) {
       if (found.length >= MAX_NESTED_ROOTS || visited >= MAX_NESTED_CANDIDATES) break
@@ -130,6 +160,60 @@ function findNestedPlanRoots(workspaceRoot: string): string[] {
   return found
 }
 
+const nestedRootsCache = new Map<string, { roots: string[]; expiresAt: number }>()
+
+/**
+ * Re-check, against the live filesystem, every property the traversal itself
+ * requires of a root it reports. A reused allowset therefore replays only a
+ * resource decision — which candidates fitted inside the traversal budget — and
+ * can never admit a path that is not, right now, a genuine nested repository
+ * contained in the workspace.
+ */
+function isLiveNestedRoot(workspaceRoot: string, nestedRoot: string): boolean {
+  const segments = nestedRoot.split('/')
+  if (segments.length === 0 || segments.length > MAX_NESTED_ROOT_DEPTH) return false
+  if (
+    segments.some(
+      (seg) => !seg || seg.startsWith('.') || (NOISE_SEGMENTS as readonly string[]).includes(seg),
+    )
+  ) {
+    return false
+  }
+  const gitAbs = resolveWorkspaceRelativePath(workspaceRoot, `${nestedRoot}/.git`, false)
+  if (!gitAbs) return false
+  try {
+    return statSync(gitAbs).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Answer the nested-repository question for one candidate root. The bounded
+ * traversal is the expensive part and runs at most once per workspace per TTL;
+ * a reused answer costs one containment resolution plus one `stat`.
+ */
+function isAllowedNestedPlanRoot(workspaceRoot: string, nestedRoot: string): boolean {
+  const cached = nestedRootsCache.get(workspaceRoot)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.roots.includes(nestedRoot) && isLiveNestedRoot(workspaceRoot, nestedRoot)
+  }
+
+  const roots = findNestedPlanRoots(workspaceRoot)
+  nestedRootsCache.delete(workspaceRoot)
+  nestedRootsCache.set(workspaceRoot, {
+    roots,
+    expiresAt: Date.now() + NESTED_ROOTS_CACHE_TTL_MS,
+  })
+  // Insertion order is eviction order: keep only the most recent workspaces.
+  while (nestedRootsCache.size > NESTED_ROOTS_CACHE_MAX_WORKSPACES) {
+    const oldest = nestedRootsCache.keys().next()
+    if (oldest.done) break
+    nestedRootsCache.delete(oldest.value)
+  }
+  return roots.includes(nestedRoot)
+}
+
 /**
  * Validates whether a relative path represents an allowed plan document within
  * the given workspace root (or bounded nested Git repository root).
@@ -140,7 +224,8 @@ function findNestedPlanRoots(workspaceRoot: string): string[] {
  * 2. Documents must reside in one of the canonical PLAN_DOC_DIRS, either at top-level
  *    or within a discovered nested Git repository root.
  * 3. Top-level plans in canonical directories return true immediately without nested BFS.
- * 4. Nested repositories are only recognized if present in the bounded BFS discovery allowset.
+ * 4. Nested repositories are only recognized if present in the bounded BFS discovery allowset,
+ *    which may be reused within NESTED_ROOTS_CACHE_TTL_MS but is then re-verified live.
  * 5. Symlink escapes are strictly prevented using resolveWorkspaceRelativePath().
  */
 export function isAllowedPlanDocumentPath(relPath: string, workspaceRoot: string): boolean {
@@ -202,8 +287,7 @@ export function isAllowedPlanDocumentPath(relPath: string, workspaceRoot: string
         return false
       }
 
-      const allowedRoots = findNestedPlanRoots(workspaceRoot)
-      return allowedRoots.includes(nestedRoot)
+      return isAllowedNestedPlanRoot(workspaceRoot, nestedRoot)
     }
   }
 
