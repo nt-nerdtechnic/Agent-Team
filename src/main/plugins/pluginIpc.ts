@@ -561,9 +561,14 @@ export function registerPluginIpc(
         } catch (grantError) {
           throw new AggregateError([error, grantError], 'Plugin install and grant restoration failed; runtime remains unavailable.')
         }
-        if (previousSummary) {
-          try {
-            let restoredFactoryActivation: PluginActivationCatalogEntry | undefined
+        // Each restoration step is gated on the state it actually replaces: the
+        // package summary restores the package, the captured activation
+        // restores the backend. A Host can hold a descriptor and an approved
+        // backend without an installed-package summary, and that backend must
+        // still come back after the revocation this transaction performed.
+        try {
+          let restoredFactoryActivation: PluginActivationCatalogEntry | undefined
+          if (previousSummary) {
             if (previousSummary.provenance === 'factory-bundled' && previousDescriptor?.packageDir) {
               const restored = manager.loadFactoryPlugin(previousDescriptor.packageDir, pkg.id)
               if (!restored.loaded) throw new Error(`Factory package restoration failed: ${restored.reason}`)
@@ -575,24 +580,32 @@ export function registerPluginIpc(
                 { official: previousSummary.provenance === 'official-registry' }
               )
             }
-            if (previousBackend && !manager.hasBackendActivation(pkg.id, previousBackend.packageVersion)) {
-              manager.registerBackendActivation(previousBackend)
-            }
-            if (restoredFactoryActivation) options.onActivationChange?.({ pluginId: pkg.id, activation: restoredFactoryActivation })
-            if (previousSummary.provenance === 'official-registry') {
-              if (previousActivation && previousArtifactDigest) {
-                const activation = {
-                  ...previousActivation,
-                  provenance: 'official-registry' as const,
-                  artifactDigest: previousArtifactDigest,
-                }
-                options.onActivationChange?.({ pluginId: pkg.id, activation })
-              }
-            }
-          } catch (restoreError) {
-            cleanupFailedPluginInstall(manager, options.onActivationChange, pkg.id)
-            throw new AggregateError([error, restoreError], 'Plugin install and runtime restoration failed.')
+          } else if (previousBackend && previousDescriptor) {
+            // Without a summary there is no package registration to carry the
+            // descriptor back, and cleanupFailedPluginInstall dropped it. A
+            // backend activation is refused without its matching descriptor,
+            // so put back the one this Host held before the install. `builtin`
+            // records that the Host call site, not package data, is the
+            // identity source — as it was for the original registration.
+            manager.registerDescriptor(previousDescriptor, { builtin: true })
           }
+          if (previousBackend && !manager.hasBackendActivation(pkg.id, previousBackend.packageVersion)) {
+            manager.registerBackendActivation(previousBackend)
+          }
+          if (restoredFactoryActivation) options.onActivationChange?.({ pluginId: pkg.id, activation: restoredFactoryActivation })
+          if (previousSummary?.provenance === 'official-registry') {
+            if (previousActivation && previousArtifactDigest) {
+              const activation = {
+                ...previousActivation,
+                provenance: 'official-registry' as const,
+                artifactDigest: previousArtifactDigest,
+              }
+              options.onActivationChange?.({ pluginId: pkg.id, activation })
+            }
+          }
+        } catch (restoreError) {
+          cleanupFailedPluginInstall(manager, options.onActivationChange, pkg.id)
+          throw new AggregateError([error, restoreError], 'Plugin install and runtime restoration failed.')
         }
         throw error
       } finally {
@@ -634,8 +647,12 @@ export function registerPluginIpc(
         }
         throw error
       }
-      removePlugin(pluginsRoot, id)
+      // Drop the grant before the package files. The grant store lives beside
+      // the package directory, not inside it, so it does not need those files;
+      // ordering it first keeps a package whose directory removal fails
+      // fail-closed instead of leaving a full grant over wiped storage.
       capabilityGrants.remove(id)
+      removePlugin(pluginsRoot, id)
       if (options.factoryPackageIds?.includes(id)) {
         if (!options.onFactoryPackageRemoved) {
           throw new Error('factory package removal is unavailable')

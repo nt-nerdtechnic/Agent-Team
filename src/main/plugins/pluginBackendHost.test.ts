@@ -261,6 +261,57 @@ describe('PluginBackendHost', () => {
     )
   })
 
+  it('reports the child slot it can no longer reclaim after a failed close', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const closeError = new Error('child did not exit')
+    let created = 0
+    const createSupervisor = vi.fn(() => {
+      const failing = created++ === 0
+      return {
+        start: vi.fn(async () => ({
+          value: null,
+          serverInfo: { name: 'controlled', version: '1.0.0' },
+        })),
+        clientFor: vi.fn(() => ({ call: vi.fn(async () => null as never), subscribe: vi.fn() })),
+        close: vi.fn(async () => {
+          if (failing) throw closeError
+        }),
+      } as unknown as PluginBackendSupervisor
+    })
+    const host = new PluginBackendHost({
+      createSupervisor,
+      resolvePlanRoot: async ({ workspacePath }) => workspacePath,
+    })
+    hosts.push(host)
+    host.register(activation)
+    await host.bindView(runtime, activation.packageDir, process.cwd())
+
+    await expect(host.unbindView('view-1')).rejects.toBe(closeError)
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('backend child slot retained after a failed close'),
+    )
+
+    // A failed close cannot prove the child exited, so its slot stays consumed
+    // and the limit it costs says so.
+    for (let index = 1; index < MAX_BACKEND_CHILDREN; index += 1) {
+      host.bindView({
+        ...runtime,
+        instanceId: `view-${index}`,
+        hostWindowId: `window-${index}`,
+      }, activation.packageDir, process.cwd())
+    }
+    expect(() => host.bindView({
+      ...runtime,
+      instanceId: 'view-over-cap',
+      hostWindowId: 'window-over-cap',
+    }, activation.packageDir, process.cwd())).toThrowError(expect.objectContaining({
+      code: 'RESOURCE_LIMIT',
+      message: expect.stringContaining(
+        `1 of ${MAX_BACKEND_CHILDREN} slots are retained by backend children whose close failed`,
+      ),
+    }))
+  })
+
   it('rejects a filesystem binding without a Host root resolver', async () => {
     const createSupervisor = vi.fn(() => undefined as unknown as PluginBackendSupervisor)
     const host = new PluginBackendHost({ createSupervisor })

@@ -1313,6 +1313,61 @@ describe('devPlansPluginDescriptor', () => {
     }
   })
 
+  it('reports backend activity only while a backend runtime is bound, not for a startup registration', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const packageDir = realpathSync(process.cwd())
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/index.html',
+    }
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir,
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(packageDescriptor, { builtin: true })
+    // What a packaged launch does: registerBundledPlans() approves the bundled
+    // Plans backend as metadata. No child is spawned, so there is no activity.
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir,
+      entryFile: '/plugins/navide.plans/backend',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.resolve_root'],
+      approvedEvents: ['plans.changed'],
+    })
+    expect(mgr.hasBackendActivation(PLANS_PLUGIN_ID, packageVersion)).toBe(true)
+    expect(mgr.hasBackendActivity()).toBe(false)
+
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        query: '?workspace_path=%2Fworkspace',
+      })
+      // The view bound a backend runtime: a child is live.
+      expect(mgr.hasBackendActivity()).toBe(true)
+      mgr.destroyInstance(handle.instanceId)
+      // The last bound runtime is gone; the registration alone is not activity.
+      expect(mgr.hasBackendActivity()).toBe(false)
+    } finally {
+      await mgr.closeBackendPlugins()
+    }
+  })
+
   it('preserves generic BACKEND_UNAVAILABLE semantics for renderer and fallback while emitting host-only diagnostics on startup failure', async () => {
     const mgr = new FrontendPluginManager()
     const packageVersion = '1.0.0'
@@ -2191,6 +2246,59 @@ describe('package-version grant revocation', () => {
       await mgr.closeBackendPlugins()
     }
   })
+
+  it('lifts the stopping gate when a package-version drain rejects', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.failed-drain-gate'
+    const packageVersion = '1.0.0'
+    const contributionKey = `${pluginId}.main`
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'main',
+      contributionKey,
+      kind: 'custom',
+      location: 'main',
+      title: 'Failed drain gate',
+      entryFile: '/plugins/acme.failed-drain-gate/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+      capabilityPolicy: {
+        kind: 'manifest-v2',
+        system: ['fs'],
+        grants: [{ permission: 'system', namespace: 'fs' }],
+      },
+    }
+    mgr.registerDescriptor(descriptor)
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion,
+      system: ['fs'],
+      storage: true,
+    }))
+    const host = new FakeBrowserWindow()
+    const revoke = vi
+      .spyOn(PluginBackendHost.prototype, 'revokePackageVersion')
+      .mockRejectedValue(new Error('drain failed'))
+
+    try {
+      await expect(mgr.revokePackageVersion(pluginId, packageVersion)).rejects.toThrow('drain failed')
+
+      // A failed drain must not leave the contribution permanently refused:
+      // the frontend gate covers the teardown sweep, not the child process.
+      await expect(mgr.openContribution(asHost(host), contributionKey, {
+        bounds: { x: 0, y: 0, width: 300, height: 500 },
+        workspacePath: '/workspace',
+      })).resolves.toEqual({ ok: true })
+    } finally {
+      revoke.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
 })
 
 describe('registerDescriptor reserved-id guard', () => {
@@ -2733,6 +2841,26 @@ describe('loadInstalledPlugins official receipt gate', () => {
       activation: { pluginId: 'navide.git', packageVersion: '1.0.0' },
     })
     expect(mgr.getDescriptor('navide.git')?.packageVersion).toBe('1.0.0')
+  })
+
+  it('leaves the restored factory contribution openable, not marked stopping', async () => {
+    writeV2Plugin('factory-git', { id: 'navide.git', frontend: true })
+    const mgr = new FrontendPluginManager()
+    expect(mgr.loadFactoryPlugin(join(root, 'factory-git'), 'navide.git').loaded).toBe(true)
+    mgr.setCapabilityGrantResolver(() => ({ packageVersion: '1.0.0', system: [], storage: true }))
+    mgr.replaceBuiltinForRecovery(descriptor('navide.git'))
+    // Let the recovery revocation settle so only the restore path can mark the
+    // package version stopping.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(mgr.restoreFactoryAfterRecovery(join(root, 'factory-git'), 'navide.git')).toMatchObject({
+      restored: true,
+    })
+
+    await expect(mgr.openContribution(asHost(new FakeBrowserWindow()), 'navide.git.main', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })).resolves.toEqual({ ok: true })
   })
 
   it('refuses to restore a factory package that is not in legacy recovery', () => {
@@ -6393,6 +6521,149 @@ describe('first-party Git private bridge', () => {
           filepath: '.agent-team/plans/feature.html',
         },
       ])
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('opens a plan source reference for a user click but not for an MCP agent', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'navide-plan-source-ref-'))
+    try {
+      const plansDir = join(tempDir, '.agent-team/plans')
+      mkdirSync(plansDir, { recursive: true })
+      writeFileSync(join(plansDir, 'feature.html'), '<html></html>')
+      mkdirSync(join(tempDir, 'src/main'), { recursive: true })
+      writeFileSync(join(tempDir, 'src/main/index.ts'), 'export {}\n')
+
+      const mgr = new FrontendPluginManager()
+      const packageVersion = '0.1.0'
+      const viewLeft = {
+        id: 'left',
+        contributionKey: 'navide.plans.left',
+        kind: 'custom' as const,
+        location: 'left' as const,
+        title: 'Plans',
+        entryFile: '/path/to/plans/left.html',
+      }
+      const descriptor: PluginLaunchDescriptor = {
+        id: PLANS_PLUGIN_ID,
+        packageVersion,
+        packageDir: '/path/to/plans',
+        requires: ['fs', 'ui', 'plans', 'terminal'],
+        capabilityPolicy: {
+          kind: 'manifest-v2',
+          system: ['fs', 'ui', 'aiCli'],
+          shell: 'allowlist',
+          grants: [],
+        },
+        devUrl: '',
+        entryFile: viewLeft.entryFile,
+        views: [viewLeft],
+      }
+      mgr.registerDescriptor(descriptor, { builtin: true })
+      mgr.setCapabilityGrantResolver((pluginId, version) => {
+        if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+          return {
+            packageVersion,
+            system: ['fs', 'ui', 'aiCli'],
+            shell: 'allowlist',
+            storage: true,
+          }
+        }
+        return null
+      })
+      mgr.setExecutionPolicyResolver(() => ({
+        policy: { schemaVersion: 1, mode: 'full', system: [], shell: [] },
+        revision: 1,
+        state: 'user',
+      }))
+      const capabilityContext = mgr.plansCapabilityContext(packageVersion, tempDir, 'plans-left')
+      const host = new FakeBrowserWindow()
+      const handle = await mgr.openView(descriptor, viewLeft, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: tempDir,
+        capabilityContext,
+      })
+      const leftView = host.children[0] as FakeViewLike
+
+      const editorCalls: Array<Record<string, string>> = []
+      mgr.setOpenInEditorHandler((params) => {
+        editorCalls.push(params)
+        return true
+      })
+      mgr.setPublicCapabilityHandler((plan) => mgr.executePublicCapability(plan))
+
+      const handler = ipcHandlers.get(CAPABILITY_CALL)
+      expect(handler).toBeDefined()
+
+      // 1. A user click on a `file:line` reference inside a plan: ACCEPTED
+      const resSource = await handler!(
+        { sender: { id: leftView.webContents.id } },
+        {
+          reqId: 'plan-source-accepted',
+          ns: 'ui',
+          method: 'openInEditor',
+          args: { path: 'src/main/index.ts', line: 42 },
+        },
+      )
+      expect(resSource).toEqual({
+        reqId: 'plan-source-accepted',
+        ok: true,
+        result: { opened: true },
+      })
+      expect(editorCalls).toEqual([
+        {
+          workspace_path: resolve(tempDir),
+          filepath: 'src/main/index.ts',
+          line: '42',
+        },
+      ])
+
+      // 2. A user click on a path outside the workspace: REJECTED
+      const resEscape = await handler!(
+        { sender: { id: leftView.webContents.id } },
+        {
+          reqId: 'plan-source-escape-rejected',
+          ns: 'ui',
+          method: 'openInEditor',
+          args: { path: '../outside.ts' },
+        },
+      )
+      expect(resEscape).toEqual({
+        reqId: 'plan-source-escape-rejected',
+        ok: false,
+        error: { code: 'INTERNAL_ERROR', message: 'public capability failed' },
+      })
+      expect(editorCalls).toHaveLength(1)
+
+      // 3. The same in-workspace source path from an MCP agent: REJECTED
+      const resAgentSource = await mgr.executeAgentCapability(handle.instanceId, {
+        reqId: 'plan-source-agent-rejected',
+        ns: 'ui',
+        method: 'openInEditor',
+        args: { path: 'src/main/index.ts', line: 42 },
+      })
+      expect(resAgentSource).toEqual({
+        reqId: 'plan-source-agent-rejected',
+        ok: false,
+        error: { code: 'INTERNAL_ERROR', message: 'public capability failed' },
+      })
+      expect(editorCalls).toHaveLength(1)
+
+      // 4. An MCP agent keeps its plan-document reach
+      const resAgentPlan = await mgr.executeAgentCapability(handle.instanceId, {
+        reqId: 'plan-doc-agent-accepted',
+        ns: 'ui',
+        method: 'openInEditor',
+        args: { path: '.agent-team/plans/feature.html' },
+      })
+      expect(resAgentPlan).toEqual({
+        reqId: 'plan-doc-agent-accepted',
+        ok: true,
+        result: { opened: true },
+      })
+      expect(editorCalls).toHaveLength(2)
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }

@@ -930,7 +930,6 @@ export class FrontendPluginManager {
     string,
     Map<string, PendingBackendSubscription>
   >()
-  private backendActivationCount = 0
   /** Host-generated instance id → running view. */
   private readonly running = new Map<string, RunningPlugin>()
   /** Plugin id → instances opened through the legacy adapter; a v2 descriptor may still be here. */
@@ -3316,7 +3315,7 @@ export class FrontendPluginManager {
       // even when the selected workspace is a nested subdirectory.
       // Keep the existing public editor capability and editor router, but use
       // the same Host-selected Plans root for that one first-party surface.
-      const root = resolve(
+      let root = resolve(
         plugin.id === PLANS_PLUGIN_ID ? resolvePlansRootPath(workspacePath) : workspacePath,
       )
       if (plugin.id === PLANS_PLUGIN_ID) {
@@ -3324,7 +3323,15 @@ export class FrontendPluginManager {
           throw new Error('Plans editor path must be relative')
         }
         if (!isAllowedPlanDocumentPath(path, root)) {
-          throw new Error('Plans editor path is outside the plans directory')
+          // A `file:line` reference inside a plan cites a source file, not
+          // another plan document. Following one is a direct user action, so
+          // only a Host-authenticated `user` initiator may leave the plan
+          // directories, and only for a target inside the bound workspace. An
+          // agent/MCP initiator keeps the plan-document-only reach it has now.
+          if (plan.initiator?.kind !== 'user' || !isWorkspaceContainedPath(workspacePath, path)) {
+            throw new Error('Plans editor path is outside the plans directory')
+          }
+          root = resolve(workspacePath)
         }
       }
       const relativePath = relative(root, resolve(root, path))
@@ -5984,14 +5991,34 @@ export class FrontendPluginManager {
       )
     }
     this.pluginBackendHost.register(activation)
-    this.backendActivationCount++
     this.refreshHostSessionRegistration()
   }
 
+  /**
+   * True only while this Host holds, or is acquiring, a package backend child.
+   *
+   * A registered activation is not activity: `registerBundledPlans()` registers
+   * the bundled Plans backend as metadata on every packaged launch and spawns
+   * nothing, so counting registrations made this predicate permanently true and
+   * any caller that branched on it dead. Only bound runtimes count: a view whose
+   * backend bind was started or completed, a headless MCP instance, and the
+   * renderer calls and subscriptions that can only exist against one of those.
+   *
+   * A view whose bind rejected still reports activity until the view closes:
+   * the predicate stays conservative rather than claim a child is gone while
+   * its instance record is still live.
+   */
   hasBackendActivity(): boolean {
-    return this.backendActivationCount > 0 ||
+    if (
       this.pendingBackendCalls.size > 0 ||
-      this.pendingBackendSubscriptions.size > 0
+      this.pendingBackendSubscriptions.size > 0 ||
+      this.headlessBackendInstances.size > 0 ||
+      this.pendingHeadlessBackendBinds.size > 0
+    ) return true
+    for (const plugin of this.running.values()) {
+      if (plugin.backendWorkspaceId !== null || plugin.backendBindingTask !== null) return true
+    }
+    return false
   }
 
   /** True only when the Host has registered the exact package-version backend
@@ -6017,7 +6044,6 @@ export class FrontendPluginManager {
     this.pendingBackendSubscriptions.clear()
     this.headlessBackendInstances.clear()
     this.pendingHeadlessBackendBinds.clear()
-    this.backendActivationCount = 0
     this.plansBackendHealth = 'unknown'
     this.plansBackendHealthIdentity = null
     await this.pluginBackendHost.close()
@@ -6089,7 +6115,14 @@ export class FrontendPluginManager {
     activation.provenance = 'factory-bundled'
     const previousVersion =
       this.packageVersionForPluginId(expectedPluginId) ?? this.recoveryPackageVersions.get(expectedPluginId)
-    if (previousVersion) this.revokePackageVersionInBackground(expectedPluginId, previousVersion)
+    // Revoking the exact version this call is about to re-register would mark
+    // the restored package stopping before it is even registered (the stopping
+    // key is added synchronously), so the restored Git contribution would be
+    // refused for the whole drain. Only a genuinely older version is worth
+    // revoking; the plugin-scoped teardown below covers the same-version case.
+    if (previousVersion && previousVersion !== descriptor.packageVersion) {
+      this.revokePackageVersionInBackground(expectedPluginId, previousVersion)
+    }
     this.stopAiSessionsForPlugin(expectedPluginId)
     this.destroyPluginInstances(expectedPluginId)
     this.clearTerminalRoutes(expectedPluginId)
@@ -6964,17 +6997,21 @@ export class FrontendPluginManager {
         }
       }
       await this.pluginBackendHost.revokePackageVersion(pluginId, packageVersion)
-      if (hadActivation) this.backendActivationCount = Math.max(0, this.backendActivationCount - 1)
       if (hadActivation) this.refreshHostSessionRegistration()
     })
     this.packageRevocationTasks.set(key, task)
-    let completed = false
     try {
       await task
-      completed = true
     } finally {
       if (this.packageRevocationTasks.get(key) === task) this.packageRevocationTasks.delete(key)
-      if (completed) this.stoppingPlugins.delete(key)
+      // This barrier only has to outlive the frontend teardown sweep above, and
+      // that sweep is over once the task settles either way. The fail-closed
+      // admission barrier for a child that may have survived a rejected drain
+      // lives in PluginBackendHost.revokePackageVersion, which retains it for
+      // the life of the process; keeping this one as well would not add to that
+      // guarantee and would strand UI-only packages that have no backend child
+      // (Git) with a dead contribution until the App restarts.
+      this.stoppingPlugins.delete(key)
     }
   }
 

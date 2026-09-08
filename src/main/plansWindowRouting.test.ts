@@ -86,6 +86,9 @@ describe('Plans window production routing unit tests', () => {
     }
 
     const legacyOpened: Array<{ workspacePath: string; relPath?: string }> = []
+    // Recovery state observed at each legacy open; the legacy window only
+    // carries its recovery bootstrap when recovery is already on at that point.
+    const legacyOpenRecoveryStates: boolean[] = []
     const recoveryEntered: string[] = []
     const warnings: string[] = []
     const migrations: string[] = []
@@ -113,6 +116,7 @@ describe('Plans window production routing unit tests', () => {
       },
       openLegacyPlanWindow: async (ws, rel) => {
         legacyOpened.push({ workspacePath: ws, relPath: rel })
+        legacyOpenRecoveryStates.push(recoveryState)
         return options.legacyAvailable ?? true
       },
       warnMain: (msg) => {
@@ -125,6 +129,7 @@ describe('Plans window production routing unit tests', () => {
       router,
       openCatalogWindowSpy,
       legacyOpened,
+      legacyOpenRecoveryStates,
       recoveryEntered,
       warnings,
       migrations,
@@ -220,6 +225,61 @@ describe('Plans window production routing unit tests', () => {
     expect(ok).toBe(true)
     expect(openCatalogWindowSpy).not.toHaveBeenCalled()
     expect(legacyOpened).toEqual([{ workspacePath, relPath: '.agent-team/plans/plan.html' }])
+  })
+
+  it('enters recovery before opening legacy when the v2 package is missing', async () => {
+    const { router, legacyOpened, legacyOpenRecoveryStates, recoveryEntered, openCatalogWindowSpy, workspacePath } =
+      setupRouter({ descriptor: null })
+
+    const ok = await router.openPlanWindow(workspacePath, '.agent-team/plans/plan.html')
+    expect(ok).toBe(true)
+    expect(recoveryEntered).toEqual(['package-incomplete'])
+    expect(legacyOpenRecoveryStates).toEqual([true])
+    expect(openCatalogWindowSpy).not.toHaveBeenCalled()
+    expect(legacyOpened).toEqual([{ workspacePath, relPath: '.agent-team/plans/plan.html' }])
+  })
+
+  it('enters recovery before opening legacy when the v2 package misses its window contribution', async () => {
+    const { router, legacyOpenRecoveryStates, recoveryEntered, workspacePath } = setupRouter({
+      descriptor: {
+        id: PLANS_PLUGIN_ID,
+        packageVersion: '0.1.0',
+        packageDir: process.cwd(),
+        requires: ['fs', 'ui', 'plans', 'terminal'],
+        capabilityPolicy: {
+          kind: 'manifest-v2',
+          system: ['fs', 'ui', 'aiCli'],
+          shell: 'allowlist',
+          grants: [],
+        },
+        devUrl: '',
+        entryFile: '/path/to/plans/window.html',
+        views: [
+          {
+            id: 'left',
+            contributionKey: `${PLANS_PLUGIN_ID}.left`,
+            kind: 'custom',
+            location: 'left',
+            title: 'Plans',
+            entryFile: '/path/to/plans/left.html',
+          },
+        ],
+      },
+    })
+
+    expect(await router.openPlanWindow(workspacePath)).toBe(true)
+    expect(recoveryEntered).toEqual(['package-incomplete'])
+    expect(legacyOpenRecoveryStates).toEqual([true])
+  })
+
+  it('does not re-enter recovery when it is already active for a complete package', async () => {
+    const { router, recoveryEntered, legacyOpenRecoveryStates, workspacePath } = setupRouter({
+      recoveryEnabled: true,
+    })
+
+    expect(await router.openPlanWindow(workspacePath)).toBe(true)
+    expect(recoveryEntered).toEqual([])
+    expect(legacyOpenRecoveryStates).toEqual([true])
   })
 
   it('routes to legacy plan window when the complete v2 package backend is unavailable', async () => {

@@ -105,6 +105,10 @@ export function createPlansWindowRouter(options: PlansWindowRouterOptions): Plan
     )
     const hasAvailableV2Backend = frontendPluginManager.isPlansBackendAvailable()
     if (!hasCompleteV2Package || isPlansRecoveryEnabled()) {
+      // A missing or incomplete v2 package is itself a Plans availability
+      // failure. Without entering recovery the legacy window opens without its
+      // recovery bootstrap and the dead v2 contribution stays preparable.
+      if (!hasCompleteV2Package) enterPlansRecovery('package-incomplete')
       return (await openLegacyPlanWindow(workspacePath, relPath)) !== false
     }
 

@@ -79,6 +79,7 @@ interface BoundView {
   closing: boolean
   closingReason?: 'view-destroyed' | 'plugin-stopping'
   slotReleased: boolean
+  slotRetained: boolean
   calls: Set<AbortController>
   subscriptions: Set<BackendPluginSubscription>
   pendingSubscriptions: number
@@ -182,6 +183,8 @@ export class PluginBackendHost {
     { packageKey: string; task: Promise<void> }
   >()
   private reservedChildSlots = 0
+  /** Slots consumed by children whose close failed; never reclaimed. */
+  private retainedChildSlots = 0
 
   constructor(options: PluginBackendHostOptions = {}) {
     this.environment = Object.freeze({ ...(options.environment ?? {}) })
@@ -293,7 +296,7 @@ export class PluginBackendHost {
       throw new BackendPluginError('INVALID_RUNTIME')
     }
     if (this.reservedChildSlots >= MAX_BACKEND_CHILDREN) {
-      throw new BackendPluginError('RESOURCE_LIMIT', 'Backend child process limit reached.')
+      throw new BackendPluginError('RESOURCE_LIMIT', this.childLimitMessage())
     }
 
     const view: BoundView = {
@@ -305,6 +308,7 @@ export class PluginBackendHost {
       bindingTask: Promise.resolve(),
       closing: false,
       slotReleased: false,
+      slotRetained: false,
       calls: new Set(),
       subscriptions: new Set(),
       pendingSubscriptions: 0,
@@ -395,9 +399,32 @@ export class PluginBackendHost {
   }
 
   private releaseChildSlot(view: BoundView): void {
-    if (view.slotReleased) return
+    if (view.slotReleased || view.slotRetained) return
     view.slotReleased = true
     this.reservedChildSlots--
+  }
+
+  /** A close that rejected cannot prove the child exited, and no one retries
+   * it: the view is already unregistered and the Host has no exit signal to
+   * reclaim on. Releasing the slot would let a new child start while that one
+   * may still be running, which is the same reason a failed drain keeps its
+   * package admission barrier. Keep the slot for the life of the process and
+   * report it, so the limit it will eventually hit is explained. */
+  private retainChildSlot(view: BoundView): void {
+    if (view.slotReleased || view.slotRetained) return
+    view.slotRetained = true
+    this.retainedChildSlots++
+    console.warn(
+      `[plugin-backend] backend child slot retained after a failed close for ` +
+      `${view.activation.pluginId}@${view.activation.packageVersion}: ` +
+      `${this.retainedChildSlots} of ${MAX_BACKEND_CHILDREN} slots are held by children that may still be running.`,
+    )
+  }
+
+  private childLimitMessage(): string {
+    if (this.retainedChildSlots === 0) return 'Backend child process limit reached.'
+    return 'Backend child process limit reached. ' +
+      `${this.retainedChildSlots} of ${MAX_BACKEND_CHILDREN} slots are retained by backend children whose close failed.`
   }
 
   async unbindView(
@@ -432,7 +459,12 @@ export class PluginBackendHost {
       } catch {
         // A failed binding has no child to close; callers already receive it.
       }
-      await view.supervisor?.close()
+      try {
+        await view.supervisor?.close()
+      } catch (error) {
+        this.retainChildSlot(view)
+        throw error
+      }
       this.releaseChildSlot(view)
     })()
     this.unbindTasks.set(instanceId, { packageKey, task })

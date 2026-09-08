@@ -672,6 +672,42 @@ describe('plugins:remove boundary validation', () => {
     }
   })
 
+  it('drops the capability grant when package removal fails after storage cleanup', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'navide-remove-grant-')))
+    const installedDir = join(root, 'acme.demo')
+    mkdirSync(installedDir, { recursive: true })
+    const grants = new PluginCapabilityGrantStore(root)
+    grants.set('acme.demo', {
+      packageVersion: '1.0.0',
+      system: ['fs', 'ui', 'aiCli'],
+      shell: 'allowlist',
+      storage: true,
+    })
+    const manager = new FrontendPluginManager()
+    vi.spyOn(manager, 'removeInstalledPlugin').mockImplementation(() => undefined)
+    const rmrf = vi.spyOn(defaultInstallerDeps, 'rmrf').mockImplementation(() => {
+      throw new Error('test package removal failure')
+    })
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {
+        cleanupPluginStorage: async () => undefined,
+      })
+      const removeHandler = handlers.get('plugins:remove')
+      if (!removeHandler) throw new Error('remove handler not registered')
+
+      // Storage is already wiped here, so a package left behind by a failed
+      // directory removal must not keep a usable grant.
+      await expect(removeHandler(null, { id: 'acme.demo' })).rejects.toThrow(
+        'test package removal failure'
+      )
+      expect(grants.get('acme.demo', '1.0.0')).toBeNull()
+      expect(existsSync(installedDir)).toBe(true)
+    } finally {
+      rmrf.mockRestore()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('keeps the package installed when storage cleanup fails and permits retry', async () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-remove-storage-failure-'))
     const installedDir = join(root, 'acme.demo')
@@ -1322,6 +1358,53 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         }),
       ])
     } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('restores an approved backend that has no installed-package summary after a failed install', async () => {
+    const { bytes, digest } = buildBackendPkg()
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'navide-install-backend-only-')))
+    const manager = new FrontendPluginManager()
+    try {
+      registerPluginIpc(manager, root, () => true, TRUST_CONFIG, undefined, {})
+      const prepareHandler = handlers.get('plugins:prepareInstall')
+      const commitHandler = handlers.get('plugins:commitInstall')
+      if (!prepareHandler || !commitHandler) throw new Error('install handlers not registered')
+
+      // A descriptor and an approved backend without an installed-package
+      // summary: the shape the developer Plans v2 registration leaves behind.
+      const packageDir = join(root, 'acme.demo')
+      mkdirSync(packageDir, { recursive: true })
+      manager.registerDescriptor({
+        id: 'acme.demo', packageVersion: '1.0.0', packageDir,
+        requires: [], devUrl: '', entryFile: join(packageDir, 'index.html'),
+      })
+      const backend = {
+        pluginId: 'acme.demo', packageVersion: '1.0.0', packageDir,
+        entryFile: join(packageDir, 'backend', 'entry'), protocolVersion: 1 as const,
+        activation: 'startup' as const, approvedMethods: ['fixture.echo'], approvedEvents: [],
+      }
+      manager.registerBackendActivation(backend)
+      expect(manager.listInstalledPackages()).toEqual([])
+
+      installFetch(signedDetail(digest), bytes, digest)
+      await prepareHandler(null, { namespace: 'acme', name: 'demo' })
+      vi.spyOn(defaultInstallerDeps, 'writeFile').mockImplementation(() => {
+        throw new Error('test package write failure')
+      })
+
+      await expect(
+        commitHandler(null, {
+          id: 'acme.demo',
+          publisherConfirmed: true,
+          riskConfirmed: true,
+        })
+      ).rejects.toThrow('test package write failure')
+      expect(manager.hasBackendActivation('acme.demo', '1.0.0')).toBe(true)
+      expect(manager.getBackendActivation('acme.demo', '1.0.0')).toEqual(backend)
+    } finally {
+      await manager.closeBackendPlugins()
       rmSync(root, { recursive: true, force: true })
     }
   })
