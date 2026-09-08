@@ -56,6 +56,7 @@ import {
   runPlansLegacyRecovery,
 } from './plugins/plansStorageMigration'
 import { createPlansStorageMigrationGate, type PlansStorageAvailability } from './plugins/plansStorageMigrationGate'
+import { repairPlansStorageRecord, type PlansStorageRepairResult } from './plugins/plansStorageRepair'
 import { retainedPlansLegacyAdapter, type PlansLegacyRecoveryBootstrap } from './plugins/plansLegacyAdapter'
 import type { LegacyPlansPreferenceProjection } from '../shared/plansPreferences'
 import {
@@ -1555,6 +1556,41 @@ async function migratePlansStorageState(): Promise<PlansStorageAvailability> {
   return plansRecoveryEnabled && availability.status === 'ready' ? { status: 'recovery' } : availability
 }
 
+/** Operator entry point for a Plans lifecycle record the Host refuses to read.
+ * Legacy recovery is where the user already meets a broken Plans install, so
+ * the recovery panel offers the repair there; it is never run for them, because
+ * discarding the record gives up the upgrade source. The session stays in
+ * recovery afterwards — nothing here can re-bind the withdrawn v2 backend — so
+ * the panel tells the user to restart. */
+async function runPlansStorageRecordRepair(): Promise<PlansStorageRepairResult> {
+  const descriptor = frontendPluginManager.getDescriptor('navide.plans')
+  const packageVersion = descriptor?.capabilityPolicy?.kind === 'manifest-v2'
+    ? descriptor.packageVersion ?? null
+    : null
+  const result = await repairPlansStorageRecord({
+    lifecycle: plansStorageLifecycle,
+    packageVersion,
+    // Drive the gate directly: migratePlansStorageState() short-circuits while
+    // the session sits in recovery, and the repair has to rebuild the durable
+    // record now rather than at the next launch.
+    ensureStorage: async (version) => {
+      const availability = await ensurePlansStorage(version)
+      plansStorageAvailability = availability
+      return availability
+    },
+  })
+  if (result.repaired) {
+    warnMain(`[plans] unreadable lifecycle record discarded on request; storage ok=${result.ok}`)
+  }
+  return result
+}
+ipcMain.handle('plans:repairStorageRecord', (event): Promise<PlansStorageRepairResult> | PlansStorageRepairResult => {
+  if (!isTrustedPluginManagementSender(event, mainWindows)) {
+    return { ok: false, repaired: false, reason: 'untrusted sender' }
+  }
+  return runPlansStorageRecordRepair()
+})
+
 /**
  * The legacy Plans renderer is the only trusted process that can see the old
  * renderer-origin localStorage. It sends only the fixed projection; the Host
@@ -1614,11 +1650,21 @@ frontendPluginManager.setPlansStorageReadinessHandler(async (packageVersion) => 
   if (frontendPluginManager.getDescriptor('navide.plans')?.packageVersion !== packageVersion) return false
   return (await migratePlansStorageState()).status === 'ready'
 })
-void migratePlansStorageState().catch((error: unknown) => {
-  plansStorageAvailability = { status: 'unavailable' }
-  enterPlansRecovery('storage-migration-failure')
-  warnMain(`[plans] storage initialization failed: ${error instanceof Error ? error.message : String(error)}`)
-})
+/** Run that warm-up. Deferred out of module scope to the app-ready block below
+ * (after the backend start has settled): it clones, re-reads and fsyncs one
+ * storage partition per workspace Plans has ever been opened in, and at module
+ * scope that filesystem burst ran on the libuv threadpool alongside
+ * startBackend's login-shell PATH probe — the contention shape behind spurious
+ * "Backend failed to start" timeouts. Nothing reads Plans storage without
+ * awaiting the same gate through migratePlansStorageState(), so deferring only
+ * removes the head start, not the guarantee. */
+function warmPlansStorage(): void {
+  void migratePlansStorageState().catch((error: unknown) => {
+    plansStorageAvailability = { status: 'unavailable' }
+    enterPlansRecovery('storage-migration-failure')
+    warnMain(`[plans] storage initialization failed: ${error instanceof Error ? error.message : String(error)}`)
+  })
+}
 
 const DEFAULT_EDITOR_SETTING_KEY = 'agentTeam.defaultEditor'
 const DEFAULT_EDITOR_COMMAND_KEY = 'agentTeam.defaultEditor.customCommand'
@@ -2245,13 +2291,22 @@ async function openCatalogContributionWindow(
   let hostWindow = contributionWindows.get(windowKey)
   let created = false
   if (!hostWindow || hostWindow.isDestroyed()) {
-    hostWindow = new BrowserWindow(getContributionWindowConfig(contributionKey, contribution.title))
+    const ownedWindow = new BrowserWindow(
+      getContributionWindowConfig(contributionKey, contribution.title)
+    )
+    hostWindow = ownedWindow
     created = true
-    contributionWindows.set(windowKey, hostWindow)
-    hostWindow.once('closed', () => {
-      contributionWindows.delete(windowKey)
+    contributionWindows.set(windowKey, ownedWindow)
+    ownedWindow.once('closed', () => {
+      // Identity-guarded: 'closed' arrives after close(), and a reopen in that
+      // gap has already registered a different window under the same key. An
+      // unguarded delete would evict that live window and let the next open
+      // create a duplicate instead of focusing it.
+      if (contributionWindows.get(windowKey) === ownedWindow) {
+        contributionWindows.delete(windowKey)
+      }
       try {
-        frontendPluginManager.closeContribution(hostWindow!, contributionKey)
+        frontendPluginManager.closeContribution(ownedWindow, contributionKey)
       } catch {
         // The host has already torn down its WebContentsView.
       }
@@ -2264,7 +2319,7 @@ async function openCatalogContributionWindow(
   })
   if (!result.ok) {
     if (created && !hostWindow.isDestroyed()) {
-      contributionWindows.delete(windowKey)
+      if (contributionWindows.get(windowKey) === hostWindow) contributionWindows.delete(windowKey)
       hostWindow.close()
     }
     return result
@@ -3907,6 +3962,10 @@ app.whenReady().then(async () => {
       backendLastError = String(err)
       broadcastBackendChanged()
     })
+  // Warm Plans storage only once that start has settled: its per-workspace
+  // partition clone must not compete for the libuv threadpool with the spawn's
+  // login-shell PATH probe.
+  void backendStarting.then(warmPlansStorage)
 
   // Open any folders requested at launch: queued open-file events (macOS cold
   // launch from a Quick Action) plus CLI path args on a packaged build. Dev runs
@@ -4070,6 +4129,10 @@ app.on('before-quit', async (e) => {
   // A user-initiated quit is a clean exit — nothing to restore next launch.
   // Must run before the early return below (backend may already be gone).
   windowRegistry.markCleanExit()
+  // Nothing to tear down means the native quit can proceed. hasBackendActivity()
+  // now reports live plugin backends only - bound views, headless MCP instances
+  // and in-flight calls - so a packaged launch that merely registered the bundled
+  // Plans backend as metadata no longer keeps this guard permanently false.
   if (!backend && !backendStarting && !frontendPluginManager.hasBackendActivity()) return
   e.preventDefault()
   void teardownBackendAndQuit()

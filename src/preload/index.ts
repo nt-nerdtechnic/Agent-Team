@@ -173,6 +173,12 @@ contextBridge.exposeInMainWorld('agentTeam', {
   // package. Called when the user opens the Git tab, which is the natural
   // retry for a downgrade caused by a transient activation failure.
   retryGitV2: (): Promise<{ ok: boolean; reason?: string }> => ipcRenderer.invoke('git:retryV2'),
+  // Ask the Host to discard a Plans lifecycle record it cannot read. Offered as
+  // an explicit action in the Plans recovery panel: the Host never clears such
+  // a record on its own, because a discarded record reads as a first install
+  // and gives up the upgrade source.
+  repairPlansStorageRecord: (): Promise<{ ok: boolean; repaired: boolean; reason?: string }> =>
+    ipcRenderer.invoke('plans:repairStorageRecord'),
   onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void): (() => void) => {
     const listener = (_event: unknown, payload: unknown): void => {
       if (isGitRecoveryChanged(payload)) cb(payload)
