@@ -1247,6 +1247,32 @@ function requestGitV2Retry(): void {
     .finally(() => { gitV2RetryInFlight = false })
 }
 
+// A Plans lifecycle record the Host cannot read wedges Plans in recovery on
+// every launch, and the Host will not discard it on its own: that would read as
+// a first install and give up the upgrade source. Recovery is where the user
+// already meets the broken install, so the repair is offered here as an
+// explicit action rather than run for them when the panel opens.
+const plansRepairInFlight = ref(false)
+const plansRepairMessage = ref('')
+async function repairPlansStorageRecord(): Promise<void> {
+  const repair = window.agentTeam?.repairPlansStorageRecord
+  if (!repair || plansRepairInFlight.value) return
+  plansRepairInFlight.value = true
+  plansRepairMessage.value = ''
+  try {
+    const result = await repair()
+    plansRepairMessage.value = result?.ok
+      ? i18n.global.t(result.repaired ? 'label.plans-repair-restart' : 'label.plans-repair-clean')
+      : i18n.global.t('label.plans-repair-failed', { reason: result?.reason ?? '' })
+  } catch (error) {
+    plansRepairMessage.value = i18n.global.t('label.plans-repair-failed', {
+      reason: error instanceof Error ? error.message : String(error),
+    })
+  } finally {
+    plansRepairInFlight.value = false
+  }
+}
+
 watch(legacyGitRecovery, (enabled) => {
   if (enabled || sidebarTab.value !== 'git') return
   const restored = gitPluginTab.value?.tabId
@@ -2350,9 +2376,13 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 
     <!-- ── Explorer / plugin regions (shared split: panel on top, agent dock pinned at bottom) ── -->
     <div v-show="sidebarTab === 'explorer' || sidebarTab === 'git' || sidebarTab === 'plans' || isPluginTab(sidebarTab)" class="pane-split">
+      <!-- Only the packaged Plans panel drops the host padding: its guest
+           document owns the full inset. Naming that one surface keeps Git and
+           generic plugin tabs on the shared `.part-top` padding, which a "not
+           explorer" condition silently took away from them. -->
       <div
         class="part-top"
-        :class="{ 'part-top-plugin': sidebarTab !== 'explorer' && !legacyGitRecovery && !legacyPlansRecovery }"
+        :class="{ 'part-top-plugin': sidebarTab === 'plans' && !legacyPlansRecovery }"
         style="flex: 1"
       >
         <ExplorerPane
@@ -2405,6 +2435,17 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         </template>
         <template v-if="legacyPlansRecovery && backend && sidebarTab === 'plans'">
           <div class="legacy-recovery-label" data-plans-legacy-recovery-label>Legacy recovery</div>
+          <div class="plans-repair-row">
+            <button
+              class="ghost"
+              data-plans-repair-record
+              :disabled="plansRepairInFlight"
+              @click="repairPlansStorageRecord()"
+            >
+              {{ $t(plansRepairInFlight ? 'label.plans-repair-running' : 'label.plans-repair-record') }}
+            </button>
+            <span v-if="plansRepairMessage" class="plans-repair-message">{{ plansRepairMessage }}</span>
+          </div>
           <PlanPane
             class="plans-split"
             :workspace-path="workspace ?? ''"
@@ -3476,6 +3517,19 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   border: 1px solid var(--border-muted);
   font-size: 10px;
   font-weight: 600;
+  line-height: 15px;
+}
+.plans-repair-row {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 4px;
+}
+.plans-repair-message {
+  color: var(--text-muted);
+  font-size: 11px;
   line-height: 15px;
 }
 .dot {

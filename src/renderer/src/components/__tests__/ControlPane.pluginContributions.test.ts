@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { shallowMount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import ControlPane from '../ControlPane.vue'
 
 const baseProps = {
@@ -222,6 +222,30 @@ describe('ControlPane manifest-driven plugin placement', () => {
       })],
     } as never)
     expect(sessionStorage.getItem('agentTeam.sidebarTab')).toBe('plugin:navide.git.left')
+
+    Reflect.deleteProperty(window, 'agentTeam')
+    wrapper.unmount()
+  })
+
+  it('offers the Plans storage-record repair in recovery without running it', async () => {
+    const repairPlansStorageRecord = vi.fn().mockResolvedValue({ ok: true, repaired: true })
+    Object.assign(window, { agentTeam: { repairPlansStorageRecord } })
+    sessionStorage.setItem('agentTeam.sidebarTab', 'plans')
+    const wrapper = mountPane([], {
+      backend: { status: { value: 'connected' } },
+      workspace: '/workspace',
+      legacyPlansRecovery: true,
+    })
+
+    // Opening the panel must not repair anything: discarding the record gives
+    // up the upgrade source, so only the user may ask for it.
+    expect(repairPlansStorageRecord).not.toHaveBeenCalled()
+
+    await wrapper.get('[data-plans-repair-record]').trigger('click')
+    await flushPromises()
+    expect(repairPlansStorageRecord).toHaveBeenCalledTimes(1)
+    // The session stays in recovery, so the panel has to say what comes next.
+    expect(wrapper.get('.plans-repair-message').text()).not.toBe('')
 
     Reflect.deleteProperty(window, 'agentTeam')
     wrapper.unmount()
