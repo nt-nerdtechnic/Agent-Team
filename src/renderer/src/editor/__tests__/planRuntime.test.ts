@@ -4,7 +4,8 @@
 // host-side postMessage validation — non-whitelisted events are ignored and
 // malformed payloads never reach the write hooks.
 // @vitest-environment happy-dom
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import { Window as HappyWindow } from 'happy-dom'
 import {
   MAX_ANCHOR_LENGTH,
   MAX_OPEN_CODE_LINE,
@@ -19,6 +20,7 @@ import {
   type PlanRuntimeHostHooks,
   type PlanRuntimeInit,
 } from '../planRuntime'
+import { replaceSectionBody } from '../../composables/usePlanHtml'
 
 // Labels required by PlanRuntimeConfig for the inline edit/delete affordances.
 const LABELS = { editLabel: 'Edit', deleteLabel: 'Delete', saveLabel: 'Save', cancelLabel: 'Cancel' }
@@ -454,5 +456,84 @@ describe('sanitizePlanSectionHtml', () => {
     expect(out).toContain('<th>H</th>')
     expect(out).toContain('<td>C</td>')
     expect(out).toContain('<li>a</li>')
+  })
+})
+
+// Regression: an <h2> with no <section> ancestor is editable like any other, so
+// the preview must serialize only that heading's own sibling prose and the host
+// must replace exactly that range — never the heading text, a sibling of the
+// heading's container, or the container's own closing tag.
+describe('section-less heading edits round-trip', () => {
+  const windows: HappyWindow[] = []
+  afterEach(async () => {
+    await Promise.all(windows.splice(0).map((w) => w.happyDOM.abort()))
+  })
+
+  // Drives the real runtime in happy-dom (hover the region, click Edit, rewrite
+  // the first paragraph, click Save) and feeds the real postMessage payload to
+  // the real host-side writer.
+  function editFirstHeading(source: string, anchor: string, rewritten: string) {
+    const window = new HappyWindow()
+    windows.push(window)
+    window.document.body.innerHTML = source
+    const postMessage = vi.spyOn(window, 'postMessage').mockImplementation(() => {})
+    window.eval(buildPlanRuntimeScript(initOf()))
+    const heading = window.document.querySelector('h2')!
+    const region = heading.closest('section') ?? heading.closest('.plan-rt-section') ?? heading
+    region.dispatchEvent(new window.MouseEvent('mouseenter'))
+    const button = (label: string) =>
+      [...window.document.querySelectorAll('.plan-rt-secbar button')].find(
+        (node) => node.textContent === label,
+      )!
+    button('Edit').dispatchEvent(new window.MouseEvent('click'))
+    const editable = window.document.querySelector('[contenteditable="true"]')!
+    // The editable region is the heading's prose body, never the bare heading.
+    expect(editable.querySelector('p')).not.toBeNull()
+    editable.querySelector('p')!.textContent = rewritten
+    button('Save').dispatchEvent(new window.MouseEvent('click'))
+    const edit = postMessage.mock.calls
+      .map(([message]) => message)
+      .find(
+        (message): message is { type: 'section-edit'; anchor: string; html: string } =>
+          typeof message === 'object' &&
+          message !== null &&
+          (message as { type?: unknown }).type === 'section-edit',
+      )
+    if (!edit) throw new Error('Runtime did not emit a section edit')
+    return { edit, written: replaceSectionBody(source, anchor, edit.html) }
+  }
+
+  it('replaces only the prose of a heading that has no section ancestor', () => {
+    const body = '<p>Original risk</p><h3>Mitigation</h3><p>Keep this detail</p>'
+    const source = `<h1>Plan</h1><h2>Risks</h2>${body}<h2>Validation</h2><p>Keep validation</p>`
+    const { edit, written } = editFirstHeading(source, 'Risks', 'Updated risk')
+    expect(edit.html).toBe('<p>Updated risk</p><h3>Mitigation</h3><p>Keep this detail</p>')
+    expect(written).toBe(source.replace(body, `\n${edit.html}\n`))
+  })
+
+  it.each([
+    [
+      'an aside followed by siblings',
+      '<aside><h2>Note</h2><p>n</p></aside><p>after</p><h2>Next</h2><p>x</p>',
+      'Note',
+      '<p>n</p>',
+    ],
+    [
+      'a table cell',
+      '<table><tr><td><h2>Cell</h2><p>c</p></td><td>other</td></tr></table>',
+      'Cell',
+      '<p>c</p>',
+    ],
+    [
+      'a list item',
+      '<ul><li><h2>Alpha</h2><p>a</p></li><li><h2>Beta</h2><p>b</p></li></ul>',
+      'Alpha',
+      '<p>a</p>',
+    ],
+    ['a header element', '<header><h2>Subtitle</h2><p>meta</p></header>', 'Subtitle', '<p>meta</p>'],
+  ])('clamps the edited body to %s', (_case, source, anchor, body) => {
+    const { edit, written } = editFirstHeading(source, anchor, 'Rewritten')
+    expect(edit.html).toBe('<p>Rewritten</p>')
+    expect(written).toBe(source.replace(body, `\n${edit.html}\n`))
   })
 })

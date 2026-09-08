@@ -372,8 +372,29 @@ export function buildPlanRuntimeScript(init: PlanRuntimeInit): string {
     targets.push({ anchor: anchor, head: head, region: region, kind: kind, body: body || region });
   }
   var h2s = document.querySelectorAll('h2');
-  for (var i = 0; i < h2s.length; i++)
-    addTarget(h2s[i], h2s[i].closest('section') || h2s[i], 'section', null);
+  for (var i = 0; i < h2s.length; i++) {
+    var head = h2s[i];
+    var section = head.closest('section');
+    if (section) {
+      addTarget(head, section, 'section', null);
+      continue;
+    }
+    // A preview-only wrapper gives a heading's sibling prose an editable
+    // region. Only its body is serialized back into the original document.
+    var region = document.createElement('div');
+    region.className = 'plan-rt-section';
+    var body = document.createElement('div');
+    head.parentNode.insertBefore(region, head);
+    var next = head.nextSibling;
+    region.appendChild(head);
+    region.appendChild(body);
+    while (next && !(next.nodeType === 1 && /^H[12]$/.test(next.tagName))) {
+      var following = next.nextSibling;
+      body.appendChild(next);
+      next = following;
+    }
+    addTarget(head, region, 'heading', body);
+  }
   var phaseHeads = document.querySelectorAll('.phase-head');
   for (var j = 0; j < phaseHeads.length; j++) {
     var phase = phaseHeads[j].closest('.phase') || phaseHeads[j];
@@ -504,7 +525,7 @@ export function buildPlanRuntimeScript(init: PlanRuntimeInit): string {
     secbar.innerHTML = '';
     for (var a = 0; a < arguments.length; a++) secbar.appendChild(arguments[a]);
   }
-  function editableEl(t) { return t.kind === 'phase' ? t.body : t.region; }
+  function editableEl(t) { return t.body; }
   function serializeBody(t) {
     var container = editableEl(t);
     var html = '';

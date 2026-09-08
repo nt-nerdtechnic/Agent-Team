@@ -392,12 +392,42 @@ function enclosingElement(
   return best
 }
 
-/** Next same-or-higher heading (`<h2`/`<h3`) or section close after `from`. */
-function nextHeadingBoundary(content: string, from: number): number {
-  const re = /<h2\b|<h3\b|<\/section\s*>/gi
+/** Next heading at the same or higher level; lower headings belong to the body. */
+function nextHeadingBoundary(content: string, from: number, level: number): number {
+  const re = new RegExp(`<h[1-${level}]\\b`, 'gi')
   re.lastIndex = from
   const m = re.exec(content)
   return m ? m.index : content.length
+}
+
+// Elements that never carry a close tag, so they open no container.
+const VOID_TAGS = new Set(
+  'area base br col embed hr img input link meta param source track wbr'.split(' '),
+)
+const ANY_TAG_RE = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*?(\/?)>/g
+
+/**
+ * Index of the close tag that ends the heading's own parent — the point the
+ * preview's sibling walk stops at. The first close tag with no matching open
+ * tag after `from` is by definition the enclosing element's, so the body is
+ * clamped to any container rather than to a whitelist of tag names.
+ * Returns `content.length` when the heading has no enclosing element.
+ */
+function enclosingCloseBoundary(content: string, from: number): number {
+  ANY_TAG_RE.lastIndex = from
+  const open: string[] = []
+  let m: RegExpExecArray | null
+  while ((m = ANY_TAG_RE.exec(content))) {
+    const tag = m[2].toLowerCase()
+    if (m[1] === '/') {
+      const depth = open.lastIndexOf(tag)
+      if (depth === -1) return m.index
+      open.length = depth
+    } else if (m[3] !== '/' && !VOID_TAGS.has(tag)) {
+      open.push(tag)
+    }
+  }
+  return content.length
 }
 
 function locateSection(content: string, anchor: string): SectionLoc | null {
@@ -434,7 +464,11 @@ function locateSection(content: string, anchor: string): SectionLoc | null {
         return { kind: 'section', regionStart: section.start, regionEnd: section.end, bodyStart, bodyEnd }
       }
     }
-    const bodyEnd = nextHeadingBoundary(content, bodyStart)
+    // A heading's body cannot include its enclosing element's closing tag.
+    const bodyEnd = Math.min(
+      nextHeadingBoundary(content, bodyStart, Number(tag.slice(1))),
+      enclosingCloseBoundary(content, bodyStart),
+    )
     return { kind: 'heading', regionStart: openStart, regionEnd: bodyEnd, bodyStart, bodyEnd }
   }
   return null
