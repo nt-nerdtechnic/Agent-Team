@@ -142,6 +142,23 @@ export interface InstallResult {
   terminal_opened?: boolean
 }
 
+/**
+ * Why an install did not happen, kept per dep so the card can say it.
+ *
+ * A failure used to reach the user only through the log pane, which sits at the
+ * bottom of the left column behind a scroll and dies with the modal. The
+ * fast-failing cases — a missing bootstrap binary answers in well under a
+ * second — therefore looked like the button did nothing at all.
+ */
+export interface InstallFailure {
+  /** Backend text, verbatim: the card shows it, the log keeps the full tail. */
+  message: string
+  /** The command that ran, so the user always has a way forward by hand. */
+  command: string
+  /** Set when the command itself exited 0 but the dep is still not detected. */
+  ranButUndetected: boolean
+}
+
 // Inline installs (brew) block the WS reply until the command finishes; the
 // backend caps them at 900s, so the request deadline must outlive that —
 // the default 10s send timeout aborts every real install mid-download.
@@ -172,6 +189,8 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
   /** How the last external-terminal watch ended — the UI has to say something
    *  when polling gives up, otherwise the card just sits at "not installed". */
   const watchOutcome = ref<'' | 'detected' | 'timeout'>('')
+  /** Last install failure per dep id, so the card can show it in place. */
+  const installErrors = ref<Record<string, InstallFailure>>({})
 
   let elapsedTimer: ReturnType<typeof setInterval> | null = null
   let watchTimer: ReturnType<typeof setTimeout> | null = null
@@ -184,6 +203,18 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
   function logDetail(headline: string, detail: string): void {
     log(headline)
     for (const line of detail.trim().split('\n').slice(-20)) log(`  ${line}`)
+  }
+
+  function setInstallError(depId: string, failure: InstallFailure): void {
+    installErrors.value = { ...installErrors.value, [depId]: failure }
+  }
+
+  /** Drop a dep's stale failure — on retry, and once it detects as installed. */
+  function clearInstallError(depId: string): void {
+    if (!(depId in installErrors.value)) return
+    const next = { ...installErrors.value }
+    delete next[depId]
+    installErrors.value = next
   }
 
   function stopElapsed(): void {
@@ -294,7 +325,15 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
   }
 
   async function install(dep: OnboardDep): Promise<InstallResult | null> {
-    if (installing.value) return null
+    if (installing.value) {
+      // Returning silently here made a second click look like a dead button:
+      // every install button is disabled during an install, but a click that
+      // lands in the gap before the re-render still arrives at this guard.
+      const busy = deps.value.find((d) => d.id === installing.value)
+      log(`⏳ ${dep.label} has to wait for the ${busy?.label ?? installing.value} install to finish.`)
+      return null
+    }
+    clearInstallError(dep.id)
     installing.value = dep.id
     startElapsed()
     log(`▶ Installing ${dep.label}…`)
@@ -310,10 +349,13 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
       )
       const r = resp.payload
       if (!r?.ok) {
-        logDetail(
-          `✗ ${dep.label} installation failed:`,
-          r?.error || r?.output || resp.error?.message || 'unknown'
-        )
+        const reason = r?.error || r?.output || resp.error?.message || 'unknown'
+        logDetail(`✗ ${dep.label} installation failed:`, reason)
+        setInstallError(dep.id, {
+          message: reason.trim(),
+          command: r?.command ?? dep.install_cmd ?? '',
+          ranButUndetected: false,
+        })
         return r ?? null
       }
       if (r.needs_terminal && r.command) {
@@ -335,7 +377,13 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
       log(r.output?.trim() || `✓ ${dep.label} installed`)
       return r
     } catch (e) {
-      log(`✗ ${dep.label} installation error: ${e instanceof Error ? e.message : String(e)}`)
+      const reason = e instanceof Error ? e.message : String(e)
+      log(`✗ ${dep.label} installation error: ${reason}`)
+      setInstallError(dep.id, {
+        message: reason,
+        command: dep.install_cmd ?? '',
+        ranButUndetected: false,
+      })
       return null
     } finally {
       installing.value = ''
@@ -348,6 +396,15 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
         if (ranInlineOk && after && after.status !== 'ok') {
           log(`⚠ ${dep.label} installed successfully but is still not detected.`)
           log('  It may need a new shell session, or it landed outside PATH.')
+          // Exit 0 with the card still red is the other way this reads as
+          // "nothing happened" — the card has to say what actually occurred.
+          setInstallError(dep.id, {
+            message: '',
+            command: dep.install_cmd ?? '',
+            ranButUndetected: true,
+          })
+        } else if (after?.status === 'ok') {
+          clearInstallError(dep.id)
         }
       }
     }
@@ -506,7 +563,7 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
 
   return {
     status, loading, installing, maintaining, pulling, logLines,
-    installElapsedSec, watching, watchOutcome,
+    installElapsedSec, watching, watchOutcome, installErrors,
     refresh, install, pullModel, startOllamaService, markComplete, runMaintenance,
     setAutoupdatePolicy, dismissInstallPrompt, dispose,
     deps, foundationDeps, cliDeps, analyzerDeps, models, modelCatalog, gate,

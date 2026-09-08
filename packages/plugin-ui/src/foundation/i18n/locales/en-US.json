@@ -3122,7 +3122,14 @@
         "denied": "Full disk access is off. Toggle Navide on in System Settings — this screen updates by itself.",
         "pane-hint": "Toggle Navide on in Privacy & Security → Full Disk Access."
       }
-    }
+    },
+    "blocked-by": "Install {names} first — it is required before this can be installed here.",
+    "go-install": "Install {name} first",
+    "install-failed": "Installation failed: {reason}",
+    "run-by-hand": "You can also run this yourself in a terminal: {cmd}",
+    "installed-not-detected": "The command finished, but {label} is still not detected. It may need a new shell session, or it landed outside PATH.",
+    "installed-still-outdated": "The install finished, but the {label} found on PATH is still the old {version}. The new one may sit behind the system copy — open a new shell session, then re-detect.",
+    "running-inline": "Running {cmd} in the background — this can take a few minutes and prints nothing until it finishes."
   },
   "executions": {
     "last-scan": "Last scan {time}",

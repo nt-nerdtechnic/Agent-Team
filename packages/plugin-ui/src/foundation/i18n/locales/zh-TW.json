@@ -3122,7 +3122,14 @@
         "denied": "完全取用磁碟權限未開啟。請到系統設定把 Navide 打開，此畫面會自動更新。",
         "pane-hint": "在「隱私權與安全性 → 完全取用磁碟」中開啟 Navide。"
       }
-    }
+    },
+    "blocked-by": "需要先安裝 {names}，才能從這裡安裝。",
+    "go-install": "先安裝 {name}",
+    "install-failed": "安裝失敗：{reason}",
+    "run-by-hand": "你也可以自己在終端機執行：{cmd}",
+    "installed-not-detected": "指令已執行完成，但仍偵測不到 {label}。可能需要新的終端機工作階段，或它安裝在 PATH 之外。",
+    "installed-still-outdated": "安裝完成了，但 PATH 上找到的仍是舊版 {label} {version}。新版可能排在系統內建版本後面 — 開一個新的終端機工作階段再重新偵測。",
+    "running-inline": "正在背景執行 {cmd} — 可能需要幾分鐘，完成前不會有輸出。"
   },
   "executions": {
     "last-scan": "上次掃描 {time}",
