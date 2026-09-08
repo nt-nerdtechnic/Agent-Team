@@ -354,9 +354,11 @@ authenticated binding. The frontend cannot set or override `pluginId`,
 `hostWindowId`. It also carries the Host-authenticated `initiator`: a `user`
 initiator has `kind` and `id`, while an MCP-routed agent has `kind: "agent"`,
 `source: "mcp"`, and an opaque `id`. The Host mints both forms from the
-authenticated caller and rejects package-supplied identity fields. Optional
-view/workspace fields are `null` for startup-only backend calls that have no
-such binding.
+authenticated caller and rejects package-supplied identity fields. `initiator`
+was added after Backend Wire v1 shipped, so the v1 schema keeps it an additive
+optional field: the Host always sends it, and a v1 backend must accept a
+`runtime` both with and without it. Optional view/workspace fields are `null`
+for startup-only backend calls that have no such binding.
 
 ```json
 {"jsonrpc":"2.0","id":"req-1","method":"navide/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"navide-host","version":"0.2.0"}},"name":"plans.list","arguments":{"filter":"open"},"runtime":{"pluginId":"navide.plans","packageVersion":"1.0.0","workspaceId":"ws-1","instanceId":"view-1","contributionKey":"navide.plans.left","hostWindowId":"window-1","initiator":{"kind":"agent","source":"mcp","id":"agent-request-1"}}}}
@@ -1226,6 +1228,7 @@ message, and optional structured details:
 | `BACKEND_UNAVAILABLE` | Required Host/backend service is down | Disable the action and offer retry |
 | `PLUGIN_STOPPING` | Runtime is draining or restarting | Do not start new work |
 | `STORAGE_QUOTA_EXCEEDED` | A storage key, value, or package-version snapshot exceeds its Host limit | Reduce the stored data or remove old keys |
+| `RESOURCE_LIMIT` | A Host-owned concurrency or result-size limit was reached | Reduce in-flight calls or request less data, then retry |
 | `INTERNAL_ERROR` | Non-actionable Host failure | Log the correlation ID; do not inspect internals |
 
 The v1 broker's `CAP_DENIED`, `UNKNOWN`, `BAD_REQUEST`, and `BACKEND_ERROR`

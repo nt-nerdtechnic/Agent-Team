@@ -236,6 +236,7 @@ function publicCapabilityError(code: string): PluginErrorCode {
     case 'BACKEND_UNAVAILABLE':
     case 'PLUGIN_STOPPING':
     case 'STORAGE_QUOTA_EXCEEDED':
+    case 'RESOURCE_LIMIT':
     case 'INTERNAL_ERROR':
       return code
     default:

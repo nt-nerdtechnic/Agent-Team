@@ -98,6 +98,7 @@
     },
     "runtime": {
       "type": "object",
+      "description": "Host-owned runtime identity attached to every Host-to-child request. `initiator` was added after Backend Wire v1 shipped; per the v1 compatibility policy it is an additive OPTIONAL field, so a v1 receiver must accept a runtime both with and without it. The Host always sends it.",
       "additionalProperties": false,
       "required": [
         "pluginId",
@@ -105,8 +106,7 @@
         "workspaceId",
         "instanceId",
         "contributionKey",
-        "hostWindowId",
-        "initiator"
+        "hostWindowId"
       ],
       "properties": {
         "pluginId": { "type": "string", "minLength": 1 },

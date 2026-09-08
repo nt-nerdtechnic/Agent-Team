@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { PLUGIN_ERROR_CODES } from '@navide/plugin-contracts'
 import {
   createPluginCapabilityClient,
   createPluginViewRuntimeClient,
@@ -73,6 +74,28 @@ describe('public plugin SDK adapters', () => {
       scope: 'workspace',
       key: 'density',
     })).rejects.toMatchObject({ code: 'CAPABILITY_DENIED', message: 'not granted' })
+  })
+
+  it('models the Host RESOURCE_LIMIT code instead of flattening it to INTERNAL_ERROR', async () => {
+    // The Host emits RESOURCE_LIMIT into the plugin-facing capability envelope
+    // (backend round-trip limits). An unmodeled code is silently downgraded to
+    // INTERNAL_ERROR, which no exhaustive switch on PluginErrorCode can see.
+    expect(PLUGIN_ERROR_CODES).toContain('RESOURCE_LIMIT')
+
+    const bridge: TestCapabilityBridge = {
+      callCapability: vi.fn(() => Promise.resolve({
+        reqId: 'cap-3',
+        ok: false,
+        error: { code: 'RESOURCE_LIMIT', message: 'backend call limit reached' },
+      })),
+      on: vi.fn(),
+    }
+    ;(globalThis as unknown as { nav: TestCapabilityBridge }).nav = bridge
+
+    await expect(createPluginCapabilityClient().capabilities.invoke('storage.get', {
+      scope: 'workspace',
+      key: 'density',
+    })).rejects.toMatchObject({ code: 'RESOURCE_LIMIT', message: 'backend call limit reached' })
   })
 
   it('adapts view readiness and open targets through the public SDK', () => {

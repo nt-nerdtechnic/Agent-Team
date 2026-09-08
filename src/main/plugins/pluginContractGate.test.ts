@@ -269,6 +269,52 @@ describe('B0 capability and Backend Wire contract gate', () => {
     expect(JSON.parse(result.stdout.trim())).toEqual(expected)
   })
 
+  it('keeps runtime.initiator an additive optional field of Backend Wire v1', () => {
+    const schema = JSON.parse(
+      readFileSync(join(CONTRACT_FIXTURES, 'backend-wire-v1.schema.json'), 'utf8')
+    ) as { $id: string; $defs: { runtime: { required: string[]; properties: Record<string, unknown> } } }
+    const runtime = schema.$defs.runtime
+
+    // The contract stays v1: `initiator` is defined (so `additionalProperties:
+    // false` permits it) but not required (so a pre-initiator runtime frame,
+    // which is what a backend vendored against the original v1 emits, is valid).
+    expect(schema.$id).toBe('https://navide.dev/schemas/backend-wire-v1.schema.json')
+    expect(runtime.properties.initiator).toBeDefined()
+    expect(runtime.required).not.toContain('initiator')
+
+    const legacyFrame = JSON.parse(
+      readFileSync(join(WIRE_FIXTURES, 'valid', 'call-without-initiator.json'), 'utf8')
+    ) as { params: { runtime: Record<string, unknown> } }
+    const legacyKeys = Object.keys(legacyFrame.params.runtime)
+    expect(legacyKeys).not.toContain('initiator')
+    expect(runtime.required.every((key) => legacyKeys.includes(key))).toBe(true)
+    expect(legacyKeys.every((key) => key in runtime.properties)).toBe(true)
+  })
+
+  it('answers a Backend Wire v1 call whose runtime omits the optional initiator', () => {
+    const raw = readFileSync(join(WIRE_FIXTURES, 'valid', 'call-without-initiator.json'), 'utf8').trimEnd()
+    const result = spawnSync(process.execPath, [BACKEND_WIRE_CHILD], {
+      encoding: 'utf8',
+      input: `${raw}\n`,
+      maxBuffer: 1_000_000,
+      timeout: 5_000,
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
+    const response = JSON.parse(result.stdout.trim()) as {
+      id: string
+      result?: { value?: { runtime?: unknown } }
+      error?: unknown
+    }
+    expect(response.error).toBeUndefined()
+    expect(response.id).toBe('req-2')
+    expect(response.result?.value?.runtime).toEqual(
+      (JSON.parse(raw) as { params: { runtime: unknown } }).params.runtime
+    )
+  })
+
   it.each(rawWireFixtures)('rejects raw Backend Wire input %s at the Host framing seam', (name) => {
     const raw = readFileSync(join(WIRE_FIXTURES, 'invalid-raw', name), 'utf8')
     expect(() => parseBackendWireFrame(raw)).toThrow(

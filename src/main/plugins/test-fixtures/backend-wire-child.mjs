@@ -31,27 +31,35 @@ function isEventName(value) {
   return typeof value === 'string' && /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/.test(value)
 }
 
+const RUNTIME_KEYS = [
+  'pluginId',
+  'packageVersion',
+  'workspaceId',
+  'instanceId',
+  'contributionKey',
+  'hostWindowId',
+]
+
+function isInitiator(value) {
+  return isRecord(value) &&
+    (exactKeys(value, ['kind', 'id']) &&
+      value.kind === 'user' &&
+      typeof value.id === 'string' && value.id.length > 0 ||
+      exactKeys(value, ['kind', 'source', 'id']) &&
+      value.kind === 'agent' && value.source === 'mcp' &&
+      typeof value.id === 'string' && value.id.length > 0)
+}
+
 function isRuntime(value) {
-  return exactKeys(value, [
-    'pluginId',
-    'packageVersion',
-    'workspaceId',
-    'instanceId',
-    'contributionKey',
-    'hostWindowId',
-    'initiator',
-  ]) &&
+  // `initiator` is an additive OPTIONAL field of Backend Wire v1: the Host
+  // always sends it, and a v1 receiver must also accept the pre-initiator
+  // runtime shape.
+  return (exactKeys(value, RUNTIME_KEYS) || exactKeys(value, [...RUNTIME_KEYS, 'initiator'])) &&
     typeof value.pluginId === 'string' && value.pluginId.length > 0 &&
     typeof value.packageVersion === 'string' && value.packageVersion.length > 0 &&
     ['workspaceId', 'instanceId', 'contributionKey', 'hostWindowId']
       .every((key) => value[key] === null || typeof value[key] === 'string') &&
-    isRecord(value.initiator) &&
-    (exactKeys(value.initiator, ['kind', 'id']) &&
-      value.initiator.kind === 'user' &&
-      typeof value.initiator.id === 'string' && value.initiator.id.length > 0 ||
-      exactKeys(value.initiator, ['kind', 'source', 'id']) &&
-      value.initiator.kind === 'agent' && value.initiator.source === 'mcp' &&
-      typeof value.initiator.id === 'string' && value.initiator.id.length > 0)
+    (value.initiator === undefined || isInitiator(value.initiator))
 }
 
 function scanString(text, start) {
