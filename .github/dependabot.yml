@@ -13,6 +13,19 @@ updates:
       dev-tooling:
         dependency-type: "development"
         update-types: ["minor", "patch"]
+    # Majors escape the dev-tooling group and land as one PR each. These two
+    # must not be bumped by a bot:
+    ignore:
+      # The whole toolchain is pinned to Node 22 (package.json engines,
+      # CI and release workflows). @types/node has to track that major, or
+      # typecheck starts accepting APIs the runtime does not have.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # A vitest major is a breaking migration (v5 splits the browser
+      # providers and narrows peer ranges). Do it deliberately, in its own
+      # branch, with the full suite run — not from a bot PR.
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "uv"
     directory: "/backend"
     schedule:
