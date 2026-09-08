@@ -5,25 +5,70 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const source = resolve(repositoryRoot, 'plugins/navide-plans/backend/plans_backend.py')
+const sourceDirectory = resolve(repositoryRoot, 'plugins/navide-plans/backend')
+const source = join(sourceDirectory, 'plans_backend.py')
 const backendDirectory = resolve(repositoryRoot, 'dist-plugins/navide-plans/backend')
 const executableName = process.platform === 'win32' ? 'navide-plans.exe' : 'navide-plans'
 const executable = join(backendDirectory, executableName)
 const cacheFile = resolve(repositoryRoot, 'node_modules/.cache/navide/plans-v2-backend.json')
+
+// The escape hatch for a contributor without uv/PyInstaller who is working on
+// something else entirely. Skipping leaves the packaged Plans backend absent,
+// which the Host detects at startup and answers by running Plans through its
+// legacy recovery view; every other surface starts normally.
+if (process.env['NAVIDE_SKIP_PLANS_BACKEND_BUILD'] === '1') {
+  console.log(
+    'Skipping the production Plans backend build (NAVIDE_SKIP_PLANS_BACKEND_BUILD=1); ' +
+      'Plans will start in legacy recovery.',
+  )
+  process.exit(0)
+}
+
+/** Every Python module PyInstaller can pull into the bundle, not just the entry
+ * point: a second module added beside it must invalidate the cached build. */
+function backendSourceFiles() {
+  return readdirSync(sourceDirectory, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.py'))
+    .map((entry) => join(entry.parentPath, entry.name))
+    .sort()
+}
+
+/** An input that may legitimately be absent hashes as empty; creating it later
+ * changes the digest, which is the outcome we want. */
+function optionalFileBytes(path) {
+  try {
+    return readFileSync(path)
+  } catch {
+    return Buffer.alloc(0)
+  }
+}
+
 const fingerprint = createHash('sha256')
   .update(`${process.platform}\0${process.arch}\0`)
-for (const input of [source, fileURLToPath(import.meta.url), resolve(repositoryRoot, 'backend/pyproject.toml'), resolve(repositoryRoot, 'backend/uv.lock')]) {
+for (const input of [
+  ...backendSourceFiles(),
+  fileURLToPath(import.meta.url),
+  resolve(repositoryRoot, 'backend/pyproject.toml'),
+  resolve(repositoryRoot, 'backend/uv.lock'),
+]) {
+  // The path is hashed alongside the bytes so a rename is a change too.
+  fingerprint.update(relative(repositoryRoot, input)).update('\0')
   fingerprint.update(readFileSync(input)).update('\0')
 }
+// PyInstaller's own version is pinned by backend/uv.lock, but the interpreter
+// uv resolves for the build is not, and a onefile bundle embeds it. The project
+// venv marker records that interpreter (and the uv that created it).
+fingerprint.update(optionalFileBytes(resolve(repositoryRoot, 'backend/.venv/pyvenv.cfg'))).update('\0')
 const inputDigest = fingerprint.digest('hex')
 
 function executableDigest() {
@@ -55,35 +100,43 @@ const temporaryRoot = mkdtempSync(join(tmpdir(), 'navide-plans-v2-backend-'))
 
 try {
   mkdirSync(backendDirectory, { recursive: true })
-  execFileSync(
-    'uv',
-    [
-      '--project',
-      resolve(repositoryRoot, 'backend'),
-      'run',
-      'pyinstaller',
-      '--noconfirm',
-      '--clean',
-      '--onefile',
-      '--name',
-      'navide-plans',
-      '--distpath',
-      backendDirectory,
-      '--workpath',
-      join(temporaryRoot, 'work'),
-      '--specpath',
-      join(temporaryRoot, 'spec'),
-      source,
-    ],
-    {
-      cwd: repositoryRoot,
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        PYINSTALLER_CONFIG_DIR: join(temporaryRoot, 'config'),
+  try {
+    execFileSync(
+      'uv',
+      [
+        '--project',
+        resolve(repositoryRoot, 'backend'),
+        'run',
+        'pyinstaller',
+        '--noconfirm',
+        '--clean',
+        '--onefile',
+        '--name',
+        'navide-plans',
+        '--distpath',
+        backendDirectory,
+        '--workpath',
+        join(temporaryRoot, 'work'),
+        '--specpath',
+        join(temporaryRoot, 'spec'),
+        source,
+      ],
+      {
+        cwd: repositoryRoot,
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          PYINSTALLER_CONFIG_DIR: join(temporaryRoot, 'config'),
+        },
       },
-    },
-  )
+    )
+  } catch (error) {
+    throw new Error(
+      `Packaging the Plans backend failed: ${error instanceof Error ? error.message : String(error)}\n` +
+        'Install uv (https://docs.astral.sh/uv/) and run `uv --project backend sync`, or set ' +
+        'NAVIDE_SKIP_PLANS_BACKEND_BUILD=1 to start the app without the packaged Plans backend.',
+    )
+  }
 
   const entry = lstatSync(executable)
   if (!entry.isFile() || entry.isSymbolicLink() || entry.size === 0) {
