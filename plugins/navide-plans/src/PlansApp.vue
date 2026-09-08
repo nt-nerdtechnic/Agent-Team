@@ -15,10 +15,14 @@ import {
   setWorkspacePreference,
   createPlansAiCliController,
 } from './backend'
+import { installPlansKeybindings } from './plansKeybindings'
+import { buildPlanCliContext } from './planCliContext'
 import PlanReviewToolbar from './retained/PlanReviewToolbar.vue'
+import PlanMarkdownBody from './retained/PlanMarkdownBody.vue'
 import NotificationHost from './retained/NotificationHost.vue'
-import { resolvePlanStore } from './retained/planStore'
-import { parseHtmlPlanMeta } from './retained/usePlanHtml'
+import { resolvePlanStore, type SectionBody } from './retained/planStore'
+import { htmlPlanAwaitingUser, parseHtmlPlanMeta } from './retained/usePlanHtml'
+import { sharePlanToGit } from './retained/planShare'
 import { plansTransport } from './retained/transport'
 import type { ReviewNote, PlanTodo as RetainedTodo, PlanMeta as RetainedMeta } from './retained/planModel'
 import { buildPlanRuntimeScript, buildTodoStatusRuntime, createPlanRuntimeMessageHandler, sanitizePlanSectionHtml } from './retained/planRuntime'
@@ -84,7 +88,7 @@ function isLeftContribution(): boolean {
   return new URLSearchParams(window.location.search).get('contribution') === 'left'
 }
 const { loadTheme } = useTheme()
-const { toast, confirm } = useNotify()
+const { toast, confirm, dialog } = useNotify()
 const { t, te } = useI18n()
 
 function formatBackendError(cause: unknown): string {
@@ -93,6 +97,12 @@ function formatBackendError(cause: unknown): string {
 
 const planDocFrame = ref<HTMLIFrameElement | null>(null)
 const reviewToolbar = ref<InstanceType<typeof PlanReviewToolbar> | null>(null)
+// Markdown documents render their body in-process (no iframe); the ref carries
+// the outline-scroll and cancel-edit handles the HTML path gets by postMessage.
+const markdownBody = ref<InstanceType<typeof PlanMarkdownBody> | null>(null)
+// Bumped on every completed document read so an open markdown body reloads in
+// place after a toolbar write, mirroring the HTML preview's refresh counter.
+const markdownRefresh = ref(0)
 
 const plans = ref<PlanSummary[]>([])
 const selectedPath = ref(initialRelPath)
@@ -123,11 +133,30 @@ const contextMenu = ref<{ x: number; y: number; relPath: string } | null>(null)
 const renameInput = ref<HTMLInputElement | null>(null)
 const renameTarget = ref<string | null>(null)
 const renameValue = ref('')
-const aiPanelOpen = ref(false)
 const showCreateForm = ref(false)
 let stopTarget: (() => void) | null = null
 let plansSubscription: ReturnType<typeof plansBackend.subscribe> | null = null
 const aiCliController = createPlansAiCliController()
+
+/**
+ * Briefing injected into the embedded CLI agent right after it spawns, the way
+ * v1's AiCliDock did it: which plan is open, its plan-meta summary and a
+ * truncated copy of the document. Built from the document already in hand so
+ * the panel's synchronous `buildContext` contract is satisfied without a
+ * second backend read.
+ */
+function buildAiCliContext(): string {
+  const document = selected.value
+  const meta = document?.meta ?? null
+  return buildPlanCliContext({
+    workspacePath,
+    relPath: document?.rel_path ?? null,
+    meta: meta
+      ? { name: meta.name, stage: meta.stage, todoStatuses: meta.todos.map((todo) => todo.status) }
+      : null,
+    content: document?.html ?? null,
+  })
+}
 
 
 const reviewNoteAnchors = computed(() => {
@@ -247,13 +276,19 @@ function captureSectionTarget(): SectionTarget | null {
 function isActiveSectionTarget(target: SectionTarget): boolean {
   return selectedPath.value === target.path && activeReadGeneration === target.generation && selected.value === target.document
 }
-async function replaceSectionBody(anchor: string, html: string): Promise<void> {
+async function replaceSectionBody(anchor: string, body: string): Promise<void> {
   const target = captureSectionTarget()
   if (!target) return
   try {
-    const result = await resolvePlanStore(target.path).replaceSectionBody(
+    const store = resolvePlanStore(target.path)
+    // The carrier decides the payload kind: a markdown file stores the edited
+    // text verbatim, only an HTML plan is sanitized as markup.
+    const sectionBody: SectionBody = store.format === 'markdown'
+      ? { kind: 'markdown', text: body }
+      : { kind: 'html', sanitized: sanitizePlanSectionHtml(body) }
+    const result = await store.replaceSectionBody(
       { backend: plansTransport, workspacePath, relPath: target.path },
-      anchor, { kind: 'html', sanitized: sanitizePlanSectionHtml(html) },
+      anchor, sectionBody,
     )
     if (!result.ok) throw new Error(result.error || t('pane.plans.review-save-failed'))
     if (isActiveSectionTarget(target)) await refreshSelected()
@@ -321,6 +356,14 @@ function planProgress(plan: PlanSummary): { done: number; total: number } {
     done: plan.todos?.by_status.done ?? 0,
     total: plan.todos?.total ?? 0,
   }
+}
+
+/** Unfinished todos this plan's meta marks as `owner: 'user'` — the listing
+ *  answers "what is waiting on me" without opening every document. Shared with
+ *  the retained HTML parser so both carriers count the same way. */
+function planAwaiting(plan: PlanSummary): number {
+  const todos = plan.meta?.todos
+  return todos ? htmlPlanAwaitingUser(todos as unknown as RetainedTodo[]) : 0
 }
 
 function progressRatio(plan: PlanSummary): number {
@@ -456,7 +499,7 @@ async function loadPreference(key: string, fallback: string): Promise<string> {
 }
 
 async function loadPreferences(): Promise<void> {
-  const [filter, sortValue, direction, group, collapsed, recent, pinned] = await Promise.all([
+  const [filter, sortValue, direction, group, collapsed, recent, pinned, lastOpened] = await Promise.all([
     loadPreference('plans.filter', 'all'),
     loadPreference('plans.sort', 'updated'),
     loadPreference('plans.sortdir', 'desc'),
@@ -464,7 +507,9 @@ async function loadPreferences(): Promise<void> {
     loadPreference('plans.collapsed', JSON.stringify(['archived'])),
     loadPreference('plans.recent', '[]'),
     loadPreference('plans.pinned', '[]'),
+    loadPreference(LAST_OPENED_KEY, ''),
   ])
+  lastOpenedPath.value = lastOpened
   if (filter === 'all' || PLAN_STAGES.includes(filter as PlanStage)) stageFilter.value = filter as StageFilter
   if (['updated', 'title', 'progress'].includes(sortValue)) sort.value = sortValue as SortMode
   if (direction === 'asc' || direction === 'desc') sortDirection.value = direction
@@ -511,6 +556,33 @@ function noteOpened(relPath: string): void {
   void persistPreference('plans.recent', JSON.stringify(recentPaths.value))
 }
 
+// The plan this workspace last had open. v1's PlanWindowApp persisted the same
+// pointer (lastOpenedStorageKey) so that opening the window from the Window
+// menu — with no rel_path in the entry query — came back to the document the
+// user was in, rather than to an empty window.
+const LAST_OPENED_KEY = 'plans.last-opened'
+const lastOpenedPath = ref('')
+
+function persistLastOpened(relPath: string): void {
+  if (!relPath || lastOpenedPath.value === relPath) return
+  lastOpenedPath.value = relPath
+  void persistPreference(LAST_OPENED_KEY, relPath)
+}
+
+/**
+ * Reopen the stored plan when the window was launched without one.
+ *
+ * A pointer at a plan that has since been deleted or renamed is simply not
+ * opened: the list is the authority on what exists, and opening the window onto
+ * a load error is worse than opening it empty.
+ */
+async function restoreLastOpened(): Promise<void> {
+  if (isLeftContribution() || initialRelPath || selectedPath.value) return
+  const stored = lastOpenedPath.value
+  if (!stored || !plans.value.some((plan) => plan.rel_path === stored)) return
+  await openPlan(stored)
+}
+
 function togglePin(relPath: string): void {
   pinnedPaths.value = pinnedPaths.value.includes(relPath)
     ? pinnedPaths.value.filter((path) => path !== relPath)
@@ -530,6 +602,8 @@ function applySelected(document: PlanDocument, relPath: string): void {
   selectedPath.value = relPath
   selectedTodoId.value = document.meta?.todos[0]?.id ?? ''
   todoStatus.value = document.meta?.todos[0]?.status ?? 'pending'
+  markdownRefresh.value++
+  persistLastOpened(relPath)
 }
 
 function countNoteAnchors(notes: PlanMeta['reviewNotes']): Record<string, number> {
@@ -829,14 +903,60 @@ async function deleteCompleted(): Promise<void> {
   }
 }
 
-async function promoteSelected(): Promise<void> {
-  if (!selectedPath.value || selected.value?.meta) return
+/** Promote one plain document to a plan. Addressed by row so the list's own
+ *  context menu can invoke it without opening the document first. */
+async function promotePath(relPath: string): Promise<void> {
+  const plan = plans.value.find((item) => item.rel_path === relPath)
+  if (!relPath || plan?.meta) return
   busy.value = true
   try {
-    await plansBackend.call('plans.promote', { rel_path: selectedPath.value })
+    await plansBackend.call('plans.promote', { rel_path: relPath })
     await loadPlans(false)
     await refreshSelected()
     toast(t('pane.plans.upgrade-success'), { type: 'success' })
+  } catch (cause) {
+    toast(formatBackendError(cause), { type: 'error' })
+  } finally {
+    busy.value = false
+  }
+}
+
+/** Snapshot one plan into the git-tracked `.plans/` directory. Same semantics
+ *  as the review toolbar's overflow entry, addressed by row. */
+async function shareToGitPath(relPath: string): Promise<void> {
+  busy.value = true
+  try {
+    const result = await sharePlanToGit(plansTransport, workspacePath, relPath)
+    if (result.ok) toast(t('pane.plans.share-git-success'), { type: 'success' })
+    else toast(result.error ?? t('pane.plans.share-git-failed'), { type: 'error' })
+  } catch (cause) {
+    toast(formatBackendError(cause), { type: 'error' })
+  } finally {
+    busy.value = false
+  }
+}
+
+/** Archive / unarchive one row. Unarchiving is reversible, so it skips the
+ *  confirmation the way the legacy pane did. */
+async function toggleArchivePath(relPath: string): Promise<void> {
+  const plan = plans.value.find((item) => item.rel_path === relPath)
+  if (!plan?.meta) return
+  const archiving = !isArchived(plan)
+  if (archiving) {
+    const ok = await confirm(t('pane.plans.archive-confirm', { name: planTitle(plan) }), {
+      title: t('pane.plans.archive'),
+      confirmText: t('pane.plans.archive'),
+    })
+    if (!ok) return
+  }
+  busy.value = true
+  try {
+    await plansBackend.call('plans.update_archive', {
+      rel_path: relPath,
+      archived_at: archiving ? new Date().toISOString() : null,
+    })
+    await loadPlans(false)
+    await refreshSelected()
   } catch (cause) {
     toast(formatBackendError(cause), { type: 'error' })
   } finally {
@@ -848,6 +968,27 @@ function isHtmlPath(relPath: string): boolean {
   return relPath.toLowerCase().endsWith('.html')
 }
 
+function isMarkdownPath(relPath: string): boolean {
+  return relPath.toLowerCase().endsWith('.md')
+}
+
+
+// Drag contract with the Host's CLI pane drop handler (TerminalPane): the
+// terminal tells a plan drag from a pane drag by MIME type, then pastes the
+// plan's workspace-relative path into the target CLI prompt. The plugin cannot
+// import the Host's planDrag module, so the wire shape is restated here; it
+// must stay byte-compatible with `parsePlanRefPayload`.
+const PLAN_REF_MIME = 'application/x-plan-ref'
+
+function onPlanRowDragStart(event: DragEvent, plan: PlanSummary): void {
+  if (!event.dataTransfer) return
+  event.dataTransfer.effectAllowed = 'copy'
+  const overview = plan.meta?.overview || plan.overview || undefined
+  event.dataTransfer.setData(
+    PLAN_REF_MIME,
+    JSON.stringify({ relPath: plan.rel_path, name: planTitle(plan), overview }),
+  )
+}
 
 async function copyPath(relPath: string): Promise<void> {
   try {
@@ -893,6 +1034,14 @@ function closeContextMenu(): void {
   contextMenu.value = null
 }
 
+/** The listed row the open context menu points at, so the menu can branch on
+ *  plan meta (archive state, plan vs plain document) without a second lookup. */
+const contextMenuPlan = computed<PlanSummary | null>(() => {
+  const relPath = contextMenu.value?.relPath
+  if (!relPath) return null
+  return plans.value.find((plan) => plan.rel_path === relPath) ?? null
+})
+
 function closeTransientMenus(): void {
   closeContextMenu()
 }
@@ -921,24 +1070,48 @@ function confirmQuickOpen(): void {
   void openPlan(plan.rel_path)
 }
 
+/**
+ * Peel one layer of open surface state, topmost first; returns whether
+ * anything was actually closed. Escape walks this from both key routes — the
+ * Host `closeModal` command in the window, the local listener in the embedded
+ * left contribution — so the priority order lives in one place.
+ */
+function peelOverlay(): boolean {
+  if (sectionEditing.value) {
+    planDocFrame.value?.contentWindow?.postMessage({ type: 'cancel-edit' }, '*')
+    sectionEditing.value = false
+    return true
+  }
+  if (markdownBody.value?.isEditing()) {
+    markdownBody.value.cancelEdit()
+    return true
+  }
+  if (quickOpenActive.value) {
+    closeQuickOpen()
+    return true
+  }
+  if (reviewToolbar.value?.closeActiveOverlay()) return true
+  if (snapshotPreview.value) {
+    snapshotPreview.value = null
+    return true
+  }
+  return false
+}
+
 function onKeydown(event: KeyboardEvent): void {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'p') {
     event.preventDefault()
     openQuickOpen()
-  } else if (event.key === 'Escape' && sectionEditing.value) {
+  } else if (event.key === 'Escape' && peelOverlay()) {
     event.preventDefault()
-    planDocFrame.value?.contentWindow?.postMessage({ type: 'cancel-edit' }, '*')
-    sectionEditing.value = false
-  } else if (event.key === 'Escape' && quickOpenActive.value) {
-    closeQuickOpen()
-  } else if (event.key === 'Escape' && reviewToolbar.value?.closeActiveOverlay()) {
-    event.preventDefault()
-  } else if (event.key === 'Escape' && snapshotPreview.value) {
-    snapshotPreview.value = null
   }
 }
 
 function scrollToAnchor(anchor: string): void {
+  if (markdownBody.value) {
+    markdownBody.value.scrollToAnchor(anchor)
+    return
+  }
   planDocFrame.value?.contentWindow?.postMessage({ type: 'scroll-to', anchor }, '*')
 }
 
@@ -1015,9 +1188,30 @@ watch(quickOpenQuery, () => {
   quickOpenIndex.value = 0
 })
 
+// The Plans window joins the Host's shared rule table, so the user's shortcut
+// set reaches it the way it reaches every other window — ⌘P quick open, ⌘⇧W
+// close, ⇧⌘R reload and ESC/⌘W close-modal all resolve through the same
+// commands v1's PlanWindowApp registered. The embedded left contribution is a
+// panel inside the Host shell and keeps its own local listener instead: a
+// `planWindow` context or a closeWindow command would be wrong there.
+const hostKeybindings = !isLeftContribution()
+if (hostKeybindings) {
+  installPlansKeybindings({
+    quickOpen: openQuickOpen,
+    closeModal: () => {
+      // An application dialog owns Escape itself (NotificationHost cancels on
+      // it); declining leaves the event alone so it reaches that handler.
+      if (dialog.value) return false
+      if (peelOverlay()) return undefined
+      window.close()
+      return undefined
+    },
+  })
+}
+
 onMounted(() => {
   loadTheme()
-  window.addEventListener('keydown', onKeydown)
+  if (!hostKeybindings) window.addEventListener('keydown', onKeydown)
   window.addEventListener('click', closeTransientMenus)
   window.addEventListener('message', onWindowMessage)
   try {
@@ -1034,7 +1228,7 @@ onMounted(() => {
   }
   const targetSubscription = plansViewRuntime.onOpenTarget(receiveTarget)
   stopTarget = () => targetSubscription.dispose()
-  void Promise.all([loadPreferences(), loadPlans()])
+  void Promise.all([loadPreferences(), loadPlans()]).then(restoreLastOpened)
 })
 
 onUnmounted(() => {
@@ -1072,6 +1266,14 @@ onUnmounted(() => {
             :aria-label="t('pane.plans.refresh')"
             @click="void loadPlans(false)"
           >↻</button>
+          <button
+            v-if="!isLeftContribution()"
+            class="plans-icon-btn plans-sidebar-toggle"
+            type="button"
+            :title="t('pane.plans.v2.hide-list')"
+            :aria-label="t('pane.plans.v2.hide-list')"
+            @click="sidebarCollapsed = true"
+          >⟨</button>
         </header>
 
         <div class="plans-toolbar">
@@ -1167,6 +1369,8 @@ onUnmounted(() => {
                 :class="{ selected: selectedPath === plan.rel_path }"
                 role="button"
                 tabindex="0"
+                draggable="true"
+                @dragstart="onPlanRowDragStart($event, plan)"
                 @click="void openPlan(plan.rel_path)"
                 @keydown.enter.prevent="void openPlan(plan.rel_path)"
                 @contextmenu.prevent="openContextMenu($event, plan.rel_path)"
@@ -1176,6 +1380,11 @@ onUnmounted(() => {
                   {{ planStageLabel(planStage(plan)) }}
                 </span>
                 <span v-else class="plan-chip">{{ t('pane.plans.v2.document') }}</span>
+                <span
+                  v-if="planAwaiting(plan) > 0"
+                  class="plan-chip plan-chip--awaiting"
+                  :title="t('pane.plans.awaiting-you-title')"
+                >{{ t('pane.plans.awaiting-you', { count: planAwaiting(plan) }) }}</span>
                 <button
                   type="button"
                   class="plan-row-pin"
@@ -1212,6 +1421,8 @@ onUnmounted(() => {
                 type="button"
                 class="plan-row"
                 :class="{ selected: selectedPath === plan.rel_path, 'plan-row--done': planStage(plan) === 'done' }"
+                draggable="true"
+                @dragstart="onPlanRowDragStart($event, plan)"
                 @click="void openPlan(plan.rel_path)"
                 @contextmenu.prevent="openContextMenu($event, plan.rel_path)"
               >
@@ -1231,6 +1442,11 @@ onUnmounted(() => {
                     {{ planStageLabel(planStage(plan)) }}
                   </span>
                   <span v-else class="plan-chip">{{ t('pane.plans.v2.document') }}</span>
+                  <span
+                    v-if="planAwaiting(plan) > 0"
+                    class="plan-chip plan-chip--awaiting"
+                    :title="t('pane.plans.awaiting-you-title')"
+                  >{{ t('pane.plans.awaiting-you', { count: planAwaiting(plan) }) }}</span>
                   <span class="plan-row-type">
                     {{ isHtmlPath(plan.rel_path) ? t('pane.plans.v2.html') : t('pane.plans.v2.markdown') }}
                   </span>
@@ -1282,6 +1498,8 @@ onUnmounted(() => {
                 type="button"
                 class="plan-row plan-row--done"
                 :class="{ selected: selectedPath === plan.rel_path }"
+                draggable="true"
+                @dragstart="onPlanRowDragStart($event, plan)"
                 @click="void openPlan(plan.rel_path)"
                 @contextmenu.prevent="openContextMenu($event, plan.rel_path)"
               >
@@ -1294,6 +1512,11 @@ onUnmounted(() => {
                   <span v-if="planStage(plan)" class="plan-chip" :class="`plan-chip--stage-${planStage(plan)}`">
                     {{ planStageLabel(planStage(plan)) }}
                   </span>
+                  <span
+                    v-if="planAwaiting(plan) > 0"
+                    class="plan-chip plan-chip--awaiting"
+                    :title="t('pane.plans.awaiting-you-title')"
+                  >{{ t('pane.plans.awaiting-you', { count: planAwaiting(plan) }) }}</span>
                   <span class="plan-chip archived">{{ t('pane.plans.archived') }}</span>
                 </span>
                 <span
@@ -1318,6 +1541,15 @@ onUnmounted(() => {
 
       </div>
       </aside>
+
+      <button
+        v-if="!isLeftContribution() && sidebarCollapsed"
+        class="plans-icon-btn plans-sidebar-toggle plans-sidebar-toggle--show"
+        type="button"
+        :title="t('pane.plans.v2.show-list')"
+        :aria-label="t('pane.plans.v2.show-list')"
+        @click="sidebarCollapsed = false"
+      >⟩</button>
 
       <main v-if="!isLeftContribution()" class="plan-window-main plan-content">
         <div v-if="documentLoadError" class="pdp-error">
@@ -1361,6 +1593,24 @@ onUnmounted(() => {
               />
             </div>
 
+            <!-- Markdown plan / plain markdown document: rendered body with
+                 editable sections and clickable frontmatter todos. -->
+            <div v-else-if="isMarkdownPath(selected.rel_path)" class="plan-markdown-container">
+              <div class="document-status">
+                <span>{{ selected.meta ? t('pane.plans.v2.plan-metadata') : t('pane.plans.v2.plain-document') }}</span>
+                <button type="button" @click="void copyPath(selected.rel_path)">{{ t('action.copy-path') }}</button>
+              </div>
+              <PlanMarkdownBody
+                ref="markdownBody"
+                :key="selected.rel_path"
+                :workspace-path="workspacePath"
+                :rel-path="selected.rel_path"
+                :backend="plansTransport"
+                :refresh="markdownRefresh"
+                @updated="void refreshSelected()"
+              />
+            </div>
+
             <!-- Plain document / fallback view -->
             <div v-else class="plan-fallback-container">
               <div class="document-status">
@@ -1391,14 +1641,19 @@ onUnmounted(() => {
         </div>
       </main>
 
-      <aside v-if="!isLeftContribution() && aiPanelOpen" class="ai-sidebar">
-        <SafeAiCliPanel :controller="aiCliController" />
+      <aside v-if="!isLeftContribution()" class="ai-sidebar">
+        <SafeAiCliPanel :controller="aiCliController" :build-context="buildAiCliContext" />
       </aside>
     <div v-if="contextMenu" class="context-menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
       <button type="button" @click="void openInEditor(contextMenu.relPath); closeContextMenu()">{{ t('action.open-in-editor') }}</button>
       <button type="button" @click="void copyPath(contextMenu.relPath); closeContextMenu()">{{ t('action.copy-path') }}</button>
       <button type="button" @click="void openPlan(contextMenu.relPath); closeContextMenu()">{{ t('pane.plans.v2.select') }}</button>
       <button v-if="isHtmlPath(contextMenu.relPath)" type="button" @click="selectedPath = contextMenu!.relPath; void beginRename()">{{ t('action.rename') }}</button>
+      <button v-if="isHtmlPath(contextMenu.relPath)" type="button" class="plans-ctx-share" @click="void shareToGitPath(contextMenu!.relPath); closeContextMenu()">{{ t('pane.plans.share-git') }}</button>
+      <button v-if="contextMenuPlan?.meta" type="button" class="plans-ctx-archive" @click="void toggleArchivePath(contextMenu!.relPath); closeContextMenu()">
+        {{ contextMenuPlan && isArchived(contextMenuPlan) ? t('pane.plans.unarchive') : t('pane.plans.archive') }}
+      </button>
+      <button v-if="contextMenuPlan && !contextMenuPlan.meta" type="button" class="plans-ctx-promote" @click="void promotePath(contextMenu!.relPath); closeContextMenu()">{{ t('pane.plans.menu-upgrade') }}</button>
       <button type="button" class="danger" @click="void deletePath(contextMenu!.relPath); closeContextMenu()">{{ t('action.delete') }}</button>
     </div>
 
@@ -1484,6 +1739,13 @@ onUnmounted(() => {
   padding: 3px 7px;
 }
 .plans-icon-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+/* The re-open control sits outside the sidebar, which is unmounted while the
+   list is hidden, so it anchors to the layout instead of the header. */
+.plans-sidebar-toggle--show {
+  align-self: flex-start;
+  margin: 8px 0 0 8px;
+}
 
 .plans-layout.is-left-contribution .plans-sidebar {
   border-right: 0;
@@ -1697,6 +1959,11 @@ onUnmounted(() => {
 .plan-chip--stage-done { background: rgba(63, 185, 80, 0.2); color: #3fb950; }
 .plan-chip--stage-abandoned { background: rgba(139, 148, 158, 0.15); color: #6e7681; }
 .plan-chip.archived { background: var(--bg-muted); color: var(--text-muted); }
+.plan-chip--awaiting {
+  background: var(--danger-subtle, var(--attention-subtle));
+  color: var(--danger-bright, var(--attention-bright));
+  text-transform: none;
+}
 
 .plan-row-delete {
   align-items: center;
@@ -1828,6 +2095,19 @@ onUnmounted(() => {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+}
+
+.plan-markdown-container {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* The markdown body owns its own scroller; give it the remaining height. */
+.plan-markdown-container > :last-child {
+  flex: 1 1 0;
+  min-height: 0;
 }
 
 .document-status {

@@ -1,8 +1,55 @@
 # Plans v1 / packaged v2 parity coverage
 
-The product oracle is `src/renderer/src/editor/__tests__/PlanReviewToolbar.test.ts`. All 80 executable v1 cases are retained under the same exact names in `plugins/navide-plans/src/retained/PlanReviewToolbar.test.ts`. This table covers every oracle case, including lifecycle, snapshots, execution, narrow-width demotion, concurrency, keyboard handling and markdown metadata. No v1 toolbar case is missing at the component layer.
+## Scope of this document — read this first
+
+The packaged plugin (`plugins/navide-plans`) re-implements what v1 rendered from
+`src/renderer/src/PlanWindowApp.vue` plus the surfaces that window composed
+(`editor/PlansPane.vue`, `editor/PlanReviewToolbar.vue`,
+`editor/PlanDocPreview.vue`, `editor/PlanMarkdownBody.vue`, and the shared
+`AiCliDock`). Parity therefore means all of those, not the toolbar alone.
+
+**Until 2026-09 this document scoped its oracle to the review toolbar and the
+document preview only.** Everything else the window did — the list surface, and
+the window-level behaviour that sits outside both — was never compared against
+v1, and regressions in exactly those areas shipped under a fully green suite:
+the "awaiting you" row marker, the plan-ref drag payload, three context-menu
+entries, the sidebar hide/show control, Host keybinding participation, the
+last-opened plan pointer, and an AI CLI panel whose open-state was declared but
+never set. The narrow scope is what let them through. The surface inventory
+below is now the scope; a row that says "not compared" is a real gap, not a
+formality.
+
+### Surface inventory
+
+| v1 surface | v2 owner | Compared against v1? | Evidence |
+| --- | --- | --- | --- |
+| Review toolbar (`editor/PlanReviewToolbar.vue`) | `src/retained/PlanReviewToolbar.vue` | Yes — all 80 oracle cases | `src/retained/PlanReviewToolbar.test.ts`, mapping table below |
+| Document preview (`editor/PlanDocPreview.vue`) | `PlansApp.vue` iframe + `src/planSecurity.ts` | Partly — 9 covered / 2 partial / 2 uncovered of 13 | `src/PlansApp.test.ts`, preview mapping table below |
+| Markdown document body (`editor/PlanMarkdownBody.vue`) | `src/retained/PlanMarkdownBody.vue`, `src/retained/markdownRender.ts` | Yes, at the behaviour level (not case-for-case against a v1 oracle file) | `src/PlansAppMarkdown.test.ts` |
+| Plan list rows and row actions (`editor/PlansPane.vue`) | `PlansApp.vue` sidebar | Yes for the restored capabilities; the rest of the pane is not case-mapped | `src/PlansAppListSurface.test.ts` |
+| Window-level behaviour (`PlanWindowApp.vue` itself) | `PlansApp.vue` + `src/plansKeybindings.ts` + `src/planCliContext.ts` | Yes for keybindings/commands, last-opened and the CLI panel; **not** for UI zoom (see below) | `src/PlansAppWindowSurface.test.ts` |
+| Notifications / toasts (`components/NotificationHost.vue`) | `src/retained/NotificationHost.vue` | Not compared — carried over rather than re-implemented | — |
+| Plan-root resolution (`plugins/plans/resolvePlanRoot`) | packaged backend (`backend/plans_backend.py`) | Not compared at this layer | Host/backend tests, not this suite |
+
+### Window-level parity detail
+
+| v1 behaviour | v1 site | v2 state |
+| --- | --- | --- |
+| `useKeybindings()` + `setContext('planWindow', true)` | `PlanWindowApp.vue:310, 318` | Restored — `src/plansKeybindings.ts`, proved by `Plans window — Host keybinding participation` |
+| `workbench.action.quickOpen` (⌘P), declining while focus is in the CLI panel | `PlanWindowApp.vue:322-327` | Restored |
+| `workbench.action.closeWindow` (⌘⇧W) | `PlanWindowApp.vue:331` | Restored |
+| `workbench.action.reloadWindow` (⇧⌘R) | `PlanWindowApp.vue:334` | Restored |
+| `workbench.action.closeModal` (ESC / ⌘W) with the priority walk down to closing the window | `PlanWindowApp.vue:348-374` | Restored; the walk additionally declines while an application dialog is open, which v1 did not |
+| `workbench.action.zoomUiIn` / `Out` / `Reset` | `PlanWindowApp.vue:340-342` via `lib/uiScale` | **Not restored, and not restorable from a packaged plugin today.** `lib/uiScale` applies the scale through `window.agentTeam.setUiScale` → `ipcMain.handle('window:setUiScale')`, which explicitly refuses any sender that is a plugin frame or WebContentsView (`src/main/index.ts`, "plugin content … can never resize the host's chrome"), and the plugin preload (`src/preload/plugin-preload.ts`) exposes no such bridge. `docs/plugin-contracts/capabilities-v1.json` has no zoom or interface-scale method. Restoring it needs a new public capability (e.g. `ui.setInterfaceScale`) in the contracts package plus a Host handler; a plugin-local CSS zoom was rejected because it would compose with the Host's own `setZoomFactor` and create a second, diverging source of truth for a setting the Host documents as app-wide. Zoom **changes made elsewhere** do still reach this window — main pushes the factor to plugin WebContents (`src/main/ui-zoom-store.ts`). What is lost is only initiating a zoom change from the Plans window. |
+| `lastOpenedStorageKey` — reopen the last document when launched without one | `PlanWindowApp.vue:42, 162, 185` | Restored on the plugin's workspace-scoped `storage.get/set` as `plans.last-opened`; a pointer at a deleted or renamed plan is checked against the listed plans and silently skipped |
+| `AiCliDock` with `buildPlanCliContext` auto-injection | `PlanWindowApp.vue:31-32, 388-417, 605-612` | Restored — `SafeAiCliPanel` (its own collapsed rail is the control) with a package-local `src/planCliContext.ts`; the Host-private `@navide/plugin-shell` builder cannot be imported, so the payload text is restated and must be kept in step |
+| Per-workspace CLI pane id (`aiTerminalPaneId`) | `PlanWindowApp.vue:388` | Not applicable — the `aiCli.*` capability owns session identity; the plugin does not name a pane |
+
+### What these tests are and are not
 
 These are component tests with injected transport and note-operation ports. Their fake server applies the real private PlanStore to inert content; they do **not** prove Host routing or the packaged executable. The production PlansApp suite mounts the real toolbar, preview and notification presentation, with observable controls and SDK-shaped responses. The separate packaged roundtrip suite must prove the selected built artifact and actual backend. A passing component row must not be described as manual UI or packaged end-to-end verification.
+
+The product oracle for the toolbar is `src/renderer/src/editor/__tests__/PlanReviewToolbar.test.ts`. All 80 executable v1 cases are retained under the same exact names in `plugins/navide-plans/src/retained/PlanReviewToolbar.test.ts`. The table below covers every oracle case, including lifecycle, snapshots, execution, narrow-width demotion, concurrency, keyboard handling and markdown metadata. No v1 toolbar case is missing at the component layer.
 
 ## Complete toolbar case mapping
 
@@ -114,8 +161,41 @@ The following cases are in `plugins/navide-plans/src/PlansApp.test.ts` and mount
 | Existing todo no-flash path and anchored CRUD preserve the original iframe | Existing `preserves iframe identity...` and Review Notes identity cases |
 | Picker registry order/labels/hints | `src/retained/agentSpecs.test.ts` compares the exact ordered projection with the v1 registry |
 
+## List surface regression matrix
+
+`plugins/navide-plans/src/PlansAppListSurface.test.ts` mounts production PlansApp and covers the row capabilities v1's `PlansPane` offered without opening a document. These were re-added after the migration dropped them; the file is behaviour-mapped, not case-mapped against a v1 oracle file (v1 has no PlansPane test suite to map to).
+
+| Behaviour | Production test evidence |
+| --- | --- |
+| "Awaiting you" marker on a plan with an unfinished user-owned todo, and its absence otherwise | `marks a plan whose unfinished todo is owned by the user`; `leaves a plan unmarked when no unfinished todo is owned by the user` |
+| Dragging a row onto a CLI pane writes the `application/x-plan-ref` payload the terminal drop handler parses | `writes the plan-ref payload the terminal drop handler parses`; `carries a plain document with no overview` |
+| Share to Git, Archive / Unarchive, Promote-to-plan context-menu entries and their gating | `shares the right row to the git-tracked .plans/ directory`; `archives an unarchived plan after confirmation`; `unarchives an archived plan without a confirmation prompt`; `promotes a plain document to a plan from its own row`; `offers neither promote nor share on a row that is already a plan` |
+| Sidebar hide/show control | `hides the list and offers a control that brings it back` |
+
+## Window surface regression matrix
+
+`plugins/navide-plans/src/PlansAppWindowSurface.test.ts` mounts production PlansApp and covers the behaviour that belonged to the v1 window shell rather than to any panel inside it. Same caveat: behaviour-mapped against the v1 source, not case-mapped against a v1 test file — `PlanWindowApp.vue` has no test suite in v1.
+
+| Behaviour | v1 site | Production test evidence |
+| --- | --- | --- |
+| The four window commands are registered against the Host rule table | `PlanWindowApp.vue:322-349` | `registers the window commands v1 registered` |
+| Firing the registered quick-open command actually opens the palette | `PlanWindowApp.vue:322` | `opens quick open when the registered command fires, however it is bound` |
+| Close and reload act on the window | `PlanWindowApp.vue:331, 334` | `closes and reloads the window from the registered commands` |
+| A real Escape keystroke resolves through the shipped `planWindow` rule (proves the context is declared and the dispatcher installed, not just that a handler exists) | `PlanWindowApp.vue:318, 348` | `routes a real Escape keystroke through the shared rule table` |
+| Escape with nothing left to peel closes the window | `PlanWindowApp.vue:374` | `closes the window once nothing is left to peel` |
+| Launching without a `rel_path` reopens the plan this workspace last had open | `PlanWindowApp.vue:185` | `reopens the stored plan when launched without one` |
+| Opening a document records the pointer | `PlanWindowApp.vue:162` | `records the plan that was actually opened` |
+| A stale pointer (deleted/renamed plan) degrades to an empty window with no error | `PlanWindowApp.vue:185-190` | `opens empty, without an error, when the stored plan no longer exists` |
+| An explicit launch target wins over the stored pointer | `PlanWindowApp.vue:181-184` | `prefers the plan the window was launched with over the stored one` |
+| The CLI agent panel is reachable at all | `PlanWindowApp.vue:605` | `mounts the panel instead of leaving it behind unreachable state` |
+| The open plan is injected as the spawned agent's context | `PlanWindowApp.vue:394-417, 611` | `injects the open plan as the spawned agent context`; `says so plainly when no plan is open` |
+
+Not covered by this file, deliberately: UI zoom (see the window-level parity detail above — it is not implementable from a packaged plugin without a new Host capability), and the actual spawn of a CLI process. The panel's `buildContext` is called directly; that the Host really starts an agent and pastes the payload is an `aiCli.*` capability concern, not a plugin one.
+
 ## Remaining verification boundaries
 
+- **Interface zoom in the Plans window: not implemented, not merely untested.** No test asserts ⇧⌘=/⇧⌘-/⇧⌘0 in this window because the packaged plugin cannot apply an app-wide scale; the Host refuses the IPC from plugin frames and the capability catalog has no equivalent. Do not read the green suite as evidence that zoom works here.
+- **`PlansPane` beyond the restored row capabilities: not case-mapped.** v1 ships no test file for the plan list, so the list matrix above is written from the v1 source, not from an oracle. Filtering, sorting, grouping, pinning, quick open and rename are exercised by `PlansApp.test.ts` and `PlansAppListSurface.test.ts` but have not been diffed control-by-control against `editor/PlansPane.vue`.
 - **Chromium layout and hit testing: manual only.** Happy DOM can prove panel presence, parent placement, enabled controls, event routing and focus, but cannot prove actual pixel spacing, clipping, overlapping elements or pointer hit targets. Manually compare v1/v2 at wide and narrow widths after proving artifact provenance.
 - **Physical IME interaction: manual only.** Component tests exercise `isComposing` and ordinary Enter events; a real input method must still be checked in the isolated app.
 - **Execution dispatch and OS browser opening: component + Host boundary tests, not a launched agent/browser.** The 80-case oracle suite injects those ports. Do not infer an actual CLI launch, external browser launch or successful agent execution from these results.

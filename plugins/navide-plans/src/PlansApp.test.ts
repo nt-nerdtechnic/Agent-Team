@@ -817,7 +817,9 @@ describe('PlansApp', () => {
 
     expect(view.findAll('select')[0].element).toHaveProperty('value', 'approved')
     expect(view.findAll('select')[1].element).toHaveProperty('value', 'title')
-    expect(state.sets).toEqual([])
+    // Only the last-opened pointer for the document actually opened; no
+    // preference default is written back on load.
+    expect(state.sets).toEqual([{ key: 'plans.last-opened', value: existingPath }])
     expect(state.subscribe).toHaveBeenCalledTimes(2)
     expect(state.calls.filter(({ name }) => name === 'plans.list')).toHaveLength(1)
 
@@ -834,8 +836,9 @@ describe('PlansApp', () => {
     expect(view.findAll('select')[0].element).toHaveProperty('value', 'all')
     expect(view.findAll('select')[1].element).toHaveProperty('value', 'updated')
 
-    // Did not write default fallbacks into workspace storage
-    expect(state.sets).toEqual([])
+    // Did not write default fallbacks into workspace storage — the only write
+    // is the last-opened pointer for the document that was actually opened.
+    expect(state.sets).toEqual([{ key: 'plans.last-opened', value: existingPath }])
 
     // Explicit user change does persist
     const filterSelect = view.findAll('select')[0]
