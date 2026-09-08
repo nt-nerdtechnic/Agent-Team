@@ -1108,14 +1108,29 @@ if (
   bundledPlansDescriptor?.capabilityPolicy?.kind === 'manifest-v2' &&
   bundledPlansDescriptor.packageVersion
 ) {
-  pluginCapabilityGrants.set('navide.plans', {
-    packageVersion: bundledPlansDescriptor.packageVersion,
-    system: [...bundledPlansDescriptor.capabilityPolicy.system],
-    ...(bundledPlansDescriptor.capabilityPolicy.shell
-      ? { shell: bundledPlansDescriptor.capabilityPolicy.shell }
-      : {}),
-    storage: true,
-  })
+  // The grant store writes synchronously to userData; a read-only, full or
+  // EPERM directory throws here. Left unguarded this aborts module evaluation
+  // before any IPC handler below registers, so the whole App comes up dead.
+  // Same precedent as the factory Git grant write (factoryGitStartup.ts): an
+  // unpersistable grant leaves v2 unusable, so fall back to legacy recovery
+  // and log it rather than taking startup down with it.
+  try {
+    pluginCapabilityGrants.set('navide.plans', {
+      packageVersion: bundledPlansDescriptor.packageVersion,
+      system: [...bundledPlansDescriptor.capabilityPolicy.system],
+      ...(bundledPlansDescriptor.capabilityPolicy.shell
+        ? { shell: bundledPlansDescriptor.capabilityPolicy.shell }
+        : {}),
+      storage: true,
+    })
+  } catch (error) {
+    plansRecoveryEnabled = true
+    warnMain(
+      `[main] navide.plans capability grant could not be persisted; using legacy recovery: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+  }
   if (plansRecoveryEnabled) {
     frontendPluginManager.markPlansBackendUnavailable('package-recovery')
     warnMain(
