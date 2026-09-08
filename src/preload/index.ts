@@ -5,6 +5,12 @@ import type {
   UpdaterSettings,
   UpdateState,
 } from '../shared/updater'
+import type {
+  ExecutionPolicyApi,
+  ManifestPermissionsSummary,
+  PackageVersionGrantSummary,
+} from '../shared/executionPolicy'
+import type { LegacyPlansPreferenceProjection } from '../shared/plansPreferences'
 import { LEGAL_LINKS, type LegalRoute } from '../shared/legalLinks'
 
 /** Which Electron-owned cache groups to clear. Never touches user state. */
@@ -54,7 +60,7 @@ export interface GitCredential {
 /** Main-owned recovery transition. The renderer can only move into recovery;
  * there is deliberately no public event or API for switching back. */
 export interface GitRecoveryChanged {
-  legacy: true
+  legacy: boolean
 }
 
 function isGitRecoveryChanged(payload: unknown): payload is GitRecoveryChanged {
@@ -63,7 +69,21 @@ function isGitRecoveryChanged(payload: unknown): payload is GitRecoveryChanged {
     payload !== null &&
     !Array.isArray(payload) &&
     'legacy' in payload &&
-    payload.legacy === true
+    typeof payload.legacy === 'boolean'
+  )
+}
+
+export interface PlansRecoveryChanged {
+  legacy: boolean
+}
+
+function isPlansRecoveryChanged(payload: unknown): payload is PlansRecoveryChanged {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    'legacy' in payload &&
+    typeof payload.legacy === 'boolean'
   )
 }
 
@@ -87,6 +107,9 @@ export interface InstalledPluginSummary {
   id: string
   requires: string[]
   sensitive: string[]
+  packageVersion?: string
+  manifestPermissions?: ManifestPermissionsSummary
+  packageVersionGrant?: PackageVersionGrantSummary | null
   provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
 }
@@ -156,6 +179,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
     }
     ipcRenderer.on('git:recoveryChanged', listener)
     return () => ipcRenderer.removeListener('git:recoveryChanged', listener)
+  },
+  onPlansRecoveryChanged: (cb: (change: PlansRecoveryChanged) => void): (() => void) => {
+    const listener = (_event: unknown, payload: unknown): void => {
+      if (isPlansRecoveryChanged(payload)) cb(payload)
+    }
+    ipcRenderer.on('plans:recoveryChanged', listener)
+    return () => ipcRenderer.removeListener('plans:recoveryChanged', listener)
   },
   onMenuAction: (cb: (action: string) => void): void => {
     ipcRenderer.on('menu:action', (_event, action: string) => cb(action))
@@ -227,6 +257,29 @@ contextBridge.exposeInMainWorld('agentTeam', {
       workspace_path: args.workspace_path,
       ...(args.rel_path ? { rel_path: args.rel_path } : {}),
     }),
+  projectLegacyPlansPreferences: (args: {
+    workspace_path: string
+    values: LegacyPlansPreferenceProjection
+  }): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('plans:projectLegacyPreferences', {
+      workspace_path: args.workspace_path,
+      values: args.values,
+    }),
+  /** Read the Host-selected previous Plans snapshot projection for the
+   * retained legacy route. The sender/window determines the workspace; the
+   * renderer cannot supply a snapshot, tier, or package version. */
+  getPlansLegacyRecoveryPreferences: (): Promise<LegacyPlansPreferenceProjection | null> =>
+    ipcRenderer.invoke('plans:getLegacyRecoveryPreferences'),
+  onPlansLegacyRecoveryPreferences: (
+    cb: (values: LegacyPlansPreferenceProjection) => void,
+  ): (() => void) => {
+    const listener = (_event: unknown, values: unknown): void => {
+      if (!values || typeof values !== 'object' || Array.isArray(values)) return
+      cb(values as LegacyPlansPreferenceProjection)
+    }
+    ipcRenderer.on('plans:legacyRecoveryPreferences', listener)
+    return () => ipcRenderer.removeListener('plans:legacyRecoveryPreferences', listener)
+  },
   openGitHistoryWindow: (args: { workspace_path: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:openGitHistory', { workspace_path: args.workspace_path }),
   openGitWindow: (args: {
@@ -667,6 +720,31 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ): Promise<PermissionStatus> => ipcRenderer.invoke('permissions:request', key, payload),
     openSettings: (key: PermissionKey): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('permissions:open-settings', key),
+  },
+  executionPolicy: {
+    inspect: (workspacePath?: string): ReturnType<ExecutionPolicyApi['inspect']> =>
+      ipcRenderer.invoke('execution-policy:inspect', workspacePath),
+    setUser: (args: Parameters<ExecutionPolicyApi['setUser']>[0]): ReturnType<ExecutionPolicyApi['setUser']> =>
+      ipcRenderer.invoke('execution-policy:set-user', args),
+    resetUser: (args: Parameters<ExecutionPolicyApi['resetUser']>[0]): ReturnType<ExecutionPolicyApi['resetUser']> =>
+      ipcRenderer.invoke('execution-policy:reset-user', args),
+    selectSource: (
+      args: Parameters<ExecutionPolicyApi['selectSource']>[0]
+    ): ReturnType<ExecutionPolicyApi['selectSource']> =>
+      ipcRenderer.invoke('execution-policy:select-source', args),
+    rebuild: (
+      args: Parameters<ExecutionPolicyApi['rebuild']>[0]
+    ): ReturnType<ExecutionPolicyApi['rebuild']> =>
+      ipcRenderer.invoke('execution-policy:rebuild', args),
+    resetSourceSelections: (
+      args: Parameters<ExecutionPolicyApi['resetSourceSelections']>[0]
+    ): ReturnType<ExecutionPolicyApi['resetSourceSelections']> =>
+      ipcRenderer.invoke('execution-policy:reset-source-selections', args),
+    onChanged: (handler: Parameters<ExecutionPolicyApi['onChanged']>[0]): ReturnType<ExecutionPolicyApi['onChanged']> => {
+      const listener = (): void => handler()
+      ipcRenderer.on('execution-policy:changed', listener)
+      return () => ipcRenderer.removeListener('execution-policy:changed', listener)
+    },
   },
   plugins: {
     listInstalled: (): Promise<InstalledPluginSummary[]> =>

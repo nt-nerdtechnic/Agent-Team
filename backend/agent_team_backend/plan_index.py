@@ -82,6 +82,10 @@ _NOISE_SEGMENTS = frozenset({
 # Backstop for a pathological tree (thousands of sibling repos).
 _MAX_NESTED_ROOTS = 50
 
+# Maximum candidate directory entries scanned per directory level per data contract fixture.
+_MAX_DIRECTORY_ENTRIES = 2000
+_MAX_NESTED_CANDIDATES = 2000
+
 
 def _create_plan_index_schema(cur: sqlite3.Cursor) -> None:
     cur.execute(
@@ -107,6 +111,10 @@ def resolve_plan_root(workspace_path: str) -> str:
     Returns ``workspace_path`` unchanged when there is no repository within the
     bound, when the path is not a directory, or when the walk reaches the user's
     home directory — a dotfiles repo at ``~`` must never become a plan root.
+
+    The packaged Issue 21 test child carries a standalone copy of this resolver
+    because it is built without importing the application backend package. The
+    backend test suite keeps both implementations in parity.
     """
     if not workspace_path:
         return workspace_path
@@ -178,25 +186,28 @@ def find_nested_plan_roots(root: Path) -> list[str]:
     """
     found: list[str] = []
     frontier: list[tuple[Path, int]] = [(root, 0)]
-    while frontier and len(found) < _MAX_NESTED_ROOTS:
+    visited = 0
+    while frontier and len(found) < _MAX_NESTED_ROOTS and visited < _MAX_NESTED_CANDIDATES:
         current, depth = frontier.pop(0)
         if depth >= _MAX_ROOT_DEPTH:
             continue
         try:
             with os.scandir(current) as it:
-                children = sorted(
-                    (
-                        de
-                        for de in it
-                        if de.is_dir()
-                        and not de.name.startswith(".")
-                        and de.name not in _NOISE_SEGMENTS
-                    ),
-                    key=lambda de: de.name.lower(),
-                )
+                candidates = [
+                    de
+                    for de in it
+                    if de.is_dir()
+                    and not de.name.startswith(".")
+                    and de.name not in _NOISE_SEGMENTS
+                ]
+            candidates.sort(key=lambda de: de.name.encode("utf-8"))
+            children = candidates[:_MAX_DIRECTORY_ENTRIES]
         except (OSError, ValueError):
             continue
         for de in children:
+            if len(found) >= _MAX_NESTED_ROOTS or visited >= _MAX_NESTED_CANDIDATES:
+                break
+            visited += 1
             child = Path(de.path)
             if (child / ".git").is_dir():
                 found.append(child.relative_to(root).as_posix())

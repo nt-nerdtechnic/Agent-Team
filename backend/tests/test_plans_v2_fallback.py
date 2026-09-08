@@ -1,0 +1,185 @@
+"""MCP recovery contract for the production Plans package adapter."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from agent_team_backend.fs_service import FsError
+from agent_team_backend.mcp_server import auth as plan_mcp_auth
+from agent_team_backend.mcp_server import server as plan_mcp
+from agent_team_backend.mcp_server.toolkit import Caller
+from agent_team_backend.plugins.builtin.navide_plans import plan_tools
+
+
+_SAFE_RECOVERY = "legacy-safe-before-dispatch"
+
+
+def _host_context() -> Any:
+    return SimpleNamespace(
+        request_context=SimpleNamespace(
+            request=SimpleNamespace(
+                query_params={
+                    "client": "host",
+                    "t": plan_mcp_auth.internal_token(),
+                }
+            )
+        )
+    )
+
+
+def _route_failure(monkeypatch: pytest.MonkeyPatch, response: Any) -> None:
+    async def route(*args: Any, **kwargs: Any) -> Any:
+        return response
+
+    monkeypatch.setattr(plan_mcp, "request_host_agent_workspace_backend", route)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,arguments", [
+    ("plans.list", {}),
+    ("plans.read", {"rel_path": ".agent-team/plans/example.html"}),
+])
+async def test_read_recovery_requires_the_exact_host_disposition(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, Any],
+) -> None:
+    _route_failure(monkeypatch, {
+        "ok": False,
+        "error": {"code": "BACKEND_UNAVAILABLE", "message": "child unavailable"},
+        "recoveryDisposition": _SAFE_RECOVERY,
+    })
+
+    result = await plan_tools._host_agent_plan_call(
+        Caller(kind="host"),
+        "/workspace",
+        name,
+        arguments,
+    )
+
+    assert result is plan_tools._NO_HOST_ROUTE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", [
+    "BACKEND_UNAVAILABLE",
+    "host_timeout",
+    "host_unavailable",
+    "PROTOCOL_ERROR",
+    "PLUGIN_STOPPING",
+    "CAPABILITY_DENIED",
+])
+async def test_mutation_does_not_fallback_without_the_host_disposition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    error_code: str,
+) -> None:
+    _route_failure(monkeypatch, {
+        "ok": False,
+        "error": {"code": error_code, "message": "Plans operation failed"},
+    })
+    legacy_calls: list[tuple[Any, ...]] = []
+
+    def legacy_must_not_run(*args: Any) -> dict[str, Any]:
+        legacy_calls.append(args)
+        return {"stage": "done"}
+
+    monkeypatch.setattr(plan_tools, "_update_stage_sync", legacy_must_not_run)
+
+    with pytest.raises(FsError) as raised:
+        await plan_tools.plan_update_stage(
+            ".agent-team/plans/example.html",
+            "done",
+            _host_context(),
+            workspace_path=str(tmp_path),
+        )
+
+    assert raised.value.code == error_code
+    assert legacy_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    {"ok": False, "error": {"code": "BACKEND_UNAVAILABLE"}, "recoveryDisposition": "unknown"},
+    {"ok": False, "error": {"code": "BACKEND_UNAVAILABLE"}, "recoveryDisposition": None},
+    {"ok": False, "recoveryDisposition": _SAFE_RECOVERY},
+    None,
+])
+async def test_unknown_or_malformed_host_recovery_reply_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    response: Any,
+) -> None:
+    _route_failure(monkeypatch, response)
+
+    def legacy_must_not_run(*args: Any) -> dict[str, Any]:
+        raise AssertionError("legacy Plans mutation must not run")
+
+    monkeypatch.setattr(plan_tools, "_update_stage_sync", legacy_must_not_run)
+
+    with pytest.raises(FsError):
+        await plan_tools.plan_update_stage(
+            ".agent-team/plans/example.html",
+            "done",
+            _host_context(),
+            workspace_path=str(tmp_path),
+        )
+
+
+@pytest.mark.asyncio
+async def test_caller_supplied_disposition_cannot_authorize_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_payloads: list[dict[str, Any]] = []
+
+    async def route(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured_payloads.append(args[2])
+        return {
+            "ok": False,
+            "error": {"code": "BACKEND_UNAVAILABLE", "message": "child unavailable"},
+        }
+
+    monkeypatch.setattr(plan_mcp, "request_host_agent_workspace_backend", route)
+
+    with pytest.raises(FsError) as raised:
+        await plan_tools._host_agent_plan_call(
+            Caller(kind="host"),
+            "/workspace",
+            "plans.update_stage",
+            {"rel_path": ".agent-team/plans/example.html", "stage": "done", "recoveryDisposition": _SAFE_RECOVERY},
+        )
+
+    assert raised.value.code == "BACKEND_UNAVAILABLE"
+    assert captured_payloads[0]["args"]["recoveryDisposition"] == _SAFE_RECOVERY
+
+
+@pytest.mark.asyncio
+async def test_host_approved_pre_dispatch_recovery_runs_one_legacy_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _route_failure(monkeypatch, {
+        "ok": False,
+        "error": {"code": "BACKEND_UNAVAILABLE", "message": "child failed before dispatch"},
+        "recoveryDisposition": _SAFE_RECOVERY,
+    })
+    legacy_calls: list[tuple[str, str, str]] = []
+
+    def legacy_update(workspace_path: str, rel_path: str, stage: str) -> dict[str, Any]:
+        legacy_calls.append((workspace_path, rel_path, stage))
+        return {"stage": stage, "approvedAt": None}
+
+    monkeypatch.setattr(plan_tools, "_update_stage_sync", legacy_update)
+
+    result = await plan_tools.plan_update_stage(
+        ".agent-team/plans/example.html",
+        "done",
+        _host_context(),
+        workspace_path=str(tmp_path),
+    )
+
+    assert result == {"stage": "done", "approvedAt": None}
+    assert legacy_calls == [(str(tmp_path), ".agent-team/plans/example.html", "done")]

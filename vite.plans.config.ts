@@ -12,11 +12,12 @@ import { PLANS_PLUGIN_REQUIRES } from './src/shared/pluginCapabilities'
 // `useBackend`. (A shared build can't diverge a module per entry —
 // PlanWindowApp is one module in the graph.)
 //
-// Output: dist-plugins/plans/ — shipped inside the app package as the bundled
-// builtin copy (electron-builder `extraResources` → resources/plugins/plans;
-// `pnpm build` chains this build so packaging always has it). In dev,
-// AGENT_TEAM_PLUGIN_DEV=1 registers a descriptor pointing straight at this
-// local build.
+// Output: dist-plugins/plans/ — the frontend-only bundled builtin copy
+// (electron-builder `extraResources` → resources/plugins/plans). The packaged
+// backend fixture is built separately into dist-test-fixtures/ and is used
+// only by the Issue 21 integration composition; it is never part of this
+// application resource tree. In dev, AGENT_TEAM_PLUGIN_DEV=1 registers a
+// descriptor pointing straight at this local build.
 
 const APP_VERSION: string = JSON.parse(
   readFileSync(resolve(__dirname, 'package.json'), 'utf-8')
@@ -68,6 +69,8 @@ export default defineConfig({
     //   ../../composables/useBackend  ./useBackend  ../useBackend
     alias: [
       { find: /^(?:\.\.?\/)+(?:composables\/)?useBackend$/, replacement: capabilityBackend },
+      { find: '@navide/plugin-sdk', replacement: resolve(__dirname, 'packages/plugin-sdk/src/index.ts') },
+      { find: '@navide/plugin-contracts', replacement: resolve(__dirname, 'packages/plugin-contracts/src/index.ts') },
       { find: '@navide/plugin-ui/shared', replacement: resolve(__dirname, 'packages/plugin-ui/src/shared/index.ts') },
       { find: '@navide/plugin-ui/styles.css', replacement: resolve(__dirname, 'packages/plugin-ui/src/foundation/styles.css') },
       { find: '@navide/plugin-ui/foundation', replacement: resolve(__dirname, 'packages/plugin-ui/src/foundation/index.ts') },

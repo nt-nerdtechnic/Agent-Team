@@ -8,6 +8,8 @@
 // shared WebSocket transport below.
 
 import { BrowserWindow, WebContentsView, ipcMain, type WebContents } from 'electron'
+import { warnMain } from '../main-log'
+import { validateSupportedLocale } from '../hostLocale'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -16,6 +18,7 @@ import { WebSocket as NodeWebSocket } from 'ws'
 import {
   parseCapabilityCall,
   planCapabilityCall,
+  executionPolicyAllows,
   backendResponseToCapability,
   isEventAllowed,
   isPublicCapabilityEventAllowed,
@@ -27,14 +30,17 @@ import {
   terminalSessionsFromResponse,
   HOST_CAPABILITIES,
   HOST_EVENT_SOURCE_PLUGIN_ID,
+  HOST_USER_INITIATOR,
   type CapabilityCall,
   type CapabilityResponse,
   type AuthenticatedRuntimeBinding,
+  type AuthenticatedInitiator,
   type HostCapabilityContext,
   type HostCapabilityGrant,
   type PublicCapabilityExecutionPlan,
   type TerminalOutputBatcher,
 } from './pluginCapabilityBroker'
+import type { ExecutionPolicySnapshot } from './executionPolicy'
 import {
   PluginStorageError,
   type StorageExecution,
@@ -77,6 +83,36 @@ import {
   buildPluginContributionCatalog,
   type PluginContributionCatalogEntry,
 } from './pluginContributionCatalog'
+import {
+  canonicalBackendPackageDir,
+  PluginBackendHost,
+} from './pluginBackendHost'
+import {
+  isAllowedBackendTimeout,
+  MAX_BACKEND_CALLS_PER_INSTANCE,
+  MAX_BACKEND_SUBSCRIPTIONS_PER_INSTANCE,
+} from './pluginBackendLimits'
+import {
+  createHostPlansFilesystemPort,
+  createProductionPlansBridgeDispatcher,
+  PlansBridgeError,
+  type PlansBridgeContext,
+  type PlansFilesystemPort,
+  type PlansFilesystemServiceOperation,
+} from './plansBridge'
+import {
+  BackendPluginError,
+  type BackendPluginLaunchSpec,
+  type BackendPluginSubscription,
+  type JsonValue,
+} from './pluginBackendSupervisor'
+import {
+  isWorkspaceContainedPath,
+  resolvePathForContainment,
+  workspaceMutationPathError,
+} from './workspacePathPolicy'
+import { resolvePlansRootPath } from './plansRoot'
+import { isAllowedPlanDocumentPath } from './plansDirectories'
 
 /** Everything the manager needs to launch one plugin view. */
 export interface PluginLaunchDescriptor {
@@ -85,6 +121,8 @@ export interface PluginLaunchDescriptor {
   /** Canonical package version for Manifest v2 descriptors. Legacy descriptors
    *  omit this field because their loader identity is plugin-id keyed. */
   packageVersion?: string
+  /** Host-verified package root used for exact backend activation identity. */
+  packageDir?: string
   /** Capabilities the plugin's manifest declares (drives broker scoping). */
   requires: string[]
   /** Access-aware policy for Manifest v2; omitted descriptors retain V1 behavior. */
@@ -135,6 +173,7 @@ interface PendingGuest {
   readonly token: string
   readonly instanceId: string
   readonly registryKey: string
+  readonly contributionKey: string
   readonly descriptor: PluginLaunchDescriptor
   readonly hostWindow: BrowserWindow
   readonly workspacePath: string | null
@@ -207,6 +246,8 @@ interface RunningPlugin {
   id: string
   /** True when this instance was created through the plugin-id keyed {@link open} adapter. */
   openedViaLegacyAdapter: boolean
+  /** Canonical Manifest v2 contribution key, when this is a view instance. */
+  contributionKey: string | null
   /** Canonical Manifest v2 identity; this controls PTY semantics regardless of opener. */
   hasV2DescriptorIdentity: boolean
   requires: string[]
@@ -216,6 +257,13 @@ interface RunningPlugin {
   hostWindow: BrowserWindow
   /** Host-owned workspace path; never sourced from plugin payloads. */
   workspacePath: string | null
+  /** SHA-256 workspace identity actually bound to the package backend. Null
+   *  while the optional backend route is unavailable, so callers can fall
+   *  back to the legacy adapter. */
+  backendWorkspaceId: string | null
+  /** The initial Plans backend bind. The dedicated Plans opener awaits this
+   *  before claiming that the v2 surface is usable. */
+  backendBindingTask: Promise<void> | null
   /** Query string the entry was last loaded with (drives reload-on-change). */
   query: string
   /** webContents.id captured at creation (not readable after destroy). */
@@ -237,6 +285,16 @@ interface RunningPlugin {
   /** True once the renderer sent the authenticated readiness handshake. */
   pluginReady: boolean
   pendingTargets: Record<string, string>[]
+}
+
+type PlansBackendHealth = 'unknown' | 'ready' | 'unavailable'
+
+/** Host-minted only after the exact packaged Plans route failed before its
+ * child received the request. The Python MCP adapter must never infer this
+ * from a broad backend error. */
+const LEGACY_SAFE_BEFORE_DISPATCH = 'legacy-safe-before-dispatch' as const
+type PlansRecoveryResponse = CapabilityResponse & {
+  recoveryDisposition?: typeof LEGACY_SAFE_BEFORE_DISPATCH
 }
 
 interface GitContributionState {
@@ -330,6 +388,13 @@ interface EarlyAiEventBuffer {
   events: Array<{ type: 'terminal.output' | 'terminal.exit'; payload: unknown }>
 }
 
+interface PendingBackendSubscription {
+  controller: AbortController
+  subscription: BackendPluginSubscription | null
+  unregister: (() => void) | null
+  cancelled: boolean
+}
+
 const IPC_CALL = 'plugin:cap:call'
 const IPC_CAST = 'plugin:cap:cast'
 const IPC_HOST_CALL = 'plugin:host:call'
@@ -337,6 +402,35 @@ const IPC_EVENT = 'plugin:cap:event'
 const IPC_READY = 'plugin:ready'
 const IPC_HIDE_SELF = 'plugin:hideSelf'
 const IPC_OPEN_TARGET = 'plugin:openTarget'
+const IPC_BACKEND_CALL = 'plugin:backend:call'
+const IPC_BACKEND_CANCEL = 'plugin:backend:cancel'
+const IPC_BACKEND_SUBSCRIBE = 'plugin:backend:subscribe'
+const IPC_BACKEND_EVENT = 'plugin:backend:event'
+const IPC_BACKEND_STATUS = 'plugin:backend:status'
+const PLUGIN_BACKEND_TEMP_ENV_KEYS = ['TMPDIR', 'TEMP', 'TMP'] as const
+const BACKEND_IDENTITY_KEYS = new Set([
+  'pluginId',
+  'packageVersion',
+  'workspaceId',
+  'instanceId',
+  'contributionKey',
+  'hostWindowId',
+  'runtime',
+  'initiator',
+])
+
+/** Keep the packaged one-file backend able to extract itself without passing
+ * the Electron process environment across the plugin trust boundary. */
+export function createPluginBackendChildEnvironment(): Readonly<Record<string, string>> {
+  const environment: Record<string, string> = {}
+  for (const key of PLUGIN_BACKEND_TEMP_ENV_KEYS) {
+    const value = process.env[key]
+    if (typeof value === 'string' && value.length > 0 && !value.includes('\u0000')) {
+      environment[key] = value
+    }
+  }
+  return Object.freeze(environment)
+}
 const TERMINAL_OWNED_WS_TYPES = new Set([
   'terminal.input',
   'terminal.log_sent',
@@ -345,6 +439,20 @@ const TERMINAL_OWNED_WS_TYPES = new Set([
   'terminal.kill',
   'terminal.redraw',
 ])
+
+/** These first-party packages consume the public aiCli event vocabulary. Other
+ * v2 packages may declare aiCli for capability admission without opting into
+ * the event translation, so their internal terminal ownership remains intact. */
+const PUBLIC_AI_CLI_EVENT_PLUGIN_IDS = new Set(['navide.git', 'navide.plans'])
+
+function usesPublicAiCliEvents(plugin: RunningPlugin | undefined): plugin is RunningPlugin {
+  return Boolean(
+    plugin?.hasV2DescriptorIdentity &&
+      PUBLIC_AI_CLI_EVENT_PLUGIN_IDS.has(plugin.id) &&
+      plugin.capabilityPolicy.kind === 'manifest-v2' &&
+      plugin.capabilityPolicy.system.includes('aiCli')
+  )
+}
 
 /** First-party compatibility actions used while the existing Git surface is
  *  moved behind the Manifest v2 package boundary. These are deliberately
@@ -450,6 +558,37 @@ function workspaceOf(query: string): string {
   return new URLSearchParams(query).get('workspace_path') ?? ''
 }
 
+export type PlansPackageSource =
+  | 'official-registry'
+  | 'developer-local-unpacked'
+  | 'factory-bundled'
+  | 'factory-dev'
+  | 'host-bundled'
+  | 'installed'
+
+const PLANS_PACKAGE_SOURCES = new Set<PlansPackageSource>([
+  'official-registry',
+  'developer-local-unpacked',
+  'factory-bundled',
+  'factory-dev',
+  'host-bundled',
+  'installed',
+])
+
+/** Build the Plans DevTools provenance query from fixed Host vocabulary only.
+ * This accepts no filesystem identity, so the URL is safe to expose in every
+ * runtime while still identifying the selected package class and version. */
+export function appendPlansProvenanceQuery(
+  query: string,
+  packageVersion: string,
+  packageSource: PlansPackageSource,
+): string {
+  const params = new URLSearchParams(query.startsWith('?') ? query.slice(1) : query)
+  params.set('plans_package_version', packageVersion)
+  params.set('plans_package_source', PLANS_PACKAGE_SOURCES.has(packageSource) ? packageSource : 'host-bundled')
+  return `?${params.toString()}`
+}
+
 /** Entry query string → plain params record (as sent over IPC_OPEN_TARGET). */
 function queryToParams(query: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -492,78 +631,20 @@ function toPayload(args: unknown): Record<string, unknown> {
   return typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {}
 }
 
+function isJsonValue(value: unknown, seen = new Set<object>()): value is JsonValue {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (typeof value !== 'object' || seen.has(value)) return false
+  seen.add(value)
+  const valid = Array.isArray(value)
+    ? value.every((item) => isJsonValue(item, seen))
+    : Object.values(value as Record<string, unknown>).every((item) => isJsonValue(item, seen))
+  seen.delete(value)
+  return valid
+}
+
 function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
-}
-
-function isErrnoCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null &&
-    (error as { code?: unknown }).code === code
-}
-
-/** Resolve existing symlinks while preserving a non-existent trailing path. */
-function resolvePathForContainment(path: string): string | null {
-  let current = resolve(path)
-  const missingSegments: string[] = []
-
-  while (true) {
-    try {
-      lstatSync(current)
-    } catch (error) {
-      if (!isErrnoCode(error, 'ENOENT')) return null
-      const parent = dirname(current)
-      if (parent === current) return null
-      missingSegments.unshift(basename(current))
-      current = parent
-      continue
-    }
-
-    try {
-      return missingSegments.length > 0
-        ? resolve(realpathSync(current), ...missingSegments)
-        : realpathSync(current)
-    } catch {
-      // An existing symlink that cannot be resolved is not safe to fall back
-      // to lexically: this includes dangling links and symlink loops.
-      return null
-    }
-  }
-}
-
-function isWorkspaceContainedPath(workspacePath: string, candidatePath: string): boolean {
-  if (candidatePath.includes('\0')) return false
-  const root = resolvePathForContainment(workspacePath)
-  const normalizedCandidate = candidatePath.replace(/\\/g, '/')
-  const candidate = root
-    ? resolvePathForContainment(resolve(workspacePath, normalizedCandidate))
-    : null
-  if (!root || !candidate) return false
-  const relativePath = relative(root, candidate)
-  return relativePath !== '..' &&
-    !relativePath.startsWith(`..${sep}`) &&
-    !isAbsolute(relativePath)
-}
-
-/** Return the Host-side policy error for a filesystem mutation target. The
- * backend repeats this check, but the Host must stop a denied request before it
- * reaches the transport as well. `.gitignore` is intentionally not matched by
- * the segment check. */
-function workspaceMutationPathError(workspacePath: string, candidatePath: unknown): string | null {
-  if (typeof candidatePath !== 'string' || !candidatePath || !isWorkspaceContainedPath(workspacePath, candidatePath)) {
-    return 'path escapes the Host workspace binding'
-  }
-  const normalizedCandidate = candidatePath.replace(/\\/g, '/')
-  const root = resolvePathForContainment(workspacePath)
-  const candidate = root
-    ? resolvePathForContainment(resolve(workspacePath, normalizedCandidate))
-    : null
-  if (!root || !candidate) return 'path cannot be safely resolved'
-  const relativePath = relative(root, candidate)
-  const rootIsGitDirectory = basename(root) === '.git'
-  if (rootIsGitDirectory || relativePath.split(sep).some((segment) => segment === '.git')) {
-    return 'Git metadata paths are protected'
-  }
-  return null
 }
 
 function isExpectedHttpsRemote(url: unknown, expectedHost: string): boolean {
@@ -628,6 +709,10 @@ function sameTerminalRoute(left: TerminalRoute | null, right: TerminalRoute | nu
   )
 }
 
+function packageVersionKey(pluginId: string, packageVersion: string): string {
+  return `${pluginId}\u0000${packageVersion}`
+}
+
 function validateV2CapabilityContext(
   descriptor: PluginLaunchDescriptor,
   context: HostCapabilityContext | null
@@ -686,11 +771,175 @@ function validateV2CapabilityContext(
   }
 }
 
+export const MAX_DIAGNOSTIC_LINE_CHARS = 2048
+export const MAX_DIAGNOSTIC_LINES_PER_EMISSION = 100
+
+export function sanitizeDiagnosticLines(raw: unknown): string[] {
+  if (raw === null || raw === undefined) return []
+  const text = typeof raw === 'string' ? raw : String(raw)
+  const strippedAnsi = text.replace(/\x1B(?:\].*?(?:\x07|\x1B\\\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_]|.?)/gu, '')
+  const strippedControls = strippedAnsi.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/gu, '')
+  const rawLines = strippedControls.split(/\r\n|\r|\n|\u2028|\u2029/u)
+  const result: string[] = []
+
+  for (const rawLine of rawLines) {
+    const line = rawLine.trimEnd()
+    if (line.length === 0) continue
+    if (result.length >= MAX_DIAGNOSTIC_LINES_PER_EMISSION) {
+      result.push('... [diagnostic lines truncated]')
+      break
+    }
+    if (line.length > MAX_DIAGNOSTIC_LINE_CHARS) {
+      result.push(`${line.slice(0, MAX_DIAGNOSTIC_LINE_CHARS)}... [line truncated]`)
+    } else {
+      result.push(line)
+    }
+  }
+
+  return result
+}
+
 export class FrontendPluginManager {
+  private readonly descriptorSources = new Map<string, 'installed-catalog' | 'factory-bundle' | 'host-bundled'>()
+  private plansDiagnosticsEnabled = false
+  private plansShellHandlers: {
+    dispatchExecution: (args: { workspace_path: string; rel_path: string; agent_key: string }) => { delivered: boolean }
+    openPath: (absolutePath: string) => Promise<{ ok: boolean; error?: string; revealed?: boolean }>
+  } | null = null
+
+  setPlansShellHandlers(handlers: NonNullable<FrontendPluginManager['plansShellHandlers']>): void {
+    this.plansShellHandlers = handlers
+  }
+
+  forwardPlansExecutionResult(payload: { workspace_path: string; rel_path: string; ok: boolean; reason?: string }): void {
+    for (const plugin of this.running.values()) {
+      if (plugin.id === PLANS_PLUGIN_ID && plugin.hasV2DescriptorIdentity &&
+        plugin.workspacePath && resolve(plugin.workspacePath) === resolve(payload.workspace_path)) {
+        this.emitToInstance(plugin.instanceId, 'plans.execution-result', payload)
+      }
+    }
+  }
+
+  /** Host-only switch: packaged startup never enables this diagnostic. */
+  setPlansDiagnosticsEnabled(enabled: boolean): void {
+    this.plansDiagnosticsEnabled = enabled
+  }
+
+  /** Inspect the exact selected frontend/backend tuple without granting access
+   * or starting a child. Filesystem identities remain inside the Host. */
+  getPlansProvenance(): {
+    descriptorSource: string
+    selectionOrigin: string
+    acquisitionProvenance: string | null
+    packageDirectory: string | null
+    packageVersion: string | null
+    frontendEntry: string
+    frontendEntries: Record<string, string>
+    backendExecutable: string | null
+  } | null {
+    const descriptor = this.descriptors.get(PLANS_PLUGIN_ID)
+    if (!descriptor) return null
+    const selectionOrigin = this.descriptorSources.get(PLANS_PLUGIN_ID) ?? 'host-bundled'
+    const packageDirectory = canonicalBackendPackageDir(descriptor.packageDir)
+    const activation = descriptor.packageVersion && packageDirectory
+      ? this.pluginBackendHost.activationFor(PLANS_PLUGIN_ID, descriptor.packageVersion, packageDirectory)
+      : undefined
+    const installed = selectionOrigin === 'installed-catalog'
+      ? this.installedPackages.get(PLANS_PLUGIN_ID)
+      : undefined
+    return {
+      descriptorSource: selectionOrigin,
+      selectionOrigin,
+      acquisitionProvenance: selectionOrigin === 'factory-bundle'
+        ? 'factory-bundled'
+        : installed?.provenance ?? null,
+      packageDirectory,
+      packageVersion: descriptor.packageVersion ?? null,
+      frontendEntry: descriptor.entryFile,
+      frontendEntries: Object.fromEntries((descriptor.views ?? []).map((view) => [view.contributionKey, view.entryFile])),
+      backendExecutable: activation?.entryFile ?? null,
+    }
+  }
+  private readonly loggedDiagnosticCauses = new WeakSet<object>()
+
+  private emitHostDiagnosticChunk(chunk: string): void {
+    const lines = sanitizeDiagnosticLines(chunk)
+    for (const line of lines) {
+      warnMain(`[plugin-backend] ${line}`)
+    }
+  }
+
+  private emitHostBackendFailureDiagnostic(pluginId: string, error: BackendPluginError): void {
+    const cause = error.cause
+    if (!cause) return
+
+    if (typeof cause === 'object' && cause !== null) {
+      if (this.loggedDiagnosticCauses.has(cause)) return
+      this.loggedDiagnosticCauses.add(cause)
+    }
+    this.loggedDiagnosticCauses.add(error)
+
+    const rawCause = cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)
+    const lines = sanitizeDiagnosticLines(rawCause)
+    if (lines.length === 0) return
+
+    warnMain(`[plugin-backend] Backend child failure for ${pluginId}: ${lines[0]}`)
+    for (let i = 1; i < lines.length; i++) {
+      warnMain(`[plugin-backend] ${lines[i]}`)
+    }
+  }
+
+  /** Package-local Backend Wire children receive only Host-approved temp paths. */
+  private readonly pluginBackendHost = new PluginBackendHost({
+    environment: createPluginBackendChildEnvironment(),
+    onStderr: (chunk) => {
+      this.emitHostDiagnosticChunk(chunk)
+    },
+    resolvePlanRoot: async ({ workspacePath, signal }) => {
+      if (signal.aborted) throw new BackendPluginError('USER_CANCELLED')
+      return resolvePlansRootPath(workspacePath)
+    },
+    resolveExecutionPolicy: (_runtime, workspacePath) =>
+      this.executionPolicyResolver?.(workspacePath),
+    onBackendFailure: (runtime, error) => {
+      if (error.cause) {
+        this.emitHostBackendFailureDiagnostic(runtime.pluginId, error)
+      }
+      if (runtime.pluginId === PLANS_PLUGIN_ID && this.isPlansBackendAvailabilityError(error)) {
+        this.markPlansBackendUnavailable('child-unavailable')
+        const plugin = runtime.instanceId ? this.running.get(runtime.instanceId) : undefined
+        if (plugin?.id === PLANS_PLUGIN_ID && plugin.workspacePath) {
+          try {
+            this.plansBackendFailureHandler?.({
+              instanceId: plugin.instanceId,
+              workspacePath: plugin.workspacePath,
+              packageVersion: runtime.packageVersion,
+              query: plugin.query,
+              contributionKey: plugin.contributionKey,
+              reason: error.message,
+            })
+          } catch {
+            // A recovery observer must not change the child failure result.
+          }
+        }
+      }
+    },
+  })
+  private readonly pendingBackendCalls = new Map<string, Map<string, AbortController>>()
+  private readonly pendingBackendSubscriptions = new Map<
+    string,
+    Map<string, PendingBackendSubscription>
+  >()
+  private backendActivationCount = 0
   /** Host-generated instance id → running view. */
   private readonly running = new Map<string, RunningPlugin>()
   /** Plugin id → instances opened through the legacy adapter; a v2 descriptor may still be here. */
   private readonly legacyInstances = new Map<string, string>()
+  /** Host-private package backend instances used by MCP when no Plans window
+   *  is mounted. The key includes the package version and workspace identity;
+   *  callers never receive the generated instance id. */
+  private readonly headlessBackendInstances = new Map<string, string>()
+  private readonly pendingHeadlessBackendBinds = new Map<string, Promise<string>>()
   /** webContents.id → opaque instance id, so a call's origin can be trusted,
    *  not the payload. */
   private readonly bySender = new Map<number, string>()
@@ -708,6 +957,10 @@ export class FrontendPluginManager {
   private ipcReady = false
   /** Backend WS url as last reported by main, or null when no backend is up. */
   private backendWsUrl: string | null = null
+  /** Main-process-only bearer used to authenticate this Host WS session. */
+  private backendHostToken: string | null = null
+  private hostSessionRegistered = false
+  private hostRegistrationTask: Promise<void> | null = null
   /** Lazily-created shared transport to the backend plugin host. */
   private wsClient: WsClient | null = null
   /** Last transport status, replayed to late-loading plugin views so their
@@ -723,6 +976,15 @@ export class FrontendPluginManager {
   private publicStorageHandler:
     | ((execution: StorageExecution) => unknown | Promise<unknown>)
     | null = null
+  /** Host-owned source of effective agent Execution Policy snapshots. */
+  private executionPolicyResolver:
+    | ((workspacePath?: string) => ExecutionPolicySnapshot)
+    | null = null
+  /** Exact package-version tuples whose complete runtime is being revoked. */
+  private readonly stoppingPlugins = new Set<string>()
+  private readonly packageRevocationTasks = new Map<string, Promise<void>>()
+  /** Package versions displaced by the temporary legacy recovery descriptor. */
+  private readonly recoveryPackageVersions = new Map<string, string>()
   /** Host-renderer state for the left Git contribution, keyed by its host
    *  BrowserWindow. It is never serialized into a public capability context. */
   private readonly gitContributionStates = new Map<number, GitContributionState>()
@@ -731,9 +993,60 @@ export class FrontendPluginManager {
   private capabilityGrantResolver:
     | ((pluginId: string, packageVersion: string) => HostCapabilityGrant | null)
     | null = null
+  /** Previous Plans snapshot selected by the Host lifecycle record. It is
+   *  intentionally absent until the lifecycle has found a real prior active
+   *  package; current candidate/active identities are never reused as a fake
+   *  previous snapshot. */
+  private plansStorageSnapshotContext: {
+    packageVersion: string
+    previousPackageVersion: string | null
+  } | null = null
+  private plansStorageReadinessHandler: ((packageVersion: string) => Promise<boolean>) | null = null
+
+  /** Host-only migration admission shared by renderer and headless requests. */
+  setPlansStorageReadinessHandler(handler: (packageVersion: string) => Promise<boolean>): void {
+    this.plansStorageReadinessHandler = handler
+  }
+
+  private async plansStorageReady(packageVersion: string | undefined): Promise<boolean> {
+    if (!packageVersion) return false
+    try {
+      return await this.plansStorageReadinessHandler!(packageVersion)
+    } catch {
+      return false
+    }
+  }
+
+  private async plansInstanceStorageAdmission(plugin: RunningPlugin, reqId: string): Promise<CapabilityResponse | null> {
+    if (plugin.id !== PLANS_PLUGIN_ID || !plugin.hasV2DescriptorIdentity || !this.plansStorageReadinessHandler) return null
+    const binding = plugin.capabilityContext?.runtimeBinding
+    const ready = await this.plansStorageReady(binding?.packageVersion)
+    if (this.isPluginStopping(plugin)) return buildError(reqId, 'PLUGIN_STOPPING', 'plugin runtime is stopping')
+    if (
+      this.running.get(plugin.instanceId) !== plugin ||
+      !binding || !sameRuntimeBinding(binding, plugin.capabilityContext?.runtimeBinding) ||
+      !this.plansCapabilityContext(binding.packageVersion, plugin.workspacePath ?? '', binding.audience ?? undefined)
+    ) return buildError(reqId, 'CAPABILITY_DENIED', 'Plans runtime Grant is unavailable')
+    return ready ? null : buildError(reqId, 'BACKEND_UNAVAILABLE', 'Plans storage is unavailable')
+  }
   private activationFailureHandler:
     | ((failure: { pluginId: string; packageVersion: string; reason: string }) => void)
     | null = null
+  private plansBackendFailureHandler:
+    | ((failure: {
+        instanceId: string
+        workspacePath: string
+        packageVersion: string
+        query: string
+        contributionKey: string | null
+        reason: string
+      }) => void)
+    | null = null
+  /** Host-only liveness for the exact selected Plans descriptor/activation.
+   *  An unavailable child must withdraw the MCP feature until a later bind
+   *  succeeds; otherwise MCP keeps selecting the broken v2 adapter. */
+  private plansBackendHealth: PlansBackendHealth = 'unknown'
+  private plansBackendHealthIdentity: { packageVersion: string; packageDir: string } | null = null
   private readonly pendingActivations = new Map<
     string,
     ReturnType<typeof setTimeout> | null
@@ -784,7 +1097,7 @@ export class FrontendPluginManager {
       this.pendingTerminalOwners.delete(sessionId)
       const route = this.terminalRoutes.get(sessionId)
       const plugin = route ? this.runningPluginForTerminalRoute(route) : undefined
-      if (plugin?.hasV2DescriptorIdentity && plugin.id === GIT_PLUGIN_ID) {
+      if (usesPublicAiCliEvents(plugin)) {
         const binding = plugin.capabilityContext?.runtimeBinding
         const data = toPayload(payload).data
         if (
@@ -810,16 +1123,116 @@ export class FrontendPluginManager {
     return [...this.running.values()].filter((plugin) => plugin.id === pluginId)
   }
 
+  private packageVersionOfPlugin(plugin: RunningPlugin): string | null {
+    const packageVersion = plugin.capabilityContext?.runtimeBinding?.packageVersion
+    return nonEmptyString(packageVersion) ? packageVersion : null
+  }
+
+  private isPluginStopping(plugin: RunningPlugin): boolean {
+    const packageVersion = this.packageVersionOfPlugin(plugin)
+    return packageVersion !== null && this.stoppingPlugins.has(packageVersionKey(plugin.id, packageVersion))
+  }
+
+  private isPackageVersionStopping(pluginId: string, packageVersion: unknown): boolean {
+    return (
+      typeof packageVersion === 'string' &&
+      packageVersion.length > 0 &&
+      this.stoppingPlugins.has(packageVersionKey(pluginId, packageVersion))
+    )
+  }
+
+  private packageVersionForPluginId(pluginId: string): string | null {
+    const descriptorVersion = this.descriptors.get(pluginId)?.packageVersion
+    if (nonEmptyString(descriptorVersion)) return descriptorVersion
+    const activationVersion = this.pluginBackendHost.activationForPlugin(pluginId)?.packageVersion
+    return nonEmptyString(activationVersion) ? activationVersion : null
+  }
+
+  private instancesForPackageVersion(pluginId: string, packageVersion: string): RunningPlugin[] {
+    return this.instancesForPlugin(pluginId).filter(
+      (plugin) => this.packageVersionOfPlugin(plugin) === packageVersion,
+    )
+  }
+
   private nextInstanceId(): string {
     let instanceId = randomUUID()
     while (this.running.has(instanceId)) instanceId = randomUUID()
     return instanceId
   }
 
-  private workspaceIdForPath(workspacePath: string): string | null {
+  workspaceIdForPath(workspacePath: string): string | null {
     if (!nonEmptyString(workspacePath)) return null
     const normalized = resolve(workspacePath)
     return createHash('sha256').update(normalized).digest('hex')
+  }
+
+  private hasPlansBackendView(
+    descriptor: PluginLaunchDescriptor,
+    workspacePath: string | null | undefined,
+    capabilityContext?: HostCapabilityContext | null,
+  ): boolean {
+    const policy = descriptor.capabilityPolicy
+    const isManifestV2 = policy?.kind === 'manifest-v2'
+    const grant = capabilityContext?.userGrant
+    const v2BindAllowed = !isManifestV2 || (
+      policy?.kind === 'manifest-v2' &&
+      policy.system.includes('fs') &&
+      grant !== null &&
+      grant !== undefined &&
+      grant.packageVersion === descriptor.packageVersion &&
+      grant.system.includes('fs') &&
+      grant.storage === true
+    )
+    return descriptor.id === 'navide.plans' &&
+      nonEmptyString(descriptor.packageVersion) &&
+      nonEmptyString(descriptor.packageDir) &&
+      nonEmptyString(workspacePath) &&
+      v2BindAllowed &&
+      (!isManifestV2 || this.isPlansBackendAvailable()) &&
+      this.pluginBackendHost.activationFor(
+        descriptor.id,
+        descriptor.packageVersion,
+        descriptor.packageDir,
+      ) !== undefined
+  }
+
+  /**
+   * The Plans bundle exposes this Host-selected identity in DevTools so a
+   * developer can distinguish the package that was selected from an older
+   * bundle left in a profile. This deliberately carries only a closed source
+   * label, never the package directory or another filesystem-derived value.
+   */
+  private plansPackageSource(descriptor: PluginLaunchDescriptor): PlansPackageSource {
+    const selected = this.descriptors.get(PLANS_PLUGIN_ID)
+    const packageDirectory = canonicalBackendPackageDir(descriptor.packageDir)
+    const matchesSelection = selected?.id === descriptor.id &&
+      selected.packageVersion === descriptor.packageVersion &&
+      packageDirectory !== null &&
+      canonicalBackendPackageDir(selected.packageDir) === packageDirectory
+    if (!matchesSelection) return 'host-bundled'
+    if (this.descriptorSources.get(descriptor.id) === 'factory-bundle') return 'factory-bundled'
+    const installed = this.installedPackages.get(PLANS_PLUGIN_ID)
+    if (this.descriptorSources.get(descriptor.id) === 'installed-catalog' && installed && installed.packageVersion === descriptor.packageVersion) {
+      return installed.provenance ?? 'installed'
+    }
+    return 'host-bundled'
+  }
+
+  /** Add immutable Host provenance after caller-provided launch data. The
+   * selected descriptor is authoritative: caller query values cannot spoof
+   * the active Plans package identity. */
+  private plansProvenanceQuery(descriptor: PluginLaunchDescriptor, query: string): string {
+    if (descriptor.id !== PLANS_PLUGIN_ID || !nonEmptyString(descriptor.packageVersion)) return query
+    if (!this.plansDiagnosticsEnabled) {
+      const params = new URLSearchParams(query)
+      params.delete('plans_package_version')
+      params.delete('plans_package_source')
+      params.delete('plans_diagnostics')
+      return `?${params.toString()}`
+    }
+    const params = new URLSearchParams(query)
+    params.set('plans_diagnostics', '1')
+    return appendPlansProvenanceQuery(params.toString(), descriptor.packageVersion, this.plansPackageSource(descriptor))
   }
 
   private issueGitCredentialOwner(plugin: RunningPlugin): GitCredentialOwner | null {
@@ -941,16 +1354,269 @@ export class FrontendPluginManager {
     }
   }
 
+  /** Host-selected grant/binding context for the first-party Plans package.
+   *  Plans has no public domain permission: its document operations use the
+   *  package-local backend and the Host-private filesystem Bridge, while the
+   *  embedded AI panel uses the existing public `aiCli` catalog. */
+  plansCapabilityContext(
+    packageVersion: string,
+    workspacePath: string,
+    audience = 'plans-window'
+  ): HostCapabilityContext | null {
+    const workspaceId = this.workspaceIdForPath(workspacePath)
+    const descriptor = this.descriptors.get(PLANS_PLUGIN_ID)
+    const policy = descriptor?.capabilityPolicy
+    if (
+      !descriptor ||
+      policy?.kind !== 'manifest-v2' ||
+      descriptor.packageVersion !== packageVersion ||
+      !descriptor.packageDir
+    ) return null
+    const grant = this.capabilityGrantResolver?.(PLANS_PLUGIN_ID, packageVersion) ?? null
+    if (
+      !grant ||
+      grant.packageVersion !== packageVersion ||
+      grant.storage !== true ||
+      !policy.system.includes('fs') ||
+      !grant.system.includes('fs')
+    ) return null
+    if (
+      grant.shell !== policy.shell ||
+      grant.system.length !== policy.system.length ||
+      grant.system.some((namespace) => !policy.system.includes(namespace)) ||
+      (policy.shell === 'full' && grant.highRiskShellConfirmed !== true)
+    ) return null
+    const installed = this.installedPackages.get(PLANS_PLUGIN_ID)
+    return {
+      publisherEligible:
+        isReservedPluginId(PLANS_PLUGIN_ID) &&
+        (installed?.provenance === 'official-registry' ||
+          installed?.provenance === 'factory-bundled' ||
+          installed === undefined),
+      userGrant: grant,
+      runtimeBinding: {
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion,
+        workspaceId,
+        instanceId: null,
+        audience,
+      },
+      aiCliProfiles: Object.keys(AI_CLI_PROFILES),
+      storageSnapshots: new Map([
+        ['candidate', packageVersion],
+        ['active', packageVersion],
+        ...(this.plansStorageSnapshotContext?.packageVersion === packageVersion &&
+        this.plansStorageSnapshotContext.previousPackageVersion
+          ? [['previous', this.plansStorageSnapshotContext.previousPackageVersion] as const]
+          : []),
+      ]),
+      storageSnapshotTier: 'active',
+    }
+  }
+
+  /** Supply the actual previous active identity selected during Plans storage
+   *  migration. The renderer cannot choose or replace this value. */
+  setPlansStorageSnapshotContext(
+    packageVersion: string,
+    previousPackageVersion: string | null,
+  ): void {
+    this.plansStorageSnapshotContext = {
+      packageVersion,
+      previousPackageVersion,
+    }
+  }
+
+  /** Return the exact Host-selected Plans descriptor/activation tuple. */
+  private plansBackendSelection(): {
+    descriptor: PluginLaunchDescriptor
+    activation: BackendPluginLaunchSpec
+  } | null {
+    const descriptor = this.descriptors.get(PLANS_PLUGIN_ID)
+    if (
+      !descriptor ||
+      descriptor.capabilityPolicy?.kind !== 'manifest-v2' ||
+      !nonEmptyString(descriptor.packageVersion) ||
+      !nonEmptyString(descriptor.packageDir)
+    ) return null
+    const activation = this.pluginBackendHost.activationFor(
+      PLANS_PLUGIN_ID,
+      descriptor.packageVersion,
+      descriptor.packageDir,
+    )
+    if (!activation) return null
+    if (
+      activation.pluginId !== PLANS_PLUGIN_ID ||
+      activation.packageVersion !== descriptor.packageVersion ||
+      canonicalBackendPackageDir(activation.packageDir) !== canonicalBackendPackageDir(descriptor.packageDir) ||
+      !activation.approvedBridgePorts?.includes('filesystem')
+    ) return null
+    return { descriptor, activation }
+  }
+
+  private plansGrantMatchesPolicy(
+    descriptor: PluginLaunchDescriptor,
+    packageVersion: string,
+  ): boolean {
+    const policy = descriptor.capabilityPolicy
+    const grant = this.capabilityGrantResolver?.(PLANS_PLUGIN_ID, packageVersion) ?? null
+    if (
+      policy?.kind !== 'manifest-v2' ||
+      descriptor.packageVersion !== packageVersion ||
+      !grant ||
+      grant.packageVersion !== packageVersion ||
+      grant.storage !== true ||
+      !policy.system.includes('fs') ||
+      !grant.system.includes('fs') ||
+      grant.shell !== policy.shell ||
+      grant.system.length !== policy.system.length ||
+      grant.system.some((namespace) => !policy.system.includes(namespace)) ||
+      (policy.shell === 'full' && grant.highRiskShellConfirmed !== true)
+    ) return false
+    return true
+  }
+
+  private plansHealthApplies(
+    packageVersion: string,
+    packageDir: string,
+  ): boolean {
+    return this.plansBackendHealthIdentity?.packageVersion === packageVersion &&
+      canonicalBackendPackageDir(this.plansBackendHealthIdentity.packageDir) ===
+        canonicalBackendPackageDir(packageDir)
+  }
+
+  /** True only when the descriptor, exact activation, Grant and child health
+   * all identify a usable production Plans backend. */
+  isPlansBackendAvailable(): boolean {
+    const selection = this.plansBackendSelection()
+    if (!selection) return false
+    if (!this.plansGrantMatchesPolicy(selection.descriptor, selection.descriptor.packageVersion!)) {
+      return false
+    }
+    return !(
+      this.plansHealthApplies(selection.descriptor.packageVersion!, selection.descriptor.packageDir!) &&
+      this.plansBackendHealth === 'unavailable'
+    )
+  }
+
+  /**
+   * Return whether a failed Plans v2 route may be replaced by the legacy
+   * adapter. A descriptor/Grant mismatch is a security decision and must not
+   * be hidden by fallback; only a missing exact activation or a failed child
+   * is an availability recovery.
+   */
+  plansBackendFallbackAllowed(): boolean {
+    const descriptor = this.descriptors.get(PLANS_PLUGIN_ID)
+    if (descriptor?.capabilityPolicy?.kind !== 'manifest-v2') return true
+    if (!nonEmptyString(descriptor.packageVersion) || !nonEmptyString(descriptor.packageDir)) {
+      return true
+    }
+    if (!this.plansGrantMatchesPolicy(descriptor, descriptor.packageVersion)) return false
+    const activation = this.pluginBackendHost.activationFor(
+      PLANS_PLUGIN_ID,
+      descriptor.packageVersion,
+      descriptor.packageDir,
+    )
+    if (!activation) return true
+    if (
+      activation.pluginId !== PLANS_PLUGIN_ID ||
+      activation.packageVersion !== descriptor.packageVersion ||
+      canonicalBackendPackageDir(activation.packageDir) !==
+        canonicalBackendPackageDir(descriptor.packageDir) ||
+      !activation.approvedBridgePorts?.includes('filesystem')
+    ) return true
+    return (
+      this.plansHealthApplies(descriptor.packageVersion, descriptor.packageDir) &&
+      this.plansBackendHealth === 'unavailable'
+    )
+  }
+
+  /** Withdraw the v2 availability bit after a bind/child/recovery failure.
+   *  The descriptor remains installed so recovery can retry it explicitly. */
+  markPlansBackendUnavailable(_reason = 'child-unavailable'): void {
+    const descriptor = this.descriptors.get(PLANS_PLUGIN_ID)
+    if (
+      descriptor?.capabilityPolicy?.kind !== 'manifest-v2' ||
+      !nonEmptyString(descriptor.packageVersion) ||
+      !nonEmptyString(descriptor.packageDir)
+    ) return
+    this.plansBackendHealth = 'unavailable'
+    this.plansBackendHealthIdentity = {
+      packageVersion: descriptor.packageVersion,
+      packageDir: descriptor.packageDir,
+    }
+    this.refreshHostSessionRegistration()
+  }
+
+  private markPlansBackendReady(packageVersion: string, packageDir: string): void {
+    this.plansBackendHealth = 'ready'
+    this.plansBackendHealthIdentity = { packageVersion, packageDir }
+    this.refreshHostSessionRegistration()
+  }
+
+  private isPlansBackendAvailabilityError(error: unknown): boolean {
+    return error instanceof BackendPluginError && (
+      error.code === 'BACKEND_UNAVAILABLE' ||
+      error.code === 'NOT_READY' ||
+      error.code === 'TIMEOUT' ||
+      error.code === 'PROTOCOL_ERROR' ||
+      error.code === 'INVALID_RUNTIME' ||
+      error.code === 'PLUGIN_STOPPING'
+    )
+  }
+
   setCapabilityGrantResolver(
     resolver: ((pluginId: string, packageVersion: string) => HostCapabilityGrant | null) | null
   ): void {
     this.capabilityGrantResolver = resolver
+    this.refreshHostSessionRegistration()
+  }
+
+  setExecutionPolicyResolver(
+    resolver: ((workspacePath?: string) => ExecutionPolicySnapshot) | null
+  ): void {
+    this.executionPolicyResolver = resolver
+  }
+
+  /** Set the main-process-only token for the current backend instance. The
+   * token is never included in renderer-facing backend status payloads. */
+  setBackendHostToken(token: string | null): void {
+    if (token === this.backendHostToken) return
+    this.hostRegistrationTask = null
+    this.backendHostToken = token
+    this.hostSessionRegistered = false
+    const client = this.wsClient
+    const url = this.backendWsUrl
+    if (token && client && url && client.isHealthyFor(url)) {
+      this.registerHostSession(client)
+    }
   }
 
   setActivationFailureHandler(
     handler: ((failure: { pluginId: string; packageVersion: string; reason: string }) => void) | null
   ): void {
     this.activationFailureHandler = handler
+  }
+
+  setPlansBackendFailureHandler(
+    handler: ((failure: {
+      instanceId: string
+      workspacePath: string
+      packageVersion: string
+      query: string
+      contributionKey: string | null
+      reason: string
+    }) => void) | null,
+  ): void {
+    this.plansBackendFailureHandler = handler
+  }
+
+  /** Wait for the initial backend/root bind of one exact view. This is used by
+   *  the Plans opener so a failed package child can be replaced before the
+   *  caller presents the v2 window as successful. */
+  async waitForBackendBinding(instanceId: string): Promise<void> {
+    const plugin = this.running.get(instanceId)
+    if (!plugin) throw new BackendPluginError('INVALID_RUNTIME')
+    if (plugin.backendBindingTask) await plugin.backendBindingTask
   }
 
   private settleActivation(instanceId: string): void {
@@ -965,6 +1631,17 @@ export class FrontendPluginManager {
     this.settleActivation(instanceId)
     const packageVersion = plugin.capabilityContext?.runtimeBinding?.packageVersion
     if (!packageVersion) return
+    if (plugin.id === PLANS_PLUGIN_ID && plugin.workspacePath) {
+      this.markPlansBackendUnavailable('child-unavailable')
+      this.plansBackendFailureHandler?.({
+        instanceId,
+        workspacePath: plugin.workspacePath,
+        packageVersion,
+        query: plugin.query,
+        contributionKey: plugin.contributionKey,
+        reason,
+      })
+    }
     this.activationFailureHandler?.({ pluginId: plugin.id, packageVersion, reason })
   }
 
@@ -976,6 +1653,9 @@ export class FrontendPluginManager {
     const packageVersion = descriptor.packageVersion
     const policy = descriptor.capabilityPolicy
     if (!packageVersion || policy?.kind !== 'manifest-v2') return null
+    if (descriptor.id === PLANS_PLUGIN_ID) {
+      return this.plansCapabilityContext(packageVersion, workspacePath, view.contributionKey)
+    }
     const grant = this.capabilityGrantResolver?.(descriptor.id, packageVersion) ?? null
     if (!grant || grant.packageVersion !== packageVersion || grant.storage !== true) return null
     if (
@@ -1078,6 +1758,30 @@ export class FrontendPluginManager {
       ) && this.hasValidTerminalBinding({ ...plugin, capabilityContext: nextContext }))
     if (!preserveTerminalOwnership) this.releaseTerminalOwnership(plugin)
     plugin.capabilityContext = nextContext
+  }
+
+  /** Attach a Host-authenticated origin at the final broker boundary. The
+   *  context supplied while opening a view remains Host state; neither the
+   *  renderer payload nor a package backend can select this value. */
+  private capabilityContextForInitiator(
+    plugin: RunningPlugin,
+    initiator: AuthenticatedInitiator,
+  ): HostCapabilityContext | null {
+    const context = plugin.capabilityContext
+    if (!context) return null
+    let executionPolicy: ExecutionPolicySnapshot | undefined
+    if (initiator.kind === 'agent' && this.executionPolicyResolver) {
+      try {
+        executionPolicy = this.executionPolicyResolver(plugin.workspacePath ?? undefined)
+      } catch {
+        return null
+      }
+    }
+    return {
+      ...context,
+      initiator,
+      ...(executionPolicy ? { executionPolicy } : {}),
+    }
   }
 
   private instanceForSender(senderId: number): RunningPlugin | undefined {
@@ -1195,6 +1899,14 @@ export class FrontendPluginManager {
     )
   }
 
+  private payloadClaimsInitiator(payload: unknown): boolean {
+    return (
+      typeof payload === 'object' &&
+      payload !== null &&
+      Object.prototype.hasOwnProperty.call(payload, 'initiator')
+    )
+  }
+
   private workspaceBoundPayload(
     plugin: RunningPlugin,
     payload: unknown
@@ -1208,6 +1920,9 @@ export class FrontendPluginManager {
     const record = payload as Record<string, unknown>
     if (Object.prototype.hasOwnProperty.call(record, 'instanceId')) {
       return buildError('', 'BAD_REQUEST', 'instance identity is Host-owned')
+    }
+    if (this.payloadClaimsInitiator(record)) {
+      return buildError('', 'BAD_REQUEST', 'initiator identity is Host-owned')
     }
     if (Object.prototype.hasOwnProperty.call(record, 'credential')) {
       return buildError('', 'BAD_REQUEST', 'credentials are Host-owned')
@@ -1762,6 +2477,9 @@ export class FrontendPluginManager {
       if (Object.prototype.hasOwnProperty.call(rawPayload, 'instanceId')) {
         return buildError(reqId, 'BAD_REQUEST', 'instance identity is Host-owned')
       }
+      if (this.payloadClaimsInitiator(rawPayload)) {
+        return buildError(reqId, 'BAD_REQUEST', 'initiator identity is Host-owned')
+      }
       const call: CapabilityCall = {
         pluginId: plugin.id,
         ns: 'ui',
@@ -1778,8 +2496,14 @@ export class FrontendPluginManager {
   private async handleHostCall(senderId: number, payload: unknown): Promise<CapabilityResponse> {
     const plugin = this.instanceForSender(senderId)
     if (!plugin) return buildError('', 'BAD_REQUEST', 'unknown plugin sender')
+    if (this.isPluginStopping(plugin)) {
+      return buildError('', 'PLUGIN_STOPPING', 'plugin runtime is stopping')
+    }
     if (this.payloadClaimsInstance(payload)) {
       return buildError('', 'BAD_REQUEST', 'instance identity is Host-owned')
+    }
+    if (this.payloadClaimsInitiator(payload)) {
+      return buildError('', 'BAD_REQUEST', 'initiator identity is Host-owned')
     }
     if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
       return buildError('', 'BAD_REQUEST', 'malformed Host action call')
@@ -1791,7 +2515,146 @@ export class FrontendPluginManager {
     if (!reqId || !action || typeof args !== 'object' || args === null || Array.isArray(args)) {
       return buildError(reqId, 'BAD_REQUEST', 'malformed Host action call')
     }
+    if (action === 'plans.shell') return this.runPlansShellAction(reqId, args as Record<string, unknown>, plugin)
     return this.runGitHostAction(reqId, action, args as Record<string, unknown>, plugin)
+  }
+
+  /** Private direct-user adapter for retained Plans shell actions. Like the
+   * v1 IPC, this is not an Agent/MCP method or a public capability namespace. */
+  private async runPlansShellAction(reqId: string, args: Record<string, unknown>, plugin: RunningPlugin): Promise<CapabilityResponse> {
+    const context = plugin.capabilityContext
+    const binding = context?.runtimeBinding
+    const policy = plugin.capabilityPolicy
+    const currentGrant = binding ? this.capabilityGrantResolver?.(PLANS_PLUGIN_ID, binding.packageVersion) : null
+    const required = args.operation === 'dispatch_execution' ? ['fs', 'ui', 'aiCli'] as const : ['fs', 'ui'] as const
+    if (!plugin.hasV2DescriptorIdentity || plugin.id !== PLANS_PLUGIN_ID || !plugin.workspacePath ||
+      !context?.publisherEligible || !binding || binding.pluginId !== PLANS_PLUGIN_ID ||
+      binding.instanceId !== plugin.instanceId || binding.workspaceId !== this.workspaceIdForPath(plugin.workspacePath) ||
+      !binding.audience || !['plans-window', 'plans-left'].includes(binding.audience) || policy.kind !== 'manifest-v2' ||
+      !currentGrant || currentGrant.storage !== true || currentGrant.packageVersion !== binding.packageVersion ||
+      !context.userGrant || context.userGrant.packageVersion !== binding.packageVersion ||
+      required.some((permission) => !policy.system.includes(permission) || !currentGrant.system.includes(permission) || !context.userGrant?.system.includes(permission))) {
+      return buildError(reqId, 'CAPABILITY_DENIED', 'Plans shell action is unavailable')
+    }
+    const operation = args.operation
+    if (operation !== 'open_path' && operation !== 'dispatch_execution') {
+      return buildError(reqId, 'METHOD_NOT_FOUND', 'Plans shell action is not mapped')
+    }
+    const allowedKeys = operation === 'open_path' ? ['operation', 'rel_path'] : ['operation', 'rel_path', 'agent_key']
+    if (Object.keys(args).some((key) => !allowedKeys.includes(key)) || !nonEmptyString(args.rel_path)) {
+      return buildError(reqId, 'BAD_REQUEST', 'Plans shell payload is invalid')
+    }
+    const root = resolvePlansRootPath(plugin.workspacePath)
+    if (!isAllowedPlanDocumentPath(args.rel_path, root)) {
+      return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Plans shell path is outside the Plans directories')
+    }
+    if (!this.plansShellHandlers) return buildError(reqId, 'BACKEND_ERROR', 'Plans shell handlers are unavailable')
+    try {
+      if (operation === 'open_path') {
+        return buildSuccess(reqId, await this.plansShellHandlers.openPath(resolve(root, args.rel_path)))
+      }
+      if (!nonEmptyString(args.agent_key) || !Object.hasOwn(AI_CLI_PROFILES, args.agent_key)) {
+        return buildError(reqId, 'BAD_REQUEST', 'Plans execution agent is invalid')
+      }
+      return buildSuccess(reqId, this.plansShellHandlers.dispatchExecution({
+        workspace_path: plugin.workspacePath, rel_path: args.rel_path, agent_key: args.agent_key,
+      }))
+    } catch {
+      return buildError(reqId, 'BACKEND_ERROR', 'Plans shell action failed')
+    }
+  }
+
+  private exactBackendPayload(
+    payload: unknown,
+    allowed: ReadonlySet<string>,
+  ): Record<string, unknown> | null {
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null
+    const record = payload as Record<string, unknown>
+    const keys = Object.keys(record)
+    if (keys.some((key) => BACKEND_IDENTITY_KEYS.has(key) || !allowed.has(key))) return null
+    return record
+  }
+
+  private backendError(reqId: string, error: unknown): CapabilityResponse {
+    if (!(error instanceof BackendPluginError)) {
+      return buildError(reqId, 'BACKEND_ERROR', 'Backend plugin request failed.')
+    }
+    switch (error.code) {
+      case 'INVALID_ARGUMENT':
+        return buildError(reqId, 'INVALID_ARGUMENT', 'Backend call arguments are invalid.')
+      case 'CAPABILITY_DENIED':
+        return buildError(reqId, 'CAPABILITY_DENIED', 'Backend capability is denied.')
+      case 'RESOURCE_LIMIT':
+        return buildError(reqId, 'RESOURCE_LIMIT', 'Backend resource limit reached.')
+      case 'RESULT_TOO_LARGE':
+        return buildError(reqId, 'RESOURCE_LIMIT', 'Backend result exceeds the allowed size.')
+      case 'TIMEOUT':
+        return buildError(reqId, 'TIMEOUT', 'Backend plugin call timed out.')
+      case 'USER_CANCELLED':
+        return buildError(reqId, 'USER_CANCELLED', 'Backend plugin call was cancelled.')
+      case 'PLUGIN_STOPPING':
+        return buildError(reqId, 'PLUGIN_STOPPING', 'Backend plugin is stopping.')
+      case 'PLUGIN_ERROR':
+        if (error.pluginCode === 'CAPABILITY_DENIED') {
+          return buildError(reqId, 'CAPABILITY_DENIED', 'Backend capability is denied.')
+        }
+        if (error.pluginCode === 'WORKSPACE_SCOPE_VIOLATION') {
+          return buildError(reqId, 'WORKSPACE_SCOPE_VIOLATION', 'Workspace scope is unavailable.')
+        }
+        if (error.pluginCode === 'INVALID_ARGUMENT') {
+          return buildError(reqId, 'INVALID_ARGUMENT', 'Backend call arguments are invalid.')
+        }
+        return buildError(reqId, 'BACKEND_ERROR', 'Plugin request failed.')
+      default:
+        return buildError(reqId, 'BACKEND_UNAVAILABLE', 'Backend plugin is unavailable.')
+    }
+  }
+
+  /** Keep the package-local Plans resolver inside its sender-bound workspace.
+   *  The child receives the renderer's path as an operation argument, but the
+   *  authorization decision compares its canonical hash with the Host-bound
+   *  workspace id before any child dispatch occurs. */
+  private backendCallScopeError(
+    plugin: RunningPlugin,
+    reqId: string,
+    name: unknown,
+    args: unknown,
+  ): CapabilityResponse | null {
+    if (plugin.id !== PLANS_PLUGIN_ID || name !== 'plans.resolve_root') return null
+    if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+      return buildError(reqId, 'INVALID_ARGUMENT', 'Plans backend arguments are invalid.')
+    }
+    const workspacePath = (args as Record<string, unknown>).workspace_path
+    if (!nonEmptyString(workspacePath)) {
+      return buildError(reqId, 'INVALID_ARGUMENT', 'Plans workspace path is invalid.')
+    }
+    const boundWorkspaceId = plugin.backendWorkspaceId
+    if (!boundWorkspaceId) return null
+    const requestedWorkspaceId = this.workspaceIdForPath(workspacePath)
+    if (requestedWorkspaceId !== boundWorkspaceId) {
+      return buildError(
+        reqId,
+        'WORKSPACE_SCOPE_VIOLATION',
+        'Plans backend workspace is outside the bound workspace.',
+      )
+    }
+    return null
+  }
+
+  private cancelBackendRecord(instanceId: string, id: string): void {
+    const calls = this.pendingBackendCalls.get(instanceId)
+    const call = calls?.get(id)
+    if (call) {
+      calls!.delete(id)
+      if (calls!.size === 0) this.pendingBackendCalls.delete(instanceId)
+      call.abort()
+      return
+    }
+    const subscriptions = this.pendingBackendSubscriptions.get(instanceId)
+    const pending = subscriptions?.get(id)
+    if (!pending) return
+    pending.cancelled = true
+    pending.unregister?.()
   }
 
   /** Register the broker IPC handlers exactly once. Safe to call repeatedly. */
@@ -1805,6 +2668,9 @@ export class FrontendPluginManager {
         // Not a known plugin view — refuse without leaking anything.
         return buildError('', 'BAD_REQUEST', 'unknown plugin sender')
       }
+      if (this.isPluginStopping(plugin)) {
+        return buildError('', 'PLUGIN_STOPPING', 'plugin runtime is stopping')
+      }
       const pluginId = plugin.id
       const reqId =
         typeof payload === 'object' && payload && 'reqId' in payload
@@ -1813,9 +2679,16 @@ export class FrontendPluginManager {
       if (this.payloadClaimsInstance(payload)) {
         return buildError(reqId, 'BAD_REQUEST', 'instance identity is Host-owned')
       }
+      if (this.payloadClaimsInitiator(payload)) {
+        return buildError(reqId, 'BAD_REQUEST', 'initiator identity is Host-owned')
+      }
       const call = parseCapabilityCall(payload, pluginId)
       if (!call) {
         return buildError(reqId, 'BAD_REQUEST', 'malformed capability call')
+      }
+      if (this.plansStorageReadinessHandler) {
+        const storageAdmission = await this.plansInstanceStorageAdmission(plugin, reqId)
+        if (storageAdmission) return storageAdmission
       }
 
       // Enforce scoping + route. A denied namespace is rejected here and never
@@ -1825,7 +2698,7 @@ export class FrontendPluginManager {
         plan = planCapabilityCall(
           call,
           plugin.capabilityPolicy,
-          plugin.capabilityContext ?? undefined
+          this.capabilityContextForInitiator(plugin, HOST_USER_INITIATOR) ?? undefined
         )
       } catch {
         return buildError(call.reqId, 'INVALID_ARGUMENT', 'invalid capability request')
@@ -1867,6 +2740,7 @@ export class FrontendPluginManager {
               args: plan.args,
               partition: plan.storage.partition,
               snapshot: plan.storage.snapshot,
+              ...(plan.initiator ? { initiator: plan.initiator } : {}),
             })
             if (
               plugin.hasV2DescriptorIdentity &&
@@ -1983,6 +2857,236 @@ export class FrontendPluginManager {
       this.handleHostCall(event.sender.id, payload)
     )
 
+    ipcMain.handle(IPC_BACKEND_CALL, async (event, payload: unknown): Promise<CapabilityResponse> => {
+      const plugin = this.instanceForSender(event.sender.id)
+      const record = this.exactBackendPayload(
+        payload,
+        new Set(['reqId', 'name', 'args', 'timeoutMs']),
+      )
+      const reqId =
+        typeof payload === 'object' && payload !== null && !Array.isArray(payload) &&
+        typeof (payload as Record<string, unknown>).reqId === 'string'
+          ? (payload as Record<string, unknown>).reqId as string
+          : ''
+      if (!plugin) return buildError(reqId, 'BAD_REQUEST', 'unknown plugin sender')
+      if (this.isPluginStopping(plugin)) {
+        return buildError(reqId, 'PLUGIN_STOPPING', 'plugin runtime is stopping')
+      }
+      if (
+        !record ||
+        !nonEmptyString(record.reqId) ||
+        !nonEmptyString(record.name) ||
+        !Object.prototype.hasOwnProperty.call(record, 'args')
+      ) {
+        return buildError(reqId, 'BAD_REQUEST', 'malformed backend call')
+      }
+      if (record.timeoutMs !== undefined && !isAllowedBackendTimeout(record.timeoutMs)) {
+        return buildError(reqId, 'INVALID_ARGUMENT', 'backend timeout is invalid')
+      }
+      const scopeError = this.backendCallScopeError(
+        plugin,
+        record.reqId,
+        record.name,
+        record.args,
+      )
+      if (scopeError) return scopeError
+      const calls = this.pendingBackendCalls.get(plugin.instanceId) ?? new Map<string, AbortController>()
+      if (calls.has(record.reqId)) {
+        return buildError(record.reqId, 'BAD_REQUEST', 'backend request id is already pending')
+      }
+      if (calls.size >= MAX_BACKEND_CALLS_PER_INSTANCE) {
+        return buildError(record.reqId, 'RESOURCE_LIMIT', 'backend call limit reached')
+      }
+      if (
+        plugin.id === PLANS_PLUGIN_ID &&
+        plugin.hasV2DescriptorIdentity &&
+        plugin.capabilityPolicy.kind === 'manifest-v2' &&
+        !this.isPlansBackendAvailable()
+      ) {
+        return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable')
+      }
+      this.pendingBackendCalls.set(plugin.instanceId, calls)
+      const controller = new AbortController()
+      calls.set(record.reqId, controller)
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+      let abortListener: (() => void) | undefined
+      let remainingTimeout = record.timeoutMs as number | undefined
+      try {
+        if (
+          plugin.id === PLANS_PLUGIN_ID &&
+          plugin.hasV2DescriptorIdentity &&
+          plugin.capabilityPolicy.kind === 'manifest-v2' &&
+          (record.name === 'plans.create' || this.plansStorageReadinessHandler)
+        ) {
+          const timeoutMs = remainingTimeout ?? 30_000
+          const deadline = Date.now() + timeoutMs
+          const cancelled = new Promise<never>((_resolve, reject) => {
+            abortListener = () => reject(new BackendPluginError(
+              controller.signal.reason === 'timeout' ? 'TIMEOUT' : 'USER_CANCELLED',
+            ))
+            controller.signal.addEventListener('abort', abortListener, { once: true })
+          })
+          timeoutTimer = setTimeout(() => controller.abort('timeout'), timeoutMs)
+          const admission = await Promise.race([
+            (async () => {
+              if (this.plansStorageReadinessHandler) {
+                const storageAdmission = await this.plansInstanceStorageAdmission(plugin, reqId)
+                if (storageAdmission) return storageAdmission
+              }
+              if (controller.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
+              if (record.name === 'plans.create' && !(await this.provisionPlansAssets(plugin.workspacePath ?? ''))) {
+                return buildError(reqId, 'BACKEND_UNAVAILABLE', 'Plans assets are unavailable')
+              }
+              return null
+            })(),
+            cancelled,
+          ])
+          clearTimeout(timeoutTimer)
+          remainingTimeout = deadline - Date.now()
+          if (remainingTimeout <= 0) throw new BackendPluginError('TIMEOUT')
+          if (admission) return admission
+        }
+        if (controller.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
+        const result = await this.pluginBackendHost.call(
+          plugin.instanceId,
+          record.name,
+          record.args as JsonValue,
+          { signal: controller.signal, ...(remainingTimeout === undefined ? {} : { timeoutMs: remainingTimeout }) },
+        )
+        return buildSuccess(record.reqId, result)
+      } catch (error) {
+        if (plugin.id === PLANS_PLUGIN_ID && this.isPlansBackendAvailabilityError(error)) {
+          this.markPlansBackendUnavailable('child-unavailable')
+        }
+        return this.backendError(record.reqId, error)
+      } finally {
+        if (timeoutTimer !== undefined) clearTimeout(timeoutTimer)
+        if (abortListener) controller.signal.removeEventListener('abort', abortListener)
+        if (calls.get(record.reqId) === controller) calls.delete(record.reqId)
+        if (calls.size === 0 && this.pendingBackendCalls.get(plugin.instanceId) === calls) {
+          this.pendingBackendCalls.delete(plugin.instanceId)
+        }
+      }
+    })
+
+    ipcMain.on(IPC_BACKEND_CANCEL, (event, payload: unknown) => {
+      const plugin = this.instanceForSender(event.sender.id)
+      if (!plugin) return
+      const record = this.exactBackendPayload(payload, new Set(['reqId', 'subscriptionId']))
+      if (!record) return
+      const keys = Object.keys(record)
+      if (keys.length !== 1) return
+      const id = keys[0] === 'reqId' ? record.reqId : record.subscriptionId
+      if (!nonEmptyString(id)) return
+      this.cancelBackendRecord(plugin.instanceId, id)
+    })
+
+    ipcMain.handle(IPC_BACKEND_SUBSCRIBE, async (event, payload: unknown): Promise<CapabilityResponse> => {
+      const plugin = this.instanceForSender(event.sender.id)
+      const record = this.exactBackendPayload(payload, new Set(['subscriptionId', 'event']))
+      const subscriptionId =
+        typeof payload === 'object' && payload !== null && !Array.isArray(payload) &&
+        typeof (payload as Record<string, unknown>).subscriptionId === 'string'
+          ? (payload as Record<string, unknown>).subscriptionId as string
+          : ''
+      if (
+        !plugin ||
+        !record ||
+        Object.keys(record).length !== 2 ||
+        !nonEmptyString(record.subscriptionId) ||
+        !nonEmptyString(record.event)
+      ) return buildError(subscriptionId, 'BAD_REQUEST', 'malformed backend subscription')
+      if (this.isPluginStopping(plugin)) {
+        return buildError(subscriptionId, 'PLUGIN_STOPPING', 'plugin runtime is stopping')
+      }
+      const eventName = record.event as string
+      const subscriptions = this.pendingBackendSubscriptions.get(plugin.instanceId) ??
+        new Map<string, PendingBackendSubscription>()
+      if (subscriptions.has(subscriptionId)) {
+        return buildError(subscriptionId, 'BAD_REQUEST', 'backend subscription id is already pending')
+      }
+      if (subscriptions.size >= MAX_BACKEND_SUBSCRIPTIONS_PER_INSTANCE) {
+        return buildError(subscriptionId, 'RESOURCE_LIMIT', 'backend subscription limit reached')
+      }
+      this.pendingBackendSubscriptions.set(plugin.instanceId, subscriptions)
+      const pending: PendingBackendSubscription = {
+        controller: new AbortController(),
+        subscription: null,
+        unregister: null,
+        cancelled: false,
+      }
+      subscriptions.set(subscriptionId, pending)
+      const dispose = (): void => {
+        if (subscriptions.get(subscriptionId) !== pending) return
+        subscriptions.delete(subscriptionId)
+        if (subscriptions.size === 0) this.pendingBackendSubscriptions.delete(plugin.instanceId)
+        pending.cancelled = true
+        pending.controller.abort()
+        pending.subscription?.dispose('cancelled')
+        pending.subscription = null
+      }
+      pending.unregister = this.registerInstanceSubscription(plugin.instanceId, dispose)
+      let subscription: BackendPluginSubscription | null = null
+      try {
+        subscription = await this.pluginBackendHost.subscribe(
+          plugin.instanceId,
+          eventName,
+          (eventPayload) => {
+            const current = this.running.get(plugin.instanceId)
+            if (
+              pending.cancelled ||
+              current !== plugin ||
+              current.senderId !== event.sender.id ||
+              current.view.webContents.isDestroyed()
+            ) return
+            current.view.webContents.send(IPC_BACKEND_EVENT, {
+              subscriptionId,
+              event: eventName,
+              payload: eventPayload,
+            })
+          },
+          { signal: pending.controller.signal },
+        )
+        if (pending.cancelled || subscriptions.get(subscriptionId) !== pending) {
+          subscription.dispose('cancelled')
+          return buildError(subscriptionId, 'USER_CANCELLED', 'Backend plugin subscription was cancelled.')
+        }
+        pending.subscription = subscription
+        void subscription.settled.then((result) => {
+          if (
+            pending.cancelled ||
+            subscriptions.get(subscriptionId) !== pending
+          ) return
+          if (result.reason !== 'cancelled' && result.reason !== 'view-destroyed') {
+            const response = result.error
+              ? this.backendError(subscriptionId, result.error)
+              : buildError(subscriptionId, 'BACKEND_UNAVAILABLE', 'Backend plugin subscription ended.')
+            const current = this.running.get(plugin.instanceId)
+            if (
+              current === plugin &&
+              current.senderId === event.sender.id &&
+              !current.view.webContents.isDestroyed()
+            ) {
+              current.view.webContents.send(IPC_BACKEND_STATUS, {
+                subscriptionId,
+                ok: false,
+                error: response.error,
+              })
+            }
+          }
+          pending.unregister?.()
+        })
+        await subscription.acknowledged
+        if (pending.cancelled || subscriptions.get(subscriptionId) !== pending) {
+          return buildError(subscriptionId, 'USER_CANCELLED', 'Backend plugin subscription was cancelled.')
+        }
+        return buildSuccess(subscriptionId, null)
+      } catch (error) {
+        pending.unregister?.()
+        return this.backendError(subscriptionId, error)
+      }
+    })
+
     // Fire-and-forget capability channel (nav.castCapability) — see handleCast.
     ipcMain.on(IPC_CAST, (event, payload: unknown) => {
       this.handleCast(event.sender.id, payload)
@@ -2031,10 +3135,19 @@ export class FrontendPluginManager {
         if (this.anyPluginNeedsBackend()) this.ensureBackend()
         return
       }
-      if (client.isHealthyFor(url)) return
+      if (client.isHealthyFor(url)) {
+        if (this.backendHostToken && !this.hostSessionRegistered) {
+          this.registerHostSession(client)
+        }
+        return
+      }
+      this.hostRegistrationTask = null
+      this.hostSessionRegistered = false
       client.reset('backend changed')
       client.connect(url)
     } else if (client) {
+      this.hostRegistrationTask = null
+      this.hostSessionRegistered = false
       client.reset('backend stopped')
       client.markErrored()
       // reset()/markErrored() deliberately emit no status transition, so tell
@@ -2059,8 +3172,19 @@ export class FrontendPluginManager {
     | ((params: Record<string, string>) => boolean | Promise<boolean>)
     | null = null
 
+  /** Main-owned navigation adapter for the first-party Plans left surface. */
+  private openPlansWindowHandler:
+    | ((workspacePath: string, relPath: string) => boolean | Promise<boolean>)
+    | null = null
+
   setOpenInEditorHandler(fn: (params: Record<string, string>) => boolean | Promise<boolean>): void {
     this.openInEditorHandler = fn
+  }
+
+  setOpenPlansWindowHandler(
+    fn: ((workspacePath: string, relPath: string) => boolean | Promise<boolean>) | null,
+  ): void {
+    this.openPlansWindowHandler = fn
   }
 
   /** Install the Host-owned execution adapter for an already-authorized v2
@@ -2072,6 +3196,42 @@ export class FrontendPluginManager {
     this.publicCapabilityHandler = fn
   }
 
+  /** Connect the production Plans child to the existing Host filesystem
+   * service. The default Backend Host bridge remains fail-closed for tests and
+   * for callers that have not completed application wiring. */
+  configurePlansFilesystemService(filesystemPort?: PlansFilesystemPort): void {
+    this.pluginBackendHost.setBridgeDispatcher(
+      createProductionPlansBridgeDispatcher({
+        filesystem: filesystemPort ?? createHostPlansFilesystemPort({
+          call: (operation, payload, context) =>
+            this.sendPlansFilesystemService(operation, payload, context),
+        }),
+      }),
+    )
+  }
+
+  /** Provision the canonical Plans assets before a package child can create a
+   *  document. This Host-only call keeps template selection out of the child;
+   *  a missing template is an availability failure, never a reason to invent
+   *  a second document format. */
+  private async provisionPlansAssets(workspacePath: string): Promise<boolean> {
+    if (!nonEmptyString(workspacePath)) return false
+    try {
+      const payload = await this.sendPublicBackend(
+        'plans.ensure_assets',
+        { workspace_path: resolve(workspacePath) },
+      )
+      return (
+        typeof payload === 'object' &&
+        payload !== null &&
+        !Array.isArray(payload) &&
+        (payload as Record<string, unknown>).ok === true
+      )
+    } catch {
+      return false
+    }
+  }
+
   /** Execute a cataloged public plan for the Host. The plan is already
    *  authorized by the broker; this method still resolves the exact live
    *  instance so a stale plan cannot borrow a sibling workspace or PTY. */
@@ -2081,12 +3241,18 @@ export class FrontendPluginManager {
     if (!plugin || plugin.id !== plan.runtime.pluginId) {
       throw new Error('public capability instance is no longer active')
     }
+    if (this.isPluginStopping(plugin)) {
+      throw new BackendPluginError('PLUGIN_STOPPING')
+    }
     if (!sameRuntimeBinding(plugin.capabilityContext?.runtimeBinding, plan.runtime)) {
       throw new Error('public capability runtime binding is stale')
     }
     const workspacePath = plugin.workspacePath
     if (plan.scope === 'workspace' && !workspacePath) {
       throw new Error('public capability workspace binding is missing')
+    }
+    if (!this.publicPlanPolicyAllows(plan, plugin)) {
+      throw new Error('agent execution policy denied the operation')
     }
 
     if (plan.address.startsWith('aiCli.')) {
@@ -2121,14 +3287,46 @@ export class FrontendPluginManager {
         if (violation) throw new Error(`filesystem ${violation}`)
       }
       if (wsType === 'fs.write_file') payload.content = args.content
-      const response = await this.sendPublicBackend(wsType, payload)
+      const response = await this.sendPublicBackend(
+        wsType,
+        payload,
+        () => this.publicPlanCanDispatch(plan, plugin),
+      )
       return response
+    }
+
+    if (plan.address === 'ui.openPlansWindow') {
+      if (!workspacePath) throw new Error('Plans window capability requires a workspace')
+      const path = typeof plan.args.path === 'string' ? plan.args.path : ''
+      if (!path || isAbsolute(path)) throw new Error('Plans window path must be relative')
+      const root = resolve(resolvePlansRootPath(workspacePath))
+      const relativePath = relative(root, resolve(root, path))
+      if (!isAllowedPlanDocumentPath(relativePath, root)) {
+        throw new Error('Plans window path is outside the plans directory')
+      }
+      if (!this.openPlansWindowHandler) throw new Error('Plans window handler not registered')
+      const opened = await this.openPlansWindowHandler(workspacePath, relativePath)
+      return { opened }
     }
 
     if (plan.address === 'ui.openInEditor') {
       if (!workspacePath) throw new Error('editor capability requires a workspace')
       const path = typeof plan.args.path === 'string' ? plan.args.path : ''
-      const root = resolve(workspacePath)
+      // Plans documents are rooted at the repository's plan directories
+      // even when the selected workspace is a nested subdirectory.
+      // Keep the existing public editor capability and editor router, but use
+      // the same Host-selected Plans root for that one first-party surface.
+      const root = resolve(
+        plugin.id === PLANS_PLUGIN_ID ? resolvePlansRootPath(workspacePath) : workspacePath,
+      )
+      if (plugin.id === PLANS_PLUGIN_ID) {
+        if (!path || isAbsolute(path)) {
+          throw new Error('Plans editor path must be relative')
+        }
+        if (!isAllowedPlanDocumentPath(path, root)) {
+          throw new Error('Plans editor path is outside the plans directory')
+        }
+      }
       const relativePath = relative(root, resolve(root, path))
       if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
         throw new Error('editor path escapes the workspace')
@@ -2153,11 +3351,15 @@ export class FrontendPluginManager {
 
     if (plan.address === 'shell.run') {
       const command = typeof plan.args.command === 'string' ? plan.args.command : ''
-      const response = await this.sendPublicBackend('shell.run', {
-        workspace_path: workspacePath,
-        command,
-        host_mode: 'allowlist',
-      })
+      const response = await this.sendPublicBackend(
+        'shell.run',
+        {
+          workspace_path: workspacePath,
+          command,
+          host_mode: plan.shellMode ?? 'allowlist',
+        },
+        () => this.publicPlanCanDispatch(plan, plugin),
+      )
       return {
         exitCode: Number((response as Record<string, unknown>).exit_code ?? 0),
         stdout: String((response as Record<string, unknown>).stdout ?? (response as Record<string, unknown>).output ?? ''),
@@ -2168,15 +3370,536 @@ export class FrontendPluginManager {
     throw new Error(`unsupported public capability '${plan.address}'`)
   }
 
+  /** Host entry point for an authenticated MCP request. The request shape is
+   * untrusted and contains no initiator; the Host mints the agent identity and
+   * keeps it attached to the resulting public or backend operation. */
+  async executeAgentCapability(instanceId: string, payload: unknown): Promise<CapabilityResponse> {
+    const reqId =
+      typeof payload === 'object' && payload !== null && !Array.isArray(payload) &&
+      typeof (payload as Record<string, unknown>).reqId === 'string'
+        ? (payload as Record<string, unknown>).reqId as string
+        : ''
+    const plugin = this.running.get(instanceId)
+    if (!plugin) return buildError(reqId, 'BAD_REQUEST', 'unknown plugin instance')
+    if (this.isPluginStopping(plugin)) {
+      return buildError(reqId, 'PLUGIN_STOPPING', 'plugin runtime is stopping')
+    }
+    if (this.payloadClaimsInstance(payload) || this.payloadClaimsInitiator(payload)) {
+      return buildError(reqId, 'BAD_REQUEST', 'Host-owned identity cannot be supplied')
+    }
+    const call = parseCapabilityCall(payload, plugin.id)
+    if (!call) return buildError(reqId, 'BAD_REQUEST', 'malformed capability call')
+    if (plugin.capabilityPolicy.kind !== 'manifest-v2') {
+      return buildError(call.reqId, 'CAPABILITY_DENIED', 'agent calls require a Manifest v2 capability')
+    }
+    const storageAdmission = await this.plansInstanceStorageAdmission(plugin, reqId)
+    if (storageAdmission) return storageAdmission
+    const initiator: AuthenticatedInitiator = Object.freeze({
+      kind: 'agent',
+      source: 'mcp',
+      id: randomUUID(),
+    })
+    const context = this.capabilityContextForInitiator(plugin, initiator)
+    if (!context) {
+      return buildError(call.reqId, 'CAPABILITY_DENIED', 'agent capability context is unavailable')
+    }
+    let plan: ReturnType<typeof planCapabilityCall>
+    try {
+      plan = planCapabilityCall(call, plugin.capabilityPolicy, context)
+    } catch {
+      return buildError(call.reqId, 'INVALID_ARGUMENT', 'invalid capability request')
+    }
+    if (plan.kind === 'respond') return plan.response
+    if (plan.kind === 'public') {
+      if (!this.publicPlanCanDispatch(plan, plugin)) {
+        return buildError(call.reqId, 'CAPABILITY_DENIED', 'agent execution policy denied the operation')
+      }
+      try {
+        if (plan.storage) {
+          if (!this.publicStorageHandler || !isStorageExecutionAddress(plan.address)) {
+            return buildError(call.reqId, 'BACKEND_UNAVAILABLE', 'storage capability broker is not connected')
+          }
+          return buildSuccess(call.reqId, await this.publicStorageHandler({
+            address: plan.address,
+            args: plan.args,
+            partition: plan.storage.partition,
+            snapshot: plan.storage.snapshot,
+            ...(plan.initiator ? { initiator: plan.initiator } : {}),
+          }))
+        }
+        if (!this.publicCapabilityHandler) {
+          return buildError(call.reqId, 'BACKEND_UNAVAILABLE', 'public capability broker is not connected')
+        }
+        return buildSuccess(call.reqId, await this.publicCapabilityHandler(plan))
+      } catch {
+        return buildError(call.reqId, 'INTERNAL_ERROR', 'public capability failed')
+      }
+    }
+    // Manifest v2 agent plans are public capability plans. Keep this branch
+    // fail-closed if a future planner ever produces a Host action here: agent
+    // requests must never reach the legacy Host-action executor.
+    if (plan.kind === 'host') {
+      return buildError(call.reqId, 'CAPABILITY_DENIED', 'agent Host actions are unavailable')
+    }
+    return buildError(call.reqId, 'UNKNOWN', `no handler for '${call.ns}.${call.method}'`)
+  }
+
+  private headlessPlansKey(packageVersion: string, workspacePath: string): string {
+    const workspaceId = this.workspaceIdForPath(workspacePath)
+    return `${PLANS_PLUGIN_ID}\u0000${packageVersion}\u0000${workspaceId ?? workspacePath}`
+  }
+
+  private async bindHeadlessPlansBackend(
+    descriptor: PluginLaunchDescriptor,
+    activation: BackendPluginLaunchSpec,
+    workspacePath: string,
+  ): Promise<string> {
+    const packageVersion = descriptor.packageVersion
+    const packageDir = descriptor.packageDir
+    if (!nonEmptyString(packageVersion) || !nonEmptyString(packageDir)) {
+      throw new BackendPluginError('INVALID_RUNTIME')
+    }
+    const workspaceId = this.workspaceIdForPath(workspacePath)
+    if (!workspaceId) throw new BackendPluginError('INVALID_RUNTIME')
+    const key = this.headlessPlansKey(packageVersion, workspacePath)
+    const existing = this.headlessBackendInstances.get(key)
+    if (existing) return existing
+    const pending = this.pendingHeadlessBackendBinds.get(key)
+    if (pending) return pending
+
+    if (
+      activation.pluginId !== PLANS_PLUGIN_ID ||
+      activation.packageVersion !== packageVersion ||
+      canonicalBackendPackageDir(activation.packageDir) !== canonicalBackendPackageDir(packageDir)
+    ) {
+      throw new BackendPluginError('INVALID_RUNTIME')
+    }
+    let task!: Promise<string>
+    task = this.pluginBackendHost.bindWorkspace(
+      {
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion,
+        workspaceId,
+        instanceId: null,
+        contributionKey: 'navide.plans.mcp',
+        hostWindowId: null,
+        initiator: HOST_USER_INITIATOR,
+      },
+      packageDir,
+      workspacePath,
+    ).then((instanceId) => {
+      if (this.isPackageVersionStopping(PLANS_PLUGIN_ID, packageVersion)) {
+        void this.pluginBackendHost.unbindView(instanceId, 'plugin-stopping')
+        throw new BackendPluginError('PLUGIN_STOPPING')
+      }
+      this.markPlansBackendReady(packageVersion, packageDir)
+      this.headlessBackendInstances.set(key, instanceId)
+      return instanceId
+    }).catch((error: unknown) => {
+      if (this.isPlansBackendAvailabilityError(error)) {
+        this.markPlansBackendUnavailable('bind-failure')
+      }
+      throw error
+    }).finally(() => {
+      if (this.pendingHeadlessBackendBinds.get(key) === task) {
+        this.pendingHeadlessBackendBinds.delete(key)
+      }
+    })
+    this.pendingHeadlessBackendBinds.set(key, task)
+    return task
+  }
+
+  /** Reuse the private Plans bridge's execution-policy evaluation for the
+   * headless MCP route. This makes policy a Host gate before either packaged
+   * dispatch or recovery is considered, while the bridge rechecks it at the
+   * actual filesystem boundary. */
+  private plansAgentFilesystemPolicyAllows(
+    workspacePath: string,
+    initiator: AuthenticatedInitiator,
+  ): boolean {
+    let snapshot: ExecutionPolicySnapshot | undefined
+    try {
+      snapshot = this.executionPolicyResolver?.(workspacePath)
+    } catch {
+      return false
+    }
+    return Boolean(
+      snapshot &&
+      snapshot.state !== 'corrupt' &&
+      executionPolicyAllows(initiator, snapshot, 'fs'),
+    )
+  }
+
+  /** Revalidate every security property immediately before authorizing the
+   * legacy adapter. This is deliberately independent of the broad error code:
+   * the caller proves the package child never received the request. */
+  private canMintPlansLegacyRecoveryDisposition(
+    descriptor: PluginLaunchDescriptor,
+    activation: BackendPluginLaunchSpec,
+    workspacePath: string,
+    method: string,
+    initiator: AuthenticatedInitiator,
+  ): boolean {
+    const selection = this.plansBackendSelection()
+    if (
+      !selection ||
+      selection.descriptor !== descriptor ||
+      selection.activation !== activation ||
+      !activation.agentMethods?.includes(method) ||
+      this.isPackageVersionStopping(PLANS_PLUGIN_ID, descriptor.packageVersion) ||
+      !this.plansCapabilityContext(descriptor.packageVersion!, workspacePath, 'plans-mcp') ||
+      !this.plansAgentFilesystemPolicyAllows(workspacePath, initiator)
+    ) return false
+    return this.plansBackendFallbackAllowed()
+  }
+
+  private plansPreDispatchFailureResponse(
+    reqId: string,
+    error: unknown,
+    descriptor: PluginLaunchDescriptor,
+    activation: BackendPluginLaunchSpec,
+    workspacePath: string,
+    method: string,
+    initiator: AuthenticatedInitiator,
+  ): PlansRecoveryResponse {
+    const response = this.backendError(reqId, error)
+    if (!this.canMintPlansLegacyRecoveryDisposition(
+      descriptor, activation, workspacePath, method, initiator,
+    )) return response
+    return { ...response, recoveryDisposition: LEGACY_SAFE_BEFORE_DISPATCH }
+  }
+
+  /** Host entry point for an authenticated MCP request when the Plans window
+   *  is closed. The package/version and workspace are selected from the
+   *  transport target; the request body contains only a package method call. */
+  async executeAgentBackendCallForWorkspace(
+    pluginId: string,
+    workspacePath: string,
+    payload: unknown,
+  ): Promise<CapabilityResponse> {
+    const record = this.exactBackendPayload(payload, new Set(['reqId', 'name', 'args', 'timeoutMs']))
+    const reqId =
+      typeof payload === 'object' && payload !== null && !Array.isArray(payload) &&
+      typeof (payload as Record<string, unknown>).reqId === 'string'
+        ? (payload as Record<string, unknown>).reqId as string
+        : ''
+    if (
+      pluginId !== PLANS_PLUGIN_ID ||
+      !nonEmptyString(workspacePath) ||
+      !record ||
+      !nonEmptyString(record.reqId) ||
+      !nonEmptyString(record.name) ||
+      !Object.prototype.hasOwnProperty.call(record, 'args') ||
+      !isJsonValue(record.args) ||
+      (record.timeoutMs !== undefined && !isAllowedBackendTimeout(record.timeoutMs))
+    ) return buildError(reqId, 'BAD_REQUEST', 'malformed Plans backend request')
+
+    const descriptor = this.descriptors.get(PLANS_PLUGIN_ID)
+    const packageVersion = descriptor?.packageVersion
+    if (!descriptor || !nonEmptyString(packageVersion)) {
+      return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable')
+    }
+    // Revocation wins over all subsequent grant and policy checks. A package
+    // that is draining cannot receive a recovery disposition.
+    if (this.isPackageVersionStopping(PLANS_PLUGIN_ID, packageVersion)) {
+      return buildError(record.reqId, 'PLUGIN_STOPPING', 'Backend plugin is stopping.')
+    }
+    const selection = this.plansBackendSelection()
+    if (!selection || selection.descriptor !== descriptor) {
+      return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable')
+    }
+    const { activation } = selection
+    if (!activation.agentMethods?.includes(record.name)) {
+      return buildError(record.reqId, 'CAPABILITY_DENIED', 'Plans agent method is not allowlisted')
+    }
+    if (!this.plansCapabilityContext(packageVersion, workspacePath, 'plans-mcp')) {
+      return buildError(record.reqId, 'CAPABILITY_DENIED', 'Plans package Grant is unavailable')
+    }
+    const initiator: AuthenticatedInitiator = Object.freeze({
+      kind: 'agent',
+      source: 'mcp',
+      id: randomUUID(),
+    })
+    if (!this.plansAgentFilesystemPolicyAllows(workspacePath, initiator)) {
+      return buildError(record.reqId, 'CAPABILITY_DENIED', 'agent execution policy denied the operation')
+    }
+    const deadline = Date.now() + (typeof record.timeoutMs === 'number' ? record.timeoutMs : 30_000)
+    if (this.plansStorageReadinessHandler) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let ready: boolean
+      try {
+        ready = await Promise.race([
+          this.plansStorageReady(packageVersion),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new BackendPluginError('TIMEOUT')), Math.max(1, deadline - Date.now()))
+          }),
+        ])
+      } catch (error) {
+        return this.backendError(record.reqId, error)
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+      if (this.isPackageVersionStopping(PLANS_PLUGIN_ID, packageVersion)) {
+        return buildError(record.reqId, 'PLUGIN_STOPPING', 'Backend plugin is stopping.')
+      }
+      const current = this.plansBackendSelection()
+      if (
+        current?.descriptor !== descriptor || current.activation !== activation ||
+        !this.plansCapabilityContext(packageVersion, workspacePath, 'plans-mcp') ||
+        !this.plansAgentFilesystemPolicyAllows(workspacePath, initiator)
+      ) return buildError(record.reqId, 'CAPABILITY_DENIED', 'Plans runtime authorization changed')
+      if (!ready) return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans storage is unavailable')
+    }
+    if (!this.isPlansBackendAvailable()) {
+      return this.plansPreDispatchFailureResponse(
+        record.reqId,
+        new BackendPluginError('BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable'),
+        descriptor,
+        activation,
+        workspacePath,
+        record.name,
+        initiator,
+      )
+    }
+    if (record.name === 'plans.create' && !(await this.provisionPlansAssets(workspacePath))) {
+      return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans assets are unavailable')
+    }
+    let dispatched = false
+    try {
+      const instanceId = await this.bindHeadlessPlansBackend(descriptor, activation, workspacePath)
+      const remainingTimeout = deadline - Date.now()
+      if (remainingTimeout <= 0) return buildError(record.reqId, 'TIMEOUT', 'Plans request timed out')
+      // Calling into the Host child marks a request as dispatched even if the
+      // Promise rejects immediately: a child may have accepted side effects.
+      dispatched = true
+      const result = await this.pluginBackendHost.call(
+        instanceId,
+        record.name,
+        record.args,
+        {
+          initiator,
+          ...(this.plansStorageReadinessHandler
+            ? { timeoutMs: remainingTimeout }
+            : record.timeoutMs === undefined ? {} : { timeoutMs: record.timeoutMs }),
+        },
+      )
+      return buildSuccess(record.reqId, result)
+    } catch (error) {
+      if (this.isPlansBackendAvailabilityError(error)) {
+        this.markPlansBackendUnavailable('child-unavailable')
+      }
+      if (!dispatched) {
+        return this.plansPreDispatchFailureResponse(
+          record.reqId, error, descriptor, activation, workspacePath, record.name, initiator,
+        )
+      }
+      return this.backendError(record.reqId, error)
+    }
+  }
+
+  /** Host entry point for a package-local backend call originating at MCP.
+   * The child sees only the Host-minted runtime initiator; its arguments cannot
+   * add, remove, or replace that identity. */
+  async executeAgentBackendCall(instanceId: string, payload: unknown): Promise<CapabilityResponse> {
+    const record = this.exactBackendPayload(payload, new Set(['reqId', 'name', 'args', 'timeoutMs']))
+    const reqId =
+      typeof payload === 'object' && payload !== null && !Array.isArray(payload) &&
+      typeof (payload as Record<string, unknown>).reqId === 'string'
+        ? (payload as Record<string, unknown>).reqId as string
+        : ''
+    const plugin = this.running.get(instanceId)
+    if (!plugin) return buildError(reqId, 'BAD_REQUEST', 'unknown plugin instance')
+    if (this.isPluginStopping(plugin)) {
+      return buildError(reqId, 'PLUGIN_STOPPING', 'plugin runtime is stopping')
+    }
+    if (
+      !record ||
+      !nonEmptyString(record.reqId) ||
+      !nonEmptyString(record.name) ||
+      !Object.prototype.hasOwnProperty.call(record, 'args') ||
+      !isJsonValue(record.args) ||
+      (record.timeoutMs !== undefined && !isAllowedBackendTimeout(record.timeoutMs))
+    ) return buildError(reqId, 'BAD_REQUEST', 'malformed backend call')
+    const storageAdmission = await this.plansInstanceStorageAdmission(plugin, reqId)
+    if (storageAdmission) return storageAdmission
+    const scopeError = this.backendCallScopeError(
+      plugin,
+      record.reqId,
+      record.name,
+      record.args,
+    )
+    if (scopeError) return scopeError
+    if (!plugin.hasV2DescriptorIdentity || plugin.capabilityPolicy.kind !== 'manifest-v2') {
+      return buildError(record.reqId, 'CAPABILITY_DENIED', 'agent calls require a Manifest v2 capability')
+    }
+    const initiator: AuthenticatedInitiator = Object.freeze({
+      kind: 'agent',
+      source: 'mcp',
+      id: randomUUID(),
+    })
+    const context = this.capabilityContextForInitiator(plugin, initiator)
+    const binding = context?.runtimeBinding
+    if (
+      !context ||
+      !binding ||
+      !sameRuntimeBinding(binding, plugin.capabilityContext?.runtimeBinding) ||
+      !context.userGrant ||
+      context.userGrant.packageVersion !== binding.packageVersion
+    ) {
+      return buildError(record.reqId, 'CAPABILITY_DENIED', 'agent capability context is unavailable')
+    }
+    if (plugin.id === PLANS_PLUGIN_ID && !this.isPlansBackendAvailable()) {
+      return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable')
+    }
+    if (
+      plugin.id === PLANS_PLUGIN_ID &&
+      record.name === 'plans.create' &&
+      !(await this.provisionPlansAssets(plugin.workspacePath ?? ''))
+    ) {
+      return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans assets are unavailable')
+    }
+    try {
+      const result = await this.pluginBackendHost.call(
+        instanceId,
+        record.name,
+        record.args,
+        {
+          initiator,
+          ...(record.timeoutMs === undefined ? {} : { timeoutMs: record.timeoutMs }),
+        },
+      )
+      return buildSuccess(record.reqId, result)
+    } catch (error) {
+      if (plugin.id === PLANS_PLUGIN_ID && this.isPlansBackendAvailabilityError(error)) {
+        this.markPlansBackendUnavailable('child-unavailable')
+      }
+      return this.backendError(record.reqId, error)
+    }
+  }
+
+  private publicPlanPolicyAllows(
+    plan: PublicCapabilityExecutionPlan,
+    plugin: RunningPlugin,
+  ): boolean {
+    const initiator = plan.initiator
+    if (!initiator || initiator.kind !== 'agent') return true
+    const namespace = plan.address.split('.', 1)[0]
+    if (namespace !== 'fs' && namespace !== 'ui' && namespace !== 'aiCli' && namespace !== 'shell') {
+      return true
+    }
+    let snapshot: ExecutionPolicySnapshot | undefined
+    try {
+      snapshot = this.executionPolicyResolver?.(plugin.workspacePath ?? undefined)
+    } catch {
+      return false
+    }
+    if (!snapshot) return false
+    if (snapshot.state === 'corrupt') return false
+    if (plan.policyRevision !== undefined && snapshot.revision === plan.policyRevision) return true
+    return executionPolicyAllows(
+      initiator,
+      snapshot,
+      namespace,
+      namespace === 'shell' && typeof plan.args.command === 'string'
+        ? plan.args.command
+        : undefined,
+    )
+  }
+
+  private publicPlanCanDispatch(
+    plan: PublicCapabilityExecutionPlan,
+    plugin: RunningPlugin,
+  ): boolean {
+    return (
+      this.running.get(plugin.instanceId) === plugin &&
+      !this.isPluginStopping(plugin) &&
+      sameRuntimeBinding(plugin.capabilityContext?.runtimeBinding, plan.runtime) &&
+      this.publicPlanPolicyAllows(plan, plugin)
+    )
+  }
+
   private async sendPublicBackend(
     wsType: string,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    beforeDispatch?: () => boolean,
   ): Promise<unknown> {
     const client = this.ensureBackend()
     if (!client) throw new Error('backend not connected')
-    const response = await client.send(wsType, payload)
+    const response = await client.send(wsType, payload, 10_000, {
+      ...(beforeDispatch ? { beforeDispatch } : {}),
+    })
     if (!response.ok) throw new Error(response.error?.message ?? 'backend request failed')
     return response.payload
+  }
+
+  /** Revalidate the live Manifest/Grant pair at every private filesystem
+   *  dispatch. A Grant revocation must take effect even for a child that was
+   *  bound before the revocation; the backend child never owns this decision. */
+  private plansFilesystemGrantAllows(context: PlansBridgeContext): boolean {
+    const runtime = context.runtime
+    if (
+      runtime.pluginId !== PLANS_PLUGIN_ID ||
+      !nonEmptyString(runtime.packageVersion) ||
+      !nonEmptyString(context.workspacePath)
+    ) return false
+    const selection = this.plansBackendSelection()
+    if (
+      !selection ||
+      selection.activation.packageVersion !== runtime.packageVersion ||
+      !this.isPlansBackendAvailable()
+    ) return false
+    const expected = this.plansCapabilityContext(
+      runtime.packageVersion,
+      context.workspacePath,
+      runtime.contributionKey ?? 'plans-window',
+    )?.runtimeBinding
+    return Boolean(
+      expected &&
+      runtime.pluginId === expected.pluginId &&
+      runtime.packageVersion === expected.packageVersion &&
+      runtime.workspaceId === expected.workspaceId &&
+      runtime.contributionKey === expected.audience
+    )
+  }
+
+  private plansBridgeCanDispatch(context: PlansBridgeContext): boolean {
+    if (context.signal.aborted) return false
+    if (!nonEmptyString(context.workspacePath)) return false
+    if (!this.plansFilesystemGrantAllows(context)) return false
+    if (context.runtime.initiator.kind !== 'agent') return true
+    return this.plansAgentFilesystemPolicyAllows(
+      context.workspacePath,
+      context.runtime.initiator,
+    )
+  }
+
+  private async sendPlansFilesystemService(
+    operation: PlansFilesystemServiceOperation,
+    payload: Record<string, JsonValue>,
+    context: PlansBridgeContext,
+  ): Promise<JsonValue> {
+    if (context.signal.aborted) throw new PlansBridgeError('USER_CANCELLED')
+    if (!this.plansBridgeCanDispatch(context)) {
+      throw new PlansBridgeError('CAPABILITY_DENIED', 'Filesystem capability is denied.')
+    }
+    try {
+      const response = await this.sendPublicBackend(
+        operation,
+        payload,
+        () => this.plansBridgeCanDispatch(context),
+      )
+      if (!isJsonValue(response)) {
+        throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Filesystem service returned an invalid response.')
+      }
+      return response
+    } catch (error) {
+      if (error instanceof PlansBridgeError) throw error
+      if (context.signal.aborted) throw new PlansBridgeError('USER_CANCELLED')
+      if (error instanceof Error && error.message === 'request denied before dispatch') {
+        throw new PlansBridgeError('CAPABILITY_DENIED', 'Filesystem capability is denied.')
+      }
+      throw new PlansBridgeError('BACKEND_UNAVAILABLE', 'Filesystem service is unavailable.')
+    }
   }
 
   private setAiBindings(
@@ -2275,16 +3998,22 @@ export class FrontendPluginManager {
     const client = this.ensureBackend()
     if (!client) throw new Error('backend not connected')
     const args = plan.args
+    const beforeDispatch = (): boolean => this.publicPlanCanDispatch(plan, plugin)
     if (plan.address === 'aiCli.resumeSession') {
       const candidate = [...this.aiSessions.values()]
         .filter((entry) => entry.attachedInstanceId === null && this.aiSessionMatchesPlugin(entry, plugin))
         .sort((a, b) => b.createdAt - a.createdAt)[0]
       if (!candidate) return null
-      const response = await client.send('terminal.reattach', {
-        terminal_session_ids: [candidate.sessionId],
-        cols: Number(args.cols),
-        rows: Number(args.rows),
-      })
+      const response = await client.send(
+        'terminal.reattach',
+        {
+          terminal_session_ids: [candidate.sessionId],
+          cols: Number(args.cols),
+          rows: Number(args.rows),
+        },
+        10_000,
+        { beforeDispatch },
+      )
       if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI resume failed')
       const alive = toPayload(response.payload).alive
       if (!Array.isArray(alive) || !alive.includes(candidate.sessionId)) {
@@ -2304,7 +4033,7 @@ export class FrontendPluginManager {
     if (plan.address === 'aiCli.startSession') {
       const profileId = String(args.profileId)
       const requestId = nonEmptyString(args.requestId) ? args.requestId : randomUUID()
-      const paneId = `navide-git-${plugin.instanceId}-${requestId}`
+      const paneId = `navide-${plugin.id}-${plugin.instanceId}-${requestId}`
       const pending = new Map(plugin.capabilityContext?.pendingStartBindings ?? [])
       const binding = plugin.capabilityContext?.runtimeBinding
       if (!binding) throw new Error('AI CLI runtime binding is missing')
@@ -2321,18 +4050,23 @@ export class FrontendPluginManager {
       if (!command) throw new Error(`AI CLI profile '${profileId}' is not available`)
       let committed = false
       try {
-        const response = await client.send('terminal.create', {
-          pane_id: paneId,
-          create_generation: requestId,
-          agent_key: profileId,
-          // The Host chooses the executable from the allowlisted profile. The
-          // package never supplies a command, shell, cwd, or environment.
-          command,
-          cwd: workspacePath,
-          cols: args.cols,
-          rows: args.rows,
-          metadata: { workspace_path: workspacePath, origin: 'navide-git' },
-        })
+        const response = await client.send(
+          'terminal.create',
+          {
+            pane_id: paneId,
+            create_generation: requestId,
+            agent_key: profileId,
+            // The Host chooses the executable from the allowlisted profile. The
+            // package never supplies a command, shell, cwd, or environment.
+            command,
+            cwd: workspacePath,
+            cols: args.cols,
+            rows: args.rows,
+            metadata: { workspace_path: workspacePath, origin: plugin.id },
+          },
+          10_000,
+          { beforeDispatch },
+        )
         if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI start failed')
         const result = toPayload(response.payload)
         const sessionId = typeof result.terminal_session_id === 'string' ? result.terminal_session_id : ''
@@ -2368,10 +4102,15 @@ export class FrontendPluginManager {
       const requestId = String(args.requestId)
       const pending = this.pendingAiStarts.get(`${plugin.instanceId}:${requestId}`)
       if (!pending) throw new Error('AI CLI start request is no longer pending')
-      const response = await pending.client.send('terminal.create.cancel', {
-        pane_id: pending.paneId,
-        create_generation: pending.requestId,
-      })
+      const response = await pending.client.send(
+        'terminal.create.cancel',
+        {
+          pane_id: pending.paneId,
+          create_generation: pending.requestId,
+        },
+        10_000,
+        { beforeDispatch },
+      )
       if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI cancel failed')
       const pendingBindings = new Map(plugin.capabilityContext?.pendingStartBindings ?? [])
       pendingBindings.delete(requestId)
@@ -2382,11 +4121,16 @@ export class FrontendPluginManager {
     const sessionId = typeof args.sessionId === 'string' ? args.sessionId : ''
     if (!sessionId) throw new Error('AI CLI session id is required')
     if (plan.address === 'aiCli.reattachSession') {
-      const response = await client.send('terminal.reattach', {
-        terminal_session_ids: [sessionId],
-        cols: Number(args.cols),
-        rows: Number(args.rows),
-      })
+      const response = await client.send(
+        'terminal.reattach',
+        {
+          terminal_session_ids: [sessionId],
+          cols: Number(args.cols),
+          rows: Number(args.rows),
+        },
+        10_000,
+        { beforeDispatch },
+      )
       if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI reattach failed')
       const alive = toPayload(response.payload).alive
       if (!Array.isArray(alive) || !alive.includes(sessionId)) {
@@ -2411,7 +4155,7 @@ export class FrontendPluginManager {
       payload.rows = args.rows
     }
     if (type === 'terminal.kill') payload.force = args.force === true
-    const response = await client.send(type, payload)
+    const response = await client.send(type, payload, 10_000, { beforeDispatch })
     if (!response.ok) throw new Error(response.error?.message ?? 'AI CLI request failed')
     if (type === 'terminal.kill') {
       this.removeAiSession(plugin, sessionId)
@@ -2479,16 +4223,17 @@ export class FrontendPluginManager {
     this.dispatchEvent(event, payload, sourceBinding, targetPluginId)
   }
 
-  /** Route only the fixed Host-owned Git settings contract to v2 Git views. */
+  /** Route only the fixed Host-owned settings contract to v2 views. */
   dispatchHostSettingsChanged(payload: unknown): void {
     const rawSettings =
       typeof payload === 'object' && payload !== null && !Array.isArray(payload)
         ? (payload as Record<string, unknown>).settings
         : null
     if (typeof rawSettings !== 'object' || rawSettings === null || Array.isArray(rawSettings)) return
+    const allowedKeys: readonly string[] = [...GIT_HOST_READ_ONLY_KEYS, 'agent-team:language']
     const settings = Object.fromEntries(
       Object.entries(rawSettings as Record<string, unknown>)
-        .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
+        .filter(([key]) => allowedKeys.includes(key))
     )
     if (Object.keys(settings).length === 0) return
     this.dispatchEvent('ui.settings_changed', { source: 'host', settings })
@@ -2629,8 +4374,13 @@ export class FrontendPluginManager {
     if (!this.wsClient) {
       const client = createWsClient({
         WebSocketImpl: NodeWebSocket as unknown as WsConstructor,
-        onStatus: (s) => this.dispatchBackendStatus(s),
+        onStatus: (s) => {
+          if (s !== 'connected') this.hostSessionRegistered = false
+          this.dispatchBackendStatus(s)
+          if (s === 'connected') this.registerHostSession(client)
+        },
       })
+      this.wsClient = client
       for (const event of new Set([...Object.keys(CAP_EVENTS), ...PUBLIC_CAPABILITY_EVENT_ADDRESSES])) {
         client.on(event, (payload) => {
           // The shared backend listener has no authenticated public-event
@@ -2643,10 +4393,128 @@ export class FrontendPluginManager {
           }
         })
       }
+      client.on('agent.capability.request', (payload) => {
+        void this.handleAgentCapabilityRequest(client, payload)
+      })
       client.connect(this.backendWsUrl)
-      this.wsClient = client
     }
     return this.wsClient
+  }
+
+  private hasActivePlansBackend(): boolean {
+    return this.isPlansBackendAvailable()
+  }
+
+  private refreshHostSessionRegistration(): void {
+    const client = this.wsClient
+    const url = this.backendWsUrl
+    if (
+      !client ||
+      !url ||
+      !this.backendHostToken ||
+      !client.isHealthyFor(url) ||
+      this.hostRegistrationTask
+    ) return
+    this.hostSessionRegistered = false
+    this.registerHostSession(client)
+  }
+
+  private registerHostSession(client: WsClient): void {
+    const token = this.backendHostToken
+    const url = this.backendWsUrl
+    if (!token || !url || this.wsClient !== client || this.hostRegistrationTask) return
+    const plansBackendV2 = this.hasActivePlansBackend()
+    const task = (async (): Promise<void> => {
+      try {
+        const response = await client.send<{ registered?: unknown }>(
+          'host.register',
+          { token, features: { plans_backend_v2: plansBackendV2 } },
+          5_000,
+        )
+        if (
+          this.wsClient === client &&
+          this.backendWsUrl === url &&
+          client.isHealthyFor(url) &&
+          this.backendHostToken === token
+        ) {
+          this.hostSessionRegistered = response.ok && response.payload?.registered === true
+          if (!this.hostSessionRegistered) {
+            console.warn('[plugin-backend] Host session registration was rejected')
+          }
+        }
+      } catch (error) {
+        if (
+          this.wsClient === client &&
+          this.backendWsUrl === url &&
+          this.backendHostToken === token
+        ) {
+          console.warn(
+            `[plugin-backend] Host session registration failed: ${
+              error instanceof Error ? error.message : 'backend unavailable'
+            }`,
+          )
+        }
+      }
+    })()
+    this.hostRegistrationTask = task
+    void task.finally(() => {
+      if (this.hostRegistrationTask !== task) return
+      this.hostRegistrationTask = null
+      if (
+        plansBackendV2 !== this.hasActivePlansBackend() &&
+        this.wsClient === client &&
+        this.backendWsUrl === url &&
+        this.backendHostToken === token &&
+        client.isHealthyFor(url)
+      ) {
+        this.hostSessionRegistered = false
+        this.registerHostSession(client)
+      }
+    })
+  }
+
+  private async handleAgentCapabilityRequest(client: WsClient, payload: unknown): Promise<void> {
+    if (this.wsClient !== client || !this.hostSessionRegistered) return
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return
+    const record = payload as Record<string, unknown>
+    const legacyRequest =
+      Object.keys(record).length === 4 &&
+      Object.keys(record).every((key) => ['request_id', 'instance_id', 'operation', 'payload'].includes(key)) &&
+      nonEmptyString(record.request_id) &&
+      nonEmptyString(record.instance_id) &&
+      (record.operation === 'capability' || record.operation === 'backend') &&
+      isJsonValue(record.payload)
+    const workspaceRequest =
+      Object.keys(record).length === 4 &&
+      Object.keys(record).every((key) => ['request_id', 'target', 'operation', 'payload'].includes(key)) &&
+      nonEmptyString(record.request_id) &&
+      record.operation === 'backend' &&
+      isJsonValue(record.payload) &&
+      typeof record.target === 'object' &&
+      record.target !== null &&
+      !Array.isArray(record.target) &&
+      Object.keys(record.target).length === 2 &&
+      nonEmptyString((record.target as Record<string, unknown>).plugin_id) &&
+      nonEmptyString((record.target as Record<string, unknown>).workspace_path)
+    if (!legacyRequest && !workspaceRequest) return
+
+    const response = legacyRequest
+      ? record.operation === 'capability'
+        ? await this.executeAgentCapability(record.instance_id as string, record.payload)
+        : await this.executeAgentBackendCall(record.instance_id as string, record.payload)
+      : await this.executeAgentBackendCallForWorkspace(
+        (record.target as Record<string, unknown>).plugin_id as string,
+        (record.target as Record<string, unknown>).workspace_path as string,
+        record.payload,
+      )
+    if (this.wsClient !== client || !this.hostSessionRegistered) return
+    await client.send(
+      'agent.capability.result',
+      { request_id: record.request_id, response },
+      10_000,
+    ).catch(() => {
+      // The MCP waiter has its own timeout; a closed backend is reported there.
+    })
   }
 
   private routeForPlugin(plugin: RunningPlugin): TerminalRoute | null {
@@ -2713,7 +4581,9 @@ export class FrontendPluginManager {
     }
     if (!route.instanceId) return undefined
     const plugin = this.running.get(route.instanceId)
-    return plugin && this.routeMatchesPlugin(route, plugin) ? plugin : undefined
+    return plugin && !this.isPluginStopping(plugin) && this.routeMatchesPlugin(route, plugin)
+      ? plugin
+      : undefined
   }
 
   private activeTerminalOwnerKey(route: TerminalRoute): string | null {
@@ -2792,70 +4662,94 @@ export class FrontendPluginManager {
       // their workspace-scoped event fan-out during the recovery window.
       if (nonce) return
     }
+    const deliveredInstanceIds = new Set<string>()
+
     // Settings are a private first-party contract for the Git package. The
     // v2 surface receives only the typed Host read-only keys or the exact
-    // plugin-owned storage key; the legacy loop below remains unchanged for
-    // rollback compatibility.
+    // plugin-owned storage key; explicit recovery Git remains baseline and
+    // language must not enter legacy Git fan-out.
     if (event === 'ui.settings_changed') {
       const record = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
         ? payload as Record<string, unknown>
         : null
       const rawSettings = record?.settings
       const source = record?.source
-      let settings: Record<string, unknown> = {}
-      let settingsWorkspace: string | null = null
-      let settingsPayload: Record<string, unknown> | null = null
       if (typeof rawSettings === 'object' && rawSettings !== null && !Array.isArray(rawSettings)) {
-        if (source === 'host') {
-          settings = Object.fromEntries(
-            Object.entries(rawSettings as Record<string, unknown>)
-              .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
-          )
-          settingsPayload = { source, settings }
-        } else if (source === 'plugin-storage') {
-          const scope = record?.scope
-          const allowedKeys = scope === 'plugin'
-            ? GIT_USER_PREFERENCE_KEYS
-            : scope === 'workspace'
-              ? [GIT_WORKSPACE_REPOSITORY_KEY]
-              : []
-          settings = Object.fromEntries(
-            Object.entries(rawSettings as Record<string, unknown>)
-              .filter(([key]) => allowedKeys.includes(key as never))
-          )
-          const workspacePath = record?.workspace_path
-          if (scope === 'workspace' && typeof workspacePath === 'string' && workspacePath.length > 0) {
-            settingsWorkspace = resolve(workspacePath)
-          }
-          settingsPayload = {
-            source,
-            scope,
-            settings,
-            ...(settingsWorkspace ? { workspace_path: workspacePath } : {}),
-          }
-        }
-      }
-      if (settingsPayload && Object.keys(settings).length > 0 &&
-        (source !== 'plugin-storage' || record?.scope !== 'workspace' || settingsWorkspace !== null)) {
         for (const plugin of this.running.values()) {
-          if (
+          const isV2Ui =
             plugin.hasV2DescriptorIdentity &&
-            plugin.id === GIT_PLUGIN_ID &&
             plugin.capabilityPolicy.kind === 'manifest-v2' &&
             plugin.capabilityPolicy.system.includes('ui') &&
-            plugin.capabilityContext?.userGrant?.system.includes('ui') &&
-            (settingsWorkspace === null || (
-              plugin.workspacePath !== null &&
-              resolve(plugin.workspacePath) === settingsWorkspace
-            ))
-          ) {
-            this.emitToInstance(plugin.instanceId, event, settingsPayload)
+            Boolean(plugin.capabilityContext?.userGrant?.system.includes('ui'))
+
+          const isLegacyGit =
+            !plugin.hasV2DescriptorIdentity &&
+            plugin.id === GIT_PLUGIN_ID &&
+            isEventAllowed(plugin.capabilityPolicy, event)
+
+          const isLegacyPlans =
+            !plugin.hasV2DescriptorIdentity &&
+            plugin.id === PLANS_PLUGIN_ID &&
+            isEventAllowed(plugin.capabilityPolicy, event)
+
+          if (!isV2Ui && !isLegacyGit && !isLegacyPlans) {
+            continue
+          }
+
+          if (plugin.id === GIT_PLUGIN_ID) {
+            if (source === 'host') {
+              const gitSettings = Object.fromEntries(
+                Object.entries(rawSettings as Record<string, unknown>)
+                  .filter(([key]) => GIT_HOST_READ_ONLY_KEYS.includes(key as typeof GIT_HOST_READ_ONLY_KEYS[number]))
+              )
+              if (Object.keys(gitSettings).length > 0) {
+                this.emitToInstance(plugin.instanceId, event, { source, settings: gitSettings })
+              }
+              deliveredInstanceIds.add(plugin.instanceId)
+            } else if (source === 'plugin-storage' && isV2Ui) {
+              const scope = record?.scope
+              const allowedKeys = scope === 'plugin'
+                ? GIT_USER_PREFERENCE_KEYS
+                : scope === 'workspace'
+                  ? [GIT_WORKSPACE_REPOSITORY_KEY]
+                  : []
+              const gitSettings = Object.fromEntries(
+                Object.entries(rawSettings as Record<string, unknown>)
+                  .filter(([key]) => allowedKeys.includes(key as never))
+              )
+              const workspacePath = record?.workspace_path
+              const settingsWorkspace = scope === 'workspace' && typeof workspacePath === 'string' && workspacePath.length > 0
+                ? resolve(workspacePath)
+                : null
+              if (
+                Object.keys(gitSettings).length > 0 &&
+                (scope !== 'workspace' || (settingsWorkspace !== null && plugin.workspacePath !== null && resolve(plugin.workspacePath) === settingsWorkspace))
+              ) {
+                this.emitToInstance(plugin.instanceId, event, {
+                  source,
+                  scope,
+                  settings: gitSettings,
+                  ...(settingsWorkspace ? { workspace_path: workspacePath } : {}),
+                })
+              }
+              deliveredInstanceIds.add(plugin.instanceId)
+            }
+          } else if (plugin.id === PLANS_PLUGIN_ID && (isV2Ui || isLegacyPlans)) {
+            if (source === 'host') {
+              const language = (rawSettings as Record<string, unknown>)['agent-team:language']
+              if (language === 'zh-TW' || language === 'en-US') {
+                this.emitToInstance(plugin.instanceId, event, {
+                  source: 'host',
+                  settings: { 'agent-team:language': language },
+                })
+              }
+              deliveredInstanceIds.add(plugin.instanceId)
+            }
           }
         }
       }
       // Keep the legacy loop below active while the rollback bundle is live.
     }
-    const deliveredInstanceIds = new Set<string>()
     // Git's existing changed event is a private first-party transport seam,
     // not a public Manifest v2 capability. Route it by the Host-owned
     // workspace path so two Git view instances never receive one another's
@@ -2916,7 +4810,7 @@ export class FrontendPluginManager {
       const route = this.terminalRoutes.get(sessionId)
       if (!route && this.bufferEarlyAiEvent('terminal.exit', payload)) return
       const ownerPlugin = route ? this.runningPluginForTerminalRoute(route) : undefined
-      if (ownerPlugin?.hasV2DescriptorIdentity && ownerPlugin.id === GIT_PLUGIN_ID) {
+      if (usesPublicAiCliEvents(ownerPlugin)) {
         this.terminalOutputBatcher.flushSession(sessionId)
         const binding = ownerPlugin.capabilityContext?.runtimeBinding
         const exitCode = toPayload(payload).exit_code
@@ -3013,7 +4907,7 @@ export class FrontendPluginManager {
    *  still pass their plugin id through the v1 adapter. */
   noteTerminalRoutes(instanceOrPluginId: string, wsType: string, result: unknown): void {
     const plugin = this.resolveInstance(instanceOrPluginId)
-    if (!plugin) return
+    if (!plugin || this.isPluginStopping(plugin)) return
     const route = this.routeForPlugin(plugin)
     if (!route) return
     for (const sessionId of terminalSessionsFromResponse(wsType, result)) {
@@ -3075,9 +4969,17 @@ export class FrontendPluginManager {
       console.debug('[plugin] cast dropped: unknown sender')
       return 'unknown-sender'
     }
+    if (this.isPluginStopping(plugin)) {
+      console.debug(`[plugin] cast dropped: ${plugin.id} plugin runtime is stopping`)
+      return 'denied'
+    }
     const pluginId = plugin.id
     if (this.payloadClaimsInstance(payload)) {
       console.debug(`[plugin] cast dropped: ${pluginId} instance identity is Host-owned`)
+      return 'malformed'
+    }
+    if (this.payloadClaimsInitiator(payload)) {
+      console.debug(`[plugin] cast dropped: ${pluginId} initiator identity is Host-owned`)
       return 'malformed'
     }
     const call = parseCapabilityCall(payload, pluginId)
@@ -3277,7 +5179,10 @@ export class FrontendPluginManager {
     }
   }
 
-  private forgetInstance(instanceId: string): RunningPlugin | undefined {
+  private forgetInstance(
+    instanceId: string,
+    options: { unbindBackend?: boolean } = {},
+  ): RunningPlugin | undefined {
     const plugin = this.running.get(instanceId)
     if (!plugin) return undefined
     this.settleActivation(instanceId)
@@ -3287,6 +5192,17 @@ export class FrontendPluginManager {
     plugin.detachHostClosed = null
     this.cancelPendingAiStarts(plugin)
     this.releaseTerminalOwnership(plugin)
+    const backendCalls = this.pendingBackendCalls.get(instanceId)
+    this.pendingBackendCalls.delete(instanceId)
+    for (const controller of backendCalls?.values() ?? []) controller.abort()
+    const backendSubscriptions = this.pendingBackendSubscriptions.get(instanceId)
+    for (const pending of backendSubscriptions?.values() ?? []) {
+      pending.cancelled = true
+      pending.controller.abort()
+      // PluginBackendHost owns live subscription disposal during unbind.
+      pending.subscription = null
+    }
+    if (options.unbindBackend !== false) this.pluginBackendHost.unbindView(instanceId)
     this.releaseInstanceSubscriptions(instanceId)
     this.discardGitPathGrants(instanceId)
     this.releaseGitCredentialOwnersForInstance(instanceId)
@@ -3319,9 +5235,28 @@ export class FrontendPluginManager {
     }
   }
 
+  private clearTerminalRoutesForPackageVersion(pluginId: string, packageVersion: string): void {
+    for (const [sessionId, route] of this.terminalRoutes) {
+      if (route.pluginId !== pluginId || route.packageVersion !== packageVersion) continue
+      this.terminalOutputBatcher.dropSession(sessionId)
+      this.pendingTerminalOwners.delete(sessionId)
+      this.terminalRoutes.delete(sessionId)
+    }
+  }
+
   private stopAiSessionsForPlugin(pluginId: string): void {
+    this.stopAiSessions((session) => session.pluginId === pluginId)
+  }
+
+  private stopAiSessionsForPackageVersion(pluginId: string, packageVersion: string): void {
+    this.stopAiSessions(
+      (session) => session.pluginId === pluginId && session.packageVersion === packageVersion,
+    )
+  }
+
+  private stopAiSessions(predicate: (session: AiSessionLedgerEntry) => boolean): void {
     for (const [sessionId, session] of this.aiSessions) {
-      if (session.pluginId !== pluginId) continue
+      if (!predicate(session)) continue
       this.aiSessions.delete(sessionId)
       void session.client.send('terminal.kill', {
         terminal_session_id: sessionId,
@@ -3330,6 +5265,16 @@ export class FrontendPluginManager {
         // Removal still forgets ownership when the backend is unavailable.
       })
     }
+  }
+
+  private revokePackageVersionInBackground(pluginId: string, packageVersion: string): void {
+    void this.revokePackageVersion(pluginId, packageVersion).catch((error: unknown) => {
+      console.warn(
+        `[plugin] package revocation failed for ${pluginId}@${packageVersion}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    })
   }
 
   /**
@@ -3342,8 +5287,14 @@ export class FrontendPluginManager {
     hostWindow: BrowserWindow,
     descriptor: PluginLaunchDescriptor,
     bounds: PluginViewBounds,
-    opts: { closeHostOnHide?: boolean; mirrorTitle?: boolean } = {}
-  ): void {
+    opts: {
+      closeHostOnHide?: boolean
+      mirrorTitle?: boolean
+      workspacePath?: string
+      capabilityContext?: HostCapabilityContext | null
+    } = {}
+  ): string | null {
+    if (this.isPackageVersionStopping(descriptor.id, descriptor.packageVersion)) return null
     this.registerIpc()
 
     const existingId = this.legacyInstances.get(descriptor.id)
@@ -3353,11 +5304,22 @@ export class FrontendPluginManager {
         // Stale record (renderer crash / host teardown race) — drop it and fall
         // through to a fresh create; loadEntry on a dead webContents would brick.
         this.destroyInstance(existing.instanceId)
+      } else if (
+        opts.workspacePath !== undefined &&
+        (existing.workspacePath === null ||
+          resolve(existing.workspacePath) !== resolve(opts.workspacePath))
+      ) {
+        // A package backend is bound to the workspace at bind time. Recreate
+        // the view on a workspace switch instead of reusing a child with the
+        // old filesystem root.
+        this.destroyInstance(existing.instanceId)
       } else {
         const nextDescriptorContext =
-          descriptor.capabilityContext === undefined
-            ? existing.capabilityContext
-            : descriptor.capabilityContext
+          opts.capabilityContext !== undefined
+            ? opts.capabilityContext
+            : descriptor.capabilityContext === undefined
+              ? existing.capabilityContext
+              : descriptor.capabilityContext
         validateV2CapabilityContext(descriptor, nextDescriptorContext ?? null)
         if (existing.hasV2DescriptorIdentity !== hasV2DescriptorIdentity(descriptor)) {
           // A live instance must not switch between v1 and v2 route semantics.
@@ -3395,12 +5357,12 @@ export class FrontendPluginManager {
           // keep the view on its original host, so focus that one — the open
           // must never land invisibly behind another window.
           revealHostWindow(existing.hostWindow)
-          return
+          return existing.instanceId
         }
       }
     }
 
-    this.mountView(hostWindow, descriptor, bounds, descriptor.query ?? '', opts, undefined, true)
+    return this.mountView(hostWindow, descriptor, bounds, descriptor.query ?? '', opts, undefined, true).instanceId
   }
 
   /**
@@ -3418,6 +5380,9 @@ export class FrontendPluginManager {
     const registered = this.descriptors.get(packageDescriptor.id)
     if (!registered) {
       throw new Error(`package descriptor '${packageDescriptor.id}' is not registered by the Host`)
+    }
+    if (this.isPackageVersionStopping(registered.id, registered.packageVersion)) {
+      throw new BackendPluginError('PLUGIN_STOPPING')
     }
     const canonicalView = registered.views?.find(
       (candidate) => candidate.contributionKey === view.contributionKey
@@ -3447,6 +5412,12 @@ export class FrontendPluginManager {
       this.focusInstance(handle.instanceId)
     } else {
       this.deactivate(handle.instanceId)
+    }
+    try {
+      await this.waitForBackendBinding(handle.instanceId)
+    } catch (error) {
+      this.destroyInstance(handle.instanceId)
+      throw error
     }
     return handle
   }
@@ -3481,6 +5452,7 @@ export class FrontendPluginManager {
     workspacePath: string | null
     query: string
     capabilityContext: HostCapabilityContext | null
+    contributionKey: string | null
     isV2Identity: boolean
     openedViaLegacyAdapter: boolean
     fill: boolean
@@ -3491,6 +5463,7 @@ export class FrontendPluginManager {
       instanceId,
       id: descriptor.id,
       openedViaLegacyAdapter,
+      contributionKey: input.contributionKey,
       hasV2DescriptorIdentity: isV2Identity,
       requires: descriptor.requires,
       capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
@@ -3501,6 +5474,8 @@ export class FrontendPluginManager {
       view: input.surface,
       hostWindow: input.hostWindow,
       workspacePath: input.workspacePath,
+      backendWorkspaceId: null,
+      backendBindingTask: null,
       query: input.query,
       senderId: input.surface.webContents.id,
       fill: input.fill,
@@ -3531,6 +5506,83 @@ export class FrontendPluginManager {
     }
     if (openedViaLegacyAdapter) this.legacyInstances.set(descriptor.id, instanceId)
     this.bySender.set(record.senderId, instanceId)
+
+    const activation = nonEmptyString(descriptor.packageVersion) && nonEmptyString(descriptor.packageDir)
+      ? this.pluginBackendHost.activationFor(
+          descriptor.id,
+          descriptor.packageVersion,
+          descriptor.packageDir,
+        )
+      : undefined
+    if (
+      this.hasPlansBackendView(descriptor, record.workspacePath, record.capabilityContext) &&
+      record.workspacePath &&
+      activation
+    ) {
+      const workspaceId = this.workspaceIdForPath(record.workspacePath)
+      if (workspaceId) {
+        const workspacePath = record.workspacePath
+        const binding = Promise.resolve().then(() => this.pluginBackendHost.bindView({
+            pluginId: descriptor.id,
+            packageVersion: activation.packageVersion,
+            workspaceId,
+            instanceId,
+            contributionKey: record.contributionKey ?? 'navide.plans.window',
+            hostWindowId: String(hostWindow.id),
+            initiator: HOST_USER_INITIATOR,
+          }, descriptor.packageDir!, workspacePath))
+        record.backendBindingTask = binding.then(() => {
+            if (this.running.get(instanceId) === record) record.backendWorkspaceId = workspaceId
+            this.markPlansBackendReady(activation.packageVersion, descriptor.packageDir!)
+          }).catch((error: unknown) => {
+            if (this.isPlansBackendAvailabilityError(error)) {
+              this.markPlansBackendUnavailable('bind-failure')
+              try {
+                this.plansBackendFailureHandler?.({
+                  instanceId,
+                  workspacePath,
+                  packageVersion: activation.packageVersion,
+                  query: record.query,
+                  contributionKey: record.contributionKey,
+                  reason: error instanceof Error ? error.message : 'Plans backend bind failed',
+                })
+              } catch {
+                // A recovery observer must not change the bind result.
+              }
+            }
+            warnMain(
+              `[plugin-backend] Plans view ${instanceId} could not bind: ${
+                error instanceof Error ? error.message : 'invalid backend runtime'
+              }`,
+            )
+            if (error instanceof Error && (error as any).cause) {
+              const cause = (error as any).cause
+              const alreadyLogged =
+                (typeof cause === 'object' && cause !== null && this.loggedDiagnosticCauses.has(cause)) ||
+                this.loggedDiagnosticCauses.has(error)
+              if (!alreadyLogged) {
+                if (typeof cause === 'object' && cause !== null) {
+                  this.loggedDiagnosticCauses.add(cause)
+                }
+                this.loggedDiagnosticCauses.add(error)
+                const rawCause = cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)
+                const lines = sanitizeDiagnosticLines(rawCause)
+                if (lines.length > 0) {
+                  warnMain(`[plugin-backend] Cause: ${lines[0]}`)
+                  for (let i = 1; i < lines.length; i++) {
+                    warnMain(`[plugin-backend] ${lines[i]}`)
+                  }
+                }
+              }
+            }
+            throw error
+          })
+        // The opener consumes this rejection; the attached no-op handler keeps
+        // direct callers that do not await open() from producing an unhandled
+        // rejection while still allowing waitForBackendBinding to observe it.
+        void record.backendBindingTask.catch(() => undefined)
+      }
+    }
 
     // A plugin needing the backend gets the shared transport connected now (if
     // the backend url is already known) so server-push events reach it without
@@ -3662,7 +5714,12 @@ export class FrontendPluginManager {
         // on the Page Visibility API inside plugin views.
         backgroundThrottling: false,
         // Injected so the preload can stamp calls with an authoritative plugin id.
-        additionalArguments: [`--plugin-id=${descriptor.id}`],
+        additionalArguments: [
+          `--plugin-id=${descriptor.id}`,
+          ...(this.hasPlansBackendView(descriptor, opts.workspacePath, capabilityContext)
+            ? ['--plugin-backend=1']
+            : []),
+        ],
       },
     })
 
@@ -3690,6 +5747,7 @@ export class FrontendPluginManager {
       workspacePath: opts.workspacePath ?? null,
       query,
       capabilityContext: capabilityContext ?? null,
+      contributionKey: viewDescriptor?.contributionKey ?? null,
       isV2Identity,
       openedViaLegacyAdapter,
       fill: bounds === 'fill',
@@ -3716,6 +5774,7 @@ export class FrontendPluginManager {
   /** Deliver a new open target to a running view, queueing until its entry has
    *  finished loading (so a target racing the first load is never lost). */
   private sendOpenTarget(record: RunningPlugin, params: Record<string, string>): void {
+    if (this.isPluginStopping(record)) return
     if (record.ready) record.view.webContents.send(IPC_OPEN_TARGET, params)
     else record.pendingTargets.push(params)
   }
@@ -3755,7 +5814,7 @@ export class FrontendPluginManager {
     forceFile = false
   ): void {
     const devUrl = !forceFile && process.env['ELECTRON_RENDERER_URL'] ? descriptor.devUrl : null
-    const query = descriptor.query ?? ''
+    const query = this.plansProvenanceQuery(descriptor, descriptor.query ?? '')
     if (devUrl) void view.webContents.loadURL(devUrl + query)
     else void view.webContents.loadFile(descriptor.entryFile, query ? { search: query } : undefined)
   }
@@ -3766,6 +5825,7 @@ export class FrontendPluginManager {
   activate(instanceId: string): void {
     const plugin = this.resolveInstance(instanceId)
     if (!plugin) return
+    if (this.isPluginStopping(plugin)) return
     if (plugin.fill && !plugin.hostWindow.isDestroyed()) {
       this.applyBounds(plugin, 'fill')
       this.trackHostResize(plugin)
@@ -3777,7 +5837,7 @@ export class FrontendPluginManager {
    *  or bounds. Stale/unknown instance ids are ignored. */
   focusInstance(instanceId: string): void {
     const plugin = this.running.get(instanceId)
-    if (!plugin || plugin.view.webContents.isDestroyed()) return
+    if (!plugin || this.isPluginStopping(plugin) || plugin.view.webContents.isDestroyed()) return
     revealHostWindow(plugin.hostWindow)
     plugin.view.webContents.focus()
   }
@@ -3803,16 +5863,15 @@ export class FrontendPluginManager {
    *  the workspace identity itself is changed only by recreating the view. */
   updateViewQuery(instanceId: string, query: string): void {
     const plugin = this.running.get(instanceId)
-    if (!plugin) return
+    if (!plugin || this.isPluginStopping(plugin)) return
     plugin.query = query
     if (query) this.sendOpenTarget(plugin, queryToParams(query))
   }
 
-  /** Host-only/deferred integration seam: register an event/backend
-   *  subscription under one exact view instance. The returned function
-   *  unregisters and disposes it exactly once; instance teardown invokes the
-   *  same wrapper for any remaining subscription. No production v2 producer is
-   *  wired through this seam yet. */
+  /** Host-only integration seam: register an event/backend subscription under
+   *  one exact view instance. The returned function unregisters and disposes
+   *  it exactly once; instance teardown invokes the same wrapper for any
+   *  remaining subscription. */
   registerInstanceSubscription(instanceId: string, dispose: () => void): () => void {
     if (!this.running.has(instanceId)) {
       try {
@@ -3888,6 +5947,80 @@ export class FrontendPluginManager {
       )
     }
     this.descriptors.set(descriptor.id, descriptor)
+    this.descriptorSources.set(descriptor.id, opts.builtin ? 'host-bundled' : 'installed-catalog')
+  }
+
+  /** Register one Host-approved package-local backend activation. */
+  registerBackendActivation(activation: BackendPluginLaunchSpec): void {
+    const descriptor = this.descriptors.get(activation.pluginId)
+    if (!descriptor) {
+      throw new BackendPluginError(
+        'INVALID_ACTIVATION',
+        'Backend activation has no selected package descriptor.',
+      )
+    }
+    const descriptorPackageDir = canonicalBackendPackageDir(descriptor.packageDir)
+    const activationPackageDir = canonicalBackendPackageDir(activation.packageDir)
+    if (
+      descriptor.id !== activation.pluginId ||
+      descriptor.packageVersion !== activation.packageVersion ||
+      !descriptorPackageDir ||
+      !activationPackageDir ||
+      descriptorPackageDir !== activationPackageDir
+    ) {
+      throw new BackendPluginError(
+        'INVALID_ACTIVATION',
+        'Backend activation does not match the selected package descriptor.',
+      )
+    }
+    activation = { ...activation, packageDir: descriptorPackageDir }
+    const existing = this.pluginBackendHost.activationForPlugin(activation.pluginId)
+    if (existing) {
+      throw new BackendPluginError(
+        'INVALID_ACTIVATION',
+        existing.packageVersion === activation.packageVersion
+          ? 'Backend package version is already registered.'
+          : 'Backend plugin id is already registered with a different package version.',
+      )
+    }
+    this.pluginBackendHost.register(activation)
+    this.backendActivationCount++
+    this.refreshHostSessionRegistration()
+  }
+
+  hasBackendActivity(): boolean {
+    return this.backendActivationCount > 0 ||
+      this.pendingBackendCalls.size > 0 ||
+      this.pendingBackendSubscriptions.size > 0
+  }
+
+  /** True only when the Host has registered the exact package-version backend
+   * activation that a v2 view or headless agent route will use. */
+  hasBackendActivation(pluginId: string, packageVersion: string): boolean {
+    return this.pluginBackendHost.hasActivation(pluginId, packageVersion)
+  }
+
+  /** Host-only rollback snapshot of an already approved backend registration. */
+  getBackendActivation(pluginId: string, packageVersion: string): BackendPluginLaunchSpec | undefined {
+    const packageDir = this.descriptors.get(pluginId)?.packageDir
+    return packageDir ? this.pluginBackendHost.activationFor(pluginId, packageVersion, packageDir) : undefined
+  }
+
+  async closeBackendPlugins(): Promise<void> {
+    for (const calls of this.pendingBackendCalls.values()) {
+      for (const controller of calls.values()) controller.abort()
+    }
+    for (const subscriptions of this.pendingBackendSubscriptions.values()) {
+      for (const pending of subscriptions.values()) pending.unregister?.()
+    }
+    this.pendingBackendCalls.clear()
+    this.pendingBackendSubscriptions.clear()
+    this.headlessBackendInstances.clear()
+    this.pendingHeadlessBackendBinds.clear()
+    this.backendActivationCount = 0
+    this.plansBackendHealth = 'unknown'
+    this.plansBackendHealthIdentity = null
+    await this.pluginBackendHost.close()
   }
 
   /**
@@ -3908,6 +6041,11 @@ export class FrontendPluginManager {
    *  view must not continue using the old package after its descriptor has
    *  been rolled back. The package inventory itself is left untouched. */
   replaceBuiltinForRecovery(descriptor: PluginLaunchDescriptor): void {
+    const packageVersion = this.packageVersionForPluginId(descriptor.id)
+    if (packageVersion) {
+      this.recoveryPackageVersions.set(descriptor.id, packageVersion)
+      this.revokePackageVersionInBackground(descriptor.id, packageVersion)
+    }
     this.builtinFallbacks.set(descriptor.id, descriptor)
     this.stopAiSessionsForPlugin(descriptor.id)
     this.destroyPluginInstances(descriptor.id)
@@ -3949,12 +6087,17 @@ export class FrontendPluginManager {
       return { restored: false, reason: 'factory package has no Manifest v2 policy' }
     }
     activation.provenance = 'factory-bundled'
-    this.builtinFallbacks.delete(expectedPluginId)
+    const previousVersion =
+      this.packageVersionForPluginId(expectedPluginId) ?? this.recoveryPackageVersions.get(expectedPluginId)
+    if (previousVersion) this.revokePackageVersionInBackground(expectedPluginId, previousVersion)
     this.stopAiSessionsForPlugin(expectedPluginId)
     this.destroyPluginInstances(expectedPluginId)
     this.clearTerminalRoutes(expectedPluginId)
     this.descriptors.delete(expectedPluginId)
     this.registerDescriptor(descriptor, { official: true })
+    this.descriptorSources.set(expectedPluginId, 'factory-bundle')
+    this.recoveryPackageVersions.delete(expectedPluginId)
+    this.builtinFallbacks.delete(expectedPluginId)
     return { restored: true, activation }
   }
 
@@ -4005,6 +6148,17 @@ export class FrontendPluginManager {
     return [...this.installedPackages.values()].map((summary) => ({
       id: summary.id,
       requires: [...summary.requires],
+      ...(summary.packageVersion ? { packageVersion: summary.packageVersion } : {}),
+      ...(summary.manifestPermissions
+        ? {
+            manifestPermissions: {
+              system: [...summary.manifestPermissions.system],
+              ...(summary.manifestPermissions.shell
+                ? { shell: summary.manifestPermissions.shell }
+                : {}),
+            },
+          }
+        : {}),
       ...(summary.provenance ? { provenance: summary.provenance } : {}),
       ...(summary.warning ? { warning: summary.warning } : {}),
     }))
@@ -4109,6 +6263,7 @@ export class FrontendPluginManager {
     summary.provenance = 'factory-bundled'
     activation.provenance = 'factory-bundled'
     this.registerInstalledPackage(summary, scanned.descriptor, { official: true })
+    this.descriptorSources.set(expectedPluginId, 'factory-bundle')
     return {
       loaded: true,
       pluginId: activation.pluginId,
@@ -4138,6 +6293,13 @@ export class FrontendPluginManager {
       )
     }
 
+    const previousVersion = this.packageVersionForPluginId(summary.id)
+    if (previousVersion && (
+      this.pluginBackendHost.hasActivation(summary.id, previousVersion) ||
+      this.instancesForPackageVersion(summary.id, previousVersion).length > 0
+    )) {
+      this.revokePackageVersionInBackground(summary.id, previousVersion)
+    }
     this.destroyPluginInstances(summary.id)
     this.clearTerminalRoutes(summary.id)
     this.descriptors.delete(summary.id)
@@ -4145,6 +6307,17 @@ export class FrontendPluginManager {
     this.installedPackages.set(summary.id, {
       id: summary.id,
       requires: [...summary.requires],
+      ...(summary.packageVersion ? { packageVersion: summary.packageVersion } : {}),
+      ...(summary.manifestPermissions
+        ? {
+            manifestPermissions: {
+              system: [...summary.manifestPermissions.system],
+              ...(summary.manifestPermissions.shell
+                ? { shell: summary.manifestPermissions.shell }
+                : {}),
+            },
+          }
+        : {}),
       ...(summary.provenance ? { provenance: summary.provenance } : {}),
       ...(summary.warning ? { warning: summary.warning } : {}),
     })
@@ -4185,8 +6358,18 @@ export class FrontendPluginManager {
     const descriptor = listed ? this.descriptors.get(listed.id) : undefined
     const view = descriptor?.views?.find((candidate) => candidate.contributionKey === contributionKey)
     if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
+    if (this.isPackageVersionStopping(descriptor.id, descriptor.packageVersion)) {
+      return { ok: false, error: 'Backend plugin is stopping.' }
+    }
     if (view.location === 'window') {
       return { ok: false, error: 'window contributions require a dedicated Host window' }
+    }
+    if (
+      descriptor.id === PLANS_PLUGIN_ID &&
+      descriptor.capabilityPolicy?.kind === 'manifest-v2' &&
+      !this.isPlansBackendAvailable()
+    ) {
+      return { ok: false, error: 'Plans agent backend is unavailable' }
     }
     const capabilityContext = this.contributionCapabilityContext(descriptor, view, options.workspacePath)
     if (descriptor.capabilityPolicy?.kind === 'manifest-v2' && !capabilityContext) {
@@ -4209,7 +6392,8 @@ export class FrontendPluginManager {
     this.releaseGuestReservations(registryKey)
 
     const token = randomUUID()
-    const query = `${options.query}&nv_guest=${token}`
+    const guestQuery = `${options.query}&nv_guest=${token}`
+    const query = this.plansProvenanceQuery(descriptor, guestQuery)
     const entryFile = view.entryFile ?? descriptor.entryFile
     const pending: PendingGuest = {
       token,
@@ -4220,6 +6404,7 @@ export class FrontendPluginManager {
       workspacePath: options.workspacePath || null,
       query,
       capabilityContext: capabilityContext ?? null,
+      contributionKey,
       isV2Identity: hasV2DescriptorIdentity(descriptor),
       timer: null,
       attached: false,
@@ -4239,6 +6424,17 @@ export class FrontendPluginManager {
   private releaseGuestReservations(registryKey: string): void {
     for (const [token, pending] of this.pendingGuests) {
       if (pending.registryKey !== registryKey) continue
+      if (pending.timer) clearTimeout(pending.timer)
+      this.pendingGuests.delete(token)
+    }
+  }
+
+  private clearGuestReservationsForPackageVersion(pluginId: string, packageVersion: string): void {
+    for (const [token, pending] of this.pendingGuests) {
+      if (
+        pending.descriptor.id !== pluginId ||
+        pending.descriptor.packageVersion !== packageVersion
+      ) continue
       if (pending.timer) clearTimeout(pending.timer)
       this.pendingGuests.delete(token)
     }
@@ -4265,12 +6461,24 @@ export class FrontendPluginManager {
   /** The webPreferences main must force onto an attaching guest. Null means the
    *  src was not handed out by {@link prepareGuestContribution}, which is the
    *  caller's signal to veto the attach. */
-  guestAttachPreferences(src: string): { preload: string; pluginId: string } | null {
+  guestAttachPreferences(src: string): {
+    preload: string
+    pluginId: string
+    additionalArguments: string[]
+  } | null {
     const pending = this.pendingGuestFor(src)
-    if (!pending) return null
+    if (!pending || this.isPackageVersionStopping(pending.descriptor.id, pending.descriptor.packageVersion)) {
+      return null
+    }
     return {
       preload: join(__dirname, '../preload/plugin-preload.js'),
       pluginId: pending.descriptor.id,
+      additionalArguments: [
+        `--plugin-id=${pending.descriptor.id}`,
+        ...(this.hasPlansBackendView(pending.descriptor, pending.workspacePath, pending.capabilityContext)
+          ? ['--plugin-backend=1']
+          : []),
+      ],
     }
   }
 
@@ -4280,6 +6488,11 @@ export class FrontendPluginManager {
   attachGuestContribution(src: string, guest: WebContents): boolean {
     const pending = this.pendingGuestFor(src)
     if (!pending) return false
+    if (this.isPackageVersionStopping(pending.descriptor.id, pending.descriptor.packageVersion)) {
+      if (pending.timer) clearTimeout(pending.timer)
+      this.pendingGuests.delete(pending.token)
+      return false
+    }
     // Pairing a guest with a reservation by event order alone rests on an
     // Electron-internal detail. Verify the guest really belongs to the window
     // the reservation was made for, so a future async step between the two
@@ -4316,6 +6529,7 @@ export class FrontendPluginManager {
       workspacePath: pending.workspacePath,
       query: pending.query,
       capabilityContext: pending.capabilityContext,
+      contributionKey: pending.contributionKey,
       isV2Identity: pending.isV2Identity,
       openedViaLegacyAdapter: false,
       fill: false,
@@ -4350,8 +6564,18 @@ export class FrontendPluginManager {
     )
     const view = descriptor?.views?.find((candidate) => candidate.contributionKey === contributionKey)
     if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
+    if (this.isPackageVersionStopping(descriptor.id, descriptor.packageVersion)) {
+      return { ok: false, error: 'Backend plugin is stopping.' }
+    }
     if (view.location === 'window') {
       return { ok: false, error: 'window contributions require a dedicated Host window' }
+    }
+    if (
+      descriptor.id === PLANS_PLUGIN_ID &&
+      descriptor.capabilityPolicy?.kind === 'manifest-v2' &&
+      !this.isPlansBackendAvailable()
+    ) {
+      return { ok: false, error: 'Plans agent backend is unavailable' }
     }
     const capabilityContext = this.contributionCapabilityContext(
       descriptor,
@@ -4411,8 +6635,18 @@ export class FrontendPluginManager {
     )
     const view = descriptor?.views?.find((candidate) => candidate.contributionKey === contributionKey)
     if (!descriptor || !view) return { ok: false, error: 'contribution is not installed' }
+    if (this.isPackageVersionStopping(descriptor.id, descriptor.packageVersion)) {
+      return { ok: false, error: 'Backend plugin is stopping.' }
+    }
     if (view.location !== 'window') {
       return { ok: false, error: 'contribution is not a window view' }
+    }
+    if (
+      descriptor.id === PLANS_PLUGIN_ID &&
+      descriptor.capabilityPolicy?.kind === 'manifest-v2' &&
+      !this.isPlansBackendAvailable()
+    ) {
+      return { ok: false, error: 'Plans agent backend is unavailable' }
     }
     const capabilityContext = this.contributionCapabilityContext(
       descriptor,
@@ -4470,6 +6704,8 @@ export class FrontendPluginManager {
       this.contributionInstances.delete(key)
       return { ok: false }
     }
+    const plugin = this.running.get(handle.instanceId)
+    if (!plugin || this.isPluginStopping(plugin)) return { ok: false }
     if (visible && !bounds) return { ok: false }
     if (bounds) this.setBounds(handle.instanceId, bounds)
     if (visible) this.activate(handle.instanceId)
@@ -4648,6 +6884,8 @@ export class FrontendPluginManager {
           action: 'quarantine',
           reason: 'reserved plugin id requires the App-authorized Official Registry',
         })
+        const packageVersion = scanned.activation?.packageVersion ?? scanned.descriptor?.packageVersion
+        if (packageVersion) this.revokePackageVersionInBackground(pluginId, packageVersion)
         this.destroyPluginInstances(pluginId)
         this.clearTerminalRoutes(pluginId)
         this.installedPackages.delete(pluginId)
@@ -4658,6 +6896,8 @@ export class FrontendPluginManager {
       }
       decisions.push({ pluginId, ...decision })
       if (decision.action === 'quarantine') {
+        const packageVersion = scanned.activation?.packageVersion ?? scanned.descriptor?.packageVersion
+        if (packageVersion) this.revokePackageVersionInBackground(pluginId, packageVersion)
         this.destroyPluginInstances(pluginId)
         this.clearTerminalRoutes(pluginId)
         this.installedPackages.delete(pluginId)
@@ -4674,9 +6914,68 @@ export class FrontendPluginManager {
    * storage, while leaving the package registered so a failed cleanup can be
    * retried. */
   preparePluginRemoval(id: string): void {
+    const packageVersion = this.packageVersionForPluginId(id)
+    if (packageVersion && (
+      this.pluginBackendHost.hasActivation(id, packageVersion) ||
+      this.instancesForPackageVersion(id, packageVersion).length > 0
+    )) {
+      this.revokePackageVersionInBackground(id, packageVersion)
+    }
     this.stopAiSessionsForPlugin(id)
     this.destroyPluginInstances(id)
     this.clearTerminalRoutes(id)
+  }
+
+  /** Revoke one exact package-version Grant and drain the complete runtime
+   *  attached to it. Completed filesystem, shell, and external effects are not
+   *  rolled back; this only prevents further work and tears down live state. */
+  async revokePackageVersion(pluginId: string, packageVersion: string): Promise<void> {
+    const key = packageVersionKey(pluginId, packageVersion)
+    const existing = this.packageRevocationTasks.get(key)
+    if (existing) {
+      await existing
+      return
+    }
+    this.stoppingPlugins.add(key)
+    for (const headlessKey of this.headlessBackendInstances.keys()) {
+      if (headlessKey.startsWith(`${pluginId}\u0000${packageVersion}\u0000`)) {
+        this.headlessBackendInstances.delete(headlessKey)
+      }
+    }
+    for (const headlessKey of this.pendingHeadlessBackendBinds.keys()) {
+      if (headlessKey.startsWith(`${pluginId}\u0000${packageVersion}\u0000`)) {
+        this.pendingHeadlessBackendBinds.delete(headlessKey)
+      }
+    }
+    this.clearGuestReservationsForPackageVersion(pluginId, packageVersion)
+    const hadActivation = this.pluginBackendHost.hasActivation(pluginId, packageVersion)
+    const task = Promise.resolve().then(async () => {
+      this.stopAiSessionsForPackageVersion(pluginId, packageVersion)
+      this.clearTerminalRoutesForPackageVersion(pluginId, packageVersion)
+      for (const plugin of this.instancesForPackageVersion(pluginId, packageVersion)) {
+        this.deactivate(plugin.instanceId)
+        const forgotten = this.forgetInstance(plugin.instanceId, { unbindBackend: false })
+        if (!forgotten) continue
+        this.detachView(forgotten)
+        try {
+          if (!forgotten.view.webContents.isDestroyed()) forgotten.view.webContents.close()
+        } catch {
+          // Electron may already be tearing the view down; Host state is gone.
+        }
+      }
+      await this.pluginBackendHost.revokePackageVersion(pluginId, packageVersion)
+      if (hadActivation) this.backendActivationCount = Math.max(0, this.backendActivationCount - 1)
+      if (hadActivation) this.refreshHostSessionRegistration()
+    })
+    this.packageRevocationTasks.set(key, task)
+    let completed = false
+    try {
+      await task
+      completed = true
+    } finally {
+      if (this.packageRevocationTasks.get(key) === task) this.packageRevocationTasks.delete(key)
+      if (completed) this.stoppingPlugins.delete(key)
+    }
   }
 
   /** Unregister a descriptor and tear down its view if it is open. Used by the
@@ -4697,7 +6996,7 @@ export class FrontendPluginManager {
    *  in {@link dispatchEvent}). */
   private emitToInstance(instanceId: string, type: string, data: unknown): void {
     const plugin = this.running.get(instanceId)
-    if (plugin && !plugin.view.webContents.isDestroyed()) {
+    if (plugin && !this.isPluginStopping(plugin) && !plugin.view.webContents.isDestroyed()) {
       plugin.view.webContents.send(IPC_EVENT, { type, data })
     }
   }
@@ -4784,6 +7083,13 @@ export interface BundledMiniIdeSource {
   /** Repo root holding `dist-plugins/` when unpackaged. Defaults to the
    *  built main bundle's `../..` (`out/main` → repo root). */
   devRoot?: string
+}
+
+/** Optional selected activation supplied by the startup installer scan. The
+ * installed package must win over the bundled copy, but its already-verified
+ * activation must still be registered with the package-local Host broker. */
+export interface BundledPlansSource extends BundledMiniIdeSource {
+  installedActivation?: PluginActivationCatalogEntry
 }
 
 /** Directory of the bundled mini-IDE copy: `resources/plugins/mini-ide` inside
@@ -4943,6 +7249,63 @@ export function openMiniIdePluginView(
 /** Id of the Plans extension (the plan review surface). */
 export const PLANS_PLUGIN_ID = 'navide.plans'
 
+/** The production Plans package owns both the embedded left surface and the
+ * dedicated window. A v2 descriptor with only one is an incomplete cutover
+ * and must stay on the explicit legacy recovery path. */
+export function hasCompletePlansContributions(
+  descriptor: PluginLaunchDescriptor | undefined,
+): boolean {
+  return Boolean(
+    descriptor?.capabilityPolicy?.kind === 'manifest-v2' &&
+    descriptor.views?.some((view) =>
+      view.contributionKey === `${PLANS_PLUGIN_ID}.left` && view.location === 'left'
+    ) &&
+    descriptor.views?.some((view) =>
+      view.contributionKey === `${PLANS_PLUGIN_ID}.window` && view.location === 'window'
+    )
+  )
+}
+
+/** Methods exposed by the first-party Plans Backend Wire child. The list is
+ *  Host-owned and intentionally narrower than the backend implementation. */
+export const PLANS_BACKEND_METHODS = [
+  'plans.resolve_root',
+  'plans.list',
+  'plans.list_docs',
+  'plans.read',
+  'plans.read_document',
+  'plans.write_document',
+  'plans.list_directory',
+  'plans.cache_put',
+  'plans.create',
+  'plans.update_stage',
+  'plans.update_todo',
+  'plans.add_note',
+  'plans.review_note_add',
+  'plans.review_note_edit',
+  'plans.review_note_resolve',
+  'plans.review_note_delete',
+  'plans.update_archive',
+  'plans.promote',
+  'plans.rename',
+  'plans.delete',
+] as const
+
+/** MCP-facing package adapter methods. Destructive document deletion is not
+ *  an agent tool, even though the manual UI can use the same package child. */
+export const PLANS_AGENT_BACKEND_METHODS = [
+  'plans.list',
+  'plans.list_docs',
+  'plans.read',
+  'plans.create',
+  'plans.update_stage',
+  'plans.update_todo',
+  'plans.add_note',
+] as const
+
+export const PLANS_BACKEND_EVENTS = ['plans.changed'] as const
+export const PLANS_BACKEND_BRIDGE_PORTS = ['filesystem'] as const
+
 /** Directory of the bundled Plans copy: `resources/plugins/plans` inside the
  *  app package (shipped via electron-builder `extraResources`), or the local
  *  `dist-plugins/plans` build output when running unpackaged. Mirrors
@@ -4953,46 +7316,158 @@ export function bundledPlansDir(source: BundledMiniIdeSource): string {
     : join(source.devRoot ?? join(__dirname, '../..'), 'dist-plugins', 'plans')
 }
 
+/** Directory of the production combined Plans package. The old
+ *  `dist-plugins/plans` bundle remains a separate rollback adapter. */
+export function bundledPlansV2Dir(source: BundledMiniIdeSource): string {
+  return source.isPackaged
+    ? join(source.resourcesPath, 'plugins', 'navide-plans')
+    : join(source.devRoot ?? join(__dirname, '../..'), 'dist-plugins', 'navide-plans')
+}
+
+export function plansBackendActivation(
+  activation: PluginActivationCatalogEntry,
+): BackendPluginLaunchSpec | null {
+  if (activation.pluginId !== PLANS_PLUGIN_ID || !activation.backend) return null
+  return {
+    pluginId: activation.pluginId,
+    packageVersion: activation.packageVersion,
+    packageDir: activation.packageDir,
+    entryFile: activation.backend.entryFile,
+    protocolVersion: activation.backend.protocolVersion,
+    activation: activation.backend.activation,
+    approvedMethods: [...PLANS_BACKEND_METHODS],
+    agentMethods: [...PLANS_AGENT_BACKEND_METHODS],
+    approvedEvents: [...PLANS_BACKEND_EVENTS],
+    approvedBridgePorts: [...PLANS_BACKEND_BRIDGE_PORTS],
+  }
+}
+
 /**
- * Register the app-bundled Plans surface as a builtin descriptor at startup,
- * mirroring {@link registerBundledMiniIde} exactly (same precedence order and
- * fail-closed validation). Never throws: a missing dir, invalid manifest,
- * spoofed id, or missing entry file returns `registered: false` with a reason
- * (caller logs), so a corrupt bundle degrades instead of crashing startup.
+ * Register the app-bundled combined Plans package at startup. The v2 package
+ * is selected as one descriptor/backend tuple; the old frontend-only bundle
+ * is retained only as an explicit fallback while the migration is available.
+ * A missing dir, invalid manifest, spoofed id, missing entry, or missing
+ * packaged backend returns `registered: false` for the v2 candidate and lets
+ * the legacy adapter be considered.
  */
 export function registerBundledPlans(
   manager: FrontendPluginManager,
-  source: BundledMiniIdeSource
+  source: BundledPlansSource
 ): { registered: boolean; reason?: string } {
-  const dir = bundledPlansDir(source)
-  const scanned = loadPluginDir(dir)
-  if (!scanned.descriptor) {
-    return { registered: false, reason: `${dir}: ${scanned.error ?? 'invalid plugin dir'}` }
+  const selected = manager.getDescriptor(PLANS_PLUGIN_ID)
+  if (selected?.capabilityPolicy?.kind === 'manifest-v2' && selected.packageVersion) {
+    if (manager.hasBackendActivation(PLANS_PLUGIN_ID, selected.packageVersion)) {
+      return hasCompletePlansContributions(selected)
+        ? { registered: true }
+        : { registered: false, reason: 'selected Plans package is missing a production view contribution' }
+    }
+    const installed = source.installedActivation
+    if (
+      !installed ||
+      installed.pluginId !== PLANS_PLUGIN_ID ||
+      installed.packageVersion !== selected.packageVersion
+    ) {
+      return {
+        registered: false,
+        reason: 'selected installed Plans package has no matching verified backend activation',
+      }
+    }
+    const activation = plansBackendActivation(installed)
+    if (!activation || !existsSync(activation.entryFile)) {
+      return { registered: false, reason: 'selected installed Plans backend entry is missing' }
+    }
+    try {
+      manager.registerBackendActivation(activation)
+    } catch (error) {
+      return {
+        registered: false,
+        reason: `selected installed Plans backend activation rejected: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+    const registered = manager.getDescriptor(PLANS_PLUGIN_ID)
+    return hasCompletePlansContributions(registered)
+      ? { registered: true }
+      : { registered: false, reason: 'selected Plans package is missing a production view contribution' }
   }
-  if (scanned.descriptor.id !== PLANS_PLUGIN_ID) {
+  const v2Dir = bundledPlansV2Dir(source)
+  const v2 = loadPluginDir(v2Dir)
+  if (v2.descriptor && v2.activation && v2.descriptor.id === PLANS_PLUGIN_ID) {
+    if (!existsSync(v2.descriptor.entryFile)) {
+      return { registered: false, reason: `${v2Dir}: entry file missing (${v2.descriptor.entryFile})` }
+    }
+    const activation = plansBackendActivation(v2.activation)
+    if (!activation || !existsSync(activation.entryFile)) {
+      return { registered: false, reason: `${v2Dir}: packaged backend entry is missing` }
+    }
+    const loaded = manager.loadFactoryPlugin(v2Dir, PLANS_PLUGIN_ID)
+    if (!loaded.loaded) {
+      // An officially verified installed package has precedence over the app
+      // copy. Its activation is managed by the installed-package lifecycle;
+      // do not replace it with the bundled package's backend.
+      const installed = manager.getDescriptor(PLANS_PLUGIN_ID)
+      if (installed?.packageVersion && hasCompletePlansContributions(installed)) {
+        return { registered: true }
+      }
+      return { registered: false, reason: `${v2Dir}: ${loaded.reason}` }
+    }
+    try {
+      manager.registerBackendActivation(activation)
+    } catch (error) {
+      return {
+        registered: false,
+        reason: `${v2Dir}: backend activation rejected: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+    const registered = manager.getDescriptor(PLANS_PLUGIN_ID)
+    return hasCompletePlansContributions(registered)
+      ? { registered: true }
+      : { registered: false, reason: `${v2Dir}: production view contribution is incomplete` }
+  }
+
+  const legacyDir = bundledPlansDir(source)
+  const legacy = loadPluginDir(legacyDir)
+  if (!legacy.descriptor) {
     return {
       registered: false,
-      reason: `${dir}: manifest id '${scanned.descriptor.id}' is not '${PLANS_PLUGIN_ID}'`,
+      reason: `${v2Dir}: ${v2.error ?? 'invalid v2 package'}; ${legacyDir}: ${legacy.error ?? 'invalid plugin dir'}`,
     }
   }
-  if (!existsSync(scanned.descriptor.entryFile)) {
-    return { registered: false, reason: `${dir}: entry file missing (${scanned.descriptor.entryFile})` }
+  if (legacy.descriptor.id !== PLANS_PLUGIN_ID) {
+    return {
+      registered: false,
+      reason: `${legacyDir}: manifest id '${legacy.descriptor.id}' is not '${PLANS_PLUGIN_ID}'`,
+    }
   }
-  manager.registerBuiltin(scanned.descriptor)
+  if (!existsSync(legacy.descriptor.entryFile)) {
+    return { registered: false, reason: `${legacyDir}: entry file missing (${legacy.descriptor.entryFile})` }
+  }
+  manager.registerBuiltin(legacy.descriptor)
   return { registered: true }
 }
 
 /** Build the entry query PlanWindowApp reads from `window.location.search`:
  *  `workspace_path`, the backend `http_url` (resolved by the plans
- *  capabilityBackend shim), the optional `rel_path` of a plan to auto-open, and
+ *  capabilityBackend shim), the optional `rel_path` of a plan to auto-open,
  *  the current `theme` id so the plugin paints with the app theme before its
- *  first settings reconcile (zero-flash; see plugins/plans/mount.ts). */
-function plansQuery(workspacePath: string, httpUrl: string, relPath: string, theme: string): string {
+ *  first settings reconcile (zero-flash; see plugins/plans/mount.ts), and the
+ *  validated Host `locale`. */
+export function plansQuery(
+  workspacePath: string,
+  httpUrl: string,
+  relPath: string,
+  theme: string,
+  locale?: string
+): string {
   const params = new URLSearchParams()
   if (workspacePath) params.set('workspace_path', workspacePath)
   if (httpUrl) params.set('http_url', httpUrl)
   if (relPath) params.set('rel_path', relPath)
   if (theme) params.set('theme', theme)
+  const trimmed = typeof locale === 'string' ? locale.trim() : ''
+  const validLocale = validateSupportedLocale(trimmed) ?? 'zh-TW'
+  params.set('locale', validLocale)
+  params.set('v2', '1')
+  params.set('contribution', 'window')
   const qs = params.toString()
   return qs ? `?${qs}` : ''
 }
@@ -5016,6 +7491,46 @@ export function devPlansPluginDescriptor(): PluginLaunchDescriptor {
   }
 }
 
+/** Dev descriptor for the combined package. The legacy descriptor above is
+ *  intentionally preserved for rollback tests and manual fallback checks. */
+export function devPlansV2PluginBundle(): {
+  descriptor: PluginLaunchDescriptor
+  activation: BackendPluginLaunchSpec
+} | null {
+  const dir = join(__dirname, '../../dist-plugins/navide-plans')
+  const scanned = loadPluginDir(dir)
+  if (
+    !scanned.descriptor ||
+    !hasCompletePlansContributions(scanned.descriptor) ||
+    !scanned.activation?.backend ||
+    !existsSync(scanned.activation.backend.entryFile)
+  ) return null
+  const activation = plansBackendActivation(scanned.activation)
+  return activation ? { descriptor: scanned.descriptor, activation } : null
+}
+
+export function devPlansV2PluginDescriptor(): PluginLaunchDescriptor | null {
+  return devPlansV2PluginBundle()?.descriptor ?? null
+}
+
+let plansWindow: BrowserWindow | null = null
+
+function ensurePlansWindow(): BrowserWindow {
+  if (plansWindow && !plansWindow.isDestroyed()) return plansWindow
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 760,
+    title: 'Plans',
+    titleBarStyle: 'hidden',
+    backgroundColor: '#0d1117',
+  })
+  plansWindow = win
+  win.on('closed', () => {
+    if (plansWindow === win) plansWindow = null
+  })
+  return win
+}
+
 /**
  * Open the Plans plugin view for a workspace (dev menu / future plan-window
  * surface). Looks the descriptor up in the loader registry; returns false when
@@ -5027,13 +7542,36 @@ export function openPlansPluginView(
   workspacePath: string,
   httpUrl = '',
   relPath = '',
-  theme = ''
-): boolean {
+  theme = '',
+  locale = ''
+): Promise<boolean> {
   const base = frontendPluginManager.getDescriptor(PLANS_PLUGIN_ID)
-  if (!base) return false
-  frontendPluginManager.open(
+  if (!base) return Promise.resolve(false)
+  if (base.capabilityPolicy?.kind === 'manifest-v2') {
+    if (
+      !base.packageVersion ||
+      !base.packageDir ||
+      !frontendPluginManager.isPlansBackendAvailable() ||
+      !hasCompletePlansContributions(base)
+    ) return Promise.resolve(false)
+    const window = ensurePlansWindow()
+    return frontendPluginManager.openContributionWindow(
+      window,
+      `${PLANS_PLUGIN_ID}.window`,
+      {
+        workspacePath,
+        query: plansQuery(workspacePath, httpUrl, relPath, theme, locale),
+      },
+    ).then((result) => {
+      if (result.ok) return true
+      frontendPluginManager.markPlansBackendUnavailable('view-failure')
+      if (!window.isDestroyed()) window.close()
+      return false
+    })
+  }
+  const instanceId = frontendPluginManager.open(
     hostWindow,
-    { ...base, query: plansQuery(workspacePath, httpUrl, relPath, theme) },
+    { ...base, query: plansQuery(workspacePath, httpUrl, relPath, theme, locale) },
     {
       x: 0,
       y: 0,
@@ -5041,7 +7579,7 @@ export function openPlansPluginView(
       height: 800,
     }
   )
-  return true
+  return Promise.resolve(instanceId !== null)
 }
 
 /** Id of the Git extension (the standalone Git client surface). */

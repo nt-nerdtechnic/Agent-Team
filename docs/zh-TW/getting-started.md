@@ -9,7 +9,7 @@ Navide 支援配備 Apple 晶片且執行 macOS 13 以上版本的 Mac。[v0.1.4
 ## 從原始碼安裝的前置需求
 
 - macOS 13+
-- Node.js 22+
+- Node.js 22.12+（22.x）
 - pnpm 10+
 - Python 3.12+
 - uv 0.11+

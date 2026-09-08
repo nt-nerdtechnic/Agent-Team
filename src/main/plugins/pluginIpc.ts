@@ -54,6 +54,10 @@ import { currentPluginHostTarget } from './pluginTarget'
 import type { FrontendPluginManager } from './frontendPluginManager'
 import type { ContributionIcon } from './pluginContributionIcon'
 import { PluginCapabilityGrantStore } from './pluginCapabilityGrantStore'
+import type {
+  ManifestPermissionsSummary,
+  PackageVersionGrantSummary,
+} from '../../shared/executionPolicy'
 
 /** Development-only endpoint. It is intentionally not the official Registry
  * identity: a local Registry must establish trust through root approval. */
@@ -105,6 +109,9 @@ interface InstalledSummary {
   id: string
   requires: string[]
   sensitive: string[]
+  packageVersion?: string
+  manifestPermissions?: ManifestPermissionsSummary
+  packageVersionGrant?: PackageVersionGrantSummary | null
   provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
 }
@@ -150,6 +157,36 @@ function assertPluginRemovalTarget(pluginsRoot: string, value: unknown): string 
   const target = resolve(root, value)
   if (dirname(target) !== root) throw new Error('invalid plugin id')
   return value
+}
+
+function installedPackageVersion(
+  manager: FrontendPluginManager,
+  pluginsRoot: string,
+  pluginId: string,
+): string | null {
+  const descriptorVersion = manager.getDescriptor(pluginId)?.packageVersion
+  if (typeof descriptorVersion === 'string' && descriptorVersion.length > 0) {
+    return descriptorVersion
+  }
+  try {
+    const activation = loadPluginDir(join(pluginsRoot, pluginId)).activation
+    return activation?.packageVersion ?? null
+  } catch {
+    return null
+  }
+}
+
+async function revokeInstalledPackageRuntime(
+  manager: FrontendPluginManager,
+  pluginsRoot: string,
+  pluginId: string,
+): Promise<void> {
+  const packageVersion = installedPackageVersion(manager, pluginsRoot, pluginId)
+  if (packageVersion) {
+    await manager.revokePackageVersion(pluginId, packageVersion)
+  } else {
+    manager.preparePluginRemoval(pluginId)
+  }
 }
 
 function cleanupFailedPluginInstall(
@@ -198,6 +235,7 @@ export function registerPluginIpc(
 ): PluginTrustRefreshController {
   // Packages verified by prepareInstall, awaiting a commit, keyed by plugin id.
   const prepared = new Map<string, { pkg: PreparedInstall }>()
+  const activeTransactions = new Set<string>()
   const capabilityGrants = new PluginCapabilityGrantStore(pluginsRoot)
 
   const assertAuthorized = (event: IpcMainInvokeEvent): void => {
@@ -211,18 +249,62 @@ export function registerPluginIpc(
       {
         id: string
         requires: string[]
+        packageVersion?: string
+        manifestPermissions?: ManifestPermissionsSummary
         provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
         warning?: string
       }
     >()
     for (const descriptor of manager.listDescriptors()) {
-      summaries.set(descriptor.id, { id: descriptor.id, requires: descriptor.requires })
+      const manifestPermissions = descriptor.capabilityPolicy?.kind === 'manifest-v2'
+        ? {
+            system: [...descriptor.capabilityPolicy.system],
+            ...(descriptor.capabilityPolicy.shell
+              ? { shell: descriptor.capabilityPolicy.shell }
+              : {}),
+          }
+        : undefined
+      summaries.set(descriptor.id, {
+        id: descriptor.id,
+        requires: [...descriptor.requires],
+        ...(descriptor.packageVersion ? { packageVersion: descriptor.packageVersion } : {}),
+        ...(manifestPermissions ? { manifestPermissions } : {}),
+      })
     }
     for (const pkg of manager.listInstalledPackages()) summaries.set(pkg.id, pkg)
     return [...summaries.values()].map((summary) => ({
       id: summary.id,
       requires: summary.requires,
       sensitive: sensitiveCapabilities(summary.requires),
+      ...(summary.packageVersion ? { packageVersion: summary.packageVersion } : {}),
+      ...(summary.manifestPermissions
+        ? {
+            manifestPermissions: {
+              system: [...summary.manifestPermissions.system],
+              ...(summary.manifestPermissions.shell
+                ? { shell: summary.manifestPermissions.shell }
+                : {}),
+            },
+          }
+        : {}),
+      ...(summary.packageVersion
+        ? {
+            packageVersionGrant: (() => {
+              const grant = capabilityGrants.get(summary.id, summary.packageVersion)
+              return grant
+                ? {
+                    packageVersion: grant.packageVersion,
+                    system: [...grant.system],
+                    ...(grant.shell ? { shell: grant.shell } : {}),
+                    ...(grant.highRiskShellConfirmed !== undefined
+                      ? { highRiskShellConfirmed: grant.highRiskShellConfirmed }
+                      : {}),
+                    ...(grant.storage !== undefined ? { storage: grant.storage } : {}),
+                  }
+                : null
+            })(),
+          }
+        : {}),
       ...(summary.provenance ? { provenance: summary.provenance } : {}),
       ...(summary.warning ? { warning: summary.warning } : {}),
     }))
@@ -330,11 +412,14 @@ export function registerPluginIpc(
 
   ipcMain.handle(
     'plugins:commitInstall',
-    (
+    async (
       event,
       args: { id: string; publisherConfirmed?: boolean; riskConfirmed?: boolean }
     ) => {
       assertAuthorized(event)
+      if (activeTransactions.has(args.id)) {
+        throw new Error(`plugin transaction already in progress for ${args.id}`)
+      }
       const pending = prepared.get(args.id)
       if (!pending) throw new Error(`no prepared install for ${args.id}; call prepareInstall first`)
       const { pkg } = pending
@@ -377,9 +462,20 @@ export function registerPluginIpc(
             }
           })()
         : undefined
+      const previousPackageVersion = installedPackageVersion(manager, pluginsRoot, pkg.id)
+      const previousBackend = previousPackageVersion
+        ? manager.getBackendActivation(pkg.id, previousPackageVersion)
+        : undefined
       let transaction: ReturnType<typeof commitInstallTransaction> | undefined
       let publisherConsentPersisted = false
+      // Claim the prepared package synchronously before revocation yields.
+      // Keep the claim through rollback so its artifact and Grant stay paired.
+      activeTransactions.add(pkg.id)
+      prepared.delete(args.id)
       try {
+        if (previousPackageVersion) {
+          await manager.revokePackageVersion(pkg.id, previousPackageVersion)
+        }
         transaction = commitInstallTransaction(pkg, pluginsRoot)
         const descriptor = transaction.descriptor
         let verifiedArtifactDigest: string | undefined
@@ -397,7 +493,6 @@ export function registerPluginIpc(
               }))
           const decision = verifyCommitted(join(pluginsRoot, pkg.id), pkg.id, commitTrust)
           if (decision.action === 'quarantine') {
-            prepared.delete(args.id)
             throw new Error(`installed plugin quarantined: ${decision.reason}`)
           }
           verifiedArtifactDigest = decision.artifactDigest
@@ -436,7 +531,6 @@ export function registerPluginIpc(
         if (activation?.backend) options.onActivationChange?.({ pluginId: pkg.id, activation })
         options.onPackageInstalled?.(pkg.id)
         transaction.finalize()
-        prepared.delete(args.id)
         return {
           id: pkg.id,
           requires: summary.requires,
@@ -450,25 +544,41 @@ export function registerPluginIpc(
           }
         }
         try {
+          // Drain a candidate activated earlier in this transaction before
+          // restoring files underneath its launch specification.
+          if (manager.hasBackendActivation(pkg.id, pkg.version)) {
+            await manager.revokePackageVersion(pkg.id, pkg.version)
+          }
           transaction?.rollback()
-        } catch {
-          // Preserve the original install failure if quarantine/rollback fails.
+        } catch (rollbackError) {
+          cleanupFailedPluginInstall(manager, options.onActivationChange, pkg.id)
+          throw new AggregateError([error, rollbackError], 'Plugin install and rollback failed; runtime remains unavailable.')
         }
         cleanupFailedPluginInstall(manager, options.onActivationChange, pkg.id)
         try {
           if (previousGrant) capabilityGrants.set(pkg.id, previousGrant)
           else capabilityGrants.remove(pkg.id)
-        } catch {
-          // Preserve the original install failure. A malformed or missing
-          // exact package-version grant remains fail-closed at activation.
+        } catch (grantError) {
+          throw new AggregateError([error, grantError], 'Plugin install and grant restoration failed; runtime remains unavailable.')
         }
         if (previousSummary) {
           try {
-            manager.registerInstalledPackage(
-              previousSummary,
-              previousDescriptor,
-              { official: previousSummary.provenance === 'official-registry' }
-            )
+            let restoredFactoryActivation: PluginActivationCatalogEntry | undefined
+            if (previousSummary.provenance === 'factory-bundled' && previousDescriptor?.packageDir) {
+              const restored = manager.loadFactoryPlugin(previousDescriptor.packageDir, pkg.id)
+              if (!restored.loaded) throw new Error(`Factory package restoration failed: ${restored.reason}`)
+              restoredFactoryActivation = restored.activation
+            } else {
+              manager.registerInstalledPackage(
+                previousSummary,
+                previousDescriptor,
+                { official: previousSummary.provenance === 'official-registry' }
+              )
+            }
+            if (previousBackend && !manager.hasBackendActivation(pkg.id, previousBackend.packageVersion)) {
+              manager.registerBackendActivation(previousBackend)
+            }
+            if (restoredFactoryActivation) options.onActivationChange?.({ pluginId: pkg.id, activation: restoredFactoryActivation })
             if (previousSummary.provenance === 'official-registry') {
               if (previousActivation && previousArtifactDigest) {
                 const activation = {
@@ -479,12 +589,14 @@ export function registerPluginIpc(
                 options.onActivationChange?.({ pluginId: pkg.id, activation })
               }
             }
-          } catch {
-            // Preserve the original install failure if a manager restoration
-            // itself cannot be completed.
+          } catch (restoreError) {
+            cleanupFailedPluginInstall(manager, options.onActivationChange, pkg.id)
+            throw new AggregateError([error, restoreError], 'Plugin install and runtime restoration failed.')
           }
         }
         throw error
+      } finally {
+        activeTransactions.delete(pkg.id)
       }
     }
   )
@@ -492,6 +604,9 @@ export function registerPluginIpc(
   ipcMain.handle('plugins:remove', async (event, args: { id?: unknown } | null) => {
     assertAuthorized(event)
     const id = assertPluginRemovalTarget(pluginsRoot, args?.id)
+    if (activeTransactions.has(id)) {
+      throw new Error(`plugin transaction already in progress for ${id}`)
+    }
     const cleanupPluginStorage = options.cleanupPluginStorage
     if (!cleanupPluginStorage) {
       throw new Error('plugin storage cleanup is unavailable')
@@ -499,25 +614,43 @@ export function registerPluginIpc(
     // Stop live instances before storage cleanup. The storage adapter drains
     // operations already admitted for this plugin; this phase also prevents
     // new renderer calls from being admitted while cleanup is in progress.
-    manager.preparePluginRemoval(id)
-    // Storage cleanup is an explicit uninstall operation. If it fails, keep
-    // the package and prepared state intact so the caller can retry. The
-    // manager deliberately remains registered but stopped until this succeeds.
-    await cleanupPluginStorage(id)
-    capabilityGrants.remove(id)
-    removePlugin(pluginsRoot, id)
-    if (options.factoryPackageIds?.includes(id)) {
-      if (!options.onFactoryPackageRemoved) {
-        throw new Error('factory package removal is unavailable')
+    const previousVersion = installedPackageVersion(manager, pluginsRoot, id)
+    const previousBackend = previousVersion ? manager.getBackendActivation(id, previousVersion) : undefined
+    const pending = prepared.get(id)
+    activeTransactions.add(id)
+    try {
+      await revokeInstalledPackageRuntime(manager, pluginsRoot, id)
+      // Storage cleanup is an explicit uninstall operation. On failure retain
+      // the package and restore its approved backend tuple for this session.
+      try {
+        await cleanupPluginStorage(id)
+      } catch (error) {
+        if (previousBackend) {
+          try {
+            manager.registerBackendActivation(previousBackend)
+          } catch (restoreError) {
+            throw new AggregateError([error, restoreError], 'Plugin storage cleanup and runtime restoration failed.')
+          }
+        }
+        throw error
       }
-      options.onFactoryPackageRemoved(id)
-      manager.removeInstalledPlugin(id, { restoreBuiltin: false })
-    } else {
-      manager.removeInstalledPlugin(id)
+      removePlugin(pluginsRoot, id)
+      capabilityGrants.remove(id)
+      if (options.factoryPackageIds?.includes(id)) {
+        if (!options.onFactoryPackageRemoved) {
+          throw new Error('factory package removal is unavailable')
+        }
+        options.onFactoryPackageRemoved(id)
+        manager.removeInstalledPlugin(id, { restoreBuiltin: false })
+      } else {
+        manager.removeInstalledPlugin(id)
+      }
+      if (prepared.get(id) === pending) prepared.delete(id)
+      options.onActivationChange?.({ pluginId: id })
+      return { ok: true }
+    } finally {
+      activeTransactions.delete(id)
     }
-    prepared.delete(id)
-    options.onActivationChange?.({ pluginId: id })
-    return { ok: true }
   })
 
   return {

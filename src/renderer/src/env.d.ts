@@ -4,6 +4,10 @@ type UpdateActionResult = import('../../shared/updater').UpdateActionResult
 type UpdateSettingsResult = import('../../shared/updater').UpdateSettingsResult
 type UpdaterSettings = import('../../shared/updater').UpdaterSettings
 type UpdateState = import('../../shared/updater').UpdateState
+type ExecutionPolicyApi = import('../../shared/executionPolicy').ExecutionPolicyApi
+type ManifestPermissionsSummary = import('../../shared/executionPolicy').ManifestPermissionsSummary
+type PackageVersionGrantSummary = import('../../shared/executionPolicy').PackageVersionGrantSummary
+type LegacyPlansPreferenceProjection = import('../../shared/plansPreferences').LegacyPlansPreferenceProjection
 type LegalRoute = import('../../shared/legalLinks').LegalRoute
 
 interface BackendInfo {
@@ -39,7 +43,11 @@ interface GitCredential {
 }
 
 interface GitRecoveryChanged {
-  legacy: true
+  legacy: boolean
+}
+
+interface PlansRecoveryChanged {
+  legacy: boolean
 }
 
 declare global {
@@ -60,6 +68,7 @@ declare global {
       onBackendChanged: (cb: (info: BackendInfo) => void) => void
       retryGitV2: () => Promise<{ ok: boolean; reason?: string }>
       onGitRecoveryChanged: (cb: (change: GitRecoveryChanged) => void) => () => void
+      onPlansRecoveryChanged: (cb: (change: PlansRecoveryChanged) => void) => () => void
       onMenuAction: (cb: (action: string) => void) => void
       onSystemResumed: (cb: () => void) => () => void
       setRecentWorkspaces: (list: { path: string; name: string; exists: boolean }[]) => void
@@ -93,6 +102,14 @@ declare global {
       onGroupReattached: (cb: (groupId: string) => void) => void
       onOpenPipelineManager: (handler: (payload: { pipelineId?: string }) => void) => () => void
       openPlansWindow: (args: { workspace_path: string; rel_path?: string }) => Promise<{ ok: boolean }>
+      projectLegacyPlansPreferences: (args: {
+        workspace_path: string
+        values: LegacyPlansPreferenceProjection
+      }) => Promise<{ ok: boolean; error?: string }>
+      getPlansLegacyRecoveryPreferences: () => Promise<LegacyPlansPreferenceProjection | null>
+      onPlansLegacyRecoveryPreferences: (
+        cb: (values: LegacyPlansPreferenceProjection) => void,
+      ) => () => void
       onOpenResourceManager: (handler: () => void) => () => void
       requestPaneAction: (args: {
         paneId: string
@@ -318,6 +335,7 @@ declare global {
         ) => Promise<TccPermissionStatus>
         openSettings: (key: TccPermissionKey) => Promise<{ ok: boolean; error?: string }>
       }
+      executionPolicy?: ExecutionPolicyApi
       plugins?: {
         listInstalled: () => Promise<InstalledPluginSummary[]>
         listFactoryPackages: () => Promise<FactoryPluginSummary[]>
@@ -364,6 +382,9 @@ declare global {
     id: string
     requires: string[]
     sensitive: string[]
+    packageVersion?: string
+    manifestPermissions?: ManifestPermissionsSummary
+    packageVersionGrant?: PackageVersionGrantSummary | null
     provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
     warning?: string
   }

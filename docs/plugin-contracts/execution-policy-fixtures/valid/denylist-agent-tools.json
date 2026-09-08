@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "mode": "denylist",
+  "system": ["aiCli"],
+  "shell": ["sudo", "bash"]
+}

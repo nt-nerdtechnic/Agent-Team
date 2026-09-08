@@ -31,6 +31,7 @@ import {
   PLUGIN_QUARANTINE_MARKER,
   PLUGIN_STAGING_DIR,
 } from './pluginInstallPaths'
+import type { ManifestPermissionsSummary } from '../../shared/executionPolicy'
 
 export {
   assertManifestFiles,
@@ -163,6 +164,7 @@ export function manifestToDescriptor(
     return {
       id: manifest.id,
       packageVersion: manifest.version,
+      packageDir: pluginDir,
       requires: manifestCapabilities(manifest),
       capabilityPolicy: manifestCapabilityPolicy(manifest),
       devUrl: '',
@@ -173,6 +175,7 @@ export function manifestToDescriptor(
   }
   return {
     id: manifest.id,
+    packageDir: pluginDir,
     requires: manifest.requires,
     capabilityPolicy: manifestCapabilityPolicy(manifest),
     devUrl: '',
@@ -305,6 +308,9 @@ export function verifyOfficialInstall(
 export interface ScannedPlugin {
   /** The plugin's on-disk directory. */
   dir: string
+  /** Validated manifest version, including legacy manifests whose launch
+   *  descriptor intentionally remains plugin-id keyed. */
+  manifestVersion?: string
   /** Package-level inventory data derived from the validated manifest. */
   packageSummary?: InstalledPluginPackageSummary
   /** The parsed descriptor, when the manifest was valid. */
@@ -318,6 +324,8 @@ export interface ScannedPlugin {
 export interface InstalledPluginPackageSummary {
   id: string
   requires: string[]
+  packageVersion?: string
+  manifestPermissions?: ManifestPermissionsSummary
   provenance?: 'official-registry' | 'developer-local-unpacked' | 'factory-bundled'
   warning?: string
 }
@@ -329,6 +337,15 @@ export function manifestToInstalledPackageSummary(
   return {
     id: manifest.id,
     requires: manifestCapabilities(manifest),
+    ...(isManifestV2(manifest)
+      ? {
+          packageVersion: manifest.version,
+          manifestPermissions: {
+            system: [...(manifest.permissions.system ?? [])],
+            ...(manifest.permissions.shell ? { shell: manifest.permissions.shell } : {}),
+          },
+        }
+      : {}),
     ...(provenance ? { provenance } : {}),
   }
 }
@@ -348,6 +365,7 @@ export function loadPluginDir(dir: string): ScannedPlugin {
       const descriptor = manifest.contributes ? manifestToDescriptor(manifest, dir) : undefined
       return {
         dir,
+        manifestVersion: manifest.version,
         packageSummary: manifestToInstalledPackageSummary(manifest),
         descriptor,
         activation,
@@ -355,6 +373,7 @@ export function loadPluginDir(dir: string): ScannedPlugin {
     }
     return {
       dir,
+      manifestVersion: manifest.version,
       packageSummary: manifestToInstalledPackageSummary(manifest),
       descriptor: manifestToDescriptor(manifest, dir),
     }

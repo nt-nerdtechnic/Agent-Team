@@ -52,6 +52,7 @@ from .mcp_settings import (
     restore_mcp_server_secrets,
 )
 from .plan_index import resolve_plan_root
+from .plan_provisioning import SPEC_FILENAME, TEMPLATE_FILENAME, ensure_plan_assets
 from .profiles_store import SUPPORTED_AGENT_KEYS as PROFILE_AGENT_KEYS
 from .skills_store import (
     SkillConflictError,
@@ -151,6 +152,64 @@ def lookup(msg_type: str) -> Handler | None:
 
 
 # ── Editor AI (editor.*) ────────────────────────────────────────────────────
+@handler("host.register")
+async def host_register(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Authenticate Electron's private Host WebSocket session."""
+    from . import app
+
+    if (
+        not isinstance(payload, dict)
+        or set(payload) not in ({"token"}, {"token", "features"})
+        or not app.host_session_token_matches(payload.get("token"))
+        or (
+            "features" in payload
+            and (
+                not isinstance(payload["features"], dict)
+                or set(payload["features"]) - {"plans_backend_v2"}
+                or not isinstance(payload["features"].get("plans_backend_v2", False), bool)
+            )
+        )
+    ):
+        session.host_authenticated = False
+        session.plans_backend_v2 = False
+        await session.send_json(
+            make_error(msg_id, msg_type, "UNAUTHORIZED", "Host session authentication failed")
+        )
+        return
+    session.host_authenticated = True
+    features = payload.get("features", {})
+    session.plans_backend_v2 = isinstance(features, dict) and features.get("plans_backend_v2") is True
+    await session.send_json(make_response(msg_id, msg_type, {"registered": True}))
+
+
+@handler("agent.capability.result")
+async def agent_capability_result(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Return a Host-brokered agent capability response to the MCP waiter."""
+    if not session.host_authenticated:
+        await session.send_json(
+            make_error(msg_id, msg_type, "UNAUTHORIZED", "Host session is not authenticated")
+        )
+        return
+    from .mcp_server import server as plan_mcp
+
+    if not isinstance(payload, dict) or set(payload) != {"request_id", "response"}:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent.capability.result is malformed")
+        )
+        return
+    request_id = payload.get("request_id")
+    response = payload.get("response")
+    if not isinstance(request_id, str) or not request_id or not isinstance(response, dict):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent.capability.result is malformed")
+        )
+        return
+    delivered = plan_mcp.resolve_agent_capability(request_id, response)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))
+
+
 @handler("editor.rewrite")
 async def editor_rewrite(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -201,6 +260,11 @@ async def editor_complete(session: "Session", msg_id: str, msg_type: str, payloa
 async def fs_list_dir(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    mode = payload.get("mode", "display")
+    if mode not in ("display", "discovery"):
+        await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": "invalid list_dir mode"}))
+        return
+
     ws_path = payload.get("workspace_path") or ""
     rel = payload.get("rel_path", "") or ""
     # Registering a watch resolves the path and schedules a recursive observer —
@@ -209,7 +273,7 @@ async def fs_list_dir(session: "Session", msg_id: str, msg_type: str, payload: d
     # place before the scan below reports the tree it is watching.
     await asyncio.to_thread(app._watch_plans_workspace, ws_path, rel)
     show_hidden = bool(payload.get("show_hidden", False))
-    result = await asyncio.to_thread(app.fs_service.list_dir, ws_path, rel, show_hidden=show_hidden)
+    result = await asyncio.to_thread(app.fs_service.list_dir, ws_path, rel, show_hidden=show_hidden, mode=mode)
     await session.send_json(make_response(msg_id, msg_type, result))
 
 
@@ -330,6 +394,18 @@ async def fs_stat_path(session: "Session", msg_id: str, msg_type: str, payload: 
     await session.send_json(make_response(msg_id, msg_type, result))
 
 
+@handler("fs.stat_workspace_path")
+async def fs_stat_workspace_path(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    result = await asyncio.to_thread(
+        app.fs_service.stat_workspace_path,
+        payload.get("workspace_path") or "",
+        payload.get("rel_path", "") or "",
+    )
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
 @handler("fs.page_capability")
 async def fs_page_capability(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """The capability the renderer needs to build a /fs/page URL for one workspace.
@@ -387,6 +463,39 @@ async def fs_convert_office(session: "Session", msg_id: str, msg_type: str, payl
 # One scan of every plan/report directory, carrying the meta the caller parsed
 # last time whenever the file has not changed since. Replaces a per-directory
 # fs.list_dir fan-out plus one fs.read_file per document on every refresh.
+@handler("plans.ensure_assets")
+async def plans_ensure_assets(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Provision the canonical Plans assets for a Host-owned create dispatch."""
+    if not session.host_authenticated:
+        await session.send_json(
+            make_error(msg_id, msg_type, "UNAUTHORIZED", "Host session is not authenticated")
+        )
+        return
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"workspace_path"}
+        or not isinstance(payload.get("workspace_path"), str)
+        or not payload["workspace_path"]
+    ):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "Plans asset request is malformed")
+        )
+        return
+    workspace_path = payload["workspace_path"]
+    root = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    await asyncio.to_thread(ensure_plan_assets, workspace_path)
+    plans_dir = Path(root) / ".agent-team" / "plans"
+    if not (
+        (plans_dir / SPEC_FILENAME).is_file()
+        and (plans_dir / TEMPLATE_FILENAME).is_file()
+    ):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BACKEND_UNAVAILABLE", "Plans assets could not be provisioned")
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "root": root}))
+
+
 @handler("plans.list_docs")
 async def plans_list_docs(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app

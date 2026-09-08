@@ -93,6 +93,7 @@ import CodeWorkflowHelp from './CodeWorkflowHelp.vue'
 import SettingsSystemHelp from './SettingsSystemHelp.vue'
 import IconReferenceHelp from './IconReferenceHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
+import ExecutionPolicyPane from './ExecutionPolicyPane.vue'
 import StorageUsagePane from './StorageUsagePane.vue'
 import LayoutSettingsPane from '../layout/LayoutSettingsPane.vue'
 import McpPane from './McpPane.vue'
@@ -189,7 +190,7 @@ const reclaimNowCount = computed(() => props.reclaimableNowCount ?? 0)
 const reclaimNowSize = computed(() => formatBytes(props.reclaimableNowBytes ?? 0))
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'prompts' | 'memory' | 'analyzer' | 'cliAgents' | 'general' | 'cross-device' | 'updates' | 'appearance' | 'statusBadges' | 'layout' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
+type Tab = 'mcp' | 'skills' | 'prompts' | 'memory' | 'analyzer' | 'cliAgents' | 'general' | 'cross-device' | 'updates' | 'appearance' | 'statusBadges' | 'layout' | 'accounts' | 'extensions' | 'executionPolicy' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
 type HelpTopic =
@@ -643,6 +644,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     keywords: 'storage disk space usage cache caches cleanup clean logs node_modules stale free 儲存 空間 磁碟 快取 清理 清除 日誌 佔用 釋出',
   },
   {
+    id: 'execution-policy',
+    tab: 'executionPolicy',
+    section: 'execution-policy',
+    title: 'Execution Policy / 執行政策',
+    group: 'Security',
+    summary: 'Edit the global agent policy, choose workspace sources, review repository recommendations, and recover corrupt policy storage.',
+    keywords: 'execution policy permission permissions allowlist denylist full shell executable system namespace source repository recommendation untrusted recovery rebuild security 執行政策 權限 允許清單 拒絕清單 完整模式 shell 可執行檔 系統命名空間 來源 repository 建議 不受信任 修復 重建 安全性',
+  },
+  {
     id: 'help-mcp',
     tab: 'help',
     section: 'help',
@@ -992,6 +1002,7 @@ const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof Se
   layout: { scope: 'User', storage: 'localStorage' },
   accounts: { scope: 'User / Workspace bindings', storage: 'safeStorage' },
   extensions: { scope: 'User', storage: 'mainProcess' },
+  executionPolicy: { scope: 'User / Workspace', storage: 'mainProcess' },
   storage: { scope: 'User', storage: 'app_data_dir' },
   keybindings: { scope: 'User', storage: 'mainProcess' },
 }
@@ -1955,6 +1966,15 @@ watch(activeTab, (tab) => {
               <SettingsNavItem :label="$t('settings.nav.extensions')" :active="activeTab === 'extensions'" @select="activeTab = 'extensions'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 2.6h3.2v1.5a1.3 1.3 0 0 0 2.4 0V2.6h1.4v3.2h-1.5a1.3 1.3 0 0 0 0 2.4h1.5v3.2H6.4v-1.5a1.3 1.3 0 0 0-2.4 0v1.5H2.6V8.2h1.5a1.3 1.3 0 0 0 0-2.4H2.6V2.6h3.8Z"/></svg>
+                </template>
+              </SettingsNavItem>
+            </div>
+
+            <div class="s-nav-group">
+              <div class="s-nav-group-title">{{ $t('settings.nav.group.security') }}</div>
+              <SettingsNavItem :label="$t('settings.nav.executionPolicy')" :active="activeTab === 'executionPolicy'" @select="activeTab = 'executionPolicy'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8 13 3.7v3.7c0 3.1-2 5.7-5 6.8-3-1.1-5-3.7-5-6.8V3.7L8 1.8Z"/><path d="m5.7 8 1.5 1.5 3.2-3.2"/></svg>
                 </template>
               </SettingsNavItem>
             </div>
@@ -3389,6 +3409,16 @@ watch(activeTab, (tab) => {
           </div>
         </div>
 
+        <!-- ── EXECUTION POLICY TAB ─────────────────────────────────────── -->
+        <div v-show="activeTab === 'executionPolicy'" class="s-body s-body--bleed execution-policy-body" data-settings-section="execution-policy">
+          <h1 class="s-page-title">{{ $t('settings.nav.executionPolicy') }}</h1>
+          <div class="settings-meta-row">
+            <span class="scope-badge">{{ settingsScopeNotes.executionPolicy.scope }}</span>
+            <span class="settings-path">{{ pathForTab('executionPolicy') }}</span>
+          </div>
+          <ExecutionPolicyPane :workspace-path="props.workspacePath" />
+        </div>
+
         <!-- ── KEYBOARD SHORTCUTS TAB ────────────────────────────────────── -->
         <!-- ── HELP TAB (read-only reference: messaging + shortcuts) ─────── -->
         <!-- ── KEYBINDINGS TAB (editable; the Help tab keeps the read-only
@@ -3418,7 +3448,7 @@ watch(activeTab, (tab) => {
         <!-- ── EXTENSIONS TAB (flag-gated) ───────────────────────────────── -->
         <div v-show="activeTab === 'extensions'" class="s-body s-body--bleed" data-settings-section="extensions">
           <h1 class="s-page-title">{{ $t('settings.nav.extensions') }}</h1>
-          <ExtensionsPane />
+          <ExtensionsPane :workspace-path="props.workspacePath" />
         </div>
 
         <!-- ── STATUS BADGES TAB ─────────────────────────────────────────── -->

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://navide.dev/schemas/execution-policy-v1.schema.json",
+  "title": "Navide Agent Execution Policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mode", "system", "shell"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "mode": { "enum": ["full", "allowlist", "denylist"] },
+    "system": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["fs", "ui", "aiCli"] }
+    },
+    "shell": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9._+-]*$"
+      }
+    }
+  },
+  "if": {
+    "properties": { "mode": { "const": "full" } }
+  },
+  "then": {
+    "properties": {
+      "system": { "maxItems": 0 },
+      "shell": { "maxItems": 0 }
+    }
+  }
+}

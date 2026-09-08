@@ -152,9 +152,17 @@ async def test_plan_list_rejects_a_request_with_no_credential(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_plan_list_accepts_a_host_credential(tmp_path) -> None:
+async def test_plan_list_accepts_a_host_credential(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     # No plans directory yet — plan_list just returns [] rather than erroring,
     # so reaching that (instead of CallerUnknown) proves the credential passed.
+    async def route(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": {"code": "BACKEND_UNAVAILABLE", "message": "test pre-dispatch failure"},
+            "recoveryDisposition": "legacy-safe-before-dispatch",
+        }
+
+    monkeypatch.setattr(plan_mcp, "request_host_agent_workspace_backend", route)
     result = await plan_tools.plan_list(
         _ctx(client="host", t=plan_mcp_auth.internal_token()), workspace_path=str(tmp_path)
     )

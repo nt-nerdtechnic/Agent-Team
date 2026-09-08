@@ -42,6 +42,12 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -66,6 +72,7 @@ jobs:
           uv --project backend run ruff check backend
           pnpm typecheck
           pnpm test:run
+          pnpm run test:packaged-plans
           uv --project backend run pytest backend/tests
 
       - name: Provision Antigravity usage secrets
@@ -94,6 +101,9 @@ jobs:
         shell: bash
         run: |
           pnpm build
+          test -f dist-plugins/plans/index.html
+          test ! -e dist-plugins/plans/backend/navide-plans
+          test ! -e dist-plugins/plans/backend/navide-plans-go
           # hdiutil on shared macOS runners intermittently fails to attach the
           # DMG staging image ("Device not configured"); retry absorbs it.
           for attempt in 1 2 3; do
@@ -120,6 +130,8 @@ jobs:
         run: |
           app_path="$(find dist-release -maxdepth 2 -name '*.app' -type d -print -quit)"
           test -n "${app_path}"
+          test ! -e "${app_path}/Contents/Resources/plugins/plans/backend/navide-plans"
+          test ! -e "${app_path}/Contents/Resources/plugins/plans/backend/navide-plans-go"
           echo "Verifying ${app_path}"
           # Signed with a valid Developer ID and the seal is intact.
           codesign --verify --deep --strict --verbose=2 "${app_path}"

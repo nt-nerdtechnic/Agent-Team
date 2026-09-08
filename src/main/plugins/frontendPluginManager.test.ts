@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { generateKeyPairSync, sign as edSign } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // The manager imports electron for its view lifecycle. A functional stub backs
@@ -236,14 +236,25 @@ import {
   isReservedPluginId,
   devPlansPluginDescriptor,
   openMiniIdePluginView,
+  openPlansPluginView,
+  plansQuery,
   openGitLeftPluginView,
   closeGitLeftPluginView,
+  GIT_PLUGIN_ID,
   PLANS_PLUGIN_ID,
   MINI_IDE_PLUGIN_ID,
   bundledMiniIdeDir,
   registerBundledMiniIde,
+  registerBundledPlans,
+  createPluginBackendChildEnvironment,
+  sanitizeDiagnosticLines,
+  MAX_DIAGNOSTIC_LINE_CHARS,
+  MAX_DIAGNOSTIC_LINES_PER_EMISSION,
   type PluginLaunchDescriptor,
 } from './frontendPluginManager'
+import { PluginBackendHost } from './pluginBackendHost'
+import { BackendPluginError } from './pluginBackendSupervisor'
+import type { PlansBridgeContext } from './plansBridge'
 import { manifestV2CapabilityPolicy } from './pluginPermissions'
 import {
   HOST_EVENT_SOURCE_PLUGIN_ID,
@@ -251,6 +262,7 @@ import {
   type StorageSnapshotTier,
 } from './pluginCapabilityBroker'
 import { PluginStorageError } from './pluginStorage'
+import type { ExecutionPolicySnapshot } from './executionPolicy'
 
 interface FakeWebContentsLike {
   id: number
@@ -362,6 +374,134 @@ function descriptor(id: string): PluginLaunchDescriptor {
   return { id, requires: [], devUrl: '', entryFile: `/plugins/${id}/index.html` }
 }
 
+describe('backend Host session registration', () => {
+  it('re-registers on the new socket when the previous registration is pending', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    mgr.open(
+      asHost(host),
+      { id: 'acme.host-session', requires: ['terminal'], devUrl: '', entryFile: '/plugins/acme.host-session/index.html' },
+      { x: 0, y: 0, width: 10, height: 10 },
+    )
+    mgr.setBackendHostToken('host-token')
+    mgr.setBackendWsUrl('ws://backend-old')
+    const oldSocket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    oldSocket.open()
+    expect(oldSocket.sent.map((raw) => JSON.parse(raw).type)).toContain('host.register')
+    expect(JSON.parse(oldSocket.sent[0]!).payload).toMatchObject({
+      features: { plans_backend_v2: false },
+    })
+
+    mgr.setBackendWsUrl('ws://backend-new')
+    const newSocket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    newSocket.open()
+
+    expect(newSocket.sent.map((raw) => JSON.parse(raw).type)).toContain('host.register')
+  })
+
+  it('advertises Plans support only after its exact v2 backend activation is registered', () => {
+    const mgr = new FrontendPluginManager()
+    mgr.open(
+      asHost(new FakeBrowserWindow()),
+      { id: 'acme.host-session-plans', requires: ['terminal'], devUrl: '', entryFile: '/plugins/acme.host-session-plans/index.html' },
+      { x: 0, y: 0, width: 10, height: 10 },
+    )
+    mgr.registerDescriptor({
+      id: PLANS_PLUGIN_ID,
+      packageVersion: '1.0.0',
+      packageDir: process.cwd(),
+      requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/index.html',
+      views: [],
+    }, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion: '1.0.0',
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.list'],
+      agentMethods: ['plans.list'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion: '1.0.0',
+      system: ['fs'],
+      storage: true,
+    }))
+    mgr.setBackendHostToken('host-token')
+    mgr.setBackendWsUrl('ws://backend-plans')
+    const socket = wsMock.FakeNodeWebSocket.instances.at(-1)!
+    socket.open()
+
+    const registration = socket.sent
+      .map((raw) => JSON.parse(raw) as { type?: string; payload?: unknown })
+      .find((message) => message.type === 'host.register')
+    expect(registration?.payload).toMatchObject({
+      features: { plans_backend_v2: true },
+    })
+  })
+
+  it('withdraws Plans support after an unavailable child is observed', () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    mgr.registerDescriptor({
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/index.html',
+      views: [],
+    }, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.list'],
+      agentMethods: ['plans.list'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion,
+      system: ['fs'],
+      storage: true,
+    }))
+
+    expect(mgr.isPlansBackendAvailable()).toBe(true)
+    mgr.markPlansBackendUnavailable('child-crash')
+    expect(mgr.isPlansBackendAvailable()).toBe(false)
+  })
+})
+
+describe('createPluginBackendChildEnvironment', () => {
+  it('keeps only the temporary-directory variables needed by packaged backends', () => {
+    vi.stubEnv('TMPDIR', '/tmp/navide-plugin-backend')
+    vi.stubEnv('TEMP', 'C:\\Users\\test\\AppData\\Local\\Temp')
+    vi.stubEnv('TMP', 'C:\\Users\\test\\AppData\\Local\\Temp')
+    vi.stubEnv('PATH', 'host-path-must-not-cross-boundary')
+
+    try {
+      expect(createPluginBackendChildEnvironment()).toEqual({
+        TMPDIR: '/tmp/navide-plugin-backend',
+        TEMP: 'C:\\Users\\test\\AppData\\Local\\Temp',
+        TMP: 'C:\\Users\\test\\AppData\\Local\\Temp',
+      })
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+})
+
 describe('isReservedPluginId', () => {
   it('flags first-party and internal Host identities, not third-party ids', () => {
     expect(isReservedPluginId('navide.mini-ide')).toBe(true)
@@ -369,6 +509,234 @@ describe('isReservedPluginId', () => {
     expect(isReservedPluginId('navide.plans')).toBe(true)
     expect(isReservedPluginId(HOST_EVENT_SOURCE_PLUGIN_ID)).toBe(true)
     expect(isReservedPluginId('acme.demo')).toBe(false)
+  })
+})
+
+describe('plansCapabilityContext', () => {
+  it('fails closed until the exact package-version grant is available', () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '2.0.0'
+    mgr.registerDescriptor({
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/index.html',
+      views: [],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs', 'ui', 'aiCli'] }),
+    }, { builtin: true })
+
+    expect(mgr.plansCapabilityContext(packageVersion, process.cwd())).toBeNull()
+
+    const grant = {
+      packageVersion,
+      system: ['fs', 'ui', 'aiCli'] as const,
+      storage: true,
+    }
+    mgr.setCapabilityGrantResolver(() => grant)
+
+    expect(mgr.plansCapabilityContext(packageVersion, process.cwd())).toMatchObject({
+      publisherEligible: true,
+      userGrant: grant,
+      runtimeBinding: {
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion,
+        audience: 'plans-window',
+      },
+    })
+    expect(mgr.plansCapabilityContext('2.0.1', process.cwd())).toBeNull()
+  })
+
+  it('requires filesystem permission in both the Manifest policy and the Grant', () => {
+    const policyWithoutFs = new FrontendPluginManager()
+    policyWithoutFs.registerDescriptor({
+      id: PLANS_PLUGIN_ID,
+      packageVersion: '2.0.0',
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/index.html',
+      views: [],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['ui'] }),
+    }, { builtin: true })
+    policyWithoutFs.setCapabilityGrantResolver(() => ({
+      packageVersion: '2.0.0',
+      system: ['ui'],
+      storage: true,
+    }))
+    expect(policyWithoutFs.plansCapabilityContext('2.0.0', process.cwd())).toBeNull()
+
+    const grantWithoutFs = new FrontendPluginManager()
+    grantWithoutFs.registerDescriptor({
+      id: PLANS_PLUGIN_ID,
+      packageVersion: '2.0.0',
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/index.html',
+      views: [],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs', 'ui'] }),
+    }, { builtin: true })
+    grantWithoutFs.setCapabilityGrantResolver(() => ({
+      packageVersion: '2.0.0',
+      system: ['ui'],
+      storage: true,
+    }))
+    expect(grantWithoutFs.plansCapabilityContext('2.0.0', process.cwd())).toBeNull()
+  })
+
+  it('does not bind a v2 Plans view when the matched policy and Grant omit fs', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '2.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/frontend/window/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: ['ui'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['ui'] }),
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion, system: ['ui'], storage: true },
+      runtimeBinding: {
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion,
+        workspaceId: mgr.workspaceIdForPath('/workspace'),
+        instanceId: null,
+        audience: view.contributionKey,
+      },
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.list'],
+      agentMethods: ['plans.list'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindView')
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        capabilityContext: context,
+      })
+      expect(bind).not.toHaveBeenCalled()
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+})
+
+describe('Plans private filesystem grant revalidation', () => {
+  it('denies a revoked Grant before the filesystem service can be called', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '2.0.0'
+    const workspacePath = process.cwd()
+    const grant = {
+      packageVersion,
+      system: ['fs'] as const,
+      storage: true,
+    }
+    mgr.registerDescriptor({
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: ['fs'],
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/window/index.html',
+      views: [],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+    }, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.list'],
+      agentMethods: ['plans.list'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    let activeGrant: typeof grant | null = grant
+    mgr.setCapabilityGrantResolver(() => activeGrant)
+    const service = vi
+      .spyOn(
+        mgr as unknown as {
+          sendPublicBackend: (
+            wsType: string,
+            payload: Record<string, unknown>,
+            beforeDispatch?: () => boolean,
+          ) => Promise<unknown>
+        },
+        'sendPublicBackend',
+      )
+      .mockResolvedValue({ content: 'draft' })
+    const internals = mgr as unknown as {
+      sendPlansFilesystemService: (
+        operation: string,
+        payload: Record<string, unknown>,
+        context: PlansBridgeContext,
+      ) => Promise<unknown>
+    }
+    const context: PlansBridgeContext = {
+      runtime: {
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion,
+        workspaceId: mgr.workspaceIdForPath(workspacePath),
+        instanceId: 'plans-view-1',
+        contributionKey: 'navide.plans.window',
+        hostWindowId: 'window-1',
+        initiator: { kind: 'user', id: 'user-1' },
+      },
+      workspacePath,
+      authorizedPlanRoot: workspacePath,
+      requestId: 'bridge-test-1',
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    }
+    try {
+      await expect(internals.sendPlansFilesystemService(
+        'fs.read_file',
+        { rel_path: 'draft.html' },
+        context,
+      )).resolves.toEqual({ content: 'draft' })
+      expect(service).toHaveBeenCalledOnce()
+
+      activeGrant = null
+      await expect(internals.sendPlansFilesystemService(
+        'fs.read_file',
+        { rel_path: 'draft.html' },
+        context,
+      )).rejects.toMatchObject({ code: 'CAPABILITY_DENIED' })
+      expect(service).toHaveBeenCalledOnce()
+    } finally {
+      service.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
   })
 })
 
@@ -397,6 +765,1431 @@ describe('devPlansPluginDescriptor', () => {
     mgr.registerDeveloperDescriptor(devPlansPluginDescriptor())
     expect(mgr.getDescriptor(PLANS_PLUGIN_ID)?.id).toBe(PLANS_PLUGIN_ID)
     expect(mgr.listInstalledPackages()).toEqual([])
+  })
+
+  it('registers the bundled Plans frontend without activating a backend fixture', () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-plans-bundle-'))
+    try {
+      const dir = join(root, 'dist-plugins', 'plans')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        join(dir, 'manifest.json'),
+        JSON.stringify({ id: PLANS_PLUGIN_ID, version: '0.1.92', entry: 'index.html', requires: [] }),
+      )
+      writeFileSync(join(dir, 'index.html'), '<!doctype html>')
+
+      const mgr = new FrontendPluginManager()
+      expect(registerBundledPlans(mgr, {
+        isPackaged: false,
+        resourcesPath: '',
+        devRoot: root,
+      })).toEqual({ registered: true })
+      expect(mgr.getDescriptor(PLANS_PLUGIN_ID)?.packageVersion).toBeUndefined()
+      expect(mgr.hasBackendActivity()).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('registers the already-verified installed Plans backend before bundled fallback', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-plans-installed-'))
+    const packageDir = join(root, 'navide.plans')
+    const backendEntry = join(packageDir, 'backend', 'navide-plans')
+    try {
+      mkdirSync(join(packageDir, 'frontend'), { recursive: true })
+      mkdirSync(join(packageDir, 'backend'), { recursive: true })
+      writeFileSync(join(packageDir, 'frontend', 'index.html'), '<!doctype html>')
+      writeFileSync(join(packageDir, 'frontend', 'left.html'), '<!doctype html>')
+      writeFileSync(backendEntry, '#!/bin/sh\n')
+      chmodSync(backendEntry, 0o700)
+      const canonicalPackageDir = realpathSync(packageDir)
+      const packageVersion = '2.0.0'
+      const mgr = new FrontendPluginManager()
+      mgr.registerDescriptor(
+        {
+          id: PLANS_PLUGIN_ID,
+          packageVersion,
+          packageDir: canonicalPackageDir,
+          requires: [],
+          devUrl: '',
+          entryFile: join(packageDir, 'frontend', 'index.html'),
+          views: [
+            {
+              id: 'left',
+              contributionKey: `${PLANS_PLUGIN_ID}.left`,
+              kind: 'custom',
+              location: 'left',
+              title: 'Plans',
+              entryFile: join(packageDir, 'frontend', 'left.html'),
+            },
+            {
+              id: 'window',
+              contributionKey: `${PLANS_PLUGIN_ID}.window`,
+              kind: 'custom',
+              location: 'window',
+              title: 'Plans',
+              entryFile: join(packageDir, 'frontend', 'index.html'),
+            },
+          ],
+          capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs', 'ui'] }),
+        },
+        { official: true },
+      )
+
+      expect(registerBundledPlans(mgr, {
+        isPackaged: false,
+        resourcesPath: '',
+        devRoot: join(root, 'no-bundled-copy'),
+        installedActivation: {
+          pluginId: PLANS_PLUGIN_ID,
+          packageVersion,
+          packageDir: canonicalPackageDir,
+          views: [],
+          backend: { entryFile: backendEntry, protocolVersion: 1, activation: 'startup' },
+          provenance: 'official-registry',
+          artifactDigest: 'ab'.repeat(32),
+        },
+      })).toEqual({ registered: true })
+      expect(mgr.hasBackendActivation(PLANS_PLUGIN_ID, packageVersion)).toBe(true)
+      await mgr.closeBackendPlugins()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a backend activation before its selected package descriptor exists', () => {
+    const mgr = new FrontendPluginManager()
+
+    expect(() => mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion: '1.0.0',
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.resolve_root'],
+      approvedEvents: ['plans.changed'],
+    })).toThrowError(expect.objectContaining({
+      code: 'INVALID_ACTIVATION',
+      message: 'Backend activation has no selected package descriptor.',
+    }))
+    expect(mgr.hasBackendActivity()).toBe(false)
+  })
+
+  it('rejects a backend activation whose package root is not the selected descriptor root', () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/index.html',
+      views: [],
+    }
+    mgr.registerDescriptor(packageDescriptor, { builtin: true })
+
+    expect(() => mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: join(process.cwd(), 'src'),
+      entryFile: '/plugins/navide.plans/backend',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.resolve_root'],
+      approvedEvents: ['plans.changed'],
+    })).toThrowError(expect.objectContaining({ code: 'INVALID_ACTIVATION' }))
+  })
+
+  it('rejects and tears down a Plans view when backend binding fails', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion, system: ['fs'], storage: true },
+      runtimeBinding: {
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion,
+        workspaceId: 'bound-workspace',
+        instanceId: null,
+        audience: view.contributionKey,
+      },
+    }
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      capabilityContext: context,
+    }
+    mgr.registerDescriptor(packageDescriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.resolve_root'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion,
+      system: ['fs'],
+      storage: true,
+    }))
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindView').mockImplementation(() => {
+      throw new Error('binding race')
+    })
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const host = new FakeBrowserWindow()
+    try {
+      await expect(mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        query: '?workspace_path=%2Fworkspace',
+        capabilityContext: context,
+      })).rejects.toThrow('binding race')
+
+      expect((mgr as unknown as { running: Map<string, unknown> }).running.size).toBe(0)
+      expect(bind).toHaveBeenCalledOnce()
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('could not bind'))
+    } finally {
+      warning.mockRestore()
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('rejects a package Plans call whose workspace path is not sender-bound', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion, system: ['fs'], storage: true },
+      runtimeBinding: {
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion,
+        workspaceId: 'bound-workspace',
+        instanceId: null,
+        audience: view.contributionKey,
+      },
+    }
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      capabilityContext: context,
+    }
+    mgr.registerDescriptor(packageDescriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.resolve_root'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion,
+      system: ['fs'],
+      storage: true,
+    }))
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindView').mockResolvedValue()
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call')
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        query: '?workspace_path=%2Fworkspace',
+        capabilityContext: context,
+      })
+      const webContents = (host.children[0] as FakeViewLike).webContents
+      const invalidTimeout = await ipcHandlers.get('plugin:backend:call')?.(
+        { sender: { id: webContents.id } },
+        {
+          reqId: 'invalid-timeout-1',
+          name: 'plans.resolve_root',
+          args: { workspace_path: '/workspace' },
+          timeoutMs: 0,
+        },
+      )
+      expect(invalidTimeout).toMatchObject({
+        reqId: 'invalid-timeout-1',
+        ok: false,
+        error: { code: 'INVALID_ARGUMENT' },
+      })
+      expect(hostCall).not.toHaveBeenCalled()
+      const response = await ipcHandlers.get('plugin:backend:call')?.(
+        { sender: { id: webContents.id } },
+        {
+          reqId: 'scope-1',
+          name: 'plans.resolve_root',
+          args: { workspace_path: '/other-workspace' },
+        },
+      )
+
+      expect(response).toMatchObject({
+        reqId: 'scope-1',
+        ok: false,
+        error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+      })
+      expect(hostCall).not.toHaveBeenCalled()
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      bind.mockRestore()
+      hostCall.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it.each([
+    ['provisioning', 'cancel'], ['provisioning', 'timeout'],
+    ['migration', 'cancel'], ['migration', 'timeout'],
+  ] as const)('reserves Plans create while %s and honors %s', async (phase, ending) => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window', contributionKey: `${PLANS_PLUGIN_ID}.window`, kind: 'custom',
+      location: 'window', title: 'Plans', entryFile: '/plugins/navide.plans/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion, system: ['fs'], storage: true },
+      runtimeBinding: {
+        pluginId: PLANS_PLUGIN_ID, packageVersion, workspaceId: 'bound-workspace',
+        instanceId: null, audience: view.contributionKey,
+      },
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(), requires: [],
+      devUrl: '', entryFile: view.entryFile, views: [view],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }), capabilityContext: context,
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend', protocolVersion: 1, activation: 'startup',
+      approvedMethods: ['plans.create'], approvedEvents: [], approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({ packageVersion, system: ['fs'], storage: true }))
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindView').mockResolvedValue()
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call').mockResolvedValue(null as never)
+    let release!: (value: boolean) => void
+    const paused = new Promise<boolean>((resolve) => { release = resolve })
+    const provision = vi.spyOn(
+      mgr as unknown as { provisionPlansAssets: (path: string) => Promise<boolean> },
+      'provisionPlansAssets',
+    ).mockReturnValue(phase === 'provisioning' ? paused : Promise.resolve(true))
+    if (phase === 'migration') mgr.setPlansStorageReadinessHandler(() => paused)
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host), bounds: 'fill', workspacePath: '/workspace', capabilityContext: context,
+      })
+      const sender = { sender: { id: (host.children[0] as FakeViewLike).webContents.id } }
+      const payload = { reqId: 'pending-create', name: 'plans.create', args: { workspace_path: '/workspace' }, timeoutMs: 20 }
+      const call = ipcHandlers.get('plugin:backend:call')!
+      const pending = call(sender, payload)
+      // Do not await a duplicate before releasing provisioning: broken code
+      // admits it and would otherwise leave the regression test hanging.
+      const duplicate = call(sender, payload)
+      if (ending === 'cancel') ipcListeners.get('plugin:backend:cancel')?.(sender, { reqId: payload.reqId })
+      else await new Promise((resolve) => setTimeout(resolve, 40))
+      release(true)
+      expect(await duplicate).toMatchObject({ error: { code: 'BAD_REQUEST' } })
+      expect(await pending).toMatchObject({ error: { code: ending === 'cancel' ? 'USER_CANCELLED' : 'TIMEOUT' } })
+      if (phase === 'provisioning') expect(provision).toHaveBeenCalledOnce()
+      else expect(provision).not.toHaveBeenCalled()
+      expect(hostCall).not.toHaveBeenCalled()
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      release(true)
+      bind.mockRestore()
+      hostCall.mockRestore()
+      provision.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('applies the sender-bound workspace scope to agent Plans calls', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call').mockResolvedValue(null)
+    const host = new FakeBrowserWindow()
+
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+      })
+      const running = (mgr as unknown as {
+        running: Map<string, { backendWorkspaceId: string | null }>
+      }).running.get(handle.instanceId)
+      expect(running).toBeDefined()
+      running!.backendWorkspaceId = createHash('sha256').update(resolve('/workspace')).digest('hex')
+
+      const response = await mgr.executeAgentBackendCall(handle.instanceId, {
+        reqId: 'agent-scope-1',
+        name: 'plans.resolve_root',
+        args: { workspace_path: '/other-workspace' },
+      })
+
+      expect(response).toMatchObject({
+        reqId: 'agent-scope-1',
+        ok: false,
+        error: { code: 'WORKSPACE_SCOPE_VIOLATION' },
+      })
+      expect(hostCall).not.toHaveBeenCalled()
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      hostCall.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('requires the v2 Manifest context and package grant before an agent backend call', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.agent-backend'
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'main',
+      contributionKey: `${pluginId}.main`,
+      kind: 'custom',
+      location: 'main',
+      title: 'Agent backend',
+      entryFile: '/plugins/acme.agent-backend/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(descriptor)
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call').mockResolvedValue(null)
+    const host = new FakeBrowserWindow()
+
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+      })
+
+      await expect(mgr.executeAgentBackendCall(handle.instanceId, {
+        reqId: 'agent-backend-context-1',
+        name: 'fixture.echo',
+        args: null,
+      })).resolves.toMatchObject({
+        reqId: 'agent-backend-context-1',
+        ok: false,
+        error: { code: 'CAPABILITY_DENIED' },
+      })
+      expect(hostCall).not.toHaveBeenCalled()
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      hostCall.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('maps a Host resource limit to the stable IPC error code', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/index.html',
+    }
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(packageDescriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.resolve_root'],
+      approvedEvents: ['plans.changed'],
+    })
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call').mockRejectedValue(
+      new BackendPluginError('RESOURCE_LIMIT'),
+    )
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        query: '?workspace_path=%2Fworkspace',
+      })
+      const webContents = (host.children[0] as FakeViewLike).webContents
+      const response = await ipcHandlers.get('plugin:backend:call')?.(
+        { sender: { id: webContents.id } },
+        {
+          reqId: 'resource-limit-1',
+          name: 'plans.resolve_root',
+          args: { workspace_path: '/workspace' },
+        },
+      )
+
+      expect(response).toMatchObject({
+        reqId: 'resource-limit-1',
+        ok: false,
+        error: { code: 'RESOURCE_LIMIT' },
+      })
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      hostCall.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('preserves generic BACKEND_UNAVAILABLE semantics for renderer and fallback while emitting host-only diagnostics on startup failure', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/index.html',
+    }
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(packageDescriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: packageDescriptor.id,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.resolve_root'],
+      approvedEvents: ['plans.changed'],
+    })
+
+    const spawnError = new Error('spawn /private/opt/plans ENOENT')
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call').mockRejectedValue(
+      new BackendPluginError('BACKEND_UNAVAILABLE', undefined, { cause: spawnError }),
+    )
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const failureHandler = vi.fn()
+    mgr.setPlansBackendFailureHandler(failureHandler)
+
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        query: '?workspace_path=%2Fworkspace',
+      })
+      const webContents = (host.children[0] as FakeViewLike).webContents
+      const response = await ipcHandlers.get('plugin:backend:call')?.(
+        { sender: { id: webContents.id } },
+        {
+          reqId: 'call-unavailable-1',
+          name: 'plans.resolve_root',
+          args: { workspace_path: '/workspace' },
+        },
+      )
+
+      expect(response).toEqual({
+        reqId: 'call-unavailable-1',
+        ok: false,
+        error: {
+          code: 'BACKEND_UNAVAILABLE',
+          message: 'Backend plugin is unavailable.',
+        },
+      })
+      expect(JSON.stringify(response)).not.toContain('/private/opt/plans')
+
+      // Simulate child failure callback to verify host-private diagnostic logging and fallback
+      const hostInstance = (mgr as unknown as { pluginBackendHost: PluginBackendHost }).pluginBackendHost
+      const onStderr = (hostInstance as unknown as { onStderr?: (chunk: string) => void }).onStderr
+      onStderr?.('test child stderr\n')
+      expect(warnSpy).toHaveBeenCalledWith('[plugin-backend] test child stderr')
+
+      const onBackendFailure = (hostInstance as unknown as { onBackendFailure?: (runtime: unknown, error: unknown) => void }).onBackendFailure
+      onBackendFailure?.(
+        { pluginId: PLANS_PLUGIN_ID, packageVersion, instanceId: handle.instanceId },
+        new BackendPluginError('BACKEND_UNAVAILABLE', undefined, { cause: spawnError }),
+      )
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[plugin-backend] Backend child failure for navide.plans:'),
+      )
+      expect(failureHandler).toHaveBeenCalledWith(expect.objectContaining({
+        instanceId: handle.instanceId,
+        reason: 'Backend plugin is unavailable.',
+      }))
+      expect(failureHandler.mock.calls[0][0].reason).not.toContain('/private/opt/plans')
+
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      warnSpy.mockRestore()
+      hostCall.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('sanitizes package-child stderr with control sequences and newlines, emitting each retained line with trusted host prefix and bounded retention', () => {
+    const raw = '\x1b[31;1mfatal:\x1b[0m failed to load /internal/path/lib.so\x1b]0;title\x07\r\n\x00\x082026-09-03T12:00:00.000Z [auth] spoofed admin login\r\nline 3\r'
+    const lines = sanitizeDiagnosticLines(raw)
+    expect(lines).toEqual([
+      'fatal: failed to load /internal/path/lib.so',
+      '2026-09-03T12:00:00.000Z [auth] spoofed admin login',
+      'line 3',
+    ])
+
+    // Verify line length bounding
+    const longLine = 'a'.repeat(MAX_DIAGNOSTIC_LINE_CHARS + 50)
+    const truncatedLine = sanitizeDiagnosticLines(longLine)
+    expect(truncatedLine[0]).toHaveLength(MAX_DIAGNOSTIC_LINE_CHARS + '... [line truncated]'.length)
+    expect(truncatedLine[0]).toContain('... [line truncated]')
+
+    // Verify line count bounding
+    const manyLines = Array.from({ length: MAX_DIAGNOSTIC_LINES_PER_EMISSION + 20 }, (_, i) => `line ${i}`).join('\n')
+    const truncatedLines = sanitizeDiagnosticLines(manyLines)
+    expect(truncatedLines).toHaveLength(MAX_DIAGNOSTIC_LINES_PER_EMISSION + 1)
+    expect(truncatedLines[truncatedLines.length - 1]).toBe('... [diagnostic lines truncated]')
+
+    // Verify emission via FrontendPluginManager onStderr
+    const mgr = new FrontendPluginManager()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const hostInstance = (mgr as unknown as { pluginBackendHost: PluginBackendHost }).pluginBackendHost
+      const onStderr = (hostInstance as unknown as { onStderr?: (chunk: string) => void }).onStderr
+      onStderr?.(raw)
+
+      expect(warnSpy).toHaveBeenCalledTimes(3)
+      for (const call of warnSpy.mock.calls) {
+        expect(call[0]).toMatch(/^\[plugin-backend\] /)
+        expect(call[0]).not.toContain('\x1b')
+        expect(call[0]).not.toContain('\r')
+        expect(call[0]).not.toContain('\n')
+      }
+      expect(warnSpy).toHaveBeenNthCalledWith(1, '[plugin-backend] fatal: failed to load /internal/path/lib.so')
+      expect(warnSpy).toHaveBeenNthCalledWith(2, '[plugin-backend] 2026-09-03T12:00:00.000Z [auth] spoofed admin login')
+      expect(warnSpy).toHaveBeenNthCalledWith(3, '[plugin-backend] line 3')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('sanitizes package-child failure cause and avoids duplicate full stack/cause entries in host diagnostics', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/index.html',
+    }
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(packageDescriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: packageDescriptor.id,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.resolve_root'],
+      approvedEvents: ['plans.changed'],
+    })
+
+    const pathLikeError = new Error('spawn /custom/private/plans/start ENOENT\x1b[31m\x07\r\n    at Object.spawnProcess (test.ts:1:1)')
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call').mockRejectedValue(
+      new BackendPluginError('BACKEND_UNAVAILABLE', undefined, { cause: pathLikeError }),
+    )
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const failureHandler = vi.fn()
+    mgr.setPlansBackendFailureHandler(failureHandler)
+
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        query: '?workspace_path=%2Fworkspace',
+      })
+
+      // Simulate onBackendFailure with path-like cause
+      const hostInstance = (mgr as unknown as { pluginBackendHost: PluginBackendHost }).pluginBackendHost
+      const onBackendFailure = (hostInstance as unknown as { onBackendFailure?: (runtime: unknown, error: unknown) => void }).onBackendFailure
+      const backendError = new BackendPluginError('BACKEND_UNAVAILABLE', undefined, { cause: pathLikeError })
+      onBackendFailure?.(
+        { pluginId: PLANS_PLUGIN_ID, packageVersion, instanceId: handle.instanceId },
+        backendError,
+      )
+
+      // Verified failure was logged with trusted prefix on each line, without ANSI or CR injection
+      const failureCalls = warnSpy.mock.calls.filter(([arg]) => String(arg).includes('Backend child failure'))
+      expect(failureCalls.length).toBeGreaterThanOrEqual(1)
+      for (const call of warnSpy.mock.calls) {
+        expect(call[0]).toMatch(/^\[plugin-backend\] /)
+        expect(call[0]).not.toContain('\x1b')
+        expect(call[0]).not.toContain('\r')
+      }
+
+      // Now verify that if another failure handler or view-bind catch runs with the same backendError,
+      // it avoids duplicate full stack/cause entries
+      const callCountBefore = warnSpy.mock.calls.length
+      onBackendFailure?.(
+        { pluginId: PLANS_PLUGIN_ID, packageVersion, instanceId: handle.instanceId },
+        backendError,
+      )
+      expect(warnSpy.mock.calls.length).toBe(callCountBefore)
+
+      // Recovery payload stays generic and does not leak the path-like cause
+      expect(failureHandler).toHaveBeenCalledWith(expect.objectContaining({
+        instanceId: handle.instanceId,
+        reason: 'Backend plugin is unavailable.',
+      }))
+      expect(failureHandler.mock.calls[0][0].reason).not.toContain('/custom/private/plans')
+
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      warnSpy.mockRestore()
+      hostCall.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+})
+
+describe('production Plans agent backend routing', () => {
+  it.each(['ready', 'failed', 'revoked'] as const)('gates renderer and agent storage writes on migration: %s', async (outcome) => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window', contributionKey: `${PLANS_PLUGIN_ID}.window`, kind: 'custom', location: 'window',
+      title: 'Plans', entryFile: '/plugins/navide.plans/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(), requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      devUrl: '', entryFile: view.entryFile, views: [view],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend', protocolVersion: 1, activation: 'startup',
+      approvedMethods: ['plans.list'], approvedEvents: [], approvedBridgePorts: ['filesystem'],
+    })
+    let granted = true
+    mgr.setCapabilityGrantResolver(() => granted ? { packageVersion, system: ['fs'], storage: true } : null)
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindView').mockResolvedValue()
+    const host = new FakeBrowserWindow()
+    const storage = vi.fn().mockResolvedValue(null)
+    mgr.setPublicStorageHandler(storage)
+    let release!: (ready: boolean) => void
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host), bounds: 'fill', workspacePath: '/workspace',
+        capabilityContext: mgr.plansCapabilityContext(packageVersion, '/workspace', view.contributionKey)!,
+      })
+      mgr.setPlansStorageReadinessHandler(() => new Promise<boolean>((resolve) => { release = resolve }))
+      const payload = { reqId: 'storage-gate', ns: 'storage', method: 'set', args: { scope: 'workspace', key: 'plans.sort', value: 'title' } }
+      for (const origin of ['renderer', 'agent']) {
+        granted = true
+        const pending = origin === 'renderer'
+          ? ipcHandlers.get('plugin:cap:call')!({ sender: { id: (host.children[0] as FakeViewLike).webContents.id } }, payload)
+          : mgr.executeAgentCapability(handle.instanceId, payload)
+        await Promise.resolve()
+        const previousCalls = storage.mock.calls.length
+        if (outcome === 'revoked') granted = false
+        release(outcome !== 'failed')
+        const response = await pending
+        expect(response).toMatchObject({ ok: outcome === 'ready' })
+        expect(storage).toHaveBeenCalledTimes(previousCalls + (outcome === 'ready' ? 1 : 0))
+      }
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      release?.(false)
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it.each(['ready', 'failed', 'revoked', 'timeout'] as const)('awaits storage readiness before headless dispatch: %s', async (outcome) => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    mgr.registerDescriptor({
+      id: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(), requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      devUrl: '', entryFile: '/plugins/navide.plans/frontend/window/index.html', views: [],
+    }, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans', protocolVersion: 1, activation: 'startup',
+      approvedMethods: ['plans.list'], agentMethods: ['plans.list'], approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    let granted = true
+    mgr.setCapabilityGrantResolver(() => granted ? { packageVersion, system: ['fs'], storage: true } : null)
+    mgr.setExecutionPolicyResolver(() => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] }, revision: 1, state: 'user',
+    }))
+    let settle!: (ready: boolean) => void
+    const readiness = new Promise<boolean>((resolve) => { settle = resolve })
+    mgr.setPlansStorageReadinessHandler(() => readiness)
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindWorkspace').mockResolvedValue('headless-storage')
+    const call = vi.spyOn(PluginBackendHost.prototype, 'call').mockResolvedValue({ plans: [] } as never)
+    try {
+      const pending = mgr.executeAgentBackendCallForWorkspace(PLANS_PLUGIN_ID, '/workspace', {
+        reqId: 'storage-gate', name: 'plans.list', args: {}, timeoutMs: 20,
+      })
+      await Promise.resolve()
+      expect(bind).not.toHaveBeenCalled()
+      expect(call).not.toHaveBeenCalled()
+      if (outcome === 'revoked') granted = false
+      if (outcome !== 'timeout') settle(outcome !== 'failed')
+      const result = await pending
+      if (outcome === 'ready') {
+        expect(result.ok).toBe(true)
+        expect(call).toHaveBeenCalledOnce()
+      } else {
+        expect(result).toMatchObject({ ok: false, error: { code: outcome === 'timeout' ? 'TIMEOUT' : outcome === 'failed' ? 'BACKEND_UNAVAILABLE' : 'CAPABILITY_DENIED' } })
+        expect(result).not.toHaveProperty('recoveryDisposition')
+        expect(bind).not.toHaveBeenCalled()
+        expect(call).not.toHaveBeenCalled()
+      }
+    } finally {
+      settle(false)
+      bind.mockRestore()
+      call.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('denies non-allowlisted methods before binding and preserves the minted agent Initiator', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/window/index.html',
+      views: [],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.list', 'plans.create', 'plans.delete'],
+      agentMethods: ['plans.list', 'plans.create'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion,
+      system: ['fs'],
+      storage: true,
+    }))
+    mgr.setExecutionPolicyResolver(() => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] },
+      revision: 1,
+      state: 'user',
+    }))
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindWorkspace').mockResolvedValue('headless-plans-1')
+    const call = vi.spyOn(PluginBackendHost.prototype, 'call').mockResolvedValue({
+      rel_path: '.agent-team/plans/agent-plan.html',
+    } as never)
+    const provision = vi
+      .spyOn(
+        mgr as unknown as { provisionPlansAssets: (workspacePath: string) => Promise<boolean> },
+        'provisionPlansAssets',
+      )
+      .mockResolvedValue(true)
+
+    try {
+      await expect(mgr.executeAgentBackendCallForWorkspace(
+        PLANS_PLUGIN_ID,
+        '/workspace',
+        { reqId: 'agent-denied-1', name: 'plans.delete', args: { rel_path: 'plan.html' } },
+      )).resolves.toMatchObject({
+        reqId: 'agent-denied-1',
+        ok: false,
+        error: { code: 'CAPABILITY_DENIED' },
+      })
+      expect(bind).not.toHaveBeenCalled()
+      expect(call).not.toHaveBeenCalled()
+
+      await expect(mgr.executeAgentBackendCallForWorkspace(
+        PLANS_PLUGIN_ID,
+        '/workspace',
+        {
+          reqId: 'agent-create-1',
+          name: 'plans.create',
+          args: { name: 'Agent plan', overview: '', todos: [] },
+        },
+      )).resolves.toEqual({
+        reqId: 'agent-create-1',
+        ok: true,
+        result: { rel_path: '.agent-team/plans/agent-plan.html' },
+      })
+      expect(bind).toHaveBeenCalledOnce()
+      expect(call).toHaveBeenCalledWith(
+        'headless-plans-1',
+        'plans.create',
+        { name: 'Agent plan', overview: '', todos: [] },
+        { initiator: expect.objectContaining({ kind: 'agent', source: 'mcp' }) },
+      )
+
+      await expect(mgr.executeAgentBackendCallForWorkspace(
+        PLANS_PLUGIN_ID,
+        '/workspace',
+        { reqId: 'agent-list-1', name: 'plans.list', args: {} },
+      )).resolves.toMatchObject({ reqId: 'agent-list-1', ok: true })
+      expect(bind).toHaveBeenCalledOnce()
+
+      call.mockRejectedValueOnce(new BackendPluginError(
+        'PLUGIN_ERROR',
+        'child denied',
+        { pluginCode: 'CAPABILITY_DENIED' },
+      ))
+      await expect(mgr.executeAgentBackendCallForWorkspace(
+        PLANS_PLUGIN_ID,
+        '/workspace',
+        { reqId: 'agent-denied-child-1', name: 'plans.list', args: {} },
+      )).resolves.toMatchObject({
+        reqId: 'agent-denied-child-1',
+        ok: false,
+        error: { code: 'CAPABILITY_DENIED' },
+      })
+    } finally {
+      provision.mockRestore()
+      call.mockRestore()
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('denies the headless route when the exact package Grant is missing', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/window/index.html',
+      views: [],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.create'],
+      agentMethods: ['plans.create'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindWorkspace')
+    try {
+      await expect(mgr.executeAgentBackendCallForWorkspace(
+        PLANS_PLUGIN_ID,
+        '/workspace',
+        {
+          reqId: 'agent-no-grant-1',
+          name: 'plans.create',
+          args: { name: 'Denied plan', overview: '', todos: [] },
+        },
+      )).resolves.toMatchObject({
+        reqId: 'agent-no-grant-1',
+        ok: false,
+        error: { code: 'CAPABILITY_DENIED' },
+      })
+      expect(bind).not.toHaveBeenCalled()
+    } finally {
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('mints legacy-safe-before-dispatch only after a policy-approved bind failure', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/window/index.html',
+      views: [],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.create'],
+      agentMethods: ['plans.create'],
+      approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({ packageVersion, system: ['fs'], storage: true }))
+    mgr.setExecutionPolicyResolver(() => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] },
+      revision: 1,
+      state: 'user',
+    }))
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindWorkspace').mockRejectedValue(
+      new BackendPluginError('BACKEND_UNAVAILABLE'),
+    )
+    const provision = vi.spyOn(
+      mgr as unknown as { provisionPlansAssets: (workspacePath: string) => Promise<boolean> },
+      'provisionPlansAssets',
+    ).mockResolvedValue(true)
+    try {
+      await expect(mgr.executeAgentBackendCallForWorkspace(PLANS_PLUGIN_ID, '/workspace', {
+        reqId: 'safe-pre-dispatch', name: 'plans.create', args: { name: 'Safe', overview: '', todos: [] },
+      })).resolves.toMatchObject({
+        reqId: 'safe-pre-dispatch', ok: false,
+        error: { code: 'BACKEND_UNAVAILABLE' },
+        recoveryDisposition: 'legacy-safe-before-dispatch',
+      })
+      await expect(mgr.executeAgentBackendCallForWorkspace(PLANS_PLUGIN_ID, '/workspace', {
+        reqId: 'safe-pre-dispatch-after-health-failure',
+        name: 'plans.create',
+        args: { name: 'Safe Again', overview: '', todos: [] },
+      })).resolves.toMatchObject({
+        reqId: 'safe-pre-dispatch-after-health-failure', ok: false,
+        error: { code: 'BACKEND_UNAVAILABLE' },
+        recoveryDisposition: 'legacy-safe-before-dispatch',
+      })
+      expect(bind).toHaveBeenCalledOnce()
+    } finally {
+      provision.mockRestore()
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('never mints a recovery disposition once the packaged child call starts', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(), requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }), devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/window/index.html', views: [],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans', protocolVersion: 1, activation: 'startup',
+      approvedMethods: ['plans.create'], agentMethods: ['plans.create'], approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({ packageVersion, system: ['fs'], storage: true }))
+    mgr.setExecutionPolicyResolver(() => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] }, revision: 1, state: 'user',
+    }))
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindWorkspace').mockResolvedValue('headless-plans-1')
+    const call = vi.spyOn(PluginBackendHost.prototype, 'call').mockRejectedValue(
+      new BackendPluginError('TIMEOUT'),
+    )
+    const provision = vi.spyOn(
+      mgr as unknown as { provisionPlansAssets: (workspacePath: string) => Promise<boolean> },
+      'provisionPlansAssets',
+    ).mockResolvedValue(true)
+    try {
+      const response = await mgr.executeAgentBackendCallForWorkspace(PLANS_PLUGIN_ID, '/workspace', {
+        reqId: 'post-dispatch', name: 'plans.create', args: { name: 'Post', overview: '', todos: [] },
+      }) as unknown as Record<string, unknown>
+      expect(response).toMatchObject({ reqId: 'post-dispatch', ok: false, error: { code: 'TIMEOUT' } })
+      expect(response).not.toHaveProperty('recoveryDisposition')
+      expect(call).toHaveBeenCalledOnce()
+    } finally {
+      provision.mockRestore()
+      call.mockRestore()
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('denies a headless mutation before binding when the current agent policy denies fs', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(), requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }), devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/window/index.html', views: [],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans', protocolVersion: 1, activation: 'startup',
+      approvedMethods: ['plans.create'], agentMethods: ['plans.create'], approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({ packageVersion, system: ['fs'], storage: true }))
+    mgr.setExecutionPolicyResolver(() => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: [], shell: [] }, revision: 1, state: 'user',
+    }))
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindWorkspace')
+    try {
+      const response = await mgr.executeAgentBackendCallForWorkspace(PLANS_PLUGIN_ID, '/workspace', {
+        reqId: 'policy-denied', name: 'plans.create', args: { name: 'Denied', overview: '', todos: [] },
+      }) as unknown as Record<string, unknown>
+      expect(response).toMatchObject({ ok: false, error: { code: 'CAPABILITY_DENIED' } })
+      expect(response).not.toHaveProperty('recoveryDisposition')
+      expect(bind).not.toHaveBeenCalled()
+    } finally {
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('returns PLUGIN_STOPPING during revocation and CAPABILITY_DENIED after Grant revocation without binding', async () => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(), requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }), devUrl: '',
+      entryFile: '/plugins/navide.plans/frontend/window/index.html', views: [],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans', protocolVersion: 1, activation: 'startup',
+      approvedMethods: ['plans.create'], agentMethods: ['plans.create'], approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    let grantActive = true
+    mgr.setCapabilityGrantResolver(() => grantActive ? ({ packageVersion, system: ['fs'], storage: true }) : null)
+    mgr.setExecutionPolicyResolver(() => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] }, revision: 1, state: 'user',
+    }))
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindWorkspace')
+    let releaseRevocation!: () => void
+    const revocationGate = new Promise<void>((resolve) => { releaseRevocation = resolve })
+    const revoke = vi.spyOn(PluginBackendHost.prototype, 'revokePackageVersion').mockImplementation(
+      async () => revocationGate,
+    )
+    try {
+      grantActive = false
+      const revoked = await mgr.executeAgentBackendCallForWorkspace(PLANS_PLUGIN_ID, '/workspace', {
+        reqId: 'grant-revoked', name: 'plans.create', args: { name: 'Revoked', overview: '', todos: [] },
+      }) as unknown as Record<string, unknown>
+      expect(revoked).toMatchObject({ ok: false, error: { code: 'CAPABILITY_DENIED' } })
+      expect(revoked).not.toHaveProperty('recoveryDisposition')
+      expect(bind).not.toHaveBeenCalled()
+      grantActive = true
+
+      const revocation = mgr.revokePackageVersion(PLANS_PLUGIN_ID, packageVersion)
+      await Promise.resolve()
+      const stopping = await mgr.executeAgentBackendCallForWorkspace(PLANS_PLUGIN_ID, '/workspace', {
+        reqId: 'revocation-in-progress', name: 'plans.create', args: { name: 'Stop', overview: '', todos: [] },
+      }) as unknown as Record<string, unknown>
+      expect(stopping).toMatchObject({ ok: false, error: { code: 'PLUGIN_STOPPING' } })
+      expect(stopping).not.toHaveProperty('recoveryDisposition')
+      expect(bind).not.toHaveBeenCalled()
+
+      releaseRevocation()
+      await revocation
+    } finally {
+      revoke.mockRestore()
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+})
+
+describe('package-version grant revocation', () => {
+  it('disables and destroys only the revoked package version', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.revocable'
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${pluginId}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Revocable',
+      entryFile: '/plugins/acme.revocable/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: null,
+      runtimeBinding: {
+        pluginId,
+        packageVersion,
+        workspaceId: 'workspace-1',
+        instanceId: null,
+        audience: view.contributionKey,
+      },
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+      capabilityContext: context,
+    }
+    mgr.registerDescriptor(descriptor)
+    const revoke = vi
+      .spyOn(PluginBackendHost.prototype, 'revokePackageVersion')
+      .mockResolvedValue()
+    const host = new FakeBrowserWindow()
+
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        capabilityContext: context,
+      })
+      const surface = host.children[0] as FakeViewLike
+
+      await mgr.revokePackageVersion(pluginId, packageVersion)
+
+      expect(revoke).toHaveBeenCalledWith(pluginId, packageVersion)
+      expect(surface.visible).toBe(false)
+      expect(surface.webContents.isDestroyed()).toBe(true)
+      expect((mgr as unknown as { running: Map<string, unknown> }).running.has(handle.instanceId)).toBe(false)
+    } finally {
+      revoke.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('blocks reopening while a package version is being revoked', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.revocation-gate'
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'main',
+      contributionKey: `${pluginId}.main`,
+      kind: 'custom',
+      location: 'main',
+      title: 'Revocation gate',
+      entryFile: '/plugins/acme.revocation-gate/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: null,
+      runtimeBinding: {
+        pluginId,
+        packageVersion,
+        workspaceId: 'workspace-1',
+        instanceId: null,
+        audience: view.contributionKey,
+      },
+    }
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+      capabilityContext: context,
+    }
+    mgr.registerDescriptor(packageDescriptor)
+    let finish!: () => void
+    const revoke = vi
+      .spyOn(PluginBackendHost.prototype, 'revokePackageVersion')
+      .mockImplementation(() => new Promise<void>((resolve) => { finish = resolve }))
+    const host = new FakeBrowserWindow()
+
+    try {
+      await mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        capabilityContext: context,
+      })
+      const revocation = mgr.revokePackageVersion(pluginId, packageVersion)
+      await Promise.resolve()
+
+      await expect(mgr.openView(packageDescriptor, view, {
+        hostWindow: asHost(new FakeBrowserWindow()),
+        bounds: 'fill',
+        workspacePath: '/workspace',
+        capabilityContext: context,
+      })).rejects.toMatchObject({ code: 'PLUGIN_STOPPING' })
+
+      finish()
+      await revocation
+      expect(revoke).toHaveBeenCalledWith(pluginId, packageVersion)
+    } finally {
+      revoke.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('blocks contribution updates while a package version is being revoked', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.contribution-revocation-gate'
+    const packageVersion = '1.0.0'
+    const contributionKey = `${pluginId}.main`
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'main',
+      contributionKey,
+      kind: 'custom',
+      location: 'main',
+      title: 'Revocation update gate',
+      entryFile: '/plugins/acme.contribution-revocation-gate/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+      capabilityPolicy: {
+        kind: 'manifest-v2',
+        system: ['fs'],
+        grants: [{ permission: 'system', namespace: 'fs' }],
+      },
+    }
+    mgr.registerDescriptor(descriptor)
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion,
+      system: ['fs'],
+      storage: true,
+    }))
+    const host = new FakeBrowserWindow()
+    let finish!: () => void
+    const revoke = vi
+      .spyOn(PluginBackendHost.prototype, 'revokePackageVersion')
+      .mockImplementation(() => new Promise<void>((resolve) => { finish = resolve }))
+
+    try {
+      await expect(mgr.openContribution(asHost(host), contributionKey, {
+        bounds: { x: 0, y: 0, width: 300, height: 500 },
+        workspacePath: '/workspace',
+      })).resolves.toEqual({ ok: true })
+      const revocation = mgr.revokePackageVersion(pluginId, packageVersion)
+
+      expect(mgr.updateContribution(
+        asHost(host),
+        contributionKey,
+        { x: 0, y: 0, width: 300, height: 500 },
+        true,
+      )).toEqual({ ok: false })
+
+      await Promise.resolve()
+      finish()
+      await revocation
+    } finally {
+      revoke.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
   })
 })
 
@@ -865,7 +2658,13 @@ describe('loadInstalledPlugins official receipt gate', () => {
     expect(result).toMatchObject({ loaded: true, pluginId: 'navide.git', packageVersion: '1.0.0' })
     expect(mgr.getDescriptor('navide.git')?.packageVersion).toBe('1.0.0')
     expect(mgr.listInstalledPackages()).toEqual([
-      { id: 'navide.git', requires: [], provenance: 'factory-bundled' },
+      {
+        id: 'navide.git',
+        requires: [],
+        packageVersion: '1.0.0',
+        manifestPermissions: { system: [] },
+        provenance: 'factory-bundled',
+      },
     ])
   })
 
@@ -1087,6 +2886,8 @@ describe('loadInstalledPlugins official receipt gate', () => {
         {
           id: 'acme.viewer',
           requires: [],
+          packageVersion: '1.0.0',
+          manifestPermissions: { system: [] },
           provenance: 'developer-local-unpacked',
           warning: 'Unsigned local unpacked plugin — Developer Mode only',
         },
@@ -3593,6 +5394,77 @@ describe('first-party Git private bridge', () => {
     return { mgr, view: host.children[0] as FakeViewLike, host, sent, instanceId: handle.instanceId }
   }
 
+  function plansDescriptor(
+    mgr: FrontendPluginManager,
+    workspacePath = '/workspace',
+    audience = 'plans-window',
+  ): PluginLaunchDescriptor {
+    const packageVersion = '0.1.0'
+    const view = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom' as const,
+      location: 'window' as const,
+      title: 'Plans',
+      entryFile: '/path/to/plans/window.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: '/path/to/plans',
+      requires: ['fs', 'ui', 'plans', 'terminal'],
+      capabilityPolicy: {
+        kind: 'manifest-v2',
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+        grants: [],
+      },
+      devUrl: '',
+      entryFile: '/path/to/plans/window.html',
+      views: [view],
+    }
+    mgr.setCapabilityGrantResolver((pluginId, version) => {
+      if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+        return {
+          packageVersion,
+          system: ['fs', 'ui', 'aiCli'],
+          shell: 'allowlist',
+          storage: true,
+        }
+      }
+      return null
+    })
+    descriptor.capabilityContext = mgr.plansCapabilityContext(packageVersion, workspacePath, audience)
+    return descriptor
+  }
+
+  async function openPlansView(workspacePath = '/workspace', audience = 'plans-window', diagnostics = false): Promise<{
+    mgr: FrontendPluginManager
+    view: FakeViewLike
+    host: FakeBrowserWindow
+    sent: Array<{ channel: string; args: unknown[] }>
+    instanceId: string
+  }> {
+    const mgr = new FrontendPluginManager()
+    mgr.setPlansDiagnosticsEnabled(diagnostics)
+    const descriptor = plansDescriptor(mgr, workspacePath, audience)
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    const capabilityContext = mgr.plansCapabilityContext(descriptor.packageVersion!, workspacePath, audience)
+    const host = new FakeBrowserWindow()
+    const sent: Array<{ channel: string; args: unknown[] }> = []
+    ;(host as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => sent.push({ channel, args }),
+    }
+    const handle = await mgr.openView(descriptor, descriptor.views![0], {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext,
+      query: '?plans_diagnostics=1&plans_package_version=spoofed&plans_package_source=spoofed',
+    })
+    return { mgr, view: host.children[0] as FakeViewLike, host, sent, instanceId: handle.instanceId }
+  }
+
   async function call(
     view: FakeViewLike,
     action: string,
@@ -3607,6 +5479,240 @@ describe('first-party Git private bridge', () => {
       args,
     })) as Record<string, unknown>
   }
+
+  it('keeps Plans provenance invisible by default and overrides caller diagnostics when explicitly enabled', async () => {
+    const disabled = await openPlansView()
+    expect(disabled.view.webContents.loads[0]).not.toContain('plans_diagnostics')
+    expect(disabled.view.webContents.loads[0]).not.toContain('plans_package_')
+    const enabled = await openPlansView('/workspace', 'plans-window', true)
+    const query = new URLSearchParams(enabled.view.webContents.loads[0].split('?')[1])
+    expect(query.get('plans_diagnostics')).toBe('1')
+    expect(query.get('plans_package_version')).toBe('0.1.0')
+    expect(query.get('plans_package_source')).not.toBe('spoofed')
+  })
+
+  it('loads the selected factory contribution with its actual provenance regardless of the development environment flag', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'plans-factory-query-')))
+    const mgr = new FrontendPluginManager()
+    try {
+      const packageDir = join(root, 'dist-plugins/navide-plans')
+      mkdirSync(join(packageDir, 'frontend/left'), { recursive: true })
+      mkdirSync(join(packageDir, 'frontend/window'), { recursive: true })
+      mkdirSync(join(packageDir, 'backend'), { recursive: true })
+      writeFileSync(join(packageDir, 'manifest.json'), readFileSync('plugins/navide-plans/manifest.json'))
+      writeFileSync(join(packageDir, 'frontend/left/index.html'), '<!doctype html>')
+      writeFileSync(join(packageDir, 'frontend/window/index.html'), '<!doctype html>')
+      copyFileSync(process.execPath, join(packageDir, 'backend/navide-plans'))
+      expect(registerBundledPlans(mgr, { isPackaged: false, resourcesPath: '', devRoot: root })).toEqual({ registered: true })
+      mgr.setPlansDiagnosticsEnabled(true)
+      mgr.setCapabilityGrantResolver(() => ({ packageVersion: '0.1.0', system: ['fs', 'ui', 'aiCli'], storage: true }))
+      const descriptor = mgr.getDescriptor(PLANS_PLUGIN_ID)!
+      const contribution = descriptor.views!.find((view) => view.location === 'window')!
+      const host = new FakeBrowserWindow()
+      await mgr.openView({ ...descriptor, entryFile: contribution.entryFile }, contribution, {
+        hostWindow: asHost(host), bounds: 'fill', workspacePath: root,
+        capabilityContext: mgr.plansCapabilityContext('0.1.0', root, 'plans-window'),
+        query: '?plans_package_source=spoofed',
+      })
+      const loaded = (host.children[0] as FakeViewLike).webContents.loads[0]
+      expect(loaded).toContain(contribution.entryFile)
+      const query = new URLSearchParams(loaded.split('?')[1])
+      expect(query.get('plans_package_source')).toBe('factory-bundled')
+      expect(query.get('plans_package_version')).toBe('0.1.0')
+    } finally {
+      await mgr.closeBackendPlugins()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('retains Plans shell actions through the authenticated private bridge', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'plans-shell-')))
+    try {
+      mkdirSync(join(root, '.agent-team/plans'), { recursive: true })
+      writeFileSync(join(root, '.agent-team/plans/draft.html'), '<html></html>')
+      const { mgr, view } = await openPlansView(root)
+      const dispatchExecution = vi.fn(() => ({ delivered: true }))
+      const openPath = vi.fn(async () => ({ ok: true }))
+      mgr.setPlansShellHandlers({ dispatchExecution, openPath })
+      await expect(call(view, 'plans.shell', { operation: 'dispatch_execution', rel_path: '.agent-team/plans/draft.html', agent_key: 'codex' })).resolves.toMatchObject({ ok: true, result: { delivered: true } })
+      expect(dispatchExecution).toHaveBeenCalledTimes(1)
+      expect(dispatchExecution).toHaveBeenCalledWith({ workspace_path: root, rel_path: '.agent-team/plans/draft.html', agent_key: 'codex' })
+      await expect(call(view, 'plans.shell', { operation: 'open_path', rel_path: '.agent-team/plans/draft.html' })).resolves.toMatchObject({ ok: true, result: { ok: true } })
+      expect(openPath).toHaveBeenCalledTimes(1)
+      expect(openPath).toHaveBeenCalledWith(join(root, '.agent-team/plans/draft.html'))
+      mgr.forwardPlansExecutionResult({ workspace_path: root, rel_path: '.agent-team/plans/draft.html', ok: true })
+      expect(view.webContents.sent).toContainEqual({ channel: 'plugin:cap:event', args: [{ type: 'plans.execution-result', data: { workspace_path: root, rel_path: '.agent-team/plans/draft.html', ok: true } }] })
+      const count = view.webContents.sent.length
+      mgr.forwardPlansExecutionResult({ workspace_path: '/other-workspace', rel_path: '.agent-team/plans/draft.html', ok: false })
+      expect(view.webContents.sent).toHaveLength(count)
+      for (const args of [
+        { operation: 'open_path', rel_path: '/etc/passwd' },
+        { operation: 'open_path', rel_path: '../outside.html' },
+        { operation: 'open_path', rel_path: '.agent-team/plans/draft.html', workspace_path: '/other' },
+        { operation: 'dispatch_execution', rel_path: '.agent-team/plans/draft.html', agent_key: 'unknown' },
+      ]) await expect(call(view, 'plans.shell', args)).resolves.toMatchObject({ ok: false })
+      expect(openPath).toHaveBeenCalledTimes(1)
+      expect(dispatchExecution).toHaveBeenCalledTimes(1)
+      mgr.setCapabilityGrantResolver(() => null)
+      await expect(call(view, 'plans.shell', { operation: 'open_path', rel_path: '.agent-team/plans/draft.html' })).resolves.toMatchObject({ ok: false, error: { code: 'CAPABILITY_DENIED' } })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('denies Plans shell actions from another first-party package', async () => {
+    const { mgr, view } = await openGitView()
+    const openPath = vi.fn(async () => ({ ok: true }))
+    mgr.setPlansShellHandlers({ dispatchExecution: () => ({ delivered: true }), openPath })
+    await expect(call(view, 'plans.shell', { operation: 'open_path', rel_path: '.agent-team/plans/draft.html' })).resolves.toMatchObject({ ok: false, error: { code: 'CAPABILITY_DENIED' } })
+    expect(openPath).not.toHaveBeenCalled()
+  })
+
+  it('keeps manual calls usable while denying the equivalent agent operation', async () => {
+    const { mgr, view, instanceId } = await openGitView()
+    const plans: unknown[] = []
+    mgr.setExecutionPolicyResolver((): ExecutionPolicySnapshot => ({
+      policy: { schemaVersion: 1, mode: 'denylist', system: ['fs'], shell: [] },
+      revision: 7,
+      state: 'user',
+    }))
+    mgr.setPublicCapabilityHandler((plan) => {
+      plans.push(plan)
+      return null
+    })
+    const capabilityHandler = ipcHandlers.get('plugin:cap:call')
+    expect(capabilityHandler).toBeDefined()
+
+    await expect(mgr.executeAgentCapability(instanceId, {
+      reqId: 'agent-fs',
+      ns: 'fs',
+      method: 'listFilesFlat',
+      args: { query: '', maxResults: 1 },
+    })).resolves.toMatchObject({
+      reqId: 'agent-fs',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED', message: 'agent execution policy denied the operation' },
+    })
+    expect(plans).toEqual([])
+
+    await expect(capabilityHandler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'manual-fs',
+      ns: 'fs',
+      method: 'listFilesFlat',
+      args: { query: '', maxResults: 1 },
+    })).resolves.toMatchObject({ reqId: 'manual-fs', ok: true })
+    expect(plans[0]).toMatchObject({
+      initiator: { kind: 'user' },
+    })
+
+    await expect(mgr.executeAgentCapability(instanceId, {
+      reqId: 'forged-agent',
+      ns: 'fs',
+      method: 'listFilesFlat',
+      args: { query: '', maxResults: 1 },
+      initiator: { kind: 'user', id: 'forged' },
+    })).resolves.toMatchObject({
+      reqId: 'forged-agent',
+      ok: false,
+      error: { code: 'BAD_REQUEST' },
+    })
+  })
+
+  it('rechecks a stale agent policy before invoking the public handler', async () => {
+    const { mgr, instanceId } = await openGitView()
+    let reads = 0
+    const allow = (): ExecutionPolicySnapshot => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] },
+      revision: 1,
+      state: 'user',
+    })
+    const deny = (): ExecutionPolicySnapshot => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: [], shell: [] },
+      revision: 2,
+      state: 'user',
+    })
+    mgr.setExecutionPolicyResolver(() => {
+      reads += 1
+      return reads === 1 ? allow() : deny()
+    })
+    const handler = vi.fn()
+    mgr.setPublicCapabilityHandler(handler)
+
+    await expect(mgr.executeAgentCapability(instanceId, {
+      reqId: 'stale-agent-policy',
+      ns: 'fs',
+      method: 'listFilesFlat',
+      args: { query: '', maxResults: 1 },
+    })).resolves.toMatchObject({
+      reqId: 'stale-agent-policy',
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED', message: 'agent execution policy denied the operation' },
+    })
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('uses the global policy for an agent plugin-scoped UI call without a workspace', async () => {
+    const mgr = new FrontendPluginManager()
+    const pluginId = 'acme.plugin-ui'
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'main',
+      contributionKey: `${pluginId}.main`,
+      kind: 'custom',
+      location: 'main',
+      title: 'Plugin UI',
+      entryFile: '/plugins/acme.plugin-ui/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion, system: ['ui'] },
+      runtimeBinding: {
+        pluginId,
+        packageVersion,
+        workspaceId: null,
+        instanceId: null,
+        audience: view.contributionKey,
+      },
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: pluginId,
+      packageVersion,
+      packageDir: process.cwd(),
+      requires: ['ui'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['ui'] }),
+      capabilityContext: context,
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(descriptor)
+    mgr.setExecutionPolicyResolver(() => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['ui'], shell: [] },
+      revision: 1,
+      state: 'user',
+    }))
+    const handler = vi.fn()
+    mgr.setPublicCapabilityHandler(handler)
+    const host = new FakeBrowserWindow()
+
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        capabilityContext: context,
+      })
+
+      await expect(mgr.executeAgentCapability(handle.instanceId, {
+        reqId: 'agent-plugin-ui-1',
+        ns: 'ui',
+        method: 'openExternal',
+        args: { url: 'https://example.com' },
+      })).resolves.toMatchObject({ reqId: 'agent-plugin-ui-1', ok: true })
+      expect(handler).toHaveBeenCalledOnce()
+    } finally {
+      await mgr.closeBackendPlugins()
+    }
+  })
 
   it('denies Git storage writes outside the approved preference ownership', async () => {
     const { mgr, view } = await openGitView()
@@ -3658,6 +5764,638 @@ describe('first-party Git private bridge', () => {
         },
       }],
     }])
+  })
+
+  it('does not route Host-owned language settings changes to v2 Git views', async () => {
+    const { mgr, view } = await openGitView()
+
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agent-team:language': 'zh-TW',
+        'unknown.setting': 'ignored',
+      },
+    })
+
+    expect(view.webContents.sent).toHaveLength(0)
+  })
+
+  it('routes Host-owned language settings changes to active Plans v2 views', async () => {
+    const { mgr, view } = await openPlansView()
+
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agent-team:language': 'zh-TW',
+        'unknown.setting': 'ignored',
+      },
+    })
+
+    expect(view.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agent-team:language': 'zh-TW',
+          },
+        },
+      }],
+    }])
+  })
+
+  it('preserves Git package-private settings contract: Plans receives only Host language and never Git settings or storage', async () => {
+    const mgr = new FrontendPluginManager()
+    const workspacePath = '/workspace'
+    const gitDesc = gitDescriptor(mgr, workspacePath, 'git-left')
+    mgr.registerDescriptor(gitDesc, { builtin: true })
+    const gitHost = new FakeBrowserWindow()
+    const gitSent: Array<{ channel: string; args: unknown[] }> = []
+    ;(gitHost as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => gitSent.push({ channel, args }),
+    }
+    await mgr.openView(gitDesc, gitDesc.views![0], {
+      hostWindow: asHost(gitHost),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext: gitDesc.capabilityContext,
+    })
+    const gitView = gitHost.children[0] as FakeViewLike
+
+    const plansDesc = plansDescriptor(mgr, workspacePath, 'plans-window')
+    mgr.registerDescriptor(plansDesc, { builtin: true })
+    const plansCapabilityContext = mgr.plansCapabilityContext(plansDesc.packageVersion!, workspacePath, 'plans-window')
+    const plansHost = new FakeBrowserWindow()
+    const plansSent: Array<{ channel: string; args: unknown[] }> = []
+    ;(plansHost as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => plansSent.push({ channel, args }),
+    }
+    await mgr.openView(plansDesc, plansDesc.views![0], {
+      hostWindow: asHost(plansHost),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext: plansCapabilityContext,
+    })
+    const plansView = plansHost.children[0] as FakeViewLike
+
+    gitView.webContents.sent.length = 0
+    plansView.webContents.sent.length = 0
+
+    // 1. Git-only Host settings: Git receives them, Plans receives nothing
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agentTeam.yolo': '0',
+        'agentTeam.analyzerModel': 'qwen2:latest',
+        'agent-team:theme': 'dark',
+      },
+    })
+    expect(gitView.webContents.sent).toHaveLength(1)
+    expect(gitView.webContents.sent[0]).toEqual({
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agentTeam.yolo': '0',
+            'agentTeam.analyzerModel': 'qwen2:latest',
+            'agent-team:theme': 'dark',
+          },
+        },
+      }],
+    })
+    expect(plansView.webContents.sent).toHaveLength(0)
+
+    gitView.webContents.sent.length = 0
+    plansView.webContents.sent.length = 0
+
+    // 2. Mixed Host settings: Git receives git settings, Plans receives ONLY language
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agentTeam.yolo': '1',
+        'agent-team:language': 'zh-TW',
+      },
+    })
+    expect(gitView.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agentTeam.yolo': '1',
+          },
+        },
+      }],
+    }])
+    expect(plansView.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agent-team:language': 'zh-TW',
+          },
+        },
+      }],
+    }])
+
+    gitView.webContents.sent.length = 0
+    plansView.webContents.sent.length = 0
+
+    // 3. Plugin-storage settings: Git receives git user preference, Plans receives nothing
+    mgr.setPublicStorageHandler(() => null)
+    const handler = ipcHandlers.get(CAPABILITY_CALL)
+    await handler!(
+      { sender: { id: gitView.webContents.id } },
+      {
+        reqId: 'git-storage-1',
+        ns: 'storage',
+        method: 'set',
+        args: { scope: 'plugin', key: 'agentTeam.git.logScope', value: 'all' },
+      },
+    )
+    expect(gitView.webContents.sent).toHaveLength(1)
+    expect(gitView.webContents.sent[0].args[0]).toMatchObject({
+      type: 'ui.settings_changed',
+      data: { source: 'plugin-storage' },
+    })
+    expect(plansView.webContents.sent).toHaveLength(0)
+  })
+
+  it('preserves legacy Git host settings filtering without language entering legacy Git fan-out', async () => {
+    const mgr = new FrontendPluginManager()
+    const workspacePath = '/workspace'
+
+    // 1. Register and open legacy (recovery) Git view
+    const legacyGit: PluginLaunchDescriptor = {
+      id: GIT_PLUGIN_ID,
+      requires: ['ui', 'git'],
+      devUrl: '',
+      entryFile: '/plugins/git/index.html',
+    }
+    mgr.registerDescriptor(legacyGit, { builtin: true })
+    const gitHost = new FakeBrowserWindow()
+    const gitSent: Array<{ channel: string; args: unknown[] }> = []
+    ;(gitHost as unknown as { webContents: { send: (channel: string, ...args: unknown[]) => void } }).webContents = {
+      send: (channel, ...args) => gitSent.push({ channel, args }),
+    }
+    await mgr.open(asHost(gitHost), legacyGit, 'fill')
+    const legacyGitView = gitHost.children[0] as FakeViewLike
+
+    // 2. Register and open Plans v2 view
+    const plans = plansDescriptor(mgr, workspacePath, 'plans-window')
+    mgr.registerDescriptor(plans, { builtin: true })
+    const plansCapabilityContext = mgr.plansCapabilityContext(plans.packageVersion!, workspacePath, 'plans-window')
+    const plansHost = new FakeBrowserWindow()
+    await mgr.openView(plans, plans.views![0], {
+      hostWindow: asHost(plansHost),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext: plansCapabilityContext,
+    })
+    const plansView = plansHost.children[0] as FakeViewLike
+
+    legacyGitView.webContents.sent.length = 0
+    plansView.webContents.sent.length = 0
+
+    // 3. Dispatch mixed host settings with both git settings and language
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agentTeam.yolo': '1',
+        'agent-team:language': 'zh-TW',
+      },
+    })
+
+    // Plans v2 receives only language
+    expect(plansView.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agent-team:language': 'zh-TW',
+          },
+        },
+      }],
+    }])
+
+    // Explicit recovery Git receives only git read-only settings; language MUST NOT enter legacy Git fan-out
+    expect(legacyGitView.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agentTeam.yolo': '1',
+          },
+        },
+      }],
+    }])
+
+    legacyGitView.webContents.sent.length = 0
+    plansView.webContents.sent.length = 0
+
+    // 4. Dispatch language-only settings change
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agent-team:language': 'en-US',
+      },
+    })
+
+    // Plans v2 receives language
+    expect(plansView.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agent-team:language': 'en-US',
+          },
+        },
+      }],
+    }])
+
+    // Legacy Git fan-out receives NOTHING (language is completely blocked from legacy Git)
+    expect(legacyGitView.webContents.sent).toHaveLength(0)
+  })
+
+  it('routes Host-owned language settings changes to legacy Plans plugin bundle while keeping legacy Git isolated', async () => {
+    const mgr = new FrontendPluginManager()
+
+    // 1. Register and open legacy Plans view
+    const legacyPlans: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      requires: ['fs', 'ui', 'plans', 'terminal'],
+      devUrl: '',
+      entryFile: '/plugins/plans/index.html',
+    }
+    mgr.registerDescriptor(legacyPlans, { builtin: true })
+    const plansHost = new FakeBrowserWindow()
+    await mgr.open(asHost(plansHost), legacyPlans, 'fill')
+    const legacyPlansView = plansHost.children[0] as FakeViewLike
+
+    // 2. Register and open legacy Git view
+    const legacyGit: PluginLaunchDescriptor = {
+      id: GIT_PLUGIN_ID,
+      requires: ['ui', 'git'],
+      devUrl: '',
+      entryFile: '/plugins/git/index.html',
+    }
+    mgr.registerDescriptor(legacyGit, { builtin: true })
+    const gitHost = new FakeBrowserWindow()
+    await mgr.open(asHost(gitHost), legacyGit, 'fill')
+    const legacyGitView = gitHost.children[0] as FakeViewLike
+
+    legacyPlansView.webContents.sent.length = 0
+    legacyGitView.webContents.sent.length = 0
+
+    // 3. Dispatch language setting change
+    mgr.dispatchHostSettingsChanged({
+      settings: {
+        'agent-team:language': 'en-US',
+      },
+    })
+
+    // Legacy Plans receives language update
+    expect(legacyPlansView.webContents.sent).toEqual([{
+      channel: 'plugin:cap:event',
+      args: [{
+        type: 'ui.settings_changed',
+        data: {
+          source: 'host',
+          settings: {
+            'agent-team:language': 'en-US',
+          },
+        },
+      }],
+    }])
+
+    // Legacy Git receives nothing (language never enters Git)
+    expect(legacyGitView.webContents.sent).toHaveLength(0)
+  })
+
+  it('dispatches authenticated navide.plans.left ui.openPlansWindow call to registered handler', async () => {
+    const mgr = new FrontendPluginManager()
+    const workspacePath = '/workspace'
+    const packageVersion = '0.1.0'
+    const viewLeft = {
+      id: 'left',
+      contributionKey: 'navide.plans.left',
+      kind: 'custom' as const,
+      location: 'left' as const,
+      title: 'Plans',
+      entryFile: '/path/to/plans/left.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir: '/path/to/plans',
+      requires: ['fs', 'ui', 'plans', 'terminal'],
+      capabilityPolicy: {
+        kind: 'manifest-v2',
+        system: ['fs', 'ui', 'aiCli'],
+        shell: 'allowlist',
+        grants: [],
+      },
+      devUrl: '',
+      entryFile: viewLeft.entryFile,
+      views: [viewLeft],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.setCapabilityGrantResolver((pluginId, version) => {
+      if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+        return {
+          packageVersion,
+          system: ['fs', 'ui', 'aiCli'],
+          shell: 'allowlist',
+          storage: true,
+        }
+      }
+      return null
+    })
+    const capabilityContext = mgr.plansCapabilityContext(packageVersion, workspacePath, 'plans-left')
+    const host = new FakeBrowserWindow()
+    await mgr.openView(descriptor, viewLeft, {
+      hostWindow: asHost(host),
+      bounds: 'fill',
+      workspacePath,
+      capabilityContext,
+    })
+    const leftView = host.children[0] as FakeViewLike
+
+    const opens: Array<{ workspacePath: string; relPath?: string }> = []
+    mgr.setOpenPlansWindowHandler(async (ws, rel) => {
+      opens.push({ workspacePath: ws, relPath: rel })
+      return true
+    })
+    mgr.setPublicCapabilityHandler((plan) => mgr.executePublicCapability(plan))
+
+    const handler = ipcHandlers.get(CAPABILITY_CALL)
+    expect(handler).toBeDefined()
+
+    const response = await handler!(
+      { sender: { id: leftView.webContents.id } },
+      {
+        reqId: 'open-plan-left',
+        ns: 'ui',
+        method: 'openPlansWindow',
+        args: { path: '.agent-team/plans/feature.html' },
+      },
+    )
+
+    expect(response).toEqual({
+      reqId: 'open-plan-left',
+      ok: true,
+      result: { opened: true },
+    })
+    expect(opens).toEqual([{
+      workspacePath,
+      relPath: '.agent-team/plans/feature.html',
+    }])
+  })
+
+  it('routes ui.openPlansWindow for nested repos strictly with .git directory and blocks .git file/symlink escape', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'navide-open-plans-test-'))
+    const extDir = mkdtempSync(join(tmpdir(), 'navide-open-ext-test-'))
+
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageVersion = '0.1.0'
+      const viewLeft = {
+        id: 'left',
+        contributionKey: 'navide.plans.left',
+        kind: 'custom' as const,
+        location: 'left' as const,
+        title: 'Plans',
+        entryFile: '/path/to/plans/left.html',
+      }
+      const descriptor: PluginLaunchDescriptor = {
+        id: PLANS_PLUGIN_ID,
+        packageVersion,
+        packageDir: '/path/to/plans',
+        requires: ['fs', 'ui', 'plans', 'terminal'],
+        capabilityPolicy: {
+          kind: 'manifest-v2',
+          system: ['fs', 'ui', 'aiCli'],
+          shell: 'allowlist',
+          grants: [],
+        },
+        devUrl: '',
+        entryFile: viewLeft.entryFile,
+        views: [viewLeft],
+      }
+      mgr.registerDescriptor(descriptor, { builtin: true })
+      mgr.setCapabilityGrantResolver((pluginId, version) => {
+        if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+          return {
+            packageVersion,
+            system: ['fs', 'ui', 'aiCli'],
+            shell: 'allowlist',
+            storage: true,
+          }
+        }
+        return null
+      })
+      const capabilityContext = mgr.plansCapabilityContext(packageVersion, tempDir, 'plans-left')
+      const host = new FakeBrowserWindow()
+      await mgr.openView(descriptor, viewLeft, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: tempDir,
+        capabilityContext,
+      })
+      const leftView = host.children[0] as FakeViewLike
+
+      const opens: Array<{ workspacePath: string; relPath?: string }> = []
+      mgr.setOpenPlansWindowHandler(async (ws, rel) => {
+        opens.push({ workspacePath: ws, relPath: rel })
+        return true
+      })
+      mgr.setPublicCapabilityHandler((plan) => mgr.executePublicCapability(plan))
+      const handler = ipcHandlers.get(CAPABILITY_CALL)!
+
+      // 1. Nested repo with .git directory: ALLOWED
+      const nestedDir = join(tempDir, 'packages/subrepo')
+      mkdirSync(join(nestedDir, '.git'), { recursive: true })
+      mkdirSync(join(nestedDir, '.agent-team/plans'), { recursive: true })
+      writeFileSync(join(nestedDir, '.agent-team/plans/nested.html'), '<html></html>')
+
+      const resAllowed = await handler(
+        { sender: { id: leftView.webContents.id } },
+        {
+          reqId: 'open-nested-allowed',
+          ns: 'ui',
+          method: 'openPlansWindow',
+          args: { path: 'packages/subrepo/.agent-team/plans/nested.html' },
+        },
+      )
+      expect(resAllowed).toEqual({
+        reqId: 'open-nested-allowed',
+        ok: true,
+        result: { opened: true },
+      })
+      expect(opens).toContainEqual({
+        workspacePath: tempDir,
+        relPath: 'packages/subrepo/.agent-team/plans/nested.html',
+      })
+
+      // 2. Nested repo with .git FILE (submodule/worktree): REJECTED
+      const subDir = join(tempDir, 'packages/submodule')
+      mkdirSync(join(subDir, '.agent-team/plans'), { recursive: true })
+      writeFileSync(join(subDir, '.git'), 'gitdir: ../../.git/modules/submodule\n')
+      writeFileSync(join(subDir, '.agent-team/plans/sub.html'), '<html></html>')
+
+      const resGitFile = await handler(
+        { sender: { id: leftView.webContents.id } },
+        {
+          reqId: 'open-git-file-rejected',
+          ns: 'ui',
+          method: 'openPlansWindow',
+          args: { path: 'packages/submodule/.agent-team/plans/sub.html' },
+        },
+      )
+      expect(resGitFile).toEqual({
+        reqId: 'open-git-file-rejected',
+        ok: false,
+        error: { code: 'INTERNAL_ERROR', message: 'public capability failed' },
+      })
+
+      // 3. Symlink escape: REJECTED
+      const extPlanDir = join(extDir, '.agent-team/plans')
+      mkdirSync(extPlanDir, { recursive: true })
+      writeFileSync(join(extPlanDir, 'ext.html'), '<html></html>')
+      symlinkSync(extPlanDir, join(tempDir, 'linked-plans'), 'dir')
+
+      const resSymlink = await handler(
+        { sender: { id: leftView.webContents.id } },
+        {
+          reqId: 'open-symlink-rejected',
+          ns: 'ui',
+          method: 'openPlansWindow',
+          args: { path: 'linked-plans/ext.html' },
+        },
+      )
+      expect(resSymlink).toEqual({
+        reqId: 'open-symlink-rejected',
+        ok: false,
+        error: { code: 'INTERNAL_ERROR', message: 'public capability failed' },
+      })
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      rmSync(extDir, { recursive: true, force: true })
+    }
+  })
+
+  it('routes ui.openInEditor rejecting raw workspace absolute path and accepting relative path', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'navide-open-editor-test-'))
+    try {
+      const plansDir = join(tempDir, '.agent-team/plans')
+      mkdirSync(plansDir, { recursive: true })
+      writeFileSync(join(plansDir, 'feature.html'), '<html></html>')
+
+      const mgr = new FrontendPluginManager()
+      const packageVersion = '0.1.0'
+      const viewLeft = {
+        id: 'left',
+        contributionKey: 'navide.plans.left',
+        kind: 'custom' as const,
+        location: 'left' as const,
+        title: 'Plans',
+        entryFile: '/path/to/plans/left.html',
+      }
+      const descriptor: PluginLaunchDescriptor = {
+        id: PLANS_PLUGIN_ID,
+        packageVersion,
+        packageDir: '/path/to/plans',
+        requires: ['fs', 'ui', 'plans', 'terminal'],
+        capabilityPolicy: {
+          kind: 'manifest-v2',
+          system: ['fs', 'ui', 'aiCli'],
+          shell: 'allowlist',
+          grants: [],
+        },
+        devUrl: '',
+        entryFile: viewLeft.entryFile,
+        views: [viewLeft],
+      }
+      mgr.registerDescriptor(descriptor, { builtin: true })
+      mgr.setCapabilityGrantResolver((pluginId, version) => {
+        if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+          return {
+            packageVersion,
+            system: ['fs', 'ui', 'aiCli'],
+            shell: 'allowlist',
+            storage: true,
+          }
+        }
+        return null
+      })
+      const capabilityContext = mgr.plansCapabilityContext(packageVersion, tempDir, 'plans-left')
+      const host = new FakeBrowserWindow()
+      await mgr.openView(descriptor, viewLeft, {
+        hostWindow: asHost(host),
+        bounds: 'fill',
+        workspacePath: tempDir,
+        capabilityContext,
+      })
+      const leftView = host.children[0] as FakeViewLike
+
+      const editorCalls: Array<Record<string, string>> = []
+      mgr.setOpenInEditorHandler((params) => {
+        editorCalls.push(params)
+        return true
+      })
+      mgr.setPublicCapabilityHandler((plan) => mgr.executePublicCapability(plan))
+
+      const handler = ipcHandlers.get(CAPABILITY_CALL)
+      expect(handler).toBeDefined()
+
+      // 1. Raw absolute path within workspace: REJECTED, handler NOT called
+      const absPath = join(tempDir, '.agent-team/plans/feature.html')
+      const resAbs = await handler!(
+        { sender: { id: leftView.webContents.id } },
+        {
+          reqId: 'open-editor-abs-rejected',
+          ns: 'ui',
+          method: 'openInEditor',
+          args: { path: absPath },
+        },
+      )
+      expect(resAbs).toEqual({
+        reqId: 'open-editor-abs-rejected',
+        ok: false,
+        error: { code: 'INTERNAL_ERROR', message: 'public capability failed' },
+      })
+      expect(editorCalls).toHaveLength(0)
+
+      // 2. Valid relative plan path: ACCEPTED, handler called with normalized relative path
+      const resRel = await handler!(
+        { sender: { id: leftView.webContents.id } },
+        {
+          reqId: 'open-editor-rel-accepted',
+          ns: 'ui',
+          method: 'openInEditor',
+          args: { path: '.agent-team/plans/feature.html' },
+        },
+      )
+      expect(resRel).toEqual({
+        reqId: 'open-editor-rel-accepted',
+        ok: true,
+        result: { opened: true },
+      })
+      expect(editorCalls).toEqual([
+        {
+          workspace_path: resolve(tempDir),
+          filepath: '.agent-team/plans/feature.html',
+        },
+      ])
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
   })
 
   it('labels plugin storage changes so the settings facade accepts only its owned scope', async () => {
@@ -5342,5 +8080,122 @@ describe('Git left legacy rollback composition', () => {
     )).resolves.toEqual({ ok: true, fallback: 'legacy' })
     expect(host.children).toHaveLength(0)
     expect(closeGitLeftPluginView(asHost(host))).toEqual({ ok: true })
+  })
+
+  describe('plansQuery and openPlansPluginView locale propagation', () => {
+    it('formats plansQuery with validated locale', () => {
+      const q1 = new URLSearchParams(plansQuery('/workspace', 'http://127.0.0.1:1', 'plan.html', 'dark', 'en-US'))
+      expect(q1.get('workspace_path')).toBe('/workspace')
+      expect(q1.get('http_url')).toBe('http://127.0.0.1:1')
+      expect(q1.get('rel_path')).toBe('plan.html')
+      expect(q1.get('theme')).toBe('dark')
+      expect(q1.get('locale')).toBe('en-US')
+      expect(q1.get('v2')).toBe('1')
+      expect(q1.get('contribution')).toBe('window')
+
+      const q2 = new URLSearchParams(plansQuery('/workspace', '', '', '', 'zh-TW'))
+      expect(q2.get('locale')).toBe('zh-TW')
+
+      const q3 = new URLSearchParams(plansQuery('/workspace', '', '', '', '  en-US  '))
+      expect(q3.get('locale')).toBe('en-US')
+
+      const q4 = new URLSearchParams(plansQuery('/workspace', '', '', '', 'fr-FR'))
+      expect(q4.get('locale')).toBe('zh-TW')
+
+      const q5 = new URLSearchParams(plansQuery('/workspace', '', '', ''))
+      expect(q5.get('locale')).toBe('zh-TW')
+    })
+
+    it('passes validated locale through openPlansPluginView for legacy Plans descriptor', async () => {
+      const legacyPlans: PluginLaunchDescriptor = {
+        id: PLANS_PLUGIN_ID,
+        requires: ['fs', 'ui', 'plans', 'terminal'],
+        devUrl: '',
+        entryFile: '/plugins/plans/index.html',
+      }
+      frontendPluginManager.registerDescriptor(legacyPlans, { builtin: true })
+      const host = new FakeBrowserWindow()
+
+      const opened = await openPlansPluginView(
+        asHost(host),
+        '/workspace',
+        'http://127.0.0.1:1234',
+        '.agent-team/plans/my-plan.html',
+        'dark',
+        'en-US',
+      )
+      expect(opened).toBe(true)
+      expect(host.children).toHaveLength(1)
+      const view = host.children[0] as FakeViewLike
+      expect(view.webContents.loads[0]).toContain('locale=en-US')
+      expect(view.webContents.loads[0]).toContain('workspace_path=%2Fworkspace')
+    })
+
+    it('passes validated locale through openPlansPluginView for v2 Plans descriptor', async () => {
+      const packageVersion = '0.1.92'
+      const packageDir = realpathSync(process.cwd())
+      const v2Plans: PluginLaunchDescriptor = {
+        id: PLANS_PLUGIN_ID,
+        packageVersion,
+        packageDir,
+        requires: ['fs', 'ui', 'plans', 'terminal'],
+        capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs', 'ui', 'aiCli'], shell: 'allowlist' }),
+        devUrl: '',
+        entryFile: '/plugins/navide-plans/index.html',
+        views: [
+          {
+            id: 'left',
+            contributionKey: `${PLANS_PLUGIN_ID}.left`,
+            kind: 'custom',
+            location: 'left',
+            title: 'Plans',
+            entryFile: '/plugins/navide-plans/left.html',
+          },
+          {
+            id: 'window',
+            contributionKey: `${PLANS_PLUGIN_ID}.window`,
+            kind: 'custom',
+            location: 'window',
+            title: 'Plans',
+            entryFile: '/plugins/navide-plans/window.html',
+          },
+        ],
+      }
+      frontendPluginManager.registerDescriptor(v2Plans, { builtin: true })
+      frontendPluginManager.registerBackendActivation({
+        pluginId: PLANS_PLUGIN_ID,
+        packageVersion,
+        packageDir,
+        entryFile: '/plugins/navide-plans/backend/navide-plans',
+        protocolVersion: 1,
+        activation: 'startup',
+        approvedMethods: ['plans.list'],
+        agentMethods: ['plans.list'],
+        approvedEvents: ['plans.changed'],
+        approvedBridgePorts: ['filesystem'],
+      })
+      frontendPluginManager.setCapabilityGrantResolver((pluginId, version) => {
+        if (pluginId === PLANS_PLUGIN_ID && version === packageVersion) {
+          return {
+            packageVersion,
+            system: ['fs', 'ui', 'aiCli'],
+            shell: 'allowlist',
+            storage: true,
+          }
+        }
+        return null
+      })
+
+      const host = new FakeBrowserWindow()
+      const opened = await openPlansPluginView(
+        asHost(host),
+        packageDir,
+        'http://127.0.0.1:1234',
+        '.agent-team/plans/my-plan.html',
+        'dark',
+        'en-US',
+      )
+      expect(opened).toBe(true)
+    })
   })
 })

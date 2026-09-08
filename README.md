@@ -126,7 +126,7 @@ For a development checkout, install from source instead.
 
 ### Source prerequisites
 
-- Node.js 22+ and pnpm 10+
+- Node.js 22.12+ (22.x) and pnpm 10+
 - Python 3.12+ and uv 0.11+
 - At least one supported coding CLI
 - Optional: Ollama or a local GGUF model for analysis

@@ -64,6 +64,8 @@ export interface BackendHandle {
   host: string
   port: number
   shell: string
+  /** Main-process-only bearer used to register the Host WebSocket session. */
+  hostSessionToken: string
   /** Where the backend keeps its state — and its ws token. Recorded here
    *  rather than recomputed by callers because dev and packaged resolve it
    *  differently, and two copies of that rule would drift. */
@@ -173,6 +175,7 @@ export async function startBackend(
   guardStdioStreams()
   const port = await findFreePort()
   const host = '127.0.0.1'
+  const hostSessionToken = randomBytes(32).toString('base64url')
 
   // Electron strips PATH on macOS when launched from Finder/Dock.
   // Use a login shell to recover the full user PATH (nvm, fnm, volta, brew…).
@@ -183,6 +186,7 @@ export async function startBackend(
       { schemaVersion: 1, packages: [] }
     )
   const env = bindBackendPluginActivationCatalog(process.env, catalog)
+  env.NAVIDE_BACKEND_HOST_TOKEN = hostSessionToken
   let userShell = process.env.SHELL ?? '/bin/zsh'
   if (process.platform === 'darwin') {
     const { shell, path: loginPath } = await getLoginShellEnv()
@@ -256,6 +260,7 @@ export async function startBackend(
     host,
     port,
     shell: userShell,
+    hostSessionToken,
     dataDir: env.AGENT_TEAM_DATA_DIR ?? join(app.getPath('appData'), 'Agent-Team'),
     proc,
     stop: () =>

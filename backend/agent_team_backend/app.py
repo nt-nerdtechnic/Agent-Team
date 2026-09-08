@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -90,6 +91,12 @@ from .db import DB_FILENAME, Database, WorkspaceDatabases
 from .store_migrations import run_startup_migrations, version_change
 from .terminals import TerminalService, output_frame_session_id
 from .tokens_store import TokensStore
+
+
+# Electron gives the backend one bearer used only for the private Host WebSocket
+# registration. Keep it in this process, not in os.environ: backend-launched
+# shells, PTYs, Git hooks, and CLI helpers must not inherit a Host credential.
+_HOST_SESSION_TOKEN = os.environ.pop("NAVIDE_BACKEND_HOST_TOKEN", "")
 from .ui_settings import UiSettingsStore
 from .history_store import HistoryStore
 from .agent_message_log import AgentMessageLog
@@ -366,6 +373,39 @@ async def unicast_any(event: dict[str, Any]) -> bool:
     return False
 
 
+async def unicast_host(event: dict[str, Any]) -> bool:
+    """Send one internal agent request to the authenticated Electron Host."""
+    for session in list(_SESSIONS):
+        if session.dead or not session.host_authenticated:
+            continue
+        try:
+            await session.send_json(event)
+        except Exception as err:  # noqa: BLE001
+            log.warning("host unicast send failed: %s", err)
+            _SESSIONS.discard(session)
+            continue
+        return not session.dead
+    return False
+
+
+def host_supports_plans_backend() -> bool:
+    """Return whether the authenticated Electron Host owns production Plans."""
+    return any(
+        not session.dead and session.host_authenticated and session.plans_backend_v2
+        for session in list(_SESSIONS)
+    )
+
+
+def host_session_token_matches(token: Any) -> bool:
+    """Validate the per-backend token used by Electron's Host session."""
+    expected = _HOST_SESSION_TOKEN
+    return (
+        isinstance(token, str)
+        and bool(expected)
+        and secrets.compare_digest(token, expected)
+    )
+
+
 # A send slower than this is worth attributing; see Session._note_send_timing.
 _SEND_SLOW_WARN_MS = 500.0
 # Floor between two slow-send lines. The probe fires hardest exactly when the
@@ -407,6 +447,11 @@ class Session:
         # Set once the peer is gone (send failed or ws() loop exited). All
         # further send_json calls become silent no-ops.
         self.dead = False
+        # Only the Electron main process may receive Host-private agent
+        # handoffs. The bearer is registered over this WebSocket and never
+        # appears in renderer/backend-info payloads.
+        self.host_authenticated = False
+        self.plans_backend_v2 = False
         # Throttle state for the slow-send probe (see _note_send_timing).
         # None rather than 0.0: the first slow send must always report, which a
         # zero baseline would swallow whenever the clock starts near zero.

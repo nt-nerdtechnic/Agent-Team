@@ -132,6 +132,31 @@ def main() -> None:
     Draft202012Validator.check_schema(schema)
     validator = StrictDraft202012Validator(schema)
 
+    execution_policy_schema = _load_strict(ROOT / "execution-policy-v1.schema.json")
+    Draft202012Validator.check_schema(execution_policy_schema)
+    execution_policy_validator = StrictDraft202012Validator(execution_policy_schema)
+    execution_policy_fixtures = ROOT / "execution-policy-fixtures"
+    for path in sorted((execution_policy_fixtures / "valid").glob("*.json")):
+        policy = _load_strict(path)
+        errors = list(execution_policy_validator.iter_errors(policy))
+        if errors:
+            raise AssertionError(
+                f"valid Execution Policy fixture rejected: {path}: {errors[0].message}"
+            )
+        print(f"POLICY  {path.name}")
+    for path in sorted((execution_policy_fixtures / "invalid").glob("*.json")):
+        policy = _load_strict(path)
+        if not list(execution_policy_validator.iter_errors(policy)):
+            raise AssertionError(f"invalid Execution Policy fixture accepted: {path}")
+        print(f"POLICY-NO {path.name}")
+    for path in sorted((execution_policy_fixtures / "invalid-raw").glob("*.json")):
+        try:
+            _load_strict(path)
+        except (DuplicateKeyError, json.JSONDecodeError):
+            print(f"POLICY-RAW {path.name}")
+        else:
+            raise AssertionError(f"invalid raw Execution Policy parsed successfully: {path}")
+
     for path in sorted((ROOT / "fixtures" / "valid").glob("*.json")):
         manifest = _load_strict(path)
         errors = list(validator.iter_errors(manifest))

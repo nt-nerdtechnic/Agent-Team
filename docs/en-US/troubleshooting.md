@@ -4,7 +4,7 @@ English | [繁體中文](../zh-TW/troubleshooting.md) | [日本語](../ja-JP/tro
 
 ## The app does not start
 
-1. Confirm Node.js 22+, pnpm 10+, Python 3.12+, and uv 0.11+.
+1. Confirm Node.js 22.12+ (22.x), pnpm 10+, Python 3.12+, and uv 0.11+.
 2. Reinstall locked dependencies:
 
    ```bash

@@ -105,6 +105,15 @@
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "INTERNAL_ERROR"]
     },
     {
+      "address": "ui.openPlansWindow",
+      "visibility": "public",
+      "eligibility": "firstParty",
+      "permission": { "id": "system", "access": "ui", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["opened"], "properties": { "opened": { "type": "boolean" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
       "address": "ui.openExternal",
       "visibility": "public",
       "permission": { "id": "system", "access": "ui", "scope": "plugin" },

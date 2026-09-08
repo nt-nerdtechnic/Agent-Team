@@ -3,13 +3,46 @@
 // with allow-scripts sandbox, stripped document scripts, a CSP meta, and the
 // injected runtime; a refresh bump reloads in place; messages that fail the
 // source check never emit; outline navigation posts into the frame.
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { ref } from 'vue'
 import PlanDocPreview from '../PlanDocPreview.vue'
 import { i18n } from '@navide/plugin-ui/foundation'
 
 i18n.global.locale.value = 'en-US'
+
+const originalContentWindowDesc = Object.getOwnPropertyDescriptor(
+  HTMLIFrameElement.prototype,
+  'contentWindow',
+)
+
+beforeAll(() => {
+  Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+    get() {
+      if (!this._mockContentWindow) {
+        this._mockContentWindow = {
+          postMessage: vi.fn(),
+        } as unknown as Window
+      }
+      return this._mockContentWindow
+    },
+    configurable: true,
+  })
+})
+
+afterAll(() => {
+  if (originalContentWindowDesc) {
+    Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', originalContentWindowDesc)
+  } else {
+    delete (HTMLIFrameElement.prototype as unknown as { contentWindow?: unknown }).contentWindow
+  }
+})
+
+function getDocumentToken(wrapper: ReturnType<typeof mount>): string {
+  const srcdoc = wrapper.find('iframe').attributes('srcdoc') ?? ''
+  const match = srcdoc.match(/"documentToken":"([^"]+)"/)
+  return match ? match[1] : ''
+}
 
 const PLAN_DOC = [
   '<!doctype html><html><head><title>t</title>',
@@ -77,7 +110,7 @@ describe('PlanDocPreview', () => {
     expect(srcdoc).toContain('"anchors":{"Goals":1}')
   })
 
-  it('reloads the document in place when the refresh prop bumps', async () => {
+  it('reloads the document and replaces iframe element when the refresh prop bumps', async () => {
     const { wrapper, backend } = await mountPreview()
     expect(backend.send).toHaveBeenCalledTimes(1)
     const before = wrapper.find('iframe').element
@@ -86,7 +119,7 @@ describe('PlanDocPreview', () => {
     await flushPromises()
 
     expect(backend.send).toHaveBeenCalledTimes(2)
-    expect(wrapper.find('iframe').element).toBe(before) // no remount
+    expect(wrapper.find('iframe').element).not.toBe(before) // replaced via :key="currentDocumentToken ?? relPath"
   })
 
   it('shows the error state with the backend reason and resolved path', async () => {
@@ -140,11 +173,34 @@ describe('PlanDocPreview', () => {
     expect(wrapper.emitted('section-comment')).toBeUndefined()
   })
 
+  it('rejects window messages with stale token or legacy token field', async () => {
+    const { wrapper } = await mountPreview()
+    const frame = wrapper.find('iframe').element as HTMLIFrameElement
+    const frameWindow = frame.contentWindow
+
+    // Message with stale documentToken
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: { type: 'todo-clicked', todoId: 'phase-a', alt: false, documentToken: 'stale-token' },
+        source: frameWindow ?? window,
+      }),
+    )
+    // Message with legacy token alias
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: { type: 'todo-clicked', todoId: 'phase-a', alt: false, token: 'stale-token' },
+        source: frameWindow ?? window,
+      }),
+    )
+    await flushPromises()
+    expect(wrapper.emitted('todo-clicked')).toBeUndefined()
+  })
+
   it('scrollToAnchor posts a scroll-to message into the frame', async () => {
     const { wrapper } = await mountPreview()
     const frameWindow = (wrapper.find('iframe').element as HTMLIFrameElement).contentWindow
-    if (!frameWindow) return // happy-dom without frame window support — covered by unit tests
-    const postSpy = vi.spyOn(frameWindow, 'postMessage')
+    expect(frameWindow).toBeTruthy()
+    const postSpy = vi.spyOn(frameWindow!, 'postMessage')
     ;(wrapper.vm as unknown as { scrollToAnchor: (a: string) => void }).scrollToAnchor('Goals')
     expect(postSpy).toHaveBeenCalledWith({ type: 'scroll-to', anchor: 'Goals' }, '*')
   })
@@ -162,8 +218,8 @@ describe('PlanDocPreview', () => {
     const { wrapper } = await mountPreview()
     const vm = wrapper.vm as unknown as { isEditing: () => boolean; cancelEdit: () => void }
     expect(vm.isEditing()).toBe(false)
-    const frameWindow = (wrapper.find('iframe').element as HTMLIFrameElement).contentWindow
-    if (!frameWindow) return
+    const frameWindow = (wrapper.find('iframe').element as HTMLIFrameElement).contentWindow!
+    expect(frameWindow).toBeTruthy()
     const postSpy = vi.spyOn(frameWindow, 'postMessage')
     vm.cancelEdit()
     expect(postSpy).toHaveBeenCalledWith({ type: 'cancel-edit' }, '*')
@@ -171,13 +227,15 @@ describe('PlanDocPreview', () => {
 
   it('clears editing state when an external reload (loadDoc) runs', async () => {
     const { wrapper } = await mountPreview()
-    const frameWindow = (wrapper.find('iframe').element as HTMLIFrameElement).contentWindow
-    if (!frameWindow) return // covered by planRuntime message-handler unit tests
+    const frameWindow = (wrapper.find('iframe').element as HTMLIFrameElement).contentWindow!
+    expect(frameWindow).toBeTruthy()
+    const token = getDocumentToken(wrapper)
+    expect(token).toBeTruthy()
     const vm = wrapper.vm as unknown as { isEditing: () => boolean }
     // Enter editing state from the frame.
     window.dispatchEvent(
       new MessageEvent('message', {
-        data: { type: 'section-editing', active: true },
+        data: { type: 'section-editing', active: true, documentToken: token },
         source: frameWindow,
       }),
     )
@@ -191,11 +249,18 @@ describe('PlanDocPreview', () => {
 
   it('emits validated section-edit/section-delete and tracks editing state from the frame', async () => {
     const { wrapper } = await mountPreview()
-    const frameWindow = (wrapper.find('iframe').element as HTMLIFrameElement).contentWindow
-    if (!frameWindow) return // covered by planRuntime message-handler unit tests
+    const frameWindow = (wrapper.find('iframe').element as HTMLIFrameElement).contentWindow!
+    expect(frameWindow).toBeTruthy()
+    const token = getDocumentToken(wrapper)
+    expect(token).toBeTruthy()
     const vm = wrapper.vm as unknown as { isEditing: () => boolean }
-    const fire = (data: unknown): void => {
-      window.dispatchEvent(new MessageEvent('message', { data, source: frameWindow }))
+    const fire = (data: Record<string, unknown>): void => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { ...data, documentToken: token },
+          source: frameWindow,
+        }),
+      )
     }
     fire({ type: 'section-edit', anchor: 'Goals', html: '<p>x</p>' })
     fire({ type: 'section-delete', anchor: 'Goals' })
@@ -204,5 +269,56 @@ describe('PlanDocPreview', () => {
     expect(wrapper.emitted('section-edit')?.[0]).toEqual([{ anchor: 'Goals', html: '<p>x</p>' }])
     expect(wrapper.emitted('section-delete')?.[0]).toEqual(['Goals'])
     expect(vm.isEditing()).toBe(true)
+  })
+
+  it('enforces window source and document token across iframe remount (4 combinations)', async () => {
+    const { wrapper } = await mountPreview()
+    const oldFrame = wrapper.find('iframe').element as HTMLIFrameElement
+    const oldWindow = oldFrame.contentWindow!
+    const oldToken = getDocumentToken(wrapper)
+    expect(oldWindow).toBeTruthy()
+    expect(oldToken).toBeTruthy()
+
+    // Trigger reload: refresh prop bump replaces the iframe and regenerates token
+    await wrapper.setProps({ refresh: 1 })
+    await flushPromises()
+
+    const newFrame = wrapper.find('iframe').element as HTMLIFrameElement
+    expect(newFrame).not.toBe(oldFrame)
+    const newWindow = newFrame.contentWindow!
+    const newToken = getDocumentToken(wrapper)
+    expect(newWindow).toBeTruthy()
+    expect(newToken).toBeTruthy()
+    expect(newWindow).not.toBe(oldWindow)
+    expect(newToken).not.toBe(oldToken)
+
+    const fireTodo = (source: Window, token: string): void => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'todo-clicked', todoId: 'phase-a', alt: false, documentToken: token },
+          source,
+        }),
+      )
+    }
+
+    // 1. Old iframe window + old token -> rejected
+    fireTodo(oldWindow, oldToken)
+    await flushPromises()
+    expect(wrapper.emitted('todo-clicked')).toBeUndefined()
+
+    // 2. Old iframe window + new token -> rejected
+    fireTodo(oldWindow, newToken)
+    await flushPromises()
+    expect(wrapper.emitted('todo-clicked')).toBeUndefined()
+
+    // 3. New iframe window + old token -> rejected
+    fireTodo(newWindow, oldToken)
+    await flushPromises()
+    expect(wrapper.emitted('todo-clicked')).toBeUndefined()
+
+    // 4. New iframe window + new token -> accepted
+    fireTodo(newWindow, newToken)
+    await flushPromises()
+    expect(wrapper.emitted('todo-clicked')).toEqual([[{ todoId: 'phase-a', alt: false }]])
   })
 })

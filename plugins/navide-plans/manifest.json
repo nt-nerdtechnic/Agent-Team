@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "navide.plans",
+  "name": "Plans",
+  "version": "0.1.0",
+  "publisher": "navide",
+  "engines": { "navide": "^0.1.0" },
+  "permissions": {
+    "system": ["fs", "ui", "aiCli"]
+  },
+  "marketplace": {
+    "description": "Review and update workspace plans.",
+    "license": "MIT",
+    "repository": "https://github.com/nt-nerdtechnic/Navide",
+    "categories": ["productivity", "project-management"]
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "left",
+        "kind": "custom",
+        "location": "left",
+        "title": "Plans",
+        "entry": "frontend/left/index.html"
+      },
+      {
+        "id": "window",
+        "kind": "custom",
+        "location": "window",
+        "title": "Plans",
+        "entry": "frontend/window/index.html"
+      }
+    ]
+  },
+  "backend": {
+    "entry": "backend/navide-plans",
+    "protocolVersion": 1,
+    "activation": "startup"
+  }
+}

@@ -79,8 +79,22 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+          cache-suffix: frontend
+
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          pnpm install --frozen-lockfile
+          uv --project backend sync --locked
 
       - name: Typecheck
         run: pnpm typecheck
@@ -127,6 +141,55 @@ jobs:
       - name: Backend tests
         run: uv --project backend run --locked pytest backend/tests
 
+  plans:
+    name: Packaged Plans checks
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+          cache-suffix: plans
+
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          uv --project backend sync --locked
+
+      - name: Packaged Plans integration gate
+        run: pnpm run test:packaged-plans
+
+      - name: Verify production Plans bundle excludes fixture
+        run: |
+          pnpm run build:plans
+          node scripts/verify-plans-production.mjs
+
   registry:
     name: Marketplace registry and contract checks
     runs-on: ubuntu-latest
@@ -164,7 +227,7 @@ jobs:
     # Preserve the existing required-check name for branch protection.
     name: Lint and test
     if: ${{ always() }}
-    needs: [frontend, backend, registry, dependency-audit]
+    needs: [frontend, backend, plans, registry, dependency-audit]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -172,10 +235,12 @@ jobs:
         env:
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           BACKEND_RESULT: ${{ needs.backend.result }}
+          PLANS_RESULT: ${{ needs.plans.result }}
           REGISTRY_RESULT: ${{ needs.registry.result }}
           AUDIT_RESULT: ${{ needs['dependency-audit'].result }}
         run: |
           test "$FRONTEND_RESULT" = success
           test "$BACKEND_RESULT" = success
+          test "$PLANS_RESULT" = success
           test "$REGISTRY_RESULT" = success
           test "$AUDIT_RESULT" = success

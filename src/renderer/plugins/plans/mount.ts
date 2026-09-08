@@ -33,6 +33,12 @@ if (initialTheme) {
   seedSettings({ 'agent-team:theme': JSON.stringify(initialTheme) })
 }
 
+const initialLocale = new URLSearchParams(window.location.search).get('locale')
+if (initialLocale === 'zh-TW' || initialLocale === 'en-US') {
+  i18n.global.locale.value = initialLocale
+  seedSettings({ 'agent-team:language': initialLocale })
+}
+
 // Host-driven plan switching without a reload. PlanWindowApp subscribes to
 // `window.agentTeam.onPlanOpenDoc` to switch the open plan in place when the
 // sidebar (in the core window) clicks another plan. That host bridge is absent
@@ -57,6 +63,11 @@ if (initialTheme) {
   nav?.onOpenTarget?.((params) => {
     const relPath = params['rel_path']
     if (relPath) planOpenDocCb?.(relPath)
+    const targetLocale = params['locale']
+    if (targetLocale === 'zh-TW' || targetLocale === 'en-US') {
+      i18n.global.locale.value = targetLocale
+      seedSettings({ 'agent-team:language': targetLocale })
+    }
   })
 }
 

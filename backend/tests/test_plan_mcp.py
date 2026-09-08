@@ -85,6 +85,19 @@ async def _call(tool: str, args: dict) -> _ToolResult:
     return _ToolResult(value=value)
 
 
+@pytest.fixture(autouse=True)
+def _host_approves_legacy_test_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy behavior tests must model the Host's explicit pre-dispatch verdict."""
+    async def route(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": {"code": "BACKEND_UNAVAILABLE", "message": "test pre-dispatch failure"},
+            "recoveryDisposition": "legacy-safe-before-dispatch",
+        }
+
+    monkeypatch.setattr(plan_mcp, "request_host_agent_workspace_backend", route)
+
+
 def _plans_dir(workspace: Path) -> Path:
     return workspace / ".agent-team" / "plans"
 

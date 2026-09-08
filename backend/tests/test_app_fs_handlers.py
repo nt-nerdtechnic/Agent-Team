@@ -90,6 +90,71 @@ async def test_fs_list_dir_offloads_the_plan_watch_registration(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_mode", ["", None, False, 0, "invalid", "DISPLAY"])
+async def test_fs_list_dir_mode_validation_rejects_falsy_and_invalid_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_mode: Any
+) -> None:
+    session = _session()
+    called: list[str] = []
+    monkeypatch.setattr(app, "_watch_plans_workspace", lambda *a, **kw: called.append("watch"))
+    monkeypatch.setattr(fs_service, "list_dir", lambda *a, **kw: called.append("list_dir"))
+
+    await app.handle_message(session, {
+        "id": "list-mode-val",
+        "type": "fs.list_dir",
+        "payload": {
+            "workspace_path": str(tmp_path),
+            "rel_path": "",
+            "mode": invalid_mode,
+        },
+    })
+    payload = session.websocket.sent[0]["payload"]  # type: ignore[attr-defined]
+    assert payload == {"ok": False, "error": "invalid list_dir mode"}
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_fs_list_dir_omitted_mode_defaults_to_display(tmp_path: Path) -> None:
+    session = _session()
+    (tmp_path / "f.txt").write_text("hello", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    await app.handle_message(session, {
+        "id": "list-default",
+        "type": "fs.list_dir",
+        "payload": {
+            "workspace_path": str(tmp_path),
+            "rel_path": "",
+        },
+    })
+    payload = session.websocket.sent[0]["payload"]  # type: ignore[attr-defined]
+    assert payload["ok"] is True
+    names = [e["name"] for e in payload["entries"]]
+    assert "f.txt" in names
+    assert "sub" in names
+
+
+@pytest.mark.asyncio
+async def test_fs_list_dir_discovery_mode_accepted(tmp_path: Path) -> None:
+    session = _session()
+    (tmp_path / "f.txt").write_text("hello", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    await app.handle_message(session, {
+        "id": "list-discovery",
+        "type": "fs.list_dir",
+        "payload": {
+            "workspace_path": str(tmp_path),
+            "rel_path": "",
+            "mode": "discovery",
+        },
+    })
+    payload = session.websocket.sent[0]["payload"]  # type: ignore[attr-defined]
+    assert payload["ok"] is True
+    names = [e["name"] for e in payload["entries"]]
+    assert "sub" in names
+    assert "f.txt" not in names
+
+
+@pytest.mark.asyncio
 async def test_fs_delete_handler_reports_trash_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

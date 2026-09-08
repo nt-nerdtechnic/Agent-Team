@@ -2,6 +2,7 @@ export interface PluginContributionQueryOptions {
   contributionKey: string
   workspacePath: string
   theme: string
+  locale?: string
   httpUrl?: string
   gitReadOnly?: Record<string, string>
   extraParams?: Record<string, string>
@@ -14,9 +15,17 @@ export function composePluginContributionQuery(options: PluginContributionQueryO
   if (options.httpUrl) params.set('http_url', options.httpUrl)
   else params.delete('http_url')
   params.set('theme', options.theme)
+  if (options.locale !== undefined) {
+    const validLocale = options.locale === 'zh-TW' || options.locale === 'en-US' ? options.locale : 'zh-TW'
+    params.set('locale', validLocale)
+  } else {
+    params.delete('locale')
+  }
   for (const [key, value] of Object.entries(options.gitReadOnly ?? {})) params.set(key, value)
   params.set('v2', '1')
-  if (options.contributionKey === 'navide.git.left') params.set('contribution', 'left')
-  if (options.contributionKey === 'navide.git.window') params.set('contribution', 'window')
+  const contribution = options.contributionKey.split('.').at(-1)
+  if (contribution === 'left' || contribution === 'window') {
+    params.set('contribution', contribution)
+  }
   return `?${params.toString()}`
 }

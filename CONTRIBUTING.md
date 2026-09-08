@@ -45,7 +45,8 @@ Describe the problem you are trying to solve and the solution you have in mind.
 
 ## Development Setup / 開發環境設定
 
-**Requirements:** Node.js 22+, pnpm 10+, Python 3.12+, uv 0.11+, macOS 13+
+**Requirements:** Node.js 22.12+ (22.x), pnpm 10+, Python 3.12+, uv 0.11+, Go 1.27.x
+for the packaged Plans fixture, macOS 13+
 
 ```bash
 git clone https://github.com/nt-nerdtechnic/Navide.git
@@ -58,6 +59,12 @@ pnpm dev
 ```
 
 The `pnpm dev` command starts Electron, Vite dev server, and the Python FastAPI backend together.
+
+The first development start packages the production Plans backend with
+`uv`/PyInstaller. Later starts reuse it when the source, build script, Python
+dependency files, platform, architecture, and executable contents are unchanged.
+Missing or changed output is rebuilt automatically. `pnpm run build:plans:backend`
+always rebuilds it explicitly; production and CI builds remain unconditional.
 
 > `pnpm dev` 會同時啟動 Electron、Vite dev server 和 Python FastAPI backend。
 
@@ -97,8 +104,8 @@ The `pnpm dev` command starts Electron, Vite dev server, and the Python FastAPI 
 Please fill in the pull request template — include a summary of changes and how you tested them.
 
 CI runs frontend checks and the application/plugin build, macOS backend checks,
-and marketplace registry/contract checks in parallel. The `Lint and test` status
-passes only when all three jobs succeed. CI does not run Electron UI automation;
+packaged Plans checks, and marketplace registry/contract checks in parallel. The
+`Lint and test` status passes only when all four jobs succeed. CI does not run Electron UI automation;
 test UI changes manually. To reproduce the build check locally, run `pnpm build`.
 
 > Fork 後建立 feature branch，跑測試與型別檢查無誤後，依照下方 commit 格式提交，並開 PR 至 `main`。

@@ -1,24 +1,33 @@
 # Plugin Developer Spec v2
 
-> **Status: target draft; Issues 03 and 16 contract enforcement are implemented.** The current runtime uses manifest
+> **Status: target draft; Issues 03, 16, the bounded Issue 21 Plans spike, Issue 22's bridge/lifecycle work, and Issue 23E's production Plans integration are implemented.** The current runtime uses manifest
 > v1 and is documented in [Plugin development guide](plugin-development.md).
 > This document is the author-facing contract that the v2 migration must
 > implement before third-party publishing opens.
 >
 > Issue 03 adds strict Manifest v2 grant parsing, catalog validation, and the
-> Host authorization/planning seam. Actual backend child-process lifecycle
-> remains deferred to its owning follow-up issue. Issue 03 completes the
+> Host authorization/planning seam. Issue 21 adds one bundled Plans
+> package-local operation through the public SDK, authenticated Host router,
+> and self-contained Python Backend Wire child. Issue 22 adds the Host-private
+> core-service ports, package-owned watcher, bounded child lifecycle, and
+> cross-language fixture parity. Issue 23E activates the first-party combined
+> Plans package with the shared agent Execution Policy and retains the legacy
+> adapter as a bounded recovery path. Issue 03 completes the
 > parser, catalog, authorization planner, and Host enforcement seams.
 > Issue 16 adds the durable storage adapter and Host-only lifecycle seams to
-> Electron main. Production grant/consent and runtime-context production are
-> not wired yet, so ordinary production plugin instances cannot reach storage;
-> calls remain denied until that later integration is delivered. Other public
+> Electron main. Third-party production grant/consent and general
+> runtime-context wiring are not wired yet, so ordinary third-party plugin
+> instances cannot reach storage; calls remain denied until that later
+> integration is delivered. The bundled Git and Plans packages use explicit
+> Host-selected grants as first-party migration consumers. Other public
 > execution adapters and persisted consent wiring also remain disabled.
 >
 > Issue 06 adds the public package boundary and the external frontend workflow.
 > The checked-in SDK CLI currently supports `validate` and frontend-only
-> `package`; `init`, `dev`, backend packaging, signing, publishing, and runtime
-> transport remain deferred to their owning issues.
+> `package`; `init`, `dev`, third-party backend packaging, signing, publishing,
+> and general runtime activation remain deferred to their owning issues. The
+> first-party Plans build scripts package the app's production artifact and are
+> not the public author workflow.
 >
 > **Migration decision:** Plan B (the B0-B9 checkpoint path) was approved on
 > 2026-08-13. Plans A and C are not active implementation alternatives.
@@ -27,7 +36,7 @@
 > migration is now implemented as the bundled `navide.git` production case.
 > It is one Manifest v2 package with two isolated `custom` views (`left` and
 > `window`), and both views use the same active package version. This does not
-> open third-party publishing or complete the later Plans/Skills migration,
+> open third-party publishing or complete the later Skills migration,
 > marketplace lifecycle, or legacy-removal work.
 
 ## What is public
@@ -211,7 +220,7 @@ protocol.
 | Source development | Authors may use `.py` files, a virtual environment, and any Python build/test layout. | None. Source layout is not an installed interface. |
 | `navide-plugin dev` | The author-owned development tool may launch the local Python interpreter or a temporary build. It must expose the same protocol-compatible child process used by the packaged backend. | Developer Mode receives a development launch descriptor; this exception is unsigned, local-only, and cannot be published or auto-updated. |
 | `navide-plugin package` | Python, its required modules, and the plugin code are bundled into a target-specific executable by an author-selected tool such as PyInstaller or Nuitka. | `backend.entry` names the resulting executable inside the archive. |
-| Install and runtime target | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The Electron main process now has an internal Issue 07 conformance seam that can spawn an approved entry directly without a shell and communicate through Backend Wire v1. Approved catalog startup wiring and the complete plugin lifecycle remain later runtime work; Issue 05 still emits the fail-closed activation catalog but does not activate third-party v2 backends. |
+| Install and runtime target | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The Electron main process has an internal Backend Wire v1 supervisor and Host router. Issue 21 exercises one bundled Plans executable directly without a shell; it does not activate installed third-party backends or complete the general package lifecycle. |
 
 Manifest validation rejects recognizable source or script suffixes. Package
 validation also rejects empty backend entries, POSIX entries without executable
@@ -306,9 +315,21 @@ interface PluginBackendClient {
   subscribe<Payload extends JsonValue>(
     event: string,
     listener: (payload: Payload) => void,
-  ): Disposable
+  ): Disposable & { ready: Promise<void>; settled: Promise<void> }
 }
 ```
+
+`ready` resolves after the Host has accepted the subscription. A package view
+may retain an existing event fallback until its package owns the equivalent
+event source, and must dispose the returned subscription when its view is
+destroyed. `settled` rejects if an accepted subscription ends because the
+backend becomes unavailable, so the view can restore that fallback event
+route. Issue 22 supplies the package-owned watcher and makes the accepted
+package subscription authoritative. Legacy watcher fallback remains available
+only when the package subscription cannot be accepted or later becomes
+unavailable. Issue 23E uses this package-owned watcher in production Plans;
+the legacy watcher remains the bounded fallback when the combined package is
+unavailable.
 
 The production adapter maps that Interface to MCP base methods plus one
 Navide-owned event notification:
@@ -330,11 +351,15 @@ to the same request ID. A backend-initiated graceful close sends the final
 Each Host-to-backend call carries a `runtime` object generated from the
 authenticated binding. The frontend cannot set or override `pluginId`,
 `packageVersion`, `workspaceId`, `instanceId`, `contributionKey`, or
-`hostWindowId`. Optional view/workspace fields are `null` for startup-only
-backend calls that have no such binding.
+`hostWindowId`. It also carries the Host-authenticated `initiator`: a `user`
+initiator has `kind` and `id`, while an MCP-routed agent has `kind: "agent"`,
+`source: "mcp"`, and an opaque `id`. The Host mints both forms from the
+authenticated caller and rejects package-supplied identity fields. Optional
+view/workspace fields are `null` for startup-only backend calls that have no
+such binding.
 
 ```json
-{"jsonrpc":"2.0","id":"req-1","method":"navide/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"navide-host","version":"0.2.0"}},"name":"plans.list","arguments":{"filter":"open"},"runtime":{"pluginId":"navide.plans","packageVersion":"1.0.0","workspaceId":"ws-1","instanceId":"view-1","contributionKey":"navide.plans.left","hostWindowId":"window-1"}}}
+{"jsonrpc":"2.0","id":"req-1","method":"navide/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"navide-host","version":"0.2.0"}},"name":"plans.list","arguments":{"filter":"open"},"runtime":{"pluginId":"navide.plans","packageVersion":"1.0.0","workspaceId":"ws-1","instanceId":"view-1","contributionKey":"navide.plans.left","hostWindowId":"window-1","initiator":{"kind":"agent","source":"mcp","id":"agent-request-1"}}}}
 ```
 
 A successful call response includes MCP's required `resultType` discriminator,
@@ -357,18 +382,26 @@ and Host routes never cross the SDK Interface.
 The normative Backend Wire v1 schema and accepted/rejected fixture corpus are
 published under `docs/plugin-contracts/` and validated together with the
 Manifest v2 corpus. This contract enables backend-only and combined package
-description and installation. Issue 07 adds a private Electron-main
-supervisor/stdio conformance seam for health and unary calls; it is not a
-public SDK surface and does not activate the installed catalog. Future AI
-integration is a separate adapter: it may
-expose an explicit allowlist of schema-described package methods as MCP tools.
-No package method is AI-callable by default, and adopting this wire profile
-does not itself create a tool catalog.
+description and installation. Issues 07 and 08 add the private Electron-main
+supervisor/stdio and subscription lifecycle seams; Issue 21 connects one
+bundled Plans operation and event through the public SDK and Host router. Issue
+22's bridge ports and child lifecycle are Host-private implementation seams.
+Issue 23E consumes them for the first-party Plans package and exposes an
+explicit Host-owned allowlist of Plans methods to the MCP adapter; no package
+method is AI-callable by default, and adopting this wire profile does not
+itself create a tool catalog. This remains distinct from a general third-party
+installed-backend activation workflow.
 
 After installation, frontend-only, backend-only, and combined packages appear
 in the Extensions installed list and can be removed there. Package inventory is
 independent of frontend view descriptors, so a backend-only package remains
 manageable even though it contributes no view.
+
+The Host permits only one install or removal transaction per Plugin at a time,
+including rollback. A competing operation for the same Plugin is rejected;
+operations for different Plugins remain independent. An install consumes its
+prepared package only after the required confirmations pass. If that attempt
+fails, prepare the package again before retrying.
 
 The exact OS/architecture identifiers, archive size limits, and deterministic
 ZIP metadata are B8 decisions. Until they are published, examples must not be
@@ -554,6 +587,223 @@ fields, unknown permissions, duplicate JSON object keys, and unknown view kinds
 fail closed. Manifest v2 initially supports only `custom` views.
 `tree`/`provider` is deferred until its provider registration, item shape,
 pagination, cancellation, error, and lifecycle Interface is published.
+
+## Agent Execution Policy
+
+The Host has one global, agent-oriented Execution Policy. It is separate from
+Manifest `permissions`, package-version Plugin Grants, and direct user actions;
+it is not a per-plugin permission document. The normative v1 schema is
+[`execution-policy-v1.schema.json`](../plugin-contracts/execution-policy-v1.schema.json).
+
+The policy has exactly these fields:
+
+```json
+{
+  "schemaVersion": 1,
+  "mode": "allowlist",
+  "system": ["fs", "ui", "aiCli"],
+  "shell": ["git", "gh", "glab"]
+}
+```
+
+`mode` is exactly `full`, `allowlist`, or `denylist`. `system` contains only
+first-level public namespaces (`fs`, `ui`, and `aiCli`). `shell` contains exact
+top-level executable names, not command strings or paths. The normative JSON
+Schema describes the canonical persisted spelling
+`[a-z0-9][a-z0-9._+-]*`. The contract parser also accepts ASCII uppercase
+letters in input, canonicalizing them to lowercase before duplicate detection
+and persistence, so `git` and `GIT` are the same entry.
+Agent shell enforcement compares parsed top-level executable tokens
+case-insensitively, so `GIT status` is evaluated against the `git` entry in
+both allowlist and denylist modes. Entries are unique.
+`full` is represented by the same shape with both arrays empty:
+
+```json
+{
+  "schemaVersion": 1,
+  "mode": "full",
+  "system": [],
+  "shell": []
+}
+```
+
+The initial Host default is `allowlist` with all three system namespaces and
+only `git`, `gh`, and `glab` in `shell`. Wrappers and interpreters are not in
+that default. A user policy replaces the single global default and persists at
+`<userData>/execution-policy/policy.json`. The Host-owned companion
+`<userData>/execution-policy/revision.json` stores the durable revision
+high-water mark. A valid policy is accepted only when its `revision` exactly
+matches that high-water mark; a missing or corrupt policy therefore cannot
+silently roll the effective revision backward. A missing sidecar is a legacy
+migration case: only a strict-valid, owner-safe `policy.json` can bootstrap it
+at the existing revision, without incrementing; bootstrap is serialized by
+exclusive creation, idempotent for parallel readers, and must succeed before
+the legacy policy is returned. If an existing sidecar is corrupt or unsafe,
+the Host fails closed at the store instance's trusted revision floor, never
+reconstructs that floor from `policy.json`, and rejects ordinary set/reset
+writes. A strict-valid sidecar below the instance floor is treated as rollback
+or inconsistent state: reads fail closed at the floor, while a valid set/reset
+may repair it at the next revision. The directory and both files are owner-only
+(`0700` and `0600`). Valid updates use same-directory temporary files and
+atomic replacement, writing the high-water mark before the policy so an
+interrupted update fails closed at the newer revision. Unknown versions,
+fields, namespaces, modes, duplicate keys or entries, oversized state, and
+unsafe executable spellings fail closed. Corrupt policy or inconsistent
+state with a trusted sidecar can be repaired by a valid set/reset; corrupt or
+unsafe sidecars and unsafe filesystem entries such as symlinks or non-regular
+files remain preserved for explicit recovery or manual cleanup. On read, the
+Host repairs an existing policy directory whose mode has drifted from `0700`
+before loading its files; a missing directory remains the normal missing-state
+path. If the directory cannot be inspected or safely repaired, the store treats
+it as unavailable, fails closed, and leaves recovery to explicit or manual
+handling rather than interpreting it as a corrupt revision sidecar.
+
+The global-policy portion of Issue 23A defines the durable contract and Host
+persistence seam. Repository source selection, UI/IPC exposure, and runtime
+enforcement are specified by the relevant follow-up issues; this contract does
+not add rules for plugins, Plans, Git, miniIDE, methods, paths, subcommands,
+arguments, globs, or regular expressions.
+
+## Repository Policy Recommendations
+
+A repository may provide one untrusted recommendation at the Host-defined
+canonical path `.navide/execution-policy.json`. The document uses the same
+strict versioned Execution Policy contract as the Host default and global user
+setting. Unknown fields or versions, duplicate JSON keys or entries, invalid
+modes or namespaces, unsafe executable spellings, oversized files, symlinks,
+and non-regular files are invalid and never broaden authority.
+
+Opening a repository only makes its recommendation inspectable. It never
+selects the recommendation automatically. Without a per-repository selection,
+the Host preserves the existing global default or user policy behavior. An
+explicit Host selection chooses exactly one source: the Navide default, the
+global user setting, or the repository recommendation. Sources replace one
+another; they are not merged with each other, Manifest permissions, or Plugin
+Grants.
+
+The Host stores per-repository source selections and the accepted repository
+document fingerprint in its owner-only user-data state at
+`<userData>/execution-policy/sources.json`, with the companion
+`sources-revision.json`. Selection changes use the same durable effective
+policy revision as the global policy store and persist across application
+restarts. The repository document is never rewritten or deleted by source
+selection or by switching back to the default or user source.
+
+The accepted fingerprint is calculated from the parser's canonical policy
+representation, including normalized shell names and set-stable system and
+shell entries, rather than raw file bytes. Formatting, JSON key ordering, and
+equivalent entry ordering therefore do not require re-acceptance. A missing or
+temporarily unavailable document resolves to an unavailable source, while an
+invalid, unsupported, duplicate-key, or unsafe document resolves to a corrupt
+source. A changed valid document makes a previously accepted repository source
+stale. In each case the Host preserves the durable selection, leaves the
+repository source inactive, and returns the empty fail-closed policy; it never
+silently rewrites the selection to default or user.
+
+To accept a repository recommendation, the Host caller must provide the
+fingerprint returned by its inspection of the recommendation. The Host
+re-reads the canonical document and refuses the selection with
+`recommendation-stale` when the current valid fingerprint differs, without
+writing source state or advancing the effective policy revision. The caller
+must inspect the current recommendation again before explicitly accepting it;
+the Host never accepts repository content that was not bound to the caller's
+inspected fingerprint.
+
+A recommendation using `full` additionally requires the caller's explicit
+`highRiskConfirmed: true` acknowledgement. The Host checks it against the same
+validated recommendation before writing a selection or advancing its revision;
+otherwise it returns `high-risk-confirmation-required`. Settings resets this
+acknowledgement when the workspace or inspected fingerprint changes.
+
+The Host source snapshot distinguishes `selectedSource` (the last explicit
+per-workspace choice) from `activeSource` (the source that actually supplied
+the policy) and reports `active`, `stale`, `unavailable`, or `corrupt` status.
+No explicit choice is represented by a null `selectedSource` and follows the
+global user/default policy without creating source state. Expected source
+operation refusals are typed and do not write state or advance the revision;
+an explicit `user` selection requires a strict-valid global user policy. If no
+such policy exists, a new selection is refused with
+`user-policy-unavailable`; an existing user pin remains selected but becomes
+`activeSource: null`, `status: unavailable`, and fail-closed. A malformed,
+owner-unsafe, or metadata-corrupt global policy instead reports a
+`status: corrupt` snapshot and never falls back to the Host default. Querying
+never rewrites the pin; recovery requires restoring the global user policy or
+explicitly selecting the `default` source. This does not affect an implicit
+workspace with no selection, which continues to use the Host default when no
+user policy exists.
+An explicit Host-only full reset can clear all source selections when the
+durable source high-water mark is trustworthy. The snapshot also exposes
+opaque revision-aware `effectivePolicyKey` and canonical-policy
+`effectivePolicyHash` identities for later Host consumers; Issue 23B does not
+implement caching or enforcement. This Host source service is intentionally
+not exposed through preload, IPC, renderer APIs, or Settings UI in Issue 23B;
+those surfaces belong to Issue 23D.
+
+### Runtime enforcement
+
+The Host authenticates `user` and `agent` initiators independently from every
+plugin payload. Direct user actions use the Host-owned `user` identity. An
+MCP-routed agent request receives a Host-minted `agent` identity that survives
+the MCP handoff, package-local Backend Wire call, and any Host capability call;
+the package cannot add, remove, or replace it.
+
+Only the `agent` initiator is evaluated against the global Execution Policy.
+Manifest permissions, the capability catalog, the explicit package-version
+Grant, publisher eligibility, request schemas, workspace binding, and runtime
+state remain mandatory for both initiators. `full` mode bypasses only the
+agent-specific namespace and executable filters. `allowlist` and `denylist`
+operate on first-level `fs`, `ui`, and `aiCli` namespaces and on every resolved
+top-level executable in a shell pipeline or command chain. Policy v1 does not
+express subcommands, arguments, path patterns, or wrappers. The v1 shell parser
+fails closed on unquoted grouping or negation syntax (`(`, `)`, `{`, `}`, `!`)
+and assignment-prefixed commands (`NAME=value`); this applies to both direct
+user and agent shell execution, so quote these characters or assignment-shaped
+arguments when they are intended as command data. For the private Backend
+Bridge, only the `filesystem` port currently maps to the `fs` Execution Policy
+namespace. All other current Bridge ports fail closed for agent Initiators until
+an explicit namespace mapping is assigned; user Initiators continue through
+their existing checks.
+
+When a queued operation is held across a policy revision, the Host re-evaluates
+it immediately before dispatch. An operation already dispatched keeps the
+decision made for that dispatch; completed effects are not reversible. An
+exact package-version Grant revocation marks that package version stopping
+before draining it, rejects new work, settles pending calls and subscriptions
+once with `PLUGIN_STOPPING`, stops its event routes, disables and closes its
+views, and gracefully closes its child backend before the bounded force-kill
+fallback. Other package versions remain independent. Factory and Official
+Registry packages use these same checks and have no bypass.
+
+### Settings and Extensions surface
+
+Settings exposes Execution Policy in its own tab. The Host default is
+read-only; the user can create or edit one global user policy in `full`,
+`allowlist`, or `denylist` mode. Allowlist and denylist editing has separate
+first-level `system` namespace and top-level `shell` executable controls. Full
+mode explains that arbitrary executables, including high-risk tools, are
+allowed and cannot be saved without an explicit high-risk confirmation.
+
+For an open workspace, Settings shows the currently effective source and the
+repository recommendation as untrusted proposed configuration. Selecting the
+Host default, user policy, or a valid repository recommendation is explicit;
+repository acceptance is bound to the inspected canonical fingerprint. The
+Host never merges sources or silently changes an unavailable selection to a
+broader source. Selecting the Host default is the source-level reset; resetting
+the user policy is a separate operation.
+
+If durable global policy state is corrupt, Settings offers a separately
+confirmed rebuild that removes and recreates only the Host-owned `policy.json`
+and `revision.json` pair from the Host default. Workspace source selections,
+`sources.json`, `sources-revision.json`, and repository policy files are
+preserved. An unsafe or unavailable policy directory is reported as a manual
+remediation case and never treated as permission to delete files.
+
+Extensions displays the selected agent's effective Execution Policy next to
+the installed package inventory. Each v2 package separately reports its
+Manifest Permissions and exact package-version Grant state, including when no
+matching Grant exists. Neither display is presented as replacing the other;
+policy validation, broker denials, and recovery failures remain fail-closed
+and are surfaced with safe messages.
 
 ## SDK interface
 
@@ -811,8 +1061,62 @@ uses the retained legacy renderer for the remainder of the process. Trust,
 signature, revocation, grant, and capability denials fail closed and never
 trigger the legacy path. An invalid installed package is also not hidden by the
 factory or legacy copy. `NAVIDE_GIT_RECOVERY=legacy` remains the explicit operator override.
-Issue 19 does not remove the legacy implementation or implement later
-Plans/Skills migration or marketplace lifecycle work.
+Issue 19 does not remove the legacy implementation or implement later Skills
+migration or marketplace lifecycle work.
+
+### First-party production Plans package
+
+Issue 23E makes `navide.plans` the first combined production package that
+consumes the shared agent Execution Policy. One active Manifest v2 package
+version supplies both custom Plans contributions (`left` and `window`) and the
+self-contained Backend Wire executable. The package imports only the public SDK
+and UI packages; the Host selects its exact package/version, grant, workspace
+binding, backend methods, events, and private Bridge ports.
+
+MCP integration uses the current core backend architecture introduced by
+`4a6cc02a`. The core owns the single server and endpoint, authentication, caller
+identity, tool registration lifecycle, and authenticated Host handoff. The
+builtin Plans adapter registers its existing `plan_*` tools on that server
+before the session manager starts. The production package does not own an MCP
+server or a second tool registry: it implements Plans domain operations over
+Backend Wire. The flow is agent → core MCP → Plans tool adapter → Host →
+packaged Plans backend → Host capability broker. Recovery keeps the same core
+MCP entrypoint.
+
+Manual document operations use the package backend through the Host-private
+`filesystem` Bridge, which maps to the existing `fs` capability boundary. User
+initiated operations are not filtered by the agent Execution Policy. Agent MCP
+operations use a Host-owned headless backend binding when the Plans window is
+closed. The Host mints the authenticated `agent` Initiator at dispatch time,
+checks the package's explicit method allowlist, re-evaluates the workspace
+policy, and rejects denied work before the filesystem Bridge can produce a
+side effect. Plans has no public `plans` permission.
+
+Plans documents remain workspace files. Filter, sort, and collapse preferences
+use the approved workspace storage partition with idempotent migration from
+the legacy local preference keys. Backend subscriptions, workspace binding,
+timeouts, cancellation, child restart, Grant revocation, and crash cleanup
+remain Host-owned and settle through the same Backend Wire lifecycle. If the
+combined package cannot be selected or activated, the retained legacy Plans
+adapter remains available without converting or deleting workspace documents.
+
+Plans v2 surfaces and preference writes require completed storage migration and
+successful persistence of the active lifecycle record. A lifecycle read,
+migration, or lifecycle persistence failure disables v2 activation and enters
+recovery. Recovery reads only the lifecycle-selected previous snapshot; corrupt
+or unreadable recovery state is reported as unavailable rather than replaced
+with an empty snapshot. A genuinely missing migration source retains the
+first-install initialization behavior.
+
+Nested repository discovery uses the same deterministic limits in the Host,
+core index, and packaged backend: two levels, 50 found roots, 2,000 directory
+candidates per directory, and 2,000 candidate probes across the entire walk.
+The global budget also stops scans that find no nested repositories. Top-level
+Plans directories remain available without a nested scan.
+
+Issues 25 and 26 must reuse this Execution Policy contract, its Policy Sources,
+Host-minted Initiators, and the shared Host broker for miniIDE composition.
+They must not introduce an IDE-specific policy, permission, or Initiator model.
 
 ### Embedded AI CLI public mapping
 

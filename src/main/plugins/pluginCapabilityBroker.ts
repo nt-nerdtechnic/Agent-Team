@@ -15,6 +15,7 @@ import {
 import type { PluginShellMode, PluginSystemNamespace } from './pluginManifestV2'
 import type { PluginCapabilityPolicy } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
+import type { ExecutionPolicySnapshot } from './executionPolicy'
 
 /** A capability call as it arrives from a plugin view over IPC. */
 export interface CapabilityCall {
@@ -43,6 +44,7 @@ export type CapabilityErrorCode =
   | 'UNKNOWN'
   | 'BAD_REQUEST'
   | 'BACKEND_ERROR'
+  | 'RESOURCE_LIMIT'
   | 'CAPABILITY_DENIED'
   | 'METHOD_NOT_FOUND'
   | 'INVALID_ARGUMENT'
@@ -92,6 +94,45 @@ export interface HostCapabilityContext {
   storageSnapshots?: ReadonlyMap<StorageSnapshotTier, string>
   /** Host-selected tier fixed for the lifetime of one runtime instance. */
   storageSnapshotTier?: StorageSnapshotTier
+  /** Host-authenticated operation origin. Plugin payloads never provide this. */
+  initiator?: AuthenticatedInitiator
+  /** Effective agent policy captured when this operation was admitted. */
+  executionPolicy?: ExecutionPolicySnapshot
+}
+
+/** Host-authenticated origin of an operation. This is an internal value: it is
+ * never accepted from a Plugin request or exposed through the preload API. */
+export type AuthenticatedInitiator =
+  | Readonly<{ kind: 'user'; id: string }>
+  | Readonly<{ kind: 'agent'; source: 'mcp'; id: string }>
+
+/** Stable Host identity used for direct user work when no account identity is
+ * available at this internal boundary. It is not a credential. */
+export const HOST_USER_INITIATOR: AuthenticatedInitiator = Object.freeze({
+  kind: 'user',
+  id: 'host-user',
+})
+
+/** Validate an initiator at a Host boundary before it is attached to work. */
+export function isAuthenticatedInitiator(value: unknown): value is AuthenticatedInitiator {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.kind === 'user') {
+    return (
+      Object.keys(record).length === 2 &&
+      Object.keys(record).every((key) => key === 'kind' || key === 'id') &&
+      typeof record.id === 'string' &&
+      record.id.length > 0
+    )
+  }
+  return (
+    record.kind === 'agent' &&
+    Object.keys(record).length === 3 &&
+    Object.keys(record).every((key) => key === 'kind' || key === 'source' || key === 'id') &&
+    record.source === 'mcp' &&
+    typeof record.id === 'string' &&
+    record.id.length > 0
+  )
 }
 
 /** A tier name for the Host-managed versioned storage snapshots. */
@@ -129,6 +170,10 @@ export interface PublicCapabilityExecutionPlan {
   scope: PublicCapabilityScope
   args: Record<string, unknown>
   runtime: AuthenticatedRuntimeBinding
+  /** Host-authenticated origin retained for downstream adapters. */
+  initiator?: AuthenticatedInitiator
+  /** Policy revision captured when this plan was admitted. */
+  policyRevision?: number
   shellMode?: PluginShellMode
   session?: AuthenticatedRuntimeBinding
   storage?: StoragePlan
@@ -343,7 +388,12 @@ export function shellTopLevelExecutables(command: string): string[] | null {
       char === '`' ||
       (char === '$' && command[index + 1] === '(') ||
       char === '<' ||
-      char === '>'
+      char === '>' ||
+      char === '(' ||
+      char === ')' ||
+      char === '{' ||
+      char === '}' ||
+      char === '!'
     ) {
       return null
     }
@@ -353,6 +403,12 @@ export function shellTopLevelExecutables(command: string): string[] | null {
     }
     if (char === '"') {
       quote = 'double'
+      continue
+    }
+    if (char === '|' && command[index + 1] === '&') {
+      if (!pushSegment(index)) return null
+      index += 1
+      segmentStart = index + 1
       continue
     }
     if (char === ';' || char === '|' || char === '&' || char === '\n' || char === '\r') {
@@ -404,6 +460,10 @@ export function shellTopLevelExecutables(command: string): string[] | null {
       token += char
     }
     if (!token || tokenQuote !== null || tokenEscaped) return null
+    // A leading assignment changes the environment of the command that
+    // follows it. Version 1 does not resolve shell prefixes, so do not let a
+    // denylist inspect the assignment token and miss the real executable.
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)) return null
     // A path-qualified token is not reduced to a basename: doing so would let
     // a Plugin replace an allowlisted command with an arbitrary same-named
     // executable from the workspace or a temporary directory.
@@ -416,6 +476,38 @@ export function shellTopLevelExecutables(command: string): string[] | null {
 function shellCommandAllowed(command: string, allowlist: readonly string[]): boolean {
   const executables = shellTopLevelExecutables(command)
   return executables !== null && executables.every((executable) => allowlist.includes(executable))
+}
+
+/** Decide the agent-only Execution Policy filter for one first-level public
+ * namespace or shell command. Manifest, Grant, catalog, and runtime checks are
+ * intentionally outside this function and remain mandatory for every caller. */
+export function executionPolicyAllows(
+  initiator: AuthenticatedInitiator | undefined,
+  snapshot: ExecutionPolicySnapshot | undefined,
+  namespace: PluginSystemNamespace | 'shell',
+  command?: string,
+): boolean {
+  // Direct user work is governed by the existing Host checks, not by the
+  // agent-oriented Execution Policy. An omitted initiator preserves legacy
+  // direct-user behavior for callers that predate this seam.
+  if (!initiator || initiator.kind !== 'agent') return true
+  if (!snapshot || snapshot.state === 'corrupt') return false
+
+  const { policy } = snapshot
+  if (policy.mode === 'full') return true
+  if (namespace === 'shell') {
+    const executables = shellTopLevelExecutables(command ?? '')
+    if (!executables) return false
+    // Policy entries are persisted in lowercase; normalize command tokens at
+    // the enforcement boundary so case-insensitive filesystems cannot bypass policy.
+    const canonicalExecutables = executables.map((executable) => executable.toLowerCase())
+    return policy.mode === 'allowlist'
+      ? canonicalExecutables.every((executable) => policy.shell.includes(executable))
+      : canonicalExecutables.every((executable) => !policy.shell.includes(executable))
+  }
+  return policy.mode === 'allowlist'
+    ? policy.system.includes(namespace)
+    : !policy.system.includes(namespace)
 }
 
 function requiresWorkspace(
@@ -503,6 +595,21 @@ export function planPublicCapabilityCall(
     return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'AI CLI profile is not Host-allowlisted')
   }
 
+  const initiator = context.initiator
+  if (initiator !== undefined && !isAuthenticatedInitiator(initiator)) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'authenticated initiator is invalid')
+  }
+  if (
+    !executionPolicyAllows(
+      initiator,
+      context.executionPolicy,
+      entry.namespace,
+      entry.namespace === 'shell' ? String(args.command) : undefined,
+    )
+  ) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'agent execution policy denied the operation')
+  }
+
   let session: AuthenticatedRuntimeBinding | undefined
   if (entry.address === 'aiCli.cancelStart') {
     const requestId = args.requestId
@@ -539,6 +646,10 @@ export function planPublicCapabilityCall(
       scope: entry.scope,
       args,
       runtime: binding,
+      ...(initiator ? { initiator } : {}),
+      ...(initiator && context.executionPolicy
+        ? { policyRevision: context.executionPolicy.revision }
+        : {}),
       ...(policy.shell && entry.namespace === 'shell' ? { shellMode: policy.shell } : {}),
       ...(session ? { session } : {}),
     },
@@ -579,6 +690,10 @@ function planStoragePartition(
   context: HostCapabilityContext
 ): PublicCapabilityDecision {
   const address = `${call.ns}.${call.method}`
+  const initiator = context.initiator
+  if (initiator !== undefined && !isAuthenticatedInitiator(initiator)) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'authenticated initiator is invalid')
+  }
   const grant = context.userGrant
   const binding = context.runtimeBinding
 
@@ -644,6 +759,7 @@ function planStoragePartition(
       args,
       runtime: binding,
       storage: { partition, snapshot },
+      ...(initiator ? { initiator } : {}),
     },
   }
 }
@@ -801,7 +917,8 @@ export function backendResponseToCapability(
   resp: WsResponse
 ): CapabilityResponse {
   if (resp.ok) return buildSuccess(reqId, resp.payload)
-  return buildError(reqId, 'BACKEND_ERROR', resp.error?.message ?? 'backend request failed')
+  const code = resp.error?.code === 'RESOURCE_LIMIT' ? 'RESOURCE_LIMIT' : 'BACKEND_ERROR'
+  return buildError(reqId, code, resp.error?.message ?? 'backend request failed')
 }
 
 // ── Terminal PTY routing + output micro-batching ─────────────────────────────

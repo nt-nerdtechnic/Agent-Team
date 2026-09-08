@@ -256,4 +256,41 @@ describe('ControlPane manifest-driven plugin placement', () => {
     expect(tab.get('.git-badge').text()).toBe('7')
     wrapper.unmount()
   })
+
+  it('hosts navide.git in PluginRegionHost, keeps it mounted when off-tab, and shows change badge', async () => {
+    const gitContrib = contribution({
+      pluginId: 'navide.git',
+      contributionKey: 'navide.git.left',
+      title: 'Git',
+      icon: 'data:image/png;base64,git-icon',
+    })
+    const wrapper = mountPane([gitContrib], { gitChangesCount: 7 })
+
+    const tab = wrapper.get('[data-plugin-contribution="navide.git.left"]')
+    expect(tab.attributes('title')).toContain('⌘4')
+    expect(tab.get('.git-badge').text()).toBe('7')
+
+    const findGitHost = () =>
+      wrapper.findAllComponents({ name: 'PluginRegionHost' })
+        .find((h) => h.props('contribution')?.contributionKey === 'navide.git.left')
+
+    let host = findGitHost()
+    expect(host).toBeDefined()
+    expect(host!.props('visible')).toBe(false)
+
+    await tab.trigger('click')
+    await wrapper.vm.$nextTick()
+    host = findGitHost()
+    expect(host).toBeDefined()
+    expect(host!.props('visible')).toBe(true)
+
+    const agentsTab = wrapper.findAll('.sidebar-tabs .tab-btn')[0]
+    await agentsTab.trigger('click')
+    await wrapper.vm.$nextTick()
+    host = findGitHost()
+    expect(host).toBeDefined()
+    expect(host!.props('visible')).toBe(false)
+
+    wrapper.unmount()
+  })
 })

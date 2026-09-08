@@ -3270,6 +3270,139 @@ async def cli_send_and_wait(
     )
 
 
+# ── Host capability handoff (internal 23C seam) ─────────────────────────────
+# This is deliberately not registered as a public MCP tool yet. Issue 23E
+# supplies the production Plans tool route. Keeping the handoff here lets that
+# route use the same authenticated Host boundary without allowing an MCP
+# caller or package child to supply an Initiator object.
+_AGENT_CAPABILITY_TIMEOUT_S = 30.0
+_agent_capability_pending: PendingRegistry[dict[str, Any]] = PendingRegistry()
+
+
+def resolve_agent_capability(request_id: str, result: dict[str, Any]) -> bool:
+    """Resolve one Host-brokered agent operation."""
+    return _agent_capability_pending.resolve(request_id, result)
+
+
+async def request_host_agent_capability(
+    instance_id: str,
+    operation: str,
+    payload: dict[str, Any],
+    *,
+    caller: "_Caller",
+) -> dict[str, Any]:
+    """Handoff an authenticated MCP request to the Electron Host.
+
+    ``caller`` has already passed :func:`_resolve_caller`. It is intentionally
+    used only as an admission proof; the event carries no caller-provided
+    Initiator. The Host mints the opaque agent Initiator after receiving it on
+    its token-authenticated WebSocket session.
+    """
+    from agent_team_backend import app
+    from agent_team_backend.ipc import make_event
+
+    if not isinstance(instance_id, str) or not instance_id:
+        return {"ok": False, "error": "plugin instance is required", "error_code": "bad_request"}
+    if operation not in {"capability", "backend"} or not isinstance(payload, dict):
+        return {"ok": False, "error": "agent capability request is malformed", "error_code": "bad_request"}
+    if caller.kind not in {"pane", "host", "external"}:
+        return {"ok": False, "error": "caller is not authenticated", "error_code": "unauthorized"}
+
+    request_id = f"mcp:{secrets.token_hex(16)}"
+    future = _agent_capability_pending.register(request_id)
+    try:
+        sent = await app.unicast_host(
+            make_event(
+                "agent.capability.request",
+                {
+                    "request_id": request_id,
+                    "instance_id": instance_id,
+                    "operation": operation,
+                    "payload": payload,
+                },
+            )
+        )
+        if not sent:
+            return {
+                "ok": False,
+                "error": "Navide Host is not connected",
+                "error_code": "host_unavailable",
+            }
+        result = await _agent_capability_pending.wait(
+            request_id,
+            future,
+            timeout=_AGENT_CAPABILITY_TIMEOUT_S,
+        )
+        if result is TIMEOUT:
+            return {
+                "ok": False,
+                "error": "Navide Host did not answer the capability request",
+                "error_code": "host_timeout",
+            }
+        return result
+    finally:
+        _agent_capability_pending.discard(request_id)
+
+
+async def request_host_agent_workspace_backend(
+    plugin_id: str,
+    workspace_path: str,
+    payload: dict[str, Any],
+    *,
+    caller: "_Caller",
+) -> dict[str, Any]:
+    """Route one agent backend call to a Host-owned workspace binding.
+
+    The workspace is a routing target, never an Initiator or package identity.
+    The Electron Host authenticates the backend session, resolves/reuses its
+    own headless package runtime, and mints the agent Initiator at that final
+    boundary.
+    """
+    from agent_team_backend import app
+    from agent_team_backend.ipc import make_event
+
+    if not isinstance(plugin_id, str) or not plugin_id:
+        return {"ok": False, "error": "plugin id is required", "error_code": "bad_request"}
+    if not isinstance(workspace_path, str) or not workspace_path:
+        return {"ok": False, "error": "workspace path is required", "error_code": "bad_request"}
+    if not isinstance(payload, dict) or caller.kind not in {"pane", "host", "external"}:
+        return {"ok": False, "error": "agent backend request is malformed", "error_code": "bad_request"}
+    request_id = f"mcp:{secrets.token_hex(16)}"
+    future = _agent_capability_pending.register(request_id)
+    try:
+        sent = await app.unicast_host(
+            make_event(
+                "agent.capability.request",
+                {
+                    "request_id": request_id,
+                    "target": {"plugin_id": plugin_id, "workspace_path": workspace_path},
+                    "operation": "backend",
+                    "payload": payload,
+                },
+            )
+        )
+        if not sent:
+            return {
+                "ok": False,
+                "error": "Navide Host is not connected",
+                "error_code": "host_unavailable",
+            }
+        result = await _agent_capability_pending.wait(
+            request_id,
+            future,
+            timeout=_AGENT_CAPABILITY_TIMEOUT_S,
+        )
+        if result is TIMEOUT:
+            return {
+                "ok": False,
+                "error": "Navide Host did not answer the backend request",
+                "error_code": "host_timeout",
+            }
+        return result
+    finally:
+        _agent_capability_pending.discard(request_id)
+
+
 # ── UI control (ui_invoke / ui_snapshot / ui_list_actions) ─────────────────
 # Routes a request to the renderer window that owns `workspace_path` over WS
 # (`ui.invoke.request`), and waits for its `ui.invoke.result` reply. Most

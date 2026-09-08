@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "composite": false,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "noEmit": true,
+    "paths": {
+      "@navide/plugin-contracts": ["packages/plugin-contracts/src/index.ts"],
+      "@navide/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
+      "@navide/plugin-ui": ["packages/plugin-ui/src/index.ts"],
+      "@navide/plugin-ui/shared": ["packages/plugin-ui/src/shared/index.ts"],
+      "@navide/plugin-ui/shared/testing": ["packages/plugin-ui/src/shared/testing.ts"],
+      "@navide/plugin-ui/foundation": ["packages/plugin-ui/src/foundation/index.ts"],
+      "@navide/plugin-ui/foundation/*": ["packages/plugin-ui/src/foundation/*"]
+    }
+  },
+  "include": ["tests/integration/**/*.ts", "src/renderer/src/env.d.ts", "src/renderer/src/vue.d.ts"]
+}

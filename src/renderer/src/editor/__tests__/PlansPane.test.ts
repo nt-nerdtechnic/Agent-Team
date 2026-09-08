@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { ref } from 'vue'
 import PlansPane from '../PlansPane.vue'
@@ -13,6 +13,18 @@ i18n.global.locale.value = 'en-US'
 // one localStorage across the file, so reset it before each test to keep the
 // default-collapse assumptions (e.g. Archived folded) isolated.
 beforeEach(() => localStorage.clear())
+
+const originalAgentTeam = (window as unknown as { agentTeam?: unknown }).agentTeam
+const originalPlansTestUrl = window.location.href
+
+afterEach(() => {
+  if (originalAgentTeam === undefined) {
+    delete (window as unknown as { agentTeam?: unknown }).agentTeam
+  } else {
+    ;(window as unknown as { agentTeam?: unknown }).agentTeam = originalAgentTeam
+  }
+  window.history.replaceState({}, '', originalPlansTestUrl)
+})
 
 // Markdown plan carrying an explicit stage (unified list groups it by stage,
 // same as HTML plans — not the legacy Active/Completed split).
@@ -274,7 +286,64 @@ function mountPane(backend: ReturnType<typeof makeBackend>) {
   })
 }
 
+function mountLegacyRecoveryPane(backend: ReturnType<typeof makeBackend>) {
+  return mount(PlansPane, {
+    props: { workspacePath: '/ws', backend: backend as never },
+    global: { plugins: [i18n] },
+  })
+}
+
 describe('PlansPane', () => {
+  it('uses the Host-bound previous snapshot in the retained legacy route', async () => {
+    const currentPreferences = {
+      'plans.filter': 'all',
+      'plans.sort': 'updated',
+      'plans.sortdir': 'desc',
+      'plans.group': 'flat',
+      'plans.collapsed': '["in-review"]',
+      'plans.recent': '[]',
+      'plans.pinned': '[]',
+    } as const
+    for (const [key, value] of Object.entries(currentPreferences)) {
+      localStorage.setItem(`navide.plans.${key.slice('plans.'.length)}./ws`, value)
+    }
+    window.history.replaceState({}, '', '/?window=plans&workspace_path=/ws&legacy_plans_recovery=1')
+
+    const previousPreferences = {
+      'plans.filter': 'in-review',
+      'plans.sort': 'title',
+      'plans.sortdir': 'asc',
+      'plans.group': 'stage',
+      'plans.collapsed': '[]',
+      'plans.recent': '[".agent-team/plans/review_a1b2c3.html"]',
+      'plans.pinned': '[".agent-team/plans/review_a1b2c3.html"]',
+    }
+    const getRecoveryPreferences = vi.fn(async () => previousPreferences)
+    const projectLegacyPreferences = vi.fn(async () => ({ ok: true }))
+    ;(window as unknown as { agentTeam?: unknown }).agentTeam = {
+      getPlansLegacyRecoveryPreferences: getRecoveryPreferences,
+      onPlansLegacyRecoveryPreferences: vi.fn(() => () => {}),
+      projectLegacyPlansPreferences: projectLegacyPreferences,
+    }
+
+    const wrapper = mountLegacyRecoveryPane(reviewBackend())
+    await flushPromises()
+    await flushPromises()
+
+    expect(getRecoveryPreferences).toHaveBeenCalledWith()
+    expect(projectLegacyPreferences).not.toHaveBeenCalled()
+    expect((wrapper.find('.plans-stage-select').element as HTMLSelectElement).value).toBe('in-review')
+    expect((wrapper.find('.plans-sort-select').element as HTMLSelectElement).value).toBe('title')
+    expect(wrapper.find('.plans-sort-dir').text()).toBe('↑')
+    expect(wrapper.find('.plans-group-toggle').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.findAll('.plan-row').some((row) => row.text().includes('HTML Review Plan'))).toBe(true)
+
+    for (const [key, value] of Object.entries(currentPreferences)) {
+      expect(localStorage.getItem(`navide.plans.${key.slice('plans.'.length)}./ws`)).toBe(value)
+    }
+    wrapper.unmount()
+  })
+
   it('lists active and completed plans', async () => {
     const wrapper = mountPane(makeBackend())
     await flushPromises()

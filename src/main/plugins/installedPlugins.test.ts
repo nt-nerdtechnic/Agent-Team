@@ -16,6 +16,7 @@ import {
   parseManifestJson,
   manifestToDescriptor,
   manifestToActivation,
+  manifestToInstalledPackageSummary,
   buildActivationCatalog,
   loadPluginDir,
   scanInstalledPlugins,
@@ -211,6 +212,18 @@ describe('Manifest v2 contract corpus', () => {
       location: 'left',
       iconFile: '/plugins/acme.files/assets/files.png',
       entryFile: '/plugins/acme.files/frontend/left/index.html',
+    })
+  })
+
+  it('exposes Manifest v2 permissions separately in the installed package summary', () => {
+    const manifest = parseInstalledManifest(
+      JSON.parse(readFixture('valid', 'frontend-multi-view.json'))
+    )
+    expect(manifestToInstalledPackageSummary(manifest)).toEqual({
+      id: 'acme.files',
+      requires: ['fs', 'ui', 'shell'],
+      packageVersion: '1.0.0',
+      manifestPermissions: { system: ['fs', 'ui'], shell: 'allowlist' },
     })
   })
 

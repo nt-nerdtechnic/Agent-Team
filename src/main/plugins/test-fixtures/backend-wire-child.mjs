@@ -28,7 +28,7 @@ function isClientMeta(value) {
 }
 
 function isEventName(value) {
-  return typeof value === 'string' && /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$/.test(value)
+  return typeof value === 'string' && /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/.test(value)
 }
 
 function isRuntime(value) {
@@ -39,11 +39,19 @@ function isRuntime(value) {
     'instanceId',
     'contributionKey',
     'hostWindowId',
+    'initiator',
   ]) &&
     typeof value.pluginId === 'string' && value.pluginId.length > 0 &&
     typeof value.packageVersion === 'string' && value.packageVersion.length > 0 &&
     ['workspaceId', 'instanceId', 'contributionKey', 'hostWindowId']
-      .every((key) => value[key] === null || typeof value[key] === 'string')
+      .every((key) => value[key] === null || typeof value[key] === 'string') &&
+    isRecord(value.initiator) &&
+    (exactKeys(value.initiator, ['kind', 'id']) &&
+      value.initiator.kind === 'user' &&
+      typeof value.initiator.id === 'string' && value.initiator.id.length > 0 ||
+      exactKeys(value.initiator, ['kind', 'source', 'id']) &&
+      value.initiator.kind === 'agent' && value.initiator.source === 'mcp' &&
+      typeof value.initiator.id === 'string' && value.initiator.id.length > 0)
 }
 
 function scanString(text, start) {
@@ -159,7 +167,7 @@ function isCallRequest(frame) {
     exactKeys(frame.params, ['_meta', 'name', 'arguments', 'runtime']) &&
     isClientMeta(frame.params._meta) &&
     typeof frame.params.name === 'string' &&
-    /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$/.test(frame.params.name) &&
+    /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/.test(frame.params.name) &&
     isRuntime(frame.params.runtime)
 }
 
@@ -276,6 +284,22 @@ function handle(frame) {
   }
 
   const { name, arguments: args } = frame.params
+  if (name === 'plans.resolve_root') {
+    const workspacePath = isRecord(args) && typeof args.workspace_path === 'string'
+      ? args.workspace_path
+      : ''
+    if (!workspacePath) {
+      writeProtocolError(frame.id)
+      return
+    }
+    response(frame.id, { ok: true, root: workspacePath })
+    for (const subscription of subscriptions.values()) {
+      if (subscription.acknowledged && subscription.events.includes('plans.changed')) {
+        emitSubscriptionEvent(subscription.id, 'plans.changed', { workspace_path: workspacePath })
+      }
+    }
+    return
+  }
   if (name === 'fixture.echo') {
     response(frame.id, { arguments: args, runtime: frame.params.runtime })
     return

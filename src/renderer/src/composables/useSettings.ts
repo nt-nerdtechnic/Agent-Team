@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { i18n } from '@navide/plugin-ui/foundation'
-import { settingsGet, settingsReadiness, settingsSet } from '@navide/plugin-ui/shared'
+import { onSettingsChanged, settingsGet, settingsReadiness, settingsSet } from '@navide/plugin-ui/shared'
 
 const LANGUAGE_KEY = 'agent-team:language'
 const SUPPORTED = new Set(['zh-TW', 'en-US'])
@@ -11,9 +11,21 @@ function normalizeLocale(raw: string): string {
   return 'zh-TW'
 }
 
-function readLocal(): string | null {
-  const v = settingsGet<string | null>(LANGUAGE_KEY, null)
-  return v && SUPPORTED.has(v) ? v : null
+function parseSupportedLocale(raw: unknown): 'zh-TW' | 'en-US' | null {
+  if (typeof raw !== 'string') return null
+  const candidate = raw.trim()
+  if (SUPPORTED.has(candidate)) return candidate as 'zh-TW' | 'en-US'
+  try {
+    const decoded = JSON.parse(candidate)
+    return typeof decoded === 'string' && SUPPORTED.has(decoded) ? (decoded as 'zh-TW' | 'en-US') : null
+  } catch {
+    return null
+  }
+}
+
+function readLocal(): 'zh-TW' | 'en-US' | null {
+  const v = settingsGet<unknown>(LANGUAGE_KEY, null)
+  return parseSupportedLocale(v)
 }
 
 function writeLocal(value: string): void {
@@ -21,18 +33,36 @@ function writeLocal(value: string): void {
 }
 
 // Module-level singleton — shared across every component that calls useSettings().
-const language = ref<string>(i18n.global.locale.value as string)
+const initialLocale = readLocal() ?? (i18n.global.locale.value as string)
+const language = ref<string>(initialLocale)
+if (SUPPORTED.has(initialLocale) && i18n.global.locale.value !== initialLocale) {
+  i18n.global.locale.value = initialLocale as 'zh-TW' | 'en-US'
+}
+
+let unwatchSettings: (() => void) | null = null
+
+export function ensureLanguageSettingsSubscription(): void {
+  unwatchSettings?.()
+  unwatchSettings = onSettingsChanged((keys) => {
+    if (keys.includes(LANGUAGE_KEY)) {
+      const next = readLocal()
+      if (next && next !== language.value) {
+        language.value = next
+        i18n.global.locale.value = next
+      }
+    }
+  })
+}
+ensureLanguageSettingsSubscription()
 
 function loadLanguage(backendFallback?: { language?: string }): void {
   const local = readLocal()
   if (local) {
     language.value = local
-    i18n.global.locale.value = local as 'zh-TW' | 'en-US'
+    i18n.global.locale.value = local
     return
   }
-  const backend = backendFallback?.language && SUPPORTED.has(backendFallback.language)
-    ? backendFallback.language
-    : null
+  const backend = backendFallback?.language ? parseSupportedLocale(backendFallback.language) : null
   const next = backend ?? normalizeLocale(navigator.language)
   language.value = next
   i18n.global.locale.value = next as 'zh-TW' | 'en-US'
@@ -43,12 +73,16 @@ function loadLanguage(backendFallback?: { language?: string }): void {
   if (backend && settingsReadiness.status === 'ready') writeLocal(next)
 }
 
-function setLanguage(locale: string): void {
-  if (!SUPPORTED.has(locale)) return
-  language.value = locale
-  i18n.global.locale.value = locale as 'zh-TW' | 'en-US'
-  writeLocal(locale)
-  window.agentTeam?.broadcastLanguageChange?.(locale)
+function setLanguage(locale: string, options: { broadcast?: boolean } = {}): void {
+  const validated = parseSupportedLocale(locale)
+  if (!validated) return
+  const changed = language.value !== validated || i18n.global.locale.value !== validated
+  language.value = validated
+  i18n.global.locale.value = validated
+  writeLocal(validated)
+  if (options.broadcast !== false && changed) {
+    window.agentTeam?.broadcastLanguageChange?.(validated)
+  }
 }
 
 // Health-check timeout (seconds): how long the main process waits for the
@@ -99,6 +133,11 @@ async function syncToBackend(
 }
 
 export function useSettings() {
+  const local = readLocal()
+  if (local && language.value !== local) {
+    language.value = local
+    i18n.global.locale.value = local
+  }
   return {
     language,
     loadLanguage,

@@ -1,7 +1,12 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { i18n } from '@navide/plugin-ui/foundation'
 import ExtensionsPane from '../ExtensionsPane.vue'
+
+function mountExtensions(props: Record<string, unknown> = {}) {
+  return mount(ExtensionsPane, { props, global: { plugins: [i18n] } })
+}
 
 function mockPlugins(overrides: Record<string, unknown> = {}) {
   const api = {
@@ -57,7 +62,7 @@ describe('ExtensionsPane', () => {
 
   it('renders the installed list with sensitive-capability badges', async () => {
     mockPlugins()
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
     const row = wrapper.get('[data-id="navide.mini-ide"]')
     expect(row.text()).toContain('navide.mini-ide')
@@ -75,7 +80,7 @@ describe('ExtensionsPane', () => {
         { id: 'navide.git', version: '0.1.0', active: true, optedOut: false },
       ])
     const api = mockPlugins({ listFactoryPackages })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
 
     const row = wrapper.get('[data-factory-id="navide.git"]')
@@ -102,11 +107,68 @@ describe('ExtensionsPane', () => {
         { id: 'navide.git', version: '0.1.0', active: true, optedOut: false },
       ]),
     })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
 
     expect(wrapper.get('[data-factory-id="navide.git"]').text()).toContain('Active')
     expect(wrapper.find('[data-id="navide.git"]').exists()).toBe(false)
+  })
+
+  it('shows Bundled Git Manifest Permissions and its exact package-version grant', async () => {
+    mockPlugins({
+      listInstalled: vi.fn().mockResolvedValue([
+        {
+          id: 'navide.git',
+          requires: ['fs', 'shell'],
+          sensitive: ['fs', 'shell'],
+          packageVersion: '2.0.0',
+          manifestPermissions: { system: ['fs'], shell: 'allowlist' },
+          packageVersionGrant: {
+            packageVersion: '2.0.0',
+            system: ['fs'],
+            shell: 'allowlist',
+          },
+          provenance: 'factory-bundled',
+        },
+      ]),
+      listFactoryPackages: vi.fn().mockResolvedValue([
+        { id: 'navide.git', version: '2.0.0', active: true, optedOut: false },
+      ]),
+    })
+    wrapper = mountExtensions()
+    await flushPromises()
+
+    const row = wrapper.get('[data-factory-id="navide.git"]')
+    expect(row.find('.ext-manifest-permissions').text()).toContain('fs')
+    expect(row.find('.ext-manifest-permissions').text()).toContain('allowlist')
+    expect(row.find('.ext-package-grant').text()).toContain('2.0.0')
+    expect(row.find('.ext-package-grant').text()).toContain('fs')
+    expect(wrapper.find('[data-id="navide.git"]').exists()).toBe(false)
+  })
+
+  it('shows no matching Grant for a Bundled package version without a grant', async () => {
+    mockPlugins({
+      listInstalled: vi.fn().mockResolvedValue([
+        {
+          id: 'navide.git',
+          requires: [],
+          sensitive: [],
+          packageVersion: '2.0.0',
+          manifestPermissions: { system: ['fs'] },
+          packageVersionGrant: null,
+          provenance: 'factory-bundled',
+        },
+      ]),
+      listFactoryPackages: vi.fn().mockResolvedValue([
+        { id: 'navide.git', version: '2.0.0', active: true, optedOut: false },
+      ]),
+    })
+    wrapper = mountExtensions()
+    await flushPromises()
+
+    expect(wrapper.get('[data-factory-id="navide.git"] .ext-package-grant').text()).toContain(
+      'No matching grant'
+    )
   })
 
   it('shows and removes a backend-only package with no capabilities', async () => {
@@ -115,7 +177,7 @@ describe('ExtensionsPane', () => {
       .mockResolvedValueOnce([{ id: 'acme.backend', requires: [], sensitive: [] }])
       .mockResolvedValueOnce([])
     const api = mockPlugins({ listInstalled })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
 
     expect(wrapper.get('[data-id="acme.backend"]').text()).toContain('acme.backend')
@@ -129,7 +191,7 @@ describe('ExtensionsPane', () => {
 
   it('searches the marketplace and installs a non-sensitive plugin directly', async () => {
     const api = mockPlugins()
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
 
     await wrapper.get('.ext-search button').trigger('click')
@@ -155,7 +217,7 @@ describe('ExtensionsPane', () => {
         requiresConfirmation: true,
       }),
     })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
     await wrapper.get('.ext-search button').trigger('click')
     await flushPromises()
@@ -189,7 +251,7 @@ describe('ExtensionsPane', () => {
         requiresRiskConfirmation: true,
       }),
     })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
     await wrapper.get('.ext-search button').trigger('click')
     await flushPromises()
@@ -224,11 +286,85 @@ describe('ExtensionsPane', () => {
         },
       ]),
     })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
     expect(wrapper.get('[data-id="acme.local"] .ext-dev-warning').text()).toContain(
       'Developer Mode only'
     )
+  })
+
+  it('keeps manifest permissions and package-version grants separate from the effective policy', async () => {
+    const api = mockPlugins({
+      listInstalled: vi.fn().mockResolvedValue([
+        {
+          id: 'acme.v2',
+          packageVersion: '2.4.0',
+          requires: ['fs'],
+          sensitive: ['fs'],
+          manifestPermissions: { system: ['fs'], shell: 'allowlist' },
+          packageVersionGrant: {
+            packageVersion: '2.4.0',
+            system: ['fs', 'ui'],
+            shell: 'allowlist',
+            highRiskShellConfirmed: true,
+          },
+        },
+      ]),
+    })
+    const executionPolicy = {
+      inspect: vi.fn().mockResolvedValue({
+        global: {
+          policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: ['git'] },
+          revision: 3,
+          state: 'user',
+        },
+        workspace: {
+          policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: ['git'] },
+          revision: 3,
+          selectedSource: 'user',
+          activeSource: 'user',
+          status: 'active',
+          recommendation: { state: 'missing', policy: null, fingerprint: null },
+          effectivePolicyKey: 'epk1:test',
+          effectivePolicyHash: 'eph1:test',
+        },
+      }),
+      onChanged: vi.fn().mockReturnValue(() => undefined),
+    }
+    ;(window as unknown as Record<string, unknown>).agentTeam = { plugins: api, executionPolicy }
+
+    wrapper = mountExtensions({ workspacePath: '/workspace' })
+    await flushPromises()
+
+    const row = wrapper.get('[data-id="acme.v2"]')
+    expect(row.find('.ext-manifest-permissions').text()).toContain('fs')
+    expect(row.find('.ext-manifest-permissions').text()).toContain('allowlist')
+    expect(row.find('.ext-package-grant').text()).toContain('2.4.0')
+    expect(row.find('.ext-package-grant').text()).toContain('ui')
+
+    const policy = wrapper.get('[data-section="agent-execution-policy"]')
+    expect(policy.text()).toContain('User policy')
+    expect(policy.text()).toContain('Allowlist')
+    expect(policy.text()).toContain('git')
+  })
+
+  it('distinguishes an installed package with no matching grant', async () => {
+    mockPlugins({
+      listInstalled: vi.fn().mockResolvedValue([
+        {
+          id: 'acme.v2',
+          packageVersion: '2.4.0',
+          requires: [],
+          sensitive: [],
+          manifestPermissions: { system: ['fs'] },
+          packageVersionGrant: null,
+        },
+      ]),
+    })
+    wrapper = mountExtensions()
+    await flushPromises()
+
+    expect(wrapper.get('.ext-package-grant').text()).toContain('No matching grant')
   })
 
   it('shows an unsigned warning (never a verified badge) for an unsigned install', async () => {
@@ -242,7 +378,7 @@ describe('ExtensionsPane', () => {
         requiresConfirmation: true,
       }),
     })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
     await wrapper.get('.ext-search button').trigger('click')
     await flushPromises()
@@ -267,7 +403,7 @@ describe('ExtensionsPane', () => {
         requiresConfirmation: true,
       }),
     })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
     await wrapper.get('.ext-search button').trigger('click')
     await flushPromises()
@@ -290,7 +426,7 @@ describe('ExtensionsPane', () => {
         requiresConfirmation: true,
       }),
     })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
     await wrapper.get('.ext-search button').trigger('click')
     await flushPromises()
@@ -314,7 +450,7 @@ describe('ExtensionsPane', () => {
         requiresConfirmation: true,
       }),
     })
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
     await wrapper.get('.ext-search button').trigger('click')
     await flushPromises()
@@ -336,7 +472,7 @@ describe('ExtensionsPane', () => {
 
   it('removes an installed plugin', async () => {
     const api = mockPlugins()
-    wrapper = mount(ExtensionsPane)
+    wrapper = mountExtensions()
     await flushPromises()
     await wrapper.get('[data-id="navide.mini-ide"] .ext-remove').trigger('click')
     await flushPromises()

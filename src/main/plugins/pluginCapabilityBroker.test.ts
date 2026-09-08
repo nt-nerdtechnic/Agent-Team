@@ -16,6 +16,7 @@ import {
   isPublicCapabilityEventAllowed,
   HOST_EVENT_SOURCE_PLUGIN_ID,
   shellTopLevelExecutables,
+  executionPolicyAllows,
   type PublicCapabilityDecision,
   type HostCapabilityContext,
   type CapabilityCall,
@@ -24,6 +25,7 @@ import {
 } from './pluginCapabilityBroker'
 import { HOST_SHELL_EXECUTABLE_ALLOWLIST, STORAGE_LIMITS } from './pluginCapabilityCatalog'
 import { manifestV2CapabilityPolicy, type PluginCapabilityPolicy } from './pluginPermissions'
+import type { ExecutionPolicySnapshot } from './executionPolicy'
 import type { WsResponse } from '../../shared/wsClient'
 
 describe('isCapabilityAllowed', () => {
@@ -258,6 +260,44 @@ describe('Issue 03/04 public Host planner', () => {
     })
   })
 
+  it('keeps legacy Host aliases out of Manifest v2 plans', () => {
+    const uiBinding = { ...binding, pluginId: 'acme.ui' }
+    const uiPolicy = manifestV2CapabilityPolicy({ system: ['ui'] })
+    const uiContext: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion: '1.0.0', system: ['ui'] },
+      runtimeBinding: uiBinding,
+    }
+    const legacyAlias = planCapabilityCall(
+      {
+        pluginId: 'acme.ui',
+        ns: 'ui',
+        method: 'open_external',
+        args: { url: 'https://example.com' },
+        reqId: 'legacy-alias',
+      },
+      uiPolicy,
+      uiContext,
+    )
+    expect(legacyAlias).toMatchObject({
+      kind: 'respond',
+      response: { error: { code: 'METHOD_NOT_FOUND' } },
+    })
+
+    const v2Address = planCapabilityCall(
+      {
+        pluginId: 'acme.ui',
+        ns: 'ui',
+        method: 'openExternal',
+        args: { url: 'https://example.com' },
+        reqId: 'v2-address',
+      },
+      uiPolicy,
+      uiContext,
+    )
+    expect(v2Address).toMatchObject({ kind: 'public', address: 'ui.openExternal' })
+  })
+
   it('fails closed without a workspace or package-version grant', () => {
     expect(planPublicCapabilityCall(call(), policy, context({ runtimeBinding: { ...binding, workspaceId: null } }))).toMatchObject({
       kind: 'deny',
@@ -274,6 +314,28 @@ describe('Issue 03/04 public Host planner', () => {
       kind: 'allow',
       plan: { kind: 'public', address: 'aiCli.startSession' },
     })
+  })
+
+  it('requires first-party eligibility for Plans window navigation', () => {
+    const plansBinding = { ...binding, pluginId: 'navide.plans' }
+    const plansPolicy = manifestV2CapabilityPolicy({ system: ['ui'] })
+    const plansCall = call({
+      pluginId: 'navide.plans',
+      ns: 'ui',
+      method: 'openPlansWindow',
+      args: { path: '.agent-team/plans/example.html' },
+    })
+
+    expect(planPublicCapabilityCall(plansCall, plansPolicy, context({
+      runtimeBinding: plansBinding,
+      userGrant: { packageVersion: '1.0.0', system: ['ui'] },
+      publisherEligible: true,
+    }))).toMatchObject({ kind: 'allow', plan: { address: 'ui.openPlansWindow' } })
+    expect(planPublicCapabilityCall(plansCall, plansPolicy, context({
+      runtimeBinding: plansBinding,
+      userGrant: { packageVersion: '1.0.0', system: ['ui'] },
+      publisherEligible: false,
+    }))).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
   })
 
   it('requires a Host-allowlisted AI CLI profile', () => {
@@ -352,6 +414,23 @@ describe('Issue 03/04 public Host planner', () => {
     ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
   })
 
+  it.each([
+    ['parenthesized command', '(rm -rf .)'],
+    ['braced command', '{ rm -rf .; }'],
+    ['negated command', '! rm -rf .'],
+    ['assignment-prefixed command', 'RM=1 rm x'],
+  ])('fails closed for denylist shell syntax: %s', (_case, command) => {
+    const denylist: ExecutionPolicySnapshot = {
+      policy: { schemaVersion: 1, mode: 'denylist', system: [], shell: ['rm'] },
+      revision: 1,
+      state: 'user',
+    }
+    const agent = { kind: 'agent', source: 'mcp', id: 'agent-1' } as const
+
+    expect(shellTopLevelExecutables(command)).toBeNull()
+    expect(executionPolicyAllows(agent, denylist, 'shell', command)).toBe(false)
+  })
+
   it('rejects Plugin-supplied identity and raw execution fields', () => {
     const result = planPublicCapabilityCall(
       call({ args: { profileId: 'codex', cols: 100, rows: 30, workspaceId: 'spoofed', executable: '/bin/sh' } }),
@@ -363,6 +442,7 @@ describe('Issue 03/04 public Host planner', () => {
 
   it('checks every top-level executable in a shell pipeline or chain', () => {
     expect(shellTopLevelExecutables('git status && echo ok | git diff')).toEqual(['git', 'echo', 'git'])
+    expect(shellTopLevelExecutables('git status |& gh pr list')).toEqual(['git', 'gh'])
     expect(
       planPublicCapabilityCall(
         call({ ns: 'shell', method: 'run', args: { command: 'git status && rm -rf .' } }),
@@ -573,6 +653,20 @@ describe('backendResponseToCapability', () => {
     }))
     expect(cap.ok).toBe(false)
     expect(cap.error).toEqual({ code: 'BACKEND_ERROR', message: 'no such file' })
+  })
+
+  it('preserves a stable resource-limit code from the backend', () => {
+    const cap = backendResponseToCapability('r1', resp({
+      ok: false,
+      payload: null,
+      error: { code: 'RESOURCE_LIMIT', message: 'too many calls' },
+    }))
+
+    expect(cap).toEqual({
+      reqId: 'r1',
+      ok: false,
+      error: { code: 'RESOURCE_LIMIT', message: 'too many calls' },
+    })
   })
 })
 

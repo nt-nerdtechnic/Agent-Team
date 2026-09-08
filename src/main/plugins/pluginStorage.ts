@@ -3,6 +3,7 @@ import { open, readFile, readdir, rename, rm, stat, unlink, mkdir } from 'node:f
 import { basename, dirname, join, relative, sep } from 'node:path'
 import type { JsonValue, StorageGetResult } from '../../../packages/plugin-contracts/src/index'
 import type {
+  AuthenticatedInitiator,
   StoragePartition,
   StorageSnapshotRef,
   StorageSnapshotTier,
@@ -25,6 +26,8 @@ export interface StorageExecution {
   args: Record<string, unknown>
   partition: StoragePartition
   snapshot: StorageSnapshotRef
+  /** Host-authenticated operation origin, retained for internal adapters. */
+  initiator?: AuthenticatedInitiator
 }
 
 export type PluginStorageErrorCode =
@@ -39,6 +42,13 @@ export class PluginStorageError extends Error {
   ) {
     super(message)
     this.name = 'PluginStorageError'
+  }
+}
+
+/** Host lifecycle signal; only an absent snapshot can seed empty storage. */
+export class MissingStorageSnapshotError extends PluginStorageError {
+  constructor() {
+    super('INTERNAL_ERROR', 'storage clone source snapshot does not exist')
   }
 }
 
@@ -535,6 +545,44 @@ export class PluginStorageStore {
     })
   }
 
+  /** Host-only create-once write used by migrations that must never replace a
+   * value written by the active package or another Host surface. The presence
+   * check and write share the same partition lock, so this is atomic with
+   * respect to normal storage execution. */
+  async setIfAbsent(execution: StorageExecution): Promise<boolean> {
+    if (execution.address !== 'storage.set') {
+      invalid('create-once storage writes require storage.set')
+    }
+    const identity = identityOf(execution.snapshot)
+    return this.withPluginOperation(identity.pluginId, async () => {
+      const validated = validateExecution(execution)
+      return this.withLocks([identity], async () => {
+        const result = await this.set(
+          identity,
+          execution.partition,
+          validated.args,
+          validated.value!,
+          true,
+        )
+        return result === true
+      })
+    })
+  }
+
+  /** Validate exactly one Host-selected recovery source without creating or
+   * modifying any snapshot. An absent source is distinct from empty storage. */
+  async assertSnapshotReadable(identity: HostStorageSnapshotIdentity): Promise<void> {
+    assertIdentity(identity)
+    return this.withPluginOperation(identity.pluginId, () => this.withLocks([identity], async () => {
+      const stat = await this.fs.stat(snapshotDirectory(this.resolvedRoot(), identity))
+      if (!stat) throw new MissingStorageSnapshotError()
+      if (stat.kind !== 'directory') internal('storage recovery snapshot is not a directory')
+      for (const file of await this.partitionFiles(identity)) {
+        await this.readPartitionFile(file.path, file.identity, file.scope, file.workspaceId)
+      }
+    }))
+  }
+
   /** Copy one Host-selected snapshot without overwriting an existing target. */
   async cloneSnapshot(
     source: HostStorageSnapshotIdentity,
@@ -556,9 +604,8 @@ export class PluginStorageStore {
         const targetDirectory = snapshotDirectory(root, target)
         try {
           const sourceStat = await this.fs.stat(sourceDirectory)
-          if (!sourceStat || sourceStat.kind !== 'directory') {
-            internal('storage clone source snapshot does not exist')
-          }
+          if (!sourceStat) throw new MissingStorageSnapshotError()
+          if (sourceStat.kind !== 'directory') internal('storage clone source snapshot is not a directory')
           if (await this.fs.stat(targetDirectory)) {
             invalid('storage clone target snapshot already exists')
           }
@@ -728,8 +775,9 @@ export class PluginStorageStore {
     identity: HostStorageSnapshotIdentity,
     partition: StoragePartition,
     args: StorageArgs,
-    normalized: NormalizedJsonValue
-  ): Promise<null> {
+    normalized: NormalizedJsonValue,
+    onlyIfAbsent = false,
+  ): Promise<null | boolean> {
     const current = await this.readPartition(identity, partition)
     const document = current?.document ?? {
       schemaVersion: 2 as const,
@@ -744,7 +792,10 @@ export class PluginStorageStore {
       internal('storage partition scope does not match request')
     }
     const existing = document.entries.find((entry) => entry.key === args.key)
-    if (existing) existing.value = normalized.value
+    if (existing) {
+      if (onlyIfAbsent) return false
+      existing.value = normalized.value
+    }
     else document.entries.push({ key: args.key, value: normalized.value })
     validateUniqueEntries(document.entries, 'storage partition')
     const canonical = canonicalPartition(document)
@@ -768,7 +819,7 @@ export class PluginStorageStore {
       if (error instanceof PluginStorageError) throw error
       throw new PluginStorageError('INTERNAL_ERROR', 'storage partition could not be written')
     }
-    return null
+    return onlyIfAbsent ? true : null
   }
 
   private async delete(

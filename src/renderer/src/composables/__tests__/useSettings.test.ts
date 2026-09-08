@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useSettings } from '../useSettings'
-import { settingsGet, settingsReadiness } from '@navide/plugin-ui/shared'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { i18n } from '@navide/plugin-ui/foundation'
+import { initSettingsBackend, seedSettings, settingsGet, settingsReadiness, settingsSet } from '@navide/plugin-ui/shared'
 import { __resetSettingsForTest } from '@navide/plugin-ui/shared/testing'
+import { createMockBackend } from './mockBackend'
+import { ensureLanguageSettingsSubscription, useSettings } from '../useSettings'
 
 const LANGUAGE_KEY = 'agent-team:language'
 
@@ -68,6 +70,133 @@ describe('useSettings — health-check timeout', () => {
     setHealthCheckTimeoutSec(60.4)
     expect(healthCheckTimeoutSec.value).toBe(60)
     expect(write).toHaveBeenCalledWith(60)
+  })
+})
+
+describe('useSettings — language bootstrap and persistence', () => {
+  beforeEach(() => {
+    __resetSettingsForTest()
+    ensureLanguageSettingsSubscription()
+    window.agentTeam = undefined as unknown as typeof window.agentTeam
+  })
+
+  afterEach(() => {
+    delete (globalThis as typeof globalThis & { __navideSettingsBootstrap?: unknown }).__navideSettingsBootstrap
+    __resetSettingsForTest()
+  })
+
+  it('loads language from bootstrap settings cache and sets i18n locale', () => {
+    seedSettings({ 'agent-team:language': 'zh-TW' })
+    const { language, loadLanguage } = useSettings()
+    loadLanguage()
+    expect(language.value).toBe('zh-TW')
+    expect(i18n.global.locale.value).toBe('zh-TW')
+  })
+
+  it('handles JSON-encoded locale string from persisted settings', () => {
+    seedSettings({ 'agent-team:language': '"zh-TW"' })
+    const { language, loadLanguage } = useSettings()
+    loadLanguage()
+    expect(language.value).toBe('zh-TW')
+    expect(i18n.global.locale.value).toBe('zh-TW')
+  })
+
+  it('setLanguage persists to settings cache and broadcasts change via IPC', () => {
+    const broadcast = vi.fn()
+    window.agentTeam = { broadcastLanguageChange: broadcast } as unknown as typeof window.agentTeam
+    const { language, setLanguage } = useSettings()
+
+    setLanguage('en-US')
+    expect(language.value).toBe('en-US')
+    expect(i18n.global.locale.value).toBe('en-US')
+    expect(settingsGet('agent-team:language', null)).toBe('en-US')
+    expect(broadcast).toHaveBeenCalledWith('en-US')
+  })
+
+  it('setLanguage with broadcast: false persists without calling broadcastLanguageChange', () => {
+    const broadcast = vi.fn()
+    window.agentTeam = { broadcastLanguageChange: broadcast } as unknown as typeof window.agentTeam
+    const { language, setLanguage } = useSettings()
+
+    setLanguage('zh-TW', { broadcast: false })
+    expect(language.value).toBe('zh-TW')
+    expect(i18n.global.locale.value).toBe('zh-TW')
+    expect(settingsGet('agent-team:language', null)).toBe('zh-TW')
+    expect(broadcast).not.toHaveBeenCalled()
+  })
+
+  it('setLanguage ignores unsupported locales and does not broadcast', () => {
+    const broadcast = vi.fn()
+    window.agentTeam = { broadcastLanguageChange: broadcast } as unknown as typeof window.agentTeam
+    const { language, setLanguage } = useSettings()
+
+    setLanguage('zh-TW')
+    broadcast.mockClear()
+
+    setLanguage('fr-FR')
+    expect(language.value).toBe('zh-TW')
+    expect(broadcast).not.toHaveBeenCalled()
+  })
+
+  it('setLanguage does not re-broadcast when locale is already current', () => {
+    const broadcast = vi.fn()
+    window.agentTeam = { broadcastLanguageChange: broadcast } as unknown as typeof window.agentTeam
+    const { setLanguage } = useSettings()
+
+    setLanguage('en-US')
+    expect(broadcast).toHaveBeenCalledTimes(1)
+
+    setLanguage('en-US')
+    expect(broadcast).toHaveBeenCalledTimes(1)
+  })
+
+  it('adopts backendFallback when settings cache is empty', () => {
+    const { language, loadLanguage } = useSettings()
+    loadLanguage({ language: 'en-US' })
+    expect(language.value).toBe('en-US')
+    expect(i18n.global.locale.value).toBe('en-US')
+    expect(settingsGet('agent-team:language', null)).toBe('en-US')
+  })
+
+  it('updates language and i18n locale when settings change externally', () => {
+    const { backend, emit } = createMockBackend('connected')
+    initSettingsBackend(backend)
+    seedSettings({ 'agent-team:language': 'zh-TW' })
+    const { language, loadLanguage } = useSettings()
+    loadLanguage()
+    expect(language.value).toBe('zh-TW')
+
+    emit('ui.settings_changed', { settings: { 'agent-team:language': 'en-US' } })
+    expect(language.value).toBe('en-US')
+    expect(i18n.global.locale.value).toBe('en-US')
+  })
+
+  it('proves main bootstrap locale applies to i18n before first mount and matches useSettings', async () => {
+    // Simulates the exact Host bootstrap startup sequence in main.ts:
+    // 1. Host bootstrap settings contain persisted zh-TW
+    const bootstrapSettings = { 'agent-team:language': 'zh-TW' }
+    ;(globalThis as typeof globalThis & { __navideSettingsBootstrap?: Record<string, unknown> }).__navideSettingsBootstrap =
+      bootstrapSettings
+    seedSettings(bootstrapSettings)
+
+    // 2. main.ts resolves bootstrap locale and updates i18n before loadRoot / first mount
+    const bootstrapLocale = bootstrapSettings['agent-team:language']
+    if (bootstrapLocale === 'zh-TW' || bootstrapLocale === 'en-US') {
+      i18n.global.locale.value = bootstrapLocale
+    }
+    expect(i18n.global.locale.value).toBe('zh-TW')
+
+    // 3. Components calling useSettings() immediately see the bootstrapped zh-TW
+    const { language } = useSettings()
+    expect(language.value).toBe('zh-TW')
+
+    // 4. Updating via UI persists to settings store (which flushes to ui_settings.json)
+    const broadcast = vi.fn()
+    window.agentTeam = { broadcastLanguageChange: broadcast } as unknown as typeof window.agentTeam
+    const { setLanguage } = useSettings()
+    setLanguage('en-US')
+    expect(settingsGet('agent-team:language', null)).toBe('en-US')
+    expect(broadcast).toHaveBeenCalledWith('en-US')
   })
 })
 

@@ -163,7 +163,11 @@ describe('third-party plugin external workspace', () => {
       const externalProject = join(temporaryRoot, 'example')
       try {
         mkdirSync(artifacts)
-        for (const schemaName of ['plugin-manifest-v2.schema.json', 'capabilities-v1.json']) {
+        for (const schemaName of [
+          'plugin-manifest-v2.schema.json',
+          'capabilities-v1.json',
+          'execution-policy-v1.schema.json',
+        ]) {
           expect(
             readFileSync(join(repository, 'packages', 'plugin-contracts', 'src', 'schemas', schemaName), 'utf8')
           ).toBe(readFileSync(join(repository, 'docs', 'plugin-contracts', schemaName), 'utf8'))

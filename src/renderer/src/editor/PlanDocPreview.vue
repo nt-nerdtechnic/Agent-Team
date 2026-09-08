@@ -34,6 +34,7 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const frame = ref<HTMLIFrameElement | null>(null)
+const currentDocumentToken = ref<string | null>(null)
 const docHtml = ref('')
 const loadError = ref(false)
 // Backend's own reason ("not a file", "path escapes workspace", a WS timeout…).
@@ -55,6 +56,7 @@ let todoIds: string[] = []
 let anchors: string[] = []
 
 function setLoadError(reason: unknown): void {
+  currentDocumentToken.value = null
   loadError.value = true
   loadErrorDetail.value =
     reason instanceof Error ? reason.message : String(reason ?? '').trim()
@@ -93,7 +95,7 @@ async function loadDoc(): Promise<void> {
     for (const note of meta?.reviewNotes ?? []) {
       if (!note.resolved && note.anchor) counts[note.anchor] = (counts[note.anchor] ?? 0) + 1
     }
-    docHtml.value = preparePlanDocHtml(content, {
+    const prepared = preparePlanDocHtml(content, {
       anchors: counts,
       commentLabel: t('pane.plans.doc-comment'),
       editLabel: t('pane.plans.edit'),
@@ -102,6 +104,8 @@ async function loadDoc(): Promise<void> {
       cancelLabel: t('pane.plans.cancel'),
       scrollY: scrollY.value,
     })
+    docHtml.value = prepared.html
+    currentDocumentToken.value = prepared.documentToken
     loadError.value = false
     loadErrorDetail.value = ''
   } catch (err) {
@@ -111,6 +115,7 @@ async function loadDoc(): Promise<void> {
 
 const onMessage = createPlanRuntimeMessageHandler({
   getSourceWindow: () => frame.value?.contentWindow,
+  getDocumentToken: () => currentDocumentToken.value ?? '',
   getTodoIds: () => todoIds,
   getAnchors: () => anchors,
   onTodoClicked: (todoId, alt) => emit('todo-clicked', { todoId, alt }),
@@ -178,6 +183,7 @@ defineExpose({ scrollToAnchor, isEditing, cancelEdit })
     <iframe
       v-else
       ref="frame"
+      :key="currentDocumentToken ?? relPath"
       class="pdp-frame"
       sandbox="allow-scripts"
       :srcdoc="docHtml"

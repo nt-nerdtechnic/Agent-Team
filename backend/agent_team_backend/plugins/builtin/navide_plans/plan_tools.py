@@ -39,6 +39,69 @@ from agent_team_backend.plan_provisioning import TEMPLATE_FILENAME, ensure_plan_
 from mcp.server.fastmcp import Context
 
 PLANS_REL_DIR = ".agent-team/plans"
+_LEGACY_SAFE_BEFORE_DISPATCH = "legacy-safe-before-dispatch"
+_READ_ONLY_PLAN_METHODS = frozenset({"plans.list", "plans.read"})
+_MUTATING_PLAN_METHODS = frozenset({
+    "plans.create",
+    "plans.update_stage",
+    "plans.update_todo",
+    "plans.add_note",
+})
+
+
+async def _host_agent_plan_call(
+    caller: Caller,
+    workspace_path: str,
+    name: str,
+    arguments: dict[str, Any],
+) -> Any:
+    """Route through the Host; recover only from its pre-dispatch verdict.
+
+    Read-only operations deliberately use the same Host-minted disposition as
+    mutations: a generic availability response cannot prove the current agent
+    Execution Policy still permits the filesystem operation.
+    """
+    from agent_team_backend.mcp_server.server import request_host_agent_workspace_backend
+
+    response = await request_host_agent_workspace_backend(
+        "navide.plans",
+        workspace_path,
+        {"reqId": f"mcp:{secrets.token_hex(16)}", "name": name, "args": arguments},
+        caller=caller,
+    )
+    if not isinstance(response, dict):
+        raise FsError("production Plans Host reply was malformed", code="BACKEND_UNAVAILABLE")
+    if response.get("ok") is True:
+        if "result" not in response:
+            raise FsError("production Plans Host reply was malformed", code="BACKEND_UNAVAILABLE")
+        return response["result"]
+    if response.get("ok") is not False:
+        raise FsError("production Plans Host reply was malformed", code="BACKEND_UNAVAILABLE")
+
+    error = response.get("error")
+    error_code = response.get("error_code")
+    if isinstance(error, dict):
+        error_code = error.get("code") or error_code
+        message = error.get("message")
+    else:
+        message = error
+    if (
+        name in _READ_ONLY_PLAN_METHODS | _MUTATING_PLAN_METHODS and
+        response.get("recoveryDisposition") == _LEGACY_SAFE_BEFORE_DISPATCH
+    ):
+        if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+            raise FsError("production Plans Host reply was malformed", code="BACKEND_UNAVAILABLE")
+        # This exact value is a Host capability verdict, never an inference
+        # from an error code. It is required for both the read-only recovery
+        # path and every mutation path.
+        return _NO_HOST_ROUTE
+    raise FsError(
+        str(message or "production Plans backend request was denied"),
+        code=error_code if isinstance(error_code, str) else "BACKEND_UNAVAILABLE",
+    )
+
+
+_NO_HOST_ROUTE = object()
 
 
 # ── sync filesystem layer (runs in a worker thread) ─────────────────────────
@@ -398,6 +461,9 @@ async def plan_list(ctx: Context, workspace_path: str = "") -> list[dict[str, An
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(caller, workspace_path, "plans.list", {})
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(_list_plans_sync, workspace_path)
 
 
@@ -414,6 +480,9 @@ async def plan_read(rel_path: str, ctx: Context, workspace_path: str = "") -> di
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(caller, workspace_path, "plans.read", {"rel_path": rel_path})
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(_read_plan_sync, workspace_path, rel_path)
 
 
@@ -455,6 +524,14 @@ async def plan_create(
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(
+        caller,
+        workspace_path,
+        "plans.create",
+        {"name": name, "overview": overview, "todos": todos, "stage": stage},
+    )
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     result = await asyncio.to_thread(
         _create_plan_sync, workspace_path, name, overview, todos, stage
     )
@@ -479,6 +556,14 @@ async def plan_update_stage(
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(
+        caller,
+        workspace_path,
+        "plans.update_stage",
+        {"rel_path": rel_path, "stage": stage},
+    )
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(_update_stage_sync, workspace_path, rel_path, stage)
 
 
@@ -509,6 +594,14 @@ async def plan_update_todo(
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(
+        caller,
+        workspace_path,
+        "plans.update_todo",
+        {"rel_path": rel_path, "todo_id": todo_id, "status": status, "owner": owner},
+    )
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(
         _update_todo_sync, workspace_path, rel_path, todo_id, status, owner
     )
@@ -530,6 +623,14 @@ async def plan_add_note(
     """
     caller = resolve_caller(ctx)
     workspace_path = await caller_workspace(caller, workspace_path)
+    routed = await _host_agent_plan_call(
+        caller,
+        workspace_path,
+        "plans.add_note",
+        {"rel_path": rel_path, "text": text, "author": author},
+    )
+    if routed is not _NO_HOST_ROUTE:
+        return routed
     return await asyncio.to_thread(_add_note_sync, workspace_path, rel_path, text, author)
 
 
