@@ -347,11 +347,170 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** Return the executable token at the start of every shell pipeline/chain segment.
+/** Shell interpreters that run an inline command string passed with `-c`
+ * (including combined short flags such as `-lc`). Their command argument is
+ * parsed recursively so the interpreter cannot hide the real executable. */
+const SHELL_INTERPRETER_WRAPPERS: readonly string[] = ['sh', 'bash', 'zsh', 'dash']
+
+/** Wrappers that forward their trailing arguments to another executable. */
+const ARGUMENT_FORWARDING_WRAPPERS: readonly string[] = [
+  'env',
+  'sudo',
+  'nice',
+  'nohup',
+  'xargs',
+  'command',
+  'time',
+  'doas',
+]
+
+/** Wrappers can nest (`sudo env sh -c ...`); cap the recursion so a crafted
+ * command cannot drive unbounded work in the authorization path. */
+const MAX_SHELL_WRAPPER_DEPTH = 8
+
+function isShellWrapperToken(token: string): boolean {
+  const canonical = token.toLowerCase()
+  return SHELL_INTERPRETER_WRAPPERS.includes(canonical) || ARGUMENT_FORWARDING_WRAPPERS.includes(canonical)
+}
+
+/** Reject executable tokens the Host cannot resolve lexically. */
+function resolvableExecutableToken(token: string): boolean {
+  if (!token) return false
+  // A leading assignment changes the environment of the command that
+  // follows it. Version 1 does not resolve shell prefixes, so do not let a
+  // denylist inspect the assignment token and miss the real executable.
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)) return false
+  // A path-qualified token is not reduced to a basename: doing so would let
+  // a Plugin replace an allowlisted command with an arbitrary same-named
+  // executable from the workspace or a temporary directory.
+  if (token.includes('/') || token.includes('\\')) return false
+  // A token built by parameter expansion is only known at execution time.
+  if (token.includes('$')) return false
+  return true
+}
+
+/** Split one already-segmented command into its whitespace-separated tokens,
+ * removing quoting exactly as the first-token scanner does. */
+function shellSegmentTokens(segment: string): string[] | null {
+  const tokens: string[] = []
+  let token = ''
+  let started = false
+  let quote: 'single' | 'double' | null = null
+  let escaped = false
+  for (let index = 0; index < segment.length; index += 1) {
+    const char = segment[index]
+    if (escaped) {
+      token += char
+      escaped = false
+      continue
+    }
+    if (char === '\\' && quote !== 'single') {
+      escaped = true
+      started = true
+      continue
+    }
+    if (quote === 'single') {
+      if (char === "'") quote = null
+      else token += char
+      continue
+    }
+    if (quote === 'double') {
+      if (char === '"') quote = null
+      else token += char
+      continue
+    }
+    if (char === "'") {
+      quote = 'single'
+      started = true
+      continue
+    }
+    if (char === '"') {
+      quote = 'double'
+      started = true
+      continue
+    }
+    if (/\s/.test(char)) {
+      if (started) {
+        tokens.push(token)
+        token = ''
+        started = false
+      }
+      continue
+    }
+    token += char
+    started = true
+  }
+  if (quote !== null || escaped) return null
+  if (started) tokens.push(token)
+  return tokens.length > 0 ? tokens : null
+}
+
+/** Return the inline command string a shell interpreter was given with `-c`,
+ * or null when the interpreter runs something that is not statically known
+ * (a script operand, standard input, or a missing argument). */
+function inlineShellCommandArgument(tokens: readonly string[]): string | null {
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    // `--` ends option parsing; whatever follows is a script operand.
+    if (token === '--') return null
+    if (token.startsWith('--')) continue
+    if (token.startsWith('-') && token.length > 1) {
+      if (!token.includes('c')) continue
+      return tokens[index + 1] ?? null
+    }
+    return null
+  }
+  return null
+}
+
+/** Return the argument slice a forwarding wrapper hands to the next
+ * executable, or null when the wrapper's own options make that undecidable. */
+function forwardedWrapperArguments(tokens: readonly string[]): readonly string[] | null {
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)) continue
+    // An option may or may not consume the token after it, so the forwarded
+    // executable cannot be identified without emulating the wrapper.
+    if (token.startsWith('-')) return null
+    return tokens.slice(index)
+  }
+  return null
+}
+
+/** Resolve one segment's tokens to every executable it runs: the wrapper
+ * itself plus, recursively, whatever the wrapper hands execution to. */
+function resolveShellExecutableTokens(tokens: readonly string[], depth: number): string[] | null {
+  if (depth > MAX_SHELL_WRAPPER_DEPTH) return null
+  const token = tokens[0]
+  if (token === undefined || !resolvableExecutableToken(token)) return null
+  const canonical = token.toLowerCase()
+  if (SHELL_INTERPRETER_WRAPPERS.includes(canonical)) {
+    const inline = inlineShellCommandArgument(tokens)
+    if (inline === null) return null
+    const nested = shellExecutables(inline, depth + 1)
+    return nested === null ? null : [token, ...nested]
+  }
+  if (ARGUMENT_FORWARDING_WRAPPERS.includes(canonical)) {
+    const forwarded = forwardedWrapperArguments(tokens)
+    if (forwarded === null) return null
+    const nested = resolveShellExecutableTokens(forwarded, depth + 1)
+    return nested === null ? null : [token, ...nested]
+  }
+  return [token]
+}
+
+/** Return every executable a shell pipeline/chain runs: the token at the start
+ * of each segment plus, for wrappers such as `sh -c` or `env`, the executables
+ * those wrappers go on to run.
  * This is intentionally a lexical check: the Host never executes or expands the
- * command while deciding whether it is allowlisted. Version 1 does not inspect
- * subcommands or arguments. */
+ * command while deciding whether it is allowlisted. A wrapper whose target
+ * cannot be resolved lexically fails closed. */
 export function shellTopLevelExecutables(command: string): string[] | null {
+  return shellExecutables(command, 0)
+}
+
+function shellExecutables(command: string, depth: number): string[] | null {
+  if (depth > MAX_SHELL_WRAPPER_DEPTH) return null
   if (command.trim().length === 0) return null
   const segments: string[] = []
   let segmentStart = 0
@@ -460,15 +619,18 @@ export function shellTopLevelExecutables(command: string): string[] | null {
       token += char
     }
     if (!token || tokenQuote !== null || tokenEscaped) return null
-    // A leading assignment changes the environment of the command that
-    // follows it. Version 1 does not resolve shell prefixes, so do not let a
-    // denylist inspect the assignment token and miss the real executable.
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)) return null
-    // A path-qualified token is not reduced to a basename: doing so would let
-    // a Plugin replace an allowlisted command with an arbitrary same-named
-    // executable from the workspace or a temporary directory.
-    if (token.includes('/') || token.includes('\\')) return null
-    executables.push(token.trim())
+    if (!resolvableExecutableToken(token)) return null
+    if (!isShellWrapperToken(token)) {
+      executables.push(token.trim())
+      continue
+    }
+    // A wrapper hides the executable that actually runs, so the whole segment
+    // has to be tokenized and followed through.
+    const segmentTokens = shellSegmentTokens(segment)
+    if (segmentTokens === null) return null
+    const resolved = resolveShellExecutableTokens(segmentTokens, depth)
+    if (resolved === null) return null
+    executables.push(...resolved)
   }
   return executables.every((value) => value.length > 0) ? executables : null
 }

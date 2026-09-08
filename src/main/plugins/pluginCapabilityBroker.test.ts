@@ -431,6 +431,84 @@ describe('Issue 03/04 public Host planner', () => {
     expect(executionPolicyAllows(agent, denylist, 'shell', command)).toBe(false)
   })
 
+  const gitDenylist: ExecutionPolicySnapshot = {
+    policy: { schemaVersion: 1, mode: 'denylist', system: [], shell: ['git'] },
+    revision: 1,
+    state: 'user',
+  }
+  const denylistAgent = { kind: 'agent', source: 'mcp', id: 'agent-1' } as const
+
+  it.each([
+    ['sh -c', 'sh -c "git push --force"'],
+    ['bash -c', 'bash -c "git push --force"'],
+    ['zsh -c', "zsh -c 'git push --force'"],
+    ['dash -c', "dash -c 'git push --force'"],
+    ['bash -lc', 'bash -lc "git push --force"'],
+    ['sh -ic', 'sh -ic "git push --force"'],
+    ['env', 'env git push --force'],
+    ['sudo', 'sudo git push --force'],
+    ['nice', 'nice git push --force'],
+    ['nohup', 'nohup git push --force'],
+    ['xargs', 'xargs git push --force'],
+    ['command', 'command git push --force'],
+    ['time', 'time git push --force'],
+    ['doas', 'doas git push --force'],
+    ['env assignment prefix', 'env GIT_DIR=/tmp/x git push --force'],
+    ['nested forwarding wrappers', 'sudo env nice git push --force'],
+    ['wrapper inside an interpreter', 'sh -c "env git push --force"'],
+    ['interpreter inside a wrapper', 'env sh -c "git push --force"'],
+    ['wrapper in a later chain segment', 'echo ok && sudo git push --force'],
+  ])('blocks a denylisted executable hidden behind %s', (_case, command) => {
+    expect(executionPolicyAllows(denylistAgent, gitDenylist, 'shell', command)).toBe(false)
+  })
+
+  it.each([
+    ['interpreter command built by expansion', 'sh -c "$CMD"'],
+    ['interpreter running a script operand', 'sh script.sh'],
+    ['interpreter with no inline command', 'bash'],
+    ['interpreter with a missing -c argument', 'sh -c'],
+    ['interpreter after end of options', 'sh -- run.sh'],
+    ['xargs reading from standard input', 'xargs'],
+    ['wrapper option that may consume its argument', 'nice -n 10 echo hi'],
+    ['wrapper with an unresolvable target', 'env $CMD'],
+    ['wrapper target given by path', 'sudo /usr/bin/git push'],
+    ['wrapper nesting beyond the depth cap', `${'env '.repeat(12)}echo hi`],
+  ])('fails closed when a wrapper target is undeterminable: %s', (_case, command) => {
+    expect(shellTopLevelExecutables(command)).toBeNull()
+    expect(executionPolicyAllows(denylistAgent, gitDenylist, 'shell', command)).toBe(false)
+  })
+
+  it('reports the wrapper and the executable it runs', () => {
+    expect(shellTopLevelExecutables('sh -c "git status"')).toEqual(['sh', 'git'])
+    expect(shellTopLevelExecutables('env git status')).toEqual(['env', 'git'])
+    expect(shellTopLevelExecutables('sudo env nice git status')).toEqual(['sudo', 'env', 'nice', 'git'])
+  })
+
+  it('keeps wrapped commands out of the Host allowlist path', () => {
+    // `sh` is not Host-allowlisted, so a wrapped command stays denied exactly
+    // as it was before wrappers were resolved: never an easier path than
+    // running the allowlisted executable directly.
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command: 'sh -c "git status"' } }),
+        policy,
+        context()
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it('still allows ordinary quoted commands', () => {
+    expect(shellTopLevelExecutables('git commit -m "fix(ui): x"')).toEqual(['git'])
+    expect(executionPolicyAllows(denylistAgent, gitDenylist, 'shell', 'echo ok')).toBe(true)
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command: 'git commit -m "fix(ui): x"' } }),
+        policy,
+        context()
+      )
+    ).toMatchObject({ kind: 'allow', plan: { address: 'shell.run', shellMode: 'allowlist' } })
+  })
+
   it('rejects Plugin-supplied identity and raw execution fields', () => {
     const result = planPublicCapabilityCall(
       call({ args: { profileId: 'codex', cols: 100, rows: 30, workspaceId: 'spoofed', executable: '/bin/sh' } }),
