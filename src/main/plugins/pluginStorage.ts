@@ -45,6 +45,13 @@ export class PluginStorageError extends Error {
   }
 }
 
+/** Host lifecycle signal; only an absent snapshot can seed empty storage. */
+export class MissingStorageSnapshotError extends PluginStorageError {
+  constructor() {
+    super('INTERNAL_ERROR', 'storage clone source snapshot does not exist')
+  }
+}
+
 export interface HostStorageSnapshotIdentity {
   pluginId: string
   packageVersion: string
@@ -562,6 +569,20 @@ export class PluginStorageStore {
     })
   }
 
+  /** Validate exactly one Host-selected recovery source without creating or
+   * modifying any snapshot. An absent source is distinct from empty storage. */
+  async assertSnapshotReadable(identity: HostStorageSnapshotIdentity): Promise<void> {
+    assertIdentity(identity)
+    return this.withPluginOperation(identity.pluginId, () => this.withLocks([identity], async () => {
+      const stat = await this.fs.stat(snapshotDirectory(this.resolvedRoot(), identity))
+      if (!stat) throw new MissingStorageSnapshotError()
+      if (stat.kind !== 'directory') internal('storage recovery snapshot is not a directory')
+      for (const file of await this.partitionFiles(identity)) {
+        await this.readPartitionFile(file.path, file.identity, file.scope, file.workspaceId)
+      }
+    }))
+  }
+
   /** Copy one Host-selected snapshot without overwriting an existing target. */
   async cloneSnapshot(
     source: HostStorageSnapshotIdentity,
@@ -583,9 +604,8 @@ export class PluginStorageStore {
         const targetDirectory = snapshotDirectory(root, target)
         try {
           const sourceStat = await this.fs.stat(sourceDirectory)
-          if (!sourceStat || sourceStat.kind !== 'directory') {
-            internal('storage clone source snapshot does not exist')
-          }
+          if (!sourceStat) throw new MissingStorageSnapshotError()
+          if (sourceStat.kind !== 'directory') internal('storage clone source snapshot is not a directory')
           if (await this.fs.stat(targetDirectory)) {
             invalid('storage clone target snapshot already exists')
           }

@@ -15020,6 +15020,27 @@ function paneIsCommander(p: ActivePane): boolean {
              both at once. Home is collapsed to ~, the same shortening the
              sidebar's paths use. -->
         <span class="titlebar-id">
+          <!-- Back to the Welcome picker, which doubles as the workspace
+               switcher. Reads as "back" from here: leading the workspace
+               identity it takes you out of, rather than sitting in the
+               right-hand cluster among controls that act on the window.
+               Inside .titlebar-id on purpose — that block is centred, so this
+               is the only placement that stays next to the name instead of
+               parking at the 70% block's far edge.
+               Hover-only, like .titlebar-reveal on the other side of the name.
+               That is also what keeps it clickable: the same hover swaps the
+               name for the longer path and re-centres the row, so a button
+               that was already on screen would slide out from under a pointer
+               moving towards it. Appearing with the swap, it lands in its
+               settled position and stays there for as long as the pointer is
+               inside the block. -->
+          <button
+            v-if="!isDetachedWindow"
+            class="titlebar-ws-btn titlebar-back"
+            @mousedown.stop
+            @click="onSwitchWorkspace"
+            :title="$t('action.switch-workspace')"
+          >↺</button>
           <span class="titlebar-name titlebar-name--ws">{{ workspaceBaseName }}</span>
           <span v-if="workspaceDisplayPath" class="titlebar-path">{{ workspaceDisplayPath }}</span>
           <!-- Rides with the path rather than the name: it acts on the folder,
@@ -15095,19 +15116,6 @@ function paneIsCommander(p: ActivePane): boolean {
         @click="reattachThisWindow"
         :title="$t('action.reattach-group')"
       >⇲</button>
-      <!-- Back to the Welcome picker, which doubles as the workspace switcher.
-           Removed by accident in 2a53718c: only the button went, while
-           onSwitchWorkspace, the @switch-workspace binding and the i18n string
-           all stayed, leaving the feature reachable by nothing. Restored here
-           rather than in ControlPane's old spot because the workspace identity
-           now lives in the titlebar, next to the detach button it pairs with. -->
-      <button
-        v-if="!isDetachedWindow && workspaceSelected"
-        class="titlebar-ws-btn"
-        @mousedown.stop
-        @click="onSwitchWorkspace"
-        :title="$t('action.switch-workspace')"
-      >↺</button>
       <!-- Account: sits immediately before the gear so the gear keeps its
            edge position (see the plugin-cluster note above). -->
       <button
@@ -16544,6 +16552,12 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--bg-hover);
   color: var(--text-bright);
 }
+/* Back button: shown only while the pointer is on the identity block, the same
+   rule .titlebar-reveal follows at the other end of the name. Has to stay
+   BELOW .titlebar-ws-btn — that rule sets display:flex at equal specificity,
+   so moving this above it silently makes the button permanent. */
+.titlebar-back { display: none; }
+.titlebar-id:hover .titlebar-back { display: flex; }
 .titlebar-gear {
   -webkit-app-region: no-drag;
   flex-shrink: 0;

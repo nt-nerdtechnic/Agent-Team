@@ -58,6 +58,45 @@ function registerPolicyIpc(
 }
 
 describe('execution policy IPC', () => {
+  it('requires fingerprint-bound high-risk confirmation before selecting repository full mode', async () => {
+    const userData = temporaryUserData()
+    try {
+      const workspacePath = join(userData, 'workspace')
+      mkdirSync(join(workspacePath, '.navide'), { recursive: true })
+      const policyPath = join(workspacePath, '.navide/execution-policy.json')
+      writeFileSync(policyPath, JSON.stringify(FULL_POLICY))
+      const store = new ExecutionPolicySourceStore(userData)
+      const changed = vi.fn()
+      handlers.clear()
+      registerPolicyIpc(store, workspacePath, changed)
+      const before = store.getEffectivePolicy(workspacePath)
+      const request = { source: 'repository', expectedFingerprint: before.recommendation.fingerprint }
+
+      const denied = await call('execution-policy:select-source', { workspacePath, request })
+      expect(denied).toMatchObject({ ok: false, error: { code: 'high-risk-confirmation-required' } })
+      expect(store.getEffectivePolicy(workspacePath)).toEqual(before)
+      expect(changed).not.toHaveBeenCalled()
+
+      writeFileSync(policyPath, JSON.stringify({ schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: ['git'] }))
+      const stale = await call('execution-policy:select-source', { workspacePath, request, highRiskConfirmed: true })
+      expect(stale).toMatchObject({ ok: false, error: { code: 'recommendation-stale' } })
+      expect(changed).not.toHaveBeenCalled()
+
+      writeFileSync(policyPath, JSON.stringify(FULL_POLICY))
+      const current = store.getEffectivePolicy(workspacePath)
+      const accepted = await call('execution-policy:select-source', {
+        workspacePath,
+        request: { source: 'repository', expectedFingerprint: current.recommendation.fingerprint },
+        highRiskConfirmed: true,
+      })
+      expect(accepted).toMatchObject({ ok: true, changed: true })
+      expect(store.getEffectivePolicy(workspacePath).policy.mode).toBe('full')
+      expect(changed).toHaveBeenCalledTimes(1)
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+
   it('requires explicit high-risk confirmation before persisting full mode', async () => {
     const userData = temporaryUserData()
     try {

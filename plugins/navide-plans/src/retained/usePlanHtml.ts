@@ -392,9 +392,9 @@ function enclosingElement(
   return best
 }
 
-/** Next same-or-higher heading (`<h2`/`<h3`) or section close after `from`. */
-function nextHeadingBoundary(content: string, from: number): number {
-  const re = /<h2\b|<h3\b|<\/section\s*>/gi
+/** Next heading at the same or higher level; lower headings belong to the body. */
+function nextHeadingBoundary(content: string, from: number, level: number): number {
+  const re = new RegExp(`<h[1-${level}]\\b`, 'gi')
   re.lastIndex = from
   const m = re.exec(content)
   return m ? m.index : content.length
@@ -434,7 +434,12 @@ function locateSection(content: string, anchor: string): SectionLoc | null {
         return { kind: 'section', regionStart: section.start, regionEnd: section.end, bodyStart, bodyEnd }
       }
     }
-    const bodyEnd = nextHeadingBoundary(content, bodyStart)
+    let bodyEnd = nextHeadingBoundary(content, bodyStart, Number(tag.slice(1)))
+    // A heading's body cannot include its enclosing layout's closing tags.
+    for (const parentTag of ['section', 'div', 'main', 'article', 'body']) {
+      const parent = enclosingElement(content, openStart, parentTag, new RegExp(`<${parentTag}\\b`, 'gi'))
+      if (parent) bodyEnd = Math.min(bodyEnd, content.toLowerCase().lastIndexOf(`</${parentTag}`, parent.end))
+    }
     return { kind: 'heading', regionStart: openStart, regionEnd: bodyEnd, bodyStart, bodyEnd }
   }
   return null

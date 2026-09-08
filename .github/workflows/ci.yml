@@ -15,21 +15,20 @@ concurrency:
 
 jobs:
   dependency-audit:
-    # Known-vulnerability scan of the locked dependency trees (SCA). Advisory
-    # for now: the first run found a backlog (see .agent-team/plans/
-    # navide-security-program_*.html, A1), and a red gate nobody can clear is
-    # a gate people learn to ignore. Flip continue-on-error off once the
-    # backlog is cleared.
-    name: Dependency audit (advisory)
+    # Known-vulnerability scan of the locked dependency trees (SCA). This gate
+    # blocks: the backlog it was provisionally exempted for is cleared (see
+    # .agent-team/plans/dependency-audit-backlog_f203f7.html), so a new
+    # advisory at high or above now fails the run instead of adding another
+    # red cross nobody reads.
+    name: Dependency audit
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -43,7 +42,7 @@ jobs:
         continue-on-error: true
         run: pnpm audit --audit-level=high
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
       - name: pip-audit (backend lock)
         id: pip-audit
         continue-on-error: true
@@ -69,13 +68,13 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -119,15 +118,15 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -189,9 +188,7 @@ jobs:
       - name: Verify production Plans bundle excludes fixture
         run: |
           pnpm run build:plans
-          test -f dist-plugins/plans/index.html
-          test ! -e dist-plugins/plans/backend/navide-plans
-          test ! -e dist-plugins/plans/backend/navide-plans-go
+          node scripts/verify-plans-production.mjs
 
   registry:
     name: Marketplace registry and contract checks
@@ -200,15 +197,15 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: marketplace/registry/uv.lock
@@ -230,7 +227,7 @@ jobs:
     # Preserve the existing required-check name for branch protection.
     name: Lint and test
     if: ${{ always() }}
-    needs: [frontend, backend, plans, registry]
+    needs: [frontend, backend, plans, registry, dependency-audit]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -240,8 +237,10 @@ jobs:
           BACKEND_RESULT: ${{ needs.backend.result }}
           PLANS_RESULT: ${{ needs.plans.result }}
           REGISTRY_RESULT: ${{ needs.registry.result }}
+          AUDIT_RESULT: ${{ needs['dependency-audit'].result }}
         run: |
           test "$FRONTEND_RESULT" = success
           test "$BACKEND_RESULT" = success
           test "$PLANS_RESULT" = success
           test "$REGISTRY_RESULT" = success
+          test "$AUDIT_RESULT" = success

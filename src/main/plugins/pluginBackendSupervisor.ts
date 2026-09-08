@@ -1024,7 +1024,7 @@ export class PluginBackendSupervisor {
   private readonly ignoredRequestIds = new Set<WireRequestId>()
   private readonly bridgeOrigins = new Map<string, BridgeOriginBinding>()
   private readonly bridgeRequests = new Map<string, PendingBridgeRequest>()
-  private readonly bridgeWatchOrigins = new Set<string>()
+  private readonly bridgeWatchOrigins = new Map<string, PendingBridgeRequest>()
   private startTask?: Promise<BackendHealth>
   private restartTask?: Promise<BackendHealth>
   private closeTask?: Promise<void>
@@ -1962,7 +1962,7 @@ export class PluginBackendSupervisor {
       )
     }
     this.bridgeRequests.set(request.id, pending)
-    if (request.operation === 'watch') this.bridgeWatchOrigins.add(requestOriginKey)
+    if (request.operation === 'watch') this.bridgeWatchOrigins.set(requestOriginKey, pending)
     const context: PlansBridgeContext = {
       runtime: pending.runtime,
       ...(pending.workspacePath === undefined ? {} : { workspacePath: pending.workspacePath }),
@@ -1989,7 +1989,7 @@ export class PluginBackendSupervisor {
         if (this.bridgeRequests.get(request.id) === pending) {
           this.bridgeRequests.delete(request.id)
         }
-        if (request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+        this.releaseBridgeWatchOrigin(pending)
         if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
       }
     })()
@@ -2000,7 +2000,7 @@ export class PluginBackendSupervisor {
     if (!pending) return
     this.sendBridgeError(pending.generation, requestId, 'TIMEOUT')
     this.bridgeRequests.delete(requestId)
-    if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+    this.releaseBridgeWatchOrigin(pending)
     pending.controller.abort()
     this.sendCancellation(requestId, 'timeout', pending.generation)
   }
@@ -2009,6 +2009,12 @@ export class PluginBackendSupervisor {
     if (error instanceof PlansBridgeError) return error.code
     if (error instanceof BackendPluginError) return error.code
     return 'INTERNAL_ERROR'
+  }
+
+  private releaseBridgeWatchOrigin(pending: PendingBridgeRequest): void {
+    if (this.bridgeWatchOrigins.get(pending.originKey) === pending) {
+      this.bridgeWatchOrigins.delete(pending.originKey)
+    }
   }
 
   private sendBridgeSuccess(generation: ChildGeneration, requestId: WireRequestId, value: JsonValue): void {
@@ -2106,7 +2112,7 @@ export class PluginBackendSupervisor {
     const pending = this.bridgeRequests.get(requestId)
     if (!pending) return
     this.bridgeRequests.delete(requestId)
-    if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+    this.releaseBridgeWatchOrigin(pending)
     if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
     pending.controller.abort()
     this.sendCancellation(requestId, reason, pending.generation)
@@ -2140,7 +2146,7 @@ export class PluginBackendSupervisor {
     for (const [requestId, pending] of this.bridgeRequests) {
       if (pending.originKey !== key) continue
       this.bridgeRequests.delete(requestId)
-      if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+      this.releaseBridgeWatchOrigin(pending)
       if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
       pending.controller.abort()
       this.sendCancellation(requestId, 'cancelled', pending.generation)
@@ -2152,7 +2158,7 @@ export class PluginBackendSupervisor {
     for (const [requestId, pending] of this.bridgeRequests) {
       if (pending.generation !== generation) continue
       this.bridgeRequests.delete(requestId)
-      if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+      this.releaseBridgeWatchOrigin(pending)
       if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
       pending.controller.abort()
       this.sendCancellation(requestId, 'stopping', generation)
@@ -2165,7 +2171,7 @@ export class PluginBackendSupervisor {
   private abortAllBridgeRequests(): void {
     for (const [requestId, pending] of this.bridgeRequests) {
       this.bridgeRequests.delete(requestId)
-      if (pending.request.operation === 'watch') this.bridgeWatchOrigins.delete(pending.originKey)
+      this.releaseBridgeWatchOrigin(pending)
       if (pending.timeoutTimer !== undefined) clearTimeout(pending.timeoutTimer)
       pending.controller.abort()
       this.sendCancellation(requestId, 'stopping', pending.generation)

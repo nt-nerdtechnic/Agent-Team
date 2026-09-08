@@ -60,6 +60,12 @@ pnpm dev
 
 The `pnpm dev` command starts Electron, Vite dev server, and the Python FastAPI backend together.
 
+The first development start packages the production Plans backend with
+`uv`/PyInstaller. Later starts reuse it when the source, build script, Python
+dependency files, platform, architecture, and executable contents are unchanged.
+Missing or changed output is rebuilt automatically. `pnpm run build:plans:backend`
+always rebuilds it explicitly; production and CI builds remain unconditional.
+
 > `pnpm dev` 會同時啟動 Electron、Vite dev server 和 Python FastAPI backend。
 
 ---

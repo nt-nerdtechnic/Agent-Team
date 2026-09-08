@@ -381,6 +381,39 @@ describe('PluginBackendSupervisor', () => {
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
   })
 
+  it('retains the replacement watch reservation when a cancelled watch settles late', async () => {
+    const releases: Array<() => void> = []
+    let origin: unknown
+    const child = makeBridgeChild((frame) => {
+      const parsed = JSON.parse(frame)
+      if (parsed.method === 'navide/host/call') origin = parsed.params.origin
+    }, 'filesystem', 'watch')
+    const dispatch = vi.fn(() => new Promise<null>((resolve) => { releases.push(() => resolve(null)) }))
+    const supervisor = makeSupervisor({ bridgeDispatcher: { dispatch }, spawnProcess: () => child })
+    supervisors.push(supervisor)
+    await supervisor.start()
+    const controller = new AbortController()
+    const parent = supervisor.clientFor(authenticatedRuntime, { workspacePath: '/workspace' })
+      .call('fixture.bridge', null, { signal: controller.signal }).catch(() => undefined)
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1))
+    const send = (frame: unknown): void => { child.stdout.emit('data', Buffer.from(`${JSON.stringify(frame)}\n`)) }
+    send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'bridge:child-request' } })
+    send({ jsonrpc: '2.0', id: 'bridge:replacement', method: 'navide/host/call', params: {
+      origin, port: 'filesystem', operation: 'watch', arguments: {},
+    } })
+    expect(dispatch).toHaveBeenCalledTimes(2)
+    releases[0]()
+    await Promise.resolve()
+    await Promise.resolve()
+    send({ jsonrpc: '2.0', id: 'bridge:third', method: 'navide/host/call', params: {
+      origin, port: 'filesystem', operation: 'watch', arguments: {},
+    } })
+    expect(dispatch).toHaveBeenCalledTimes(2)
+    controller.abort()
+    for (const release of releases) release()
+    await parent
+  })
+
   it('dispatches a private Bridge request with the authenticated parent runtime', async () => {
     let bridgeRequest: unknown
     const supervisor = makeSupervisor({

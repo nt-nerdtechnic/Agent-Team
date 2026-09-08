@@ -151,6 +151,7 @@ const currentDocumentToken = ref<string | null>(null)
 
 let savedScrollY = 0
 let previewAnchorCounts: Record<string, number> = {}
+const currentAnchorCounts = computed(() => JSON.stringify(countNoteAnchors(selected.value?.meta?.reviewNotes ?? [])))
 const sectionEditing = ref(false)
 const snapshotPreview = ref<{ relPath: string; label: string; html: string; anchors: Record<string, number> } | null>(null)
 const previewHtml = computed(() => snapshotPreview.value?.html ?? selected.value?.html ?? '')
@@ -177,6 +178,17 @@ watch(preparedDoc, (prepared) => {
 }, { immediate: true })
 
 const iframeSrcdoc = computed(() => preparedDoc.value?.html ?? '')
+
+watch(currentAnchorCounts, (serialized) => {
+  if (serialized === JSON.stringify(previewAnchorCounts)) return
+  previewAnchorCounts = JSON.parse(serialized)
+  if (snapshotPreview.value || !currentDocumentToken.value) return
+  planDocFrame.value?.contentWindow?.postMessage({
+    type: 'review-note-anchors-updated',
+    documentToken: currentDocumentToken.value,
+    anchors: previewAnchorCounts,
+  }, '*')
+}, { flush: 'post' })
 
 async function toggleDocTodo(todoId: string, alt = false): Promise<void> {
   if (snapshotPreview.value) return

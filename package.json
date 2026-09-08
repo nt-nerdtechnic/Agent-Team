@@ -1,6 +1,6 @@
 {
   "name": "agent-team",
-  "version": "0.1.93",
+  "version": "0.2.0",
   "private": true,
   "author": "Navide Team",
   "description": "Navide: the AI-native engineering environment for one engineer directing multiple coding agents",
@@ -14,7 +14,7 @@
     "node": ">=22.12 <23"
   },
   "scripts": {
-    "dev": "vite build --config vite.plans.config.ts && vite build --config plugins/navide-plans/vite.config.ts && node scripts/build-plans-v2-backend.mjs && electron-vite dev",
+    "dev": "vite build --config vite.plans.config.ts && vite build --config plugins/navide-plans/vite.config.ts && node scripts/build-plans-v2-backend.mjs --if-needed && electron-vite dev",
     "build": "pnpm run build:official-plugins && pnpm run build:git:legacy && electron-vite build",
     "build:official-plugins": "pnpm run build:mini-ide && pnpm run build:plans && pnpm run build:git:v2",
     "build:mini-ide": "vite build --config vite.mini-ide.config.ts",
@@ -128,12 +128,13 @@
     }
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0",
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^22",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-vue": "^5.2.1",
-    "@vue/test-utils": "^2.4.10",
+    "@vue/test-utils": "^2.5.0",
     "electron": "^44.2.0",
-    "electron-builder": "^26.15.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^3.1.0",
     "happy-dom": "^20.14.0",
     "typescript": "^5.7.2",
@@ -171,11 +172,11 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "electron-updater": "^6.8.9",
-    "koffi": "^3.1.0",
+    "koffi": "^3.2.1",
     "mermaid": "^11.17.2",
     "monaco-editor": "^0.55.1",
     "vue-i18n": "11",
-    "ws": "^8.21.1",
+    "ws": "^8.21.3",
     "yaml": "^2.9.0"
   }
 }

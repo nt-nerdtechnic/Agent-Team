@@ -1001,6 +1001,34 @@ export class FrontendPluginManager {
     packageVersion: string
     previousPackageVersion: string | null
   } | null = null
+  private plansStorageReadinessHandler: ((packageVersion: string) => Promise<boolean>) | null = null
+
+  /** Host-only migration admission shared by renderer and headless requests. */
+  setPlansStorageReadinessHandler(handler: (packageVersion: string) => Promise<boolean>): void {
+    this.plansStorageReadinessHandler = handler
+  }
+
+  private async plansStorageReady(packageVersion: string | undefined): Promise<boolean> {
+    if (!packageVersion) return false
+    try {
+      return await this.plansStorageReadinessHandler!(packageVersion)
+    } catch {
+      return false
+    }
+  }
+
+  private async plansInstanceStorageAdmission(plugin: RunningPlugin, reqId: string): Promise<CapabilityResponse | null> {
+    if (plugin.id !== PLANS_PLUGIN_ID || !plugin.hasV2DescriptorIdentity || !this.plansStorageReadinessHandler) return null
+    const binding = plugin.capabilityContext?.runtimeBinding
+    const ready = await this.plansStorageReady(binding?.packageVersion)
+    if (this.isPluginStopping(plugin)) return buildError(reqId, 'PLUGIN_STOPPING', 'plugin runtime is stopping')
+    if (
+      this.running.get(plugin.instanceId) !== plugin ||
+      !binding || !sameRuntimeBinding(binding, plugin.capabilityContext?.runtimeBinding) ||
+      !this.plansCapabilityContext(binding.packageVersion, plugin.workspacePath ?? '', binding.audience ?? undefined)
+    ) return buildError(reqId, 'CAPABILITY_DENIED', 'Plans runtime Grant is unavailable')
+    return ready ? null : buildError(reqId, 'BACKEND_UNAVAILABLE', 'Plans storage is unavailable')
+  }
   private activationFailureHandler:
     | ((failure: { pluginId: string; packageVersion: string; reason: string }) => void)
     | null = null
@@ -2658,6 +2686,10 @@ export class FrontendPluginManager {
       if (!call) {
         return buildError(reqId, 'BAD_REQUEST', 'malformed capability call')
       }
+      if (this.plansStorageReadinessHandler) {
+        const storageAdmission = await this.plansInstanceStorageAdmission(plugin, reqId)
+        if (storageAdmission) return storageAdmission
+      }
 
       // Enforce scoping + route. A denied namespace is rejected here and never
       // reaches the backend; `ping`/unknown resolve in-process.
@@ -2873,25 +2905,53 @@ export class FrontendPluginManager {
       ) {
         return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans agent backend is unavailable')
       }
-      if (
-        plugin.id === PLANS_PLUGIN_ID &&
-        plugin.hasV2DescriptorIdentity &&
-        plugin.capabilityPolicy.kind === 'manifest-v2' &&
-        record.name === 'plans.create'
-      ) {
-        if (!(await this.provisionPlansAssets(plugin.workspacePath ?? ''))) {
-          return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans assets are unavailable')
-        }
-      }
       this.pendingBackendCalls.set(plugin.instanceId, calls)
       const controller = new AbortController()
       calls.set(record.reqId, controller)
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+      let abortListener: (() => void) | undefined
+      let remainingTimeout = record.timeoutMs as number | undefined
       try {
+        if (
+          plugin.id === PLANS_PLUGIN_ID &&
+          plugin.hasV2DescriptorIdentity &&
+          plugin.capabilityPolicy.kind === 'manifest-v2' &&
+          (record.name === 'plans.create' || this.plansStorageReadinessHandler)
+        ) {
+          const timeoutMs = remainingTimeout ?? 30_000
+          const deadline = Date.now() + timeoutMs
+          const cancelled = new Promise<never>((_resolve, reject) => {
+            abortListener = () => reject(new BackendPluginError(
+              controller.signal.reason === 'timeout' ? 'TIMEOUT' : 'USER_CANCELLED',
+            ))
+            controller.signal.addEventListener('abort', abortListener, { once: true })
+          })
+          timeoutTimer = setTimeout(() => controller.abort('timeout'), timeoutMs)
+          const admission = await Promise.race([
+            (async () => {
+              if (this.plansStorageReadinessHandler) {
+                const storageAdmission = await this.plansInstanceStorageAdmission(plugin, reqId)
+                if (storageAdmission) return storageAdmission
+              }
+              if (controller.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
+              if (record.name === 'plans.create' && !(await this.provisionPlansAssets(plugin.workspacePath ?? ''))) {
+                return buildError(reqId, 'BACKEND_UNAVAILABLE', 'Plans assets are unavailable')
+              }
+              return null
+            })(),
+            cancelled,
+          ])
+          clearTimeout(timeoutTimer)
+          remainingTimeout = deadline - Date.now()
+          if (remainingTimeout <= 0) throw new BackendPluginError('TIMEOUT')
+          if (admission) return admission
+        }
+        if (controller.signal.aborted) throw new BackendPluginError('USER_CANCELLED')
         const result = await this.pluginBackendHost.call(
           plugin.instanceId,
           record.name,
           record.args as JsonValue,
-          { signal: controller.signal, ...(record.timeoutMs === undefined ? {} : { timeoutMs: record.timeoutMs }) },
+          { signal: controller.signal, ...(remainingTimeout === undefined ? {} : { timeoutMs: remainingTimeout }) },
         )
         return buildSuccess(record.reqId, result)
       } catch (error) {
@@ -2900,6 +2960,8 @@ export class FrontendPluginManager {
         }
         return this.backendError(record.reqId, error)
       } finally {
+        if (timeoutTimer !== undefined) clearTimeout(timeoutTimer)
+        if (abortListener) controller.signal.removeEventListener('abort', abortListener)
         if (calls.get(record.reqId) === controller) calls.delete(record.reqId)
         if (calls.size === 0 && this.pendingBackendCalls.get(plugin.instanceId) === calls) {
           this.pendingBackendCalls.delete(plugin.instanceId)
@@ -3330,6 +3392,8 @@ export class FrontendPluginManager {
     if (plugin.capabilityPolicy.kind !== 'manifest-v2') {
       return buildError(call.reqId, 'CAPABILITY_DENIED', 'agent calls require a Manifest v2 capability')
     }
+    const storageAdmission = await this.plansInstanceStorageAdmission(plugin, reqId)
+    if (storageAdmission) return storageAdmission
     const initiator: AuthenticatedInitiator = Object.freeze({
       kind: 'agent',
       source: 'mcp',
@@ -3559,6 +3623,33 @@ export class FrontendPluginManager {
     if (!this.plansAgentFilesystemPolicyAllows(workspacePath, initiator)) {
       return buildError(record.reqId, 'CAPABILITY_DENIED', 'agent execution policy denied the operation')
     }
+    const deadline = Date.now() + (typeof record.timeoutMs === 'number' ? record.timeoutMs : 30_000)
+    if (this.plansStorageReadinessHandler) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let ready: boolean
+      try {
+        ready = await Promise.race([
+          this.plansStorageReady(packageVersion),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new BackendPluginError('TIMEOUT')), Math.max(1, deadline - Date.now()))
+          }),
+        ])
+      } catch (error) {
+        return this.backendError(record.reqId, error)
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+      if (this.isPackageVersionStopping(PLANS_PLUGIN_ID, packageVersion)) {
+        return buildError(record.reqId, 'PLUGIN_STOPPING', 'Backend plugin is stopping.')
+      }
+      const current = this.plansBackendSelection()
+      if (
+        current?.descriptor !== descriptor || current.activation !== activation ||
+        !this.plansCapabilityContext(packageVersion, workspacePath, 'plans-mcp') ||
+        !this.plansAgentFilesystemPolicyAllows(workspacePath, initiator)
+      ) return buildError(record.reqId, 'CAPABILITY_DENIED', 'Plans runtime authorization changed')
+      if (!ready) return buildError(record.reqId, 'BACKEND_UNAVAILABLE', 'Plans storage is unavailable')
+    }
     if (!this.isPlansBackendAvailable()) {
       return this.plansPreDispatchFailureResponse(
         record.reqId,
@@ -3576,6 +3667,8 @@ export class FrontendPluginManager {
     let dispatched = false
     try {
       const instanceId = await this.bindHeadlessPlansBackend(descriptor, activation, workspacePath)
+      const remainingTimeout = deadline - Date.now()
+      if (remainingTimeout <= 0) return buildError(record.reqId, 'TIMEOUT', 'Plans request timed out')
       // Calling into the Host child marks a request as dispatched even if the
       // Promise rejects immediately: a child may have accepted side effects.
       dispatched = true
@@ -3585,7 +3678,9 @@ export class FrontendPluginManager {
         record.args,
         {
           initiator,
-          ...(record.timeoutMs === undefined ? {} : { timeoutMs: record.timeoutMs }),
+          ...(this.plansStorageReadinessHandler
+            ? { timeoutMs: remainingTimeout }
+            : record.timeoutMs === undefined ? {} : { timeoutMs: record.timeoutMs }),
         },
       )
       return buildSuccess(record.reqId, result)
@@ -3625,6 +3720,8 @@ export class FrontendPluginManager {
       !isJsonValue(record.args) ||
       (record.timeoutMs !== undefined && !isAllowedBackendTimeout(record.timeoutMs))
     ) return buildError(reqId, 'BAD_REQUEST', 'malformed backend call')
+    const storageAdmission = await this.plansInstanceStorageAdmission(plugin, reqId)
+    if (storageAdmission) return storageAdmission
     const scopeError = this.backendCallScopeError(
       plugin,
       record.reqId,
@@ -5903,6 +6000,12 @@ export class FrontendPluginManager {
     return this.pluginBackendHost.hasActivation(pluginId, packageVersion)
   }
 
+  /** Host-only rollback snapshot of an already approved backend registration. */
+  getBackendActivation(pluginId: string, packageVersion: string): BackendPluginLaunchSpec | undefined {
+    const packageDir = this.descriptors.get(pluginId)?.packageDir
+    return packageDir ? this.pluginBackendHost.activationFor(pluginId, packageVersion, packageDir) : undefined
+  }
+
   async closeBackendPlugins(): Promise<void> {
     for (const calls of this.pendingBackendCalls.values()) {
       for (const controller of calls.values()) controller.abort()
@@ -7221,10 +7324,10 @@ export function bundledPlansV2Dir(source: BundledMiniIdeSource): string {
     : join(source.devRoot ?? join(__dirname, '../..'), 'dist-plugins', 'navide-plans')
 }
 
-function plansBackendActivation(
+export function plansBackendActivation(
   activation: PluginActivationCatalogEntry,
 ): BackendPluginLaunchSpec | null {
-  if (!activation.backend) return null
+  if (activation.pluginId !== PLANS_PLUGIN_ID || !activation.backend) return null
   return {
     pluginId: activation.pluginId,
     packageVersion: activation.packageVersion,

@@ -33,6 +33,7 @@ const busy = ref(false)
 const error = ref('')
 const notice = ref('')
 const fullConfirmed = ref(false)
+const repositoryFullConfirmed = ref(false)
 const rebuildArmed = ref(false)
 const rebuildConfirmed = ref(false)
 const sourceResetArmed = ref(false)
@@ -127,6 +128,10 @@ async function load(options: { replaceDraft?: boolean } = {}): Promise<void> {
 
 const workspaceSnapshot = computed(() => snapshot.value?.workspace ?? null)
 const recommendation = computed(() => workspaceSnapshot.value?.recommendation ?? null)
+const repositoryNeedsConfirmation = computed(() => recommendation.value?.policy?.mode === 'full' && !repositoryFullConfirmed.value)
+watch([() => props.workspacePath, () => recommendation.value?.fingerprint], () => {
+  repositoryFullConfirmed.value = false
+}, { flush: 'sync' })
 const effectiveSource = computed<ExecutionPolicySource | null>(() => {
   if (workspaceSnapshot.value) return workspaceSnapshot.value.activeSource
   return snapshot.value?.global.state === 'user'
@@ -286,11 +291,21 @@ async function selectSource(source: ExecutionPolicySource): Promise<void> {
       : null
     : { source } as const
   if (!request) return
+  if (source === 'repository' && repositoryNeedsConfirmation.value) {
+    if (snapshot.value) selectedSource.value = sourceSelectionFor(snapshot.value)
+    return
+  }
   busy.value = true
   error.value = ''
   notice.value = ''
   try {
-    const result = await api.selectSource({ workspacePath, request })
+    const result = await api.selectSource({
+      workspacePath,
+      request,
+      ...(source === 'repository' && recommendation.value?.policy?.mode === 'full'
+        ? { highRiskConfirmed: repositoryFullConfirmed.value }
+        : {}),
+    })
     applyOperationResult(result, 'source')
   } catch {
     if (snapshot.value) selectedSource.value = sourceSelectionFor(snapshot.value)
@@ -506,7 +521,7 @@ watch(() => props.workspacePath, () => { void load({ replaceDraft: !draftDirty.v
             name="execution-policy-source"
             :value="source"
             v-model="selectedSource"
-            :disabled="busy || !workspaceSnapshot || (source === 'user' && !hasUserPolicy) || (source === 'repository' && recommendation?.state !== 'valid')"
+            :disabled="busy || !workspaceSnapshot || (source === 'user' && !hasUserPolicy) || (source === 'repository' && (recommendation?.state !== 'valid' || repositoryNeedsConfirmation))"
             @change="selectSource(source)"
           />
           <span>
@@ -557,10 +572,17 @@ watch(() => props.workspacePath, () => { void load({ replaceDraft: !draftDirty.v
         <div><strong>{{ $t('settings.executionPolicy.systemLabel') }}</strong>: {{ listOrNone(recommendation.policy.system) }}</div>
         <div><strong>{{ $t('settings.executionPolicy.shellLabel') }}</strong>: {{ listOrNone(recommendation.policy.shell) }}</div>
       </div>
+      <div v-if="recommendation.state === 'valid' && recommendation.policy?.mode === 'full'" class="ep-warning">
+        <p>{{ $t('settings.executionPolicy.fullWarning') }}</p>
+        <label>
+          <input v-model="repositoryFullConfirmed" type="checkbox" class="ep-repository-full-confirmation" />
+          {{ $t('settings.executionPolicy.fullConfirmation') }}
+        </label>
+      </div>
       <button
         v-if="recommendation.state === 'valid' && recommendation.fingerprint && workspaceSnapshot?.selectedSource !== 'repository'"
         class="ep-accept-recommendation"
-        :disabled="busy"
+        :disabled="busy || repositoryNeedsConfirmation"
         @click="selectSource('repository')"
       >{{ $t('settings.executionPolicy.acceptRecommendation') }}</button>
     </section>

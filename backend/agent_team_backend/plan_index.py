@@ -84,6 +84,7 @@ _MAX_NESTED_ROOTS = 50
 
 # Maximum candidate directory entries scanned per directory level per data contract fixture.
 _MAX_DIRECTORY_ENTRIES = 2000
+_MAX_NESTED_CANDIDATES = 2000
 
 
 def _create_plan_index_schema(cur: sqlite3.Cursor) -> None:
@@ -185,7 +186,8 @@ def find_nested_plan_roots(root: Path) -> list[str]:
     """
     found: list[str] = []
     frontier: list[tuple[Path, int]] = [(root, 0)]
-    while frontier and len(found) < _MAX_NESTED_ROOTS:
+    visited = 0
+    while frontier and len(found) < _MAX_NESTED_ROOTS and visited < _MAX_NESTED_CANDIDATES:
         current, depth = frontier.pop(0)
         if depth >= _MAX_ROOT_DEPTH:
             continue
@@ -203,8 +205,9 @@ def find_nested_plan_roots(root: Path) -> list[str]:
         except (OSError, ValueError):
             continue
         for de in children:
-            if len(found) >= _MAX_NESTED_ROOTS:
+            if len(found) >= _MAX_NESTED_ROOTS or visited >= _MAX_NESTED_CANDIDATES:
                 break
+            visited += 1
             child = Path(de.path)
             if (child / ".git").is_dir():
                 found.append(child.relative_to(root).as_posix())

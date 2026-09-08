@@ -63,6 +63,7 @@ DOC_SUFFIXES = (".html", ".plan.md", ".md")
 _MAX_ROOT_DEPTH = 2
 _MAX_NESTED_ROOTS = 50
 _MAX_DIRECTORY_ENTRIES = 2000
+_MAX_NESTED_CANDIDATES = 2000
 _NOISE_SEGMENTS = frozenset({
     "node_modules", ".venv", "venv", "__pycache__", "dist", "build", "out",
     "target", ".next", ".nuxt", ".turbo", ".cache", ".mypy_cache",
@@ -758,7 +759,8 @@ def _sync_todo_markup(content: str, todo_id: str, status: str) -> str:
 def _find_nested_plan_roots(origin: dict[str, Any]) -> list[str]:
     found: list[str] = []
     frontier: list[tuple[str, int]] = [("", 0)]
-    while frontier and len(found) < _MAX_NESTED_ROOTS:
+    visited = 0
+    while frontier and len(found) < _MAX_NESTED_ROOTS and visited < _MAX_NESTED_CANDIDATES:
         current_rel, depth = frontier.pop(0)
         if depth >= _MAX_ROOT_DEPTH:
             continue
@@ -782,8 +784,9 @@ def _find_nested_plan_roots(origin: dict[str, Any]) -> list[str]:
             key=lambda s: s.encode("utf-8"),
         )[:_MAX_DIRECTORY_ENTRIES]
         for name in candidates:
-            if len(found) >= _MAX_NESTED_ROOTS:
+            if len(found) >= _MAX_NESTED_ROOTS or visited >= _MAX_NESTED_CANDIDATES:
                 break
+            visited += 1
             child_rel = f"{current_rel}/{name}" if current_rel else name
             try:
                 stat = _bridge_call(origin, "filesystem", "stat_path", {"rel_path": child_rel})
@@ -1094,10 +1097,16 @@ def _manual_document(origin: dict[str, Any], arguments: dict[str, Any], action: 
         result = _bridge_call(origin, "filesystem", "list_dir", {"rel_path": path})
         if not _is_record(result) or not isinstance(result.get("entries"), list):
             raise BridgeFailure("PROTOCOL_ERROR")
-        return {"ok": True, "entries": [
-            {"name": entry["name"], "is_dir": bool(entry.get("isDirectory", entry.get("is_dir", False)))}
-            for entry in result["entries"] if _is_record(entry) and isinstance(entry.get("name"), str)
-        ]}
+        entries = []
+        for name in result["entries"]:
+            if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\\" in name:
+                raise BridgeFailure("PROTOCOL_ERROR")
+            stat = _bridge_call(origin, "filesystem", "stat_path", {"rel_path": f"{path}/{name}"})
+            if not _is_record(stat) or not isinstance(stat.get("exists"), bool):
+                raise BridgeFailure("PROTOCOL_ERROR")
+            if stat["exists"]:
+                entries.append({"name": name, "is_dir": stat.get("isDirectory") is True})
+        return {"ok": True, "entries": entries}
     content = arguments["content"]
     mtime = arguments.get("expected_mtime")
     if not isinstance(content, str) or (

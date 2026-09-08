@@ -1076,6 +1076,75 @@ describe('devPlansPluginDescriptor', () => {
     }
   })
 
+  it.each([
+    ['provisioning', 'cancel'], ['provisioning', 'timeout'],
+    ['migration', 'cancel'], ['migration', 'timeout'],
+  ] as const)('reserves Plans create while %s and honors %s', async (phase, ending) => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window', contributionKey: `${PLANS_PLUGIN_ID}.window`, kind: 'custom',
+      location: 'window', title: 'Plans', entryFile: '/plugins/navide.plans/index.html',
+    }
+    const context: HostCapabilityContext = {
+      publisherEligible: false,
+      userGrant: { packageVersion, system: ['fs'], storage: true },
+      runtimeBinding: {
+        pluginId: PLANS_PLUGIN_ID, packageVersion, workspaceId: 'bound-workspace',
+        instanceId: null, audience: view.contributionKey,
+      },
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(), requires: [],
+      devUrl: '', entryFile: view.entryFile, views: [view],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }), capabilityContext: context,
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend', protocolVersion: 1, activation: 'startup',
+      approvedMethods: ['plans.create'], approvedEvents: [], approvedBridgePorts: ['filesystem'],
+    })
+    mgr.setCapabilityGrantResolver(() => ({ packageVersion, system: ['fs'], storage: true }))
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindView').mockResolvedValue()
+    const hostCall = vi.spyOn(PluginBackendHost.prototype, 'call').mockResolvedValue(null as never)
+    let release!: (value: boolean) => void
+    const paused = new Promise<boolean>((resolve) => { release = resolve })
+    const provision = vi.spyOn(
+      mgr as unknown as { provisionPlansAssets: (path: string) => Promise<boolean> },
+      'provisionPlansAssets',
+    ).mockReturnValue(phase === 'provisioning' ? paused : Promise.resolve(true))
+    if (phase === 'migration') mgr.setPlansStorageReadinessHandler(() => paused)
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host), bounds: 'fill', workspacePath: '/workspace', capabilityContext: context,
+      })
+      const sender = { sender: { id: (host.children[0] as FakeViewLike).webContents.id } }
+      const payload = { reqId: 'pending-create', name: 'plans.create', args: { workspace_path: '/workspace' }, timeoutMs: 20 }
+      const call = ipcHandlers.get('plugin:backend:call')!
+      const pending = call(sender, payload)
+      // Do not await a duplicate before releasing provisioning: broken code
+      // admits it and would otherwise leave the regression test hanging.
+      const duplicate = call(sender, payload)
+      if (ending === 'cancel') ipcListeners.get('plugin:backend:cancel')?.(sender, { reqId: payload.reqId })
+      else await new Promise((resolve) => setTimeout(resolve, 40))
+      release(true)
+      expect(await duplicate).toMatchObject({ error: { code: 'BAD_REQUEST' } })
+      expect(await pending).toMatchObject({ error: { code: ending === 'cancel' ? 'USER_CANCELLED' : 'TIMEOUT' } })
+      if (phase === 'provisioning') expect(provision).toHaveBeenCalledOnce()
+      else expect(provision).not.toHaveBeenCalled()
+      expect(hostCall).not.toHaveBeenCalled()
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      release(true)
+      bind.mockRestore()
+      hostCall.mockRestore()
+      provision.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
   it('applies the sender-bound workspace scope to agent Plans calls', async () => {
     const mgr = new FrontendPluginManager()
     const packageVersion = '1.0.0'
@@ -1478,6 +1547,110 @@ describe('devPlansPluginDescriptor', () => {
 })
 
 describe('production Plans agent backend routing', () => {
+  it.each(['ready', 'failed', 'revoked'] as const)('gates renderer and agent storage writes on migration: %s', async (outcome) => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window', contributionKey: `${PLANS_PLUGIN_ID}.window`, kind: 'custom', location: 'window',
+      title: 'Plans', entryFile: '/plugins/navide.plans/index.html',
+    }
+    const descriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(), requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      devUrl: '', entryFile: view.entryFile, views: [view],
+    }
+    mgr.registerDescriptor(descriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend', protocolVersion: 1, activation: 'startup',
+      approvedMethods: ['plans.list'], approvedEvents: [], approvedBridgePorts: ['filesystem'],
+    })
+    let granted = true
+    mgr.setCapabilityGrantResolver(() => granted ? { packageVersion, system: ['fs'], storage: true } : null)
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindView').mockResolvedValue()
+    const host = new FakeBrowserWindow()
+    const storage = vi.fn().mockResolvedValue(null)
+    mgr.setPublicStorageHandler(storage)
+    let release!: (ready: boolean) => void
+    try {
+      const handle = await mgr.openView(descriptor, view, {
+        hostWindow: asHost(host), bounds: 'fill', workspacePath: '/workspace',
+        capabilityContext: mgr.plansCapabilityContext(packageVersion, '/workspace', view.contributionKey)!,
+      })
+      mgr.setPlansStorageReadinessHandler(() => new Promise<boolean>((resolve) => { release = resolve }))
+      const payload = { reqId: 'storage-gate', ns: 'storage', method: 'set', args: { scope: 'workspace', key: 'plans.sort', value: 'title' } }
+      for (const origin of ['renderer', 'agent']) {
+        granted = true
+        const pending = origin === 'renderer'
+          ? ipcHandlers.get('plugin:cap:call')!({ sender: { id: (host.children[0] as FakeViewLike).webContents.id } }, payload)
+          : mgr.executeAgentCapability(handle.instanceId, payload)
+        await Promise.resolve()
+        const previousCalls = storage.mock.calls.length
+        if (outcome === 'revoked') granted = false
+        release(outcome !== 'failed')
+        const response = await pending
+        expect(response).toMatchObject({ ok: outcome === 'ready' })
+        expect(storage).toHaveBeenCalledTimes(previousCalls + (outcome === 'ready' ? 1 : 0))
+      }
+      mgr.destroyInstance(handle.instanceId)
+    } finally {
+      release?.(false)
+      bind.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it.each(['ready', 'failed', 'revoked', 'timeout'] as const)('awaits storage readiness before headless dispatch: %s', async (outcome) => {
+    const mgr = new FrontendPluginManager()
+    const packageVersion = '1.0.0'
+    mgr.registerDescriptor({
+      id: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(), requires: ['fs'],
+      capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+      devUrl: '', entryFile: '/plugins/navide.plans/frontend/window/index.html', views: [],
+    }, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID, packageVersion, packageDir: process.cwd(),
+      entryFile: '/plugins/navide.plans/backend/navide-plans', protocolVersion: 1, activation: 'startup',
+      approvedMethods: ['plans.list'], agentMethods: ['plans.list'], approvedEvents: ['plans.changed'],
+      approvedBridgePorts: ['filesystem'],
+    })
+    let granted = true
+    mgr.setCapabilityGrantResolver(() => granted ? { packageVersion, system: ['fs'], storage: true } : null)
+    mgr.setExecutionPolicyResolver(() => ({
+      policy: { schemaVersion: 1, mode: 'allowlist', system: ['fs'], shell: [] }, revision: 1, state: 'user',
+    }))
+    let settle!: (ready: boolean) => void
+    const readiness = new Promise<boolean>((resolve) => { settle = resolve })
+    mgr.setPlansStorageReadinessHandler(() => readiness)
+    const bind = vi.spyOn(PluginBackendHost.prototype, 'bindWorkspace').mockResolvedValue('headless-storage')
+    const call = vi.spyOn(PluginBackendHost.prototype, 'call').mockResolvedValue({ plans: [] } as never)
+    try {
+      const pending = mgr.executeAgentBackendCallForWorkspace(PLANS_PLUGIN_ID, '/workspace', {
+        reqId: 'storage-gate', name: 'plans.list', args: {}, timeoutMs: 20,
+      })
+      await Promise.resolve()
+      expect(bind).not.toHaveBeenCalled()
+      expect(call).not.toHaveBeenCalled()
+      if (outcome === 'revoked') granted = false
+      if (outcome !== 'timeout') settle(outcome !== 'failed')
+      const result = await pending
+      if (outcome === 'ready') {
+        expect(result.ok).toBe(true)
+        expect(call).toHaveBeenCalledOnce()
+      } else {
+        expect(result).toMatchObject({ ok: false, error: { code: outcome === 'timeout' ? 'TIMEOUT' : outcome === 'failed' ? 'BACKEND_UNAVAILABLE' : 'CAPABILITY_DENIED' } })
+        expect(result).not.toHaveProperty('recoveryDisposition')
+        expect(bind).not.toHaveBeenCalled()
+        expect(call).not.toHaveBeenCalled()
+      }
+    } finally {
+      settle(false)
+      bind.mockRestore()
+      call.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
   it('denies non-allowlisted methods before binding and preserves the minted agent Initiator', async () => {
     const mgr = new FrontendPluginManager()
     const packageVersion = '1.0.0'

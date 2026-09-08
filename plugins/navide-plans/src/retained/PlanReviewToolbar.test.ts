@@ -1378,6 +1378,37 @@ describe('PlanReviewToolbar – delete', () => {
 })
 
 describe('PlanReviewToolbar – narrow-bar demotion', () => {
+  it('observes the bar created by the asynchronous document read and demotes on resize', async () => {
+    const observe = vi.fn()
+    const disconnect = vi.fn()
+    let resized: () => void = () => {}
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: () => void) { resized = callback }
+      observe = observe
+      disconnect = disconnect
+    })
+    let wrapper: VueWrapper | undefined
+    try {
+      ;({ wrapper } = await mountToolbar(planDoc(baseMeta())))
+      const bar = wrapper.get('.prt-bar').element
+      expect(observe).toHaveBeenCalledWith(bar)
+      Object.defineProperty(bar, 'clientWidth', { value: 1, configurable: true })
+      Object.defineProperty(bar, 'scrollWidth', {
+        get: () => bar.querySelectorAll('.prt-icon-btn').length * 30,
+        configurable: true,
+      })
+      resized()
+      await flushPromises()
+      expect(wrapper.find('.prt-bar .prt-todos-btn').exists()).toBe(false)
+      wrapper.unmount()
+      wrapper = undefined
+      expect(disconnect).toHaveBeenCalled()
+    } finally {
+      wrapper?.unmount()
+      vi.unstubAllGlobals()
+    }
+  })
+
   // happy-dom reports every element as 0×0, so drive refitBar() against a
   // stubbed bar whose scrollWidth shrinks as buttons leave it — that is the
   // feedback loop the real layout provides.

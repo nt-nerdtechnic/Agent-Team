@@ -522,6 +522,21 @@ describe('PluginBackendHost', () => {
     await expect(subscription.settled).resolves.toMatchObject({ reason: 'view-destroyed' })
   })
 
+  it('keeps admission closed when revocation drain fails', async () => {
+    const host = makeHost()
+    host.register(activation)
+    await host.bindView(runtime, activation.packageDir, process.cwd())
+    const unbind = vi.spyOn(host, 'unbindView').mockRejectedValueOnce(new Error('drain failed'))
+    await expect(host.revokePackageVersion(activation.pluginId, activation.packageVersion))
+      .rejects.toThrow('drain failed')
+    expect(() => host.bindView({ ...runtime, instanceId: 'new-view' }, activation.packageDir, process.cwd()))
+      .toThrowError(expect.objectContaining({ code: 'PLUGIN_STOPPING' }))
+    unbind.mockRestore()
+    await expect(host.revokePackageVersion(activation.pluginId, activation.packageVersion))
+      .rejects.toThrow('drain failed')
+    await expect(host.close()).rejects.toThrow('drain failed')
+  })
+
   it('revokes one package version and settles its calls and subscriptions', async () => {
     const host = makeHost()
     hosts.push(host)

@@ -1,13 +1,18 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   DOC_SUFFIXES,
   isAllowedPlanDocumentPath,
   isPlanDocName,
   PLAN_DOC_DIRS,
 } from './plansDirectories'
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, statSync: vi.fn(actual.statSync) }
+})
 
 describe('plansDirectories', () => {
   let tempWorkspace: string
@@ -29,6 +34,19 @@ describe('plansDirectories', () => {
     } catch {
       // ignore
     }
+  })
+
+  it('bounds total nested repository probes even when no repository is found', () => {
+    for (let parent = 0; parent < 50; parent++) {
+      for (let child = 0; child < 50; child++) {
+        mkdirSync(join(tempWorkspace, `parent-${parent}`, `child-${child}`), { recursive: true })
+      }
+    }
+    vi.mocked(statSync).mockClear()
+    expect(isAllowedPlanDocumentPath('parent-0/child-0/.agent-team/plans/missing.html', tempWorkspace)).toBe(false)
+    const probes = vi.mocked(statSync).mock.calls.filter(([path]) => String(path).endsWith('/.git'))
+    expect(probes.length).toBeGreaterThan(50)
+    expect(probes.length).toBeLessThanOrEqual(2000)
   })
 
   describe('isPlanDocName', () => {

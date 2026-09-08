@@ -288,7 +288,8 @@ describe('PlansApp', () => {
     const button = view.get('[data-test="review-notes-toggle"]')
     ;(button.element as HTMLButtonElement).focus()
     const frame = view.get('iframe').element as HTMLIFrameElement
-    const source = {} as Window
+    const postMessage = vi.fn()
+    const source = { postMessage } as unknown as Window
     Object.defineProperty(frame, 'contentWindow', { value: source, configurable: true })
     const documentToken = frame.getAttribute('srcdoc')?.match(/var documentToken = "([0-9a-f]{32})"/)?.[1]
     expect(documentToken).toBeTruthy()
@@ -304,6 +305,9 @@ describe('PlansApp', () => {
       { name: 'plans.review_note_add', args: { rel_path: existingPath, text: 'Anchored comment', anchor: 'Scope' } },
     ])
     expect(view.get('iframe').element).toBe(frame)
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'review-note-anchors-updated', documentToken, anchors: { Scope: 2 },
+    }, '*')
   })
 
   it('parity: toolbar retains v1 stage badge, Todos and disabled Approve controls', async () => {
@@ -1289,7 +1293,7 @@ describe('PlansApp', () => {
     state.documents[existingPath].html = '<html><body><section><h2>Goals</h2><p>Goal details</p></section></body></html>'
     const view = await mountPlans()
     const iframe = view.get('iframe.plan-doc-frame').element as HTMLIFrameElement
-    const frameWin = {} as Window
+    const frameWin = { postMessage: vi.fn() } as unknown as Window
     Object.defineProperty(iframe, 'contentWindow', { value: frameWin, configurable: true })
     const token = iframe.getAttribute('srcdoc')?.match(/(?:var documentToken = |"documentToken":)"([0-9a-f]{32})"/)?.[1]
     expect(token).toBeTruthy()

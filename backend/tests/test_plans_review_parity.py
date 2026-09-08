@@ -97,9 +97,22 @@ def test_document_transport_rejects_non_plan_paths_before_bridge(child, monkeypa
 
 
 def test_document_transport_lists_history_in_retained_shape(child, monkeypatch):
-    monkeypatch.setattr(child, "_bridge_call", lambda *args: {"entries": [{"name": "20260901T100000_approved.html", "isDirectory": False}]})
+    calls = []
+
+    def bridge(origin, capability, method, arguments):
+        calls.append((capability, method, arguments))
+        if method == "list_dir":
+            return {"entries": ["20260901T100000_approved.html"]}
+        assert method == "stat_path"
+        return {"exists": True, "isDirectory": False}
+
+    monkeypatch.setattr(child, "_bridge_call", bridge)
     result = child._manual_document({}, {"rel_path": ".agent-team/plans/.history/a"}, "list")
     assert result == {"ok": True, "entries": [{"name": "20260901T100000_approved.html", "is_dir": False}]}
+    assert calls == [
+        ("filesystem", "list_dir", {"rel_path": ".agent-team/plans/.history/a"}),
+        ("filesystem", "stat_path", {"rel_path": ".agent-team/plans/.history/a/20260901T100000_approved.html"}),
+    ]
 
 
 @pytest.mark.parametrize("action", ["edit", "delete"])

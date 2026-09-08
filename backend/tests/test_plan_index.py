@@ -632,6 +632,24 @@ def test_plan_document_locations_triple_parity() -> None:
     assert fixture["traversalSortOrder"] == "utf8_bytes_ascending"
 
 
+def test_nested_roots_have_a_global_candidate_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for parent in range(50):
+        for child in range(50):
+            (tmp_path / f"parent-{parent}" / f"child-{child}").mkdir(parents=True)
+    probes = 0
+    original_is_dir = Path.is_dir
+
+    def is_dir(path: Path) -> bool:
+        nonlocal probes
+        if path.name == ".git":
+            probes += 1
+        return original_is_dir(path)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    assert find_nested_plan_roots(tmp_path) == []
+    assert 50 < probes <= 2000
+
+
 def test_nested_roots_deterministic_50_cap_and_utf8_sort(tmp_path: Path, index: PlanIndex) -> None:
     """Enforces deterministic 50-root limit using utf-8 bytes ascending order with case-differing names."""
     # 49 repos R00 through R48

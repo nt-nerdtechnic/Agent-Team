@@ -81,7 +81,7 @@ async def test_core_lifecycle_starts_the_server_and_refreshes_claude_config(
     assert plan_mcp._session_manager is None  # noqa: SLF001
 
 
-def test_plugin_tools_are_installed_on_the_core_server(host: PluginHost) -> None:
+async def test_plugin_tools_are_installed_on_the_core_server(host: PluginHost) -> None:
     """The whole point of register_mcp_tools: one server, one tool list.
 
     A plugin serving its own endpoint instead would give an agent two, and a
@@ -89,6 +89,13 @@ def test_plugin_tools_are_installed_on_the_core_server(host: PluginHost) -> None
     """
     wiring.startup(host)
     assert wiring.apply_mcp_tools(host, plan_mcp.server) == ["navide.plans"]
+    names = [tool.name for tool in await plan_mcp.server.list_tools()]
+    for name in ["plan_list", "plan_read", "plan_create", "plan_update_stage", "plan_update_todo", "plan_add_note"]:
+        assert names.count(name) == 1
+    assert "cli_get_status" in names
+    assert "cli_interrupt" in names
+    assert "ui_invoke" in names
+    assert host.registered_routes() == []
 
 
 # -- spawn wiring ------------------------------------------------------------

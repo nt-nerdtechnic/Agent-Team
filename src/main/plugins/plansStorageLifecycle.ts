@@ -66,8 +66,11 @@ export class PlansStorageLifecycleSelector {
         record.pluginId !== PLANS_PLUGIN_ID ||
         record.tier !== 'active' ||
         typeof record.packageVersion !== 'string' ||
-        !record.packageVersion
-      ) return null
+        !record.packageVersion ||
+        (record.previousPackageVersion !== undefined && (
+          typeof record.previousPackageVersion !== 'string' || !record.previousPackageVersion
+        ))
+      ) throw new Error('invalid Plans storage lifecycle record')
       const sourcePackageVersion = record.packageVersion === packageVersion
         ? record.previousPackageVersion
         : record.packageVersion
@@ -77,12 +80,21 @@ export class PlansStorageLifecycleSelector {
         sourcePackageVersion === packageVersion
       ) return null
       return { pluginId: PLANS_PLUGIN_ID, packageVersion: sourcePackageVersion, tier: 'active' }
-    } catch {
-      return null
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
     }
   }
 
-  rememberActive(packageVersion: string): boolean {
+  clear(): void {
+    try {
+      this.fileOps.unlinkSync(this.recordPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+
+  rememberActive(packageVersion: string, sourcePackageVersion?: string | null): boolean {
     if (!packageVersion) return false
     const parentPath = dirname(this.recordPath)
     let previousPackageVersion: string | undefined
@@ -101,6 +113,7 @@ export class PlansStorageLifecycleSelector {
     } catch {
       // First install or an unreadable old record has no trusted recovery source.
     }
+    if (sourcePackageVersion !== undefined) previousPackageVersion = sourcePackageVersion ?? undefined
     if (previousPackageVersion === packageVersion) previousPackageVersion = undefined
     const record = `${JSON.stringify({
       pluginId: PLANS_PLUGIN_ID,

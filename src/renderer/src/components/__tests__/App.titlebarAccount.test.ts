@@ -17,8 +17,9 @@ const at = (needle: string): number => {
 
 describe('titlebar account button', () => {
   it('sits immediately before the settings gear', () => {
-    // The gear must keep its edge position, so the button goes ahead of it —
-    // and after the workspace-switch button, which pairs with detach.
+    // The gear must keep its edge position, so the button goes ahead of it.
+    // The workspace-switch button is ahead of both, but no longer as its
+    // neighbour: it now leads the centred .titlebar-id block.
     const account = at('class="titlebar-account"')
     const gear = at('class="titlebar-gear"')
     expect(account).toBeLessThan(gear)

@@ -17,6 +17,8 @@ describe('Plans window production routing unit tests', () => {
     fallbackAllowed?: boolean
     v2OpenResult?: { ok: boolean; error?: string }
     descriptor?: PluginLaunchDescriptor | null
+    migrationStatus?: 'ready' | 'recovery' | 'unavailable'
+    legacyAvailable?: boolean
   } = {}) {
     const manager = new FrontendPluginManager()
     const workspacePath = '/workspace'
@@ -102,6 +104,7 @@ describe('Plans window production routing unit tests', () => {
       openCatalogContributionWindow: openCatalogWindowSpy,
       migratePlansStorageState: async () => {
         migrations.push('migrated')
+        return { status: options.migrationStatus ?? 'ready' }
       },
       isPlansRecoveryEnabled: () => recoveryState,
       enterPlansRecovery: (reason) => {
@@ -110,6 +113,7 @@ describe('Plans window production routing unit tests', () => {
       },
       openLegacyPlanWindow: async (ws, rel) => {
         legacyOpened.push({ workspacePath: ws, relPath: rel })
+        return options.legacyAvailable ?? true
       },
       warnMain: (msg) => {
         warnings.push(msg)
@@ -170,6 +174,26 @@ describe('Plans window production routing unit tests', () => {
     )
   })
 
+  it('does not open v2 or legacy when migration has no trusted recovery source', async () => {
+    const { router, openCatalogWindowSpy, legacyOpened } = setupRouter({ migrationStatus: 'unavailable' })
+    expect(await router.openPlanWindow('/workspace')).toBe(false)
+    expect(openCatalogWindowSpy).not.toHaveBeenCalled()
+    expect(legacyOpened).toEqual([])
+  })
+
+  it('uses the explicit migration recovery result before opening v2', async () => {
+    const { router, openCatalogWindowSpy, legacyOpened } = setupRouter({ migrationStatus: 'recovery' })
+    expect(await router.openPlanWindow('/workspace')).toBe(true)
+    expect(openCatalogWindowSpy).not.toHaveBeenCalled()
+    expect(legacyOpened).toEqual([{ workspacePath: '/workspace', relPath: undefined }])
+  })
+
+  it('reports failure when the retained recovery adapter cannot bind its snapshot', async () => {
+    const { router, openCatalogWindowSpy } = setupRouter({ migrationStatus: 'recovery', legacyAvailable: false })
+    expect(await router.openPlanWindow('/workspace')).toBe(false)
+    expect(openCatalogWindowSpy).not.toHaveBeenCalled()
+  })
+
   it('does not own generic openCatalogContributionWindow or manage contribution window maps', () => {
     const { router } = setupRouter()
     expect((router as unknown as Record<string, unknown>).openCatalogContributionWindow).toBeUndefined()
@@ -199,7 +223,7 @@ describe('Plans window production routing unit tests', () => {
   })
 
   it('routes to legacy plan window when the complete v2 package backend is unavailable', async () => {
-    const { router, legacyOpened, openCatalogWindowSpy, migrations, workspacePath } = setupRouter({
+    const { router, legacyOpened, recoveryEntered, openCatalogWindowSpy, migrations, workspacePath } = setupRouter({
       backendAvailable: false,
     })
 
@@ -207,6 +231,7 @@ describe('Plans window production routing unit tests', () => {
     expect(ok).toBe(true)
     expect(migrations).toHaveLength(0)
     expect(openCatalogWindowSpy).not.toHaveBeenCalled()
+    expect(recoveryEntered).toEqual(['backend-unavailable'])
     expect(legacyOpened).toEqual([{ workspacePath, relPath: '.agent-team/plans/plan.html' }])
   })
 
@@ -289,6 +314,7 @@ describe('Plans window production routing unit tests', () => {
       openCatalogContributionWindow: openCatalogWindowSpy,
       migratePlansStorageState: async () => {
         recoveryState = true
+        return { status: 'recovery' }
       },
       isPlansRecoveryEnabled: () => recoveryState,
       enterPlansRecovery: () => {},

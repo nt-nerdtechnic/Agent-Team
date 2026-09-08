@@ -90,8 +90,8 @@ export function extractPlanOutline(content: string): string[] {
 /** Apply confirmed todo writes without replacing the iframe document. */
 export function buildTodoStatusRuntime(documentToken: string, todoIds: string[]): string {
   return `;(function () {
-    var documentToken = ${JSON.stringify(documentToken)};
-    var validTodoIds = ${JSON.stringify(todoIds)};
+    var documentToken = ${JSON.stringify(documentToken).replace(/</g, '\\u003c')};
+    var validTodoIds = ${JSON.stringify(todoIds).replace(/</g, '\\u003c')};
     window.addEventListener('message', function (event) {
       if (event.source !== window.parent) return;
       var message = event.data;
@@ -396,24 +396,54 @@ export function buildPlanRuntimeScript(init: PlanRuntimeInit): string {
     targets.push({ anchor: anchor, head: head, region: region, kind: kind, body: body || region });
   }
   var h2s = document.querySelectorAll('h2');
-  for (var i = 0; i < h2s.length; i++)
-    addTarget(h2s[i], h2s[i].closest('section') || h2s[i], 'section', null);
+  for (var i = 0; i < h2s.length; i++) {
+    var head = h2s[i];
+    var section = head.closest('section');
+    if (section) {
+      addTarget(head, section, 'section', null);
+      continue;
+    }
+    // A preview-only wrapper gives a heading's sibling prose an editable
+    // region. Only its body is serialized back into the original document.
+    var region = document.createElement('div');
+    region.className = 'plan-rt-section';
+    var body = document.createElement('div');
+    head.parentNode.insertBefore(region, head);
+    var next = head.nextSibling;
+    region.appendChild(head);
+    region.appendChild(body);
+    while (next && !(next.nodeType === 1 && /^H[12]$/.test(next.tagName))) {
+      var following = next.nextSibling;
+      body.appendChild(next);
+      next = following;
+    }
+    addTarget(head, region, 'heading', body);
+  }
   var phaseHeads = document.querySelectorAll('.phase-head');
   for (var j = 0; j < phaseHeads.length; j++) {
     var phase = phaseHeads[j].closest('.phase') || phaseHeads[j];
     addTarget(phaseHeads[j], phase, 'phase', phase.querySelector('.phase-body') || phase);
   }
 
-  // Unresolved-comment badges next to anchored headings.
-  for (var k = 0; k < targets.length; k++) {
-    var count = INIT.anchors[targets[k].anchor];
-    if (typeof count === 'number' && count > 0) {
-      var badge = document.createElement('span');
-      badge.className = 'plan-rt-badge';
-      badge.textContent = String(count);
-      targets[k].head.appendChild(badge);
+  // Metadata-only updates keep the current iframe and any inline edit alive.
+  function updateAnchorBadges(anchors) {
+    for (var k = 0; k < targets.length; k++) {
+      var head = targets[k].head;
+      var badge = head.querySelector('.plan-rt-badge');
+      var count = anchors[targets[k].anchor];
+      if (typeof count === 'number' && Number.isSafeInteger(count) && count > 0) {
+        if (!badge) {
+          badge = document.createElement('span');
+          badge.className = 'plan-rt-badge';
+          head.appendChild(badge);
+        }
+        badge.textContent = String(count);
+      } else if (badge) {
+        badge.remove();
+      }
     }
   }
+  updateAnchorBadges(INIT.anchors);
 
   // Floating comment button shown while hovering a section/phase. Hiding is
   // delayed so moving the pointer onto the button (a body child overlapping
@@ -528,7 +558,7 @@ export function buildPlanRuntimeScript(init: PlanRuntimeInit): string {
     secbar.innerHTML = '';
     for (var a = 0; a < arguments.length; a++) secbar.appendChild(arguments[a]);
   }
-  function editableEl(t) { return t.kind === 'phase' ? t.body : t.region; }
+  function editableEl(t) { return t.body; }
   function serializeBody(t) {
     var container = editableEl(t);
     var html = '';
@@ -630,6 +660,12 @@ export function buildPlanRuntimeScript(init: PlanRuntimeInit): string {
   window.addEventListener('message', function (ev) {
     var d = ev.data;
     if (!d) return;
+    if (d.type === 'review-note-anchors-updated') {
+      if (ev.source !== parent || d.documentToken !== INIT.documentToken) return;
+      if (!d.anchors || typeof d.anchors !== 'object' || Array.isArray(d.anchors)) return;
+      updateAnchorBadges(d.anchors);
+      return;
+    }
     if (d.type === 'cancel-edit') {
       if (editing) cancelEdit(editing);
       return;

@@ -8,7 +8,7 @@ import pytest
 
 from agent_team_backend import app, ws_handlers
 from agent_team_backend.mcp_server import server as plan_mcp
-from agent_team_backend.mcp_server.server import _Caller, request_host_agent_capability
+from agent_team_backend.mcp_server.server import _Caller, request_host_agent_capability, request_host_agent_workspace_backend
 
 
 class FakeWebSocket:
@@ -100,6 +100,35 @@ async def test_mcp_handoff_registers_before_host_notification_and_keeps_identity
     assert result == {"ok": True, "result": "done"}
     assert len(events) == 1
     assert set(events[0]["payload"]) == {"request_id", "instance_id", "operation", "payload"}
+    assert plan_mcp._agent_capability_pending.pending == {}
+
+
+@pytest.mark.parametrize("response", [
+    {"ok": True, "result": {"rel_path": ".agent-team/plans/example.html", "name": "Example"}},
+    {"ok": False, "error": {"code": "PERMISSION_DENIED", "message": "Agent filesystem access denied"}},
+])
+async def test_new_core_workspace_handoff_uses_the_single_authenticated_host_channel(
+    monkeypatch: pytest.MonkeyPatch, response: dict[str, Any],
+) -> None:
+    events: list[dict[str, Any]] = []
+    call = {"reqId": "plans-1", "name": "plans.read", "args": {"rel_path": ".agent-team/plans/example.html"}}
+
+    async def host_reply(event: dict[str, Any]) -> bool:
+        events.append(event)
+        payload = event["payload"]
+        assert payload["target"] == {"plugin_id": "navide.plans", "workspace_path": "/workspace"}
+        assert payload["operation"] == "backend"
+        assert payload["payload"] == call
+        assert set(payload) == {"request_id", "target", "operation", "payload"}
+        assert plan_mcp.resolve_agent_capability(payload["request_id"], response)
+        return True
+
+    monkeypatch.setattr(app, "unicast_host", host_reply)
+    result = await request_host_agent_workspace_backend(
+        "navide.plans", "/workspace", call, caller=_Caller(kind="external"),
+    )
+    assert result == response
+    assert len(events) == 1
     assert plan_mcp._agent_capability_pending.pending == {}
 
 

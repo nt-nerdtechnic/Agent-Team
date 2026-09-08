@@ -17,6 +17,7 @@ export const DOC_SUFFIXES = ['.html', '.plan.md', '.md'] as const
 export const MAX_NESTED_ROOT_DEPTH = 2
 export const MAX_NESTED_ROOTS = 50
 export const MAX_DIRECTORY_ENTRIES = 2000
+export const MAX_NESTED_CANDIDATES = 2000
 export const TRAVERSAL_SORT_ORDER = 'utf8_bytes_ascending' as const
 
 export const NOISE_SEGMENTS = [
@@ -49,7 +50,7 @@ export function isPlanDocName(name: string): boolean {
 
 /**
  * Traverses the workspace breadth-first to find nested git repositories,
- * bounded by MAX_NESTED_ROOT_DEPTH, MAX_NESTED_ROOTS, and MAX_DIRECTORY_ENTRIES.
+ * bounded by depth, found roots, per-directory entries, and total candidates.
  *
  * Deterministic 4-step sequence per level:
  * 1. Directory candidates only (real directories or valid symlinked directories)
@@ -63,7 +64,8 @@ export function isPlanDocName(name: string): boolean {
 function findNestedPlanRoots(workspaceRoot: string): string[] {
   const found: string[] = []
   const frontier: Array<{ rel: string; depth: number }> = [{ rel: '', depth: 0 }]
-  while (frontier.length > 0 && found.length < MAX_NESTED_ROOTS) {
+  let visited = 0
+  while (frontier.length > 0 && found.length < MAX_NESTED_ROOTS && visited < MAX_NESTED_CANDIDATES) {
     const { rel: currentRel, depth } = frontier.shift()!
     if (depth >= MAX_NESTED_ROOT_DEPTH) continue
     const currentAbs = currentRel
@@ -107,7 +109,8 @@ function findNestedPlanRoots(workspaceRoot: string): string[] {
     const candidates = dirCandidates.slice(0, MAX_DIRECTORY_ENTRIES)
 
     for (const name of candidates) {
-      if (found.length >= MAX_NESTED_ROOTS) break
+      if (found.length >= MAX_NESTED_ROOTS || visited >= MAX_NESTED_CANDIDATES) break
+      visited++
       const childRel = currentRel ? `${currentRel}/${name}` : name
       const childAbs = resolveWorkspaceRelativePath(workspaceRoot, childRel, false)
       if (!childAbs) continue

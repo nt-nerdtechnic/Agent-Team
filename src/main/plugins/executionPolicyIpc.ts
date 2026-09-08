@@ -260,7 +260,7 @@ export function registerExecutionPolicyIpc(
       if (!workspacePath) return failure(store, undefined, 'workspace-unavailable')
       let result: ReturnType<ExecutionPolicySourceStore['selectSource']>
       try {
-        result = store.selectSource(workspacePath, request)
+        result = store.selectSource(workspacePath, request, { highRiskConfirmed: input.highRiskConfirmed === true })
       } catch (error) {
         return failure(store, workspacePath, errorCodeFor(error))
       }

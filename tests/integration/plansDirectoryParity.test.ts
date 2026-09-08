@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import {
   DOC_SUFFIXES,
   MAX_DIRECTORY_ENTRIES,
+  MAX_NESTED_CANDIDATES,
   MAX_NESTED_ROOT_DEPTH,
   MAX_NESTED_ROOTS,
   NOISE_SEGMENTS,
@@ -18,6 +19,7 @@ interface PlanDocumentLocationsFixture {
   maxNestedDepth: number
   maxNestedRoots: number
   maxDirectoryEntries: number
+  maxNestedCandidates: number
   traversalSortOrder: string
   noiseSegments: string[]
 }
@@ -51,6 +53,11 @@ describe("Plan Document Locations Fixture Parity", () => {
   it("asserts TypeScript Host maxDirectoryEntries matches fixture", () => {
     expect(MAX_DIRECTORY_ENTRIES).toBe(fixture.maxDirectoryEntries)
     expect(MAX_DIRECTORY_ENTRIES).toBe(2000)
+  })
+
+  it("asserts the global nested candidate budget matches the fixture", () => {
+    expect(MAX_NESTED_CANDIDATES).toBe(fixture.maxNestedCandidates)
+    expect(MAX_NESTED_CANDIDATES).toBe(2000)
   })
 
   it("asserts TypeScript Host traversalSortOrder matches fixture", () => {

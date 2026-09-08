@@ -585,6 +585,43 @@ def test_host_bridge_cancellation_settles_the_child_call(
     assert response["error"]["data"] == {"code": "USER_CANCELLED"}
 
 
+def test_manual_history_listing_uses_host_bridge_name_entries(
+    backend_process: subprocess.Popen[bytes], tmp_path: Path,
+) -> None:
+    history_path = ".agent-team/plans/.history/example"
+    directory = tmp_path / history_path
+    directory.mkdir(parents=True)
+    (directory / "2026-09-08.html").write_text("<h2>Previous version</h2>")
+    (directory / "nested").mkdir()
+    _send(backend_process, {
+        "jsonrpc": "2.0", "id": "history-list", "method": "navide/call",
+        "params": {
+            "_meta": CLIENT_META, "name": "plans.list_directory",
+            "arguments": {"rel_path": history_path},
+            "runtime": {**RUNTIME, "initiator": {"kind": "user", "id": "window-1"}},
+        },
+    })
+    while True:
+        frame = _read(backend_process)
+        if frame.get("id") == "history-list":
+            break
+        assert frame["method"] == "navide/host/call"
+        params = frame["params"]
+        path = tmp_path / params["arguments"]["rel_path"]
+        if params["operation"] == "list_dir":
+            assert path == directory
+            _reply_bridge(backend_process, frame, {"entries": sorted(p.name for p in path.iterdir())})
+        elif params["operation"] == "stat_path":
+            _reply_bridge(backend_process, frame, {"exists": path.exists(), "isDirectory": path.is_dir()})
+        else:
+            raise AssertionError(f"unexpected history operation: {params['operation']}")
+    assert "result" in frame, frame
+    assert frame["result"]["value"] == {"ok": True, "entries": [
+        {"name": "2026-09-08.html", "is_dir": False},
+        {"name": "nested", "is_dir": True},
+    ]}
+
+
 def test_lists_and_reads_legacy_plans_across_doc_dirs(
     backend_process: subprocess.Popen[bytes],
 ) -> None:
@@ -806,6 +843,7 @@ def test_plans_backend_fixture_triple_parity() -> None:
     # 3. Discovery limits
     assert backend_module._MAX_ROOT_DEPTH == plan_index._MAX_ROOT_DEPTH == fixture["maxNestedDepth"] == 2
     assert backend_module._MAX_NESTED_ROOTS == plan_index._MAX_NESTED_ROOTS == fixture["maxNestedRoots"] == 50
+    assert backend_module._MAX_NESTED_CANDIDATES == plan_index._MAX_NESTED_CANDIDATES == fixture["maxNestedCandidates"] == 2000
 
     # 4. Noise segments
     assert sorted(backend_module._NOISE_SEGMENTS) == sorted(plan_index._NOISE_SEGMENTS) == sorted(fixture["noiseSegments"])
@@ -848,6 +886,28 @@ def test_packaged_plans_backend_nested_roots_deterministic_50_cap(monkeypatch: p
     assert "repo-alpha" not in roots
 
 
+def test_packaged_nested_roots_have_a_global_candidate_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = importlib.util.spec_from_file_location("plans_backend_global_budget", BACKEND_ENTRY)
+    assert spec is not None and spec.loader is not None
+    backend_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend_module)
+    probes = 0
+
+    def bridge(origin: dict, service: str, operation: str, arguments: dict) -> dict:
+        nonlocal probes
+        if operation == "list_dir":
+            return {"entries": [f"directory-{i}" for i in range(50)]}
+        assert operation == "stat_path"
+        if arguments["rel_path"].endswith("/.git"):
+            probes += 1
+            return {"exists": False}
+        return {"exists": True, "isDirectory": True}
+
+    monkeypatch.setattr(backend_module, "_bridge_call", bridge)
+    assert backend_module._find_nested_plan_roots({}) == []
+    assert 50 < probes <= 2000
+
+
 def test_packaged_plans_backend_nested_roots_2000_entry_wire_truncation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -880,7 +940,7 @@ def test_packaged_plans_backend_nested_roots_2000_entry_wire_truncation(
     monkeypatch.setattr(backend_module, "_bridge_call", fake_bridge_call)
     roots = backend_module._find_nested_plan_roots({"token": "fake"})
     assert roots == ["r0000-within"]
-    assert len(requested_modes) == 2000
+    assert len(requested_modes) == 1  # The root listing exhausts the global candidate budget.
     assert all(m == "discovery" for m in requested_modes)
 
 
@@ -916,5 +976,5 @@ def test_packaged_plans_backend_nested_roots_defensive_2000_cap(
     monkeypatch.setattr(backend_module, "_bridge_call", fake_bridge_call)
     roots = backend_module._find_nested_plan_roots({"token": "fake"})
     assert roots == ["r0000-within"]
-    assert len(requested_modes) == 2000
+    assert len(requested_modes) == 1  # The root listing exhausts the global candidate budget.
     assert all(m == "discovery" for m in requested_modes)

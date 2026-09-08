@@ -560,7 +560,7 @@ describe('Plans packaged backend composition', () => {
             query: `?${query}`,
           })
         },
-        migratePlansStorageState: async () => undefined,
+        migratePlansStorageState: async () => ({ status: 'ready' }),
         isPlansRecoveryEnabled: () => false,
         enterPlansRecovery: () => undefined,
         openLegacyPlanWindow: async () => undefined,

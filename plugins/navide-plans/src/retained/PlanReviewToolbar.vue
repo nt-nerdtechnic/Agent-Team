@@ -941,13 +941,13 @@ async function refitBar(): Promise<void> {
   }
 }
 
-let barResizeObserver: ResizeObserver | null = null
-onMounted(() => {
-  if (typeof ResizeObserver === 'undefined' || !barEl.value) return
-  barResizeObserver = new ResizeObserver(() => void refitBar())
-  barResizeObserver.observe(barEl.value)
-})
-onBeforeUnmount(() => barResizeObserver?.disconnect())
+watch(barEl, (element, _previous, onCleanup) => {
+  if (typeof ResizeObserver === 'undefined' || !element) return
+  const observer = new ResizeObserver(() => void refitBar())
+  observer.observe(element)
+  onCleanup(() => observer.disconnect())
+  void refitBar()
+}, { flush: 'post' })
 
 defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverlay, refitBar, resetDocumentState })
 </script>

@@ -132,6 +132,7 @@ export interface ExecutionPolicyApi {
   selectSource: (args: {
     workspacePath: string
     request: ExecutionPolicySourceRequest
+    highRiskConfirmed?: boolean
   }) => Promise<ExecutionPolicyOperationResult>
   rebuild: (args: { confirmed?: boolean; workspacePath?: string }) => Promise<ExecutionPolicyOperationResult>
   resetSourceSelections: (args: {

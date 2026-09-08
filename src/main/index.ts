@@ -16,6 +16,7 @@ import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
 import { LEGAL_LINKS, isLegalRoute } from '../shared/legalLinks'
 import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, devPlansV2PluginBundle, openGitPluginView, openGitLeftPluginView, updateGitLeftPluginView, closeGitLeftPluginView, registerBundledMiniIde, registerBundledPlans, registerLegacyBundledGit, hasCompletePlansContributions, frontendPluginManager } from './plugins/frontendPluginManager'
+import { plansBackendActivation } from './plugins/frontendPluginManager'
 import {
   isTrustedPluginManagementSender,
   registerPluginIpc,
@@ -51,10 +52,10 @@ import { GitStorageLifecycleSelector } from './plugins/gitStorageLifecycle'
 import { PlansStorageLifecycleSelector } from './plugins/plansStorageLifecycle'
 import { resolvePlansRootPath } from './plugins/plansRoot'
 import {
-  migratePlansStorage,
   projectLegacyPlansPreferences,
   runPlansLegacyRecovery,
 } from './plugins/plansStorageMigration'
+import { createPlansStorageMigrationGate, type PlansStorageAvailability } from './plugins/plansStorageMigrationGate'
 import { retainedPlansLegacyAdapter, type PlansLegacyRecoveryBootstrap } from './plugins/plansLegacyAdapter'
 import type { LegacyPlansPreferenceProjection } from '../shared/plansPreferences'
 import {
@@ -845,6 +846,12 @@ const applyPluginActivationChange = ({
   pluginId: string
   activation?: (typeof approvedInstalledPluginActivations)[number]
 }): void => {
+  if (activation?.pluginId === 'navide.plans' && activation.backend) {
+    const backend = plansBackendActivation(activation)
+    if (backend && !frontendPluginManager.hasBackendActivation(pluginId, activation.packageVersion)) {
+      frontendPluginManager.registerBackendActivation(backend)
+    }
+  }
   approvedInstalledPluginActivations = approvedInstalledPluginActivations.filter(
     (entry) => entry.pluginId !== pluginId
   )
@@ -909,7 +916,10 @@ const pluginTrustRefresh = registerPluginIpc(
   {
     resolveContributionIcon: contributionIcon,
     onActivationChange: applyPluginActivationChange,
-    cleanupPluginStorage: (pluginId) => pluginStorageStore.cleanupPlugin(pluginId),
+    cleanupPluginStorage: async (pluginId) => {
+      await pluginStorageStore.cleanupPlugin(pluginId)
+      if (pluginId === 'navide.plans') plansStorageLifecycle.clear()
+    },
     factoryPackageIds: ['navide.git'],
     listFactoryPackages: () => {
       const descriptor = frontendPluginManager.getDescriptor('navide.git')
@@ -1455,7 +1465,20 @@ async function migrateGitStorage(): Promise<void> {
   }
 }
 
-let plansStorageMigrationInFlight: { packageVersion: string; promise: Promise<void> } | null = null
+let plansStorageAvailability: PlansStorageAvailability | null = null
+const ensurePlansStorage = createPlansStorageMigrationGate({
+  store: pluginStorageStore,
+  lifecycle: plansStorageLifecycle,
+  onReady: (packageVersion, previousPackageVersion) => {
+    frontendPluginManager.setPlansStorageSnapshotContext(packageVersion, previousPackageVersion)
+  },
+  onFailure: (packageVersion, reason, availability) => {
+    plansStorageAvailability = availability
+    plansRecoveryPackageVersion = packageVersion
+    warnMain(`[plans] storage unavailable: ${reason}`)
+    enterPlansRecovery('storage-migration-failure')
+  },
+})
 const plansLegacyRecoveryCache = new Map<string, PlansLegacyRecoveryBootstrap | null>()
 const plansLegacyRecoveryInFlight = new Map<
   string,
@@ -1508,33 +1531,13 @@ async function getPlansLegacyRecoveryBootstrap(
   }
 }
 
-async function migratePlansStorageState(): Promise<void> {
-  if (plansRecoveryEnabled) return
+async function migratePlansStorageState(): Promise<PlansStorageAvailability> {
+  if (plansRecoveryEnabled) return plansStorageAvailability ?? { status: 'recovery' }
   const descriptor = frontendPluginManager.getDescriptor('navide.plans')
   const packageVersion = descriptor?.packageVersion
-  if (descriptor?.capabilityPolicy?.kind !== 'manifest-v2' || !packageVersion) return
-  if (plansStorageMigrationInFlight?.packageVersion === packageVersion) {
-    return plansStorageMigrationInFlight.promise
-  }
-  const sourceSnapshot = plansStorageLifecycle.sourceFor(packageVersion)
-  const promise = (async () => {
-    const migration = await migratePlansStorage(pluginStorageStore, {
-      packageVersion,
-      sourceSnapshot,
-    })
-    if (!migration.completed) return
-    frontendPluginManager.setPlansStorageSnapshotContext(
-      packageVersion,
-      migration.sourcePackageVersion,
-    )
-    plansStorageLifecycle.rememberActive(packageVersion)
-  })()
-  plansStorageMigrationInFlight = { packageVersion, promise }
-  try {
-    await promise
-  } finally {
-    if (plansStorageMigrationInFlight?.promise === promise) plansStorageMigrationInFlight = null
-  }
+  if (descriptor?.capabilityPolicy?.kind !== 'manifest-v2' || !packageVersion) return { status: 'unavailable' }
+  const availability = await ensurePlansStorage(packageVersion)
+  return plansRecoveryEnabled && availability.status === 'ready' ? { status: 'recovery' } : availability
 }
 
 /**
@@ -1560,9 +1563,9 @@ async function projectPlansLegacyPreferences(
     !workspaceId
   ) return { ok: false, error: 'Plans v2 storage is unavailable.' }
 
-  await migratePlansStorageState()
-  if (plansRecoveryEnabled) {
-    return { ok: false, error: 'Plans legacy recovery is active.' }
+  const availability = await migratePlansStorageState()
+  if (availability.status !== 'ready' || !frontendPluginManager.isPlansBackendAvailable()) {
+    return { ok: false, error: 'Plans v2 storage is unavailable.' }
   }
   const result = await projectLegacyPlansPreferences(pluginStorageStore, {
     packageVersion,
@@ -1574,12 +1577,11 @@ async function projectPlansLegacyPreferences(
     : { ok: false, error: 'Plans preferences could not be migrated.' }
 }
 
-async function prepareCatalogContribution(contributionKey: string): Promise<void> {
+async function prepareCatalogContribution(contributionKey: string): Promise<boolean> {
   if (contributionKey.startsWith('navide.plans.')) {
-    if (!plansRecoveryEnabled) await migratePlansStorageState()
-    return
+    return (await migratePlansStorageState()).status === 'ready'
   }
-  if (!contributionKey.startsWith('navide.git.')) return
+  if (!contributionKey.startsWith('navide.git.')) return true
   const descriptor = frontendPluginManager.getDescriptor('navide.git')
   if (
     descriptor?.packageVersion &&
@@ -1587,12 +1589,21 @@ async function prepareCatalogContribution(contributionKey: string): Promise<void
   ) {
     await migrateGitStorage()
   }
+  return true
 }
 
 // Warm the candidate/active boundary at startup. Opening Plans awaits the
 // same promise through migratePlansStorageState, so a first click cannot race
 // snapshot promotion.
-void migratePlansStorageState()
+frontendPluginManager.setPlansStorageReadinessHandler(async (packageVersion) => {
+  if (frontendPluginManager.getDescriptor('navide.plans')?.packageVersion !== packageVersion) return false
+  return (await migratePlansStorageState()).status === 'ready'
+})
+void migratePlansStorageState().catch((error: unknown) => {
+  plansStorageAvailability = { status: 'unavailable' }
+  enterPlansRecovery('storage-migration-failure')
+  warnMain(`[plans] storage initialization failed: ${error instanceof Error ? error.message : String(error)}`)
+})
 
 const DEFAULT_EDITOR_SETTING_KEY = 'agentTeam.defaultEditor'
 const DEFAULT_EDITOR_COMMAND_KEY = 'agentTeam.defaultEditor.customCommand'
@@ -2207,7 +2218,9 @@ async function openCatalogContributionWindow(
   workspacePath: string,
   extraParams: Record<string, string> = {},
 ): Promise<{ ok: boolean; error?: string }> {
-  await prepareCatalogContribution(contributionKey)
+  if (!(await prepareCatalogContribution(contributionKey))) {
+    return { ok: false, error: 'Plans v2 storage is unavailable' }
+  }
   const contribution = frontendPluginManager.listContributionCatalog().find(
     (entry) => entry.contributionKey === contributionKey && entry.location === 'window'
   )
@@ -2410,7 +2423,9 @@ ipcMain.handle('plugins:prepareContribution', async (event, args: Record<string,
   if (contributionKey.startsWith('navide.plans.') && plansRecoveryEnabled) {
     return { ok: false, error: 'Plans legacy recovery is active' }
   }
-  await prepareCatalogContribution(contributionKey)
+  if (!(await prepareCatalogContribution(contributionKey))) {
+    return { ok: false, error: 'Plans v2 storage is unavailable' }
+  }
   const renderedTheme = typeof args?.theme === 'string' ? args.theme : ''
   const result = await frontendPluginManager.prepareGuestContribution(hostWindow, contributionKey, {
     workspacePath,
@@ -2623,8 +2638,11 @@ async function openPlanWindow(workspacePath: string, relPath?: string): Promise<
   return plansWindowRouter.openPlanWindow(workspacePath, relPath)
 }
 
-async function openLegacyPlanWindow(workspacePath: string, relPath?: string): Promise<void> {
+async function openLegacyPlanWindow(workspacePath: string, relPath?: string): Promise<boolean | void> {
+  if (plansStorageAvailability?.status === 'unavailable') return false
+  if (plansStorageAvailability?.status === 'recovery' && !frontendPluginManager.plansBackendFallbackAllowed()) return false
   const recoveryBootstrap = await getPlansLegacyRecoveryBootstrap(workspacePath)
+  if (plansStorageAvailability?.status === 'recovery' && !recoveryBootstrap) return false
   const existing = planWindows.get(workspacePath)
   if (existing) {
     // Already open for this workspace: focus it and, when a plan was clicked,

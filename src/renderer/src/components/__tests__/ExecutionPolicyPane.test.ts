@@ -128,6 +128,35 @@ describe('ExecutionPolicyPane', () => {
     })
   })
 
+  it('requires a separate acknowledgement for the current full repository recommendation', async () => {
+    const initial = snapshot()
+    initial.workspace!.recommendation.policy = { schemaVersion: 1, mode: 'full', system: [], shell: [] }
+    const api = mockExecutionPolicy(initial)
+    wrapper = mount(ExecutionPolicyPane, {
+      props: { workspacePath: '/workspace' },
+      global: { plugins: [i18n] },
+    })
+    await flushPromises()
+    expect(wrapper.get('.ep-accept-recommendation').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('input[value="repository"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('.ep-repository-full-confirmation').setValue(true)
+    await wrapper.get('.ep-accept-recommendation').trigger('click')
+    await flushPromises()
+    expect(api.selectSource).toHaveBeenCalledWith({
+      workspacePath: '/workspace',
+      request: { source: 'repository', expectedFingerprint: 'a'.repeat(64) },
+      highRiskConfirmed: true,
+    })
+
+    const changed = structuredClone(initial)
+    changed.workspace!.recommendation.fingerprint = 'b'.repeat(64)
+    vi.mocked(api.inspect).mockResolvedValue(changed)
+    vi.mocked(api.onChanged).mock.calls[0]![0]()
+    await flushPromises()
+    expect(wrapper.get('.ep-repository-full-confirmation').element).toHaveProperty('checked', false)
+    expect(wrapper.get('.ep-accept-recommendation').attributes('disabled')).toBeDefined()
+  })
+
   it('offers rebuild for corruption and manual guidance for an unsafe directory', async () => {
     const corrupted = snapshot({
       recovery: { state: 'corrupt', canRebuild: true, unsafePaths: [] },

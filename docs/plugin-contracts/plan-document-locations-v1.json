@@ -17,6 +17,7 @@
   "maxNestedDepth": 2,
   "maxNestedRoots": 50,
   "maxDirectoryEntries": 2000,
+  "maxNestedCandidates": 2000,
   "traversalSortOrder": "utf8_bytes_ascending",
   "noiseSegments": [
     ".cache",

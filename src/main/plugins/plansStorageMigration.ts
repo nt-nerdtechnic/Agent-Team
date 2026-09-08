@@ -3,6 +3,7 @@ import type {
   PluginStorageStore,
   StorageExecution,
 } from './pluginStorage'
+import { MissingStorageSnapshotError } from './pluginStorage'
 import type { StoragePartition, StorageSnapshotRef } from './pluginCapabilityBroker'
 import { PLANS_PLUGIN_ID, PlansStorageLifecycleSelector } from './plansStorageLifecycle'
 import { STORAGE_LIMITS } from './pluginCapabilityCatalog'
@@ -107,6 +108,7 @@ export async function preparePlansStorageSnapshot(
       { pluginId: PLANS_PLUGIN_ID, packageVersion, tier: 'candidate' },
     )
   } catch (error) {
+    if (error instanceof MissingStorageSnapshotError) return { sourcePackageVersion: null }
     if (!(error instanceof Error && /already exists/i.test(error.message))) throw error
   }
   return { sourcePackageVersion: sourceSnapshot.packageVersion }
@@ -331,6 +333,7 @@ export async function runPlansLegacyRecovery<T>(
     packageVersion: selected.packageVersion,
     tier: 'active',
   }
+  await store.assertSnapshotReadable(snapshot)
   const context: PlansLegacyRecoveryContext = Object.freeze({
     workspaceId: options.workspaceId,
     snapshot,

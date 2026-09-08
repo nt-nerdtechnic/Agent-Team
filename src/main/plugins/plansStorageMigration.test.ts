@@ -32,6 +32,31 @@ function readExecution(tier: 'candidate' | 'active', key: string, packageVersion
 }
 
 describe('Plans storage migration', () => {
+  it('initializes empty preferences when the selected source snapshot is absent', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-plans-storage-'))
+    roots.push(root)
+    const store = new PluginStorageStore(root)
+    await expect(migratePlansStorage(store, {
+      packageVersion: currentVersion,
+      sourceSnapshot: { pluginId, packageVersion: previousVersion, tier: 'active' },
+    })).resolves.toMatchObject({ completed: true, sourcePackageVersion: null })
+    await expect(store.execute(readExecution('active', 'plans.sort')))
+      .resolves.toEqual({ found: false, value: null })
+  })
+
+  it('does not initialize preferences when reading the selected source fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-plans-storage-'))
+    roots.push(root)
+    const store = new PluginStorageStore(root)
+    vi.spyOn(store, 'cloneSnapshot').mockRejectedValue(new Error('permission denied'))
+    const execute = vi.spyOn(store, 'execute')
+    await expect(migratePlansStorage(store, {
+      packageVersion: currentVersion,
+      sourceSnapshot: { pluginId, packageVersion: previousVersion, tier: 'active' },
+    })).resolves.toMatchObject({ completed: false })
+    expect(execute).not.toHaveBeenCalled()
+  })
+
   it('promotes a fresh candidate and clones the lifecycle-selected previous snapshot', async () => {
     const root = mkdtempSync(join(tmpdir(), 'navide-plans-storage-'))
     roots.push(root)

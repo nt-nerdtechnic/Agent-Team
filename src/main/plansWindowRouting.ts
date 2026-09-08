@@ -3,6 +3,7 @@ import {
   hasCompletePlansContributions,
   PLANS_PLUGIN_ID,
 } from './plugins/frontendPluginManager'
+import type { PlansStorageAvailability } from './plugins/plansStorageMigrationGate'
 
 export interface PlansWindowRouterOptions {
   frontendPluginManager: FrontendPluginManager
@@ -11,10 +12,10 @@ export interface PlansWindowRouterOptions {
     workspacePath: string,
     extraParams?: Record<string, string>,
   ) => Promise<{ ok: boolean; error?: string }>
-  migratePlansStorageState: () => Promise<unknown>
+  migratePlansStorageState: () => Promise<PlansStorageAvailability>
   isPlansRecoveryEnabled: () => boolean
   enterPlansRecovery: (reason: string) => void
-  openLegacyPlanWindow: (workspacePath: string, relPath?: string) => Promise<void>
+  openLegacyPlanWindow: (workspacePath: string, relPath?: string) => Promise<boolean | void>
   warnMain: (message: string) => void
 }
 
@@ -104,24 +105,26 @@ export function createPlansWindowRouter(options: PlansWindowRouterOptions): Plan
     )
     const hasAvailableV2Backend = frontendPluginManager.isPlansBackendAvailable()
     if (!hasCompleteV2Package || isPlansRecoveryEnabled()) {
-      await openLegacyPlanWindow(workspacePath, relPath)
-      return true
+      return (await openLegacyPlanWindow(workspacePath, relPath)) !== false
     }
 
     if (!hasAvailableV2Backend) {
       if (frontendPluginManager.plansBackendFallbackAllowed()) {
-        await openLegacyPlanWindow(workspacePath, relPath)
-        return true
+        enterPlansRecovery('backend-unavailable')
+        return (await openLegacyPlanWindow(workspacePath, relPath)) !== false
       }
       warnMain(`[main] ${PLANS_PLUGIN_ID} backend is unavailable for the selected package`)
       return false
     }
 
     if (plansDescriptor?.packageVersion) {
-      await migratePlansStorageState()
-      if (isPlansRecoveryEnabled()) {
-        await openLegacyPlanWindow(workspacePath, relPath)
-        return true
+      const storage = await migratePlansStorageState()
+      if (storage.status === 'unavailable') {
+        warnMain(`[main] ${PLANS_PLUGIN_ID} storage is unavailable`)
+        return false
+      }
+      if (storage.status === 'recovery' || isPlansRecoveryEnabled()) {
+        return (await openLegacyPlanWindow(workspacePath, relPath)) !== false
       }
       const result = await openCatalogContributionWindow(
         `${PLANS_PLUGIN_ID}.window`,
@@ -131,14 +134,12 @@ export function createPlansWindowRouter(options: PlansWindowRouterOptions): Plan
       if (result.ok) return true
       if (frontendPluginManager.plansBackendFallbackAllowed()) {
         enterPlansRecovery('window-open-failure')
-        await openLegacyPlanWindow(workspacePath, relPath)
-        return true
+        return (await openLegacyPlanWindow(workspacePath, relPath)) !== false
       }
       warnMain(`[main] ${PLANS_PLUGIN_ID} window open denied: ${result.error ?? 'unknown error'}`)
       return false
     }
-    await openLegacyPlanWindow(workspacePath, relPath)
-    return true
+    return (await openLegacyPlanWindow(workspacePath, relPath)) !== false
   }
 
   return {

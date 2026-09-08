@@ -469,10 +469,14 @@ export class PluginBackendHost {
       this.backends.delete(key)
     })
     this.packageRevocations.set(key, task)
+    let completed = false
     try {
       await task
+      completed = true
     } finally {
-      if (this.packageRevocations.get(key) === task) this.packageRevocations.delete(key)
+      // A failed drain cannot prove that the old child is gone. Retain its
+      // admission barrier until process teardown rather than allowing respawn.
+      if (completed && this.packageRevocations.get(key) === task) this.packageRevocations.delete(key)
     }
   }
 

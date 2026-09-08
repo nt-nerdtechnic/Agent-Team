@@ -397,6 +397,12 @@ in the Extensions installed list and can be removed there. Package inventory is
 independent of frontend view descriptors, so a backend-only package remains
 manageable even though it contributes no view.
 
+The Host permits only one install or removal transaction per Plugin at a time,
+including rollback. A competing operation for the same Plugin is rejected;
+operations for different Plugins remain independent. An install consumes its
+prepared package only after the required confirmations pass. If that attempt
+fails, prepare the package again before retrying.
+
 The exact OS/architecture identifiers, archive size limits, and deterministic
 ZIP metadata are B8 decisions. Until they are published, examples must not be
 treated as accepted enum values.
@@ -702,6 +708,12 @@ writing source state or advancing the effective policy revision. The caller
 must inspect the current recommendation again before explicitly accepting it;
 the Host never accepts repository content that was not bound to the caller's
 inspected fingerprint.
+
+A recommendation using `full` additionally requires the caller's explicit
+`highRiskConfirmed: true` acknowledgement. The Host checks it against the same
+validated recommendation before writing a selection or advancing its revision;
+otherwise it returns `high-risk-confirmation-required`. Settings resets this
+acknowledgement when the workspace or inspected fingerprint changes.
 
 The Host source snapshot distinguishes `selectedSource` (the last explicit
 per-workspace choice) from `activeSource` (the source that actually supplied
@@ -1061,6 +1073,16 @@ self-contained Backend Wire executable. The package imports only the public SDK
 and UI packages; the Host selects its exact package/version, grant, workspace
 binding, backend methods, events, and private Bridge ports.
 
+MCP integration uses the current core backend architecture introduced by
+`4a6cc02a`. The core owns the single server and endpoint, authentication, caller
+identity, tool registration lifecycle, and authenticated Host handoff. The
+builtin Plans adapter registers its existing `plan_*` tools on that server
+before the session manager starts. The production package does not own an MCP
+server or a second tool registry: it implements Plans domain operations over
+Backend Wire. The flow is agent → core MCP → Plans tool adapter → Host →
+packaged Plans backend → Host capability broker. Recovery keeps the same core
+MCP entrypoint.
+
 Manual document operations use the package backend through the Host-private
 `filesystem` Bridge, which maps to the existing `fs` capability boundary. User
 initiated operations are not filtered by the agent Execution Policy. Agent MCP
@@ -1077,6 +1099,20 @@ timeouts, cancellation, child restart, Grant revocation, and crash cleanup
 remain Host-owned and settle through the same Backend Wire lifecycle. If the
 combined package cannot be selected or activated, the retained legacy Plans
 adapter remains available without converting or deleting workspace documents.
+
+Plans v2 surfaces and preference writes require completed storage migration and
+successful persistence of the active lifecycle record. A lifecycle read,
+migration, or lifecycle persistence failure disables v2 activation and enters
+recovery. Recovery reads only the lifecycle-selected previous snapshot; corrupt
+or unreadable recovery state is reported as unavailable rather than replaced
+with an empty snapshot. A genuinely missing migration source retains the
+first-install initialization behavior.
+
+Nested repository discovery uses the same deterministic limits in the Host,
+core index, and packaged backend: two levels, 50 found roots, 2,000 directory
+candidates per directory, and 2,000 candidate probes across the entire walk.
+The global budget also stops scans that find no nested repositories. Top-level
+Plans directories remain available without a nested scan.
 
 Issues 25 and 26 must reuse this Execution Policy contract, its Policy Sources,
 Host-minted Initiators, and the shared Host broker for miniIDE composition.

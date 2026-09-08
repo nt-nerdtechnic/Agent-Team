@@ -61,6 +61,7 @@ export type ExecutionPolicySourceSnapshotStatus =
 
 export type ExecutionPolicySourceErrorCode =
   | 'invalid-source'
+  | 'high-risk-confirmation-required'
   | 'workspace-unavailable'
   | 'source-state-unavailable'
   | 'source-state-corrupt'
@@ -321,6 +322,7 @@ function effectiveKey(payload: {
 }
 
 const SOURCE_ERROR_MESSAGES: Record<ExecutionPolicySourceErrorCode, string> = {
+  'high-risk-confirmation-required': 'full repository policy requires explicit high-risk confirmation',
   'invalid-source': 'execution policy source is invalid',
   'workspace-unavailable': 'workspace is unavailable',
   'source-state-unavailable': 'execution policy source state is unavailable',
@@ -662,7 +664,11 @@ export class ExecutionPolicySourceStore {
     })
   }
 
-  selectSource(workspacePath: string, request: SourceSelectionRequest): SelectSourceResult {
+  selectSource(
+    workspacePath: string,
+    request: SourceSelectionRequest,
+    options: { highRiskConfirmed?: boolean } = {},
+  ): SelectSourceResult {
     const context = this.readSelectionContext(workspacePath)
     const { global, sourceState, workspace, recommendation, snapshot: currentSnapshot } = context
 
@@ -701,6 +707,9 @@ export class ExecutionPolicySourceStore {
         : null
       if (expectedFingerprint !== fingerprint) {
         return this.failedSelection('recommendation-stale', currentSnapshot)
+      }
+      if (recommendation.policy?.mode === 'full' && options.highRiskConfirmed !== true) {
+        return this.failedSelection('high-risk-confirmation-required', currentSnapshot)
       }
     }
     if (source === 'user' && global.state !== 'user') {

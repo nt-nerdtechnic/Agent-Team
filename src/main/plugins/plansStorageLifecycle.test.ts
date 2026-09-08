@@ -12,6 +12,34 @@ afterEach(() => {
 })
 
 describe('Plans storage lifecycle selector', () => {
+  it.each(['unreadable', 'corrupt'] as const)('does not treat an %s record as first install', (failure) => {
+    const operations = realOperations({ readFileSync: () => {
+      if (failure === 'corrupt') return '{broken'
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    } })
+    const selector = new PlansStorageLifecycleSelector('/unused/lifecycle.json', operations)
+    expect(() => selector.sourceFor('0.1.94')).toThrow()
+  })
+
+  it('clears the selector when plugin storage is removed', () => {
+    const root = fs.mkdtempSync(join(tmpdir(), 'navide-plans-lifecycle-'))
+    roots.push(root)
+    const selector = new PlansStorageLifecycleSelector(join(root, 'lifecycle.json'))
+    selector.rememberActive('0.1.93')
+    selector.clear()
+    expect(selector.sourceFor('0.1.94')).toBeNull()
+    expect(() => selector.clear()).not.toThrow()
+  })
+
+  it('does not retain a missing source after successful empty migration', () => {
+    const root = fs.mkdtempSync(join(tmpdir(), 'navide-plans-lifecycle-'))
+    roots.push(root)
+    const selector = new PlansStorageLifecycleSelector(join(root, 'lifecycle.json'))
+    selector.rememberActive('0.1.93')
+    selector.rememberActive('0.1.94', null)
+    expect(selector.sourceFor('0.1.94')).toBeNull()
+  })
+
   it('returns the exact previously recorded active identity', () => {
     const root = fs.mkdtempSync(join(tmpdir(), 'navide-plans-lifecycle-'))
     roots.push(root)
