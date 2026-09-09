@@ -147,6 +147,111 @@ describe('useUiActionBus — ownership filtering', () => {
     expect((reply?.payload as { error: string }).error).toContain('/ws-a')
   })
 
+  // Starting a pipeline reads the window's own currentWorkspace too, and it is
+  // the most expensive action to get wrong: a run spawns a pane per stage slot
+  // and burns quota in whichever project the window happens to be showing.
+  it('refuses an addressed pipeline action naming a project it is not showing', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    const started: string[] = []
+    registerCommand('ui.pipeline.start', () => {
+      started.push(currentWorkspace.value)
+      return { pipelineId: 'default' }
+    })
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({
+      workspace_path: '/ws-held',
+      action: 'ui.pipeline.start',
+      args: { task: 'ship it' },
+      addressed: true,
+    }))
+    await flush()
+
+    expect(started).toEqual([])
+    const reply = sent.find((s) => s.type === 'ui.invoke.result')
+    expect(reply?.payload).toMatchObject({ request_id: 'req-1', ok: false })
+  })
+
+  // The other four pipeline controls read the window's own currentWorkspace
+  // exactly as start and abort do — next advances the stage of whatever run is
+  // on screen, reset kills every pane in it — so an addressed request naming a
+  // project this window merely holds must be refused rather than run against
+  // the one it is showing.
+  it.each([
+    'ui.pipeline.next',
+    'ui.pipeline.resume',
+    'ui.pipeline.reset',
+    'ui.pipeline.restart',
+  ])('refuses an addressed %s naming a project it is not showing', async (action) => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    const ranAgainst: string[] = []
+    registerCommand(action, () => {
+      ranAgainst.push(currentWorkspace.value)
+      return {}
+    })
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({
+      workspace_path: '/ws-held',
+      action,
+      addressed: true,
+    }))
+    await flush()
+
+    expect(ranAgainst).toEqual([])
+    const reply = sent.find((s) => s.type === 'ui.invoke.result')
+    expect(reply?.payload).toMatchObject({ request_id: 'req-1', ok: false })
+  })
+
+  // The permission-bypass toggle is window-wide — every spawn path reads it,
+  // whichever project the pane belongs to — so it is deliberately NOT
+  // workspace-scoped and must still answer an addressed request.
+  it('runs the window-wide yolo setting for a project it is not showing', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    const calls: string[] = []
+    registerCommand('ui.settings.yolo', () => {
+      calls.push(currentWorkspace.value)
+      return { yolo: true }
+    })
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({
+      workspace_path: '/ws-held',
+      action: 'ui.settings.yolo',
+      addressed: true,
+    }))
+    await flush()
+
+    expect(calls).toEqual(['/ws-a'])
+    const reply = sent.find((s) => s.type === 'ui.invoke.result')
+    expect(reply?.payload).toMatchObject({ request_id: 'req-1', ok: true })
+  })
+
+  it('refuses an addressed pipeline abort naming a project it is not showing', async () => {
+    const { backend, emit, sent } = createMockBackend()
+    const currentWorkspace = ref('/ws-a')
+    const aborted: string[] = []
+    registerCommand('ui.pipeline.abort', () => {
+      aborted.push(currentWorkspace.value)
+      return {}
+    })
+    useUiActionBus({ backend, currentWorkspace, buildSnapshot: () => ({}) })
+
+    emit('ui.invoke.request', baseRequest({
+      workspace_path: '/ws-held',
+      action: 'ui.pipeline.abort',
+      addressed: true,
+    }))
+    await flush()
+
+    expect(aborted).toEqual([])
+    const reply = sent.find((s) => s.type === 'ui.invoke.result')
+    expect(reply?.payload).toMatchObject({ request_id: 'req-1', ok: false })
+  })
+
   it('runs a workspace-scoped action addressed to the project it IS showing', async () => {
     const { backend, emit, sent } = createMockBackend()
     const currentWorkspace = ref('/ws-a')

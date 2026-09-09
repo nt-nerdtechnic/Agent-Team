@@ -66,7 +66,17 @@ function errorMessage(err: unknown): string {
  *  is either read-only (snapshot, list_actions, ui.pane.getStatus,
  *  ui.diagnostics.read — they describe the window as it is), window-scoped
  *  (settings), or keyed by pane id, and stays on the wider rule. */
-const WORKSPACE_SCOPED_ACTIONS = new Set(['ui.pane.create', 'ui.window.openGit', 'ui.preview.show'])
+const WORKSPACE_SCOPED_ACTIONS = new Set([
+  'ui.pane.create',
+  'ui.window.openGit',
+  'ui.preview.show',
+  'ui.pipeline.start',
+  'ui.pipeline.abort',
+  'ui.pipeline.next',
+  'ui.pipeline.resume',
+  'ui.pipeline.reset',
+  'ui.pipeline.restart',
+])
 
 /** Actions whose args.paneId names a pane's PRIVATE data — its inbox — rather
  *  than a window or a project. They run only when the caller IS that pane:
