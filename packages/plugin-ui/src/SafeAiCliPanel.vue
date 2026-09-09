@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { AiCliProfile, AiCliSessionController, SafeAiCliPanelHandle } from './index'
-import { settingsGet, settingsReadiness, settingsReady, settingsSet } from './shared'
+import { setContext, settingsGet, settingsReadiness, settingsReady, settingsSet } from './shared'
 
 const QUIET_MS = 3_500
 const QUIET_TIMEOUT_MS = 25_000
@@ -147,6 +147,35 @@ function focus(): void {
   void nextTick(() => terminal?.focus())
 }
 
+// Whether this panel's terminal currently holds focus. Published as the shared
+// `terminalFocus` keybinding context, which every rule written to yield to a
+// focused PTY reads (`escape` in the Plan window, the Git window's git.*
+// chords). The Host renderer's own terminal composable publishes it for CLI
+// panes; a plugin window has no such composable, so without this the guard is
+// vacuously true there and the key is consumed before the PTY ever sees it.
+let ownsTerminalFocus = false
+
+function claimTerminalFocus(): void {
+  ownsTerminalFocus = true
+  setContext('terminalFocus', true)
+}
+
+function releaseTerminalFocus(): void {
+  if (!ownsTerminalFocus) return
+  ownsTerminalFocus = false
+  setContext('terminalFocus', false)
+}
+
+function onTerminalFocusOut(event: FocusEvent): void {
+  // Focus moving within the terminal (xterm swaps its helper textarea) is not a
+  // release. Anything else is — including a null relatedTarget, which is what a
+  // click on a non-focusable element elsewhere in the window reports; treating
+  // that as "only the window blurred" would strand the context on for good.
+  const next = event.relatedTarget
+  if (next instanceof Node && terminalHost.value?.contains(next)) return
+  releaseTerminalFocus()
+}
+
 async function waitForQuiet(): Promise<void> {
   const deadline = Date.now() + QUIET_TIMEOUT_MS
   while (running.value && Date.now() < deadline && Date.now() - lastOutputAt < QUIET_MS) {
@@ -182,7 +211,14 @@ onMounted(() => {
   })
   fitAddon = new FitAddon()
   terminal.loadAddon(fitAddon)
-  if (terminalHost.value) terminal.open(terminalHost.value)
+  if (terminalHost.value) {
+    terminal.open(terminalHost.value)
+    // focusin/focusout rather than the textarea's own focus/blur: xterm owns
+    // that element and may replace it, and these bubble from whichever one it
+    // is currently using.
+    terminalHost.value.addEventListener('focusin', claimTerminalFocus)
+    terminalHost.value.addEventListener('focusout', onTerminalFocusOut)
+  }
   if (earlyOutput) {
     terminal.write(earlyOutput)
     earlyOutput = ''
@@ -239,6 +275,11 @@ watch(() => settingsReadiness.status, (status) => {
 })
 
 onUnmounted(() => {
+  terminalHost.value?.removeEventListener('focusin', claimTerminalFocus)
+  terminalHost.value?.removeEventListener('focusout', onTerminalFocusOut)
+  // A panel unmounted while focused never fires focusout, and a stuck-on
+  // context would disable every `!terminalFocus` binding in the window.
+  releaseTerminalFocus()
   resizeObserver?.disconnect()
   stopWidthResize?.()
   removeOutputListener()
