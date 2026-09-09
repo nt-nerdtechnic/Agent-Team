@@ -265,6 +265,42 @@ describe('GitPluginHostSlot lifecycle', () => {
     expect(closeGitLeftView).toHaveBeenCalledTimes(1)
   })
 
+  it('offers a way out when a zero-sized slot never opens a view', async () => {
+    currentRect = { x: 0, y: 0, width: 0, height: 0 }
+    const openGitLeftView = vi.fn().mockResolvedValue({ ok: true })
+    window.agentTeam = {
+      getZoomFactor: vi.fn().mockResolvedValue(1),
+      openGitLeftView,
+      updateGitLeftView: vi.fn().mockResolvedValue({ ok: true }),
+      closeGitLeftView: vi.fn().mockResolvedValue({ ok: true }),
+    } as unknown as typeof window.agentTeam
+
+    const wrapper = mount(GitPluginHostSlot, {
+      props: { workspacePath: '/workspace', visible: true },
+      global: { plugins: [i18n] },
+    })
+    await flushPromises()
+
+    // Geometry of zero makes `sync` return without opening anything and
+    // without an error, so the panel would otherwise be blank under the bare
+    // "Legacy recovery" label with nothing to click.
+    expect(openGitLeftView).not.toHaveBeenCalled()
+    expect(wrapper.find('.git-plugin-host-slot__error').text()).toContain(
+      i18n.global.t('git.left-view-unavailable')
+    )
+
+    currentRect = { x: 120, y: 220, width: 500, height: 350 }
+    await wrapper.find('.git-plugin-host-slot__error button').trigger('click')
+    await flushPromises()
+
+    expect(openGitLeftView).toHaveBeenCalledWith({
+      workspace_path: '/workspace',
+      bounds: { x: 120, y: 220, width: 500, height: 350 },
+    })
+    expect(wrapper.find('.git-plugin-host-slot__error').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('treats an update rejection as the same recoverable error state', async () => {
     const openGitLeftView = vi.fn().mockResolvedValue({ ok: true })
     const updateGitLeftView = vi.fn().mockRejectedValue(new Error('view closed'))

@@ -5649,8 +5649,10 @@ button.icon-btn.muted:hover {
   min-height: 0;
   margin: 0 -14px -14px;
 }
-/* ExplorerPane fills its part-top container */
-.pane-split .part-top > * {
+/* ExplorerPane fills its part-top container. The recovery badge is excluded so
+   its own `flex: none` survives — otherwise it is stretched down the whole
+   column and steals the height the panel below it needs. */
+.pane-split .part-top > *:not(.legacy-recovery-label) {
   flex: 1;
   min-height: 0;
 }

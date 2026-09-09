@@ -20,6 +20,7 @@ vi.mock('electron', () => {
     id = nextWebContentsId++
     sent: Array<{ channel: string; args: unknown[] }> = []
     loads: string[] = []
+    reloads = 0
     focusCount = 0
     private destroyed = false
     private listeners = new Map<string, Handler[]>()
@@ -39,6 +40,9 @@ vi.mock('electron', () => {
     loadFile(file: string, opts?: { search?: string }): Promise<void> {
       this.loads.push(`${file}${opts?.search ?? ''}`)
       return Promise.resolve()
+    }
+    reload(): void {
+      this.reloads++
     }
     on(event: string, cb: Handler): this {
       const list = this.listeners.get(event) ?? []
@@ -96,6 +100,28 @@ vi.mock('electron', () => {
     contentBounds = { x: 0, y: 0, width: 1000, height: 700 }
     children: unknown[] = []
     private listeners = new Map<string, Handler[]>()
+    private hostContentsListeners = new Map<string, Handler[]>()
+    /** The window document's own contents. The manager listens for
+     *  `did-start-navigation` here so a host reload reads as a deliberate
+     *  teardown of the guests the window carries. Deliberately not a
+     *  `FakeWebContents`, which would consume a guest webContents id. */
+    webContents = {
+      on: (event: string, cb: Handler): void => {
+        const list = this.hostContentsListeners.get(event) ?? []
+        list.push(cb)
+        this.hostContentsListeners.set(event, list)
+      },
+      removeListener: (event: string, cb: Handler): void => {
+        this.hostContentsListeners.set(
+          event,
+          (this.hostContentsListeners.get(event) ?? []).filter((l) => l !== cb)
+        )
+      },
+      emit: (event: string, ...args: unknown[]): void => {
+        for (const cb of [...(this.hostContentsListeners.get(event) ?? [])]) cb(...args)
+      },
+      send: (): void => {},
+    }
     contentView = {
       addChildView: (v: unknown): void => {
         this.children.push(v)
@@ -302,6 +328,13 @@ const { ipcHandlers, ipcListeners, views, windows } = (
   }
 ).__mock
 
+interface FakeHostContents {
+  on(event: string, cb: (...args: unknown[]) => void): void
+  removeListener(event: string, cb: (...args: unknown[]) => void): void
+  emit(event: string, ...args: unknown[]): void
+  send?: (channel: string, ...args: unknown[]) => void
+}
+
 /** Host-window fake with just the surface the manager touches. */
 class FakeBrowserWindow {
   title = ''
@@ -312,6 +345,35 @@ class FakeBrowserWindow {
   contentBounds = { x: 0, y: 0, width: 1000, height: 700 }
   children: unknown[] = []
   private listeners = new Map<string, Array<(...args: unknown[]) => void>>()
+  private hostContentsListeners = new Map<string, Array<(...args: unknown[]) => void>>()
+  /** The host document's own contents. The manager watches it so a reload or
+   *  navigation of the host window reads as a deliberate guest teardown.
+   *
+   *  Assigning to `webContents` *merges* rather than replaces, so the tests
+   *  that supply their own `send` spy keep the listener surface the manager
+   *  wires up on every open. */
+  private hostContents: FakeHostContents = {
+    on: (event, cb) => {
+      const list = this.hostContentsListeners.get(event) ?? []
+      list.push(cb)
+      this.hostContentsListeners.set(event, list)
+    },
+    removeListener: (event, cb) => {
+      this.hostContentsListeners.set(
+        event,
+        (this.hostContentsListeners.get(event) ?? []).filter((l) => l !== cb)
+      )
+    },
+    emit: (event, ...args) => {
+      for (const cb of [...(this.hostContentsListeners.get(event) ?? [])]) cb(...args)
+    },
+  }
+  get webContents(): FakeHostContents {
+    return this.hostContents
+  }
+  set webContents(patch: Partial<FakeHostContents>) {
+    Object.assign(this.hostContents, patch)
+  }
   contentView = {
     addChildView: (v: unknown): void => {
       this.children.push(v)
@@ -2466,6 +2528,123 @@ describe('registerDescriptor reserved-id guard', () => {
     })
   })
 
+  /** Open the granted Manifest v2 Git left view and hand back its guest. */
+  async function openGitLeftForFailure(): Promise<{
+    mgr: FrontendPluginManager
+    host: FakeBrowserWindow
+    webContents: { emit(event: string, ...args: unknown[]): void }
+    onFailure: ReturnType<typeof vi.fn>
+  }> {
+    const mgr = new FrontendPluginManager()
+    const packageDescriptor: PluginLaunchDescriptor = {
+      ...descriptor('navide.git'),
+      packageVersion: '1.0.0',
+      capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+      views: [{
+        id: 'left',
+        contributionKey: 'navide.git.left',
+        kind: 'custom',
+        location: 'left',
+        title: 'Git',
+        entryFile: '/plugins/navide.git/frontend/left/index.html',
+      }],
+    }
+    mgr.registerInstalledPackage(
+      { id: 'navide.git', requires: ['fs'], provenance: 'official-registry' },
+      packageDescriptor,
+      { official: true },
+    )
+    mgr.setCapabilityGrantResolver(() => ({
+      packageVersion: '1.0.0', system: ['fs'], storage: true,
+    }))
+    const onFailure = vi.fn()
+    mgr.setActivationFailureHandler(onFailure)
+    const host = new FakeBrowserWindow()
+    await mgr.openContribution(asHost(host), 'navide.git.left', {
+      bounds: { x: 0, y: 0, width: 300, height: 500 },
+      workspacePath: '/workspace',
+    })
+    return {
+      mgr,
+      host,
+      webContents: (host.children[0] as FakeViewLike).webContents as unknown as {
+        emit(event: string, ...args: unknown[]): void
+      },
+      onFailure,
+    }
+  }
+
+  // `destroyed` alone cannot tell a fault from an ordinary teardown, and the
+  // load phase is not a usable proxy for it: a region re-preparing for another
+  // workspace tears its guest down seconds *after* the entry loaded. So the
+  // Host marks every deliberate teardown, and only an unmarked one is a fault.
+
+  it('blames the plugin for a guest that dies on its own before its entry loaded', async () => {
+    const { webContents, onFailure } = await openGitLeftForFailure()
+
+    webContents.emit('destroyed')
+
+    expect(onFailure).toHaveBeenCalledWith({
+      pluginId: 'navide.git',
+      packageVersion: '1.0.0',
+      reason: 'plugin renderer exited before readiness',
+    })
+  })
+
+  it('blames the plugin for a guest that dies on its own after its entry loaded', async () => {
+    const { webContents, onFailure } = await openGitLeftForFailure()
+
+    webContents.emit('did-finish-load')
+    webContents.emit('destroyed')
+
+    expect(onFailure).toHaveBeenCalledWith({
+      pluginId: 'navide.git',
+      packageVersion: '1.0.0',
+      reason: 'plugin renderer exited before readiness',
+    })
+  })
+
+  it('does not blame the plugin when the Host closed the region itself', async () => {
+    const { mgr, host, webContents, onFailure } = await openGitLeftForFailure()
+    webContents.emit('did-finish-load')
+
+    // What a renderer-side slot re-preparing for another workspace does first.
+    // A Host-driven teardown forgets the record before the guest dies, so
+    // `destroyed` finds nothing to blame — no flag needed.
+    mgr.closeContribution(asHost(host), 'navide.git.left')
+    webContents.emit('destroyed')
+
+    expect(onFailure).not.toHaveBeenCalled()
+  })
+
+  it('does not blame the plugin when the host document navigates away', async () => {
+    const { host, webContents, onFailure } = await openGitLeftForFailure()
+    webContents.emit('did-finish-load')
+
+    // A host window reload runs no renderer unmount hook, so this listener is
+    // the only thing that marks the guests it takes down as deliberate.
+    host.webContents.emit('did-start-navigation', {}, 'file:///index.html', false, true)
+    webContents.emit('destroyed')
+
+    expect(onFailure).not.toHaveBeenCalled()
+  })
+
+  it('still blames the plugin for an in-page navigation of the host', async () => {
+    const { host, webContents, onFailure } = await openGitLeftForFailure()
+    webContents.emit('did-finish-load')
+
+    // A hash/history change does not unload the document, so it must not
+    // excuse a guest that dies afterwards.
+    host.webContents.emit('did-start-navigation', {}, 'file:///index.html#git', true, true)
+    webContents.emit('destroyed')
+
+    expect(onFailure).toHaveBeenCalledWith({
+      pluginId: 'navide.git',
+      packageVersion: '1.0.0',
+      reason: 'plugin renderer exited before readiness',
+    })
+  })
+
   it('starts the v2 readiness timeout only after the entry finishes loading', async () => {
     vi.useFakeTimers()
     try {
@@ -2500,18 +2679,78 @@ describe('registerDescriptor reserved-id guard', () => {
       })
       const webContents = (host.children[0] as FakeViewLike).webContents as unknown as {
         emit(event: string, ...args: unknown[]): void
+        reloads: number
       }
 
       await vi.advanceTimersByTimeAsync(10_000)
       expect(onFailure).not.toHaveBeenCalled()
 
+      // A missed budget buys one reload before it is allowed to cost the
+      // session its v2 activation.
       webContents.emit('did-finish-load')
       await vi.advanceTimersByTimeAsync(10_000)
+      expect(webContents.reloads).toBe(1)
+      expect(onFailure).not.toHaveBeenCalled()
+
+      webContents.emit('did-finish-load')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(webContents.reloads).toBe(1)
       expect(onFailure).toHaveBeenCalledWith({
         pluginId: 'navide.git',
         packageVersion: '1.0.0',
         reason: 'plugin readiness handshake timed out',
       })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('lets a guest that reports ready after its reload keep the activation', async () => {
+    vi.useFakeTimers()
+    try {
+      const mgr = new FrontendPluginManager()
+      const packageDescriptor: PluginLaunchDescriptor = {
+        ...descriptor('navide.git'),
+        packageVersion: '1.0.0',
+        capabilityPolicy: { kind: 'manifest-v2', system: ['fs'], grants: [] },
+        views: [{
+          id: 'left',
+          contributionKey: 'navide.git.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Git',
+          entryFile: '/plugins/navide.git/frontend/left/index.html',
+        }],
+      }
+      mgr.registerInstalledPackage(
+        { id: 'navide.git', requires: ['fs'], provenance: 'official-registry' },
+        packageDescriptor,
+        { official: true },
+      )
+      mgr.setCapabilityGrantResolver(() => ({
+        packageVersion: '1.0.0', system: ['fs'], storage: true,
+      }))
+      const onFailure = vi.fn()
+      mgr.setActivationFailureHandler(onFailure)
+      const host = new FakeBrowserWindow()
+      await mgr.openContribution(asHost(host), 'navide.git.left', {
+        bounds: { x: 0, y: 0, width: 300, height: 500 },
+        workspacePath: '/workspace',
+      })
+      const webContents = (host.children[0] as FakeViewLike).webContents as unknown as {
+        emit(event: string, ...args: unknown[]): void
+        reloads: number
+        id: number
+      }
+
+      webContents.emit('did-finish-load')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(webContents.reloads).toBe(1)
+
+      webContents.emit('did-finish-load')
+      ipcListeners.get('plugin:ready')?.({ sender: { id: webContents.id } })
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(onFailure).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }

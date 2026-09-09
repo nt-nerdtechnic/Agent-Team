@@ -30,7 +30,9 @@ const emit = defineEmits<{
 const slot = ref<HTMLElement | null>(null)
 const slotError = ref(false)
 let disposed = false
-let openedWorkspace = ''
+// Reactive: the template needs it to tell an empty slot that has a native
+// view stacked over it from one with nothing to show at all.
+const openedWorkspace = ref('')
 let visibleInHost = false
 let lastBounds: { x: number; y: number; width: number; height: number } | null = null
 let lastGeometry = ''
@@ -47,7 +49,7 @@ let animationFrame: number | null = null
 let offZoomChanged: (() => void) | null = null
 
 function resetViewState(): void {
-  openedWorkspace = ''
+  openedWorkspace.value = ''
   visibleInHost = false
   lastBounds = null
   lastGeometry = ''
@@ -136,7 +138,7 @@ function applyLegacyFallback(): void {
 
 async function enterError(generation: number, workspacePath: string): Promise<void> {
   if (!isCurrent(generation, workspacePath)) return
-  const hadNativeView = openedWorkspace !== ''
+  const hadNativeView = openedWorkspace.value !== ''
   resetViewState()
   slotError.value = true
   capturePendingGeometry()
@@ -160,14 +162,14 @@ function sync(): void {
     const generation = syncGeneration
     const workspacePath = props.workspacePath.trim()
     if (!workspacePath) {
-      if (openedWorkspace) await window.agentTeam?.closeGitLeftView()
+      if (openedWorkspace.value) await window.agentTeam?.closeGitLeftView()
       if (!isCurrent(generation, workspacePath)) return
       resetViewState()
       pendingGeometry = null
       return
     }
 
-    if (openedWorkspace && openedWorkspace !== workspacePath) {
+    if (openedWorkspace.value && openedWorkspace.value !== workspacePath) {
       await window.agentTeam?.closeGitLeftView()
       if (!isCurrent(generation, workspacePath)) return
       resetViewState()
@@ -185,7 +187,7 @@ function sync(): void {
     if (bounds) {
       lastBounds = bounds
       const geometry = [bounds.x, bounds.y, bounds.width, bounds.height].join(':')
-      if (props.visible && !openedWorkspace) {
+      if (props.visible && !openedWorkspace.value) {
         try {
           const result = await window.agentTeam?.openGitLeftView({ workspace_path: workspacePath, bounds })
           if (!isCurrent(generation, workspacePath)) {
@@ -202,13 +204,13 @@ function sync(): void {
             applyLegacyFallback()
             return
           }
-          openedWorkspace = workspacePath
+          openedWorkspace.value = workspacePath
           visibleInHost = true
           lastGeometry = geometry
         } catch {
           await enterError(generation, workspacePath)
         }
-      } else if (openedWorkspace && (props.visible !== visibleInHost || geometry !== lastGeometry)) {
+      } else if (openedWorkspace.value && (props.visible !== visibleInHost || geometry !== lastGeometry)) {
         try {
           const result = await window.agentTeam?.updateGitLeftView({ bounds, visible: props.visible })
           if (!isCurrent(generation, workspacePath)) return
@@ -226,7 +228,7 @@ function sync(): void {
           await enterError(generation, workspacePath)
         }
       }
-    } else if (openedWorkspace && !props.visible && visibleInHost && lastBounds) {
+    } else if (openedWorkspace.value && !props.visible && visibleInHost && lastBounds) {
       try {
         const result = await window.agentTeam?.updateGitLeftView({ bounds: lastBounds, visible: false })
         if (!isCurrent(generation, workspacePath)) return
@@ -267,7 +269,7 @@ function scheduleSync(): void {
 }
 
 function retry(): void {
-  if (disposed || !slotError.value) return
+  if (disposed) return
   syncGeneration += 1
   slotError.value = false
   pendingGeometry = null
@@ -341,6 +343,16 @@ onBeforeUnmount(() => {
       <button type="button" class="ghost" @click="retry">{{ t('action.retry') }}</button>
     </div>
     <span v-else-if="!workspacePath" class="git-plugin-host-slot__empty">{{ t('git.open-workspace') }}</span>
+    <!-- The Host composes the v2 panel as a native view stacked over this
+         element, so an empty slot is normal *while one is open*. With no view
+         open there is nothing left to draw it: a geometry read of 0 makes
+         `sync` return without opening anything and without an error, and the
+         user is left with the bare "Legacy recovery" label. Give that state a
+         terminal face with a way out. -->
+    <div v-else-if="!openedWorkspace" class="git-plugin-host-slot__error" role="status" aria-live="polite">
+      <span>{{ t('git.left-view-unavailable') }}</span>
+      <button type="button" class="ghost" @click="retry">{{ t('action.retry') }}</button>
+    </div>
   </div>
 </template>
 

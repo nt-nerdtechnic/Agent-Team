@@ -58,6 +58,13 @@ function closeContribution(): void {
 
 async function prepare(): Promise<void> {
   const mine = ++generation
+  // Clearing `src` removes the <webview> synchronously, which destroys the
+  // guest. The Host only hears about that through the guest's own `destroyed`
+  // event and reads it as the plugin dying before its readiness handshake —
+  // which downgrades a healthy Manifest v2 package (navide.git above all) to
+  // legacy recovery for the rest of the session. Release the instance first so
+  // the Host settles the activation itself instead of inferring a failure.
+  closeContribution()
   src.value = null
   error.value = null
   if (!props.workspacePath) {

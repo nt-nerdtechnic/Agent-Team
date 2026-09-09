@@ -285,6 +285,32 @@ describe('PluginRegionHost', () => {
     wrapper.unmount()
   })
 
+  it('releases the Host instance before a workspace change destroys the guest', async () => {
+    const prepare = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, url: URL_A })
+      .mockResolvedValueOnce({ ok: true, url: URL_B })
+    const { closeContribution } = stubPlugins(prepare)
+    const wrapper = mount(PluginRegionHost, {
+      props: { contribution, workspacePath: '/ws', visible: true },
+    })
+    await flushPromises()
+    closeContribution.mockClear()
+    prepare.mockClear()
+
+    await wrapper.setProps({ workspacePath: '/other' })
+    await flushPromises()
+
+    // Dropping `src` destroys the guest synchronously. Unless the Host is told
+    // first it reads that as the plugin dying before its readiness handshake,
+    // which downgrades navide.git to legacy recovery for the whole session.
+    expect(closeContribution).toHaveBeenCalledWith({ contributionKey: 'acme.files.left' })
+    expect(closeContribution.mock.invocationCallOrder[0]).toBeLessThan(
+      prepare.mock.invocationCallOrder[0]
+    )
+    wrapper.unmount()
+  })
+
   it('releases the Host instance when the window drops its workspace', async () => {
     const prepare = vi.fn(async () => ({ ok: true, url: URL_A }))
     const { closeContribution } = stubPlugins(prepare)
