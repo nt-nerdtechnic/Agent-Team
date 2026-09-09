@@ -31,6 +31,7 @@ function idleForHours(over: Partial<ReclaimCandidate> = {}): ReclaimCandidate {
     hasDraft: false,
     lastTouchedAt: NOW - 4 * 60 * 60_000,
     managerRouting: false,
+    globalManagerRouting: false,
     stageWatched: false,
     hasQueuedMessages: false,
     ...over,
@@ -108,6 +109,28 @@ describe('reclaimBlockedBy — held by another subsystem', () => {
     // reads '' from a stale cursor from then on, reporting nothing wrong.
     const manager = idleForHours({ managerRouting: true })
     expect(reclaimBlockedBy(manager, THRESHOLD, NOW)).toBe('manager-routing')
+  })
+
+  it('never reclaims the cross-stage global Manager pane', () => {
+    // The global Manager sits in stage 01, so the stage router that held it is
+    // disposed when that stage ends, and in manager mode it has no watcher —
+    // both existing guards go false while every worker's ASK/REPORT is still
+    // routed through it. A stage 02 that runs past the reclaim threshold turned
+    // it into a placeholder, and globalManagerPaneId() (which requires
+    // `realized`) then returned null, so the router bailed silently.
+    const globalManager = idleForHours({
+      managerRouting: false,
+      stageWatched: false,
+      globalManagerRouting: true,
+    })
+    expect(reclaimBlockedBy(globalManager, THRESHOLD, NOW)).toBe('global-manager-routing')
+  })
+
+  it('releases the global Manager once its router is no longer live', () => {
+    // The flag tracks the RUNNING router, not "was ever a Manager", so a
+    // completed or aborted run does not leave the pane unreclaimable forever
+    // (the mistake resumeContinueAvailable made).
+    expect(reclaimBlockedBy(idleForHours({ globalManagerRouting: false }), THRESHOLD, NOW)).toBeNull()
   })
 
   it('never reclaims a pane a stage watcher is polling', () => {

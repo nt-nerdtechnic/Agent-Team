@@ -100,6 +100,11 @@ import {
   type StageId,
   type StageSlot
 } from './data/stages'
+import { deriveGlobalManager, type GlobalManagerRef } from './lib/globalManager'
+import { registerStage, completeSlot, releaseSlot, type StageSlotTracker } from './lib/stageTracker'
+import { evaluateManagerStage, fullAutoStallAction, type ManagerStageVerdict } from './lib/managerStageWatchdog'
+import { closeEndsTheRun } from './lib/workspaceCloseRun'
+import { droppedPrefix, remapCursor, type BufferObservation } from './lib/bufferCursor'
 import { i18n } from '@navide/plugin-ui/foundation'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
@@ -126,7 +131,7 @@ import {
   CLI_PASTE_LINE_CAP
 } from '@navide/terminal'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
-import { activityMeansWorking, allSlotsFinished, applyLoopWait, applyTurnProgress, detailMeansToolUse, loopWaitBackoffMs, loopWaitHonoured, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal, type LoopWaitState } from './lib/completion'
+import { activityMeansWorking, allSlotsFinished, applyLoopWait, applyTurnProgress, detailMeansToolUse, recordTurnComplete, paneSignalResetKeys, loopWaitBackoffMs, loopWaitHonoured, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, loopWaitingOnSubagents, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal, type LoopWaitState } from './lib/completion'
 import { reorderByIds, reorderStrings, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
 import { resolveDragBatch, reorderBatchByIds } from './lib/paneBatchDrag'
@@ -5817,6 +5822,19 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
     pane.loopMaxTurns = 0
   }
   sysNotify.forgetPane(paneId)
+  // The stage this pane was a slot of is now waiting for a signal that can
+  // never arrive: its watcher is cancelled and its PTY is gone. Release the
+  // slot so the stage can still reach N/N. Done last, once the pane is out of
+  // the list, so an advance triggered here never sees the dead pane.
+  // Deliberately narrow:
+  //   • keepInList → rebuild / idle-reclaim; the slot keeps its seat and comes
+  //     back under the same slotLabel, so its count must stand.
+  //   • !realized → a cold placeholder never had a signal source; activateStage
+  //     drops and re-spawns those, and releasing would leave the re-spawned
+  //     slot uncounted.
+  if (stageIndex >= 0 && !keepInList && pane?.origin === 'pipeline' && pane.realized) {
+    releaseStageSlot(stageIndex, paneId, `pane "${pane.slotLabel || paneId.slice(0, 8)}" closed`)
+  }
   syncViews()
 }
 
@@ -6522,13 +6540,6 @@ async function batchRebuild(ids: string[]): Promise<void> {
 }
 
 // ────────────────────────── Pipeline ──────────────────────────
-
-interface GlobalManagerRef {
-  /** stage id (e.g. "02") that contains the Manager slot. */
-  stageId: string
-  /** slot label within that stage (e.g. "Planning"). */
-  slotLabel: string
-}
 
 interface PipelineRun {
   task: string
@@ -7390,6 +7401,54 @@ registerCommand('ui.window.openGit', async () => {
 registerCommand('ui.window.openPipeline', (args) => {
   const pipelineId = (args as { pipelineId?: string } | undefined)?.pipelineId
   openPipelineManager(pipelineId)
+})
+// Running a pipeline is a RENDERER job: the backend's pipeline.start handler
+// only writes the run record, while the panes for each stage are spawned here
+// (onPipelineStart → preSpawnStage → activateStage). An MCP client calling the
+// backend directly would therefore leave a run that reads as started and did
+// nothing, so these two actions drive the very functions the ControlPane
+// buttons emit into (@pipeline-start / @pipeline-abort) rather than a copy.
+registerCommand('ui.pipeline.start', async (args) => {
+  const a = (args as { pipelineId?: string; task?: string } | undefined) ?? {}
+  if (!currentWorkspace.value) throw new Error('ui.pipeline.start requires an open workspace')
+  // A second run would overwrite pipeline.task/stageIndex/state under the
+  // panes the first one is still driving, so refuse rather than restart.
+  // Guarding a copy rather than pipeline.state itself keeps the state read
+  // AFTER the await unnarrowed — a guard on the reactive field narrows it for
+  // the rest of the function, and TS does not widen it back across an await.
+  const before: PipelineRun['state'] = pipeline.state
+  if (before === 'running') {
+    throw new Error('ui.pipeline.start: a pipeline is already running in this workspace — abort it first')
+  }
+  const pipelineId = a.pipelineId || pipelinesApi.activePipelineId.value
+  if (!pipelineId) {
+    throw new Error('ui.pipeline.start requires a pipelineId: this workspace has no active pipeline')
+  }
+  await onPipelineStart({ task: a.task ?? '', workspacePath: currentWorkspace.value, pipelineId })
+  // onPipelineStart bails SOFTLY on every one of its own refusals (unknown
+  // pipeline, stages not loaded, every slot of stage 01 failing to spawn) —
+  // it logs and returns. Reporting ok on that is exactly the "started but
+  // nothing happened" answer this action exists to avoid, so the run state is
+  // what gets reported, not the fact that the call returned.
+  const started: PipelineRun['state'] = pipeline.state
+  if (started !== 'running') {
+    throw new Error(`ui.pipeline.start: the run did not start (state "${started}") — see the pipeline log for why`)
+  }
+  return {
+    pipelineId: pipelinesApi.activePipelineId.value,
+    stages: stagesApi.stages.value.length,
+    workspacePath: pipeline.workspacePath,
+    state: started,
+  }
+})
+registerCommand('ui.pipeline.abort', async () => {
+  // onPipelineAbort itself returns silently when nothing is running; say so
+  // instead of answering ok for a no-op.
+  if (pipeline.state !== 'running') {
+    throw new Error(`ui.pipeline.abort: no pipeline is running in this workspace (state "${pipeline.state}")`)
+  }
+  await onPipelineAbort()
+  return { workspacePath: pipeline.workspacePath, state: pipeline.state }
 })
 registerCommand('ui.workspace.open', async (args) => {
   const path = (args as { path?: string } | undefined)?.path
@@ -9035,6 +9094,9 @@ async function onPipelineRestart(payload: { task: string; workspacePath: string 
   // Cancel any running watchers / questions left from a previous attempt
   // before we overwrite project state.
   cancelAllWatchers()
+  // Drop the previous attempt's slot counts too, so killing its panes below
+  // does not release slots of a run that is being thrown away anyway.
+  stageCompletions.clear()
   activeQuestion.value = null
   // Kill any pipeline-origin panes still hanging around so we get a clean grid.
   for (const p of [...panes.value]) {
@@ -9050,11 +9112,34 @@ async function onPipelineResume(): Promise<void> {
   if (info.nextStageIndex < 0) return
   // Wire the local pipeline state from the existing project, then call the
   // backend's resume endpoint and spawn the resume stage.
+  const resumeWorkspacePath = info.projectFile.replace(/\/\.agent-team\/project\.json$/, '')
+  // The recorded run belongs to ONE pipeline. Resuming it against whatever
+  // pipeline happens to be active read the WRONG stage list — a shorter one
+  // made activateStage a no-op (state left 'running' with zero panes), a longer
+  // one ran an unrelated stage with this run's task. Switch first.
+  if (info.pipelineId && info.pipelineId !== pipelinesApi.activePipelineId.value) {
+    const switched = await pipelinesApi.setActivePipeline(info.pipelineId, resumeWorkspacePath)
+    if (!switched) {
+      pipelineLog(
+        `Resume aborted: could not switch to the pipeline this run belongs to` +
+          (pipelinesApi.error.value ? ` — ${pipelinesApi.error.value}` : '')
+      )
+      return
+    }
+    await stagesApi.refresh(info.pipelineId)
+    if (stagesApi.error.value) {
+      pipelineLog(`Resume aborted: could not load that pipeline's stages — ${stagesApi.error.value}`)
+      return
+    }
+  }
   pipeline.task = info.taskDescription
-  pipeline.workspacePath = info.projectFile.replace(/\/\.agent-team\/project\.json$/, '')
+  pipeline.workspacePath = resumeWorkspacePath
   pipeline.stageIndex = info.nextStageIndex
   pipeline.state = 'running'
   pipeline.log = []
+  // Rebuild the cross-stage Manager reference; only onPipelineStart used to do
+  // this, so a resumed run routed nothing between Manager and workers.
+  pipeline.globalManager = deriveGlobalManager(stagesApi.stages.value)
   pipelineLog(`Resuming pipeline · jumping to Stage ${stagesApi.stages.value[info.nextStageIndex]?.id}`)
   const resp = await sendQuiet<ProjectPayload>('pipeline.resume', {
     workspace_path: pipeline.workspacePath
@@ -9071,6 +9156,8 @@ async function onPipelineResume(): Promise<void> {
   if (pipeline.state !== 'running') return
   // activateStage builds context from prior stages and injects kickoffs.
   await activateStage(info.nextStageIndex)
+  // Start the global Manager cross-stage router (if configured), same as start.
+  if (pipeline.state === 'running' && pipeline.globalManager) startGlobalManagerRouter()
 }
 
 // Orders every project.set_ui_state write per (workspace, state-field) key so
@@ -9338,7 +9425,7 @@ function pipelineLog(line: string): void {
 async function preSpawnStage(index: number): Promise<void> {
   const stage = stagesApi.stages.value[index]
   if (!stage) return
-  stageCompletions.set(index, { expected: stage.slots.length, done: new Set() })
+  registerStage(stageCompletions, index, stage.slots.length)
   pipelineLog(`Stage ${stage.id} ⚡ pre-spawn ${stage.slots.length} slot(s) (role only)`)
   await Promise.all(stage.slots.map(async (slot) => {
     pipelineLog(`Stage ${stage.id}/${slot.label} → pre-spawn ${slot.agentKey} as ${slot.roleKey}`)
@@ -9366,6 +9453,12 @@ async function preSpawnStage(index: number): Promise<void> {
         session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
         run_group_id: currentRunGroupId.value,
       })
+    } else {
+      // No pane: resolveCommand found no spec for this agentKey (a pipeline
+      // saved against a CLI that no longer ships, e.g. gemini). Skipping the
+      // slot silently left `expected` counting a slot that will never spawn.
+      pipelineLog(`Stage ${stage.id}/${slot.label} ✕ pre-spawn failed — no '${slot.agentKey}' agent available`)
+      releaseStageSlot(index, `slot:${slot.label}`, `slot "${slot.label}" could not spawn`)
     }
   }))
 }
@@ -9423,7 +9516,19 @@ function buildStageContext(index: number, forManager: boolean): string {
  *  Safe to call on a freshly-spawned stage too (same as old spawnPipelineStage). */
 async function activateStage(index: number): Promise<void> {
   const stage = stagesApi.stages.value[index]
-  if (!stage) return
+  if (!stage) {
+    // Out of range. The two in-run callers cannot reach this (start uses 0
+    // behind a length guard, next() returns before overrunning), so getting
+    // here means the loaded stage list does not match the index we were asked
+    // to run — e.g. a resume against a shorter pipeline. Returning silently
+    // left pipeline.state='running' with zero panes and no error anywhere.
+    pipelineLog(
+      `Pipeline stopped: stage index ${index + 1} does not exist ` +
+        `(${stagesApi.stages.value.length} stage(s) loaded)`
+    )
+    if (pipeline.state === 'running') pipeline.state = 'aborted'
+    return
+  }
 
   // Cross-stage context is now built per-slot inside the loop below (doc-driven:
   // summaries + file paths for workers, full file roster for the Manager).
@@ -9456,7 +9561,7 @@ async function activateStage(index: number): Promise<void> {
   }
 
   // Reset completion tracker in case it was partially consumed
-  stageCompletions.set(index, { expected: stage.slots.length, done: new Set() })
+  registerStage(stageCompletions, index, stage.slots.length)
 
   await Promise.all(stage.slots.map(async (slot) => {
     // Per-slot cross-stage context: workers get summaries + paths, the Manager
@@ -9504,7 +9609,13 @@ async function activateStage(index: number): Promise<void> {
           const router = ensureStageRouter(index)
           if (slot === managerSlot) router.managerPaneId = paneId
           else router.workerPaneIds.set(slot.label, paneId)
+          armRouterCursors(router, paneId)
         }
+      } else {
+        // Same as the pre-spawn path: no spec for this agentKey, so this slot
+        // gets no pane, no watcher and no completion signal ever.
+        pipelineLog(`Stage ${stage.id}/${slot.label} ✕ spawn failed — no '${slot.agentKey}' agent available`)
+        releaseStageSlot(index, `slot:${slot.label}`, `slot "${slot.label}" could not spawn`)
       }
       return
     }
@@ -9524,13 +9635,19 @@ async function activateStage(index: number): Promise<void> {
     ) {
       await sleep(500)
     }
-    if (!paneAlive(pane.id)) return
+    // Every bail-out below happens BEFORE startStageWatcher, so the slot would
+    // otherwise stay in `expected` with nothing left to report it.
+    if (!paneAlive(pane.id)) {
+      releaseStageSlot(index, pane.id, `slot "${slot.label}" pane gone before its watcher armed`)
+      return
+    }
 
     // If role was deferred (skipRoleInjection), inject it now before kickoff
     if (pane.injectionStatus === 'skipped') {
       const role = rolesApi.find(pane.roleKey)
       if (!role) {
         pipelineLog(`${tag} ✕ role '${pane.roleKey}' not found`)
+        releaseStageSlot(index, pane.id, `slot "${slot.label}" role '${pane.roleKey}' not found`)
         return
       }
       const roleContent = role.system_prompt + ROLE_STANDBY_SUFFIX + sessionMarkerLine(pane.sessionMarker)
@@ -9549,7 +9666,10 @@ async function activateStage(index: number): Promise<void> {
       }
       // Wait for agent to acknowledge the role before injecting kickoff
       const settleResult = await waitForActivityThenSettle(pane.id, 2500, 30_000)
-      if (!paneAlive(pane.id)) return
+      if (!paneAlive(pane.id)) {
+        releaseStageSlot(index, pane.id, `slot "${slot.label}" pane gone before its watcher armed`)
+        return
+      }
       if (settleResult === 'no-activity') {
         pipelineLog(`${tag} ⚠ agent silent after role — sending kickoff anyway`)
       }
@@ -9574,8 +9694,34 @@ async function activateStage(index: number): Promise<void> {
       if (attempt < MAX_KICKOFF_ATTEMPTS) {
         pipelineLog(`${tag} ✕ kickoff injection failed (attempt ${attempt}/${MAX_KICKOFF_ATTEMPTS}) — retrying in 3s`)
         await sleep(3_000)
-        if (!paneAlive(pane.id)) return
+        if (!paneAlive(pane.id)) {
+          releaseStageSlot(index, pane.id, `slot "${slot.label}" pane gone before its watcher armed`)
+          return
+        }
       }
+    }
+    // Wire the Manager router HERE — the first statement after the kickoff
+    // injection resolves, ahead of the render sync and the two backend round
+    // trips below. The floor must be taken after the kickoff (its echo carries
+    // ---STAGE-DONE--- and the worker protocol's ---ASK-START--- at line start,
+    // and a floor below them makes the router read the instructions as results),
+    // but every millisecond after that is a window in which a fast worker's real
+    // ASK block lands below the floor and is lost — the router has no fallback.
+    // Awaiting a WS round trip inside that window was hundreds of ms of it.
+    //
+    // Only when the injection VERIFIED its echo, though: markBufferPosition()
+    // flushes pending clean output first, so a verified echo is already below
+    // the floor. When ok is false the echo was never observed and may still be
+    // in flight (this app has a known late paste-ack), and a floor taken now
+    // would sit below it — putting the protocol's sentinels back above the
+    // floor, which is the failure the floor exists to prevent. That case takes
+    // the deferred arm after the round trips below, which is the position this
+    // used to have for every slot.
+    if (managerSlot) {
+      const router = ensureStageRouter(index)
+      if (slot === managerSlot) router.managerPaneId = pane.id
+      else router.workerPaneIds.set(slot.label, pane.id)
+      if (ok) armRouterCursors(router, pane.id)
     }
     pane.kickoffStatus = ok ? 'sent' : 'failed'
     syncViews()
@@ -9610,11 +9756,12 @@ async function activateStage(index: number): Promise<void> {
     })
     applyProjectPaths(stageResp ?? undefined)
 
-    // Wire Manager router
-    if (managerSlot) {
+    // Deferred floor for an unverified kickoff — see the note above the router
+    // wiring. The round trips just awaited are the settle time a late echo
+    // needs to land below it.
+    if (managerSlot && !ok) {
       const router = ensureStageRouter(index)
-      if (slot === managerSlot) router.managerPaneId = pane.id
-      else router.workerPaneIds.set(slot.label, pane.id)
+      armRouterCursors(router, pane.id)
     }
 
     startStageWatcher(index, pane.id, kickoffScanFrom)
@@ -9639,7 +9786,7 @@ async function spawnPipelineStage(index: number): Promise<void> {
 
   // Detect Manager designation (at most one per stage; ignored for lone slots).
   const managerSlot: StageSlot | null = stageCommanderSlot(stage)
-  stageCompletions.set(index, { expected: stage.slots.length, done: new Set() })
+  registerStage(stageCompletions, index, stage.slots.length)
   pipelineLog(
     `Stage ${stage.id} → ${stage.slots.length} agent(s)` +
     (managerSlot ? ` · 🎯 Manager: ${managerSlot.label}` : '')
@@ -9702,6 +9849,7 @@ async function spawnPipelineStage(index: number): Promise<void> {
         } else {
           router.workerPaneIds.set(slot.label, paneId)
         }
+        armRouterCursors(router, paneId)
       }
     }
   }))
@@ -9717,9 +9865,25 @@ async function spawnPipelineStage(index: number): Promise<void> {
 async function onPipelineStart(payload: { task: string; workspacePath: string; pipelineId?: string }): Promise<void> {
   // If a specific pipeline was requested and it's not currently active, switch first.
   if (payload.pipelineId && payload.pipelineId !== pipelinesApi.activePipelineId.value) {
-    await pipelinesApi.setActivePipeline(payload.pipelineId, payload.workspacePath)
-    // Reload stages for the newly-active pipeline before running.
-    await stagesApi.refresh()
+    // Both calls fail SOFTLY — setActivePipeline returns false and refresh only
+    // sets `error`, leaving the previous pipeline's stages loaded and isLoaded
+    // still true. Ignoring that ran the OLD pipeline's stages under the NEW
+    // pipeline's name, so abort instead of starting the wrong run.
+    const switched = await pipelinesApi.setActivePipeline(payload.pipelineId, payload.workspacePath)
+    if (!switched) {
+      pipelineLog(
+        `Pipeline start aborted: could not switch to the requested pipeline` +
+          (pipelinesApi.error.value ? ` — ${pipelinesApi.error.value}` : '')
+      )
+      return
+    }
+    // Reload stages for the newly-active pipeline before running. Pass the id
+    // explicitly so this never races the active-id ref.
+    await stagesApi.refresh(payload.pipelineId)
+    if (stagesApi.error.value) {
+      pipelineLog(`Pipeline start aborted: could not load its stages — ${stagesApi.error.value}`)
+      return
+    }
   }
   if (!stagesApi.isLoaded.value || stagesApi.stages.value.length === 0) {
     pipelineLog('Pipeline start skipped: stages not loaded yet. Please wait and try again.')
@@ -9734,15 +9898,7 @@ async function onPipelineStart(payload: { task: string; workspacePath: string; p
   // task prompt and should not become a tab/group label.
   createRunGroup(pipelineRunGroupName(payload.pipelineId))
   // Derive global commander from stage config (slot with isCommander=true).
-  let globalManager: GlobalManagerRef | null = null
-  for (const s of stagesApi.stages.value) {
-    const cmdSlot = s.slots.find((sl) => sl.isCommander)
-    if (cmdSlot) {
-      globalManager = { stageId: s.id, slotLabel: cmdSlot.label }
-      break
-    }
-  }
-  pipeline.globalManager = globalManager
+  pipeline.globalManager = deriveGlobalManager(stagesApi.stages.value)
   pipeline.log = []
   pipelineLog(`Pipeline started · ${stagesApi.stages.value.length} stages · cwd=${payload.workspacePath}`)
   const stageBlueprint = stagesApi.stages.value.map((s) => ({
@@ -9767,6 +9923,13 @@ async function onPipelineStart(payload: { task: string; workspacePath: string; p
   existingProject.value = null
   // Pre-spawn all stage slots simultaneously (role prompt only, no kickoff).
   await Promise.all(stagesApi.stages.value.map((_, i) => preSpawnStage(i)))
+  // Pre-spawn can end the run before it starts: when every slot of stage 01
+  // fails to spawn (an agentKey that no longer ships, e.g. gemini),
+  // releaseStageSlot's `expected === 0` branch sets state='aborted'. Without
+  // this check activateStage(0) then re-registered the stage and spawned the
+  // same missing agents a second time, and the global router was armed on a
+  // run that had already stopped.
+  if (pipeline.state !== 'running') return
   // Activate stage 0: build context + inject kickoffs + arm watchers.
   await activateStage(0)
   // Start the global Manager cross-stage router (if configured).
@@ -9829,6 +9992,20 @@ function globalManagerPaneId(): string | null {
   return pane?.id ?? null
 }
 
+/** The Manager pane can still receive ---STAGE-DONE--- only while it has a live
+ *  PTY. A cold placeholder is present in panes.value but has no terminal, so
+ *  pane-exists is not enough here. */
+function managerPaneAlive(managerPaneId: string): boolean {
+  if (!managerPaneId) return false
+  const ref = paneRefs[managerPaneId]
+  if (!ref) return false
+  // A pane whose CLI exited (including exit 127, a missing binary) keeps its
+  // record and its terminal ref, so pane-exists is not enough either.
+  const status = (ref.displayStatus ?? ref.status) as string | undefined
+  if (status === 'exited' || status === 'error') return false
+  return panes.value.some((p) => p.id === managerPaneId && p.realized)
+}
+
 async function onPipelineNext(): Promise<void> {
   if (pipeline.state !== 'running') return
   const currentIndex = pipeline.stageIndex
@@ -9868,10 +10045,15 @@ async function onPipelineNext(): Promise<void> {
   await activateStage(nextIndex)
 }
 
-async function onPipelineAbort(): Promise<void> {
-  if (pipeline.state !== 'running') return
+/** Everything an abort does to LOCAL orchestration state — watchers, routers,
+ *  slot counts, pending questions and prompts — with neither the backend call
+ *  nor the workspace re-check that follows it.
+ *
+ *  Split out for closeWorkspace, which needs exactly this and must NOT run the
+ *  re-check: onWorkspaceCheck(pipeline.workspacePath) sets currentWorkspace to
+ *  the workspace it inspects, and that workspace is the one being closed. */
+function tearDownPipelineOrchestration(): void {
   pipeline.state = 'aborted'
-  pipelineLog('Pipeline aborted by user')
   stopGlobalManagerRouter()
   cancelAllWatchers()
   stageCompletions.clear()
@@ -9880,6 +10062,12 @@ async function onPipelineAbort(): Promise<void> {
   if (activeQuestion.value) activeQuestion.value = null
   clearStageStallAutoTimer()
   stageStallPrompt.value = null
+}
+
+async function onPipelineAbort(): Promise<void> {
+  if (pipeline.state !== 'running') return
+  pipelineLog('Pipeline aborted by user')
+  tearDownPipelineOrchestration()
   // Abort = PAUSE, not kill: stop the orchestration (watchers/routers/questions)
   // but leave the spawned agents and their panes alive so the run can be
   // resumed later via the Resume banner. (Reset is the destructive one.)
@@ -9894,6 +10082,14 @@ async function onPipelineAbort(): Promise<void> {
 }
 
 async function onPipelineReset(paneIds?: readonly string[]): Promise<void> {
+  // Deliberately NOT tearDownPipelineOrchestration(): that sets state
+  // 'aborted', and reset would then hold a reactive 'aborted' for the whole of
+  // onKillAll below before landing on 'idle' — a state this path has never
+  // published. The rest is kept in step with it by hand, this line included:
+  // without it the global Manager's 2s interval outlived the run it belonged
+  // to (harmless, since its scan returns on state !== 'running', but it never
+  // stopped and never logged that it had).
+  stopGlobalManagerRouter()
   cancelAllWatchers()
   stageCompletions.clear()
   for (const k of Array.from(stageRouters.keys())) disposeStageRouter(k)
@@ -10103,6 +10299,11 @@ interface StageWatcher {
    *  via `claude resume`). Buffer-cap resets use this instead of 0 to avoid
    *  re-detecting the sentinel from a previous run. */
   minScanFrom: number
+  /** Last (cleanBuffer.length, cleanBytesSeen) pair this watcher saw. Every
+   *  position above is an absolute index into cleanBuffer, and the 128KB cap
+   *  drops the buffer's front without telling anyone — comparing this pair
+   *  with the current one says how far the whole coordinate system moved. */
+  bufferAnchor: BufferObservation
 }
 
 // Keyed by paneId so multiple parallel agents in the same stage each get
@@ -10111,7 +10312,7 @@ const watchers = new Map<string, StageWatcher>()
 
 // Tracks how many parallel agent slots each stage has and how many have
 // already completed, so we only advance the pipeline when ALL are done.
-const stageCompletions = new Map<number, { expected: number; done: Set<string> }>()
+const stageCompletions = new Map<number, StageSlotTracker>()
 
 // When each pane's watcher armed (start of its current stage). Kept in its own
 // Map — NOT on the watcher — so it survives cancelWatcher(), letting the stall
@@ -10249,7 +10450,14 @@ backend.on('agent.activity', (raw) => {
     // still wanted — only "the pane is free" is not, so only the two things
     // that say so are skipped: the idle timestamp the delivery queue and the
     // unattended loop both read, and the finished notification.
-    if (!ev.superseded) paneTurnCompleteAt.set(ev.pane_id, Date.now())
+    // Replay guard (see recordTurnComplete): a backend restart re-emits each
+    // CLI's historical turn ends. Stamped with the local receive time they made
+    // every pane look freshly idle — enough to finish every slot of a running
+    // pipeline stage at once. A live event is still stamped with `now`, so no
+    // consumer of this map changes.
+    if (!ev.superseded) {
+      recordTurnComplete(paneTurnCompleteAt, ev.pane_id, ev.timestamp ?? '', Date.now(), TURN_TEXT_REPLAY_TOLERANCE_MS)
+    }
     // Badge: authoritative turn end → drop the RUNNING hysteresis latch now.
     paneRefs[ev.pane_id]?.markTurnComplete?.()
     if (!markerReply && !ev.superseded) scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
@@ -10868,10 +11076,26 @@ interface StageRouter {
   preReadyQueue: PendingMessage[]
   /** Per-pane scan cursor (Manager pane and each worker pane). */
   cursors: Map<string, number>
+  /** Per-pane floor: the buffer position when the pane joined the router.
+   *  Unlike `cursors` it never advances, so the one-shot sentinel scans
+   *  (MANAGER-READY / STAGE-DONE) can start after the kickoff protocol — which
+   *  prints both sentinels at line start — without depending on whether a
+   *  DISPATCH block happened to push the cursor past it. */
+  armedCursors: Map<string, number>
+  /** Per-pane (cleanBuffer.length, cleanBytesSeen) pair from the last scan.
+   *  Both cursor maps hold absolute buffer indices, and the 128KB cap drops
+   *  the buffer's front silently; this pair is what measures that drop. */
+  bufferAnchors: Map<string, BufferObservation>
   /** True once STAGE-DONE has fired so we don't double-fire. */
   finished: boolean
   /** setInterval handle for the router scan loop. */
   pollHandle: number | null
+  /** When the router poll started (0 = not armed). Manager mode skips the
+   *  per-pane watcher, so this is the only arm time the stage cap can use. */
+  armedAt: number
+  /** True once the watchdog raised a stall for this stage, so the 4s poll does
+   *  not re-raise it every tick. Reset by continueWaitingStall. */
+  watchdogFired: boolean
 }
 const stageRouters = new Map<number, StageRouter>()
 
@@ -10887,17 +11111,94 @@ function ensureStageRouter(stageIndex: number): StageRouter {
       managerReady: false,
       preReadyQueue: [],
       cursors: new Map(),
+      armedCursors: new Map(),
+      bufferAnchors: new Map(),
       finished: false,
       pollHandle: null,
+      armedAt: 0,
+      watchdogFired: false,
     }
     stageRouters.set(stageIndex, r)
   }
   return r
 }
 
+/** Anchor a router pane's scan cursors at the current end of its buffer.
+ *
+ *  The Manager kickoff embeds the whole protocol, which prints
+ *  ---MANAGER-READY--- and ---STAGE-DONE--- on their own lines. A TUI that
+ *  echoes a pasted kickoff back verbatim therefore puts a line-anchored
+ *  ---STAGE-DONE--- into the buffer before the Manager has done anything, and
+ *  a scan starting at 0 reads that echo as the stage being finished. The
+ *  per-pane watcher has had this guard (scanFrom / kickoffScanFrom) since the
+ *  beginning; the router never did. */
+function armRouterCursors(router: StageRouter, paneId: string): void {
+  const ref = paneRefs[paneId]
+  const pos = (ref?.markBufferPosition as (() => number) | undefined)?.() ?? 0
+  router.armedCursors.set(paneId, pos)
+  router.cursors.set(paneId, pos)
+  router.bufferAnchors.set(paneId, { len: pos, bytesSeen: paneCleanBytes(paneId) })
+}
+
+/** Re-base a router pane's cursors onto the buffer as it is right now.
+ *  `bufLen` must come from the same read of cleanBuffer the caller is about to
+ *  scan, so the pair stays consistent. Without this the 128KB cap shifts every
+ *  absolute index by the dropped prefix and the router scans past the worker's
+ *  ASK block / the Manager's DISPATCH or STAGE-DONE, which is unrecoverable —
+ *  unlike the watcher, the router has no turn-text fallback of any kind. */
+function rebaseRouterCursors(router: StageRouter, paneId: string, bufLen: number): void {
+  if (!routerObservationIsReal(paneId, bufLen, router.bufferAnchors)) return
+  const obs: BufferObservation = { len: bufLen, bytesSeen: paneCleanBytes(paneId) }
+  const anchor = router.bufferAnchors.get(paneId)
+  router.bufferAnchors.set(paneId, obs)
+  if (!anchor) return
+  const dropped = droppedPrefix(anchor, obs)
+  if (dropped <= 0) return
+  router.cursors.set(paneId, remapCursor(router.cursors.get(paneId) ?? 0, dropped))
+  router.armedCursors.set(paneId, remapCursor(router.armedCursors.get(paneId) ?? 0, dropped))
+}
+
+/** Is (bufLen, cleanBytesSeen) an observation of the same terminal the anchor
+ *  came from? Both router re-basers ask before touching anything.
+ *
+ *  Two ways it is not, and both remap every cursor — the armed floor included —
+ *  back to 0, which is the direction the floor exists to prevent: the router
+ *  then re-scans the kickoff echo and reads its ---STAGE-DONE--- as the stage
+ *  finishing (the bug the floor was added for, arriving from the other side).
+ *
+ *   • No paneRefs entry (pane closed, or being rebuilt): `bufLen` came from an
+ *     empty-string fallback and paneCleanBytes() reports 0, so the pair is
+ *     fabricated rather than observed and reads as a whole-buffer trim. The
+ *     anchor is deliberately left untouched — recording 0/0 would make the NEXT
+ *     real read look like the trim instead.
+ *   • cleanBytesSeen went backwards: it is monotonic within one terminal, so
+ *     this pane id has a different terminal behind it now (a rebuild). The old
+ *     indices describe a buffer that no longer exists, so re-anchor onto the new
+ *     coordinate system but move no cursor: leaving a cursor too far forward
+ *     costs signals until the new buffer grows past it, while moving it back
+ *     re-scans the kickoff — and only one of those two can end a stage wrongly.
+ */
+function routerObservationIsReal(
+  paneId: string,
+  bufLen: number,
+  anchors: Map<string, BufferObservation>
+): boolean {
+  if (!paneRefs[paneId]) return false
+  const anchor = anchors.get(paneId)
+  const bytesSeen = paneCleanBytes(paneId)
+  if (anchor && bytesSeen < anchor.bytesSeen) {
+    anchors.set(paneId, { len: bufLen, bytesSeen })
+    return false
+  }
+  return true
+}
+
 function startRouterPoll(stageIndex: number): void {
   const router = stageRouters.get(stageIndex)
   if (!router || router.pollHandle !== null) return
+  // Manager mode arms no per-pane watcher, so the stage's clock starts here.
+  router.armedAt = Date.now()
+  router.watchdogFired = false
   router.pollHandle = window.setInterval(() => {
     void managerRouterScan(stageIndex)
   }, ROUTER_POLL_MS)
@@ -10949,6 +11250,12 @@ interface StageStallPrompt {
   reason: 'idle' | 'cap'
   detail: string                 // e.g. "no output for 92s"
   autoAdvanceAt: number | null   // wall-clock ms when Full auto will fire (null = manual only)
+  /** Set only by the Manager-mode router watchdog, and it is what makes this
+   *  prompt a *stage* stall rather than a *slot* stall. In Manager mode no pane
+   *  has a watcher and only ---STAGE-DONE--- ends the stage, so both buttons
+   *  have to mean something different here — see forceAdvanceStall /
+   *  continueWaitingStall. Undefined for every per-pane watcher stall. */
+  managerVerdict?: ManagerStageVerdict
 }
 const stageStallPrompt = ref<StageStallPrompt | null>(null)
 let stageStallAutoTimer: number | null = null
@@ -11114,7 +11421,8 @@ function promptStageStall(
   stageIndex: number,
   paneId: string,
   reason: 'idle' | 'cap',
-  detail: string
+  detail: string,
+  managerVerdict?: ManagerStageVerdict
 ): void {
   // Don't stack prompts: if one is already showing, just log and let it resolve
   if (stageStallPrompt.value) {
@@ -11132,7 +11440,8 @@ function promptStageStall(
     slotLabel: paneMeta?.slotLabel ?? '',
     reason,
     detail,
-    autoAdvanceAt: autoAnswerEnabled.value ? Date.now() + FULL_AUTO_GRACE_MS : null
+    autoAdvanceAt: autoAnswerEnabled.value ? Date.now() + FULL_AUTO_GRACE_MS : null,
+    managerVerdict
   }
   // Full auto: after the grace period, advance ONLY when every slot has a
   // reliable finish signal (sentinel / turn_complete). Otherwise keep waiting —
@@ -11147,19 +11456,27 @@ function promptStageStall(
       if (!p || p.paneId !== paneId) return
       // Single-slot stages keep the original blind force-advance (acceptance:
       // single-slot behaviour unchanged). Only multi-slot stages get the
-      // allSlotsFinished gate, so a real N/N is required before advancing.
-      if (!multiSlot) {
-        pipelineLog(`Stage ${p.stageId} 🤖 Full auto force-advanced after ${FULL_AUTO_GRACE_MS / 1000}s`)
+      // allSlotsFinished gate, so a real N/N is required before advancing —
+      // except a gone Manager, for which that gate can never pass and no
+      // signal can ever arrive. See fullAutoStallAction for why.
+      const action = fullAutoStallAction({
+        managerVerdict: p.managerVerdict,
+        multiSlot,
+        slotsFinished: () => allSlotsFinished(computeStageSlotSignals(p.stageIndex)),
+      })
+      if (action === 'force-advance') {
+        if (p.managerVerdict === 'manager-gone') {
+          pipelineLog(`Stage ${p.stageId} 🤖 Full auto force-advanced — Manager pane is gone, nothing can end the stage`)
+        } else if (!multiSlot) {
+          pipelineLog(`Stage ${p.stageId} 🤖 Full auto force-advanced after ${FULL_AUTO_GRACE_MS / 1000}s`)
+        } else {
+          pipelineLog(`Stage ${p.stageId} 🤖 Full auto advanced after ${FULL_AUTO_GRACE_MS / 1000}s — all slots finished`)
+        }
         forceAdvanceStall()
         return
       }
-      if (allSlotsFinished(computeStageSlotSignals(p.stageIndex))) {
-        pipelineLog(`Stage ${p.stageId} 🤖 Full auto advanced after ${FULL_AUTO_GRACE_MS / 1000}s — all slots finished`)
-        forceAdvanceStall()
-      } else {
-        pipelineLog(`Stage ${p.stageId} 🤖 Full auto held — not all slots finished, keep waiting`)
-        continueWaitingStall()
-      }
+      pipelineLog(`Stage ${p.stageId} 🤖 Full auto held — not all slots finished, keep waiting`)
+      continueWaitingStall()
     }, FULL_AUTO_GRACE_MS)
   }
 }
@@ -11174,15 +11491,52 @@ function continueWaitingStall(): void {
   pipelineLog(`Stage ${p.stageId} ⏯ continue waiting on "${p.slotLabel || p.paneId.slice(0, 8)}"`)
   // Restart the watcher: armedAt = now resets BOTH idle and cap counters
   startStageWatcher(p.stageIndex, p.paneId)
+  // Manager mode has no per-pane watcher to restart — its clock and its
+  // one-shot watchdog latch live on the router, so reset those instead.
+  const router = stageRouters.get(p.stageIndex)
+  if (router) {
+    router.armedAt = Date.now()
+    // Clearing the latch re-arms the watchdog, which is right for a cap: the
+    // fresh armedAt above means the next stall is another full cap away. It is
+    // wrong for 'manager-gone', whose verdict is a standing fact — the very
+    // next 4s poll re-reads it, re-raises the same prompt, and Full auto's
+    // "keep waiting" branch turns that into an endless loop of prompts. Choosing
+    // to keep waiting has to mean the question is settled, so the latch stands.
+    if (p.managerVerdict !== 'manager-gone') router.watchdogFired = false
+    else pipelineLog(`Stage ${p.stageId} ⏯ Manager is gone — waiting until you abort or force-advance`)
+  }
 }
 
-/** User clicked "強制推進" (or Full auto fired) — mark slot done. */
+/** User clicked "強制推進" (or Full auto fired) — end the stall.
+ *
+ *  Two different meanings, because two different things stalled:
+ *   • A per-pane watcher stall is one SLOT that will not report, so the slot is
+ *     marked done and the stage advances at N/N as usual.
+ *   • A Manager-mode stall (managerVerdict set) is the STAGE: Manager mode arms
+ *     no per-pane watcher, and the only thing that ever ends the stage is the
+ *     Manager printing ---STAGE-DONE---. Counting a slot there did nothing at
+ *     all — for 'manager-gone' the Manager slot has already been released, so
+ *     completeSlot returns 'duplicate' and the handler returns; and even on a
+ *     cap the remaining worker slots have no signal source, so the stage would
+ *     just log "waiting for N more slot(s)" forever. So take the same exit
+ *     ---STAGE-DONE--- takes. */
 function forceAdvanceStall(): void {
   const p = stageStallPrompt.value
   if (!p) return
   clearStageStallAutoTimer()
   stageStallPrompt.value = null
   pipelineLog(`Stage ${p.stageId} ⏭ force-advanced after ${p.reason}: ${p.detail}`)
+  if (p.managerVerdict) {
+    if (p.stageIndex !== pipeline.stageIndex || pipeline.state !== 'running') return
+    // `finished` is the router's own double-fire latch: without it the poll
+    // that is still running could reach the STAGE-DONE branch for this stage
+    // and call onPipelineNext a second time.
+    const router = stageRouters.get(p.stageIndex)
+    if (router) router.finished = true
+    stageCompletions.delete(p.stageIndex)
+    void onPipelineNext()
+    return
+  }
   onStageSlotCompleted(p.stageIndex, p.paneId, 'force')
 }
 
@@ -11209,10 +11563,18 @@ function cancelAllWatchers(): void {
   // don't grow across runs. (The armedAt comparison already guards correctness;
   // this is hygiene.) cancelWatcher (single pane) intentionally does NOT clear
   // these — the stall path needs paneArmedAt after its watcher is cancelled.
-  paneArmedAt.clear()
-  paneTurnCompleteAt.clear()
-  paneLastActiveAt.clear()
-  paneLastWorkingAt.clear()
+  // Scoped, not wholesale: these maps are SHARED with the unattended loop and
+  // with cross-pane delivery gating, so clearing every key parked an unrelated
+  // manual /loop pane forever (see paneSignalResetKeys).
+  const pipelinePaneIds = new Set(
+    panes.value.filter((p) => p.origin === 'pipeline').map((p) => p.id)
+  )
+  const livePaneIds = new Set(panes.value.map((p) => p.id))
+  for (const map of [paneArmedAt, paneTurnCompleteAt, paneLastActiveAt, paneLastWorkingAt]) {
+    for (const key of paneSignalResetKeys(map.keys(), pipelinePaneIds, livePaneIds)) {
+      map.delete(key)
+    }
+  }
 }
 
 // ── Manager-mode router: parsers + scan + route ─────────────────────────────
@@ -11304,6 +11666,47 @@ async function managerRouterScan(stageIndex: number): Promise<void> {
   const router = stageRouters.get(stageIndex)
   const stage = stagesApi.stages.value[stageIndex]
   if (!router || !stage || router.finished) return
+
+  // ── Watchdog ──────────────────────────────────────────────────────────────
+  // In Manager mode startStageWatcher returns early for every pane of the
+  // stage, so neither the idle check nor the hard cap runs anywhere. That left
+  // two ways to hang with no log line at all: the Manager pane going away (the
+  // scan below then reads an empty buffer forever), and nobody ever printing
+  // ---STAGE-DONE---. Both are judged here.
+  // The latch is only taken when the prompt is actually raised: promptStageStall
+  // drops a second concurrent prompt, and latching on a dropped one would lose
+  // the stall for good. While another prompt is up the scan below still runs.
+  if (!router.watchdogFired && !stageStallPrompt.value) {
+    const verdict = evaluateManagerStage({
+      managerPaneId: router.managerPaneId,
+      managerPaneAlive: managerPaneAlive(router.managerPaneId),
+      armedAt: router.armedAt,
+      now: Date.now(),
+      maxDurationMs: STAGE_MAX_DURATION_MS,
+    })
+    if (verdict !== 'ok') {
+      router.watchdogFired = true
+      const detail = verdict === 'manager-gone'
+        ? 'Manager pane is gone — nothing can print ---STAGE-DONE---'
+        : `hit ${Math.round(STAGE_MAX_DURATION_MS / 60_000)}min cap (Manager mode)`
+      pipelineLog(`Stage ${stage.id} ⚠ ${detail}`)
+      if (verdict === 'manager-gone') {
+        // The Manager slot can no longer report. Releasing it is what lets a
+        // Manager-only stage end instead of sitting at state='running' — and it
+        // is a no-op when onKill already released the same slot.
+        releaseStageSlot(stageIndex, router.managerPaneId, 'Manager pane is gone')
+        // The release may have ended the run on its own (nothing left to run).
+        // It is already logged; a stall prompt on top would be noise.
+        if (pipeline.state !== 'running') return
+      }
+      // The verdict rides along: it is what tells the two stall buttons that
+      // this is a STAGE stall (no per-pane watcher exists to restart, and no
+      // slot count can end the stage) rather than one slot going quiet.
+      promptStageStall(stageIndex, router.managerPaneId, verdict === 'timeout' ? 'cap' : 'idle', detail, verdict)
+      return
+    }
+  }
+
   _managerScanRunning.add(stageIndex)
   try {
 
@@ -11312,6 +11715,7 @@ async function managerRouterScan(stageIndex: number): Promise<void> {
     const ref = paneRefs[paneId]
     const buf: string = (ref?.cleanBuffer as unknown as string) ?? ''
     if (!buf) continue
+    rebaseRouterCursors(router, paneId, buf.length)
     const cursor = router.cursors.get(paneId) ?? 0
     const askRes = parseContentBlocks(buf, cursor, ASK_RE)
     const reportRes = parseContentBlocks(buf, cursor, REPORT_RE)
@@ -11329,7 +11733,12 @@ async function managerRouterScan(stageIndex: number): Promise<void> {
   if (router.managerPaneId && !router.managerReady) {
     const ref = paneRefs[router.managerPaneId]
     const buf: string = (ref?.cleanBuffer as unknown as string) ?? ''
-    const cursor = router.cursors.get(router.managerPaneId) ?? 0
+    rebaseRouterCursors(router, router.managerPaneId, buf.length)
+    // The armed floor, not the message cursor: MANAGER-READY is a one-shot
+    // signal, so it must not be skipped just because a DISPATCH block pushed
+    // the message cursor past it, and it must not be matched inside the
+    // kickoff echo that sits below the floor.
+    const cursor = router.armedCursors.get(router.managerPaneId) ?? 0
     if (findSentinel(buf, MANAGER_READY_SENTINEL, cursor) >= 0) {
       router.managerReady = true
       pipelineLog(`Stage ${stage.id} 🎯 Manager READY — 開始控場（drain ${router.preReadyQueue.length} 則訊息）`)
@@ -11344,6 +11753,7 @@ async function managerRouterScan(stageIndex: number): Promise<void> {
   if (router.managerPaneId) {
     const ref = paneRefs[router.managerPaneId]
     const buf: string = (ref?.cleanBuffer as unknown as string) ?? ''
+    rebaseRouterCursors(router, router.managerPaneId, buf.length)
     const cursor = router.cursors.get(router.managerPaneId) ?? 0
     const { items: dispatches, newCursor } = parseDispatchBlocks(buf, cursor)
     router.cursors.set(router.managerPaneId, newCursor)
@@ -11362,7 +11772,11 @@ async function managerRouterScan(stageIndex: number): Promise<void> {
         true
       )
     }
-    if (!router.finished && findSentinel(buf, MANAGER_STAGE_DONE_SENTINEL, 0) >= 0) {
+    // Scan from the armed floor, never from 0: the kickoff protocol prints
+    // ---STAGE-DONE--- at line start, so a TUI that echoes the paste back
+    // verbatim would otherwise finish the stage on the first poll.
+    const doneFrom = router.armedCursors.get(router.managerPaneId) ?? 0
+    if (!router.finished && findSentinel(buf, MANAGER_STAGE_DONE_SENTINEL, doneFrom) >= 0) {
       router.finished = true
       pipelineLog(`Stage ${stage.id} 🎯 Manager 印 ${MANAGER_STAGE_DONE_SENTINEL} — 收尾`)
       stageCompletions.delete(stageIndex)
@@ -11398,6 +11812,9 @@ async function injectManagerPane(router: StageRouter, msg: PendingMessage): Prom
 
 let globalRouterHandle: number | null = null
 const globalRouterCursors = new Map<string, number>()
+/** Same role as StageRouter.bufferAnchors — these cursors are absolute buffer
+ *  indices too, so the 128KB cap invalidates them the same way. */
+const globalRouterAnchors = new Map<string, BufferObservation>()
 let _globalScanRunning = false
 
 function startGlobalManagerRouter(): void {
@@ -11412,8 +11829,21 @@ function stopGlobalManagerRouter(): void {
     window.clearInterval(globalRouterHandle)
     globalRouterHandle = null
     globalRouterCursors.clear()
+    globalRouterAnchors.clear()
     pipelineLog('🎯 Global Manager router stopped')
   }
+}
+
+/** StageRouter's rebaseRouterCursors, for the global Manager's flat cursor map. */
+function rebaseGlobalRouterCursor(paneId: string, bufLen: number): void {
+  if (!routerObservationIsReal(paneId, bufLen, globalRouterAnchors)) return
+  const obs: BufferObservation = { len: bufLen, bytesSeen: paneCleanBytes(paneId) }
+  const anchor = globalRouterAnchors.get(paneId)
+  globalRouterAnchors.set(paneId, obs)
+  if (!anchor) return
+  const dropped = droppedPrefix(anchor, obs)
+  if (dropped <= 0) return
+  globalRouterCursors.set(paneId, remapCursor(globalRouterCursors.get(paneId) ?? 0, dropped))
 }
 
 async function globalManagerRouterScan(): Promise<void> {
@@ -11434,6 +11864,7 @@ async function globalManagerRouterScan(): Promise<void> {
     const ref = paneRefs[wp.id]
     const buf: string = (ref?.cleanBuffer as unknown as string) ?? ''
     if (!buf) continue
+    rebaseGlobalRouterCursor(wp.id, buf.length)
     const cursor = globalRouterCursors.get(wp.id) ?? 0
     const askRes = parseContentBlocks(buf, cursor, ASK_RE)
     const reportRes = parseContentBlocks(buf, cursor, REPORT_RE)
@@ -11453,6 +11884,7 @@ async function globalManagerRouterScan(): Promise<void> {
   // Scan Manager pane for DISPATCH → route to target Worker by label
   const mRef = paneRefs[managerPaneId]
   const mBuf: string = (mRef?.cleanBuffer as unknown as string) ?? ''
+  rebaseGlobalRouterCursor(managerPaneId, mBuf.length)
   const mCursor = globalRouterCursors.get(managerPaneId) ?? 0
   const { items: dispatches, newCursor: mNew } = parseDispatchBlocks(mBuf, mCursor)
   if (mNew > mCursor) globalRouterCursors.set(managerPaneId, mNew)
@@ -11489,9 +11921,11 @@ function onStageSlotCompleted(
   if (stageIndex !== pipeline.stageIndex) return  // stale
   const tracker = stageCompletions.get(stageIndex)
   if (!tracker) { void onPipelineNext(); return }
-  if (tracker.done.has(paneId)) return  // guard against double-fire
-  tracker.done.add(paneId)
-  const remaining = tracker.expected - tracker.done.size
+  // 'duplicate' covers both a double-fire and a slot already released — a
+  // released slot is out of `expected`, so counting it would over-shoot N/N.
+  const counted = completeSlot(stageCompletions, stageIndex, paneId)
+  if (counted.kind !== 'counted') return
+  const remaining = counted.remaining
   const stage = stagesApi.stages.value[stageIndex]
   const completedPane = panes.value.find((p) => p.id === paneId)
   const slotName = completedPane?.slotLabel || paneId.slice(0, 8)
@@ -11499,7 +11933,7 @@ function onStageSlotCompleted(
   // stage advance can be verified as N/N reliable signals, not a blind push.
   pipelineLog(
     `Stage ${stage?.id} ✓ slot "${slotName}" finished via ${reason}` +
-    ` (${tracker.done.size}/${tracker.expected})`
+    ` (${counted.done}/${counted.expected})`
   )
   if (remaining > 0) {
     pipelineLog(`Stage ${stage?.id} ⏳ waiting for ${remaining} more slot(s)`)
@@ -11555,7 +11989,30 @@ function onStageSlotCompleted(
           await sleep(1500)
           const sw = watchers.get(sibling.id)
           if (sw && !sw.cancelled) {
-            const len = ((paneRefs[sibling.id]?.cleanBuffer as unknown as string) || '').length
+            const sBuf = ((paneRefs[sibling.id]?.cleanBuffer as unknown as string) || '')
+            // The sibling was already nearly done — the handoff only jumped the
+            // queue — so it may have printed its OWN sentinel inside the settle
+            // windows above. Advancing over it would discard the only signal it
+            // will ever emit and leave the slot to the 60-minute cap. Claim it
+            // first, then skip the advance (the completion path cancels this
+            // watcher anyway). Scanned with the same guard the poll uses: for
+            // turn-text vendors the loose buffer scan is deliberately not
+            // authoritative, and they lose nothing here because judgeTurnText
+            // does not read scanFrom.
+            const sVendor = panes.value.find((p) => p.id === sibling.id)?.agentKey ?? ''
+            const sentinelHit =
+              !!stage.sentinel &&
+              !TURN_TEXT_VENDORS.has(sVendor) &&
+              sBuf.length > sw.scanFrom &&
+              (sBuf.indexOf('\n' + stage.sentinel, sw.scanFrom) >= 0 ||
+                findSentinel(sBuf, stage.sentinel, sw.scanFrom) >= 0)
+            if (sentinelHit) {
+              cancelWatcher(sibling.id)
+              pipelineLog(`Stage ${stage.id} ✓ sentinel detected for ${toLabel} during handoff settle — not advancing its scan window`)
+              onStageSlotCompleted(sw.stageIndex, sibling.id, 'sentinel')
+              return
+            }
+            const len = sBuf.length
             if (len > sw.scanFrom) sw.scanFrom = len
             sw.lastAnalyzedBufferLen = len
             pipelineLog(`Stage ${stage.id} 🔀 handoff scan window advanced for ${toLabel} → ${len}`)
@@ -11567,6 +12024,47 @@ function onStageSlotCompleted(
     stageCompletions.delete(stageIndex)
     void onPipelineNext()
   }
+}
+
+/**
+ * Called when one slot of a stage can no longer produce a completion signal:
+ * its pane was closed, its run-group tab was closed, or it never spawned at
+ * all (an agentKey that no longer exists in agentSpecs). Without this the
+ * stage keeps waiting for a slot that is gone — it logs "waiting for N more
+ * slot(s)" and then stays silent forever, because the pane's watcher (and with
+ * it the hard cap) was cancelled along with the pane.
+ *
+ * `slotKey` is the pane id when the slot had one, or `slot:<label>` when the
+ * spawn never produced a pane.
+ */
+function releaseStageSlot(stageIndex: number, slotKey: string, why: string): void {
+  const outcome = releaseSlot(stageCompletions, stageIndex, slotKey)
+  if (outcome.kind !== 'released') return
+  const stage = stagesApi.stages.value[stageIndex]
+  const stageLabel = stage?.id ?? String(stageIndex + 1)
+  pipelineLog(
+    `Stage ${stageLabel} ⊖ slot released (${why}) — now ${outcome.done}/${outcome.expected}`
+  )
+  if (outcome.remaining > 0) return
+  // Only the stage that is actually running decides what happens next. A
+  // release against a pre-spawned future stage just adjusts its count;
+  // activateStage re-registers it when the stage starts.
+  if (pipeline.state !== 'running' || stageIndex !== pipeline.stageIndex) return
+  if (outcome.expected === 0) {
+    // Every slot is gone and none of them finished. Advancing here would feed
+    // the next stage nothing at all, so the run stops where it is instead —
+    // visibly, rather than sitting at state='running' with no panes left.
+    pipelineLog(`Stage ${stageLabel} ✕ every slot is gone — pipeline aborted`)
+    pipeline.state = 'aborted'
+    cancelStageWatchers(stageIndex)
+    disposeStageRouter(stageIndex)
+    stopGlobalManagerRouter()
+    stageCompletions.delete(stageIndex)
+    return
+  }
+  pipelineLog(`Stage ${stageLabel} ✓ every remaining slot finished — advancing`)
+  stageCompletions.delete(stageIndex)
+  void onPipelineNext()
 }
 
 function startStageWatcher(stageIndex: number, paneId: string, kickoffScanFrom?: number): void {
@@ -11626,7 +12124,14 @@ function startStageWatcher(stageIndex: number, paneId: string, kickoffScanFrom?:
     analyzerCooldownUntil: 0,
     lastAnalyzedBufferLen: 0,
     lastPollBufLen: 0,
-    minScanFrom
+    minScanFrom,
+    // Both halves must come from the same tick: they are only ever updated
+    // together, so a pair read without an await between them is consistent
+    // even when the 50ms clean-coalescing window has made it stale.
+    bufferAnchor: {
+      len: ((pane.cleanBuffer as unknown as string) ?? '').length,
+      bytesSeen: paneCleanBytes(paneId)
+    }
   }
   watchers.set(paneId, watcher)
   paneArmedAt.set(paneId, watcher.armedAt)
@@ -11642,6 +12147,27 @@ function startStageWatcher(stageIndex: number, paneId: string, kickoffScanFrom?:
       return
     }
     const buf = (ref.cleanBuffer as unknown as string) ?? ''
+
+    // ── Buffer-trim re-base ───────────────────────────────────────────────
+    // Every position this watcher holds is an absolute index into cleanBuffer,
+    // and useTerminal drops the buffer's front once it passes 2x the 128KB cap
+    // — silently, from the watcher's point of view. Left alone, scanFrom then
+    // points ~128KB too far in and the agent's output between the new buffer
+    // start and that stale index is never scanned: a sentinel landing there is
+    // lost and the slot runs to its hard cap. cleanBytesSeen keeps counting
+    // past the cap, so the difference against the last observation measures the
+    // trim exactly. Re-basing runs BEFORE the generating check below so a
+    // shrunken buffer isn't mistaken for "the agent stopped producing".
+    const bufObs: BufferObservation = { len: buf.length, bytesSeen: paneCleanBytes(paneId) }
+    const bufDropped = droppedPrefix(watcher.bufferAnchor, bufObs)
+    watcher.bufferAnchor = bufObs
+    if (bufDropped > 0) {
+      watcher.scanFrom = remapCursor(watcher.scanFrom, bufDropped)
+      watcher.minScanFrom = remapCursor(watcher.minScanFrom, bufDropped)
+      watcher.lastAnalyzedBufferLen = remapCursor(watcher.lastAnalyzedBufferLen, bufDropped)
+      watcher.lastPollBufLen = remapCursor(watcher.lastPollBufLen, bufDropped)
+      pipelineLog(`Stage ${stage.id} 🔄 buffer trimmed ${bufDropped}c — scan window re-based to ${watcher.scanFrom}`)
+    }
 
     // ── Generating check ─────────────────────────────────────────────────
     // Compare current buffer length with the length recorded at the end of
@@ -12089,6 +12615,7 @@ function reclaimCandidate(pane: ActivePane): ReclaimCandidate {
     hasDraft: !!(ref?.hasDraft as unknown as boolean),
     lastTouchedAt: Math.max(activity, key),
     managerRouting: paneHeldByStageRouter(pane.id),
+    globalManagerRouting: globalRouterHandle !== null && pane.id === globalManagerPaneId(),
     stageWatched: watchers.has(pane.id),
     hasQueuedMessages: messaging.queuedCountFor(pane.id) > 0,
   }
@@ -12822,6 +13349,15 @@ async function closeRunGroup(id: string): Promise<void> {
   const affected = id === 'manual'
     ? panes.value.filter((p) => !p.runGroupId)
     : panes.value.filter((p) => p.runGroupId === id)
+  // Closing the tab takes every pane of the run with it. A running pipeline
+  // would be left at state='running' with no panes and its slot counts intact
+  // — an orchestration waiting on agents that no longer exist. Abort it first
+  // (same teardown as the abort button: watchers, routers, slot counts), then
+  // close the tab.
+  if (pipeline.state === 'running' && affected.some((p) => p.origin === 'pipeline')) {
+    pipelineLog('Pipeline aborted — its run group tab was closed')
+    await onPipelineAbort()
+  }
   for (const p of [...affected]) await onKill(p.id)
   if (id !== 'manual') {
     runGroups.value = runGroups.value.filter((g) => g.id !== id)
@@ -13417,6 +13953,30 @@ async function closeWorkspace(path: string): Promise<void> {
     if (normWs(currentWorkspace.value) !== normWs(land)) return
   }
   const doomed = panes.value.filter((p) => normWs(p.workspacePath) === normWs(path))
+  // Same reason closeRunGroup aborts first: every onKill below releases the
+  // pane's stage slot, and a stage whose other slots already finished then
+  // reads N/N and advances — activateStage spawning the next stage's panes
+  // into the workspace being torn down. Positive `origin === 'pipeline'`
+  // matching, because origin has three values and "not manual" also catches
+  // mcp-spawned panes.
+  //
+  // Deliberately not the user-abort handler, which closeRunGroup can afford:
+  // its trailing onWorkspaceCheck(pipeline.workspacePath) would set
+  // currentWorkspace back to the workspace being closed, moments before it
+  // leaves workspaceOrder. doCloseWorkspace avoids it for the same reason,
+  // though it inlines only part of this teardown and leaves the rest to the
+  // onPipelineReset that follows it.
+  if (closeEndsTheRun({
+    state: pipeline.state,
+    runWorkspacePath: normWs(pipeline.workspacePath),
+    closingWorkspacePath: normWs(path),
+    doomedOrigins: doomed.map((p) => p.origin),
+  })) {
+    pipelineLog('Pipeline aborted — the workspace its panes ran in was closed')
+    const abortPath = pipeline.workspacePath
+    tearDownPipelineOrchestration()
+    if (abortPath) await sendQuiet('pipeline.abort', { workspace_path: abortPath, reason: 'user' })
+  }
   for (const pane of doomed) await onKill(pane.id)
   workspaceOrder.value = workspaceOrder.value.filter((w) => normWs(w) !== normWs(path))
   persistExtraWorkspaces()
@@ -15254,7 +15814,21 @@ function paneIsCommander(p: ActivePane): boolean {
               {{ stageStallPrompt.reason === 'idle' ? '⏸ 偵測到無輸出' : '⏱ 已達時間上限' }}
               — {{ stageStallPrompt.detail }}
             </div>
-            <p class="stall-hint">
+            <!-- Manager mode changes what both buttons do, so it changes what
+                 this says. Force-advance ends the whole stage there (no slot
+                 count can end it — the workers have no watcher), and after a
+                 gone Manager "keep waiting" resets nothing and is the last
+                 prompt this stage will raise. -->
+            <p v-if="stageStallPrompt.managerVerdict === 'manager-gone'" class="stall-hint">
+              Manager 模式：Manager pane 已消失，沒有東西能再印出 ---STAGE-DONE---。
+              選擇<strong>繼續等待</strong>不會重置任何計時器，而且這是本階段最後一次提示——
+              之後的出口只剩中止整個 pipeline；<strong>強制推進</strong>會結束<strong>整個 stage</strong>並前進到下一階段。
+            </p>
+            <p v-else-if="stageStallPrompt.managerVerdict" class="stall-hint">
+              Manager 模式：未偵測到 ---STAGE-DONE---。
+              選擇<strong>繼續等待</strong>會重置此階段的時間上限；<strong>強制推進</strong>會結束<strong>整個 stage</strong>（不是單一 slot）。
+            </p>
+            <p v-else class="stall-hint">
               嚴格模式：未偵測到 sentinel 或完成意圖。
               選擇<strong>繼續等待</strong>會重置 idle 計時器；<strong>強制推進</strong>會把此 slot 標為完成。
             </p>

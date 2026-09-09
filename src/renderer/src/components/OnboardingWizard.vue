@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
 import { useOnboarding, type OnboardDep } from '../composables/useOnboarding'
+import { missingProviders, orderInstalls, providerFor } from '../lib/installPlan'
 import { usePermissions, PERMISSION_KEYS } from '../composables/usePermissions'
 import OnboardingStepCard from './OnboardingStepCard.vue'
 import OnboardingPreview from './OnboardingPreview.vue'
@@ -39,6 +40,55 @@ function installLabel(dep: OnboardDep): string {
 // Re-detect during an install would race the refresh the install itself runs,
 // and the loser's response overwrites the winner's status.
 const detectBusy = computed(() => ob.loading.value || !!ob.installing.value)
+
+// ── Blockers ──────────────────────────────────────────────────────────────────
+// The backend already reports each dep's prerequisites and their current state.
+// The wizard used to drop that entirely, so `brew install python3` on a Mac
+// without Homebrew failed in well under a second and said so only in the log
+// pane — below the fold, and gone with the modal. That is what "I click Python
+// and nothing happens" was.
+
+/** Unmet prerequisites of `dep` that this app can install itself. */
+function blockers(dep: OnboardDep): OnboardDep[] {
+  return missingProviders(dep, ob.deps.value)
+}
+
+/** Prerequisite binaries with no dep behind them (curl) — the user installs
+ *  these; naming them is still better than a button that just fails. */
+function manualBlockers(dep: OnboardDep): string[] {
+  return (dep.requirements ?? [])
+    .filter((r) => !r.ok && !providerFor(r.name, ob.deps.value))
+    .map((r) => r.name)
+}
+
+/** What the card must say before the user clicks, or after a click failed. */
+function cardError(dep: OnboardDep): string {
+  const failure = ob.installErrors.value[dep.id]
+  if (failure?.ranButUndetected) {
+    // "Not detected" would be wrong when something WAS found and it is just too
+    // old: `brew install python3` succeeds while /usr/bin/python3 (3.9) still
+    // wins the PATH, and the card has to name that, not claim an empty result.
+    return dep.status === 'outdated'
+      ? t('onboard.installed-still-outdated', { label: dep.label, version: dep.version })
+      : t('onboard.installed-not-detected', { label: dep.label })
+  }
+  if (failure) {
+    // Always leave a way forward: the exact command can be run by hand in a
+    // terminal, which is the only escape when the in-app install keeps failing.
+    const head = t('onboard.install-failed', { reason: failure.message })
+    return failure.command ? `${head}\n\n${t('onboard.run-by-hand', { cmd: failure.command })}` : head
+  }
+  // No click yet: name the blocker up front rather than after a dead-looking
+  // button press.
+  const names = [...blockers(dep).map((p) => p.label), ...manualBlockers(dep)]
+  return names.length ? t('onboard.blocked-by', { names: names.join('、') }) : ''
+}
+
+/** Jump the accordion to the prerequisite's own card so it can be installed. */
+function goToBlocker(dep: OnboardDep): void {
+  const first = blockers(dep)[0]
+  if (first) picked.value = first.id
+}
 
 /** ollama installed but its daemon is down — pulling a model cannot work. */
 function ollamaStopped(dep: OnboardDep): boolean {
@@ -181,7 +231,10 @@ const activePermission = computed<TccPermissionKey | null>(() =>
 
 // ── Footer ────────────────────────────────────────────────────────────────────
 async function installMissing(deps: OnboardDep[]): Promise<void> {
-  for (const d of deps) {
+  // In list order, `brew install node` runs before Homebrew exists and exits
+  // 127. orderInstalls pulls each prerequisite ahead of whatever needs it —
+  // the helper existed already but nothing was calling it.
+  for (const d of orderInstalls(deps, ob.deps.value)) {
     if (d.status === 'ok' || !d.can_install) continue
     const result = await ob.install(d)
     // An interactive install only *opens* a terminal — the tool is not there
@@ -246,6 +299,7 @@ function finish(): void {
             :done="d.status === 'ok'"
             :expanded="activeKey === d.id"
             :warning="d.status === 'outdated' ? $t('onboard.outdated', { min: d.min_version }) : ''"
+            :error="cardError(d)"
             @toggle="togglePick(d.id)"
           >
             <template #actions>
@@ -260,9 +314,23 @@ function finish(): void {
               <a v-else-if="d.docs_url" class="ob-btn primary" :href="d.docs_url" target="_blank" rel="noreferrer">
                 {{ $t('onboard.install-guide') }}
               </a>
+              <!-- The prerequisite has its own card; take the user to it rather
+                   than leaving them to work out what "brew is required" means. -->
+              <button
+                v-if="blockers(d).length"
+                class="ob-btn ghost"
+                @click="goToBlocker(d)"
+              >
+                {{ $t('onboard.go-install', { name: blockers(d)[0].label }) }}
+              </button>
               <button class="ob-btn ghost" :disabled="detectBusy" @click="ob.refresh()">
                 {{ ob.loading.value ? $t('label.detecting') : $t('action.re-detect') }}
               </button>
+              <!-- An inline install shows nothing until it exits: brew streams
+                   no output back here, so the card has to say it is running. -->
+              <p v-if="ob.installing.value === d.id && !d.needs_terminal" class="ob-running">
+                {{ $t('onboard.running-inline', { cmd: d.install_cmd }) }}
+              </p>
             </template>
           </OnboardingStepCard>
 
@@ -287,6 +355,7 @@ function finish(): void {
             :done="d.status === 'ok'"
             :expanded="activeKey === d.id"
             :warning="ollamaStopped(d) ? $t('onboard.ollama-stopped') : ''"
+            :error="cardError(d)"
             @toggle="togglePick(d.id)"
           >
             <template #actions>
@@ -308,9 +377,19 @@ function finish(): void {
               <a v-else-if="d.docs_url" class="ob-btn primary" :href="d.docs_url" target="_blank" rel="noreferrer">
                 {{ $t('onboard.install-guide') }}
               </a>
+              <button
+                v-if="blockers(d).length"
+                class="ob-btn ghost"
+                @click="goToBlocker(d)"
+              >
+                {{ $t('onboard.go-install', { name: blockers(d)[0].label }) }}
+              </button>
               <button class="ob-btn ghost" :disabled="detectBusy" @click="ob.refresh()">
                 {{ ob.loading.value ? $t('label.detecting') : $t('action.re-detect') }}
               </button>
+              <p v-if="ob.installing.value === d.id && !d.needs_terminal" class="ob-running">
+                {{ $t('onboard.running-inline', { cmd: d.install_cmd }) }}
+              </p>
             </template>
           </OnboardingStepCard>
 
@@ -675,6 +754,16 @@ function finish(): void {
   font-size: var(--font-xs);
   line-height: 1.55;
   color: var(--text-muted);
+}
+/* An inline install returns nothing until it exits; this line and the button's
+   elapsed counter are the only signs it is running. `flex-basis: 100%` puts it
+   on its own row under the buttons in the flex-wrapped action bar. */
+.ob-running {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+  font: var(--font-2xs) / 1.55 var(--font-mono);
+  color: var(--text-secondary);
+  word-break: break-all;
 }
 .ob-linkbtn {
   background: none;

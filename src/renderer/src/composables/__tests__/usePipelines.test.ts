@@ -171,4 +171,68 @@ describe('usePipelines', () => {
     expect(result.pipelineById.value['maintenance']?.stage_count).toBe(3)
     scope.stop()
   })
+  // Every mutation resolved to null/false without recording WHY. The only
+  // reachable rejection is the backend's PIPELINE_RUNNING veto, so "Delete
+  // failed" with no reason is exactly the case the user needs explained.
+  it('records the backend reason when a mutation is rejected', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('pipelines.list', {
+      pipelines: mockPipelines,
+      active_pipeline_id: 'default',
+      path: '/data/pipelines.json',
+    })
+    mock.setResponse('pipelines.delete', null, {
+      ok: false,
+      error: { code: 'PIPELINE_RUNNING', message: 'Cannot delete pipeline while a project is running' },
+    })
+
+    const { result, scope } = withScope(() => usePipelines(mock.backend))
+    await flush()
+
+    expect(await result.deletePipeline('maintenance', '/tmp/ws')).toBe(false)
+    expect(result.error.value).toBe('Cannot delete pipeline while a project is running')
+    scope.stop()
+  })
+
+  it('records the reason for every rejected mutation, not just delete', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('pipelines.list', {
+      pipelines: mockPipelines,
+      active_pipeline_id: 'default',
+      path: '/data/pipelines.json',
+    })
+    for (const type of ['pipelines.create', 'pipelines.rename', 'pipelines.set_active', 'pipelines.reset_builtin']) {
+      mock.setResponse(type, null, { ok: false, error: { code: 'ERR', message: `${type} refused` } })
+    }
+
+    const { result, scope } = withScope(() => usePipelines(mock.backend))
+    await flush()
+
+    await result.createPipeline('x')
+    expect(result.error.value).toBe('pipelines.create refused')
+    await result.renamePipeline('maintenance', 'x')
+    expect(result.error.value).toBe('pipelines.rename refused')
+    await result.setActivePipeline('maintenance', '/tmp/ws')
+    expect(result.error.value).toBe('pipelines.set_active refused')
+    await result.resetBuiltin('maintenance')
+    expect(result.error.value).toBe('pipelines.reset_builtin refused')
+    scope.stop()
+  })
+
+  it('records a transport failure instead of swallowing it', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('pipelines.list', {
+      pipelines: mockPipelines,
+      active_pipeline_id: 'default',
+      path: '/data/pipelines.json',
+    })
+
+    const { result, scope } = withScope(() => usePipelines(mock.backend))
+    await flush()
+
+    mock.setRejection('pipelines.create', 'ws not open')
+    expect(await result.createPipeline('x')).toBeNull()
+    expect(result.error.value).toBe('ws not open')
+    scope.stop()
+  })
 })

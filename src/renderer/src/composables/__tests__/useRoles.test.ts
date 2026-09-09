@@ -195,4 +195,77 @@ describe('useRoles', () => {
     expect(result.find('nope')).toBeUndefined()
     scope.stop()
   })
+  // roles.delete refuses while a stage slot still names the role, and the
+  // rejection carries the exact slots in error.details.usages. Keeping only the
+  // message left the user with a count and no idea where to go.
+  it('keeps the ROLE_IN_USE usage list off the rejected delete', async () => {
+    const mock = connected()
+    const usages = [
+      { pipeline_id: 'default', pipeline_name: 'Default', stage_id: '02', stage_title: 'Build', slot_label: 'Lead' },
+      { pipeline_id: 'custom', pipeline_name: 'Custom', stage_id: '01', stage_title: 'Spec', slot_label: 'Second' },
+    ]
+    mock.setResponse('roles.delete', null, {
+      ok: false,
+      error: {
+        code: 'ROLE_IN_USE',
+        message: "role 'qa' is still used by 2 pipeline stage slot(s)",
+        details: { role_key: 'qa', usages },
+      },
+    })
+
+    const { result, scope } = withScope(() => useRoles(mock.backend))
+    await flush()
+
+    expect(await result.remove('qa')).toBe(false)
+    expect(result.error.value).toBe("role 'qa' is still used by 2 pipeline stage slot(s)")
+    expect(result.roleUsages.value).toEqual(usages)
+    scope.stop()
+  })
+
+  it('clears a stale usage list once a delete succeeds', async () => {
+    const mock = connected()
+    mock.setResponse('roles.delete', null, {
+      ok: false,
+      error: {
+        code: 'ROLE_IN_USE',
+        message: 'in use',
+        details: {
+          role_key: 'qa',
+          usages: [{ pipeline_id: 'default', pipeline_name: 'Default', stage_id: '02', stage_title: 'Build', slot_label: 'Lead' }],
+        },
+      },
+    })
+
+    const { result, scope } = withScope(() => useRoles(mock.backend))
+    await flush()
+    await result.remove('qa')
+    expect(result.roleUsages.value).toHaveLength(1)
+
+    mock.setResponse('roles.delete', { roles: [pm] })
+    expect(await result.remove('dev')).toBe(true)
+    expect(result.roleUsages.value).toEqual([])
+    scope.stop()
+  })
+
+  it('ignores a malformed usages payload instead of rendering junk', async () => {
+    const mock = connected()
+    mock.setResponse('roles.delete', null, {
+      ok: false,
+      error: {
+        code: 'ROLE_IN_USE',
+        message: 'in use',
+        details: { role_key: 'qa', usages: ['not-an-object', { pipeline_id: 'ok' }, null] },
+      },
+    })
+
+    const { result, scope } = withScope(() => useRoles(mock.backend))
+    await flush()
+
+    expect(await result.remove('qa')).toBe(false)
+    // Only the object entry survives, with the missing fields defaulted.
+    expect(result.roleUsages.value).toEqual([
+      { pipeline_id: 'ok', pipeline_name: '', stage_id: '', stage_title: '', slot_label: '' },
+    ])
+    scope.stop()
+  })
 })

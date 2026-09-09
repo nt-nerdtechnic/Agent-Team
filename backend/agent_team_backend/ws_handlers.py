@@ -3942,6 +3942,14 @@ async def settings_bundle_import(session: "Session", msg_id: str, msg_type: str,
             "pipeline_id": active_id,
             "reason": "bundle_import",
         }))
+    if "roles" in applied or "pipelines" in applied:
+        # After the pipelines document, not inside the roles branch above: a
+        # bundle carrying both parts must be cleaned against the document it
+        # just imported, whose slots the earlier branch has never seen. Either
+        # half alone can strand a slot too — a new role set can drop a key the
+        # stages still name, and an imported document can name a key this
+        # machine has never had.
+        await _clear_dangling_role_refs("bundle_import")
     if isinstance(bundle.get("mcp_servers"), list):
         incoming_servers = bundle["mcp_servers"]
         if not all(isinstance(server, dict) for server in incoming_servers):
@@ -3999,6 +4007,37 @@ async def settings_bundle_import(session: "Session", msg_id: str, msg_type: str,
 
 
 # ── Roles registry (roles.*) ────────────────────────────────────────────────
+async def _broadcast_stage_role_changes(pipeline_ids: list[str], reason: str) -> None:
+    """Publish the rewritten stages of every pipeline a role edit touched.
+
+    Only role_key changed, so the stage count the pipeline summaries carry is
+    untouched and pipelines.changed would say nothing new.
+    """
+    from . import app
+
+    for pipeline_id in pipeline_ids:
+        await app.broadcast(make_event("stages.changed", {
+            "stages": app.stages_store.list(pipeline_id),
+            "pipeline_id": pipeline_id,
+            "reason": reason,
+        }))
+
+
+async def _clear_dangling_role_refs(reason: str) -> None:
+    """Blank stage slots left naming a role that the new role set dropped.
+
+    For the wholesale replacements (roles.reset, settings bundle import), which
+    cannot be refused the way a single roles.delete is. Reads the surviving keys
+    first and hands them to the stages store, so the two stores' locks are taken
+    one after the other and never nested.
+    """
+    from . import app
+
+    valid = {str(r.get("key", "")) for r in app.roles_store.list()}
+    touched = app.stages_store.clear_missing_role_references(valid)
+    await _broadcast_stage_role_changes(touched, reason)
+
+
 @handler("roles.list")
 async def roles_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -4030,11 +4069,85 @@ async def roles_upsert(session: "Session", msg_id: str, msg_type: str, payload: 
     )
 
 
+@handler("roles.rename")
+async def roles_rename(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Change a role's key, carrying the stage slots that name it across.
+
+    A rename used to be the caller's job: upsert under the new key, then delete
+    the old one. roles.delete refuses while a slot still names the role, so on a
+    default install that sequence stops halfway — both keys in the registry, the
+    slots still on the old one, and the only way out (delete the old key) refused
+    for the same reason. Doing it here keeps every intermediate state consistent:
+    the new role exists before anything points at it, and the old one goes only
+    after nothing does.
+    """
+    from . import app
+
+    old_key = payload["old_key"]
+    new_key = payload["new_key"]
+    if app.roles_store.get(old_key) is None:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "ROLE_NOT_FOUND",
+                f"no such role: {old_key!r}", {"role_key": old_key},
+            )
+        )
+        return
+    if new_key != old_key and app.roles_store.get(new_key) is not None:
+        # Merging two roles would silently drop one side's prompt, so refuse and
+        # let the caller decide which one it meant.
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "ROLE_KEY_EXISTS",
+                f"role {new_key!r} already exists", {"role_key": new_key},
+            )
+        )
+        return
+    role = app.roles_store.upsert(
+        key=new_key,
+        label=payload.get("label", ""),
+        one_line=payload.get("one_line", ""),
+        system_prompt=payload.get("system_prompt", ""),
+    )
+    touched = app.stages_store.repoint_role_references(old_key, new_key)
+    if new_key != old_key:
+        app.roles_store.delete(old_key)
+    roles = app.roles_store.list()
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {"role": role, "roles": roles, "repointed_pipeline_ids": touched},
+        )
+    )
+    await app.broadcast(
+        make_event("roles.changed", {"roles": roles, "reason": "rename"})
+    )
+    await _broadcast_stage_role_changes(touched, "role_rename")
+
+
 @handler("roles.delete")
 async def roles_delete(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
-    roles = app.roles_store.delete(payload["key"])
+    key = payload["key"]
+    # Refuse rather than strand the slots that name it: a slot pointing at a
+    # deleted role fails role injection and returns before the kickoff step, so
+    # that stage's agent waits at an empty prompt with nothing on screen to say
+    # why. The caller gets the exact slots so it can offer to edit them.
+    usages = app.stages_store.find_role_usages(key)
+    if usages:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "ROLE_IN_USE",
+                f"role {key!r} is still used by {len(usages)} pipeline stage slot(s)",
+                {"role_key": key, "usages": usages},
+            )
+        )
+        return
+    roles = app.roles_store.delete(key)
     await session.send_json(
         make_response(msg_id, msg_type, {"roles": roles})
     )
@@ -4054,6 +4167,7 @@ async def roles_reset(session: "Session", msg_id: str, msg_type: str, payload: d
     await app.broadcast(
         make_event("roles.changed", {"roles": roles, "reason": "reset"})
     )
+    await _clear_dangling_role_refs("roles_reset")
 
 
 # ── Pipelines registry (pipelines.*) ────────────────────────────────────────
@@ -4164,6 +4278,15 @@ async def pipelines_reset_builtin(session: "Session", msg_id: str, msg_type: str
     from . import app
 
     pipeline_id = payload.get("pipeline_id", "")
+    ws_path = payload.get("workspace_path", "") or ""
+    # Restoring a builtin replaces every stage the pipeline has, so it needs the
+    # same guard as editing one stage — the helper's question ("is this the
+    # pipeline the run is using?") is exactly the one to ask here.
+    if _stage_edit_hits_running_pipeline(ws_path, pipeline_id):
+        await session.send_json(
+            make_error(msg_id, msg_type, "PIPELINE_RUNNING", "Cannot reset stages while the active pipeline is running")
+        )
+        return
     pipeline = app.stages_store.reset_builtin(pipeline_id)
     pipelines = app.stages_store.list_pipelines()
     stages = app.stages_store.list(pipeline_id)
@@ -4183,6 +4306,39 @@ async def pipelines_reset_builtin(session: "Session", msg_id: str, msg_type: str
 
 
 # ── Stages registry (stages.*) ──────────────────────────────────────────────
+def _stage_edit_hits_running_pipeline(ws_path: str, pipeline_id: str | None) -> bool:
+    """True when the pipeline a stage edit targets is the one a run is using.
+
+    The comparison is against the pipeline the run recorded (pipeline.start
+    writes Project.pipeline_id), not against whether the request bothered to
+    name a pipeline: naming the running one explicitly used to walk straight
+    past the guard and edit the flow mid-run.
+    """
+    from . import app
+
+    if not ws_path:
+        return False
+    proj = app.project_store.peek(ws_path)
+    if not proj or proj.state != "running":
+        return False
+    if not pipeline_id:
+        # No id means "the active pipeline", which is what the run uses.
+        return True
+    return pipeline_id == (proj.pipeline_id or app.stages_store.get_active_pipeline_id())
+
+
+async def _broadcast_pipeline_summaries(reason: str) -> None:
+    """Republish the pipeline list: it carries stage_count, so a stage edit that
+    only broadcasts stages.changed leaves a stale "N stages" on screen."""
+    from . import app
+
+    await app.broadcast(make_event("pipelines.changed", {
+        "pipelines": app.stages_store.list_pipelines(),
+        "active_pipeline_id": app.stages_store.get_active_pipeline_id(),
+        "reason": reason,
+    }))
+
+
 @handler("stages.list")
 async def stages_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -4205,14 +4361,11 @@ async def stages_upsert(session: "Session", msg_id: str, msg_type: str, payload:
 
     pipeline_id = payload.get("pipeline_id") or None
     ws_path = payload.get("workspace_path", "") or ""
-    if ws_path and not pipeline_id:
-        # Check running guard for active pipeline
-        proj = app.project_store.peek(ws_path)
-        if proj and proj.state == "running":
-            await session.send_json(
-                make_error(msg_id, msg_type, "PIPELINE_RUNNING", "Cannot edit stages while the active pipeline is running")
-            )
-            return
+    if _stage_edit_hits_running_pipeline(ws_path, pipeline_id):
+        await session.send_json(
+            make_error(msg_id, msg_type, "PIPELINE_RUNNING", "Cannot edit stages while the active pipeline is running")
+        )
+        return
     stage = app.stages_store.upsert(payload["stage"], pipeline_id)
     effective_pipeline_id = pipeline_id or app.stages_store.get_active_pipeline_id()
     updated_stages = app.stages_store.list(pipeline_id)
@@ -4224,6 +4377,7 @@ async def stages_upsert(session: "Session", msg_id: str, msg_type: str, payload:
         "pipeline_id": effective_pipeline_id,
         "reason": "upsert",
     }))
+    await _broadcast_pipeline_summaries("stage_upsert")
 
 
 @handler("stages.reorder")
@@ -4232,13 +4386,11 @@ async def stages_reorder(session: "Session", msg_id: str, msg_type: str, payload
 
     pipeline_id = payload.get("pipeline_id") or None
     ws_path = payload.get("workspace_path", "") or ""
-    if ws_path and not pipeline_id:
-        proj = app.project_store.peek(ws_path)
-        if proj and proj.state == "running":
-            await session.send_json(
-                make_error(msg_id, msg_type, "PIPELINE_RUNNING", "Cannot reorder stages while the active pipeline is running")
-            )
-            return
+    if _stage_edit_hits_running_pipeline(ws_path, pipeline_id):
+        await session.send_json(
+            make_error(msg_id, msg_type, "PIPELINE_RUNNING", "Cannot reorder stages while the active pipeline is running")
+        )
+        return
     updated_stages = app.stages_store.reorder(payload["ids"], pipeline_id)
     effective_pipeline_id = pipeline_id or app.stages_store.get_active_pipeline_id()
     await session.send_json(
@@ -4249,6 +4401,7 @@ async def stages_reorder(session: "Session", msg_id: str, msg_type: str, payload
         "pipeline_id": effective_pipeline_id,
         "reason": "reorder",
     }))
+    await _broadcast_pipeline_summaries("stage_reorder")
 
 
 @handler("stages.delete")
@@ -4257,13 +4410,11 @@ async def stages_delete(session: "Session", msg_id: str, msg_type: str, payload:
 
     pipeline_id = payload.get("pipeline_id") or None
     ws_path = payload.get("workspace_path", "") or ""
-    if ws_path and not pipeline_id:
-        proj = app.project_store.peek(ws_path)
-        if proj and proj.state == "running":
-            await session.send_json(
-                make_error(msg_id, msg_type, "PIPELINE_RUNNING", "Cannot delete stages while the active pipeline is running")
-            )
-            return
+    if _stage_edit_hits_running_pipeline(ws_path, pipeline_id):
+        await session.send_json(
+            make_error(msg_id, msg_type, "PIPELINE_RUNNING", "Cannot delete stages while the active pipeline is running")
+        )
+        return
     updated_stages = app.stages_store.delete(payload["id"], pipeline_id)
     effective_pipeline_id = pipeline_id or app.stages_store.get_active_pipeline_id()
     await session.send_json(
@@ -4274,6 +4425,7 @@ async def stages_delete(session: "Session", msg_id: str, msg_type: str, payload:
         "pipeline_id": effective_pipeline_id,
         "reason": "delete",
     }))
+    await _broadcast_pipeline_summaries("stage_delete")
 
 
 @handler("stages.reset")
@@ -4281,6 +4433,12 @@ async def stages_reset(session: "Session", msg_id: str, msg_type: str, payload: 
     from . import app
 
     pipeline_id = payload.get("pipeline_id") or None
+    ws_path = payload.get("workspace_path", "") or ""
+    if _stage_edit_hits_running_pipeline(ws_path, pipeline_id):
+        await session.send_json(
+            make_error(msg_id, msg_type, "PIPELINE_RUNNING", "Cannot reset stages while the active pipeline is running")
+        )
+        return
     updated_stages = app.stages_store.reset(pipeline_id)
     effective_pipeline_id = pipeline_id or app.stages_store.get_active_pipeline_id()
     await session.send_json(
@@ -4291,6 +4449,7 @@ async def stages_reset(session: "Session", msg_id: str, msg_type: str, payload: 
         "pipeline_id": effective_pipeline_id,
         "reason": "reset",
     }))
+    await _broadcast_pipeline_summaries("stage_reset")
 
 
 # ── Analyzer (local LLM / Ollama) (analyzer.*) ──────────────────────────────

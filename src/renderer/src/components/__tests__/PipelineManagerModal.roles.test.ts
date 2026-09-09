@@ -187,14 +187,12 @@ describe('PipelineManagerModal — roles tab', () => {
     expect(tab(w).find('.err-msg').text()).toContain('disk full')
   })
 
-  it('reports a failed rename cleanup instead of claiming success', async () => {
-    // Rename = upsert under the new key + delete of the old one. If the delete
-    // fails the old role is still there, so this is not a successful save.
-    const { wrapper: w, mock } = await open()
-    const renamed: Role = { ...dev, key: 'engineer' }
-    mock.setResponse('roles.upsert', { role: renamed, roles: [pm, dev, renamed] })
-    mock.setResponse('roles.delete', null, {
-      ok: false, error: { code: 'ERR', message: 'delete refused' },
+  it('reports a rejected key rename instead of claiming success', async () => {
+    // A key change now goes to roles.rename, which either moves everything or
+    // moves nothing. A refusal is still a refusal: no green banner.
+    const { wrapper: w, mock, rolesApi } = await open()
+    mock.setResponse('roles.rename', null, {
+      ok: false, error: { code: 'INTERNAL_ERROR', message: 'roles.json is read-only' },
     })
 
     // rSorted is label-sorted: Developer, Project Manager.
@@ -204,9 +202,33 @@ describe('PipelineManagerModal — roles tab', () => {
     await saveBtn(w).trigger('click')
     await flushPromises()
 
-    expect(mock.sent.find((s) => s.type === 'roles.delete')?.payload).toEqual({ key: 'dev' })
-    expect(tab(w).find('.err-msg').text()).toContain('delete refused')
+    expect(mock.sent.find((s) => s.type === 'roles.rename')?.payload).toMatchObject({
+      old_key: 'dev', new_key: 'engineer',
+    })
+    expect(tab(w).find('.err-msg').text()).toBe('roles.json is read-only')
     expect(tab(w).find('.summary-ok').exists()).toBe(false)
+    // Nothing was written, so the half-finished two-key state is unreachable.
+    expect(rolesApi.roles.value.map((r) => r.key)).toEqual(['pm', 'dev'])
+  })
+
+  it('never splits a key rename into upsert + delete', async () => {
+    // The old two-step left both keys behind whenever roles.delete refused,
+    // which it does as soon as any stage slot names the role.
+    const { wrapper: w, mock } = await open()
+    const renamed: Role = { ...dev, key: 'engineer' }
+    mock.setResponse('roles.rename', {
+      role: renamed, roles: [pm, renamed], repointed_pipeline_ids: [],
+    })
+
+    await tab(w).findAll('.split-list li')[0].trigger('click')
+    await fields(w).key.setValue('engineer')
+    await flushPromises()
+    await saveBtn(w).trigger('click')
+    await flushPromises()
+
+    expect(mock.sent.some((s) => s.type === 'roles.upsert')).toBe(false)
+    expect(mock.sent.some((s) => s.type === 'roles.delete')).toBe(false)
+    expect(tab(w).find('.summary-ok').exists()).toBe(true)
   })
 
   it('keeps the half-typed new role when the roles list changes underneath', async () => {

@@ -15,6 +15,10 @@ defineProps<{
   optional?: boolean
   meta?: string
   warning?: string
+  /** A blocker or failure for this step. Shown in the card because the wizard's
+   *  log pane sits below the fold and dies with the modal — a fast failure that
+   *  only reached the log made the action button look like it did nothing. */
+  error?: string
 }>()
 
 defineEmits<{ (e: 'toggle'): void }>()
@@ -40,6 +44,8 @@ defineEmits<{ (e: 'toggle'): void }>()
           />
         </svg>
       </span>
+      <!-- A collapsed card would otherwise hide its own failure entirely. -->
+      <span v-else-if="error && !expanded" class="oc-alert" aria-hidden="true">!</span>
     </button>
 
     <!-- A done card still opens on click: its actions include Re-detect, and a
@@ -47,6 +53,7 @@ defineEmits<{ (e: 'toggle'): void }>()
     <div v-if="expanded" class="oc-body">
       <p v-if="description" class="oc-desc">{{ description }}</p>
       <p v-if="warning" class="oc-warn">{{ warning }}</p>
+      <p v-if="error" class="oc-error" role="alert">{{ error }}</p>
       <div class="oc-actions">
         <slot name="actions" />
       </div>
@@ -141,6 +148,34 @@ defineEmits<{ (e: 'toggle'): void }>()
   font-size: var(--font-xs);
   line-height: var(--lh-base);
   color: var(--attention-fg);
+}
+.oc-error {
+  margin: -6px 0 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--danger-emphasis);
+  background: var(--danger-subtle);
+  color: var(--danger-fg);
+  font-size: var(--font-xs);
+  line-height: var(--lh-base);
+  /* brew prints its whole recipe on failure; keep the card a card. */
+  max-height: 9em;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.oc-alert {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  background: var(--danger-emphasis);
+  color: var(--text-on-emphasis);
 }
 .oc-actions {
   display: flex;

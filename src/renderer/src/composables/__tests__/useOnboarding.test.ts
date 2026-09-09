@@ -186,6 +186,101 @@ describe('useOnboarding', () => {
     scope.stop()
   })
 
+  // ── install failures the card has to show ───────────────────────────────────
+  // The log pane sits below the fold and dies with the modal, so a failure that
+  // only reached it left the button looking like it had done nothing at all.
+
+  it('records a blocked install against the dep so its card can show it', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ found: false }))
+    mock.setResponse('onboarding.install', {
+      ok: false,
+      error: 'brew is required to install Python. Install brew first, then retry.',
+      missing_requirements: ['brew'],
+      command: 'brew install python3',
+    })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.foundationDeps.value[0])
+    await flush()
+    const failure = result.installErrors.value.node
+    expect(failure).toBeDefined()
+    expect(failure.message).toContain('brew is required')
+    expect(failure.command).toBe('brew install python3')
+    expect(failure.ranButUndetected).toBe(false)
+    result.dispose()
+    scope.stop()
+  })
+
+  it('records exit-0-but-undetected as its own kind of failure', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ found: false }))
+    mock.setResponse('onboarding.install', { ok: true, output: 'installed' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.foundationDeps.value[0])
+    await flush()
+    expect(result.installErrors.value.node.ranButUndetected).toBe(true)
+    result.dispose()
+    scope.stop()
+  })
+
+  it('drops a reported failure when re-detection finds the dep anyway', async () => {
+    // Homebrew exits non-zero on "already installed" often enough that the
+    // command can fail while the tool is in fact present. Leaving the card red
+    // in that state is its own kind of lie.
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ found: false }))
+    mock.setResponse('onboarding.install', { ok: false, error: 'no bottle available' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.foundationDeps.value[0])
+    await flush()
+    expect(result.installErrors.value.node).toBeDefined()
+
+    // Same failing install, but this time the post-install re-detect finds it.
+    mock.setResponse('onboarding.status', status({ found: true }))
+    await result.install(result.foundationDeps.value[0])
+    await flush()
+    expect(result.installErrors.value.node).toBeUndefined()
+    result.dispose()
+    scope.stop()
+  })
+
+  it('records a transport error against the dep too', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ found: false }))
+    mock.setRejection('onboarding.install', 'ws not open')
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.foundationDeps.value[0])
+    await flush()
+    expect(result.installErrors.value.node.message).toContain('ws not open')
+    result.dispose()
+    scope.stop()
+  })
+
+  it('says why a second install did not start instead of returning silently', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ found: false, cli: false }))
+    mock.setResponse('onboarding.install', { ok: true, output: 'installed' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+
+    // Do not await the first: it holds `installing` while the second arrives.
+    const first = result.install(result.foundationDeps.value[0])
+    const second = await result.install(result.cliDeps.value[0])
+    await first
+    await flush()
+
+    expect(second).toBeNull()
+    // One install request, and a line saying why the other did not happen.
+    expect(mock.sent.filter((s) => s.type === 'onboarding.install')).toHaveLength(1)
+    expect(result.logLines.value.join('\n')).toContain('has to wait for')
+    result.dispose()
+    scope.stop()
+  })
+
   it('skips the immediate re-detect when the install moved to a terminal', async () => {
     // That detection cannot possibly pass yet; the watcher polls for it instead.
     stubTerminal({ ok: true })

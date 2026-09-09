@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { activityMeansWorking, applyLoopWait, detailMeansToolUse, loopWaitBackoffMs, loopWaitHonoured, LOOP_WAIT_BACKOFF_MS, LOOP_WAIT_TOTAL_MAX_MS, slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, normalizeTurnText, turnMadeProgress, loopBackoffMs, applyTurnProgress, loopStallVerdict, loopWaitingOnSubagents, turnUsedNoTools, LOOP_STALL_BACKOFF_MS, LOOP_MIN_PROGRESS_CHARS, LOOP_STALL_LIMIT, LOOP_MAX_CONTINUES, LOOP_SUBAGENT_WAIT_MAX_MS, LOOP_RECENT_TURNS, type SlotSignal, type LoopStallState } from '../completion'
+import { activityMeansWorking, applyLoopWait, detailMeansToolUse, recordTurnComplete, paneSignalResetKeys, loopWaitBackoffMs, loopWaitHonoured, LOOP_WAIT_BACKOFF_MS, LOOP_WAIT_TOTAL_MAX_MS, slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, normalizeTurnText, turnMadeProgress, loopBackoffMs, applyTurnProgress, loopStallVerdict, loopWaitingOnSubagents, turnUsedNoTools, LOOP_STALL_BACKOFF_MS, LOOP_MIN_PROGRESS_CHARS, LOOP_STALL_LIMIT, LOOP_MAX_CONTINUES, LOOP_SUBAGENT_WAIT_MAX_MS, LOOP_RECENT_TURNS, type SlotSignal, type LoopStallState } from '../completion'
 
 // Fixed reference time for the watcher arming. turn_complete only counts when
 // its timestamp is strictly AFTER this.
@@ -729,5 +729,65 @@ describe('the opencode / kilo wait-then-resume sequence', () => {
     expect(turnUsedNoTools(worked)).toBe(false)
     // …while a turn that only talked, on the same vendor, still is.
     expect(turnUsedNoTools({ toolUsesThisTurn: 0, toolSignalsSeen: true })).toBe(true)
+  })
+})
+
+describe('recordTurnComplete', () => {
+  const TOL = 60_000
+  const NOW = 2_000_000
+
+  it('records a live turn end, stamped with now', () => {
+    const map = new Map<string, number>()
+    expect(recordTurnComplete(map, 'p1', String(NOW - 5_000), NOW, TOL)).toBe(true)
+    expect(map.get('p1')).toBe(NOW)
+  })
+
+  it('ignores a replayed historical turn end (backend restart re-parse)', () => {
+    const map = new Map<string, number>()
+    const old = new Date(NOW - TOL - 5_000).toISOString()
+    expect(recordTurnComplete(map, 'p1', old, NOW, TOL)).toBe(false)
+    expect(map.has('p1')).toBe(false)
+  })
+
+  it('leaves an existing live stamp untouched when a replay arrives after it', () => {
+    const map = new Map<string, number>([['p1', NOW - 1_000]])
+    recordTurnComplete(map, 'p1', String(NOW - TOL - 1), NOW, TOL)
+    expect(map.get('p1')).toBe(NOW - 1_000)
+  })
+
+  it('treats a missing timestamp as live so a vendor without one still records', () => {
+    const map = new Map<string, number>()
+    expect(recordTurnComplete(map, 'p1', '', NOW, TOL)).toBe(true)
+    expect(map.get('p1')).toBe(NOW)
+  })
+})
+
+describe('paneSignalResetKeys', () => {
+  const pipelinePanes = new Set(['pipe-1', 'pipe-2'])
+  const livePanes = new Set(['pipe-1', 'pipe-2', 'manual-1'])
+
+  it('drops the pipeline run\'s own pane keys', () => {
+    const keys = paneSignalResetKeys(['pipe-1', 'pipe-2'], pipelinePanes, livePanes)
+    expect(keys.sort()).toEqual(['pipe-1', 'pipe-2'])
+  })
+
+  it('KEEPS a live manual pane, whose /loop reads the same maps', () => {
+    // Zeroing turnCompleteAt for a pane running /loop made loopContinueReady
+    // permanently false: it needs turnCompleteAt > armedAt, and an idle CLI
+    // never produces a fresh turn end to replace the one that was deleted.
+    expect(paneSignalResetKeys(['manual-1'], pipelinePanes, livePanes)).toEqual([])
+  })
+
+  it('drops keys for panes that no longer exist, so the maps cannot grow', () => {
+    expect(paneSignalResetKeys(['gone-1'], pipelinePanes, livePanes)).toEqual(['gone-1'])
+  })
+
+  it('separates the three cases in one pass', () => {
+    const keys = paneSignalResetKeys(
+      ['pipe-1', 'manual-1', 'gone-1', 'pipe-2'],
+      pipelinePanes,
+      livePanes
+    )
+    expect(keys).toEqual(['pipe-1', 'gone-1', 'pipe-2'])
   })
 })
