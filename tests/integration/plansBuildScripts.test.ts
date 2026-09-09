@@ -84,7 +84,7 @@ describe('production Plans CI fixture exclusion', () => {
   const workflow = parse(readFileSync('.github/workflows/ci.yml', 'utf8'))
   const command = workflow.jobs.plans.steps.find((step: { name?: string }) => step.name === 'Verify production Plans bundle excludes fixture').run as string
 
-  function check(contamination?: 'extra' | 'replacement'): ReturnType<typeof spawnSync> {
+  function check(contamination?: 'extra' | 'replacement', fixtures = true): ReturnType<typeof spawnSync> {
     const root = fixture()
     const pnpm = file(root, 'bin/pnpm', '#!/bin/sh\nexit 0\n')
     chmodSync(pnpm, 0o755)
@@ -94,11 +94,13 @@ describe('production Plans CI fixture exclusion', () => {
     file(root, 'dist-plugins/navide-plans/manifest.json', JSON.stringify({ backend: { entry: 'backend/navide-plans' } }))
     const production = file(root, 'dist-plugins/navide-plans/backend/navide-plans', 'MZproduction-binary')
     chmodSync(production, 0o755)
-    const packagedFixture = file(root, 'dist-test-fixtures/plans/backend/navide-plans', 'MZtest-only-fixture')
-    file(root, 'dist-test-fixtures/plans/backend/navide-plans-go', 'MZtest-only-go-fixture')
-    if (contamination) copyFileSync(packagedFixture, contamination === 'extra'
-      ? join(root, 'dist-plugins/navide-plans/backend/copied-fixture')
-      : production)
+    if (fixtures) {
+      const packagedFixture = file(root, 'dist-test-fixtures/plans/backend/navide-plans', 'MZtest-only-fixture')
+      file(root, 'dist-test-fixtures/plans/backend/navide-plans-go', 'MZtest-only-go-fixture')
+      if (contamination) copyFileSync(packagedFixture, contamination === 'extra'
+        ? join(root, 'dist-plugins/navide-plans/backend/copied-fixture')
+        : production)
+    }
     if (existsSync('scripts/verify-plans-production.mjs')) {
       copyFileSync('scripts/verify-plans-production.mjs', join(root, 'scripts/verify-plans-production.mjs'))
     }
@@ -115,5 +117,32 @@ describe('production Plans CI fixture exclusion', () => {
   it.each(['extra', 'replacement'] as const)('rejects a fixture copied into the production backend (%s)', (contamination) => {
     const result = check(contamination)
     expect(result.status).not.toBe(0)
+  })
+
+  it('passes in a job that ships the artifact without building the test fixtures', () => {
+    // The comparison is evidence when a fixture exists; its absence is not
+    // evidence of a swap, and must not fail a job whose whole purpose is to
+    // verify a shipped build.
+    const result = check(undefined, false)
+    expect(result.status, String(result.stderr)).toBe(0)
+  })
+})
+
+describe('release workflow verifies the Plans artifact it signs', () => {
+  const workflow = parse(readFileSync('.github/workflows/release.yml', 'utf8'))
+  const steps = workflow.jobs['release-macos-arm64'].steps as Array<{ name?: string; run?: string }>
+  const buildStep = steps.find((step) => step.name === 'Build, sign & notarize application')?.run ?? ''
+  const verifyStep = steps.find((step) => step.name === 'Verify signature & notarization')?.run ?? ''
+
+  it('runs the production Plans verifier before signing', () => {
+    expect(buildStep).toContain('node scripts/verify-plans-production.mjs')
+    // Ahead of electron-builder: an empty backend must fail the release before
+    // the notarization leg, not silently ship.
+    expect(buildStep.indexOf('verify-plans-production.mjs'))
+      .toBeLessThan(buildStep.indexOf('pnpm exec electron-builder'))
+  })
+
+  it('asserts the signed app actually carries the packaged Plans backend', () => {
+    expect(verifyStep).toContain('Contents/Resources/plugins/navide-plans/backend/navide-plans')
   })
 })

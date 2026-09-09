@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { lstatSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -35,9 +35,21 @@ if (executable[0] === 0x23 && executable[1] === 0x21) {
 }
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const productionDigest = digest(executable)
+// The fixtures exist only in a job that built them. Their absence is not
+// evidence of a swap — the single-entry assertion above already rejects any
+// stray artifact in the backend directory — so a job that verifies a shipped
+// build without building fixtures must not go red on a missing comparison.
+const compared = []
 for (const fixture of [`navide-plans${suffix}`, `navide-plans-go${suffix}`]) {
-  if (digest(regularFile(join(fixtureDirectory, fixture))) === productionDigest) {
+  const fixturePath = join(fixtureDirectory, fixture)
+  if (!existsSync(fixturePath)) continue
+  if (digest(regularFile(fixturePath)) === productionDigest) {
     throw new Error(`Production Plans backend was replaced by the test-only fixture: ${fixture}`)
   }
+  compared.push(fixture)
 }
-console.log('Production Plans backend is present and excludes packaged test fixtures.')
+console.log(
+  compared.length > 0
+    ? `Production Plans backend is present and excludes packaged test fixtures (${compared.join(', ')}).`
+    : 'Production Plans backend is present; no test fixtures were built to compare against.',
+)

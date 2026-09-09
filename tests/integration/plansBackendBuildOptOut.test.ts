@@ -92,6 +92,34 @@ describe('packaged Plans backend build opt-out', () => {
     expect(existsSync(packagedBackend)).toBe(alreadyBuilt)
   })
 
+  it('refuses the opt-out on the production build path', () => {
+    // `pnpm dev` passes --if-needed; build:plans:backend — reached by
+    // build:plans ← build:official-plugins ← build ← dist, and by the CI gates —
+    // does not. Honouring the variable there ships a signed release with an
+    // empty dist-plugins/navide-plans/backend, i.e. Plans legacy recovery for
+    // every user, with nothing in the build output to say so.
+    const alreadyBuilt = existsSync(packagedBackend)
+
+    const result = spawnSync(process.execPath, [buildScript], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NAVIDE_SKIP_PLANS_BACKEND_BUILD: '1',
+        PATH: join(tmpdir(), 'navide-no-such-bin'),
+      },
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('production or CI build')
+    expect(result.stderr).toContain('NAVIDE_SKIP_PLANS_BACKEND_BUILD=1')
+    // Refused up front, not by failing somewhere inside PyInstaller: the
+    // maintainer has to see which knob caused it.
+    expect(result.stderr).not.toContain('Packaging the Plans backend failed')
+    expect(existsSync(packagedBackend)).toBe(alreadyBuilt)
+  })
+
   it('names the opt-out in the failure a contributor without uv actually hits', () => {
     const result = spawnSync(process.execPath, [buildScript, '--if-needed'], {
       cwd: repositoryRoot,

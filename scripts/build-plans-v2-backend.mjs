@@ -22,11 +22,31 @@ const executableName = process.platform === 'win32' ? 'navide-plans.exe' : 'navi
 const executable = join(backendDirectory, executableName)
 const cacheFile = resolve(repositoryRoot, 'node_modules/.cache/navide/plans-v2-backend.json')
 
+// `--if-needed` is how `pnpm dev` invokes this script, and only `pnpm dev`:
+// every production path (build:plans:backend ← build:plans ←
+// build:official-plugins ← build ← dist) and the CI gates invoke it bare. So
+// the flag is the repository's existing signal for "this is a development
+// start", and the opt-out below is honoured on that invocation alone.
+const developmentInvocation = process.argv.includes('--if-needed')
+
 // The escape hatch for a contributor without uv/PyInstaller who is working on
 // something else entirely. Skipping leaves the packaged Plans backend absent,
 // which the Host detects at startup and answers by running Plans through its
 // legacy recovery view; every other surface starts normally.
 if (process.env['NAVIDE_SKIP_PLANS_BACKEND_BUILD'] === '1') {
+  if (!developmentInvocation) {
+    // Honouring it here would ship a signed release whose
+    // dist-plugins/navide-plans/backend is empty, putting every user into Plans
+    // legacy recovery — a silent, undetectable-at-build-time failure. Refusing
+    // loudly costs the maintainer one unset; the alternative costs a release.
+    console.error(
+      'NAVIDE_SKIP_PLANS_BACKEND_BUILD=1 is set, but this is a production or CI build ' +
+        '(invoked without --if-needed). Refusing to skip: the release would ship no ' +
+        'packaged Plans backend and every user would start Plans in legacy recovery. ' +
+        'Unset the variable for this build; it applies to `pnpm dev` only.',
+    )
+    process.exit(1)
+  }
   console.log(
     'Skipping the production Plans backend build (NAVIDE_SKIP_PLANS_BACKEND_BUILD=1); ' +
       'Plans will start in legacy recovery.',
@@ -83,7 +103,7 @@ function executableDigest() {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-if (process.argv.includes('--if-needed')) {
+if (developmentInvocation) {
   try {
     const cached = JSON.parse(readFileSync(cacheFile, 'utf8'))
     if (cached.inputDigest === inputDigest && cached.outputDigest === executableDigest()) {
