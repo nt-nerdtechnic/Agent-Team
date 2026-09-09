@@ -6971,15 +6971,18 @@ async def manual_pane_unspawn(session: "Session", msg_id: str, msg_type: str, pa
     from . import app
 
     # Unspawn is the renderer saying this pane is gone for good, so a PTY still
-    # running under it goes with it.
+    # running under it goes with it. Record first, then sweep what the store
+    # actually removed: the session fallback can retire a record filed under a
+    # drifted id, and that pane's PTY has to go down too. The requested id is
+    # always swept, matching record or not.
     pane_id = payload["pane_id"]
-    await _sweep_pane_ptys(session, pane_id)
-
-    project = app.project_store.record_manual_pane_unspawn(
+    project, removed_pane_ids = app.project_store.record_manual_pane_unspawn(
         payload["workspace_path"],
         pane_id=pane_id,
         session_id=payload.get("session_id", "") or "",
     )
+    for swept_id in dict.fromkeys([pane_id, *removed_pane_ids]):
+        await _sweep_pane_ptys(session, swept_id)
     await session.send_json(
         make_response(msg_id, msg_type, app._project_payload(project))
     )

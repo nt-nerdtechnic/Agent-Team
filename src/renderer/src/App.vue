@@ -869,6 +869,11 @@ const dontConfirmCloseAgain = ref<boolean>(false)
 // Only the ⌘W path reads this — the ✕ button is a deliberate mouse click and
 // still closes outright. A running pane always asks, setting or not.
 const confirmBeforeClosePane = makeStickyBool('agentTeam.confirmClosePane', true)
+// Confirm before the sidebar's "close workspace" takes its panes down with it.
+// Default ON, and a separate setting from confirmBeforeClose: that one guards
+// returning to the welcome picker, which leaves every pane record intact. This
+// one guards the only action that marks them removed, which no reopen undoes.
+const confirmBeforeCloseWorkspace = makeStickyBool('agentTeam.confirmCloseWorkspace', true)
 // Hand a long-idle CLI's memory back to the machine. Each idle claude holds
 // ~230-330MB it never releases (GPU slabs the process allocates and keeps, see
 // the memory diagnosis) — with a dozen panes open that is most of a 32GB
@@ -13938,6 +13943,28 @@ async function switchToWorkspace(path: string): Promise<void> {
 async function closeWorkspace(path: string): Promise<void> {
   if (!path) return
   if (!workspaceOrder.value.some((w) => normWs(w) === normWs(path))) return
+  // Ask BEFORE anything is torn down. Closing marks every pane record removed
+  // and restore only brings back 'spawned' ones, so this is the one workspace
+  // action a reopen cannot undo — and the menu row alone does not say so.
+  if (confirmBeforeCloseWorkspace.value) {
+    const count = panes.value.filter((p) => normWs(p.workspacePath) === normWs(path)).length
+    const name = path.split('/').filter(Boolean).pop() || path
+    const ok = await notifyRestore.confirm(
+      count > 0
+        ? i18n.global.t('confirm-close.sidebar-ws-body', { count })
+        : i18n.global.t('confirm-close.sidebar-ws-body-empty', { name }),
+      {
+        title: i18n.global.t('confirm-close.sidebar-ws-title', { name }),
+        confirmText: i18n.global.t('confirm-close.sidebar-ws-confirm'),
+        cancelText: i18n.global.t('action.cancel'),
+        checkboxLabel: i18n.global.t('confirm-close.dont-show-again')
+      }
+    )
+    if (!ok) return
+    // Matching closeFocusedPane: only a confirmed close records the opt-out.
+    // Cancelling means "not this workspace", not "stop asking".
+    if (notifyRestore.dialogCheckbox.value) confirmBeforeCloseWorkspace.value = false
+  }
   // Closing the one on screen means landing somewhere first. Switching before
   // letting go — rather than after — is what puts the panes and the focus
   // somewhere valid: switchToWorkspace keeps the focused pane if it survives
@@ -15864,6 +15891,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :tab-request="settingsTabRequest"
       v-model:confirm-before-close="confirmBeforeClose"
       v-model:confirm-before-close-pane="confirmBeforeClosePane"
+      v-model:confirm-before-close-workspace="confirmBeforeCloseWorkspace"
       v-model:yolo-enabled="yoloEnabled"
       v-model:idle-reclaim-enabled="idleReclaimEnabled"
       v-model:idle-reclaim-minutes="idleReclaimMinutes"

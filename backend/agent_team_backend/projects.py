@@ -396,6 +396,36 @@ class ProjectStore:
             log.warning("project document for %s is corrupt during peek (%s)", ws, err)
             return None
 
+    def _quarantine_corrupt_doc(
+        self, ws: str, data: dict[str, Any], err: Exception
+    ) -> None:
+        """Keep an unreadable document before a fresh one takes its place.
+
+        Recreating is what keeps the workspace usable, but the document being
+        replaced holds every pane record for it, so overwriting in place made
+        the only copy of them unrecoverable. Keyed by time: a second failure
+        must not land on the first one's key and drop it. Never raises —
+        failing to keep the copy must not also cost the caller its recovery.
+        """
+        try:
+            db = self._databases.get(ws)
+            if db is None:
+                return
+            base = f"{_KV_KEY}.corrupt-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+            # The stamp only resolves to the second, and a retry loop can fail
+            # twice inside one — suffix rather than drop the earlier copy.
+            key, n = base, 2
+            while db.kv_get(key) is not None:
+                key, n = f"{base}-{n}", n + 1
+            db.kv_set(
+                key,
+                {"error": str(err), "quarantined_at": _now_iso(), "document": data},
+                now=int(time.time()),
+            )
+            log.warning("kept the corrupt project document for %s at kv key %s", ws, key)
+        except Exception:  # noqa: BLE001
+            log.exception("could not keep the corrupt project document for %s", ws)
+
     def load_or_create(
         self, workspace_path: str, *, name: str = "", backend_version: str = ""
     ) -> Project:
@@ -411,6 +441,7 @@ class ProjectStore:
                 return project
             except Exception as err:  # noqa: BLE001
                 log.warning("project document for %s is corrupt (%s); recreating", ws, err)
+                self._quarantine_corrupt_doc(ws, data, err)
 
         now = _now_iso()
         project = Project(
@@ -850,26 +881,34 @@ class ProjectStore:
         *,
         pane_id: str,
         session_id: str = "",
-    ) -> Project:
+    ) -> tuple[Project, list[str]]:
         """Mark a manual pane removed so it isn't re-spawned on the next restart.
 
-        Matches by pane_id OR (when given) session_id, and removes EVERY matching
-        manual record. The pane_id is regenerated on each restart and re-linked
-        via previous_pane_id; if that link ever drifts, a stale 'spawned' record
-        would otherwise be orphaned (un-removable from the UI) and resurrect on
-        every launch. session_id is stable across restarts, so it reliably lands
-        on the right record — and clears any duplicate sharing that session.
+        Matches by pane_id, falling back to session_id only when no live record
+        carries that pane_id. The pane_id is regenerated on each restart and
+        re-linked via previous_pane_id; if that link ever drifts, a stale
+        'spawned' record would otherwise be orphaned (un-removable from the UI)
+        and resurrect on every launch. session_id is stable across restarts, so
+        it recovers that case — and clears any duplicate sharing that session.
+
+        The fallback is never a parallel OR, for the same reason it is gated in
+        _find_manual_pane: a plain spawn may deliberately resume the session of
+        a pane that is still live, and closing one must not retire the other.
+
+        Returns the project and the ids of the records actually marked removed,
+        so the caller can take down every PTY that just lost its record.
         """
         project = self.load_or_create(workspace_path)
         sid = session_id.strip()
-        matches = [
+        live = [
             p for p in project.panes
-            if p.origin != "pipeline"
-            and p.spawn_status != "removed"
-            and (p.pane_id == pane_id or (sid and p.session_id == sid))
+            if p.origin != "pipeline" and p.spawn_status != "removed"
         ]
+        matches = [p for p in live if p.pane_id == pane_id]
+        if not matches and sid:
+            matches = [p for p in live if p.session_id == sid]
         if not matches:
-            return project
+            return project, []
         for pane in matches:
             self._adopt_orphans(project, pane)
             pane.spawn_status = "removed"
@@ -879,7 +918,7 @@ class ProjectStore:
             {"event": "manual_pane_unspawn", "pane_id": pane_id, "count": len(matches)},
             log_file_name=project.log_file_name,
         )
-        return project
+        return project, [p.pane_id for p in matches]
 
     def rename_pane(
         self,

@@ -122,3 +122,57 @@ async def test_manual_pane_unspawn_still_sweeps(tmp_path: Path) -> None:
     })
 
     assert terminals.killed == [("term-m", True)]
+
+
+@pytest.mark.asyncio
+async def test_manual_pane_unspawn_sweeps_the_record_the_session_fallback_hit(
+    tmp_path: Path,
+) -> None:
+    """A drifted id retires the record filed under the old one — its PTY goes too.
+
+    The renderer kills through its own terminal ref keyed by the live id, so the
+    process still running under the stale id is exactly the one with nothing
+    left pointing at it once its record is gone.
+    """
+    ws = str(tmp_path)
+    app.project_store.record_manual_pane_spawn(
+        ws, pane_id="old-id", agent="claude", session_id="sess-x",
+    )
+    terminals = FakeTerminals({"old-id": ["term-old"], "live-id": ["term-live"]})
+    session = _session(terminals)
+
+    await app.handle_message(session, {
+        "id": "m1",
+        "type": "manual_pane.unspawn",
+        "payload": {"workspace_path": ws, "pane_id": "live-id", "session_id": "sess-x"},
+    })
+
+    assert sorted(terminals.killed) == [("term-live", True), ("term-old", True)]
+
+
+@pytest.mark.asyncio
+async def test_manual_pane_unspawn_spares_the_pty_of_a_live_pane_sharing_the_session(
+    tmp_path: Path,
+) -> None:
+    """Closing one of two panes resuming the same session must not kill the other."""
+    ws = str(tmp_path)
+    app.project_store.record_manual_pane_spawn(
+        ws, pane_id="M1", agent="claude", session_id="sess-l",
+    )
+    app.project_store.record_manual_pane_spawn(
+        ws, pane_id="M2", agent="claude", session_id="sess-l",
+    )
+    terminals = FakeTerminals({"M1": ["term-1"], "M2": ["term-2"]})
+    session = _session(terminals)
+
+    await app.handle_message(session, {
+        "id": "m1",
+        "type": "manual_pane.unspawn",
+        "payload": {"workspace_path": ws, "pane_id": "M1", "session_id": "sess-l"},
+    })
+
+    assert terminals.killed == [("term-1", True)]
+    panes = session.websocket.sent[0]["payload"]["project"]["panes"]  # type: ignore[attr-defined]
+    assert {p["pane_id"]: p["spawn_status"] for p in panes} == {
+        "M1": "removed", "M2": "spawned",
+    }
