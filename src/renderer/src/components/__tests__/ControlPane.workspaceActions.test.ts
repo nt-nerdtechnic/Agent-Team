@@ -18,7 +18,7 @@ const wsRow = (path: string, label: string) => ({
   displayPath: '~/Desktop',
   isCurrent: true,
   collapsed: false,
-  count: 1,
+  count: 1, paneIds: [],
   lineage: [],
   groups: [{ id: '', name: '', rows: [] }],
   remote: [],

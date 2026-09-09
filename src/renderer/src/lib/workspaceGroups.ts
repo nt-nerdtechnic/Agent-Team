@@ -66,6 +66,11 @@ export interface WorkspaceGroupRow {
   isCurrent: boolean
   collapsed: boolean
   count: number
+  /** The ids `count` counted, in pane order. Ids, not statuses — this layer
+   *  stays structural — but the heading's count badge is painted with the
+   *  rolled-up status of exactly this set, so the number and its colour cannot
+   *  end up describing different panes. */
+  paneIds: string[]
   /** Every row of this workspace, in RENDER order — which is the grouped order,
    *  not spawn order. Shift-range selection walks this, so it has to be what
    *  the eye walks. */
@@ -118,8 +123,8 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
   const paneGroup = new Map(panes.map((p) => [p.id, p.runGroupId ?? '']))
   const lineageFor = (path: string): LineageRow[] =>
     lineage.filter((r) => paneWorkspace.get(r.id) === norm(path))
-  const countIn = (path: string): number =>
-    panes.filter((p) => norm(p.workspacePath) === norm(path)).length
+  const idsIn = (path: string): string[] =>
+    panes.filter((p) => norm(p.workspacePath) === norm(path)).map((p) => p.id)
 
   /** Split one workspace's rows into its run groups.
    *
@@ -165,6 +170,7 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
   const pushRow = (path: string): void => {
     const own = lineageFor(path)
     const groups = sectionsFor(path, own)
+    const ids = idsIn(path)
     rows.push({
       path,
       label: basename(path),
@@ -176,7 +182,8 @@ export function buildWorkspaceGroups(input: WorkspaceGroupInput): WorkspaceGroup
       // whenever a subtree was folded, while the status bar — which counts
       // panes — did not move. Folding is a view preference, not a change to
       // what the workspace holds.
-      count: countIn(path),
+      count: ids.length,
+      paneIds: ids,
       // Grouped order, not spawn order — this is what the sidebar renders, and
       // shift-range selection walks it.
       lineage: groups.flatMap((g) => g.rows),

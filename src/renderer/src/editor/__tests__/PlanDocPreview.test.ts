@@ -133,18 +133,52 @@ describe('PlanDocPreview', () => {
     )
   })
 
-  it('does not read while the backend is still starting, then loads on connect', async () => {
+  it('reads and renders even when the transport status is not connected', async () => {
+    // The status is host-pushed and can be stale while calls still land (the
+    // review toolbar reads the same file through the same send with no such
+    // check). Gating on it rendered an empty srcdoc — indistinguishable from a
+    // loaded plan, since the frame's background is white.
     const { wrapper, backend } = await mountPreview(PLAN_DOC, 'connecting')
-    // A request here would burn the client timeout and strand the preview on
-    // the error state, since loadDoc only re-runs on a refresh bump.
-    expect(backend.send).not.toHaveBeenCalled()
-    expect(wrapper.find('.pdp-error').exists()).toBe(false)
-
-    backend.status.value = 'connected'
-    await flushPromises()
 
     expect(backend.send).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.pdp-error').exists()).toBe(false)
     expect(wrapper.find('iframe').attributes('srcdoc') ?? '').toContain('id="plan-meta"')
+  })
+
+  it('retries a failed load on its own when no reconnect ever arrives', async () => {
+    vi.useFakeTimers()
+    try {
+      const { wrapper, backend } = await mountPreview(null, 'disconnected')
+      expect(backend.send).toHaveBeenCalledTimes(1)
+      expect(wrapper.find('.pdp-error').exists()).toBe(true)
+
+      backend.send.mockResolvedValue({ payload: { ok: true, content: PLAN_DOC } } as never)
+      // No status transition at all — recovery must come from the backoff timer.
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushPromises()
+
+      expect(backend.send).toHaveBeenCalledTimes(2)
+      expect(wrapper.find('.pdp-error').exists()).toBe(false)
+      expect(wrapper.find('iframe').exists()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops retrying once the backoff budget is exhausted', async () => {
+    vi.useFakeTimers()
+    try {
+      const { backend } = await mountPreview(null, 'disconnected')
+      expect(backend.send).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(120_000)
+      await flushPromises()
+
+      // 1 initial + 5 scheduled attempts, then the error state stands.
+      expect(backend.send).toHaveBeenCalledTimes(6)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('retries a failed load when the backend reconnects', async () => {

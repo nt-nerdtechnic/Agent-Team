@@ -46,7 +46,7 @@ const current = (over: Record<string, unknown> = {}) => {
   const row = {
     path: '/Users/me/Desktop/Agent-Team', label: 'Agent-Team',
     displayPath: '~/Desktop/Agent-Team', isCurrent: true, collapsed: false,
-    count: 2, lineage: [], ...over
+    count: 2, paneIds: [], lineage: [], ...over
   }
   // A caller that supplies its own groups means to test them; otherwise the
   // row gets the one ungrouped section an untouched workspace has.
@@ -156,7 +156,7 @@ describe('ControlPane – workspace sections', () => {
     // names, and neither shows the other's.
     const second = current({
       path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop',
-      count: 1, lineage: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }]
+      count: 1, paneIds: [], lineage: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }]
     })
     wrapper = mountWith({
       workspaces: [
@@ -181,7 +181,7 @@ describe('ControlPane – workspace sections', () => {
         { id: 'p2', agentLabel: 'B', status: 'idle', command: 'c', origin: 'manual', isMinimized: false, isCommander: false },
       ],
       workspaces: [current({
-        count: 2,
+        count: 2, paneIds: [],
         lineage: [
           { id: 'p1', depth: 0, hasChildren: false, collapsed: false },
           { id: 'p2', depth: 0, hasChildren: false, collapsed: false },
@@ -289,7 +289,7 @@ describe('ControlPane – workspace sections', () => {
         { id: 'p2', agentLabel: 'B', status: 'idle', command: 'c', origin: 'manual', isMinimized: false, isCommander: false },
       ],
       workspaces: [current({
-        count: 2,
+        count: 2, paneIds: [],
         lineage: [
           { id: 'p1', depth: 0, hasChildren: false, collapsed: false },
           { id: 'p2', depth: 0, hasChildren: false, collapsed: false },
@@ -314,7 +314,7 @@ describe('ControlPane – workspace sections', () => {
     // Both have an empty group id, so keying the fold on the id alone would
     // fold one workspace's loose panes when you fold the other's.
     const a = current({
-      count: 1,
+      count: 1, paneIds: [],
       lineage: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }],
       groups: [
         { id: 'g1', name: 'one', rows: [] },
@@ -322,7 +322,7 @@ describe('ControlPane – workspace sections', () => {
       ],
     })
     const b = current({
-      path: '/Users/me/Desktop/Other', label: 'Other', count: 1,
+      path: '/Users/me/Desktop/Other', label: 'Other', count: 1, paneIds: [],
       lineage: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }],
       groups: [
         { id: 'g1', name: 'one', rows: [] },
@@ -386,7 +386,7 @@ describe('ControlPane – workspace sections', () => {
     // A lone "manual" heading over everything distinguishes nothing.
     wrapper = mountWith({
       workspaces: [current({
-        count: 1,
+        count: 1, paneIds: [],
         lineage: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }],
       })],
     })
@@ -396,9 +396,9 @@ describe('ControlPane – workspace sections', () => {
   it('collapsing one local workspace leaves the other alone', () => {
     wrapper = mountWith({
       workspaces: [
-        current({ lineage: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }], count: 1, collapsed: true }),
+        current({ lineage: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }], count: 1, paneIds: [], collapsed: true }),
         current({
-          path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop', count: 1,
+          path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop', count: 1, paneIds: [],
           lineage: [{ id: 'p2', depth: 0, hasChildren: false, collapsed: false }]
         })
       ]

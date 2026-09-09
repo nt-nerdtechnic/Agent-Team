@@ -5,7 +5,8 @@ import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
 import { PANE_BATCH_MIME } from '@navide/terminal'
 import { resolveDragBatch } from '../lib/paneBatchDrag'
 import { setBatchDragImage } from '../lib/batchDragImage'
-import { paneStatusLabelText } from '../lib/paneStatusLabel'
+import { paneStatusLabelText, type PaneStatusValue } from '../lib/paneStatusLabel'
+import { rollupPaneStatus } from '../lib/paneStatusRollup'
 import { statusBadgeStyle } from '../composables/useStatusBadgePrefs'
 import { rollupTabStatus, runGroupStateLabelKey } from '../lib/tabStatus'
 import {
@@ -122,6 +123,10 @@ export interface WorkspaceGroupRow {
   isCurrent: boolean
   collapsed: boolean
   count: number
+  /** The ids `count` counted, including panes a folded subtree is hiding. The
+   *  count badge is painted with the rolled-up status of this set, so its
+   *  colour describes the same panes the number does. */
+  paneIds: string[]
   lineage: PaneLineageRow[]
   /** The same rows, split into run groups. */
   groups: { id: string; name: string; rows: PaneLineageRow[] }[]
@@ -218,7 +223,9 @@ export interface ResumeHistoryEntry {
   roleLabel: string
   sessionId?: string
   workspacePath: string
-  spawnedAt: string
+  /** Absent on records whose spawn time was never captured (see
+   *  SpawnHistoryEntry); the option label then just omits the date. */
+  spawnedAt?: string
 }
 
 export interface PipelineSummary {
@@ -792,6 +799,36 @@ onUnmounted(() => {
  */
 function groupState(rows: readonly { pane: ActivePaneView }[]): TabRunState {
   return rollupTabStatus(rows.map((r) => r.pane.status))
+}
+
+/** Every workspace heading's count-badge status, keyed by path.
+ *
+ *  Rolled up from `paneIds` — the same set the number counts — so a folded
+ *  subtree cannot make the colour and the number disagree. Held as one computed
+ *  rather than a per-row call so the 400ms status sync does one pass over the
+ *  panes instead of one per heading per render. */
+const wsCountStates = computed<Map<string, PaneStatusValue | undefined>>(() => {
+  const statusById = new Map(props.panes.map((p) => [p.id, p.status]))
+  const out = new Map<string, PaneStatusValue | undefined>()
+  for (const ws of props.workspaces ?? []) {
+    out.set(ws.path, rollupPaneStatus(ws.paneIds.flatMap((id) => statusById.get(id) ?? [])))
+  }
+  return out
+})
+
+/** The attributes that paint a count pill with a status.
+ *
+ *  One binding rather than three so the badge either carries the whole signal
+ *  or none of it — a `data-state` with no tooltip is a colour with no legend,
+ *  which is what the group dot used to be. Nothing at all when there is nothing
+ *  to report, leaving the pill on its neutral default. */
+function countBadgeAttrs(state: PaneStatusValue | undefined): Record<string, unknown> {
+  if (!state) return {}
+  return {
+    'data-state': state,
+    style: statusBadgeStyle(state),
+    title: paneStatusLabelText(state),
+  }
 }
 
 /** Does this workspace have anything its ↻ could rebuild?
@@ -1515,7 +1552,7 @@ const resumeOptions = computed<{ sessionId: string; label: string; workspacePath
     if (!sid || entry.agentKey !== activeSpawnAgent.value) continue
     if (seen.has(sid)) continue
     seen.add(sid)
-    const when = entry.spawnedAt.slice(0, 16).replace('T', ' ')
+    const when = entry.spawnedAt ? entry.spawnedAt.slice(0, 16).replace('T', ' ') : '—'
     const ws = entry.workspacePath.split('/').filter(Boolean).pop() ?? entry.workspacePath
     out.push({
       sessionId: sid,
@@ -2760,7 +2797,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           <span class="ws-text" :title="ws.path">
             <span class="ws-line">
               <span class="ws-name">{{ ws.label }}</span>
-              <span class="ws-count">{{ ws.count }}</span>
+              <span class="ws-count" v-bind="countBadgeAttrs(wsCountStates.get(ws.path))">{{ ws.count }}</span>
             </span>
             <span class="ws-path">{{ ws.displayPath }}</span>
           </span>
@@ -2813,6 +2850,10 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           >{{ isGroupCollapsed(ws?.path ?? '', g.id) ? '›' : '⌄' }}</button>
           <span class="ws-grp-key" :title="$t(runGroupStateLabelKey(g.state))"></span>
           <span class="ws-grp-name" :title="g.name || $t('label.manual-spawn')">{{ g.name || $t('label.manual-spawn') }}</span>
+          <!-- Neutral, unlike the workspace heading's: this row already carries
+               its run state in the key beside the name, and a second colour
+               here — on a different scale, since the key has four states and a
+               status has nine — reads as two signals disagreeing. -->
           <span class="ws-count">{{ g.rows.length }}</span>
           <!-- The sidebar's own entry point: ＋ here opens an agent in THIS
                group, which the stage tab bar cannot express — it can only open
@@ -4715,8 +4756,11 @@ button.icon-btn.muted:hover {
 /* Only another window's name is a link — this window's own is where you are. */
 .ws-head:not(.ws-head--current) .ws-text { cursor: pointer; }
 .ws-head:not(.ws-head--current) .ws-text:hover .ws-name { text-decoration: underline; }
-/* Same pill as StageTabBar's tab-count: a pane tally means the same thing in
-   both places, so it should not look like two different things. */
+/* Same SHAPE as StageTabBar's tab-count — a pane tally means the same thing in
+   both places, so it should not read as two different objects. The colour is
+   where they now differ, and deliberately: a tab already carries its own run
+   dot right beside the number, while a sidebar heading is often the only thing
+   left on screen once its section is folded. See the [data-state] rules below. */
 .ws-count {
   flex: none;
   display: inline-flex;
@@ -4726,11 +4770,65 @@ button.icon-btn.muted:hover {
   height: 15px;
   padding: 0 4px;
   border-radius: var(--radius-md);
-  background: var(--bg-muted);
-  color: var(--text-muted);
+  background: var(--status-badge-bg, var(--bg-muted));
+  color: var(--status-badge-fg, var(--text-muted));
   font-weight: 400;
   font-size: var(--font-3xs);
   font-variant-numeric: tabular-nums;
+}
+/* The WORKSPACE heading's tally is a status light too — and only that one; the
+   group heading's pill is left neutral, because that row already says its run
+   state in the key beside the name.
+
+   A workspace heading is the only thing left on screen once its section is
+   folded, and a grey number there could not say whether anything under it had
+   errored or was waiting on the user — the coloured dot that answers this sits
+   on the pane rows, which are exactly what folding hides. The status is the
+   loudest one under the heading (see rollupPaneStatus), and it is spelled out
+   in the pill's tooltip so the colour is not a legend nobody has.
+
+   Same defaults and the same --status-badge-* override hooks as the pane row's
+   .state pill: one status vocabulary, painted once per surface, so recolouring
+   a status in Settings moves the tally with everything else. */
+.ws-count[data-state='running'] {
+  background: var(--status-badge-bg, var(--success-muted));
+  color: var(--status-badge-fg, var(--success-fg));
+}
+.ws-count[data-state='starting'] {
+  background: var(--status-badge-bg, var(--status-starting-muted));
+  color: var(--status-badge-fg, var(--status-starting-fg));
+}
+.ws-count[data-state='idle'] {
+  background: var(--status-badge-bg, var(--status-idle-muted));
+  color: var(--status-badge-fg, var(--status-idle-fg));
+}
+.ws-count[data-state='awaiting'] {
+  background: var(--status-badge-bg, color-mix(in srgb, var(--warning-fg) 20%, transparent));
+  color: var(--status-badge-fg, var(--warning-fg));
+}
+.ws-count[data-state='error'] {
+  background: var(--status-badge-bg, var(--danger-deep));
+  color: var(--status-badge-fg, var(--danger-fg));
+}
+.ws-count[data-state='exited'] {
+  background: var(--status-badge-bg, var(--bg-muted));
+  color: var(--status-badge-fg, var(--text-disabled));
+}
+.ws-count[data-state='stopped'] {
+  background: var(--status-badge-bg, var(--bg-inset));
+  color: var(--status-badge-fg, var(--text-bright));
+}
+/* The two rollupPaneStatus can return that a pane row never shows on its own.
+   Without them the pill fell through to the neutral chip — a workspace whose
+   panes were all cold-restore placeholders, or all disconnected, looked the
+   same as one with no status at all. */
+.ws-count[data-state='waiting'] {
+  background: var(--status-badge-bg, var(--bg-muted));
+  color: var(--status-badge-fg, var(--text-primary));
+}
+.ws-count[data-state='disconnected'] {
+  background: var(--status-badge-bg, var(--bg-inset));
+  color: var(--status-badge-fg, var(--text-bright));
 }
 /* Boxed and centred like .ws-act rather than sized by a font: the ＋ used to
    be a full-width character, whose weight came from the typeface and so could
@@ -4936,7 +5034,7 @@ button.icon-btn.muted:hover {
   line-height: 1;
 }
 .ws-grp-caret:hover { color: var(--text-bright); }
-/* Same three states, same tokens, as StageTabBar's tab dot — the sidebar must
+/* Same four states, same tokens, as StageTabBar's tab dot — the sidebar must
    not be able to say "active" where the tab says otherwise. */
 .ws-grp-key {
   flex: none;
@@ -4945,6 +5043,7 @@ button.icon-btn.muted:hover {
   border-radius: 2px;
   background: var(--border-default);
 }
+.ws-grp[data-state='awaiting'] .ws-grp-key { background: var(--warning-fg); }
 .ws-grp[data-state='active'] .ws-grp-key { background: var(--success-fg); }
 .ws-grp[data-state='idle'] .ws-grp-key { background: var(--status-idle-emphasis); }
 .ws-grp-name {

@@ -1323,7 +1323,9 @@ const messageButtons: TextButtonRow[] = [
       <h3 class="irh-h3">群組列與 tab 上的方點</h3>
       <p class="irh-p">
         圓角方形、7px，跟上面的圓點<strong>刻意做成不同形狀</strong>，因為它講的是一整群、不是單一面板。
-        側欄群組列與上方 tab 用的是同一套規則、同一組顏色，只有三態：
+        側欄群組列與上方 tab 用的是同一套規則、同一組顏色，共四態；
+        <strong>橘色排在綠色之前</strong>——一群裡只要有一個面板在等你回應，
+        整群就顯示橘，即使旁邊還有面板在跑：
       </p>
       <div class="irh-tablewrap">
         <table class="irh-table">
@@ -1331,6 +1333,14 @@ const messageButtons: TextButtonRow[] = [
             <tr><th>顏色</th><th>狀態</th><th>提示字串（群組列 ／ tab）</th></tr>
           </thead>
           <tbody>
+            <tr>
+              <td class="irh-nowrap"><span class="irh-sq" data-state="awaiting"></span>橘</td>
+              <td><code>awaiting</code></td>
+              <td>
+                <code>Needs you — an agent in this group is blocked on a permission or a question</code> ／
+                <code>A CLI in this tab is waiting on you</code>
+              </td>
+            </tr>
             <tr>
               <td class="irh-nowrap"><span class="irh-sq" data-state="active"></span>綠</td>
               <td><code>active</code></td>
@@ -1578,6 +1588,7 @@ const messageButtons: TextButtonRow[] = [
   vertical-align: 1px;
   background: var(--border-default);
 }
+.irh-sq[data-state='awaiting'] { background: var(--warning-fg); }
 .irh-sq[data-state='active'] { background: var(--success-fg); }
 .irh-sq[data-state='idle'] { background: var(--status-idle-emphasis); }
 

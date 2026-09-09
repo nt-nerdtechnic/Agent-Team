@@ -47,6 +47,7 @@ const wsRow = (path: string, label: string, count = 1) => ({
   isCurrent: true,
   collapsed: false,
   count,
+  paneIds: [],
   lineage: [],
   groups: [],
 })
