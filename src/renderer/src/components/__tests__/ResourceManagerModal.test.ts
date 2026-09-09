@@ -241,6 +241,18 @@ describe('ResourceManagerModal', () => {
     w.unmount()
   })
 
+  // A pane blocked on a permission prompt used to be rewritten to 'running' on
+  // its way into this table: green dot, counted as busy, hidden among the panes
+  // that were actually working. It is the one row you open this list to find.
+  it('keeps an awaiting pane as its own state rather than folding it into running', async () => {
+    const { w } = await mountModal({
+      localRows: [localRow({ paneId: 'p9', measuredKey: 'p9', name: 'Blocked here', status: 'awaiting' })],
+    })
+    const row = w.findAll('[data-row="pane"]').find((r) => r.text().includes('Blocked here'))
+    expect(row?.attributes('data-status')).toBe('awaiting')
+    w.unmount()
+  })
+
   // Named so the two orders differ: p2 holds twice the memory, p1 sorts first.
   it('sorts by memory by default and by name on request', async () => {
     wire.panes = [

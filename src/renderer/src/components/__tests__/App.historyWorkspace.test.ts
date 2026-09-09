@@ -47,7 +47,10 @@ describe('the history modal has its own workspace', () => {
     const open = body('onOpenWorkspaceHistory')
     expect(open).not.toContain('switchToWorkspace')
     expect(open).toContain('historyWorkspace.value = foreign')
-    expect(open).toContain('await loadForeignHistory(foreign)')
+    // Opening is a refresh, and the refresh path is the one that branches on
+    // historyIsForeign — so the foreign load still runs, through it.
+    expect(open).toContain('await onRefreshHistory()')
+    expect(body('onRefreshHistory')).toContain('await loadForeignHistory(historyWorkspace.value)')
   })
 
   it('names the shown workspace for every write, never currentWorkspace', () => {

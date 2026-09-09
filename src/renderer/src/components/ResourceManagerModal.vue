@@ -108,7 +108,7 @@ watch(
 )
 
 // ── Rows ────────────────────────────────────────────────────────────────────
-type RowStatus = 'running' | 'idle' | 'disconnected'
+type RowStatus = 'running' | 'awaiting' | 'idle' | 'disconnected'
 interface ResourceRow {
   paneId: string
   name: string
@@ -142,13 +142,17 @@ const rows = computed<ResourceRow[]>(() => {
     seenPanes.add(row.paneId)
     claimedMeasurements.add(row.measuredKey)
     // The host's status vocabulary is richer than the roster's; collapse it to
-    // the three states this table draws.
+    // the states this table draws. 'awaiting' is kept rather than folded into
+    // 'running': a pane blocked on a permission prompt is the one you most want
+    // to find in this list, and painting it green hid it among the busy ones.
     const status: RowStatus =
       row.status === 'disconnected'
         ? 'disconnected'
-        : row.status === 'running' || row.status === 'awaiting'
-          ? 'running'
-          : 'idle'
+        : row.status === 'awaiting'
+          ? 'awaiting'
+          : row.status === 'running'
+            ? 'running'
+            : 'idle'
     out.push({
       paneId: row.paneId,
       name: row.name,
@@ -629,6 +633,7 @@ async function scanDisk(): Promise<void> {
   align-self: center;
 }
 .rm-row[data-status='running'] .rm-dot { background: var(--success-fg); }
+.rm-row[data-status='awaiting'] .rm-dot { background: var(--warning-fg); }
 .rm-row[data-status='disconnected'] .rm-dot {
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--text-bright);

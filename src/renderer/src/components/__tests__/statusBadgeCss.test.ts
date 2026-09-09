@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { DisplayStatus } from '@navide/terminal'
+import { PANE_STATUS_ORDER } from '../../lib/statusBadgePalette'
 
 // Every surface that paints a pane status does it with a `[data-status='x']` /
 // `[data-state='x']` CSS rule, and a status with no rule silently falls back to
@@ -64,6 +65,11 @@ const SURFACES: Surface[] = [
     selector: (s) => `.state[data-state='${s}']`,
   },
   {
+    name: 'ControlPane heading count pill',
+    file: 'src/renderer/src/components/ControlPane.vue',
+    selector: (s) => `.ws-count[data-state='${s}']`,
+  },
+  {
     name: 'App meeting badge',
     file: 'src/renderer/src/App.vue',
     selector: (s) => `.meeting-badge[data-status="${s}"]`,
@@ -103,6 +109,20 @@ describe('every pane status is styled on every surface that paints one', () => {
     const awaiting = pane.slice(pane.indexOf(".status[data-status='awaiting']"))
     expect(awaiting.slice(0, 200)).toContain('--warning-fg')
     expect(awaiting.slice(0, 200)).not.toContain('--attention-fg')
+  })
+
+  it('styles the wider vocabulary on the one surface that can show it', () => {
+    // The heading count pill is painted from rollupPaneStatus, whose vocabulary
+    // is PaneStatusValue — the seven above plus 'waiting' and 'disconnected',
+    // which no single pane row ever reports. ALL cannot cover those two, so a
+    // rolled-up workspace of cold-restore placeholders or disconnected panes
+    // fell through to the neutral chip with nothing to catch it.
+    const pane = read('src/renderer/src/components/ControlPane.vue')
+    for (const status of PANE_STATUS_ORDER) {
+      expect(pane, `ws-count has no rule for ${status}`).toContain(
+        `.ws-count[data-state='${status}']`
+      )
+    }
   })
 
   it('leaves no rule selecting the retired question status', () => {
