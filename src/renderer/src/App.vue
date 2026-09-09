@@ -16463,7 +16463,10 @@ function paneIsCommander(p: ActivePane): boolean {
       <Transition name="ws-switch">
         <div v-if="switchingWorkspace" class="stage-switching" role="status" aria-live="polite">
           <div class="empty-card loading-card">
-            <div class="spinner"></div>
+            <div class="ws-switch-mark">
+              <img class="ws-switch-logo" :src="navideMark" alt="" />
+              <span class="ws-switch-orbit"></span>
+            </div>
             <h2>{{ $t('switchWorkspace.loading', { name: switchingWorkspaceName }) }}</h2>
           </div>
         </div>
@@ -18120,6 +18123,52 @@ function paneIsCommander(p: ActivePane): boolean {
    would just add delay to the thing that is already making them wait. */
 .ws-switch-leave-active { transition: opacity 160ms ease-out; }
 .ws-switch-leave-to { opacity: 0; }
+
+/* The cover borrows the boot screen's mark but deliberately not its motion.
+   Boot and shutdown breathe the logo in place — the app itself is starting or
+   stopping, so the mark is the thing that moves. A workspace switch is the
+   surroundings changing around an app that never stopped running, so the mark
+   holds its size and an arc travels around it instead. Same brand, different
+   sentence. */
+.ws-switch-mark {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  margin: 0 auto;
+  display: grid;
+  place-items: center;
+}
+.ws-switch-logo {
+  width: 34px;
+  height: 34px;
+  display: block;
+  /* Opacity only, and shallower and quicker than boot's 2.6s breathe: the
+     scale is what makes that one read as breathing, so leaving it out is what
+     keeps these two apart at a glance. */
+  animation: ws-switch-glow 1.5s ease-in-out infinite;
+}
+.ws-switch-orbit {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--accent-muted);
+  /* Two lit sides rather than one: the trailing quarter reads as a sweep round
+     the mark, where a single arc reads as the plain spinner it replaces. */
+  border-top-color: var(--accent-fg);
+  border-right-color: var(--accent-focus);
+  animation: ws-switch-orbit 1.1s linear infinite;
+}
+@keyframes ws-switch-orbit {
+  to { transform: rotate(360deg); }
+}
+@keyframes ws-switch-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.62; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ws-switch-logo { animation: none; }
+  .ws-switch-orbit { animation-duration: 2.4s; }
+}
 
 .spinner {
   width: 38px;
