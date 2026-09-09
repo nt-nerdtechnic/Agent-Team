@@ -253,7 +253,7 @@ import {
   type PluginLaunchDescriptor,
 } from './frontendPluginManager'
 import { PluginBackendHost } from './pluginBackendHost'
-import { BackendPluginError } from './pluginBackendSupervisor'
+import { BackendPluginError, PluginBackendSupervisor } from './pluginBackendSupervisor'
 import type { PlansBridgeContext } from './plansBridge'
 import { manifestV2CapabilityPolicy } from './pluginPermissions'
 import {
@@ -1361,8 +1361,143 @@ describe('devPlansPluginDescriptor', () => {
       // The view bound a backend runtime: a child is live.
       expect(mgr.hasBackendActivity()).toBe(true)
       mgr.destroyInstance(handle.instanceId)
+      // Destroying the view starts the unbind; the child is only stopped by the
+      // awaited close() inside it, so the activity lasts until that drain ends.
+      expect(mgr.hasBackendActivity()).toBe(true)
       // The last bound runtime is gone; the registration alone is not activity.
-      expect(mgr.hasBackendActivity()).toBe(false)
+      await vi.waitFor(() => expect(mgr.hasBackendActivity()).toBe(false))
+    } finally {
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  /** The packaged Plans shape the quit path is about: a v2 window view plus the
+   *  bundled backend activation registered as metadata. */
+  function registerPlansPackage(mgr: FrontendPluginManager): {
+    packageDescriptor: PluginLaunchDescriptor
+    view: NonNullable<PluginLaunchDescriptor['views']>[number]
+    packageVersion: string
+  } {
+    const packageVersion = '1.0.0'
+    const packageDir = realpathSync(process.cwd())
+    const view: NonNullable<PluginLaunchDescriptor['views']>[number] = {
+      id: 'window',
+      contributionKey: `${PLANS_PLUGIN_ID}.window`,
+      kind: 'custom',
+      location: 'window',
+      title: 'Plans',
+      entryFile: '/plugins/navide.plans/index.html',
+    }
+    const packageDescriptor: PluginLaunchDescriptor = {
+      id: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir,
+      requires: [],
+      devUrl: '',
+      entryFile: view.entryFile,
+      views: [view],
+    }
+    mgr.registerDescriptor(packageDescriptor, { builtin: true })
+    mgr.registerBackendActivation({
+      pluginId: PLANS_PLUGIN_ID,
+      packageVersion,
+      packageDir,
+      entryFile: '/plugins/navide.plans/backend',
+      protocolVersion: 1,
+      activation: 'startup',
+      approvedMethods: ['plans.resolve_root'],
+      approvedEvents: ['plans.changed'],
+    })
+    return { packageDescriptor, view, packageVersion }
+  }
+
+  const plansOpenOptions = (host: FakeBrowserWindow): Parameters<FrontendPluginManager['openView']>[2] => ({
+    hostWindow: asHost(host),
+    bounds: 'fill',
+    workspacePath: '/workspace',
+    query: '?workspace_path=%2Fworkspace',
+  })
+
+  it('reports no backend activity after closeBackendPlugins so the re-entrant before-quit terminates', async () => {
+    const mgr = new FrontendPluginManager()
+    const { packageDescriptor, view } = registerPlansPackage(mgr)
+    const host = new FakeBrowserWindow()
+    const handle = await mgr.openView(packageDescriptor, view, plansOpenOptions(host))
+
+    // First quit: index.ts sees activity, prevents the default and runs
+    // teardownBackendAndQuit().
+    expect(mgr.hasBackendActivity()).toBe(true)
+    await mgr.closeBackendPlugins()
+
+    // teardownBackendAndQuit() then calls app.quit(), which re-emits
+    // before-quit. No window was ever closed - the quit was prevented - so the
+    // Plans record is still live. If the guard still reports activity here the
+    // default is prevented again and the App can only be force-killed.
+    const running = (mgr as unknown as { running: Map<string, unknown> }).running
+    expect(running.has(handle.instanceId)).toBe(true)
+    expect(mgr.hasBackendActivity()).toBe(false)
+  })
+
+  it('keeps reporting backend activity while a destroyed view backend unbind is still draining', async () => {
+    const mgr = new FrontendPluginManager()
+    const { packageDescriptor, view } = registerPlansPackage(mgr)
+    let releaseClose: () => void = () => {}
+    const closing = new Promise<void>((resolve) => {
+      releaseClose = resolve
+    })
+    const close = vi.spyOn(PluginBackendSupervisor.prototype, 'close').mockReturnValue(closing)
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(packageDescriptor, view, plansOpenOptions(host))
+      expect(mgr.hasBackendActivity()).toBe(true)
+
+      mgr.destroyInstance(handle.instanceId)
+      // The record is already out of `running`, but the child is only stopped
+      // by the awaited close() inside unbindView. Reporting no activity here
+      // takes the native quit fast path, which SIGKILLs the child mid-drain -
+      // possibly mid-write to a plan document.
+      const running = (mgr as unknown as { running: Map<string, unknown> }).running
+      expect(running.size).toBe(0)
+      expect(mgr.hasBackendActivity()).toBe(true)
+
+      releaseClose()
+      await vi.waitFor(() => expect(mgr.hasBackendActivity()).toBe(false))
+    } finally {
+      releaseClose()
+      close.mockRestore()
+      await mgr.closeBackendPlugins()
+    }
+  })
+
+  it('clears the stopping barrier when the revocation sweep throws synchronously', async () => {
+    const mgr = new FrontendPluginManager()
+    const { packageDescriptor, view, packageVersion } = registerPlansPackage(mgr)
+    const sweep = vi
+      .spyOn(
+        FrontendPluginManager.prototype as unknown as {
+          clearGuestReservationsForPackageVersion: (pluginId: string, packageVersion: string) => void
+        },
+        'clearGuestReservationsForPackageVersion',
+      )
+      .mockImplementation(() => {
+        throw new Error('guest reservation sweep failed')
+      })
+    try {
+      await expect(mgr.revokePackageVersion(PLANS_PLUGIN_ID, packageVersion)).rejects.toThrow(
+        'guest reservation sweep failed',
+      )
+    } finally {
+      sweep.mockRestore()
+    }
+
+    // A stranded key is permanent: every isPluginStopping /
+    // isPackageVersionStopping site then answers PLUGIN_STOPPING for this
+    // package for the life of the App, starting with the next open.
+    const host = new FakeBrowserWindow()
+    try {
+      const handle = await mgr.openView(packageDescriptor, view, plansOpenOptions(host))
+      expect(handle.instanceId).toBeTypeOf('string')
+      mgr.destroyInstance(handle.instanceId)
     } finally {
       await mgr.closeBackendPlugins()
     }

@@ -5209,7 +5209,22 @@ export class FrontendPluginManager {
       // PluginBackendHost owns live subscription disposal during unbind.
       pending.subscription = null
     }
-    if (options.unbindBackend !== false) this.pluginBackendHost.unbindView(instanceId)
+    if (options.unbindBackend !== false) {
+      // Deliberately not awaited: forgetInstance is synchronous and is called
+      // from synchronous Electron callbacks. The drain is not lost by that -
+      // PluginBackendHost registers its unbind task before this returns, so
+      // hasBackendActivity() keeps reporting the child until close() settles
+      // and a quit cannot take the native fast path mid-drain. The rejection
+      // must still be consumed here: unbindView rethrows a failed close so the
+      // child slot stays retained, and nothing else observes this call.
+      void this.pluginBackendHost.unbindView(instanceId).catch((error: unknown) => {
+        warnMain(
+          `[plugin-backend] unbind for ${instanceId} failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      })
+    }
     this.releaseInstanceSubscriptions(instanceId)
     this.discardGitPathGrants(instanceId)
     this.releaseGitCredentialOwnersForInstance(instanceId)
@@ -6000,25 +6015,28 @@ export class FrontendPluginManager {
    * A registered activation is not activity: `registerBundledPlans()` registers
    * the bundled Plans backend as metadata on every packaged launch and spawns
    * nothing, so counting registrations made this predicate permanently true and
-   * any caller that branched on it dead. Only bound runtimes count: a view whose
-   * backend bind was started or completed, a headless MCP instance, and the
-   * renderer calls and subscriptions that can only exist against one of those.
+   * any caller that branched on it dead. Only bound runtimes count: a view or
+   * headless MCP instance whose backend runtime is bound or still draining, and
+   * the in-flight work that can only exist against one of those.
    *
-   * A view whose bind rejected still reports activity until the view closes:
-   * the predicate stays conservative rather than claim a child is gone while
-   * its instance record is still live.
+   * Liveness is answered by {@link PluginBackendHost.hasLiveBackendChildren},
+   * which owns the child processes. Manager-side view bookkeeping must not be
+   * read here: every asynchronous teardown drops it synchronously at its head
+   * (`forgetInstance` before the unbind drains) or never resets it at all
+   * (`backendWorkspaceId`), so the predicate would be false while a child is
+   * still closing and true forever after `closeBackendPlugins()` - the second
+   * of which livelocks the re-entrant `before-quit` that drives shutdown.
+   * Only in-flight work the Host cannot see yet is added on top: renderer
+   * calls and subscriptions, and a headless bind that has not produced a bound
+   * runtime yet.
    */
   hasBackendActivity(): boolean {
-    if (
+    return (
       this.pendingBackendCalls.size > 0 ||
       this.pendingBackendSubscriptions.size > 0 ||
-      this.headlessBackendInstances.size > 0 ||
-      this.pendingHeadlessBackendBinds.size > 0
-    ) return true
-    for (const plugin of this.running.values()) {
-      if (plugin.backendWorkspaceId !== null || plugin.backendBindingTask !== null) return true
-    }
-    return false
+      this.pendingHeadlessBackendBinds.size > 0 ||
+      this.pluginBackendHost.hasLiveBackendChildren()
+    )
   }
 
   /** True only when the Host has registered the exact package-version backend
@@ -6970,40 +6988,49 @@ export class FrontendPluginManager {
       return
     }
     this.stoppingPlugins.add(key)
-    for (const headlessKey of this.headlessBackendInstances.keys()) {
-      if (headlessKey.startsWith(`${pluginId}\u0000${packageVersion}\u0000`)) {
-        this.headlessBackendInstances.delete(headlessKey)
-      }
-    }
-    for (const headlessKey of this.pendingHeadlessBackendBinds.keys()) {
-      if (headlessKey.startsWith(`${pluginId}\u0000${packageVersion}\u0000`)) {
-        this.pendingHeadlessBackendBinds.delete(headlessKey)
-      }
-    }
-    this.clearGuestReservationsForPackageVersion(pluginId, packageVersion)
-    const hadActivation = this.pluginBackendHost.hasActivation(pluginId, packageVersion)
-    const task = Promise.resolve().then(async () => {
-      this.stopAiSessionsForPackageVersion(pluginId, packageVersion)
-      this.clearTerminalRoutesForPackageVersion(pluginId, packageVersion)
-      for (const plugin of this.instancesForPackageVersion(pluginId, packageVersion)) {
-        this.deactivate(plugin.instanceId)
-        const forgotten = this.forgetInstance(plugin.instanceId, { unbindBackend: false })
-        if (!forgotten) continue
-        this.detachView(forgotten)
-        try {
-          if (!forgotten.view.webContents.isDestroyed()) forgotten.view.webContents.close()
-        } catch {
-          // Electron may already be tearing the view down; Host state is gone.
+    // Everything after the add lives inside the try that clears it. The
+    // synchronous prelude below can throw (a capability sweep, a Host lookup),
+    // and a barrier stranded that way is permanent: the isPluginStopping and
+    // isPackageVersionStopping sites then answer PLUGIN_STOPPING for a package
+    // that can never be prepared again - the exact failure the clearing
+    // `finally` was added to prevent, through a narrower door.
+    try {
+      for (const headlessKey of this.headlessBackendInstances.keys()) {
+        if (headlessKey.startsWith(`${pluginId}\u0000${packageVersion}\u0000`)) {
+          this.headlessBackendInstances.delete(headlessKey)
         }
       }
-      await this.pluginBackendHost.revokePackageVersion(pluginId, packageVersion)
-      if (hadActivation) this.refreshHostSessionRegistration()
-    })
-    this.packageRevocationTasks.set(key, task)
-    try {
-      await task
+      for (const headlessKey of this.pendingHeadlessBackendBinds.keys()) {
+        if (headlessKey.startsWith(`${pluginId}\u0000${packageVersion}\u0000`)) {
+          this.pendingHeadlessBackendBinds.delete(headlessKey)
+        }
+      }
+      this.clearGuestReservationsForPackageVersion(pluginId, packageVersion)
+      const hadActivation = this.pluginBackendHost.hasActivation(pluginId, packageVersion)
+      const task = Promise.resolve().then(async () => {
+        this.stopAiSessionsForPackageVersion(pluginId, packageVersion)
+        this.clearTerminalRoutesForPackageVersion(pluginId, packageVersion)
+        for (const plugin of this.instancesForPackageVersion(pluginId, packageVersion)) {
+          this.deactivate(plugin.instanceId)
+          const forgotten = this.forgetInstance(plugin.instanceId, { unbindBackend: false })
+          if (!forgotten) continue
+          this.detachView(forgotten)
+          try {
+            if (!forgotten.view.webContents.isDestroyed()) forgotten.view.webContents.close()
+          } catch {
+            // Electron may already be tearing the view down; Host state is gone.
+          }
+        }
+        await this.pluginBackendHost.revokePackageVersion(pluginId, packageVersion)
+        if (hadActivation) this.refreshHostSessionRegistration()
+      })
+      this.packageRevocationTasks.set(key, task)
+      try {
+        await task
+      } finally {
+        if (this.packageRevocationTasks.get(key) === task) this.packageRevocationTasks.delete(key)
+      }
     } finally {
-      if (this.packageRevocationTasks.get(key) === task) this.packageRevocationTasks.delete(key)
       // This barrier only has to outlive the frontend teardown sweep above, and
       // that sweep is over once the task settles either way. The fail-closed
       // admission barrier for a child that may have survived a rejected drain

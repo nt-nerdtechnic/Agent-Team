@@ -229,6 +229,22 @@ export class PluginBackendHost {
     return this.backends.has(backendKey(pluginId, packageVersion))
   }
 
+  /**
+   * True while this Host owns a backend child that is running or is still
+   * being torn down: a bound view (which owns a supervisor and a process slot)
+   * or an unbind whose drain has not settled.
+   *
+   * This is the only liveness answer a caller outside the Host can trust.
+   * A registered activation is metadata and never counts. `reservedChildSlots`
+   * and `packageRevocations` are deliberately not consulted: both are retained
+   * for the life of the process once a close or a drain fails, so reading them
+   * would make this predicate permanently true, and a child that could not be
+   * closed is not one that a longer wait recovers.
+   */
+  hasLiveBackendChildren(): boolean {
+    return this.views.size > 0 || this.unbindTasks.size > 0
+  }
+
   activationFor(
     pluginId: string,
     packageVersion: string,
